@@ -11,9 +11,13 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce 与 4096 包重放窗口基础原语；握手、PQC 身份和在线密钥轮换仍未实现。
+- 客户端重连时通过 v2 签名请求恢复原虚拟 IPv4/IPv6 租约；协调端内存分配器重启后，只要地址仍空闲即可恢复。
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 
 ### Fixed
+- 修复 `VirtualIps` 单栈地址因 Postcard 条件字段省略而无法自解码的问题；所有 Option 字段现在始终编码，并增加单栈/双栈往返回归测试。
+- 修复客户端重连后 TUN/路由仍使用旧虚拟地址、但协调端分配新地址造成流量黑洞的问题；现在地址变化会记录错误并失败关闭。
 - 修复 Linux Global Proxy / BypassMainland 策略表的默认路由未绑定虚拟源地址，导致 Exit Node 将合法的 IPv4 出站包误判为源地址伪造的问题。
 - 修复 Exit Node 返回的公网响应被客户端统一内层源地址校验丢弃的问题；仅已配置且已认证的 Exit Peer 可向本机虚拟 IP 返回公网单播源，普通 Mesh 流量仍保持严格的虚拟源地址绑定。
 - 修复 QUIC 中继发送无上限等待导致 UDP 被阻断时 TUN 数据路径卡死的问题；单包 2 秒未确认后摘除故障中继，并通过同一数据包的 TCP 信令中继完成降级。

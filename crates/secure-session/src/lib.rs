@@ -10,6 +10,7 @@
 pub mod confirmation;
 pub mod cookie;
 pub mod data_cipher;
+pub mod driver;
 pub mod handshake;
 pub mod handshake_epoch;
 pub mod key_schedule;

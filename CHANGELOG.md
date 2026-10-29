@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加 Secure Session v2 运输无关会话驱动适配层：把实验性 classic 握手、HKDF 密钥派生、双向 HMAC key confirmation、数据包收发、原子在线重协商、旧 epoch 短期宽限和本地材料失配后的失败关闭收束到一个 `SessionDriver` 接口，并提供建链、篡改/重放拒绝、错误确认拒绝、重协商和关闭后拒绝操作的集成测试。该驱动尚未被 `fuckipv6-client` 依赖或接入真实 UDP/TUN 数据面；当前 profile 仍非后量子，测试结果也不构成 WireGuard 安全等级或性能超越结论。
 - 增加文档一致性门禁：校验受跟踪 Markdown 的相对链接与标题锚点，拒绝 `file://`/越界路径，并持续检查 Secure Session v2 未接入真实数据面、未证明 WireGuard 性能对等及后量子边界等关键声明；同时校验执行队列依赖状态。独立 `docs` CI job 运行 8 个单元测试并上传 JSON 报告，补齐 Cargo 元数据声明的 MIT `LICENSE`。
 - 增加 Criterion 基准回归门禁：`scripts/criterion_compare.py` 接受原始 Criterion 目录、`bench-compare` 快照和 release-gate 报告，支持多平台基线选择，并默认拒绝平台错配、缺失/新增基准、未知或不足样本、未知标准误、高噪声和超过阈值的平均延迟回退；`scripts/release-gate.py --benchmark-baseline` 可重复指定基线并将比较失败计入发布门禁。未提供基线时报告明确记录 `not_run`，该比较只检测匹配硬件上的相对回退，不构成 WireGuard 性能对等或超越结论。
 - 发布流程为每个 Linux、Windows 和 macOS 归档生成 CycloneDX 1.5 与 SPDX 2.3 SBOM、逐产物 SHA256、汇总 `SHA256SUMS` 和未签名来源元数据；这些材料随 GitHub Release 发布，但不构成签名证明、SLSA 证明或独立安全审计。

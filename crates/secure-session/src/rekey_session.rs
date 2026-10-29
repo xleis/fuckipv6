@@ -13,7 +13,9 @@ use crate::rekey::{
     RekeyAccept, RekeyCompletion, RekeyConfirm, RekeyError, RekeyInit, RekeyNonce, RekeyPhase,
     RekeyStateMachine,
 };
-use crate::{EpochSession, ReceiveCipher, SendCipher, SessionError, SESSION_ID_LEN};
+use crate::{
+    DataCipherSuite, EpochSession, ReceiveCipher, SendCipher, SessionError, SESSION_ID_LEN,
+};
 use std::time::Instant;
 use thiserror::Error;
 
@@ -119,6 +121,11 @@ impl RekeySession {
     /// Active data epoch.
     pub const fn epoch(&self) -> u16 {
         self.session.epoch()
+    }
+
+    /// Negotiated data-cipher suite for the active epoch.
+    pub const fn suite(&self) -> DataCipherSuite {
+        self.session.suite()
     }
 
     /// Observable rekey phase.

@@ -28,7 +28,7 @@
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 
-已实现但尚未接入客户端数据面的 Secure Session v2 基础原语包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口、批量 seal/open、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码和原子 epoch 轮换。相关测试覆盖 MITM、身份/套件/epoch/SID/endpoint 错绑、重放、篡改、超时和失败关闭；但 `fuckipv6-client` 当前没有依赖 `fuckipv6-secure-session`，生产 UDP/TUN 路径仍使用静态密钥方案。可选 `pq` feature 另提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
+已实现但尚未接入客户端数据面的 Secure Session v2 基础原语包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口、批量 seal/open、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码和原子 epoch 轮换。运输无关的 `SessionDriver` 已将这些步骤收束为建链、数据收发、重协商、旧 epoch 宽限、运行时计数和失败关闭接口，并有本地集成测试；但 `fuckipv6-client` 当前没有依赖 `fuckipv6-secure-session`，生产 UDP/TUN 路径仍使用静态密钥方案。可选 `pq` feature 另提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
 
 ### 快速数据面基线（非发布结论）
 

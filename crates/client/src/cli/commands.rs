@@ -729,7 +729,14 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
 
             // 处理信令事件
             Some(event) = runtime.signaling.recv_event() => {
-                handle_runtime_signaling_event(runtime, event).await;
+                if let Err(error) = handle_runtime_signaling_event(runtime, event).await {
+                    let error = error.context(
+                        "信令重连后虚拟网络租约无法维持，客户端已失败关闭",
+                    );
+                    tracing::error!("{error:#}");
+                    shutdown_runtime(runtime).await;
+                    return Err(error);
+                }
             }
 
             relay_res = async {
@@ -1153,8 +1160,21 @@ async fn handle_inbound_payload(
     write_payload_to_tun(&mut runtime.tun, &runtime.stats, &plain_payload, source).await;
 }
 
-async fn handle_runtime_signaling_event(runtime: &mut ClientRuntime, event: SignalingEvent) {
+async fn handle_runtime_signaling_event(
+    runtime: &mut ClientRuntime,
+    event: SignalingEvent,
+) -> Result<()> {
     runtime.stats.record_signaling_received().await;
+
+    if let SignalingEvent::Registered {
+        assigned_ip,
+        assigned_ips,
+        ..
+    } = &event
+    {
+        validate_registered_assignment(&runtime.assigned_ips, assigned_ips.as_ref(), *assigned_ip)?;
+    }
+
     let action = handle_signaling_event(event, &runtime.p2p, &runtime.stats).await;
 
     #[cfg(target_os = "linux")]
@@ -1196,6 +1216,26 @@ async fn handle_runtime_signaling_event(runtime: &mut ClientRuntime, event: Sign
         | SignalingAction::PeerRemoved(_)
         | SignalingAction::None => {}
     }
+
+    Ok(())
+}
+
+fn validate_registered_assignment(
+    runtime_assigned_ips: &VirtualIps,
+    registered_assigned_ips: Option<&VirtualIps>,
+    registered_assigned_ip: Ipv6Addr,
+) -> Result<()> {
+    let registered = registered_assigned_ips
+        .cloned()
+        .unwrap_or_else(|| VirtualIps::from_ipv6(registered_assigned_ip));
+    if registered != *runtime_assigned_ips {
+        anyhow::bail!(
+            "协调端分配的虚拟地址已变化: 运行时={:?}, 重连确认={:?}; 拒绝在旧 TUN/路由上继续转发",
+            runtime_assigned_ips,
+            registered
+        );
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -3085,6 +3125,19 @@ mod tests {
         );
         assert!(websocket_host_port("http://relay.xlei.cc").is_err());
         assert!(websocket_host_port("ws://2001:db8::1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn registration_assignment_change_is_rejected() -> anyhow::Result<()> {
+        let current = VirtualIps::dual_stack("10.8.0.4".parse()?, "fd00::1004".parse()?);
+        validate_registered_assignment(&current, Some(&current), current.primary_ipv6())?;
+
+        let changed = VirtualIps::dual_stack("10.8.0.2".parse()?, "fd00::1002".parse()?);
+        let error =
+            validate_registered_assignment(&current, Some(&changed), changed.primary_ipv6())
+                .expect_err("changed assignment must fail closed");
+        assert!(error.to_string().contains("虚拟地址已变化"));
         Ok(())
     }
 

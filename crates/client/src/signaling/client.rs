@@ -61,6 +61,7 @@ struct ConnectionChannels<'a> {
 struct ConnectionState {
     reconnect_delay: Duration,
     has_connected_once: bool,
+    assigned_ips: Option<VirtualIps>,
 }
 
 fn normalize_ws_url(url: &str) -> String {
@@ -244,6 +245,7 @@ async fn connection_manager(
     let mut state = ConnectionState {
         reconnect_delay: config.initial_reconnect_delay,
         has_connected_once: false,
+        assigned_ips: None,
     };
 
     loop {
@@ -320,6 +322,7 @@ async fn handle_connected_signaling<S>(
         config.p2p_port,
         config.nat_type,
         &config.candidate_endpoints,
+        &mut state.assigned_ips,
         &mut runtime,
     )
     .await
@@ -343,6 +346,7 @@ async fn run_connection<S>(
     p2p_port: u16,
     nat_type: NatType,
     candidate_endpoints: &[SocketAddr],
+    assigned_ips: &mut Option<VirtualIps>,
     runtime: &mut ConnectionRuntime<'_>,
 ) -> Result<()>
 where
@@ -352,7 +356,13 @@ where
 
     send_signaling_message(
         &mut ws_sender,
-        build_register_message(registration, p2p_port, nat_type, candidate_endpoints),
+        build_register_message(
+            registration,
+            p2p_port,
+            nat_type,
+            candidate_endpoints,
+            assigned_ips.as_ref(),
+        ),
     )
     .await
     .context("failed to send initial signaling registration")?;
@@ -385,7 +395,7 @@ where
                     anyhow::bail!("coordinator closed signaling stream");
                 };
 
-                handle_ws_message(ws_msg, &mut ws_sender, runtime).await?;
+                handle_ws_message(ws_msg, &mut ws_sender, runtime, assigned_ips).await?;
             }
         }
     }
@@ -395,6 +405,7 @@ async fn handle_ws_message<S>(
     ws_msg: Result<Message, tokio_tungstenite::tungstenite::Error>,
     ws_sender: &mut S,
     runtime: &ConnectionRuntime<'_>,
+    assigned_ips: &mut Option<VirtualIps>,
 ) -> Result<()>
 where
     S: SinkExt<Message> + Unpin,
@@ -404,15 +415,7 @@ where
         Ok(Message::Binary(data)) => {
             let msg = codec::decode::<SignalingMessage>(&data)
                 .context("failed to deserialize signaling message")?;
-            handle_incoming_message(
-                msg,
-                runtime.channels.event_tx,
-                runtime.channels.assigned_ip_tx,
-                runtime.channels.assigned_virtual_ips_tx,
-                runtime.channels.relay_endpoint_tx,
-                runtime.channels.relay_endpoints_tx,
-                runtime.channels.known_peers_tx,
-            )?;
+            handle_incoming_message(msg, runtime.channels, assigned_ips)?;
         }
         Ok(Message::Ping(data)) => {
             ws_sender
@@ -466,12 +469,8 @@ where
 
 fn handle_incoming_message(
     msg: SignalingMessage,
-    event_tx: &mpsc::UnboundedSender<SignalingEvent>,
-    assigned_ip_tx: &watch::Sender<Option<Ipv6Addr>>,
-    assigned_virtual_ips_tx: &watch::Sender<Option<VirtualIps>>,
-    relay_endpoint_tx: &watch::Sender<Option<RelayEndpoint>>,
-    relay_endpoints_tx: &watch::Sender<Vec<RelayEndpoint>>,
-    known_peers_tx: &watch::Sender<Vec<PeerInfo>>,
+    channels: ConnectionChannels<'_>,
+    assigned_ips_state: &mut Option<VirtualIps>,
 ) -> Result<()> {
     if let SignalingMessage::RegisterAck {
         assigned_ip,
@@ -481,25 +480,26 @@ fn handle_incoming_message(
         ..
     } = &msg
     {
-        let _ = assigned_ip_tx.send(Some(*assigned_ip));
+        let _ = channels.assigned_ip_tx.send(Some(*assigned_ip));
         let ips = assigned_ips
             .clone()
             .unwrap_or_else(|| VirtualIps::from_ipv6(*assigned_ip));
-        let _ = assigned_virtual_ips_tx.send(Some(ips.clone()));
-        let _ = relay_endpoint_tx.send(relay_endpoint.clone());
+        *assigned_ips_state = Some(ips.clone());
+        let _ = channels.assigned_virtual_ips_tx.send(Some(ips.clone()));
+        let _ = channels.relay_endpoint_tx.send(relay_endpoint.clone());
         let all_relays =
             RelayEndpoint::combine_relay_endpoints(relay_endpoint.as_ref(), relay_endpoints);
-        let _ = relay_endpoints_tx.send(all_relays);
+        let _ = channels.relay_endpoints_tx.send(all_relays);
         tracing::info!("分配的虚拟 IP: 主 IPv6={}, 双栈={:?}", assigned_ip, ips);
         if let Some(endpoint) = relay_endpoint {
             tracing::info!("QUIC 中继服务端点: {}", endpoint.addr);
         }
     }
 
-    update_known_peers(&msg, known_peers_tx);
+    update_known_peers(&msg, channels.known_peers_tx);
 
     if let Some(event) = signaling_message_to_event(msg) {
-        let _ = event_tx.send(event);
+        let _ = channels.event_tx.send(event);
     }
 
     Ok(())
@@ -538,29 +538,51 @@ fn build_register_message(
     p2p_port: u16,
     nat_type: NatType,
     candidate_endpoints: &[SocketAddr],
+    requested_ips: Option<&VirtualIps>,
 ) -> SignalingMessage {
     let timestamp = current_timestamp_secs();
-    let challenge = SignalingMessage::register_challenge(
-        &registration.client_id,
-        &registration.public_key,
-        p2p_port,
-        timestamp,
-    );
+    let challenge = match requested_ips {
+        Some(ips) => SignalingMessage::register_challenge_with_ips(
+            &registration.client_id,
+            &registration.public_key,
+            Some(ips),
+            p2p_port,
+            timestamp,
+        ),
+        None => SignalingMessage::register_challenge(
+            &registration.client_id,
+            &registration.public_key,
+            p2p_port,
+            timestamp,
+        ),
+    };
     let signature = registration
         .private_identity
         .sign(&challenge)
         .to_bytes()
         .to_vec();
 
-    SignalingMessage::register_with_candidates(
-        registration.client_id.clone(),
-        registration.public_key.clone(),
-        p2p_port,
-        nat_type,
-        candidate_endpoints.to_vec(),
-        timestamp,
-        signature,
-    )
+    match requested_ips {
+        Some(ips) => SignalingMessage::register_with_ips(
+            registration.client_id.clone(),
+            registration.public_key.clone(),
+            Some(ips.clone()),
+            p2p_port,
+            nat_type,
+            candidate_endpoints.to_vec(),
+            timestamp,
+            signature,
+        ),
+        None => SignalingMessage::register_with_candidates(
+            registration.client_id.clone(),
+            registration.public_key.clone(),
+            p2p_port,
+            nat_type,
+            candidate_endpoints.to_vec(),
+            timestamp,
+            signature,
+        ),
+    }
 }
 
 fn current_timestamp_secs() -> u64 {
@@ -683,7 +705,7 @@ mod tests {
             public_key: identity.public_key(),
             private_identity: Arc::new(identity),
         };
-        let msg = build_register_message(&registration, 51820, NatType::PortRestricted, &[]);
+        let msg = build_register_message(&registration, 51820, NatType::PortRestricted, &[], None);
 
         let SignalingMessage::Register {
             client_id,
@@ -727,17 +749,17 @@ mod tests {
         let (known_peers_tx, _known_peers_rx) = watch::channel(Vec::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+        let assigned_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1);
+        let assigned_ips = VirtualIps::from_ipv6(assigned_ip);
+        let (close_first_tx, close_first_rx) = tokio::sync::oneshot::channel();
+        let (release_second_tx, release_second_rx) = tokio::sync::oneshot::channel();
         let server_task = tokio::spawn(async move {
+            serve_register_once(&listener, assigned_ip, None, Some(close_first_rx)).await?;
             serve_register_once(
                 &listener,
-                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1),
-                true,
-            )
-            .await?;
-            serve_register_once(
-                &listener,
-                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1),
-                false,
+                assigned_ip,
+                Some(assigned_ips),
+                Some(release_second_rx),
             )
             .await
         });
@@ -767,7 +789,13 @@ mod tests {
         let first = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await?
             .expect("first registration event should arrive");
-        assert!(matches!(first, SignalingEvent::Registered { .. }));
+        assert!(
+            matches!(first, SignalingEvent::Registered { .. }),
+            "first event was {first:?}"
+        );
+        close_first_tx
+            .send(())
+            .expect("test server should still be waiting to close the first connection");
 
         let mut saw_disconnect = false;
         let mut saw_reconnect = false;
@@ -791,6 +819,9 @@ mod tests {
             }
         }
 
+        release_second_tx
+            .send(())
+            .expect("test server should still be waiting after the second registration");
         assert!(saw_disconnect);
         assert!(saw_reconnect);
         assert!(saw_restored_register);
@@ -804,7 +835,8 @@ mod tests {
     async fn serve_register_once(
         listener: &TcpListener,
         assigned_ip: Ipv6Addr,
-        close_after_ack: bool,
+        expected_requested_ips: Option<VirtualIps>,
+        close_after_ack: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<()> {
         let (stream, _) = listener.accept().await?;
         let mut ws = accept_async(stream).await?;
@@ -823,19 +855,31 @@ mod tests {
             p2p_port,
             timestamp,
             signature,
+            requested_ips,
             ..
         } = register
         else {
             panic!("expected register message");
         };
 
-        let challenge =
-            SignalingMessage::register_challenge(&client_id, &public_key, p2p_port, timestamp);
+        assert_eq!(requested_ips, expected_requested_ips);
+        let challenge = match requested_ips.as_ref() {
+            Some(ips) => SignalingMessage::register_challenge_with_ips(
+                &client_id,
+                &public_key,
+                Some(ips),
+                p2p_port,
+                timestamp,
+            ),
+            None => {
+                SignalingMessage::register_challenge(&client_id, &public_key, p2p_port, timestamp)
+            }
+        };
         assert!(Identity::verify(&public_key, &challenge, &signature));
 
         let ack = SignalingMessage::RegisterAck {
             assigned_ip,
-            assigned_ips: None,
+            assigned_ips: Some(VirtualIps::from_ipv6(assigned_ip)),
             network_prefix: 64,
             ipv4_prefix: None,
             peers: Vec::new(),
@@ -845,10 +889,9 @@ mod tests {
         ws.send(Message::Binary(codec::encode(&ack)?.into()))
             .await?;
 
-        if close_after_ack {
+        if let Some(close_after_ack) = close_after_ack {
+            let _ = close_after_ack.await;
             let _ = ws.close(None).await;
-        } else {
-            sleep(Duration::from_millis(100)).await;
         }
         Ok(())
     }

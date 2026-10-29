@@ -1,11 +1,14 @@
 #!/bin/bash
 set -e
 
-HOST="relay.xlei.cc"
-USER="root"
-PASS="lds112.."
-SSH_CMD="sshpass -p $PASS ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 $USER@$HOST"
-SCP_CMD="sshpass -p $PASS scp -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+HOST="${FUCKIPV6_DEPLOY_HOST:-relay.xlei.cc}"
+USER="${FUCKIPV6_DEPLOY_USER:-root}"
+if [ -z "${SSHPASS:-}" ]; then
+  echo "SSHPASS must be provided through the environment." >&2
+  exit 1
+fi
+SSH_CMD="sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $USER@$HOST"
+SCP_CMD="sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 
 echo "[1/4] 检查远程服务器 SSH 连通性..."
 $SSH_CMD "echo '>>> SSH 连接成功: \$(uname -a)'"

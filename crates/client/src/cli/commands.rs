@@ -943,7 +943,13 @@ async fn handle_inbound_payload(
     payload: &[u8],
     source: &str,
 ) {
-    let plain_payload = runtime.p2p.decrypt_from_peer(src_ip, payload).await;
+    let plain_payload = match runtime.p2p.decrypt_from_peer(src_ip, payload).await {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::debug!("丢弃来自 {src_ip} 的未认证数据包: {error:#}");
+            return;
+        }
+    };
     if runtime.acl.is_enabled()
         && runtime.acl.check_inbound(&plain_payload) == fuckipv6_common::AclAction::Deny
     {
@@ -1341,7 +1347,13 @@ async fn send_tun_packet_quic_relay(
         return false;
     };
 
-    let encrypted = p2p.encrypt_for_peer(dst_ip, packet).await;
+    let encrypted = match p2p.encrypt_for_peer(dst_ip, packet).await {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!("无法为 QUIC relay 认证加密数据包: {error:#}");
+            return false;
+        }
+    };
     match relay.send_packet(0, src_v6, dst_v6, &encrypted).await {
         Ok(()) => {
             stats.record_p2p_tx(dst_ip, packet.len()).await;
@@ -1365,7 +1377,13 @@ async fn send_tun_packet_signaling(
     dst_ip: IpAddr,
     packet: &[u8],
 ) {
-    let encrypted = p2p.encrypt_for_peer(dst_ip, packet).await;
+    let encrypted = match p2p.encrypt_for_peer(dst_ip, packet).await {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!("无法为信令中继认证加密数据包: {error:#}");
+            return;
+        }
+    };
     let msg = SignalingMessage::relay_packet(src_ip, dst_ip, encrypted);
 
     match signaling.send(msg) {

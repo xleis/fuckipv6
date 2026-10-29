@@ -224,54 +224,69 @@ impl P2pEngine {
         Ok(())
     }
 
-    /// 对指定对等节点的载荷进行端到端加密（用于中继转发或测试）
+    /// Encrypt a payload for a registered peer using its authenticated session key.
+    ///
+    /// Relay and Exit Node traffic must never silently fall back to plaintext when
+    /// key negotiation is unavailable.
     pub async fn encrypt_for_peer(
         &self,
         dst_ip: impl crate::stats::ToIpAddr,
         payload: &[u8],
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let dst_ip = dst_ip.to_ip_addr();
         let client_id = {
             let idx = self.ip_index.read().await;
             idx.get(&dst_ip).cloned()
         };
+        let Some(client_id) = client_id else {
+            anyhow::bail!("No connection to peer {dst_ip}");
+        };
 
-        if let Some(client_id) = client_id {
+        let session_key = {
             let connections = self.connections.read().await;
-            if let Some(conn) = connections.get(&client_id) {
-                if let Some(key) = conn.session_key {
-                    if let Ok(encrypted) = fuckipv6_common::crypto::encrypt_payload(&key, payload) {
-                        return encrypted;
-                    }
-                }
-            }
-        }
-        payload.to_vec()
+            connections
+                .get(&client_id)
+                .and_then(|connection| connection.session_key)
+        };
+        let Some(key) = session_key else {
+            anyhow::bail!("No authenticated session key for peer {dst_ip}");
+        };
+
+        fuckipv6_common::crypto::encrypt_payload(&key, payload)
+            .with_context(|| format!("无法加密发往对等节点 {dst_ip} 的数据包"))
     }
 
-    /// 对来自指定对等节点的载荷进行端到端解密（用于中继接收或测试）
+    /// Decrypt and authenticate a payload received from a registered peer.
+    ///
+    /// Unlike the old compatibility helper, this never returns the original
+    /// payload when decryption fails. Callers handling routed or privileged data
+    /// must treat any error as a dropped packet.
     pub async fn decrypt_from_peer(
         &self,
         src_ip: impl crate::stats::ToIpAddr,
         payload: &[u8],
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let src_ip = src_ip.to_ip_addr();
         let client_id = {
             let idx = self.ip_index.read().await;
             idx.get(&src_ip).cloned()
         };
+        let Some(client_id) = client_id else {
+            anyhow::bail!("No registered peer for source {src_ip}");
+        };
 
-        if let Some(client_id) = client_id {
+        let session_key = {
             let connections = self.connections.read().await;
-            if let Some(conn) = connections.get(&client_id) {
-                if let Some(key) = conn.session_key {
-                    if let Ok(decrypted) = fuckipv6_common::crypto::decrypt_payload(&key, payload) {
-                        return decrypted;
-                    }
-                }
-            }
-        }
-        payload.to_vec()
+            connections
+                .get(&client_id)
+                .and_then(|connection| connection.session_key)
+        };
+        let Some(key) = session_key else {
+            anyhow::bail!("No authenticated session key for peer {src_ip}");
+        };
+
+        fuckipv6_common::crypto::decrypt_payload(&key, payload)
+            .with_context(|| format!("来自对等节点 {src_ip} 的数据包认证失败"))
     }
 
     /// 发送数据包到对等节点 (支持 IPv4 / IPv6)
@@ -304,12 +319,10 @@ impl P2pEngine {
             let session_key = conn.session_key;
             drop(connections);
 
-            let payload_to_send = if let Some(key) = session_key {
-                fuckipv6_common::crypto::encrypt_payload(&key, payload)
-                    .context("无法对出站数据包进行端到端加密")?
-            } else {
-                payload.to_vec()
-            };
+            let key =
+                session_key.context("对等节点缺少已认证的端到端会话密钥，拒绝发送明文数据")?;
+            let payload_to_send = fuckipv6_common::crypto::encrypt_payload(&key, payload)
+                .context("无法对出站数据包进行端到端加密")?;
 
             // 优先尝试端到端 QUIC 直连通道 (如果对端为 IPv6 且已就绪)
             if let IpAddr::V6(dst_v6) = dst_ip {
@@ -373,6 +386,19 @@ impl P2pEngine {
     /// 将任一虚拟 IP（IPv4 或 IPv6）映射到已认证的客户端 ID。
     pub async fn client_id_for_ip(&self, ip: IpAddr) -> Option<String> {
         self.ip_index.read().await.get(&ip).cloned()
+    }
+
+    /// Resolve a registered peer by either its IPv4 or IPv6 virtual address.
+    pub async fn peer_by_ip(&self, ip: IpAddr) -> Option<PeerInfo> {
+        let client_id = {
+            let idx = self.ip_index.read().await;
+            idx.get(&ip).cloned()
+        }?;
+        self.connections
+            .read()
+            .await
+            .get(&client_id)
+            .map(|connection| connection.peer_info.clone())
     }
 
     /// 获取所有已连接的对等节点
@@ -621,21 +647,13 @@ async fn dispatch_udp_packet(
 }
 
 async fn dispatch_legacy_data_packet(
-    connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
-    ip_index: &Arc<RwLock<HashMap<IpAddr, String>>>,
-    incoming_tx: &mpsc::UnboundedSender<IncomingPacket>,
+    _connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
+    _ip_index: &Arc<RwLock<HashMap<IpAddr, String>>>,
+    _incoming_tx: &mpsc::UnboundedSender<IncomingPacket>,
     addr: SocketAddr,
-    packet: DataPacket,
+    _packet: DataPacket,
 ) {
-    let client_id = {
-        let idx = ip_index.read().await;
-        idx.get(&packet.src_ip).cloned()
-    };
-    if let Some(ref id) = client_id {
-        update_peer_endpoint(connections, id, addr).await;
-        record_peer_payload(connections, id, packet.payload.len()).await;
-    }
-    let _ = incoming_tx.send((packet.src_ip, packet.payload));
+    tracing::warn!("丢弃来自 {addr} 的未认证旧版数据包");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -664,21 +682,10 @@ async fn dispatch_p2p_datagram(
                 packet.src_ip,
                 packet.dst_ip
             );
-            let session_key = {
-                if let Some(ref id) = client_id {
-                    let conns = connections.read().await;
-                    conns.get(id).and_then(|c| c.session_key)
-                } else {
-                    None
-                }
-            };
-            let payload = if let Some(key) = session_key {
-                fuckipv6_common::crypto::decrypt_payload(&key, &packet.payload)
-                    .unwrap_or(packet.payload)
-            } else {
-                packet.payload
-            };
-            let _ = incoming_tx.send((packet.src_ip, payload));
+            // Decryption is deliberately centralized in `decrypt_from_peer`
+            // so no receive path can accidentally treat unauthenticated bytes as
+            // validated traffic.
+            let _ = incoming_tx.send((packet.src_ip, packet.payload));
         }
         P2pDatagram::Control { src_ip, message } => {
             let client_id = {
@@ -1010,10 +1017,14 @@ mod tests {
     async fn test_p2p_engine_data_transfer() -> Result<()> {
         let engine_a = P2pEngine::new(0).await?;
         let engine_b = P2pEngine::new(0).await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
 
         let ip_a = Ipv6Addr::LOCALHOST;
         let ip_b = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
 
+        engine_a.set_identity(identity_a.clone()).await;
+        engine_b.set_identity(identity_b.clone()).await;
         engine_a.set_local_ip(ip_a).await;
         engine_b.set_local_ip(ip_b).await;
 
@@ -1030,7 +1041,7 @@ mod tests {
             .add_peer(PeerInfo::new(
                 "b".to_string(),
                 ip_b,
-                vec![2; 32],
+                identity_b.public_key(),
                 vec![endpoint_b],
                 fuckipv6_common::NatType::Open,
             ))
@@ -1040,7 +1051,7 @@ mod tests {
             .add_peer(PeerInfo::new(
                 "a".to_string(),
                 ip_a,
-                vec![1; 32],
+                identity_a.public_key(),
                 vec![endpoint_a],
                 fuckipv6_common::NatType::Open,
             ))
@@ -1064,7 +1075,22 @@ mod tests {
             .expect("engine B should receive P2P payload");
 
         assert_eq!(received.0, IpAddr::V6(ip_a));
-        assert_eq!(received.1, payload);
+        assert_ne!(received.1, payload, "data plane must not expose plaintext");
+        assert_eq!(
+            engine_b.decrypt_from_peer(ip_a, &received.1).await?,
+            payload
+        );
+        assert!(
+            engine_b.decrypt_from_peer(ip_a, &payload).await.is_err(),
+            "unauthenticated plaintext must be rejected"
+        );
+
+        let mut tampered = received.1.clone();
+        *tampered.last_mut().expect("ciphertext should not be empty") ^= 0x55;
+        assert!(engine_b.decrypt_from_peer(ip_a, &tampered).await.is_err());
+
+        let encrypted = engine_a.encrypt_for_peer(ip_b, &payload).await?;
+        assert_eq!(engine_b.decrypt_from_peer(ip_a, &encrypted).await?, payload);
 
         let health = tokio::time::timeout(Duration::from_secs(1), async {
             loop {

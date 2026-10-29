@@ -830,6 +830,7 @@ dependencies = [
  "fuckipv6-coordinator",
  "futures",
  "getrandom 0.3.4",
+ "ipnet",
  "libc",
  "quinn",
  "serde",

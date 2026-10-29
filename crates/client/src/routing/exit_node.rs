@@ -29,6 +29,11 @@ impl ExitNodeManager {
         self.config.enabled = enabled;
     }
 
+    /// 是否允许获准客户端访问出口节点所在物理局域网。
+    pub fn allows_lan_access(&self) -> bool {
+        self.config.enabled && self.config.allow_lan_access
+    }
+
     /// 校验指定客户端是否有权限通过当前节点作为出口上网
     pub fn is_client_allowed(&self, client_id: &str) -> bool {
         if !self.config.enabled {

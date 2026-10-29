@@ -233,6 +233,20 @@ impl SmartRouteEngine {
         self.mode = mode;
     }
 
+    /// 判断地址是否属于虚拟内网，而不是物理局域网或公网。
+    pub fn is_virtual_network(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => self
+                .virtual_network_v4
+                .as_ref()
+                .is_some_and(|network| network.contains(&v4)),
+            IpAddr::V6(v6) => self
+                .virtual_network_v6
+                .as_ref()
+                .is_some_and(|network| network.contains(&v6)),
+        }
+    }
+
     /// 设置虚拟网络前缀（用于准确判定 Mesh 流量）
     pub fn set_virtual_networks(&mut self, v6: Option<Ipv6Net>, v4: Option<Ipv4Net>) {
         self.virtual_network_v6 = v6;
@@ -357,6 +371,15 @@ mod tests {
         assert!(!networks
             .iter()
             .any(|network| network.contains(&"8.8.8.8".parse::<IpAddr>().unwrap())));
+    }
+
+    #[test]
+    fn virtual_network_detection_excludes_physical_lan() {
+        let engine = SmartRouteEngine::new(RoutingMode::GlobalProxy);
+        assert!(engine.is_virtual_network("10.8.0.2".parse().unwrap()));
+        assert!(engine.is_virtual_network("fd00::1002".parse().unwrap()));
+        assert!(!engine.is_virtual_network("192.168.1.2".parse().unwrap()));
+        assert!(!engine.is_virtual_network("1.1.1.1".parse().unwrap()));
     }
 
     #[test]

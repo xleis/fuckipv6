@@ -370,6 +370,11 @@ impl P2pEngine {
         }
     }
 
+    /// 将任一虚拟 IP（IPv4 或 IPv6）映射到已认证的客户端 ID。
+    pub async fn client_id_for_ip(&self, ip: IpAddr) -> Option<String> {
+        self.ip_index.read().await.get(&ip).cloned()
+    }
+
     /// 获取所有已连接的对等节点
     pub async fn get_peers(&self) -> Vec<PeerInfo> {
         self.connections

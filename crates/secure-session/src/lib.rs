@@ -7,6 +7,7 @@
 //! tested independently from the eventually selected X-Wing and ML-DSA
 //! implementations.
 
+pub mod confirmation;
 pub mod handshake;
 pub mod key_schedule;
 pub mod rekey;
@@ -890,12 +891,10 @@ mod tests {
 
         let packet_len = sender.seal(&[], &mut packet).expect("seal");
         assert_eq!(packet_len, MIN_DATA_PACKET_LEN);
-        assert_eq!(
-            receiver
-                .open_in_place(&mut packet[..packet_len])
-                .expect("open"),
-            &[]
-        );
+        let plaintext = receiver
+            .open_in_place(&mut packet[..packet_len])
+            .expect("open");
+        assert!(plaintext.is_empty());
     }
 
     #[test]

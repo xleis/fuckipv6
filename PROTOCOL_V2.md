@@ -191,7 +191,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - `HELLO` 与 `ACCEPT` 各自使用长度前缀、域分离的 SHA-512 签名输入；最终 transcript 使用第 8.2 节 canonical 构造。双方必须得到相同的 `TH2` hash 和 X25519 共享秘密。
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生，但仍不包含 X-Wing、ML-KEM、ML-DSA-65、key confirmation、wire encoding 或数据面密钥安装；这些能力必须分别完成 SS-06 至 SS-13，并通过独立评审后才能进入生产声明。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生和 SS-06 的双向 HMAC-SHA-256 key confirmation 原语；当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，数据面也未安装密钥。X-Wing、ML-KEM、ML-DSA-65、wire encoding、数据面密钥安装和原子轮换仍须分别完成 SS-07 至 SS-13，并通过独立评审后才能进入生产声明。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 

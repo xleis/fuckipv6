@@ -6,8 +6,9 @@
 //! confirmation key per direction. All labels and context fields are length
 //! prefixed with the same canonical encoding used by the handshake.
 //!
-//! This module does not perform key confirmation. Until SS-06 verifies both
-//! confirmation values, callers must not activate the derived data keys.
+//! Confirmation values are computed and verified by the adjacent
+//! [`crate::confirmation`] module. Callers must not activate the derived data
+//! keys until the required directional confirmations have been verified.
 
 use crate::handshake::{EstablishedHandshake, HandshakeIdentity};
 use crate::transcript::TranscriptHash;

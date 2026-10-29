@@ -18,6 +18,7 @@ Thumbs.db
 *.toml
 !Cargo.toml
 !**/Cargo.toml
+!deny.toml
 *.pem
 *.key
 

@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加供应链门禁：固定 `cargo-deny 0.20.2`，同时审计主 workspace 与独立 fuzz workspace 的已知漏洞、许可证、重复版本、通配版本要求和依赖来源；报告写入 `target/supply-chain/` 并由 CI 上传。该检查不生成 SBOM，也不替代对上游 crate 的人工安全审计。
 - 增加独立 `cargo fuzz` workspace 与三个崩溃可复现 harness：通用 v2/PQ 解码器、握手输入与签名验证路径、加密数据帧接收路径；提供 `scripts/fuzz-smoke.sh`，并在 secure-session 相关 PR、`main` 推送和每周定时任务中运行 2000 次短时 smoke。该入口仅证明当前语料范围内未发现 panic/越界/认证绕过，不代表密码学审计或长期 fuzz 覆盖率已经充分。
 - 增加可执行发布门禁 `scripts/release-gate.py`：默认拒绝脏工作区，执行格式、辅助脚本测试、workspace check/Clippy/test、release build、Linux musl/Windows GNU 交叉检查及 Criterion quick 基准，输出包含 commit、工具链、硬件、命令、退出码、耗时、日志路径和基准估计值的 JSON 报告；GitHub Actions 对 Linux/Windows/macOS 报告执行同 commit 聚合。`--allow-dirty` 仅供诊断且 `release_ready=false`。该门禁不证明 WireGuard 性能对等、生产安全或独立审计完成。
 - 增加 Secure Session v2 可选 `pq` feature 的 FIPS 203 ML-KEM-768 与 FIPS 204 ML-DSA-65 原语适配：锁定 `ml-kem 0.3.3` / `ml-dsa 0.1.1`（Apache-2.0 OR MIT，MSRV 1.85），提供严格定长编解码、私钥/临时随机数/shared secret 清零和脱敏 Debug，并通过 NIST ACVP keygen、encapsulation 与 sigGen KAT。两个上游 crate 均明确标注未经独立安全审计；当前仅完成原语适配，未接入 X-Wing、Ed25519 + ML-DSA-65 复合签名、`HELLO/ACCEPT` 或真实数据面，不得据此宣称已具备后量子安全或超越 WireGuard。
@@ -31,6 +32,7 @@ All notable changes are documented here. The project follows semantic versioning
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 
 ### Fixed
+- 修复供应链审计发现的 RustSec 安全公告：升级 `anyhow`、`crossbeam-epoch`、`quinn`/`quinn-proto`、`rustls`/`rustls-webpki`、`tokio` 等锁定版本，并统一主 workspace 的 `socket2`、`tower` 版本以消除可避免的重复依赖。
 - 修复 `VirtualIps` 单栈地址因 Postcard 条件字段省略而无法自解码的问题；所有 Option 字段现在始终编码，并增加单栈/双栈往返回归测试。
 - 修复客户端重连后 TUN/路由仍使用旧虚拟地址、但协调端分配新地址造成流量黑洞的问题；现在地址变化会记录错误并失败关闭。
 - 修复 Linux Global Proxy / BypassMainland 策略表的默认路由未绑定虚拟源地址，导致 Exit Node 将合法的 IPv4 出站包误判为源地址伪造的问题。

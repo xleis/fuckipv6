@@ -7,6 +7,33 @@ permissions:
   contents: read
 
 jobs:
+  supply-chain:
+    name: Supply-chain audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Audit dependencies, licenses, duplicates, and sources
+        run: ./scripts/supply-chain-audit.sh
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-reports
+          path: target/supply-chain
+          if-no-files-found: warn
+
   linux:
     name: Linux gate
     runs-on: ubuntu-latest

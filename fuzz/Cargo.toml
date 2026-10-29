@@ -3,13 +3,14 @@ name = "fuckipv6-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
+license = "MIT"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-fuckipv6-secure-session = { path = "../crates/secure-session", features = ["pq"] }
+fuckipv6-secure-session = { version = "0.3.0", path = "../crates/secure-session", features = ["pq"] }
 
 [[bin]]
 name = "wire_decoders"

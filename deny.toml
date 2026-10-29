@@ -1,0 +1,87 @@
+# Supply-chain policy for shipped release targets. This file is consumed by
+# scripts/supply-chain-audit.sh and the Verify workflow.
+
+[graph]
+# Audit the union of release targets rather than only the host platform.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+# Explicitly allow only permissive licenses used by the locked dependency graph.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT-0",
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+    "WTFPL",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# A duplicate must be removed or documented below with a narrow version pin.
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+
+# These are deliberately pinned to exact versions. An unversioned skip would
+# silently accept future duplicates, so every exception must be revisited when
+# the lockfile changes.
+skip = [
+    # FIPS 203/204 crates currently use RustCrypto 0.11, while the stable
+    # X25519/Ed25519 and AEAD crates still use RustCrypto 0.10.
+    { crate = "chacha20@0.9.1", reason = "RustCrypto 0.10 AEAD compatibility" },
+    { crate = "cpufeatures@0.2.17", reason = "RustCrypto 0.10 digest backend" },
+    { crate = "crypto-common@0.1.7", reason = "RustCrypto 0.10 trait ecosystem" },
+    { crate = "digest@0.10.7", reason = "RustCrypto 0.10 SHA/HMAC compatibility" },
+    { crate = "signature@2.2.0", reason = "ed25519-dalek 2.x compatibility" },
+
+    # The dependency graph spans getrandom 0.2 (legacy RustCrypto), 0.3 (our
+    # direct dependency), and 0.4 (quinn's rand 0.10).
+    { crate = "getrandom@0.2.17", reason = "legacy RustCrypto rand_core dependency" },
+    { crate = "getrandom@0.3.4", reason = "workspace direct random source" },
+    { crate = "rand@0.9.5", reason = "tungstenite random dependency" },
+    { crate = "rand_core@0.6.4", reason = "legacy RustCrypto compatibility" },
+    { crate = "rand_core@0.9.5", reason = "tungstenite rand compatibility" },
+
+    # Proc-macro crates independently select syn 1/2/3; Cargo does not provide
+    # a workspace-level way to force transitive macro dependencies to one syn.
+    { crate = "syn@1.0.109", reason = "wintun 0.3 derive dependency" },
+    { crate = "syn@2.0.119", reason = "current proc-macro dependency graph" },
+
+    # These crates are also pulled transitively by x509-parser/tun and by
+    # quinn/tungstenite, which currently select different major versions.
+    { crate = "thiserror@1.0.69", reason = "x509-parser and tun compatibility" },
+    { crate = "thiserror-impl@1.0.69", reason = "thiserror 1.x implementation" },
+
+    # Windows FFI versions are selected independently by ring/rustls and
+    # wintun/tun. Only the exact legacy versions are tolerated.
+    { crate = "windows-core@0.51.1", reason = "wintun/tun Windows API compatibility" },
+    { crate = "windows-sys@0.52.0", reason = "ring/rustls Windows API compatibility" },
+    { crate = "windows-sys@0.59.0", reason = "direct Windows TUN API compatibility" },
+    { crate = "windows-targets@0.48.5", reason = "windows-sys 0.52 compatibility" },
+    { crate = "windows_x86_64_gnu@0.48.5", reason = "windows-targets 0.48 compatibility" },
+    { crate = "wintun@0.3.2", reason = "tun 0.6 Windows backend" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

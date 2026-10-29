@@ -33,6 +33,19 @@ Run clippy when touching shared logic or before a release:
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Before changing dependencies or preparing a release, install `cargo-deny` 0.20.2
+and run the supply-chain policy:
+
+```bash
+cargo install cargo-deny --locked --version 0.20.2
+./scripts/supply-chain-audit.sh
+```
+
+The command audits both the workspace and the separate fuzz workspace for
+known vulnerabilities, disallowed licenses, duplicate versions, wildcard
+requirements, and non-crates.io sources. Reports are written to
+`target/supply-chain/`.
+
 ## Code Guidelines
 
 - Prefer existing module boundaries and helper APIs.

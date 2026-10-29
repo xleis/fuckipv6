@@ -108,9 +108,16 @@ impl LinuxTun {
 
         tracing::info!("TUN 设备已完全配置并打开: {}", name);
 
+        // SAFETY: both values are owning `File`s whose descriptors stay open
+        // and unchanged for the complete lifetime of their `AsyncFd` wrappers.
+        let reader = unsafe { AsyncFd::register(reader) }.context("注册 TUN 读事件失败")?;
+        // SAFETY: `writer_file` owns the duplicated descriptor and retains it
+        // until this `AsyncFd` is dropped.
+        let writer = unsafe { AsyncFd::register(writer_file) }.context("注册 TUN 写事件失败")?;
+
         Ok(Self {
-            reader: Arc::new(AsyncFd::new(reader).context("注册 TUN 读事件失败")?),
-            writer: Arc::new(AsyncFd::new(writer_file).context("注册 TUN 写事件失败")?),
+            reader: Arc::new(reader),
+            writer: Arc::new(writer),
             name: name.to_string(),
             virtual_ips: virtual_ips.clone(),
             cleanup_on_drop: true,

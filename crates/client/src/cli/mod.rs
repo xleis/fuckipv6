@@ -385,7 +385,13 @@ pub async fn run_default_app(
 
     if host {
         if let Err(e) = controller
-            .host_network(host_name, host_port, host_relay_port, auto_connect, external_host)
+            .host_network(
+                host_name,
+                host_port,
+                host_relay_port,
+                auto_connect,
+                external_host,
+            )
             .await
         {
             tracing::warn!("启动协调网络服务失败: {e:#}");
@@ -479,8 +485,15 @@ async fn run_network_command(command: Commands) -> Result<()> {
                 gui,
                 webui_port,
             };
-            network_commands::host(&name, port, relay_port, external_host, auto_connect, options)
-                .await?
+            network_commands::host(
+                &name,
+                port,
+                relay_port,
+                external_host,
+                auto_connect,
+                options,
+            )
+            .await?
         }
         Commands::Join {
             server,
@@ -538,9 +551,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             };
             network_commands::up(networks, all, options).await?
         }
-        Commands::Down { networks, all } => {
-            network_commands::down(networks, all).await?
-        }
+        Commands::Down { networks, all } => network_commands::down(networks, all).await?,
         Commands::List => {
             logging::init_default()?;
             network_commands::list_networks()?;

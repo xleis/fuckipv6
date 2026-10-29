@@ -24,7 +24,11 @@ pub struct NetworkTicket {
 impl NetworkTicket {
     pub const URI_SCHEME: &'static str = "fk://";
 
-    pub fn new(pubkey: [u8; 32], endpoint: impl Into<String>, network_name: impl Into<String>) -> Self {
+    pub fn new(
+        pubkey: [u8; 32],
+        endpoint: impl Into<String>,
+        network_name: impl Into<String>,
+    ) -> Self {
         Self {
             pubkey,
             endpoint: endpoint.into(),
@@ -97,7 +101,10 @@ impl NetworkTicket {
             .context("公钥 Base64 解码失败")?;
 
         if pubkey_bytes.len() != 32 {
-            anyhow::bail!("公钥长度错误: 预期 32 字节, 实际 {} 字节", pubkey_bytes.len());
+            anyhow::bail!(
+                "公钥长度错误: 预期 32 字节, 实际 {} 字节",
+                pubkey_bytes.len()
+            );
         }
 
         let mut pubkey = [0u8; 32];
@@ -110,7 +117,9 @@ impl NetworkTicket {
         if let Some(queries) = query_part {
             for item in queries.split('&') {
                 if let Some((k, v)) = item.split_once('=') {
-                    let decoded_val = urlencoding::decode(v).unwrap_or_else(|_| v.into()).to_string();
+                    let decoded_val = urlencoding::decode(v)
+                        .unwrap_or_else(|_| v.into())
+                        .to_string();
                     match k {
                         "name" => network_name = decoded_val,
                         "v6" => ipv6_prefix = Some(decoded_val),
@@ -166,7 +175,9 @@ mod tests {
         assert!(encoded.starts_with("fk://"));
         assert!(encoded.contains("@relay.xlei.cc:6666"));
         assert!(encoded.contains("name=team-vpn"));
-        assert!(encoded.contains("v6=fd00%3A%3A1000%2F120") || encoded.contains("v6=fd00::1000/120"));
+        assert!(
+            encoded.contains("v6=fd00%3A%3A1000%2F120") || encoded.contains("v6=fd00::1000/120")
+        );
 
         let parsed = NetworkTicket::parse(&encoded).expect("parse ticket failed");
         assert_eq!(parsed.pubkey, pubkey);

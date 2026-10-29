@@ -147,7 +147,10 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
 
     if auth_config.is_auth_required() {
-        tracing::info!("Web 管理界面已开启 JWT 访问鉴权 (管理员: {})", auth_config.admin_username);
+        tracing::info!(
+            "Web 管理界面已开启 JWT 访问鉴权 (管理员: {})",
+            auth_config.admin_username
+        );
     } else {
         tracing::info!("Web 管理界面当前运行于免密模式 (未配置 admin_password)");
     }

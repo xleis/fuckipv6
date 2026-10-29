@@ -393,9 +393,10 @@ mod tests {
         node_b.send_packet(&ip_a, b"quic-p2p-mesh-packet").await?;
 
         // Node A 接收数据
-        let (src_ip, payload) = tokio::time::timeout(std::time::Duration::from_secs(2), rx_a_rx.recv())
-            .await?
-            .expect("Node A should receive packet");
+        let (src_ip, payload) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx_a_rx.recv())
+                .await?
+                .expect("Node A should receive packet");
         assert_eq!(src_ip, ip_b);
         assert_eq!(payload, b"quic-p2p-mesh-packet");
         Ok(())

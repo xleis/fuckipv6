@@ -66,7 +66,9 @@ pub async fn start_with_config_and_options(
             "global-proxy" | "globalproxy" | "global_proxy" => {
                 config.routing.mode = fuckipv6_common::RoutingMode::GlobalProxy
             }
-            other => anyhow::bail!("未知路由模式: {other} (可用值: mesh-only, bypass-mainland, global-proxy)"),
+            other => anyhow::bail!(
+                "未知路由模式: {other} (可用值: mesh-only, bypass-mainland, global-proxy)"
+            ),
         }
     }
     if let Some(exit) = &options.exit_node {
@@ -205,7 +207,15 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     tracing::info!("性能监控已启用");
 
-    let tasks = spawn_runtime_tasks_ext(config_path, &config, &p2p, &tun, &stats, assigned_ip, enable_ipc);
+    let tasks = spawn_runtime_tasks_ext(
+        config_path,
+        &config,
+        &p2p,
+        &tun,
+        &stats,
+        assigned_ip,
+        enable_ipc,
+    );
 
     // 主事件循环
     let mut heartbeat_interval =
@@ -267,7 +277,9 @@ async fn create_p2p_engine(config: &ClientConfig) -> Result<P2pEngine> {
                 "配置的 P2P 监听端口 {} 绑定失败，自动回退到随机可用端口: {err:#}",
                 config.p2p.listen_port
             );
-            P2pEngine::new(0).await.context("无法创建 P2P 引擎 (随机端口)")?
+            P2pEngine::new(0)
+                .await
+                .context("无法创建 P2P 引擎 (随机端口)")?
         }
         Err(err) => return Err(err).context("无法创建 P2P 引擎"),
     };
@@ -294,11 +306,9 @@ async fn connect_signaling(
         });
     tracing::info!("NAT 类型检测结果: {}", report.nat_type.description());
 
-    let candidates = punching::gather_candidate_endpoints(
-        p2p.local_addr().port(),
-        &report.mapped_addresses,
-    )
-    .await;
+    let candidates =
+        punching::gather_candidate_endpoints(p2p.local_addr().port(), &report.mapped_addresses)
+            .await;
     tracing::info!(
         "本地收集到 {} 个 ICE 候选端点: {:?}",
         candidates.len(),
@@ -358,15 +368,9 @@ async fn configure_local_ip(p2p: &P2pEngine, assigned_ip: Ipv6Addr) {
 async fn create_tun_device(config: &ClientConfig, assigned_ips: &VirtualIps) -> Result<TunDevice> {
     tracing::info!("正在创建 TUN 设备: {}", config.tun.name);
 
-    let tun = TunDevice::create_dual_stack(
-        &config.tun.name,
-        assigned_ips,
-        24,
-        64,
-        config.tun.mtu,
-    )
-    .await
-    .context("无法创建 TUN 设备")?;
+    let tun = TunDevice::create_dual_stack(&config.tun.name, assigned_ips, 24, 64, config.tun.mtu)
+        .await
+        .context("无法创建 TUN 设备")?;
 
     tracing::info!("TUN 设备已创建: {}", config.tun.name);
     Ok(tun)
@@ -476,7 +480,9 @@ async fn connect_quic_relay(
             None
         }
         Err(_) => {
-            tracing::warn!("QUIC 中继连接超时（可能 UDP 端口被云防火墙拦截），降级使用信令中继 fallback");
+            tracing::warn!(
+                "QUIC 中继连接超时（可能 UDP 端口被云防火墙拦截），降级使用信令中继 fallback"
+            );
             None
         }
     }
@@ -612,7 +618,10 @@ async fn handle_inbound_payload(
         );
         return;
     }
-    runtime.stats.record_p2p_rx(src_ip, plain_payload.len()).await;
+    runtime
+        .stats
+        .record_p2p_rx(src_ip, plain_payload.len())
+        .await;
 
     // 如果本机声明为 Exit Node 出口网关，且收到目的地址为公网 IP 的数据包，记录并交给 TUN 触发内核转发/NAT
     if runtime.exit_node_manager.is_exit_node() {
@@ -987,7 +996,9 @@ async fn send_tun_packet_signaling(
 
 fn should_forward_tun_destination(dst_ip: IpAddr) -> bool {
     match dst_ip {
-        IpAddr::V4(v4) => !v4.is_broadcast() && !v4.is_multicast() && !v4.is_unspecified() && !v4.is_loopback(),
+        IpAddr::V4(v4) => {
+            !v4.is_broadcast() && !v4.is_multicast() && !v4.is_unspecified() && !v4.is_loopback()
+        }
         IpAddr::V6(v6) => !v6.is_multicast() && !v6.is_unspecified() && !v6.is_loopback(),
     }
 }
@@ -1092,7 +1103,10 @@ pub async fn status() -> Result<()> {
     };
 
     if snapshot.networks.len() > 1 {
-        println!("多网络并发运行状态 (共 {} 个网络活跃)", snapshot.networks.len());
+        println!(
+            "多网络并发运行状态 (共 {} 个网络活跃)",
+            snapshot.networks.len()
+        );
         println!("══════════════════════════════════════════════════════════════════════════════");
         for net in &snapshot.networks {
             println!("🌐 虚拟网络:        {}", net.network_name);
@@ -1118,7 +1132,9 @@ pub async fn status() -> Result<()> {
                 net.global.p2p_tx_packets,
                 net.global.p2p_rx_bytes + net.global.p2p_tx_bytes
             );
-            println!("──────────────────────────────────────────────────────────────────────────────");
+            println!(
+                "──────────────────────────────────────────────────────────────────────────────"
+            );
         }
         return Ok(());
     }
@@ -1134,10 +1150,7 @@ pub async fn status() -> Result<()> {
     }
     println!("虚拟 IP:         {}", snapshot.assigned_ip);
     println!("P2P 监听地址:    {}", snapshot.p2p_listen_addr);
-    println!(
-        "在线运行时长:    {}",
-        format_duration(snapshot.uptime_secs)
-    );
+    println!("在线运行时长:    {}", format_duration(snapshot.uptime_secs));
     println!("对等节点数量:    {}", snapshot.peers.len());
     let healthy_peers = snapshot
         .peers
@@ -1200,7 +1213,15 @@ pub async fn peers() -> Result<()> {
     if has_networks {
         println!(
             "{:<12}  {:<18}  {:<26}  {:<8}  {:<8}  {:<8}  {:<8}  {:<10}  {:<12}  公网物理端点",
-            "所属网络", "虚拟 IP", "客户端标识 (Client ID)", "链路模式", "往返时延", "丢包率", "探测成功", "当前带宽", "收/发包"
+            "所属网络",
+            "虚拟 IP",
+            "客户端标识 (Client ID)",
+            "链路模式",
+            "往返时延",
+            "丢包率",
+            "探测成功",
+            "当前带宽",
+            "收/发包"
         );
         println!("{}", "─".repeat(150));
 
@@ -1232,7 +1253,16 @@ pub async fn peers() -> Result<()> {
 
             println!(
                 "{:<12}  {:<18}  {:<26}  {:<8}  {:<8}  {:<8}  {:<8}  {:<10}  {:<12}  {}",
-                net, peer.virtual_ip, client_id, path, rtt, loss, probe, bandwidth, packets, endpoint
+                net,
+                peer.virtual_ip,
+                client_id,
+                path,
+                rtt,
+                loss,
+                probe,
+                bandwidth,
+                packets,
+                endpoint
             );
         }
         return Ok(());
@@ -1240,7 +1270,14 @@ pub async fn peers() -> Result<()> {
 
     println!(
         "{:<18}  {:<30}  {:<8}  {:<8}  {:<8}  {:<8}  {:<10}  {:<12}  公网物理端点",
-        "虚拟 IP", "客户端标识 (Client ID)", "链路模式", "往返时延", "丢包率", "探测成功", "当前带宽", "收/发包"
+        "虚拟 IP",
+        "客户端标识 (Client ID)",
+        "链路模式",
+        "往返时延",
+        "丢包率",
+        "探测成功",
+        "当前带宽",
+        "收/发包"
     );
     println!("{}", "─".repeat(140));
 
@@ -1288,7 +1325,9 @@ pub async fn ping(target: &str, count: u32) -> Result<()> {
         Ok(ip) => ip,
         Err(_) => {
             // 尝试通过本地控制接口 IPC 查找节点
-            if let Ok(crate::ipc::IpcResponse::Peers(peers)) = crate::ipc::request(crate::ipc::IpcRequest::Peers).await {
+            if let Ok(crate::ipc::IpcResponse::Peers(peers)) =
+                crate::ipc::request(crate::ipc::IpcRequest::Peers).await
+            {
                 let matched = peers.into_iter().find(|p| {
                     p.client_id == target
                         || p.client_id.starts_with(target)
@@ -1300,10 +1339,16 @@ pub async fn ping(target: &str, count: u32) -> Result<()> {
                     println!();
                     std::net::IpAddr::V6(peer.virtual_ip)
                 } else {
-                    anyhow::bail!("无法解析目标地址: {} (既非有效 IP，也未匹配到在线节点)", target);
+                    anyhow::bail!(
+                        "无法解析目标地址: {} (既非有效 IP，也未匹配到在线节点)",
+                        target
+                    );
                 }
             } else {
-                anyhow::bail!("无效的 IP 地址: {} (且本地未连接到运行中的 fuckipv6 进程)", target);
+                anyhow::bail!(
+                    "无效的 IP 地址: {} (且本地未连接到运行中的 fuckipv6 进程)",
+                    target
+                );
             }
         }
     };
@@ -1341,21 +1386,14 @@ fn platform_ping_command(target_ip: std::net::IpAddr, count: u32) -> (&'static s
         };
         (
             "ping",
-            vec![
-                flag.to_string(),
-                "-n".to_string(),
-                count_str,
-                ip_str,
-            ],
+            vec![flag.to_string(), "-n".to_string(), count_str, ip_str],
         )
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         match target_ip {
-            std::net::IpAddr::V4(_) => {
-                ("ping", vec!["-c".to_string(), count_str, ip_str])
-            }
+            std::net::IpAddr::V4(_) => ("ping", vec!["-c".to_string(), count_str, ip_str]),
             std::net::IpAddr::V6(_) => {
                 if std::path::Path::new("/bin/ping6").exists()
                     || std::path::Path::new("/usr/bin/ping6").exists()
@@ -1364,12 +1402,7 @@ fn platform_ping_command(target_ip: std::net::IpAddr, count: u32) -> (&'static s
                 } else {
                     (
                         "ping",
-                        vec![
-                            "-6".to_string(),
-                            "-c".to_string(),
-                            count_str,
-                            ip_str,
-                        ],
+                        vec!["-6".to_string(), "-c".to_string(), count_str, ip_str],
                     )
                 }
             }
@@ -1959,7 +1992,10 @@ pub async fn register_check(
     match relay_endpoint {
         Some(endpoint) => {
             println!("  QUIC 中继 / QUIC relay: {}", endpoint.addr);
-            println!("  QUIC 中继公钥指纹 / QUIC relay pin: {}", hex_encode(&endpoint.public_key_pin));
+            println!(
+                "  QUIC 中继公钥指纹 / QUIC relay pin: {}",
+                hex_encode(&endpoint.public_key_pin)
+            );
         }
         None => println!("  QUIC 中继 (QUIC relay): 不可用 (unavailable)"),
     }

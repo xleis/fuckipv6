@@ -75,16 +75,17 @@ pub async fn join(
 
     // 确定网络名称
     let config_manager = ConfigManager::new()?;
-    let network_name = name
-        .map(|s| s.to_string())
-        .unwrap_or(default_network_name);
+    let network_name = name.map(|s| s.to_string()).unwrap_or(default_network_name);
 
     println!("📝 网络名称: {}", network_name);
 
     // 检查网络是否已存在
     if config_manager.network_exists(&network_name) {
         if auto_start {
-            println!("🚀 检测到网络 [{}] 已存在，正在直接启动连接...", network_name);
+            println!(
+                "🚀 检测到网络 [{}] 已存在，正在直接启动连接...",
+                network_name
+            );
             return up(vec![network_name], false, options).await;
         }
         println!();
@@ -137,9 +138,11 @@ pub async fn up(networks: Vec<String>, all: bool, options: RuntimeOptions) -> Re
         crate::multi_network::start_multiple_networks(&networks, options).await
     } else {
         let config_manager = ConfigManager::new()?;
-        let default_network = config_manager
-            .get_default_network()?
-            .ok_or_else(|| anyhow::anyhow!("未设置默认网络。请指定网络名称 (fuckipv6 up <名称>) 或使用 --all 启动全部网络"))?;
+        let default_network = config_manager.get_default_network()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "未设置默认网络。请指定网络名称 (fuckipv6 up <名称>) 或使用 --all 启动全部网络"
+            )
+        })?;
         crate::multi_network::start_multiple_networks(&[default_network], options).await
     }
 }
@@ -205,7 +208,10 @@ pub async fn connect(
         let config_manager = ConfigManager::new()?;
         if config_manager.network_exists(&target) {
             up(vec![target], false, options).await?;
-        } else if target.starts_with(NetworkTicket::URI_SCHEME) || target.contains(':') || target.contains('.') {
+        } else if target.starts_with(NetworkTicket::URI_SCHEME)
+            || target.contains(':')
+            || target.contains('.')
+        {
             // 自动检测到邀请票据或服务器地址，执行加入并自动启动连接
             join(&target, None, true, options).await?;
         } else {

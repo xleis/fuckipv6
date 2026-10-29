@@ -11,15 +11,15 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use fuckipv6_coordinator::signaling::session::PeerSnapshot;
-use fuckipv6_coordinator::webui::{
-    BlacklistActionRequest, BlacklistActionResponse, LoginRequest, LoginResponse,
-    NetworkConfigApiResponse, NetworkConfigDto, UpdateNetworkConfigRequest,
-};
 pub use controller::{
     AppController, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
     CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, UnifiedSnapshotResponse,
     UpdateRoutingRequest,
+};
+use fuckipv6_coordinator::signaling::session::PeerSnapshot;
+use fuckipv6_coordinator::webui::{
+    BlacklistActionRequest, BlacklistActionResponse, LoginRequest, LoginResponse,
+    NetworkConfigApiResponse, NetworkConfigDto, UpdateNetworkConfigRequest,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -103,16 +103,19 @@ async fn handle_status(State(ctrl): State<Arc<AppController>>) -> Json<serde_jso
         peers_snapshot.len()
     };
 
-    let traffic = state.coordinator_traffic.clone().unwrap_or(CoordinatorTrafficDto {
-        uptime_secs: 0,
-        signaling_rx_messages: 0,
-        signaling_rx_bytes: 0,
-        signaling_tx_messages: 0,
-        signaling_tx_bytes: 0,
-        relay_packets: 0,
-        relay_payload_bytes: 0,
-        relay_errors: 0,
-    });
+    let traffic = state
+        .coordinator_traffic
+        .clone()
+        .unwrap_or(CoordinatorTrafficDto {
+            uptime_secs: 0,
+            signaling_rx_messages: 0,
+            signaling_rx_bytes: 0,
+            signaling_tx_messages: 0,
+            signaling_tx_bytes: 0,
+            relay_packets: 0,
+            relay_payload_bytes: 0,
+            relay_errors: 0,
+        });
 
     Json(serde_json::json!({
         "service": "fuckipv6-unified",
@@ -268,7 +271,10 @@ async fn handle_connect(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<ConnectRequest>,
 ) -> Result<Json<AppUiState>, StatusCode> {
-    match ctrl.connect(payload.target, payload.routing_mode, payload.exit_node).await {
+    match ctrl
+        .connect(payload.target, payload.routing_mode, payload.exit_node)
+        .await
+    {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
             ctrl.log(format!("连接网络失败: {e:#}")).await;
@@ -353,7 +359,10 @@ async fn handle_routing(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<UpdateRoutingRequest>,
 ) -> Result<Json<AppUiState>, StatusCode> {
-    match ctrl.update_routing(payload.mode, payload.exit_node, payload.is_exit_node).await {
+    match ctrl
+        .update_routing(payload.mode, payload.exit_node, payload.is_exit_node)
+        .await
+    {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
             ctrl.log(format!("路由分流策略更新失败: {e:#}")).await;
@@ -2918,4 +2927,3 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("is-exit-node-check"));
     }
 }
-

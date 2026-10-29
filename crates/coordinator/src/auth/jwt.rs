@@ -62,10 +62,9 @@ impl JwtManager {
 
     /// 签发完整 Claims
     pub fn sign_claims(&self, claims: &Claims) -> Result<String> {
-        let header_json = serde_json::to_vec(&JwtHeader::default())
-            .context("序列化 JWT Header 失败")?;
-        let claims_json = serde_json::to_vec(claims)
-            .context("序列化 JWT Claims 失败")?;
+        let header_json =
+            serde_json::to_vec(&JwtHeader::default()).context("序列化 JWT Header 失败")?;
+        let claims_json = serde_json::to_vec(claims).context("序列化 JWT Claims 失败")?;
 
         let header_b64 = base64_url_encode(&header_json);
         let claims_b64 = base64_url_encode(&claims_json);
@@ -98,19 +97,17 @@ impl JwtManager {
         }
 
         // 解析并验证 Header
-        let header_bytes = base64_url_decode(header_b64)
-            .context("解码 JWT Header 失败")?;
-        let header: JwtHeader = serde_json::from_slice(&header_bytes)
-            .context("解析 JWT Header JSON 失败")?;
+        let header_bytes = base64_url_decode(header_b64).context("解码 JWT Header 失败")?;
+        let header: JwtHeader =
+            serde_json::from_slice(&header_bytes).context("解析 JWT Header JSON 失败")?;
         if header.alg != "HS256" || header.typ != "JWT" {
             bail!("不支持的 JWT 算法或类型");
         }
 
         // 解析 Claims
-        let claims_bytes = base64_url_decode(claims_b64)
-            .context("解码 JWT Claims 失败")?;
-        let claims: Claims = serde_json::from_slice(&claims_bytes)
-            .context("解析 JWT Claims JSON 失败")?;
+        let claims_bytes = base64_url_decode(claims_b64).context("解码 JWT Claims 失败")?;
+        let claims: Claims =
+            serde_json::from_slice(&claims_bytes).context("解析 JWT Claims JSON 失败")?;
 
         // 校验过期时间
         let now = now_secs();

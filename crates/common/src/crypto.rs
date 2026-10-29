@@ -163,8 +163,8 @@ impl Identity {
         let pk_bytes: [u8; 32] = peer_ed25519_public
             .try_into()
             .context("对端 Ed25519 公钥长度无效，应为 32 字节")?;
-        let verifying_key = VerifyingKey::from_bytes(&pk_bytes)
-            .context("对端 Ed25519 公钥非有效椭圆曲线点")?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&pk_bytes).context("对端 Ed25519 公钥非有效椭圆曲线点")?;
         let montgomery = verifying_key.to_montgomery();
         Ok(X25519PublicKey::from(montgomery.to_bytes()))
     }

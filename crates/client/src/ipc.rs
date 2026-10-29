@@ -276,10 +276,7 @@ async fn serve(addr: &str, registry: MultiNetworkRegistry) -> Result<()> {
     }
 }
 
-async fn handle_client(
-    mut stream: TcpStream,
-    registry: MultiNetworkRegistry,
-) -> Result<()> {
+async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) -> Result<()> {
     let mut request = Vec::new();
     stream
         .read_to_end(&mut request)
@@ -287,12 +284,8 @@ async fn handle_client(
         .context("无法读取本地控制请求")?;
 
     let response = match serde_json::from_slice::<IpcRequest>(&request) {
-        Ok(IpcRequest::Status) => {
-            IpcResponse::Status(multi_status_snapshot(&registry).await)
-        }
-        Ok(IpcRequest::Peers) => {
-            IpcResponse::Peers(multi_peer_snapshots(&registry).await)
-        }
+        Ok(IpcRequest::Status) => IpcResponse::Status(multi_status_snapshot(&registry).await),
+        Ok(IpcRequest::Peers) => IpcResponse::Peers(multi_peer_snapshots(&registry).await),
         Ok(IpcRequest::Logs { lines }) => IpcResponse::Logs(recent_error_log_lines(lines)),
         Ok(IpcRequest::StopNetwork { name }) => {
             let signaled = registry.send_stop(name.clone()).await;

@@ -56,7 +56,10 @@ pub fn launch_gui_window(url: &str) {
                 .arg("--window-size=1180,820")
                 .spawn()
             {
-                tracing::info!("已通过 {bin} 创建 Windows 独立图形窗口 (PID: {:?})", child.id());
+                tracing::info!(
+                    "已通过 {bin} 创建 Windows 独立图形窗口 (PID: {:?})",
+                    child.id()
+                );
                 return;
             }
         }

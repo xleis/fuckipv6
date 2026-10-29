@@ -222,7 +222,11 @@ async fn configure_address(name: &str, ip: Ipv6Addr, prefix_len: u8) -> Result<(
 }
 
 async fn configure_route(name: &str) {
-    tracing::debug!("正在为网卡 {} 添加 macOS IPv6 路由: {}", name, OVERLAY_ROUTE);
+    tracing::debug!(
+        "正在为网卡 {} 添加 macOS IPv6 路由: {}",
+        name,
+        OVERLAY_ROUTE
+    );
 
     let output = tokio::process::Command::new("route")
         .args(["-n", "add", "-inet6", OVERLAY_ROUTE, "-interface", name])

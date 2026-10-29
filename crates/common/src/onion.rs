@@ -158,8 +158,8 @@ impl OnionCircuit {
             payload: payload.to_vec(),
         };
         let hop3_encoded = codec::encode(&hop3_action).context("序列化出口节点洋葱层失败")?;
-        let layer3_ciphertext = encrypt_payload(&self.key3, &hop3_encoded)
-            .context("加密出口节点 (Layer 3) 失败")?;
+        let layer3_ciphertext =
+            encrypt_payload(&self.key3, &hop3_encoded).context("加密出口节点 (Layer 3) 失败")?;
 
         // 2. 构建第 2 层（中间节点 Layer 2）
         let hop2_action = OnionNextHop::Forward {
@@ -168,8 +168,8 @@ impl OnionCircuit {
             inner_payload: layer3_ciphertext,
         };
         let hop2_encoded = codec::encode(&hop2_action).context("序列化中间节点洋葱层失败")?;
-        let layer2_ciphertext = encrypt_payload(&self.key2, &hop2_encoded)
-            .context("加密中间节点 (Layer 2) 失败")?;
+        let layer2_ciphertext =
+            encrypt_payload(&self.key2, &hop2_encoded).context("加密中间节点 (Layer 2) 失败")?;
 
         // 3. 构建第 1 层（入口守护节点 Layer 1）
         let hop1_action = OnionNextHop::Forward {
@@ -178,8 +178,8 @@ impl OnionCircuit {
             inner_payload: layer2_ciphertext,
         };
         let hop1_encoded = codec::encode(&hop1_action).context("序列化入口节点洋葱层失败")?;
-        let layer1_ciphertext = encrypt_payload(&self.key1, &hop1_encoded)
-            .context("加密入口节点 (Layer 1) 失败")?;
+        let layer1_ciphertext =
+            encrypt_payload(&self.key1, &hop1_encoded).context("加密入口节点 (Layer 1) 失败")?;
 
         Ok(layer1_ciphertext)
     }
@@ -187,12 +187,10 @@ impl OnionCircuit {
     /// 接收逆向洋葱回复（来自目标节点通过 Hop 3 -> Hop 2 -> Hop 1 返回的数据）
     /// 依次剥离 Layer 1 -> Layer 2 -> Layer 3 得到最终明文
     pub fn unpack_reverse(&self, reverse_payload: &[u8]) -> Result<Vec<u8>> {
-        let dec1 = decrypt_payload(&self.key1, reverse_payload)
-            .context("逆向洋葱解密 Layer 1 失败")?;
-        let dec2 = decrypt_payload(&self.key2, &dec1)
-            .context("逆向洋葱解密 Layer 2 失败")?;
-        let dec3 = decrypt_payload(&self.key3, &dec2)
-            .context("逆向洋葱解密 Layer 3 失败")?;
+        let dec1 =
+            decrypt_payload(&self.key1, reverse_payload).context("逆向洋葱解密 Layer 1 失败")?;
+        let dec2 = decrypt_payload(&self.key2, &dec1).context("逆向洋葱解密 Layer 2 失败")?;
+        let dec3 = decrypt_payload(&self.key3, &dec2).context("逆向洋葱解密 Layer 3 失败")?;
         Ok(dec3)
     }
 }
@@ -205,8 +203,8 @@ impl OnionCircuit {
 pub fn peel_onion_layer(shared_key: &[u8; 32], layer_ciphertext: &[u8]) -> Result<OnionNextHop> {
     let plaintext = decrypt_payload(shared_key, layer_ciphertext)
         .context("中继剥离洋葱层解密失败：认证标签不匹配或密文已被篡改")?;
-    let next_hop = codec::decode::<OnionNextHop>(&plaintext)
-        .context("解析洋葱下一跳路由控制指令失败")?;
+    let next_hop =
+        codec::decode::<OnionNextHop>(&plaintext).context("解析洋葱下一跳路由控制指令失败")?;
     Ok(next_hop)
 }
 
@@ -271,10 +269,7 @@ pub enum OnionCell {
         onion_payload: Vec<u8>,
     },
     /// 拆除电路
-    Destroy {
-        circuit_id: u64,
-        reason: String,
-    },
+    Destroy { circuit_id: u64, reason: String },
 }
 
 #[cfg(test)]
@@ -473,12 +468,8 @@ mod tests {
         packet[last_idx] ^= 0x5a;
 
         // Hop 1 解密应直接失败 (Poly1305 MAC 校验不通过)
-        let k1_hop = derive_relay_key(
-            &hop1.x25519_secret(),
-            &alice.x25519_public().to_bytes(),
-            1,
-        )
-        .unwrap();
+        let k1_hop =
+            derive_relay_key(&hop1.x25519_secret(), &alice.x25519_public().to_bytes(), 1).unwrap();
         assert!(peel_onion_layer(&k1_hop, &packet).is_err());
     }
 

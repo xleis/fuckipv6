@@ -300,7 +300,9 @@ mod tests {
         // Cloudflare DNS 1.1.1.1 (海外)
         assert!(!is_mainland_china_ip("1.1.1.1".parse().unwrap()));
         // Google IPv6 2001:4860:4860::8888 (海外)
-        assert!(!is_mainland_china_ip("2001:4860:4860::8888".parse().unwrap()));
+        assert!(!is_mainland_china_ip(
+            "2001:4860:4860::8888".parse().unwrap()
+        ));
     }
 
     #[test]

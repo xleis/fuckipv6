@@ -5,7 +5,9 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::crypto::Identity;
 use crate::protocol::RelayEndpoint;
-use crate::quic::{build_pinned_quic_client_config, recv_relay_message, send_relay_message, RelayMessage};
+use crate::quic::{
+    build_pinned_quic_client_config, recv_relay_message, send_relay_message, RelayMessage,
+};
 
 const RELAY_REGISTER_STREAM_ID: u64 = 0;
 
@@ -68,7 +70,14 @@ impl QuicRelayClient {
         }
         if relays.len() == 1 {
             let ep = &relays[0];
-            return Self::connect(ep.addr, ep.public_key_pin, &ep.server_name, identity, virtual_ip).await;
+            return Self::connect(
+                ep.addr,
+                ep.public_key_pin,
+                &ep.server_name,
+                identity,
+                virtual_ip,
+            )
+            .await;
         }
 
         let mut tasks = tokio::task::JoinSet::new();
@@ -76,16 +85,28 @@ impl QuicRelayClient {
             let id = identity.clone();
             tasks.spawn(async move {
                 let start = std::time::Instant::now();
-                match Self::connect(ep.addr, ep.public_key_pin, &ep.server_name, &id, virtual_ip).await {
+                match Self::connect(ep.addr, ep.public_key_pin, &ep.server_name, &id, virtual_ip)
+                    .await
+                {
                     Ok(client) => {
                         let rtt = client.connection.rtt();
                         let elapsed = start.elapsed();
                         let score = rtt.min(elapsed);
-                        tracing::info!("QUIC 中继 {} ({}) 握手成功, 评分延迟: {:?}", ep.server_name, ep.addr, score);
+                        tracing::info!(
+                            "QUIC 中继 {} ({}) 握手成功, 评分延迟: {:?}",
+                            ep.server_name,
+                            ep.addr,
+                            score
+                        );
                         Ok((client, score, ep))
                     }
                     Err(e) => {
-                        tracing::debug!("QUIC 中继 {} ({}) 连接失败: {:?}", ep.server_name, ep.addr, e);
+                        tracing::debug!(
+                            "QUIC 中继 {} ({}) 连接失败: {:?}",
+                            ep.server_name,
+                            ep.addr,
+                            e
+                        );
                         Err(e)
                     }
                 }
@@ -109,7 +130,12 @@ impl QuicRelayClient {
         }
 
         if let Some((client, score, ep)) = best {
-            tracing::info!("选定最佳 QUIC 中继节点: {} ({}), 延迟: {:?}", ep.server_name, ep.addr, score);
+            tracing::info!(
+                "选定最佳 QUIC 中继节点: {} ({}), 延迟: {:?}",
+                ep.server_name,
+                ep.addr,
+                score
+            );
             Ok(client)
         } else {
             anyhow::bail!("所有候选 QUIC 中继节点连接均失败");

@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{Identity, NetworkTicket, RelayEndpoint};
 use fuckipv6_coordinator::{
-    relay::server::RelayServer,
-    signaling::server::SignalingServer,
+    relay::server::RelayServer, signaling::server::SignalingServer,
     signaling::session::SessionManager,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -32,20 +31,17 @@ impl EmbeddedCoordinator {
         ip_pool: Option<&str>,
     ) -> Result<Self> {
         let pool = ip_pool.unwrap_or("fd00::1000/120");
-        let session_manager = Arc::new(
-            SessionManager::new(pool).context("无法初始化内嵌协调器地址池")?,
-        );
+        let session_manager =
+            Arc::new(SessionManager::new(pool).context("无法初始化内嵌协调器地址池")?);
 
         let signaling_bind = format!("0.0.0.0:{signaling_port}");
         let signaling_server =
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone());
 
         let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), relay_port);
-        let relay_server = RelayServer::bind_with_generated_certificate(
-            relay_bind,
-            session_manager.clone(),
-        )
-        .context("无法启动内嵌 QUIC 中继服务")?;
+        let relay_server =
+            RelayServer::bind_with_generated_certificate(relay_bind, session_manager.clone())
+                .context("无法启动内嵌 QUIC 中继服务")?;
 
         let actual_relay_addr = relay_server.local_addr();
         let relay_pin = relay_server.certificate().public_key_pin;
@@ -77,13 +73,9 @@ impl EmbeddedCoordinator {
             .with_ipv6(pool)
             .with_ipv4("10.8.0.0/24");
 
-        let signaling_task = tokio::spawn(async move {
-            signaling_server.run().await
-        });
+        let signaling_task = tokio::spawn(async move { signaling_server.run().await });
 
-        let relay_task = tokio::spawn(async move {
-            relay_server.run().await
-        });
+        let relay_task = tokio::spawn(async move { relay_server.run().await });
 
         let signaling_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), signaling_port);
 

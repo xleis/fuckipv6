@@ -59,7 +59,12 @@ impl NodeId {
 
 impl fmt::Debug for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NodeId({}..{})", &self.to_hex()[..8], &self.to_hex()[56..])
+        write!(
+            f,
+            "NodeId({}..{})",
+            &self.to_hex()[..8],
+            &self.to_hex()[56..]
+        )
     }
 }
 
@@ -156,7 +161,11 @@ impl KBucket {
             true
         } else {
             // 桶已满，放入替补缓存
-            if let Some(pos) = self.replacement_cache.iter().position(|c| c.id == contact.id) {
+            if let Some(pos) = self
+                .replacement_cache
+                .iter()
+                .position(|c| c.id == contact.id)
+            {
                 self.replacement_cache.remove(pos);
             }
             if self.replacement_cache.len() >= self.capacity {
@@ -366,10 +375,7 @@ pub enum DhtMessage {
         success: bool,
     },
     /// 查询键值请求
-    FindValue {
-        sender: DhtContact,
-        key: [u8; 32],
-    },
+    FindValue { sender: DhtContact, key: [u8; 32] },
     /// 查询键值响应：若本节点拥有此值则返回 value，否则返回更近的联系人引导发起者迭代查询
     FoundValue {
         sender: DhtContact,

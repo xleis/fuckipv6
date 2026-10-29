@@ -30,17 +30,27 @@ pub fn detect_ui_mode(cli_headless: bool, cli_gui: bool) -> UiMode {
     }
 
     // 环境变量覆盖
-    if std::env::var("FUCKIPV6_HEADLESS").map(|v| v == "1" || v == "true").unwrap_or(false) {
+    if std::env::var("FUCKIPV6_HEADLESS")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+    {
         return UiMode::Headless;
     }
-    if std::env::var("FUCKIPV6_GUI").map(|v| v == "1" || v == "true").unwrap_or(false) {
+    if std::env::var("FUCKIPV6_GUI")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+    {
         return UiMode::Gui;
     }
 
     #[cfg(target_os = "linux")]
     {
-        let has_x11 = std::env::var("DISPLAY").map(|v| !v.trim().is_empty()).unwrap_or(false);
-        let has_wayland = std::env::var("WAYLAND_DISPLAY").map(|v| !v.trim().is_empty()).unwrap_or(false);
+        let has_x11 = std::env::var("DISPLAY")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let has_wayland = std::env::var("WAYLAND_DISPLAY")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
         if has_x11 || has_wayland {
             UiMode::Gui
         } else {

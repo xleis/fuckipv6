@@ -221,7 +221,10 @@ impl AppController {
                 relay_payload_bytes: snap.traffic.relay_payload_bytes,
                 relay_errors: snap.traffic.relay_errors,
             });
-            let net_name = s.network_name.clone().unwrap_or_else(|| "default".to_string());
+            let net_name = s
+                .network_name
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
             s.networks = vec![NetworkUiDto {
                 name: net_name.clone(),
                 tun_name: crate::multi_network::derive_tun_name(Some(&net_name), "fuckipv6"),
@@ -266,7 +269,10 @@ impl AppController {
             s.coordinator_blacklist = Vec::new();
 
             if s.networks.is_empty() {
-                let current_net = s.network_name.clone().unwrap_or_else(|| "default".to_string());
+                let current_net = s
+                    .network_name
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
                 let tun_dev = crate::multi_network::derive_tun_name(Some(&current_net), "fuckipv6");
                 s.networks = vec![NetworkUiDto {
                     name: current_net,
@@ -351,7 +357,8 @@ impl AppController {
 
         self.update_state(|st| {
             st.network_name = Some(network_name.clone());
-        }).await;
+        })
+        .await;
 
         // 创建临时配置
         let temp_dir = std::env::temp_dir().join("fuckipv6-ui-temp");
@@ -359,7 +366,12 @@ impl AppController {
         let config_file = temp_dir.join(format!("{network_name}-config.toml"));
         let key_file = temp_dir.join(format!("{network_name}-key.pem"));
 
-        let mode = match routing_mode.as_deref().unwrap_or("MeshOnly").to_lowercase().as_str() {
+        let mode = match routing_mode
+            .as_deref()
+            .unwrap_or("MeshOnly")
+            .to_lowercase()
+            .as_str()
+        {
             "bypassmainland" | "bypass-mainland" | "bypass_mainland" => RoutingMode::BypassMainland,
             "globalproxy" | "global-proxy" | "global_proxy" => RoutingMode::GlobalProxy,
             _ => RoutingMode::MeshOnly,
@@ -431,11 +443,17 @@ impl AppController {
             for _ in 0..30 {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 // 从 IPC 或本地接口检查状态
-                if let Ok(crate::ipc::IpcResponse::Status(s)) = crate::ipc::request(crate::ipc::IpcRequest::Status).await {
+                if let Ok(crate::ipc::IpcResponse::Status(s)) =
+                    crate::ipc::request(crate::ipc::IpcRequest::Status).await
+                {
                     let mut st = this.state.write().await;
                     st.status = "online".to_string();
                     st.virtual_ipv6 = Some(s.assigned_ip.to_string());
-                    this.log(format!("[连接] 网络连接成功！分配虚拟 IPv6: {}", s.assigned_ip)).await;
+                    this.log(format!(
+                        "[连接] 网络连接成功！分配虚拟 IPv6: {}",
+                        s.assigned_ip
+                    ))
+                    .await;
                     break;
                 }
             }
@@ -470,7 +488,10 @@ impl AppController {
         auto_connect: bool,
         external_host: Option<String>,
     ) -> Result<String> {
-        self.log(format!("[启动] 正在启动本地协调 Actor 创建网络: {name} (信令={port}, 中继={relay_port})")).await;
+        self.log(format!(
+            "[启动] 正在启动本地协调 Actor 创建网络: {name} (信令={port}, 中继={relay_port})"
+        ))
+        .await;
 
         let coordinator = EmbeddedCoordinator::start(
             &name,
@@ -483,7 +504,8 @@ impl AppController {
         .context("启动内嵌协调 Actor 失败")?;
 
         let ticket = coordinator.ticket.to_string();
-        self.log(format!("[网络] 对等网络已创建成功！邀请票据: {ticket}")).await;
+        self.log(format!("[网络] 对等网络已创建成功！邀请票据: {ticket}"))
+            .await;
 
         *self.coordinator.write().await = Some(coordinator);
 
@@ -505,7 +527,9 @@ impl AppController {
             let this = self.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let _ = this.connect(local_target, Some("MeshOnly".to_string()), None).await;
+                let _ = this
+                    .connect(local_target, Some("MeshOnly".to_string()), None)
+                    .await;
             });
         }
 
@@ -536,7 +560,8 @@ impl AppController {
         let coord = self.coordinator.read().await;
         if let Some(c) = coord.as_ref() {
             c.session_manager.ban_client(client_id.clone()).await;
-            self.log(format!("[封禁] 协调中枢已封禁客户端: {client_id}")).await;
+            self.log(format!("[封禁] 协调中枢已封禁客户端: {client_id}"))
+                .await;
             Ok(())
         } else {
             anyhow::bail!("本地协调服务未运行")
@@ -548,7 +573,8 @@ impl AppController {
         let coord = self.coordinator.read().await;
         if let Some(c) = coord.as_ref() {
             let res = c.session_manager.unban_client(client_id).await;
-            self.log(format!("✅ 协调中枢已解封客户端: {client_id}")).await;
+            self.log(format!("✅ 协调中枢已解封客户端: {client_id}"))
+                .await;
             Ok(res)
         } else {
             anyhow::bail!("本地协调服务未运行")
@@ -586,12 +612,23 @@ impl AppController {
 
     /// 刷新在线对端信息
     pub async fn refresh_peers(&self) {
-        if let Ok(crate::ipc::IpcResponse::Peers(peers)) = crate::ipc::request(crate::ipc::IpcRequest::Peers).await {
-            let default_net = self.state.read().await.network_name.clone().unwrap_or_else(|| "default".to_string());
+        if let Ok(crate::ipc::IpcResponse::Peers(peers)) =
+            crate::ipc::request(crate::ipc::IpcRequest::Peers).await
+        {
+            let default_net = self
+                .state
+                .read()
+                .await
+                .network_name
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
             let peer_infos: Vec<PeerUiInfo> = peers
                 .into_iter()
                 .map(|p| {
-                    let net = p.network_name.clone().unwrap_or_else(|| default_net.clone());
+                    let net = p
+                        .network_name
+                        .clone()
+                        .unwrap_or_else(|| default_net.clone());
                     PeerUiInfo {
                         client_id: p.client_id,
                         virtual_ip: p.virtual_ip.to_string(),
@@ -617,7 +654,11 @@ impl AppController {
                 .filter_map(|p| {
                     let v6 = p.virtual_ip.parse().ok()?;
                     let v4 = p.virtual_ipv4.as_ref().and_then(|ip| ip.parse().ok());
-                    let net = p.network_name.clone().or_else(|| st.network_name.clone()).unwrap_or_else(|| "default".to_string());
+                    let net = p
+                        .network_name
+                        .clone()
+                        .or_else(|| st.network_name.clone())
+                        .unwrap_or_else(|| "default".to_string());
                     Some(PeerSnapshot {
                         client_id: p.client_id.clone(),
                         virtual_ip: v6,
@@ -739,7 +780,10 @@ impl AppController {
                 ipv6_pool: req.ipv6_pool.clone(),
                 ip_pool: Some(req.ipv6_pool.clone()),
             };
-            coord.session_manager.update_network_allocation(alloc).await?;
+            coord
+                .session_manager
+                .update_network_allocation(alloc)
+                .await?;
             self.log(format!(
                 "[配置] 专网地址池参数热更新生效: 模式={:?}, IPv4={}, IPv6={}",
                 req.mode, req.ipv4_pool, req.ipv6_pool
@@ -788,7 +832,8 @@ impl AppController {
             match output {
                 Ok(out) if out.status.success() => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
-                    let mut log_lines: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
+                    let mut log_lines: Vec<String> =
+                        stdout.lines().map(|s| s.to_string()).collect();
                     if log_lines.len() > lines {
                         log_lines.drain(0..log_lines.len() - lines);
                     }
@@ -799,7 +844,8 @@ impl AppController {
                     }
                 }
                 _ => {
-                    let recent: Vec<String> = self.recent_logs.read().await.iter().cloned().collect();
+                    let recent: Vec<String> =
+                        self.recent_logs.read().await.iter().cloned().collect();
                     LogsResponse {
                         service: service.to_string(),
                         lines: recent,

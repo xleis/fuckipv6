@@ -175,9 +175,8 @@ pub fn build_pinned_quic_client_config(
     client_crypto.alpn_protocols = vec![FUCKIPV6_QUIC_ALPN.to_vec()];
     client_crypto.enable_early_data = true;
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(client_crypto)?,
-    ));
+    let mut client_config =
+        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     let idle_timeout = quinn::IdleTimeout::try_from(std::time::Duration::from_secs(120))

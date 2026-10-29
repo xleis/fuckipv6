@@ -220,7 +220,11 @@ impl SignalingMessage {
     }
 
     /// 创建中继数据包消息
-    pub fn relay_packet(src_ip: impl Into<IpAddr>, dst_ip: impl Into<IpAddr>, payload: Vec<u8>) -> Self {
+    pub fn relay_packet(
+        src_ip: impl Into<IpAddr>,
+        dst_ip: impl Into<IpAddr>,
+        payload: Vec<u8>,
+    ) -> Self {
         Self::RelayPacket {
             src_ip: src_ip.into(),
             dst_ip: dst_ip.into(),

@@ -71,7 +71,9 @@ impl WindowsTun {
 
         // 使用纯 Rust Windows IP Helper API 配置 IPv6 地址和路由，彻底消除外部 netsh.exe 依赖
         ip_helper::configure_ipv6_address(name, ip, 64)?;
-        let prefix = "fd00::".parse::<Ipv6Addr>().unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0));
+        let prefix = "fd00::"
+            .parse::<Ipv6Addr>()
+            .unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0));
         ip_helper::configure_ipv6_route(name, prefix, 64)?;
 
         tracing::info!("TUN 设备已完全配置并打开: {}", name);
@@ -130,7 +132,9 @@ impl WindowsTun {
 
         // 使用纯 Rust IP Helper API 删除 IPv6 地址与路由
         let _ = ip_helper::delete_ipv6_address(&self.name, self.ip);
-        let prefix = "fd00::".parse::<Ipv6Addr>().unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0));
+        let prefix = "fd00::"
+            .parse::<Ipv6Addr>()
+            .unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0));
         let _ = ip_helper::delete_ipv6_route(&self.name, prefix, 64);
 
         tracing::info!("TUN 设备清理完成");
@@ -164,7 +168,9 @@ fn load_wintun() -> Result<wintun::Wintun> {
 
     if !WINTUN_DLL_BYTES.is_empty() {
         if !temp_dll_path.exists()
-            || std::fs::metadata(&temp_dll_path).map(|m| m.len()).unwrap_or(0)
+            || std::fs::metadata(&temp_dll_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
                 != WINTUN_DLL_BYTES.len() as u64
         {
             let _ = std::fs::write(&temp_dll_path, WINTUN_DLL_BYTES);

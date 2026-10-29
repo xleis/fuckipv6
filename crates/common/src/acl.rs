@@ -1,7 +1,7 @@
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use ipnet::IpNet;
 
 /// 访问控制规则动作
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -403,7 +403,12 @@ impl BlacklistConfig {
 mod tests {
     use super::*;
 
-    fn make_test_ipv6_packet(next_header: u8, src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
+    fn make_test_ipv6_packet(
+        next_header: u8,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let mut pkt = vec![0u8; 40];
         pkt[0] = 0x60; // Version 6
         pkt[6] = next_header;
@@ -416,7 +421,12 @@ mod tests {
     #[test]
     fn test_acl_default_allow_when_disabled() {
         let engine = AclEngine::new(&AclConfig::default());
-        let pkt = make_test_ipv6_packet(6, "fd00::1".parse().unwrap(), "fd00::2".parse().unwrap(), &[0, 22, 0, 80]);
+        let pkt = make_test_ipv6_packet(
+            6,
+            "fd00::1".parse().unwrap(),
+            "fd00::2".parse().unwrap(),
+            &[0, 22, 0, 80],
+        );
         assert_eq!(engine.check_outbound(&pkt), AclAction::Allow);
         assert_eq!(engine.check_inbound(&pkt), AclAction::Allow);
     }

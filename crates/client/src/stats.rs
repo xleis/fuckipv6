@@ -9,27 +9,39 @@ pub trait ToIpAddr {
 }
 
 impl ToIpAddr for IpAddr {
-    fn to_ip_addr(&self) -> IpAddr { *self }
+    fn to_ip_addr(&self) -> IpAddr {
+        *self
+    }
 }
 
 impl ToIpAddr for &IpAddr {
-    fn to_ip_addr(&self) -> IpAddr { **self }
+    fn to_ip_addr(&self) -> IpAddr {
+        **self
+    }
 }
 
 impl ToIpAddr for Ipv6Addr {
-    fn to_ip_addr(&self) -> IpAddr { IpAddr::V6(*self) }
+    fn to_ip_addr(&self) -> IpAddr {
+        IpAddr::V6(*self)
+    }
 }
 
 impl ToIpAddr for &Ipv6Addr {
-    fn to_ip_addr(&self) -> IpAddr { IpAddr::V6(**self) }
+    fn to_ip_addr(&self) -> IpAddr {
+        IpAddr::V6(**self)
+    }
 }
 
 impl ToIpAddr for std::net::Ipv4Addr {
-    fn to_ip_addr(&self) -> IpAddr { IpAddr::V4(*self) }
+    fn to_ip_addr(&self) -> IpAddr {
+        IpAddr::V4(*self)
+    }
 }
 
 impl ToIpAddr for &std::net::Ipv4Addr {
-    fn to_ip_addr(&self) -> IpAddr { IpAddr::V4(**self) }
+    fn to_ip_addr(&self) -> IpAddr {
+        IpAddr::V4(**self)
+    }
 }
 
 /// 性能统计收集器

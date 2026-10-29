@@ -352,11 +352,15 @@ fn padded_attr_len(len: usize) -> usize {
 }
 
 /// NAT-PMP (RFC 6886) UDP 端口映射请求构造
-pub fn build_nat_pmp_request(internal_port: u16, external_port: u16, lifetime_secs: u32) -> [u8; 12] {
+pub fn build_nat_pmp_request(
+    internal_port: u16,
+    external_port: u16,
+    lifetime_secs: u32,
+) -> [u8; 12] {
     let mut req = [0u8; 12];
     req[0] = 0; // Version 0
     req[1] = 2; // Opcode 2 (UDP mapping)
-    // req[2..4] = reserved
+                // req[2..4] = reserved
     req[4..6].copy_from_slice(&internal_port.to_be_bytes());
     req[6..8].copy_from_slice(&external_port.to_be_bytes());
     req[8..12].copy_from_slice(&lifetime_secs.to_be_bytes());
@@ -368,7 +372,8 @@ pub fn parse_nat_pmp_response(buf: &[u8]) -> Option<(u16, u16, u32)> {
     if buf.len() < 16 {
         return None;
     }
-    if buf[0] != 0 || buf[1] != 130 { // version 0, opcode 128 + 2
+    if buf[0] != 0 || buf[1] != 130 {
+        // version 0, opcode 128 + 2
         return None;
     }
     let result_code = u16::from_be_bytes([buf[2], buf[3]]);
@@ -382,7 +387,12 @@ pub fn parse_nat_pmp_response(buf: &[u8]) -> Option<(u16, u16, u32)> {
 }
 
 /// 构造 UPnP IGD AddPortMapping SOAP 报文
-pub fn build_upnp_soap_body(service_type: &str, local_ip: &str, port: u16, lease_secs: u32) -> String {
+pub fn build_upnp_soap_body(
+    service_type: &str,
+    local_ip: &str,
+    port: u16,
+    lease_secs: u32,
+) -> String {
     format!(
         r#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -417,7 +427,11 @@ pub async fn try_nat_pmp_mapping(gateway_ip: Ipv4Addr, port: u16) -> Option<u16>
     if let Ok(Ok((len, _))) = res {
         if let Some((_, mapped_port, _)) = parse_nat_pmp_response(&buf[..len]) {
             if mapped_port > 0 {
-                tracing::info!("NAT-PMP 成功映射端口: 本地 {} -> 网关外部 {}", port, mapped_port);
+                tracing::info!(
+                    "NAT-PMP 成功映射端口: 本地 {} -> 网关外部 {}",
+                    port,
+                    mapped_port
+                );
                 return Some(mapped_port);
             }
         }
@@ -437,7 +451,10 @@ pub async fn gather_candidate_endpoints(
         if socket.connect("8.8.8.8:80").is_ok() {
             if let Ok(local_addr) = socket.local_addr() {
                 let ip = local_addr.ip();
-                if !ip.is_loopback() && !ip.is_unspecified() && !candidates.contains(&SocketAddr::new(ip, p2p_port)) {
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !candidates.contains(&SocketAddr::new(ip, p2p_port))
+                {
                     candidates.push(SocketAddr::new(ip, p2p_port));
                 }
 
@@ -472,7 +489,10 @@ pub async fn gather_candidate_endpoints(
         if socket.connect("[2001:4860:4860::8888]:80").is_ok() {
             if let Ok(local_addr) = socket.local_addr() {
                 let ip = local_addr.ip();
-                if !ip.is_loopback() && !ip.is_unspecified() && !candidates.contains(&SocketAddr::new(ip, p2p_port)) {
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !candidates.contains(&SocketAddr::new(ip, p2p_port))
+                {
                     candidates.push(SocketAddr::new(ip, p2p_port));
                 }
             }
@@ -481,7 +501,10 @@ pub async fn gather_candidate_endpoints(
 
     // 3. 加入 STUN 检测到的公网映射地址
     for mapped in mapped_addresses {
-        if !mapped.ip().is_loopback() && !mapped.ip().is_unspecified() && !candidates.contains(mapped) {
+        if !mapped.ip().is_loopback()
+            && !mapped.ip().is_unspecified()
+            && !candidates.contains(mapped)
+        {
             candidates.push(*mapped);
         }
     }

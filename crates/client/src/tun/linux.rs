@@ -28,14 +28,7 @@ impl Clone for LinuxTun {
 impl LinuxTun {
     #[allow(dead_code)]
     pub async fn create(name: &str, ip: Ipv6Addr, prefix_len: u8, mtu: u16) -> Result<Self> {
-        Self::create_dual_stack(
-            name,
-            &VirtualIps::from_ipv6(ip),
-            24,
-            prefix_len,
-            mtu,
-        )
-        .await
+        Self::create_dual_stack(name, &VirtualIps::from_ipv6(ip), 24, prefix_len, mtu).await
     }
 
     pub async fn create_dual_stack(
@@ -45,7 +38,11 @@ impl LinuxTun {
         ipv6_prefix: u8,
         mtu: u16,
     ) -> Result<Self> {
-        tracing::info!("正在创建 TUN 虚拟网卡: {} (双栈模式: {:?})", name, virtual_ips);
+        tracing::info!(
+            "正在创建 TUN 虚拟网卡: {} (双栈模式: {:?})",
+            name,
+            virtual_ips
+        );
 
         validate_tun_inputs(name, mtu)?;
 
@@ -347,15 +344,27 @@ async fn configure_ipv6_route(name: &str, ip: Ipv6Addr, prefix_len: u8) {
     let net = Ipv6Addr::from(u128::from(ip) & mask);
     let route_cmd = format!("{}/{}", net, prefix_len);
     let metric = metric_for_device(name).to_string();
-    tracing::debug!("Adding IPv6 route: {} to device: {} (metric: {})", route_cmd, name, metric);
+    tracing::debug!(
+        "Adding IPv6 route: {} to device: {} (metric: {})",
+        route_cmd,
+        name,
+        metric
+    );
     let route_status = tokio::process::Command::new("ip")
-        .args(["-6", "route", "add", &route_cmd, "dev", name, "metric", &metric])
+        .args([
+            "-6", "route", "add", &route_cmd, "dev", name, "metric", &metric,
+        ])
         .output()
         .await;
 
     match route_status {
         Ok(output) if output.status.success() => {
-            tracing::info!("IPv6 路由配置成功: {} (dev {}, metric {})", route_cmd, name, metric);
+            tracing::info!(
+                "IPv6 路由配置成功: {} (dev {}, metric {})",
+                route_cmd,
+                name,
+                metric
+            );
         }
         Ok(output) => {
             tracing::warn!("配置路由失败，退出码: {} (可能路由已存在)", output.status);
@@ -379,7 +388,12 @@ async fn configure_ipv4_route(name: &str, ip: Ipv4Addr, prefix_len: u8) {
     let net = Ipv4Addr::from(u32::from(ip) & mask);
     let route_cmd = format!("{}/{}", net, prefix_len);
     let metric = metric_for_device(name).to_string();
-    tracing::debug!("Adding IPv4 route: {} to device: {} (metric: {})", route_cmd, name, metric);
+    tracing::debug!(
+        "Adding IPv4 route: {} to device: {} (metric: {})",
+        route_cmd,
+        name,
+        metric
+    );
 
     let route_status = tokio::process::Command::new("ip")
         .args(["route", "add", &route_cmd, "dev", name, "metric", &metric])

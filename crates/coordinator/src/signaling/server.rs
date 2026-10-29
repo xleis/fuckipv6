@@ -84,8 +84,14 @@ impl SignalingServer {
                     let relay_endpoints = self.relay_endpoints.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, addr, session_manager, relay_endpoint, relay_endpoints).await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            addr,
+                            session_manager,
+                            relay_endpoint,
+                            relay_endpoints,
+                        )
+                        .await
                         {
                             tracing::error!("连接错误 {}: {:?}", addr, e);
                         }

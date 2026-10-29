@@ -36,18 +36,15 @@ impl AppState {
         auth_config: CoordinatorAuthConfig,
         config_path: Option<String>,
     ) -> Self {
-        let secret = auth_config
-            .jwt_secret
-            .clone()
-            .unwrap_or_else(|| {
-                use sha2::{Digest, Sha256};
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                let hash = Sha256::digest(format!("fuckipv6-ephemeral-secret-{now}").as_bytes());
-                crate::auth::jwt::base64_url_encode(&hash)
-            });
+        let secret = auth_config.jwt_secret.clone().unwrap_or_else(|| {
+            use sha2::{Digest, Sha256};
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let hash = Sha256::digest(format!("fuckipv6-ephemeral-secret-{now}").as_bytes());
+            crate::auth::jwt::base64_url_encode(&hash)
+        });
 
         let jwt_manager = Arc::new(JwtManager::new(
             secret.into_bytes(),
@@ -2664,7 +2661,12 @@ mod tests {
             Arc::new(SessionManager::new("fd00::1000/120")?),
             CoordinatorAuthConfig::default(),
         );
-        let peers_res = peers(State(state.clone()), HeaderMap::new(), Query(HashMap::new())).await;
+        let peers_res = peers(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
         assert!(peers_res.is_ok());
 
         let logs_res = logs(State(state), HeaderMap::new(), Query(HashMap::new())).await;
@@ -2687,7 +2689,12 @@ mod tests {
         );
 
         // 未带 Token -> 401
-        let unauth = peers(State(state.clone()), HeaderMap::new(), Query(HashMap::new())).await;
+        let unauth = peers(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
         assert_eq!(unauth.unwrap_err(), StatusCode::UNAUTHORIZED);
 
         // 错误密码登录 -> 401
@@ -2804,10 +2811,13 @@ mod tests {
         );
 
         // GET 当前配置
-        let Json(current) =
-            get_network_config(State(state.clone()), HeaderMap::new(), Query(HashMap::new()))
-                .await
-                .map_err(|e| anyhow::anyhow!("status: {:?}", e))?;
+        let Json(current) = get_network_config(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("status: {:?}", e))?;
         assert_eq!(current.mode, NetworkMode::DualStack);
         assert_eq!(current.ipv4_pool, "10.8.0.0/24");
         assert_eq!(current.ipv6_pool, "fd00::1000/120");

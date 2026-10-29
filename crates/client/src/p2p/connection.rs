@@ -57,7 +57,9 @@ impl P2pEngine {
         let ip_index = Arc::new(RwLock::new(HashMap::new()));
         let local_ip = Arc::new(RwLock::new(None));
         let local_identity = Arc::new(RwLock::new(None));
-        let overlay = Arc::new(super::overlay::P2pOverlay::new(fuckipv6_common::NodeId::default()));
+        let overlay = Arc::new(super::overlay::P2pOverlay::new(
+            fuckipv6_common::NodeId::default(),
+        ));
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 
         spawn_udp_receiver(
@@ -151,12 +153,21 @@ impl P2pEngine {
             anyhow::bail!("对等节点没有可用的连接地址");
         }
 
-        tracing::info!("添加对等节点: {} (主虚拟IP: {}, 双栈: {:?}) (地址: {:?})", client_id, peer_info.virtual_ip, peer_info.virtual_ips, endpoints);
+        tracing::info!(
+            "添加对等节点: {} (主虚拟IP: {}, 双栈: {:?}) (地址: {:?})",
+            client_id,
+            peer_info.virtual_ip,
+            peer_info.virtual_ips,
+            endpoints
+        );
 
         let session_key = if let Some(local_identity) = &*self.local_identity.read().await {
             match local_identity.derive_shared_secret(&peer_info.public_key) {
                 Ok(key) => {
-                    tracing::info!("已与节点 {} 建立 WireGuard-grade E2EE 对称会话秘钥", client_id);
+                    tracing::info!(
+                        "已与节点 {} 建立 WireGuard-grade E2EE 对称会话秘钥",
+                        client_id
+                    );
                     Some(key)
                 }
                 Err(e) => {
@@ -252,7 +263,12 @@ impl P2pEngine {
     }
 
     /// 发送数据包到对等节点 (支持 IPv4 / IPv6)
-    pub async fn send_to(&self, dst_ip: impl Into<IpAddr>, src_ip: impl Into<IpAddr>, payload: &[u8]) -> Result<()> {
+    pub async fn send_to(
+        &self,
+        dst_ip: impl Into<IpAddr>,
+        src_ip: impl Into<IpAddr>,
+        payload: &[u8],
+    ) -> Result<()> {
         let dst_ip = dst_ip.into();
         let src_ip = src_ip.into();
 
@@ -289,7 +305,8 @@ impl P2pEngine {
                     if mesh.has_peer(&dst_v6).await
                         && mesh.send_packet(&dst_v6, &payload_to_send).await.is_ok()
                     {
-                        record_peer_payload(&self.connections, &client_id, payload_to_send.len()).await;
+                        record_peer_payload(&self.connections, &client_id, payload_to_send.len())
+                            .await;
                         return Ok(());
                     }
                 }
@@ -486,7 +503,17 @@ async fn dispatch_udp_packet(
     bytes: &[u8],
 ) {
     if let Ok(datagram) = codec::decode::<P2pDatagram>(bytes) {
-        dispatch_p2p_datagram(socket, connections, ip_index, local_ip, overlay, incoming_tx, addr, datagram).await;
+        dispatch_p2p_datagram(
+            socket,
+            connections,
+            ip_index,
+            local_ip,
+            overlay,
+            incoming_tx,
+            addr,
+            datagram,
+        )
+        .await;
     } else if let Ok(packet) = codec::decode::<DataPacket>(bytes) {
         dispatch_legacy_data_packet(connections, ip_index, incoming_tx, addr, packet).await;
     } else {
@@ -570,7 +597,8 @@ async fn dispatch_p2p_datagram(
                 idx.get(&src_ip).cloned()
             };
             if let Some(ref id) = client_id {
-                handle_ping_datagram(socket, connections, local_ip, addr, id, src_ip, timestamp).await;
+                handle_ping_datagram(socket, connections, local_ip, addr, id, src_ip, timestamp)
+                    .await;
             }
         }
         P2pDatagram::Pong { src_ip, timestamp } => {
@@ -579,11 +607,14 @@ async fn dispatch_p2p_datagram(
                 idx.get(&src_ip).cloned()
             };
             if let Some(ref id) = client_id {
-                handle_pong_datagram(socket, connections, local_ip, addr, id, src_ip, timestamp).await;
+                handle_pong_datagram(socket, connections, local_ip, addr, id, src_ip, timestamp)
+                    .await;
             }
         }
         P2pDatagram::Onion(cell) => {
-            overlay.handle_onion_cell(cell, addr, socket, incoming_tx).await;
+            overlay
+                .handle_onion_cell(cell, addr, socket, incoming_tx)
+                .await;
         }
         P2pDatagram::Dht(msg) => {
             overlay.handle_dht_message(msg, addr, socket).await;
@@ -636,7 +667,13 @@ async fn handle_pong_datagram(
     .latency();
     record_peer_probe_response(connections, client_id, timestamp, rtt_us).await;
     send_quality_report(socket, connections, local_ip, client_id, addr).await;
-    tracing::debug!("P2P pong from {} ({}) via {} RTT={}us", client_id, src_ip, addr, rtt_us);
+    tracing::debug!(
+        "P2P pong from {} ({}) via {} RTT={}us",
+        client_id,
+        src_ip,
+        addr,
+        rtt_us
+    );
 }
 
 fn bind_dual_stack_udp(port: u16) -> Result<UdpSocket> {

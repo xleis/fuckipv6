@@ -36,21 +36,42 @@ impl TunDevice {
         #[cfg(target_os = "linux")]
         {
             Ok(Self {
-                inner: linux::LinuxTun::create_dual_stack(name, virtual_ips, ipv4_prefix, ipv6_prefix, mtu).await?,
+                inner: linux::LinuxTun::create_dual_stack(
+                    name,
+                    virtual_ips,
+                    ipv4_prefix,
+                    ipv6_prefix,
+                    mtu,
+                )
+                .await?,
             })
         }
 
         #[cfg(target_os = "macos")]
         {
             Ok(Self {
-                inner: macos::MacosTun::create_dual_stack(name, virtual_ips, ipv4_prefix, ipv6_prefix, mtu).await?,
+                inner: macos::MacosTun::create_dual_stack(
+                    name,
+                    virtual_ips,
+                    ipv4_prefix,
+                    ipv6_prefix,
+                    mtu,
+                )
+                .await?,
             })
         }
 
         #[cfg(target_os = "windows")]
         {
             Ok(Self {
-                inner: windows::WindowsTun::create_dual_stack(name, virtual_ips, ipv4_prefix, ipv6_prefix, mtu).await?,
+                inner: windows::WindowsTun::create_dual_stack(
+                    name,
+                    virtual_ips,
+                    ipv4_prefix,
+                    ipv6_prefix,
+                    mtu,
+                )
+                .await?,
             })
         }
     }

@@ -159,8 +159,7 @@ fn consolidate_endpoints(primary: SocketAddr, candidates: &[SocketAddr]) -> Vec<
 
 fn refresh_session(session: &mut ClientSession, input: RegistrationInput) {
     session.peer_info.public_key = input.public_key;
-    session.peer_info.endpoints =
-        consolidate_endpoints(input.endpoint, &input.candidate_endpoints);
+    session.peer_info.endpoints = consolidate_endpoints(input.endpoint, &input.candidate_endpoints);
     session.peer_info.nat_type = input.nat_type;
     session.tx = input.tx;
     session.last_heartbeat = input.now;
@@ -221,7 +220,10 @@ impl SessionManager {
     /// 检查客户端 ID 或公钥是否在黑名单中
     pub async fn is_blacklisted(&self, client_id: &str, public_key: &[u8]) -> bool {
         let fingerprint = fuckipv6_common::Identity::public_key_fingerprint(public_key);
-        self.blacklist.read().await.is_banned(client_id, &fingerprint)
+        self.blacklist
+            .read()
+            .await
+            .is_banned(client_id, &fingerprint)
     }
 
     /// 将客户端加入黑名单，并强制下线如果当前在线
@@ -897,11 +899,17 @@ impl IpAllocator {
     }
 
     pub fn ipv4_prefix(&self) -> u8 {
-        self.v4_allocator.as_ref().map(|v4| v4.prefix_len).unwrap_or(24)
+        self.v4_allocator
+            .as_ref()
+            .map(|v4| v4.prefix_len)
+            .unwrap_or(24)
     }
 
     pub fn ipv6_prefix(&self) -> u8 {
-        self.v6_allocator.as_ref().map(|v6| v6.prefix_len).unwrap_or(64)
+        self.v6_allocator
+            .as_ref()
+            .map(|v6| v6.prefix_len)
+            .unwrap_or(64)
     }
 
     pub fn allocation(&self) -> &NetworkAllocation {

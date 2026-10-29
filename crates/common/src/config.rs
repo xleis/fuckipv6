@@ -315,10 +315,7 @@ impl CoordinatorConfig {
             validate_ipv4_cidr(&self.network.ipv4_pool, "network.ipv4_pool")?;
         }
         if self.network.mode.is_ipv6_enabled() {
-            validate_ipv6_cidr(
-                self.network.effective_ipv6_pool(),
-                "network.ipv6_pool",
-            )?;
+            validate_ipv6_cidr(self.network.effective_ipv6_pool(), "network.ipv6_pool")?;
         }
         validate_log_config(&self.log)?;
 

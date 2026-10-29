@@ -99,7 +99,8 @@ impl MultiNetworkSupervisor {
 
         // 统一优雅停止广播通道
         let (global_shutdown_tx, _) = watch::channel(false);
-        let network_shutdown_senders = Arc::new(RwLock::new(HashMap::<String, watch::Sender<bool>>::new()));
+        let network_shutdown_senders =
+            Arc::new(RwLock::new(HashMap::<String, watch::Sender<bool>>::new()));
 
         let mut handles = Vec::new();
 
@@ -287,7 +288,9 @@ pub async fn start_all_networks(options: RuntimeOptions) -> Result<()> {
     let config_manager = ConfigManager::new()?;
     let networks = config_manager.list_networks()?;
     if networks.is_empty() {
-        anyhow::bail!("当前没有已保存的网络配置。请使用 'fuckipv6 join' 或 'fuckipv6 host' 添加网络。");
+        anyhow::bail!(
+            "当前没有已保存的网络配置。请使用 'fuckipv6 join' 或 'fuckipv6 host' 添加网络。"
+        );
     }
 
     let names: Vec<String> = networks.into_iter().map(|n| n.name).collect();
@@ -357,7 +360,10 @@ mod tests {
     fn test_derive_tun_name_distinct_networks() {
         assert_eq!(derive_tun_name(Some("home"), "fuckipv6"), "fk-home");
         assert_eq!(derive_tun_name(Some("office"), "fuckipv6"), "fk-office");
-        assert_eq!(derive_tun_name(Some("cloud-vpn"), "fuckipv6"), "fk-cloud-vpn");
+        assert_eq!(
+            derive_tun_name(Some("cloud-vpn"), "fuckipv6"),
+            "fk-cloud-vpn"
+        );
     }
 
     #[test]

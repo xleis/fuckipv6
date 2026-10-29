@@ -118,13 +118,12 @@ impl ChunkAssembler {
         }
 
         if !self.manifest.verify_chunk(chunk_index, &data) {
-            anyhow::bail!(
-                "分块 [{}] Blake3 校验失败：数据哈希与清单不符",
-                chunk_index
-            );
+            anyhow::bail!("分块 [{}] Blake3 校验失败：数据哈希与清单不符", chunk_index);
         }
 
-        if let std::collections::hash_map::Entry::Vacant(e) = self.received_chunks.entry(chunk_index) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.received_chunks.entry(chunk_index)
+        {
             self.received_bytes += data.len() as u64;
             e.insert(data);
         }
@@ -266,8 +265,7 @@ impl P2pDirectMessage {
     ) -> Result<Self> {
         // 1. 生成一次性临时 X25519 密钥对
         let mut ephemeral_secret_bytes = [0u8; 32];
-        getrandom::fill(&mut ephemeral_secret_bytes)
-            .context("生成临时 X25519 密钥失败")?;
+        getrandom::fill(&mut ephemeral_secret_bytes).context("生成临时 X25519 密钥失败")?;
         let ephemeral_secret = StaticSecret::from(ephemeral_secret_bytes);
         let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
 
@@ -283,8 +281,8 @@ impl P2pDirectMessage {
         );
 
         // 4. ChaCha20-Poly1305 加密载荷
-        let encrypted_payload = encrypt_payload(&session_key, plaintext)
-            .context("加密直接消息失败")?;
+        let encrypted_payload =
+            encrypt_payload(&session_key, plaintext).context("加密直接消息失败")?;
 
         let mut message_id = [0u8; 16];
         getrandom::fill(&mut message_id).context("生成消息 ID 失败")?;
@@ -345,8 +343,8 @@ impl P2pDirectMessage {
         );
 
         // 4. 解密
-        let plaintext = decrypt_payload(&session_key, &self.encrypted_payload)
-            .context("解密端到端消息失败")?;
+        let plaintext =
+            decrypt_payload(&session_key, &self.encrypted_payload).context("解密端到端消息失败")?;
 
         Ok(plaintext)
     }
@@ -360,10 +358,7 @@ pub enum TransferMessage {
     /// 文件清单响应
     ManifestResponse { manifest: Option<FileManifest> },
     /// 请求指定分块
-    ChunkRequest {
-        file_id: [u8; 32],
-        chunk_index: u32,
-    },
+    ChunkRequest { file_id: [u8; 32], chunk_index: u32 },
     /// 分块数据响应
     ChunkResponse {
         file_id: [u8; 32],

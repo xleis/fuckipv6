@@ -94,7 +94,10 @@ impl P2pOverlay {
 
     /// 登记或协商一条洋葱中继跳数密钥
     pub async fn register_onion_circuit(&self, circuit_id: u64, shared_key: [u8; 32]) {
-        self.onion_circuits.write().await.insert(circuit_id, shared_key);
+        self.onion_circuits
+            .write()
+            .await
+            .insert(circuit_id, shared_key);
         tracing::info!("洋葱中继电路 #{} 共享密钥已注册就绪", circuit_id);
     }
 
@@ -142,7 +145,10 @@ impl P2pOverlay {
                                 let _ = socket.send_to(&encoded, target_endpoint).await;
                             }
                         } else {
-                            tracing::warn!("洋葱下一跳节点 {} 缺少物理端点，无法转发", next_hop.client_id);
+                            tracing::warn!(
+                                "洋葱下一跳节点 {} 缺少物理端点，无法转发",
+                                next_hop.client_id
+                            );
                         }
                     }
                     Ok(OnionNextHop::Deliver {
@@ -215,7 +221,11 @@ impl P2pOverlay {
                         if let Ok(encoded) = codec::encode(&datagram) {
                             let _ = socket.send_to(&encoded, src_addr).await;
                         }
-                        tracing::info!("洋葱电路 #{} 扩展至节点 {} 完成", circuit_id, next_hop.client_id);
+                        tracing::info!(
+                            "洋葱电路 #{} 扩展至节点 {} 完成",
+                            circuit_id,
+                            next_hop.client_id
+                        );
                     }
                 }
             }
@@ -241,7 +251,12 @@ impl P2pOverlay {
     // -------------------------------------------------------------------------
 
     /// 处理收到的 Kademlia DHT RPC 消息
-    pub async fn handle_dht_message(&self, msg: DhtMessage, src_addr: SocketAddr, socket: &UdpSocket) {
+    pub async fn handle_dht_message(
+        &self,
+        msg: DhtMessage,
+        src_addr: SocketAddr,
+        socket: &UdpSocket,
+    ) {
         // 自动更新对端联系人进 K-Bucket
         let sender = match &msg {
             DhtMessage::Ping { sender } => sender.clone(),
@@ -259,7 +274,9 @@ impl P2pOverlay {
             routing.update(sender.clone());
         }
 
-        let local_contact = self.local_contact(vec![socket.local_addr().unwrap_or(src_addr)]).await;
+        let local_contact = self
+            .local_contact(vec![socket.local_addr().unwrap_or(src_addr)])
+            .await;
 
         match msg {
             DhtMessage::Ping { .. } => {
@@ -272,7 +289,11 @@ impl P2pOverlay {
                 }
             }
             DhtMessage::Pong { .. } => {
-                tracing::debug!("收到来自 {} (NodeId: {}) 的 DHT Pong 响应", src_addr, sender.id);
+                tracing::debug!(
+                    "收到来自 {} (NodeId: {}) 的 DHT Pong 响应",
+                    src_addr,
+                    sender.id
+                );
             }
             DhtMessage::FindNode { target_id, .. } => {
                 let closest = {
@@ -324,7 +345,10 @@ impl P2pOverlay {
                         (Some(v.to_vec()), Vec::new())
                     } else {
                         let routing = self.dht_routing.read().await;
-                        (None, routing.find_closest_nodes(&NodeId(key), K_BUCKET_SIZE))
+                        (
+                            None,
+                            routing.find_closest_nodes(&NodeId(key), K_BUCKET_SIZE),
+                        )
                     }
                 };
                 let resp = DhtMessage::FoundValue {
@@ -362,7 +386,12 @@ impl P2pOverlay {
     // -------------------------------------------------------------------------
 
     /// 发布一块本地数据，生成 Blake3 Merkle Root 清单
-    pub async fn publish_data(&self, file_name: &str, data: &[u8], chunk_size: u32) -> FileManifest {
+    pub async fn publish_data(
+        &self,
+        file_name: &str,
+        data: &[u8],
+        chunk_size: u32,
+    ) -> FileManifest {
         let (manifest, chunks) = FileManifest::create_from_data(file_name, data, chunk_size);
         self.published_files
             .write()
@@ -457,7 +486,11 @@ impl P2pOverlay {
                                 );
                             }
                             Err(e) => {
-                                tracing::warn!("分块 #{} Blake3 哈希校验失败，已被拒绝: {:#}", chunk_index, e);
+                                tracing::warn!(
+                                    "分块 #{} Blake3 哈希校验失败，已被拒绝: {:#}",
+                                    chunk_index,
+                                    e
+                                );
                             }
                         }
                     }
@@ -485,7 +518,9 @@ impl P2pOverlay {
             anyhow::bail!("本地节点未配置加密身份，无法解密直接消息");
         };
 
-        let plaintext = message.open(&local_identity).context("解密端到端消息失败")?;
+        let plaintext = message
+            .open(&local_identity)
+            .context("解密端到端消息失败")?;
         tracing::info!(
             "收到来自节点 {} 的端到端加密消息 (长度: {} 字节)",
             message.sender_client_id,

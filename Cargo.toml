@@ -41,8 +41,8 @@ tower = "0.4"
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 
 # 加密
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
 sha2 = "0.10"
 blake3 = "1"
 getrandom = "0.3"

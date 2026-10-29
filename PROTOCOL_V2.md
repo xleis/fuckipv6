@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期和在线重协商协调状态机已实现并有单元测试；完整 X-Wing 握手、PQC、重协商密码学、控制通道消息与数据面接入尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期、在线重协商协调状态机和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；完整 X-Wing 握手、PQC、重协商密码学、控制通道线格式与数据面接入尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -181,6 +181,17 @@ TH2 = SHA-512(
 8. `responder_confirm = HMAC-SHA-256(K_confirm_r, TH2)`，放入 `ACCEPT`。
 
 Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一性和 `responder_confirm`。
+
+#### 4.3.1 实验性 classic profile
+
+`crates/secure-session/src/handshake.rs` 当前实现一个仅供内部迁移和后续集成测试的 classic profile，标记为 `CLASSIC_PROFILE_ID = 1`。它不是本文生产候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
+
+- `HELLO` 使用 Ed25519 长期身份签名，包含双方 `IdentityId`、X25519 临时公钥、256-bit `NI`、Unix 时间、endpoint context hash、协议版本、profile 和候选数据套件；`ACCEPT` 包含 SID、epoch、双方临时公钥、`NI/NR`、时间和 Responder 签名。
+- `IdentityId = SHA-512(L("fuckipv6-v2 classic ed25519 identity") || L(Ed25519PublicKey))[0..32]`。验证方必须同时校验公钥对应的 IdentityId 与消息字段。
+- `HELLO` 与 `ACCEPT` 各自使用长度前缀、域分离的 SHA-512 签名输入；最终 transcript 使用第 8.2 节 canonical 构造。双方必须得到相同的 `TH2` hash 和 X25519 共享秘密。
+- Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
+- all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
+- 该 profile 不包含 X-Wing、ML-KEM、ML-DSA-65、HKDF、key confirmation、wire encoding 或数据面密钥安装；这些能力必须分别完成 SS-05 至 SS-13，并通过独立评审后才能进入生产声明。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 

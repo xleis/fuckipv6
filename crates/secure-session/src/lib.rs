@@ -7,6 +7,7 @@
 //! tested independently from the eventually selected X-Wing and ML-DSA
 //! implementations.
 
+pub mod handshake;
 pub mod rekey;
 pub mod rekey_codec;
 pub mod transcript;

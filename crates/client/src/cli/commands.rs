@@ -134,6 +134,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     pub(crate) tun_buffer_tx: mpsc::UnboundedSender<Vec<u8>>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
+    pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     pub(crate) ipc_task: JoinHandle<()>,
     pub(crate) config_reload_task: JoinHandle<()>,
     pub(crate) tun_reader_task: JoinHandle<()>,
@@ -284,6 +285,7 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     // 创建性能统计收集器
     let stats = StatsCollector::new();
+    let (control_tx, control_rx) = mpsc::unbounded_channel();
 
     tracing::info!("性能监控已启用");
 
@@ -295,6 +297,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         &stats,
         assigned_ip,
         enable_ipc,
+        Some(control_tx),
     );
 
     // 主事件循环
@@ -326,6 +329,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         tun_packet_rx: tasks.tun_packet_rx,
         tun_buffer_tx: tasks.tun_buffer_tx,
         heartbeat_interval,
+        control_rx,
         ipc_task: tasks.ipc_task,
         config_reload_task: tasks.config_reload_task,
         tun_reader_task: tasks.tun_reader_task,
@@ -521,6 +525,7 @@ async fn create_tun_device(config: &ClientConfig, assigned_ips: &VirtualIps) -> 
     Ok(tun)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_runtime_tasks_ext(
     config_path: &str,
     config: &ClientConfig,
@@ -529,9 +534,15 @@ fn spawn_runtime_tasks_ext(
     stats: &StatsCollector,
     assigned_ip: Ipv6Addr,
     enable_ipc: bool,
+    control_tx: Option<mpsc::UnboundedSender<ipc::RuntimeCommand>>,
 ) -> RuntimeTasks {
     let ipc_task = if enable_ipc {
-        ipc::spawn_server(stats.clone(), p2p.clone(), assigned_ip)
+        match control_tx {
+            Some(control_tx) => {
+                ipc::spawn_server_with_control(stats.clone(), p2p.clone(), assigned_ip, control_tx)
+            }
+            None => ipc::spawn_server(stats.clone(), p2p.clone(), assigned_ip),
+        }
     } else {
         tokio::spawn(async {})
     };
@@ -573,7 +584,16 @@ fn spawn_runtime_tasks(
     stats: &StatsCollector,
     assigned_ip: Ipv6Addr,
 ) -> RuntimeTasks {
-    spawn_runtime_tasks_ext(config_path, config, p2p, tun, stats, assigned_ip, true)
+    spawn_runtime_tasks_ext(
+        config_path,
+        config,
+        p2p,
+        tun,
+        stats,
+        assigned_ip,
+        true,
+        None,
+    )
 }
 
 async fn connect_quic_relay(
@@ -687,6 +707,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 }
             }
 
+            // 本地控制接口下发的运行时命令
+            Some(command) = runtime.control_rx.recv() => {
+                if handle_runtime_command(runtime, command).await {
+                    break;
+                }
+            }
+
             // 定期心跳与 QUIC 中继自愈检测
             _ = runtime.heartbeat_interval.tick() => {
                 if runtime.signaling.send_heartbeat().is_ok() {
@@ -717,6 +744,31 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     }
 
     Ok(())
+}
+
+async fn handle_runtime_command(runtime: &mut ClientRuntime, command: ipc::RuntimeCommand) -> bool {
+    match command {
+        ipc::RuntimeCommand::ProbePeer {
+            target,
+            timeout_ms,
+            reply,
+        } => {
+            let timeout = Duration::from_millis(timeout_ms.clamp(100, 5_000));
+            let result = runtime
+                .p2p
+                .probe_peer_now(&target, timeout)
+                .await
+                .ok_or_else(|| format!("未找到在线对等节点: {target}"));
+            let _ = reply.send(result);
+            false
+        }
+        ipc::RuntimeCommand::Disconnect { reply } => {
+            tracing::info!("收到本地控制接口的断开请求");
+            shutdown_runtime(runtime).await;
+            let _ = reply.send(Ok(()));
+            true
+        }
+    }
 }
 
 async fn handle_tun_reader_packet(runtime: &ClientRuntime, packet: &[u8]) {

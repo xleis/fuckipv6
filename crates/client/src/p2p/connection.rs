@@ -3,6 +3,7 @@ use fuckipv6_common::crypto::Identity;
 use fuckipv6_common::{
     codec, ControlMessage, DataPacket, FallbackThreshold, P2pDatagram, PeerInfo,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -22,7 +23,7 @@ type IncomingPacket = (IpAddr, Vec<u8>);
 type IncomingReceiver = mpsc::UnboundedReceiver<IncomingPacket>;
 
 /// 一次主动 P2P 探针的结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerProbeOutcome {
     pub client_id: String,
     pub virtual_ip: Ipv6Addr,

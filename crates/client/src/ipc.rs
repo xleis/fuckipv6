@@ -6,10 +6,11 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 
-use crate::p2p::connection::P2pEngine;
+use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub enum IpcRequest {
     Peers,
     Logs { lines: usize },
     StopNetwork { name: Option<String> },
+    ProbePeer { target: String, timeout_ms: u64 },
+    Disconnect,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,8 +31,21 @@ pub enum IpcResponse {
     Peers(Vec<PeerSnapshot>),
     Logs(Vec<String>),
     MultiStatus(Vec<NetworkSessionSnapshot>),
+    PeerProbe(PeerProbeOutcome),
     Success { message: String },
     Error { message: String },
+}
+
+/// Commands delivered from the local control interface to the live runtime.
+pub enum RuntimeCommand {
+    ProbePeer {
+        target: String,
+        timeout_ms: u64,
+        reply: oneshot::Sender<Result<PeerProbeOutcome, String>>,
+    },
+    Disconnect {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +139,7 @@ pub struct NetworkSessionHandle {
 pub struct MultiNetworkRegistry {
     sessions: Arc<RwLock<HashMap<String, NetworkSessionHandle>>>,
     stop_tx: Arc<RwLock<Option<mpsc::UnboundedSender<Option<String>>>>>,
+    control_tx: Arc<RwLock<Option<mpsc::UnboundedSender<RuntimeCommand>>>>,
 }
 
 impl MultiNetworkRegistry {
@@ -136,6 +153,22 @@ impl MultiNetworkRegistry {
         Self {
             sessions: Arc::new(RwLock::new(map)),
             stop_tx: Arc::new(RwLock::new(None)),
+            control_tx: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn set_control_sender(&self, tx: mpsc::UnboundedSender<RuntimeCommand>) {
+        let control_tx = self.control_tx.clone();
+        tokio::spawn(async move {
+            *control_tx.write().await = Some(tx);
+        });
+    }
+
+    pub async fn send_control(&self, command: RuntimeCommand) -> bool {
+        if let Some(tx) = self.control_tx.read().await.as_ref() {
+            tx.send(command).is_ok()
+        } else {
+            false
         }
     }
 
@@ -198,6 +231,24 @@ pub fn spawn_server(
     spawn_multi_server_at(default_addr(), registry)
 }
 
+pub fn spawn_server_with_control(
+    stats: StatsCollector,
+    p2p: P2pEngine,
+    assigned_ip: Ipv6Addr,
+    control_tx: mpsc::UnboundedSender<RuntimeCommand>,
+) -> JoinHandle<()> {
+    let handle = NetworkSessionHandle {
+        network_name: "default".to_string(),
+        tun_name: "fuckipv6".to_string(),
+        assigned_ip,
+        assigned_ipv4: None,
+        p2p,
+        stats,
+    };
+    let registry = MultiNetworkRegistry::new_with_session(handle);
+    spawn_multi_server_with_control_at(default_addr(), registry, control_tx)
+}
+
 pub fn spawn_server_at(
     addr: String,
     stats: StatsCollector,
@@ -222,6 +273,19 @@ pub fn spawn_multi_server(registry: MultiNetworkRegistry) -> JoinHandle<()> {
 
 pub fn spawn_multi_server_at(addr: String, registry: MultiNetworkRegistry) -> JoinHandle<()> {
     tokio::spawn(async move {
+        if let Err(e) = serve(&addr, registry).await {
+            tracing::warn!("本地 IPC 服务已停止: {:?}", e);
+        }
+    })
+}
+
+fn spawn_multi_server_with_control_at(
+    addr: String,
+    registry: MultiNetworkRegistry,
+    control_tx: mpsc::UnboundedSender<RuntimeCommand>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        registry.set_control_sender(control_tx);
         if let Err(e) = serve(&addr, registry).await {
             tracing::warn!("本地 IPC 服务已停止: {:?}", e);
         }
@@ -287,6 +351,10 @@ async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) ->
         Ok(IpcRequest::Status) => IpcResponse::Status(multi_status_snapshot(&registry).await),
         Ok(IpcRequest::Peers) => IpcResponse::Peers(multi_peer_snapshots(&registry).await),
         Ok(IpcRequest::Logs { lines }) => IpcResponse::Logs(recent_error_log_lines(lines)),
+        Ok(IpcRequest::ProbePeer { target, timeout_ms }) => {
+            probe_runtime_peer(&registry, target, timeout_ms).await
+        }
+        Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
         Ok(IpcRequest::StopNetwork { name }) => {
             let signaled = registry.send_stop(name.clone()).await;
             if signaled {
@@ -317,6 +385,57 @@ async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) ->
         .await
         .context("无法关闭本地控制响应写入端")?;
     Ok(())
+}
+
+async fn probe_runtime_peer(
+    registry: &MultiNetworkRegistry,
+    target: String,
+    timeout_ms: u64,
+) -> IpcResponse {
+    let timeout_ms = timeout_ms.clamp(100, 5_000);
+    let (reply, response) = oneshot::channel();
+    if !registry
+        .send_control(RuntimeCommand::ProbePeer {
+            target,
+            timeout_ms,
+            reply,
+        })
+        .await
+    {
+        return IpcResponse::Error {
+            message: "运行时不支持节点探测或控制通道已关闭".to_string(),
+        };
+    }
+
+    match tokio::time::timeout(Duration::from_millis(timeout_ms + 2_000), response).await {
+        Ok(Ok(Ok(outcome))) => IpcResponse::PeerProbe(outcome),
+        Ok(Ok(Err(message))) => IpcResponse::Error { message },
+        Ok(Err(_)) | Err(_) => IpcResponse::Error {
+            message: "节点探测请求未收到运行时响应".to_string(),
+        },
+    }
+}
+
+async fn disconnect_runtime(registry: &MultiNetworkRegistry) -> IpcResponse {
+    let (reply, response) = oneshot::channel();
+    if !registry
+        .send_control(RuntimeCommand::Disconnect { reply })
+        .await
+    {
+        return IpcResponse::Error {
+            message: "运行时不支持远程断开或控制通道已关闭".to_string(),
+        };
+    }
+
+    match tokio::time::timeout(Duration::from_secs(15), response).await {
+        Ok(Ok(Ok(()))) => IpcResponse::Success {
+            message: "客户端运行时已安全停止".to_string(),
+        },
+        Ok(Ok(Err(message))) => IpcResponse::Error { message },
+        Ok(Err(_)) | Err(_) => IpcResponse::Error {
+            message: "断开请求未收到运行时响应".to_string(),
+        },
+    }
 }
 
 async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> StatusSnapshot {

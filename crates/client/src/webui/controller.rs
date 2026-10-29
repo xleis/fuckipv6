@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use crate::cli::commands::{self, RuntimeOptions};
+use crate::p2p::connection::PeerProbeOutcome;
 use crate::symmetric::EmbeddedCoordinator;
 
 #[derive(Debug, Clone, Serialize)]
@@ -462,14 +463,23 @@ impl AppController {
         Ok(())
     }
 
-    /// 断开当前网络连接
+    /// 断开当前网络连接，并等待运行中的客户端确认已经释放资源。
     pub async fn disconnect(&self) -> Result<()> {
-        let cancel = self.cancel_tx.write().await.take();
-        if let Some(tx) = cancel {
-            self.log("正在停止客户端运行实例...").await;
-            let _ = tx.send(true);
+        let has_runtime = {
+            let st = self.state.read().await;
+            matches!(st.status.as_str(), "online" | "connecting")
+        };
+
+        if has_runtime {
+            self.log("正在请求客户端运行时安全断开...").await;
+            match crate::ipc::request(crate::ipc::IpcRequest::Disconnect).await? {
+                crate::ipc::IpcResponse::Success { .. } => {}
+                crate::ipc::IpcResponse::Error { message } => anyhow::bail!(message),
+                other => anyhow::bail!("断开请求返回了意外响应: {other:?}"),
+            }
         }
 
+        *self.cancel_tx.write().await = None;
         let mut st = self.state.write().await;
         st.status = "offline".to_string();
         st.virtual_ipv6 = None;
@@ -477,6 +487,18 @@ impl AppController {
         st.connected_target = None;
         st.peers.clear();
         Ok(())
+    }
+
+    /// 向运行中的 P2P 引擎发起真实探针。
+    pub async fn probe_peer(&self, target: String, timeout_ms: u64) -> Result<PeerProbeOutcome> {
+        if target.trim().is_empty() {
+            anyhow::bail!("探测目标不能为空");
+        }
+        match crate::ipc::request(crate::ipc::IpcRequest::ProbePeer { target, timeout_ms }).await? {
+            crate::ipc::IpcResponse::PeerProbe(outcome) => Ok(outcome),
+            crate::ipc::IpcResponse::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("节点探测返回了意外响应: {other:?}"),
+        }
     }
 
     /// 一键自建对等网络并生成邀请凭证 (fk://...)

@@ -820,7 +820,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fuckipv6-client"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "fuckipv6-common"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "fuckipv6-coordinator"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

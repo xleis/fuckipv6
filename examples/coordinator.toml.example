@@ -1,0 +1,195 @@
+# fuckipv6 协调服务器配置文件示例
+# 复制此文件到 /etc/fuckipv6/coordinator.toml 并根据需要修改
+
+# WebSocket信令服务绑定地址
+# 格式: [IPv6地址]:端口
+# 示例:
+#   监听所有IPv6接口: [::]:6666
+#   仅监听本地: [::1]:6666
+#   监听特定地址: [2001:db8::1]:6666
+signaling_bind = "[::]:6666"
+
+# QUIC中继服务绑定地址（Phase 2功能）
+relay_bind = "[::]:6667"
+
+# Web管理界面绑定地址（Phase 3功能）
+webui_bind = "[::]:8080"
+
+# 客户端心跳超时时间（秒）
+heartbeat_timeout_secs = 120
+
+# ========================================
+# 网络配置 (支持双栈 / 纯 IPv4 / 纯 IPv6)
+# ========================================
+[network]
+
+# 组网模式
+# 可选值:
+#   "dual_stack" - 双栈模式 (默认，同时分配 IPv4 和 IPv6 虚拟地址)
+#   "ipv4_only"  - 纯 IPv4 模式 (仅分配 IPv4 虚拟地址)
+#   "ipv6_only"  - 纯 IPv6 模式 (仅分配 IPv6 虚拟地址)
+mode = "dual_stack"
+
+# IPv4 地址池 (当 mode 为 "dual_stack" 或 "ipv4_only" 时生效)
+# 格式: IPv4前缀/前缀长度 (推荐 /16 ~ /30，如 10.8.0.0/24)
+ipv4_pool = "10.8.0.0/24"
+
+# IPv6 地址池 (当 mode 为 "dual_stack" 或 "ipv6_only" 时生效)
+# 格式: IPv6前缀/前缀长度
+# 示例:
+#   fd00::/64      - 私有 /64 网段
+#   fd00::1000/120 - 256个地址
+ip_pool = "fd00::/64"
+
+# 地址分配策略
+# sequential - 顺序分配（默认）
+# random     - 随机分配
+allocation_strategy = "sequential"
+
+# ========================================
+# TLS配置 (用于wss://)
+# ========================================
+# [tls]
+#
+# # TLS证书路径
+# # 可使用Let's Encrypt或自签名证书
+# cert_path = "/etc/fuckipv6/cert.pem"
+# key_path = "/etc/fuckipv6/key.pem"
+#
+# # 可选: 客户端证书验证
+# # client_ca_path = "/etc/fuckipv6/client_ca.pem"
+
+# ========================================
+# 认证配置 (Phase 2)
+# ========================================
+# [auth]
+#
+# # 是否要求客户端认证
+# required = true
+#
+# # 认证方式
+# # ed25519   - Ed25519公钥签名（默认）
+# # jwt       - JWT令牌
+# # preshared - 预共享密钥
+# method = "ed25519"
+#
+# # JWT配置（当method = "jwt"时）
+# jwt_secret = "your-secret-key-change-this"
+# jwt_expiry_hours = 24
+
+# ========================================
+# 中继服务配置 (Phase 2)
+# ========================================
+# [relay]
+#
+# # 是否启用中继服务
+# enabled = true
+#
+# # 每个客户端的带宽限制(Mbps)
+# max_bandwidth_per_client = 10
+#
+# # 最大并发中继连接数
+# max_concurrent_relays = 100
+#
+# # 中继超时时间(秒)
+# # 超过此时间无流量则断开中继连接
+# idle_timeout = 300
+
+# ========================================
+# 日志配置
+# ========================================
+[log]
+
+# 日志级别
+# 可选值: trace, debug, info, warn, error
+# 生产环境推荐: info
+# 调试时推荐: debug
+level = "info"
+
+# 可选: 日志文件路径（不设置则输出到stdout）
+# file = "/var/log/fuckipv6/coordinator.log"
+
+# 可选: 日志格式
+# json  - JSON格式（便于日志分析）
+# plain - 纯文本格式（默认）
+# format = "plain"
+
+# ========================================
+# 监控和统计 (Phase 3)
+# ========================================
+# [monitoring]
+#
+# # 是否启用Prometheus指标导出
+# prometheus_enabled = true
+# prometheus_bind = "[::]:9090"
+#
+# # 统计信息保留时长(天)
+# stats_retention_days = 30
+
+# ========================================
+# 配置示例
+# ========================================
+
+# === 本地测试配置 ===
+# signaling_bind = "[::1]:6666"
+# relay_bind = "[::1]:6667"
+# webui_bind = "[::1]:8080"
+# heartbeat_timeout_secs = 120
+#
+# [network]
+# ip_pool = "fd00::1000/120"
+#
+# [log]
+# level = "debug"
+
+# === 小型生产环境配置 ===
+# signaling_bind = "[::]:6666"
+# relay_bind = "[::]:6667"
+# webui_bind = "[::]:8080"
+# heartbeat_timeout_secs = 120
+#
+# [network]
+# ip_pool = "fd00::1000/112"
+# allocation_strategy = "sequential"
+#
+# [tls]
+# cert_path = "/etc/letsencrypt/live/vpn.example.com/fullchain.pem"
+# key_path = "/etc/letsencrypt/live/vpn.example.com/privkey.pem"
+#
+# [log]
+# level = "info"
+# file = "/var/log/fuckipv6/coordinator.log"
+
+# === 大型生产环境配置（预留Phase 2） ===
+# signaling_bind = "[::]:6666"
+# relay_bind = "[::]:6667"
+# webui_bind = "[::]:8080"
+# heartbeat_timeout_secs = 120
+#
+# [network]
+# ip_pool = "fd00::/64"
+# allocation_strategy = "random"
+#
+# [tls]
+# cert_path = "/etc/fuckipv6/cert.pem"
+# key_path = "/etc/fuckipv6/key.pem"
+#
+# [auth]
+# required = true
+# method = "ed25519"
+#
+# [relay]
+# enabled = true
+# max_bandwidth_per_client = 10
+# max_concurrent_relays = 1000
+# idle_timeout = 300
+#
+# [log]
+# level = "info"
+# file = "/var/log/fuckipv6/coordinator.log"
+# format = "json"
+#
+# [monitoring]
+# prometheus_enabled = true
+# prometheus_bind = "[::]:9090"
+# stats_retention_days = 30

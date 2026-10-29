@@ -1,0 +1,51 @@
+[package]
+name = "fuckipv6-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fuckipv6"
+path = "src/main.rs"
+
+[dependencies]
+fuckipv6-common = { path = "../common" }
+fuckipv6-coordinator = { path = "../coordinator" }
+
+tokio = { workspace = true }
+tun = { workspace = true }
+socket2 = { workspace = true }
+quinn = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+axum = { workspace = true, features = ["ws"] }
+tower = { workspace = true, features = ["util"] }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+
+clap = { workspace = true }
+tracing = { workspace = true }
+
+chrono = { workspace = true }
+getrandom = { workspace = true }
+
+anyhow = { workspace = true }
+
+# Windows TUN support
+[target.'cfg(windows)'.dependencies]
+wintun = "0.5"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
+# macOS utun support
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

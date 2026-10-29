@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 配置和密钥
+*.toml
+!Cargo.toml
+!**/Cargo.toml
+*.pem
+*.key
+
+# 日志
+*.log
+
+# 生成物与本地工作区
+/test_workspace/
+/release/*.zip
+/release/fuckipv6-windows/*.exe

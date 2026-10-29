@@ -1,0 +1,24 @@
+FROM rust:1-bookworm AS builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN cargo build --release -p fuckipv6-client
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates iproute2 iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/fuckipv6 /var/lib/fuckipv6
+
+COPY --from=builder /src/target/release/fuckipv6 /usr/local/bin/fuckipv6
+COPY examples/client.toml.example /etc/fuckipv6/client.toml
+
+VOLUME ["/etc/fuckipv6", "/var/lib/fuckipv6"]
+WORKDIR /var/lib/fuckipv6
+
+ENTRYPOINT ["/usr/local/bin/fuckipv6"]
+CMD ["start", "--config", "/etc/fuckipv6/client.toml"]

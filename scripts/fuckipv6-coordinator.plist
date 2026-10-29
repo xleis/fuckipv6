@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>cc.xlei.fuckipv6.coordinator</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/fuckipv6/fuckipv6-coordinator</string>
+    <string>--bind</string>
+    <string>0.0.0.0:6666</string>
+    <string>--relay-bind</string>
+    <string>0.0.0.0:6667</string>
+    <string>--webui-bind</string>
+    <string>0.0.0.0:8080</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/usr/local/fuckipv6</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RUST_LOG</key>
+    <string>info</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/fuckipv6/coordinator.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/fuckipv6/coordinator.err.log</string>
+</dict>
+</plist>

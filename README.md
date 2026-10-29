@@ -1,0 +1,253 @@
+# fuckipv6 - IPv6虚拟局域网组网软件
+
+基于IPv6的虚拟局域网组网软件，支持P2P直连和中继fallback，优化实时应用场景。
+
+## ✨ 特性
+
+- 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
+- 🔄 **Multi-Relay 拓扑与智能选路**: 并发多中继探测与 RTT 自动寻优，双重兜底保活
+- 🛡️ **安全与 ACL 策略**: WireGuard 级端到端加密 (ChaCha20-Poly1305 + Blake3)、声明式入出站 ACL、Coordinator 准入黑名单
+- 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
+- 🔒 **身份与鉴权**: Ed25519 签名验证、Coordinator JWT Web/API 鉴权
+- 🌐 **全平台自主化**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（免外部依赖）
+- 📊 **可观测性**: 现代化 Web 管理面板、实时拓扑与流量监控、本地 IPC 控制台
+
+## 📖 快速开始
+
+### 1. 编译
+
+```bash
+git clone https://github.com/yourusername/fuckipv6
+cd fuckipv6
+cargo build --release
+```
+
+### 2. 启动协调服务器
+
+```bash
+# 在公网服务器上运行
+./target/release/fuckipv6-coordinator
+```
+
+默认信令监听 `0.0.0.0:6666`，QUIC 中继监听 `0.0.0.0:6667`，Web管理界面监听 `0.0.0.0:8080`。
+
+### 3. 配置并启动客户端
+
+```bash
+# 生成配置文件
+./target/release/fuckipv6 init-config
+
+# 编辑配置文件，修改coordinator_url
+nano client.toml
+
+# 启动客户端（需要root权限）
+sudo ./target/release/fuckipv6 start
+```
+
+### 4. 测试连通性
+
+```bash
+# 在客户端A上ping客户端B的虚拟IP
+ping6 fd00::1002
+```
+
+本机 Linux 端到端验证可使用 network namespace 脚本启动 1 个 coordinator 和 3 个隔离客户端，覆盖互 ping、路由和接近 MTU 的大包 ping：
+
+```bash
+sudo ./scripts/test-netns.sh
+```
+
+**详细文档**:
+- [快速开始指南](docs/QUICKSTART.md)
+- [架构说明](ARCHITECTURE.md)
+- [API/协议参考](API.md)
+- [用户手册（中文）](docs/USER_MANUAL.zh-CN.md)
+- [User Manual](docs/USER_MANUAL.en.md)
+- [部署指南](docs/DEPLOYMENT.md)
+
+## 🏗️ 架构
+
+```
+┌──────────────────────┐
+│  Coordinator Server  │  ← 公网服务器
+│  - WebSocket信令     │     监听: [::]:6666
+│  - QUIC中继          │     监听: [::]:6667
+│  - IP地址分配        │
+└──────────┬───────────┘
+           │ WebSocket
+    ┌──────┴──────┐
+    │             │
+┌───▼────┐   ┌───▼────┐
+│Client A│◄──┤Client B│  ← UDP P2P直连
+│        │   │        │
+│TUN设备 │   │TUN设备 │
+│fd00::1 │   │fd00::2 │
+└────────┘   └────────┘
+```
+
+**工作流程**：
+
+1. 客户端连接协调服务器，获取虚拟IP（如`fd00::1001`）
+2. 协调服务器通知所有客户端新节点上线
+3. 客户端之间通过UDP探测包验证可达端点
+4. 应用流量通过TUN设备 → UDP P2P通道 → 对端TUN设备
+5. 如果P2P端点尚未验证或发送失败，客户端优先通过协调服务器 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令通道中继
+
+## 📦 项目结构
+
+```
+fuckipv6/
+├── crates/
+│   ├── common/          # 共享库
+│   │   ├── protocol.rs  # 信令协议
+│   │   ├── types.rs     # 数据类型
+│   │   ├── config.rs    # 配置管理
+│   │   └── crypto.rs    # Ed25519加密
+│   │
+│   ├── client/          # 客户端
+│   │   ├── tun/         # TUN设备管理
+│   │   ├── p2p/         # P2P连接引擎
+│   │   ├── signaling/   # 信令客户端
+│   │   └── cli/         # 命令行界面
+│   │
+│   └── coordinator/     # 协调服务器
+│       ├── signaling/   # WebSocket信令服务
+│       ├── relay/       # QUIC中继服务
+│       └── webui/       # Web管理界面和API
+│
+└── docs/
+    └── QUICKSTART.md    # 快速开始指南
+```
+
+## 🎯 开发状态
+
+### ✅ Phase 1 - MVP (已完成)
+
+- [x] 信令服务器 (WebSocket)
+- [x] IPv6地址分配器
+- [x] TUN虚拟网卡 (Linux/macOS/Windows)
+- [x] UDP P2P连接
+- [x] 客户端注册和发现
+- [x] 基本数据转发
+- [x] CLI工具
+- [x] Ed25519注册签名验证
+- [x] UDP端点探测/基础打洞
+- [x] 信令通道中继fallback
+- [x] 本地IPC status/peers
+- [x] 协调端Web UI/API
+
+**当前可用功能**：
+- 客户端注册到协调服务器
+- 自动分配虚拟IPv6地址
+- 客户端间UDP P2P直连，失败时信令中继
+- 通过虚拟IP进行通信（ping、SSH、文件传输）
+- WebSocket 信令断线自动重连并重新注册
+- `fuckipv6 status` / `fuckipv6 peers` 查看运行时状态、RTT、丢包率、带宽估计和 P2P 健康状态
+- `fuckipv6 route` / `fuckipv6 logs` 查看路由和服务日志
+- `fuckipv6 logs --service memory` 查看运行中客户端聚合的最近 warn/error；协调端支持 `/api/logs?service=memory`
+- `fuckipv6 join/list/default/connect/leave` 管理并切换多个已保存网络配置
+- `http://<coordinator>:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
+
+### 🚧 Phase 2 - 核心功能（规划中）
+
+- [x] 基础UDP打洞探测
+- [x] 完整NAT类型检测（STUN/RFC5780）
+- [x] QUIC协议能力（证书/pin/双向流、多路复用、0-RTT 自检；P2P 直连数据面当前仍为 UDP，失败时走 QUIC relay）
+- [x] 信令通道中继服务（P2P失败时）
+- [x] 独立 QUIC 中继服务（注册、转发、限速、并发控制和 loopback 集成测试；更大规模真实 WAN 压测仍建议补充）
+- [x] 连接质量监控（RTT、丢包率、健康阈值）
+- [x] 自动Fallback机制（P2P未验证/发送失败/健康阈值不达标）
+- [x] Windows WinTun 支持
+- [x] macOS utun 支持
+
+### 📅 Phase 3 - 优化和UI（规划中）
+
+- [x] Web管理界面（在线节点/API）
+- [x] 性能优化
+- [x] 多路复用
+- [x] `status` / `peers` 运行时IPC
+- [x] `route` / `logs` 等扩展CLI命令
+
+### 🔮 Phase 4 - 生产就绪（规划中）
+
+- [x] 安全审计（`cargo audit` 无漏洞/告警；人工安全审计仍建议在生产前执行）
+- [x] 压力测试（QUIC relay 100 个已注册客户端并发连接）
+- [x] 监控和日志
+- [x] 部署工具（systemd、安装脚本、Docker、CI、Release 自动发布）
+
+## 🛠️ 技术栈
+
+- **语言**: Rust 2021
+- **异步运行时**: Tokio
+- **网络**:
+  - UDP P2P数据面（当前）→ QUIC（规划）
+  - WebSocket信令和fallback中继
+  - TUN/TAP (虚拟网卡)
+- **序列化**: postcard
+- **加密**: Ed25519-dalek, Blake3
+- **CLI**: clap
+
+## 📊 性能目标
+
+| 指标 | Phase 1 (MVP) | Phase 2 (优化后) |
+|------|---------------|------------------|
+| P2P延迟 | <50ms | <10ms (局域网) |
+| 吞吐量 | 100+ Mbps | 500+ Mbps |
+| 连接建立 | <3秒 | <1秒 |
+| 内存占用 | <100MB | <50MB |
+| CPU占用 | <20% | <5% (空闲) |
+
+CPU profiling 可使用 `PROFILE_SECONDS=10 ./scripts/profile-cpu.sh` 对协议/relay 基准采样；脚本优先生成 flamegraph，未安装 `cargo-flamegraph` 时降级输出 `target/profiling/*.perf-report.txt`。
+
+## 🤝 贡献
+
+欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## ⚠️ 注意事项
+
+- **Linux需要 root 权限或 CAP_NET_ADMIN** 创建 TUN 设备；macOS 需要 sudo/root 创建 utun 并配置路由；Windows 需要管理员权限和 WinTun
+- **虚拟网络只承载IPv6**，但信令/P2P endpoint支持IPv4或IPv6传输
+- **NAT 类型检测依赖可访问的 STUN/RFC5780 服务器**；检测失败会标记为 `Unknown`，数据转发仍会在 P2P 失败时走信令中继
+
+## FAQ
+
+**现在能用于真实组网吗？**
+
+可以用于原型验证和受控环境测试。当前已实现 Linux/macOS/Windows TUN、UDP P2P、QUIC/信令中继 fallback、身份认证、NAT 类型检测和基础观测；单机 Linux network namespace 已覆盖 3 节点、路由、互 ping 和接近 MTU 的验证。生产上线前仍建议补充真实跨主机/跨 NAT 环境验证、外部安全审计和更大规模压力测试。
+
+**必须有公网 IPv6 吗？**
+
+不必须。虚拟网络承载 IPv6 包，但协调服务器和 P2P endpoint 可以使用 IPv4 或 IPv6 传输。协调服务器需要被客户端访问到。
+
+**P2P 失败会怎样？**
+
+客户端会在端点未验证、发送失败或健康阈值不达标时通过协调服务器 WebSocket 信令通道发送 `RelayPacket`。这保证可达性优先，但吞吐不等同于专用中继服务。
+
+**为什么默认 MTU 是 1280？**
+
+1280 是 IPv6 最小 MTU，能减少跨网络路径上的分片和不可达问题。
+
+**如何切换多个网络配置？**
+
+使用 `fuckipv6 join <server> --name <name>` 保存网络，`fuckipv6 list` 查看，`fuckipv6 default <name>` 设置默认网络，`fuckipv6 connect <name>` 连接指定网络。
+
+## 📝 许可证
+
+MIT License - 详见 [LICENSE](LICENSE) 文件
+
+## 🔗 相关项目
+
+- [Tailscale](https://tailscale.com/) - 商业VPN方案
+- [WireGuard](https://www.wireguard.com/) - 现代VPN协议
+- [ZeroTier](https://www.zerotier.com/) - SD-WAN解决方案
+- [Nebula](https://github.com/slackhq/nebula) - 可扩展overlay网络
+
+## 📧 联系方式
+
+- Issues: [GitHub Issues](https://github.com/yourusername/fuckipv6/issues)
+- Discussions: [GitHub Discussions](https://github.com/yourusername/fuckipv6/discussions)
+
+---
+
+**当前版本**: v0.1.0 (Phase 1 MVP)
+**最后更新**: 2026-01-01

@@ -1,0 +1,46 @@
+[Unit]
+Description=fuckipv6 Client - IPv6 Virtual LAN P2P Mesh Network
+Documentation=https://github.com/yourusername/fuckipv6
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# 工作目录（修改为实际路径）
+WorkingDirectory=/opt/fuckipv6
+
+# 可执行文件路径（修改为实际路径）
+ExecStart=/opt/fuckipv6/fuckipv6 start --config /etc/fuckipv6/client.toml
+
+# 环境变量
+Environment="RUST_LOG=info"
+
+# 重启策略
+Restart=on-failure
+RestartSec=5s
+
+# 限制重启频率（10秒内最多3次）
+StartLimitInterval=10s
+StartLimitBurst=3
+
+# 安全加固
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/fuckipv6
+
+# 允许创建TUN设备
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fuckipv6
+
+[Install]
+WantedBy=multi-user.target

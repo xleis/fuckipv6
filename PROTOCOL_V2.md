@@ -252,10 +252,9 @@ UDP 数据帧固定 16 字节头，后接 AEAD 密文和 16 字节认证标签�
 offset  size  field
 0       1     version_and_kind  (v2 data = 0x20)
 1       1     flags
-2       2     reserved = 0
+2       2     epoch
 4       4     receiver_index
-8       4     epoch
-12      8     counter
+8       8     counter
 16      ...   AEAD ciphertext || tag
 ```
 
@@ -274,6 +273,7 @@ aad   = header[0..16] || L(SID) || L(ciphertext_length)
 - `counter` 严格递增，重协商后新 epoch 使用新的密钥和计数器零点。
 - `receiver_index` 是本地 32-bit 索引，仅在当前 epoch 有效；不能作为会话身份或认证凭据。
 - `flags` 保留位必须为零；未知位直接拒绝。
+- `epoch` 为 16-bit。达到 `0xffff` 后必须建立新会话，不能回绕；按 120 秒重协商上限可覆盖约 91 天连续会话。
 - 不使用逐包随机 nonce、逐包 JSON/postcard、逐包 `Vec` 和逐包哈希表加锁。
 - 解密前完成最小长度检查；AEAD 失败不产生错误响应。
 
@@ -286,6 +286,7 @@ aad   = header[0..16] || L(SID) || L(ciphertext_length)
 - 重复包、过旧包和超出窗口下界的包立即丢弃。
 - 只有当认证成功后窗口位图才更新。
 - 非法 `epoch`、未知 `receiver_index` 和零长度密文在解密前限流丢弃。
+- `epoch` 达到 `0xffff` 后禁止继续重协商并要求建立新会话，防止 16-bit 字段回绕。
 
 计数器不得回绕。达到 `2^32` 包、`2^60` 字节或 120 秒任一上限时进入重协商。
 

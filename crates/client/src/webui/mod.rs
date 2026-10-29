@@ -21,7 +21,7 @@ use fuckipv6_coordinator::webui::{
     BlacklistActionRequest, BlacklistActionResponse, LoginRequest, LoginResponse,
     NetworkConfigApiResponse, NetworkConfigDto, UpdateNetworkConfigRequest,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -31,6 +31,7 @@ pub fn create_app_web_router(controller: Arc<AppController>) -> Router {
         .route("/assets/webui.css", get(handle_webui_css))
         .route("/api/status", get(handle_status))
         .route("/api/peers", get(handle_peers))
+        .route("/api/peers/probe", post(handle_peer_probe))
         .route(
             "/api/config",
             get(handle_get_config).post(handle_post_config),
@@ -92,6 +93,39 @@ async fn handle_webui_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         WEBUI_CSS,
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct ProbePeerRequest {
+    target: String,
+    #[serde(default = "default_probe_timeout_ms")]
+    timeout_ms: u64,
+}
+
+fn default_probe_timeout_ms() -> u64 {
+    1_500
+}
+
+#[derive(Debug, Serialize)]
+struct ApiError {
+    error: String,
+}
+
+async fn handle_peer_probe(
+    State(ctrl): State<Arc<AppController>>,
+    Json(payload): Json<ProbePeerRequest>,
+) -> Result<Json<crate::p2p::connection::PeerProbeOutcome>, (StatusCode, Json<ApiError>)> {
+    ctrl.probe_peer(payload.target, payload.timeout_ms)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: format!("{error:#}"),
+                }),
+            )
+        })
 }
 
 async fn handle_status(State(ctrl): State<Arc<AppController>>) -> Json<serde_json::Value> {
@@ -2219,23 +2253,30 @@ tun_name = "fuckipv6"</div>
       logsEl.scrollTop = toBottom ? logsEl.scrollHeight : 0;
     }
 
-    function pingPeer(clientId) {
+    async function pingPeer(clientId) {
       const peer = (cachedPeers || []).find(p => p.client_id === clientId);
       const targetLabel = peer ? (peer.virtual_ip || shortId(clientId)) : shortId(clientId);
-      showToast(`正在向对等节点 ${targetLabel} 发送 P2P 探针...`);
-      setTimeout(() => {
-        if (peer && peer.rtt_us) {
-          const latency = (peer.rtt_us / 1000).toFixed(1);
-          const channel = peer.p2p_active ? '直连 (P2P Direct)' : '中继 (QUIC Relay)';
-          showToast(`节点 ${shortId(clientId)} 连通正常，往返延迟 ${latency} ms [${channel}]`);
-        } else if (peer) {
-          const latency = ((peer.idle_secs || 1) < 5 ? 12.4 : 26.8).toFixed(1);
-          const channel = peer.p2p_active ? '直连 (P2P Direct)' : '中继 (QUIC Relay)';
-          showToast(`节点 ${shortId(clientId)} 连通正常，往返延迟 ${latency} ms [${channel}]`);
-        } else {
-          showToast(`对等节点 ${shortId(clientId)} 探针超时或节点未在线`);
+      showToast(`正在向对等节点 ${targetLabel} 发送真实 P2P 探针...`);
+      try {
+        const response = await fetch('/api/peers/probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: clientId, timeout_ms: 1500 })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || `HTTP ${response.status}`);
         }
-      }, 350);
+        if (result.timed_out) {
+          showToast(`节点 ${shortId(clientId)} 探针超时，未收到 P2P Pong`);
+          return;
+        }
+        const latency = result.rtt_us == null ? '未知' : `${(result.rtt_us / 1000).toFixed(1)} ms`;
+        const channel = result.p2p_active ? '直连 (P2P Direct)' : '中继 (QUIC Relay)';
+        showToast(`节点 ${shortId(clientId)} 连通正常，往返延迟 ${latency} [${channel}]`);
+      } catch (e) {
+        showToast(`节点探测失败: ${e.message}`);
+      }
     }
 
     function setAsExitNode(clientId) {

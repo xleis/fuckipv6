@@ -666,7 +666,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         </div>
         <div class="brand-text">
           <h1>fuckipv6</h1>
-          <span class="sub">Coordinator Hub</span>
+          <span class="sub">分布式协调中枢</span>
         </div>
       </div>
 
@@ -699,9 +699,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
             <span>协调中枢在线</span>
           </div>
-          <p>QUIC 信令 · Relay 中继<br>JWT 鉴权可配置启用</p>
+          <p>QUIC 信令 · 流量中继<br>JWT 鉴权可配置启用</p>
         </div>
-        <div class="sidebar-version"><span>COORDINATOR</span><span>v0.1.0</span></div>
+        <div class="sidebar-version"><span>协调中枢</span><span>v0.1.0</span></div>
       </div>
     </aside>
 
@@ -855,10 +855,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
             </div>
             <select class="select-pill" id="nat-filter" onchange="filterPeersTable()">
               <option value="">全部 NAT 穿透类型</option>
-              <option value="Cone">全锥型 NAT (Cone)</option>
-              <option value="Symmetric">对称型 NAT (Symmetric)</option>
-              <option value="Restricted">受限型 NAT (Restricted)</option>
-              <option value="Open">公网开放 (Open)</option>
+              <option value="Cone">全锥型 NAT</option>
+              <option value="Symmetric">对称型 NAT</option>
+              <option value="Restricted">受限型 NAT</option>
+              <option value="Open">公网开放</option>
             </select>
           </div>
           <div class="table-responsive">
@@ -890,9 +890,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             <div class="console-toolbar">
               <div>
                 <select class="select-pill" id="log-service-select" onchange="refreshLogs()">
-                  <option value="fuckipv6-coordinator">协调器服务 (coordinator)</option>
-                  <option value="fuckipv6-client">客户端服务 (client)</option>
-                  <option value="memory">异常错误 (errors)</option>
+                  <option value="fuckipv6-coordinator">协调中枢服务</option>
+                  <option value="fuckipv6-client">客户端服务</option>
+                  <option value="memory">异常错误日志</option>
                 </select>
                 <select class="select-pill" id="log-level-filter" onchange="applyLogFilter()">
                   <option value="all" selected>全部日志级别</option>
@@ -934,8 +934,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
         </section>
 
         <footer class="app-footer">
-          <div>FUCKIPV6 VIRTUAL OVERLAY · DISTRIBUTED QUIC</div>
-          <div>COORDINATOR CONTROL PLANE · LIVE TELEMETRY</div>
+          <div>FUCKIPV6 虚拟专网 · 分布式 QUIC 网络</div>
+          <div>协调控制平面 · 实时遥测态势</div>
         </footer>
       </main>
     </div>
@@ -1271,7 +1271,7 @@ tun_name = "fuckipv6"</div>
       // 中心 Hub 协调器节点
       let core = existing.get('__core__');
       if (!core) {
-        core = new CyberNode('__core__', '协调中心 (HUB)', 'QUIC 6667', null, true, false, null);
+        core = new CyberNode('__core__', '协调中枢', 'QUIC 6667', null, true, false, null);
         core.x = width / 2;
         core.y = height / 2;
       } else {
@@ -1442,7 +1442,7 @@ tun_name = "fuckipv6"</div>
             { icon: '', label: '立即刷新全网拓扑', shortcut: '刷新', onClick: () => refresh(true) },
             { icon: '', label: '拓扑视口居中归位', shortcut: '居中', onClick: () => resetCanvasView() },
           ];
-          showContextMenu(e, 'HUB · 协调服务器', '核心中枢', items);
+          showContextMenu(e, '分布式协调中枢', '核心服务', items);
         } else if (targetNode.isNetwork) {
           const net = targetNode.netData || {};
           const items = [
@@ -1954,7 +1954,7 @@ tun_name = "fuckipv6"</div>
       let dotColor = '#10b981';
 
       if (isCore) {
-        title = 'fuckipv6 协调中枢 (HUB)';
+        title = 'fuckipv6 分布式协调中枢';
         dotColor = '#38bdf8';
         const activePeerCount = nodes.filter(n => !n.isCore && !n.isNetwork).length;
         const netCount = knownNetworks.size;
@@ -2198,7 +2198,7 @@ tun_name = "fuckipv6"</div>
         { divider: true },
         { icon: '', label: '移入黑名单并踢出', danger: true, onClick: () => banClientPrompt(clientId) },
       ];
-      showContextMenu(e, `客户端 · ${shortId(clientId)}`, p.nat_type || 'ONLINE', items);
+      showContextMenu(e, `客户端 · ${shortId(clientId)}`, p.nat_type ? formatNatType(p.nat_type) : '在线', items);
     }
 
     function handleLogsContextMenu(e) {

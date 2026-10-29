@@ -16,6 +16,7 @@ const STATIC_PREFERENCE_START: u32 = 1_000;
 const DYNAMIC_PREFERENCE_START: u32 = 20_000;
 const CATCH_ALL_PREFERENCE: u32 = 32_000;
 const TABLE_ID_BASE: u32 = 10_000;
+const MAIN_TABLE_ID: u32 = 254;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Family {
@@ -43,6 +44,7 @@ impl Family {
 struct RuleSpec {
     family: Family,
     destination: Option<IpNet>,
+    lookup: u32,
     preference: u32,
 }
 
@@ -125,6 +127,7 @@ impl LinuxRouteManager {
                 let rule = RuleSpec {
                     family,
                     destination: Some(*network),
+                    lookup: MAIN_TABLE_ID,
                     preference: STATIC_PREFERENCE_START + index as u32,
                 };
                 manager.install_rule(&rule).await?;
@@ -137,6 +140,7 @@ impl LinuxRouteManager {
                     let rule = RuleSpec {
                         family,
                         destination: None,
+                        lookup: manager.table_id,
                         preference: CATCH_ALL_PREFERENCE,
                     };
                     manager.install_rule(&rule).await?;
@@ -168,6 +172,12 @@ impl LinuxRouteManager {
 
     pub fn is_active(&self) -> bool {
         !self.active_families.is_empty()
+    }
+
+    /// Return the lookup table used by the catch-all proxy rule.
+    #[cfg(test)]
+    fn proxy_lookup_table(&self) -> u32 {
+        self.table_id
     }
 
     /// Ensure all currently reachable peer endpoints bypass the tunnel. If any
@@ -209,6 +219,7 @@ impl LinuxRouteManager {
             let rule = RuleSpec {
                 family,
                 destination: Some(host),
+                lookup: MAIN_TABLE_ID,
                 preference,
             };
             if let Err(error) = self.install_rule(&rule).await {
@@ -551,7 +562,7 @@ async fn run_ip_rule(action: &str, rule: &RuleSpec) -> Result<()> {
     }
     command.args([
         "lookup",
-        "main",
+        &rule.lookup.to_string(),
         "pref",
         &rule.preference.to_string(),
         "protocol",
@@ -571,7 +582,7 @@ fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
     }
     command.args([
         "lookup",
-        "main",
+        &rule.lookup.to_string(),
         "pref",
         &rule.preference.to_string(),
         "protocol",
@@ -718,6 +729,25 @@ mod tests {
                 "2001:db8::2".parse::<IpAddr>().unwrap()
             ]
         );
+    }
+
+    #[test]
+    fn proxy_catch_all_uses_private_table_while_bypasses_use_main() {
+        let manager = LinuxRouteManager {
+            tun_name: "fuckipv6".to_string(),
+            table_id: 12345,
+            active_families: [Family::V4, Family::V6].into_iter().collect(),
+            static_bypasses: BTreeSet::new(),
+            installed_rules: Vec::new(),
+            installed_table_routes: Vec::new(),
+            dynamic_rules: HashMap::new(),
+            dynamic_references: HashMap::new(),
+            peer_bypasses: HashMap::new(),
+            next_v4_preference: DYNAMIC_PREFERENCE_START,
+            next_v6_preference: DYNAMIC_PREFERENCE_START,
+        };
+        assert_eq!(manager.proxy_lookup_table(), 12345);
+        assert_eq!(MAIN_TABLE_ID, 254);
     }
 
     #[test]

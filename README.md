@@ -230,7 +230,7 @@ CPU profiling 可使用 `PROFILE_SECONDS=10 ./scripts/profile-cpu.sh` 对协议/
 
 ## ✅ 发布门禁
 
-发布门禁要求工作区干净，并依次执行格式检查、辅助脚本测试、workspace check/Clippy/test、release build、平台交叉编译检查和 Criterion quick 快速基准。Linux 默认额外检查 `x86_64-unknown-linux-musl` 与 `x86_64-pc-windows-gnu`。
+发布门禁要求工作区干净，并依次执行格式检查、辅助脚本测试、workspace check/Clippy/test、release build、平台交叉编译检查和 Criterion quick 快速基准。Linux 默认额外检查 `x86_64-unknown-linux-musl` 与 `x86_64-pc-windows-gnu`。若显式提供匹配硬件的 Criterion 基线，门禁还会按回退阈值、噪声余量、标准误和最小样本数拒绝相对性能回退。
 
 ```bash
 # 先查看解析后的命令计划，不执行编译
@@ -238,9 +238,17 @@ python3 scripts/release-gate.py run --platform linux --print-plan
 
 # 正式门禁；结果写入 target/release-gate/linux.json，日志写入同级 artifacts 目录
 python3 scripts/release-gate.py run --platform linux --toolchain stable
+
+# 保存匹配硬件的 full 基线，并在后续 full 门禁中启用回归判定
+python3 scripts/bench-compare.py snapshot \
+  --criterion target/criterion \
+  --output benchmarks/baselines/linux-host-criterion.json
+python3 scripts/release-gate.py run --platform linux --toolchain stable \
+  --benchmark full \
+  --benchmark-baseline benchmarks/baselines/linux-host-criterion.json
 ```
 
-诊断脏工作区时可使用 `--allow-dirty`，但报告的 `release_ready` 必定为 `false`。CI 会用 `verify.yml` 汇总 Linux、Windows、macOS 报告，只有三平台同 commit、干净且至少一个平台产生机器可读基准结果时才允许发布。门禁只证明工程检查可执行和基准可运行，不证明已达到 WireGuard 性能对等，也不替代真实跨平台网络测试、协议审查或独立密码学审计。
+基线必须来自同一平台和可比较的硬件/负载条件；`--quick` 默认只有 2 个 Criterion 样本，低于比较器默认的 10 样本门槛，正式回归判定应使用 `--benchmark full`。未提供 `--benchmark-baseline` 时报告明确记录比较状态为 `not_run`，不会把缺少基线算作通过。诊断脏工作区时可使用 `--allow-dirty`，但报告的 `release_ready` 必定为 `false`。CI 会用 `verify.yml` 汇总 Linux、Windows、macOS 报告，只有三平台同 commit、干净且至少一个平台产生机器可读基准结果时才允许发布。门禁只证明工程检查可执行和同机基准未无声回退，不证明已达到 WireGuard 性能对等，也不替代真实跨平台网络测试、协议审查或独立密码学审计。
 
 ## 🤝 贡献
 

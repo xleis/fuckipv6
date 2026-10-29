@@ -26,7 +26,7 @@
 - [ ] **QUIC 双向身份**：当前 QUIC 服务端未启用客户端证书认证，应用层身份与服务端证书未统一绑定。
 - [ ] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie，但尚未接入握手控制通道；生产路径仍缺少握手速率控制和无效包成本上限。
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
-- [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准和高负载端到端初测，但尚无空闲机 CPU pinning 复测、性能回归阈值或达到 WireGuard 对等的结果。
+- [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 
 已实现但尚未接入客户端数据面的 Secure Session v2 基础原语包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口、批量 seal/open、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码和原子 epoch 轮换。相关测试覆盖 MITM、身份/套件/epoch/SID/endpoint 错绑、重放、篡改、超时和失败关闭；但 `fuckipv6-client` 当前没有依赖 `fuckipv6-secure-session`，生产 UDP/TUN 路径仍使用静态密钥方案。可选 `pq` feature 另提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
 
@@ -145,7 +145,8 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 - [ ] **SP-07 QUIC 统一身份**：双向认证、证书/公钥绑定、0-RTT 重放限制。
 - [ ] **SP-08 审计与发布门禁**：模糊测试、外部审计、跨平台验证和性能回归门禁。
   - [x] 增加默认拒绝脏工作区的发布门禁、Linux musl/Windows GNU 编译检查和 Linux/Windows/macOS CI 报告聚合。
-  - [ ] 增加模糊测试、依赖/SBOM/许可证门禁、性能回归阈值、三平台实跑证据和独立安全审计。
+  - [x] 增加 Criterion 基线快照与回归比较器；样本不足、基线缺失或基准消失默认失败，并接入可选发布门禁参数。
+  - [ ] 保留三平台同机基线、实跑证据，并完成独立安全审计；单次微基准和同机回退门禁均不能证明超过 WireGuard。
 
 ## 完成定义
 

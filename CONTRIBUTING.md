@@ -27,6 +27,19 @@ python3 scripts/release-gate.py run --platform linux --toolchain stable
 
 The gate pins Cargo to one coherent rustup toolchain and executes formatting, helper-script tests, all-feature check/test/Clippy, a release build, platform cross-checks, and a Criterion benchmark. Use `--print-plan` to inspect commands first. `--allow-dirty` is diagnostic only and can never produce a release-ready report.
 
+To detect a same-host performance regression, capture a full Criterion baseline and pass it to the release gate:
+
+```bash
+python3 scripts/bench-compare.py snapshot \
+  --criterion target/criterion \
+  --output benchmarks/baselines/linux-host-criterion.json
+python3 scripts/release-gate.py run --platform linux --toolchain stable \
+  --benchmark full \
+  --benchmark-baseline benchmarks/baselines/linux-host-criterion.json
+```
+
+The comparator rejects missing benchmarks, insufficient samples, and regressions that exceed both the configured percentage budget and statistical noise margin. Baselines are hardware- and platform-specific. Quick benchmarks have only two samples and must not be presented as a full regression decision. This check never substitutes for end-to-end WireGuard comparison.
+
 Run clippy when touching shared logic or before a release:
 
 ```bash

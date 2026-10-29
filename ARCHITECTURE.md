@@ -127,7 +127,7 @@ Coordinator-side observability:
 
 - WebSocket signaling and cryptographic registration challenge authentication.
 - Linux, macOS (`utun`), and Windows (embedded WinTun) dual-stack TUN drivers, subject to target-platform runtime validation.
-- ChaCha20-Poly1305 payload encryption with static X25519-derived peer keys. The UDP path currently lacks ephemeral handshakes, forward secrecy, counter nonces, a replay window, and key rotation; it must not be described as WireGuard-equivalent until those gaps are closed (see `SECURITY_PERFORMANCE_TODO.md`).
+- ChaCha20-Poly1305 payload encryption with static X25519-derived peer keys. Secure Session v2 primitives for ephemeral handshakes, counter nonces, a replay window, and key rotation exist in `fuckipv6-secure-session`, but the client data path does not depend on or invoke them yet. It must not be described as WireGuard-equivalent until those primitives are integrated and validated (see `SECURITY_PERFORMANCE_TODO.md`).
 - Direct dual-mode P2P (QUIC Stream Mesh + encrypted raw UDP) and QUIC/signaling relay fallback.
 - RFC 6886 NAT-PMP and UPnP IGD automatic router port mapping.
 - Packet-level ACL filtering and coordinator admission blacklist.

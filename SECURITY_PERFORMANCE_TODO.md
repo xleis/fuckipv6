@@ -7,7 +7,7 @@
 
 威胁、代码控制、测试证据和生产缺口的逐项映射见 [`SECURITY_TRACEABILITY.md`](SECURITY_TRACEABILITY.md)。
 
-## 当前基线（2026-10-30，基于 `3f2f127`）
+## 当前基线（2026-10-30，基于 `2d3c7fc`）
 
 ### 已有能力
 

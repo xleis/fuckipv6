@@ -37,7 +37,7 @@ SECURITY_INVARIANTS = (
     (
         "readme-v2-not-production",
         "README.md",
-        r"Secure Session v2[^\n]*接入真实 UDP/TUN 数据面",
+        r"Secure Session v2[^\n]*接入生产[^\n]*UDP/TUN 数据面",
         "README must list production v2 data-plane integration as pending",
     ),
     (
@@ -47,10 +47,10 @@ SECURITY_INVARIANTS = (
         "README must not turn current microbenchmarks into a WireGuard performance claim",
     ),
     (
-        "todo-v2-not-client-bound",
+        "todo-production-v2-not-wired",
         "SECURITY_PERFORMANCE_TODO.md",
-        r"客户端尚未依赖或调用\s*`fuckipv6-secure-session`",
-        "security TODO must disclose that the client does not use secure-session",
+        r"生产\s*`P2pEngine`[^\n]*仍使用静态密钥方案",
+        "security TODO must disclose that the production P2pEngine still uses the static-key path",
     ),
     (
         "changelog-pq-boundary",

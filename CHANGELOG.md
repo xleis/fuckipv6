@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- 增加 Secure Session v2 独立 UDP 适配器及本地真实 socket 集成测试：完整执行 `HELLO -> ACCEPT -> CONFIRM`，固定对端地址与有序套件策略，设置握手/数据超时，复用 HELLO 重放缓存，并提供运行时会话与拒绝计数；测试覆盖双向数据、AEAD 篡改、重放、错误确认、不支持套件和旧版本拒绝。该适配器仍使用独立 socket，生产 `P2pEngine` 的 UDP/TUN 数据面尚未切换，因此不构成 WireGuard 安全或性能结论。
 - 增加 `common::Identity` 到 Secure Session Ed25519 身份的受控适配：复用同一长期 Ed25519 种子，但不向调用方暴露种子或私钥字节，并用签名互验测试确认注册公钥与 v2 握手身份一致。该适配是客户端 v2 数据面接线的身份基础，不代表数据面已经切换。
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式，尚不代表客户端数据面已经切换。
 

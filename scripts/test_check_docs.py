@@ -25,12 +25,13 @@ class CheckDocsTests(unittest.TestCase):
         (self.root / "README.md").write_text(
             "# Readme\n\n"
             "当前为静态 X25519 会话密钥，尚未具备前向保密与重放窗口。\n\n"
-            "- [ ] 将 Secure Session v2 临时握手接入真实 UDP/TUN 数据面。\n\n"
+            "- [ ] 将 Secure Session v2 临时握手接入生产 UDP/TUN 数据面。\n\n"
             "当前结果不是超越 WireGuard 的证明。\n",
             encoding="utf-8",
         )
         (self.root / "SECURITY_PERFORMANCE_TODO.md").write_text(
-            "客户端尚未依赖或调用 `fuckipv6-secure-session`。\n", encoding="utf-8"
+            "生产 `P2pEngine` 的 UDP/TUN 路径仍使用静态密钥方案。\n",
+            encoding="utf-8",
         )
         (self.root / "CHANGELOG.md").write_text(
             "不得据此宣称已具备后量子安全或超越 WireGuard。\n", encoding="utf-8"

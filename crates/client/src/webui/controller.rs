@@ -5,9 +5,11 @@ use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{watch, RwLock};
 
 use crate::cli::commands::{self, RuntimeOptions};
+use crate::ipc::{GlobalStatsSnapshot, NetworkSessionSnapshot, StatusSnapshot};
 use crate::p2p::connection::PeerProbeOutcome;
 use crate::symmetric::EmbeddedCoordinator;
 
@@ -34,7 +36,11 @@ pub struct NetworkUiDto {
 pub struct UnifiedSnapshotResponse {
     pub service: &'static str,
     pub online_clients: usize,
-    pub traffic: TrafficSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<TrafficSnapshot>,
+    pub runtime_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_traffic: Option<RuntimeTrafficDto>,
     pub peers: Vec<PeerSnapshot>,
     pub auth_required: bool,
     pub client_status: String,
@@ -77,6 +83,60 @@ pub struct AppUiState {
     pub coordinator_traffic: Option<CoordinatorTrafficDto>,
     pub coordinator_peers: Vec<CoordinatorPeerDto>,
     pub coordinator_blacklist: Vec<String>,
+
+    // === 本机客户端运行时状态 (来自 IPC) ===
+    #[serde(default)]
+    pub runtime_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_traffic: Option<RuntimeTrafficDto>,
+}
+
+impl AppUiState {
+    fn offline() -> Self {
+        Self {
+            status: "offline".to_string(),
+            virtual_ipv6: None,
+            virtual_ipv4: None,
+            routing_mode: "MeshOnly".to_string(),
+            exit_node: None,
+            is_exit_node: false,
+            connected_target: None,
+            hosting_ticket: None,
+            peers: Vec::new(),
+            logs: Vec::new(),
+            network_name: Some("default".to_string()),
+            networks: Vec::new(),
+            coordinator_active: false,
+            coordinator_signaling_addr: None,
+            coordinator_relay_addr: None,
+            coordinator_online_clients: 0,
+            coordinator_traffic: None,
+            coordinator_peers: Vec::new(),
+            coordinator_blacklist: Vec::new(),
+            runtime_available: false,
+            runtime_traffic: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTrafficDto {
+    pub uptime_secs: u64,
+    pub tun_rx_packets: u64,
+    pub tun_rx_bytes: u64,
+    pub tun_tx_packets: u64,
+    pub tun_tx_bytes: u64,
+    pub p2p_rx_packets: u64,
+    pub p2p_rx_bytes: u64,
+    pub p2p_tx_packets: u64,
+    pub p2p_tx_bytes: u64,
+    pub tun_read_errors: u64,
+    pub tun_write_errors: u64,
+    pub p2p_send_errors: u64,
+    pub p2p_recv_errors: u64,
+    pub signaling_messages_sent: u64,
+    pub signaling_messages_received: u64,
+    pub signaling_reconnects: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,30 +230,8 @@ pub struct AppController {
 
 impl AppController {
     pub fn new() -> Self {
-        let default_state = AppUiState {
-            status: "offline".to_string(),
-            virtual_ipv6: None,
-            virtual_ipv4: None,
-            routing_mode: "MeshOnly".to_string(),
-            exit_node: None,
-            is_exit_node: false,
-            connected_target: None,
-            hosting_ticket: None,
-            peers: Vec::new(),
-            logs: Vec::new(),
-            network_name: Some("default".to_string()),
-            networks: Vec::new(),
-            coordinator_active: false,
-            coordinator_signaling_addr: None,
-            coordinator_relay_addr: None,
-            coordinator_online_clients: 0,
-            coordinator_traffic: None,
-            coordinator_peers: Vec::new(),
-            coordinator_blacklist: Vec::new(),
-        };
-
         Self {
-            state: Arc::new(RwLock::new(default_state)),
+            state: Arc::new(RwLock::new(AppUiState::offline())),
             cancel_tx: Arc::new(RwLock::new(None)),
             coordinator: Arc::new(RwLock::new(None)),
             recent_logs: Arc::new(RwLock::new(VecDeque::with_capacity(200))),
@@ -204,6 +242,11 @@ impl AppController {
         let mut s = self.state.read().await.clone();
         let logs: Vec<String> = self.recent_logs.read().await.iter().cloned().collect();
         s.logs = logs;
+
+        match self.runtime_status().await {
+            Some(status) => apply_runtime_status(&mut s, &status),
+            None => clear_runtime_status(&mut s),
+        }
 
         if let Some(coord) = self.coordinator.read().await.as_ref() {
             let snap = coord.session_manager.snapshot().await;
@@ -226,18 +269,20 @@ impl AppController {
                 .network_name
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
-            s.networks = vec![NetworkUiDto {
-                name: net_name.clone(),
-                tun_name: crate::multi_network::derive_tun_name(Some(&net_name), "fuckipv6"),
-                assigned_ip: Some(alloc.effective_ipv6_pool().to_string()),
-                assigned_ipv4: if alloc.mode.is_ipv4_enabled() {
-                    Some(alloc.ipv4_pool.clone())
-                } else {
-                    None
-                },
-                peer_count: snap.online_clients,
-                status: "协调中枢托管中".to_string(),
-            }];
+            if !s.runtime_available {
+                s.networks = vec![NetworkUiDto {
+                    name: net_name.clone(),
+                    tun_name: crate::multi_network::derive_tun_name(Some(&net_name), "fuckipv6"),
+                    assigned_ip: Some(alloc.effective_ipv6_pool().to_string()),
+                    assigned_ipv4: if alloc.mode.is_ipv4_enabled() {
+                        Some(alloc.ipv4_pool.clone())
+                    } else {
+                        None
+                    },
+                    peer_count: snap.online_clients,
+                    status: "协调中枢托管中".to_string(),
+                }];
+            }
             s.coordinator_peers = snap
                 .peers
                 .into_iter()
@@ -268,25 +313,61 @@ impl AppController {
             s.coordinator_traffic = None;
             s.coordinator_peers = Vec::new();
             s.coordinator_blacklist = Vec::new();
+        }
 
-            if s.networks.is_empty() {
-                let current_net = s
-                    .network_name
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string());
-                let tun_dev = crate::multi_network::derive_tun_name(Some(&current_net), "fuckipv6");
-                s.networks = vec![NetworkUiDto {
-                    name: current_net,
-                    tun_name: tun_dev,
-                    assigned_ip: s.virtual_ipv6.clone(),
-                    assigned_ipv4: s.virtual_ipv4.clone(),
-                    peer_count: s.peers.len(),
-                    status: s.status.clone(),
-                }];
-            }
+        if !s.runtime_available && s.status == "online" {
+            s.status = if s.coordinator_active {
+                "hosting".to_string()
+            } else {
+                "offline".to_string()
+            };
+            s.virtual_ipv6 = None;
+            s.virtual_ipv4 = None;
+            s.connected_target = None;
+            s.networks.clear();
+        }
+
+        if s.networks.is_empty() {
+            let current_net = s
+                .network_name
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            let tun_dev = crate::multi_network::derive_tun_name(Some(&current_net), "fuckipv6");
+            s.networks = vec![NetworkUiDto {
+                name: current_net,
+                tun_name: tun_dev,
+                assigned_ip: s.virtual_ipv6.clone(),
+                assigned_ipv4: s.virtual_ipv4.clone(),
+                peer_count: s.peers.len(),
+                status: s.status.clone(),
+            }];
         }
 
         s
+    }
+
+    async fn runtime_status(&self) -> Option<StatusSnapshot> {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::ipc::request(crate::ipc::IpcRequest::Status),
+        )
+        .await
+        {
+            Ok(Ok(crate::ipc::IpcResponse::Status(status))) => Some(status),
+            _ => None,
+        }
+    }
+
+    async fn runtime_peers(&self) -> Option<Vec<crate::ipc::PeerSnapshot>> {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::ipc::request(crate::ipc::IpcRequest::Peers),
+        )
+        .await
+        {
+            Ok(Ok(crate::ipc::IpcResponse::Peers(peers))) => Some(peers),
+            _ => None,
+        }
     }
 
     pub async fn update_state<F>(&self, f: F)
@@ -640,126 +721,82 @@ impl AppController {
 
     /// 刷新在线对端信息
     pub async fn refresh_peers(&self) {
-        if let Ok(crate::ipc::IpcResponse::Peers(peers)) =
-            crate::ipc::request(crate::ipc::IpcRequest::Peers).await
-        {
-            let default_net = self
-                .state
-                .read()
-                .await
-                .network_name
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            let peer_infos: Vec<PeerUiInfo> = peers
-                .into_iter()
-                .map(|p| {
-                    let net = p
-                        .network_name
-                        .clone()
-                        .unwrap_or_else(|| default_net.clone());
-                    PeerUiInfo {
-                        client_id: p.client_id,
-                        virtual_ip: p.virtual_ip.to_string(),
-                        virtual_ipv4: None,
-                        direct: p.p2p_active,
-                        latency_ms: p.rtt_us.map(|us| us as f64 / 1000.0),
-                        network_name: Some(net.clone()),
-                        networks: vec![net],
-                    }
-                })
-                .collect();
-            self.state.write().await.peers = peer_infos;
+        let mut state = self.state.write().await;
+        if let Some(status) = self.runtime_status().await {
+            apply_runtime_status(&mut state, &status);
+        } else {
+            clear_runtime_status(&mut state);
         }
     }
+
     /// 获取全网对等节点快照列表 (兼容原有拓扑与节点管理)
     pub async fn get_peers_snapshots(&self) -> Vec<PeerSnapshot> {
+        let default_net = self
+            .state
+            .read()
+            .await
+            .network_name
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        if let Some(peers) = self.runtime_peers().await {
+            return peers
+                .iter()
+                .map(|peer| ipc_peer_to_snapshot(peer, &default_net))
+                .collect();
+        }
+
         if let Some(coord) = self.coordinator.read().await.as_ref() {
             coord.session_manager.snapshot().await.peers
         } else {
-            let st = self.state.read().await;
-            st.peers
-                .iter()
-                .filter_map(|p| {
-                    let v6 = p.virtual_ip.parse().ok()?;
-                    let v4 = p.virtual_ipv4.as_ref().and_then(|ip| ip.parse().ok());
-                    let net = p
-                        .network_name
-                        .clone()
-                        .or_else(|| st.network_name.clone())
-                        .unwrap_or_else(|| "default".to_string());
-                    Some(PeerSnapshot {
-                        client_id: p.client_id.clone(),
-                        virtual_ip: v6,
-                        virtual_ipv4: v4,
-                        endpoints: Vec::new(),
-                        nat_type: if p.direct {
-                            "Direct P2P".to_string()
-                        } else {
-                            "QUIC Relay".to_string()
-                        },
-                        connected_secs: 0,
-                        idle_secs: 0,
-                        network_name: Some(net.clone()),
-                        networks: vec![net],
-                    })
-                })
-                .collect()
+            Vec::new()
         }
     }
 
     /// 获取统一推送快照 (供 WebSocket /ws 推送使用)
     pub async fn get_unified_snapshot(&self) -> UnifiedSnapshotResponse {
-        let st = self.state.read().await.clone();
-        if let Some(coord) = self.coordinator.read().await.as_ref() {
-            let snap = coord.session_manager.snapshot().await;
-            UnifiedSnapshotResponse {
-                service: "fuckipv6-unified",
-                online_clients: snap.online_clients,
-                traffic: snap.traffic,
-                peers: snap.peers,
-                auth_required: false,
-                client_status: st.status,
-                virtual_ipv6: st.virtual_ipv6,
-                virtual_ipv4: st.virtual_ipv4,
-                routing_mode: st.routing_mode,
-                exit_node: st.exit_node,
-                is_exit_node: st.is_exit_node,
-                connected_target: st.connected_target,
-                hosting_ticket: st.hosting_ticket,
-                coordinator_active: true,
-                network_name: st.network_name,
-                networks: st.networks,
-            }
+        let st = self.get_state().await;
+        let peers = self.get_peers_snapshots().await;
+        let traffic = st
+            .coordinator_traffic
+            .as_ref()
+            .map(|traffic| TrafficSnapshot {
+                uptime_secs: traffic.uptime_secs,
+                signaling_rx_messages: traffic.signaling_rx_messages,
+                signaling_rx_bytes: traffic.signaling_rx_bytes,
+                signaling_tx_messages: traffic.signaling_tx_messages,
+                signaling_tx_bytes: traffic.signaling_tx_bytes,
+                relay_packets: traffic.relay_packets,
+                relay_payload_bytes: traffic.relay_payload_bytes,
+                relay_errors: traffic.relay_errors,
+            });
+        let online_clients = if st.runtime_available {
+            st.peers.len()
+        } else if st.coordinator_active {
+            st.coordinator_online_clients
         } else {
-            let peers = self.get_peers_snapshots().await;
-            let fake_traffic = TrafficSnapshot {
-                uptime_secs: 0,
-                signaling_rx_messages: 0,
-                signaling_rx_bytes: 0,
-                signaling_tx_messages: 0,
-                signaling_tx_bytes: 0,
-                relay_packets: 0,
-                relay_payload_bytes: 0,
-                relay_errors: 0,
-            };
-            UnifiedSnapshotResponse {
-                service: "fuckipv6-unified",
-                online_clients: peers.len(),
-                traffic: fake_traffic,
-                peers,
-                auth_required: false,
-                client_status: st.status,
-                virtual_ipv6: st.virtual_ipv6,
-                virtual_ipv4: st.virtual_ipv4,
-                routing_mode: st.routing_mode,
-                exit_node: st.exit_node,
-                is_exit_node: st.is_exit_node,
-                connected_target: st.connected_target,
-                hosting_ticket: None,
-                coordinator_active: false,
-                network_name: st.network_name,
-                networks: st.networks,
-            }
+            0
+        };
+
+        UnifiedSnapshotResponse {
+            service: "fuckipv6-unified",
+            online_clients,
+            traffic,
+            runtime_available: st.runtime_available,
+            runtime_traffic: st.runtime_traffic,
+            peers,
+            auth_required: false,
+            client_status: st.status,
+            virtual_ipv6: st.virtual_ipv6,
+            virtual_ipv4: st.virtual_ipv4,
+            routing_mode: st.routing_mode,
+            exit_node: st.exit_node,
+            is_exit_node: st.is_exit_node,
+            connected_target: st.connected_target,
+            hosting_ticket: st.hosting_ticket,
+            coordinator_active: st.coordinator_active,
+            network_name: st.network_name,
+            networks: st.networks,
         }
     }
 
@@ -895,8 +932,284 @@ impl AppController {
     }
 }
 
+fn runtime_traffic_from_status(status: &StatusSnapshot) -> RuntimeTrafficDto {
+    runtime_traffic_from_global(&status.global, status.uptime_secs)
+}
+
+fn runtime_traffic_from_global(
+    global: &GlobalStatsSnapshot,
+    uptime_secs: u64,
+) -> RuntimeTrafficDto {
+    RuntimeTrafficDto {
+        uptime_secs,
+        tun_rx_packets: global.tun_rx_packets,
+        tun_rx_bytes: global.tun_rx_bytes,
+        tun_tx_packets: global.tun_tx_packets,
+        tun_tx_bytes: global.tun_tx_bytes,
+        p2p_rx_packets: global.p2p_rx_packets,
+        p2p_rx_bytes: global.p2p_rx_bytes,
+        p2p_tx_packets: global.p2p_tx_packets,
+        p2p_tx_bytes: global.p2p_tx_bytes,
+        tun_read_errors: global.tun_read_errors,
+        tun_write_errors: global.tun_write_errors,
+        p2p_send_errors: global.p2p_send_errors,
+        p2p_recv_errors: global.p2p_recv_errors,
+        signaling_messages_sent: global.signaling_messages_sent,
+        signaling_messages_received: global.signaling_messages_received,
+        signaling_reconnects: global.signaling_reconnects,
+    }
+}
+
+fn network_ui_from_status(network: &NetworkSessionSnapshot) -> NetworkUiDto {
+    NetworkUiDto {
+        name: network.network_name.clone(),
+        tun_name: network.tun_name.clone(),
+        assigned_ip: (!network.assigned_ip.is_unspecified())
+            .then(|| network.assigned_ip.to_string()),
+        assigned_ipv4: network.assigned_ipv4.map(|ip| ip.to_string()),
+        peer_count: network.peers.len(),
+        status: "运行时在线".to_string(),
+    }
+}
+
+fn ipc_peer_to_ui(peer: &crate::ipc::PeerSnapshot, default_network: &str) -> PeerUiInfo {
+    let network = peer
+        .network_name
+        .clone()
+        .unwrap_or_else(|| default_network.to_string());
+    PeerUiInfo {
+        client_id: peer.client_id.clone(),
+        virtual_ip: peer.virtual_ip.to_string(),
+        virtual_ipv4: peer.virtual_ipv4.map(|ip| ip.to_string()),
+        direct: peer.p2p_active,
+        latency_ms: peer.rtt_us.map(|us| us as f64 / 1000.0),
+        network_name: Some(network.clone()),
+        networks: vec![network],
+    }
+}
+
+fn ipc_peer_to_snapshot(peer: &crate::ipc::PeerSnapshot, default_network: &str) -> PeerSnapshot {
+    let network = peer
+        .network_name
+        .clone()
+        .unwrap_or_else(|| default_network.to_string());
+    PeerSnapshot {
+        client_id: peer.client_id.clone(),
+        virtual_ip: peer.virtual_ip,
+        virtual_ipv4: peer.virtual_ipv4,
+        endpoints: peer.endpoints.clone(),
+        nat_type: peer.nat_type.clone(),
+        connected_secs: peer.last_p2p_success_secs.unwrap_or(0),
+        idle_secs: peer.idle_secs.unwrap_or(0),
+        network_name: Some(network.clone()),
+        networks: vec![network],
+    }
+}
+
+fn apply_runtime_status(state: &mut AppUiState, status: &StatusSnapshot) {
+    if status.networks.is_empty() && status.assigned_ip.is_unspecified() {
+        clear_runtime_status(state);
+        return;
+    }
+
+    state.runtime_available = true;
+    state.runtime_traffic = Some(runtime_traffic_from_status(status));
+
+    let default_network = status
+        .network_name
+        .clone()
+        .or_else(|| status.networks.first().map(|n| n.network_name.clone()))
+        .or_else(|| state.network_name.clone())
+        .unwrap_or_else(|| "default".to_string());
+    state.network_name = Some(default_network.clone());
+
+    let primary_v4 = status
+        .networks
+        .iter()
+        .find_map(|network| network.assigned_ipv4);
+    state.virtual_ipv6 =
+        (!status.assigned_ip.is_unspecified()).then(|| status.assigned_ip.to_string());
+    state.virtual_ipv4 = primary_v4.map(|ip| ip.to_string());
+
+    state.peers = status
+        .peers
+        .iter()
+        .map(|peer| ipc_peer_to_ui(peer, &default_network))
+        .collect();
+
+    if !status.networks.is_empty() {
+        state.networks = status.networks.iter().map(network_ui_from_status).collect();
+        state.status = "online".to_string();
+    } else if !status.assigned_ip.is_unspecified() {
+        state.networks = vec![NetworkUiDto {
+            name: default_network,
+            tun_name: status
+                .tun_name
+                .clone()
+                .unwrap_or_else(|| "fuckipv6".to_string()),
+            assigned_ip: Some(status.assigned_ip.to_string()),
+            assigned_ipv4: primary_v4.map(|ip| ip.to_string()),
+            peer_count: status.peers.len(),
+            status: "运行时在线".to_string(),
+        }];
+        state.status = "online".to_string();
+    }
+}
+
+fn clear_runtime_status(state: &mut AppUiState) {
+    state.runtime_available = false;
+    state.runtime_traffic = None;
+    state.peers.clear();
+}
+
 impl Default for AppController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::{PeerSnapshot as IpcPeerSnapshot, StatusSnapshot};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    fn zero_global() -> GlobalStatsSnapshot {
+        GlobalStatsSnapshot {
+            tun_rx_packets: 0,
+            tun_rx_bytes: 0,
+            tun_tx_packets: 0,
+            tun_tx_bytes: 0,
+            p2p_rx_packets: 0,
+            p2p_rx_bytes: 0,
+            p2p_tx_packets: 0,
+            p2p_tx_bytes: 0,
+            tun_read_errors: 0,
+            tun_write_errors: 0,
+            p2p_send_errors: 0,
+            p2p_recv_errors: 0,
+            signaling_messages_sent: 0,
+            signaling_messages_received: 0,
+            signaling_reconnects: 0,
+        }
+    }
+
+    fn runtime_peer() -> IpcPeerSnapshot {
+        IpcPeerSnapshot {
+            client_id: "peer-alpha".to_string(),
+            virtual_ip: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 2),
+            virtual_ipv4: Some(Ipv4Addr::new(10, 8, 0, 2)),
+            endpoints: vec!["127.0.0.1:41000".parse().unwrap()],
+            nat_type: "Full Cone".to_string(),
+            p2p_active: true,
+            p2p_healthy: true,
+            tx_packets: 12,
+            tx_bytes: 1_200,
+            rx_packets: 10,
+            rx_bytes: 1_000,
+            rtt_us: Some(23_000),
+            loss_rate: 0.0,
+            bandwidth_bps: 8_000_000,
+            health_probes_sent: 3,
+            health_probes_acked: 3,
+            health_window_probes: 3,
+            health_window_lost: 0,
+            probe_success_rate: 1.0,
+            idle_secs: Some(1),
+            last_p2p_success_secs: Some(42),
+            remote_rtt_us: Some(24_000),
+            remote_loss_rate: Some(0.0),
+            remote_bandwidth_bps: Some(7_500_000),
+            remote_quality_age_secs: Some(1),
+            network_name: Some("office".to_string()),
+        }
+    }
+
+    fn active_status() -> StatusSnapshot {
+        let mut global = zero_global();
+        global.tun_rx_packets = 20;
+        global.tun_rx_bytes = 2_000;
+        global.p2p_tx_packets = 12;
+        global.p2p_tx_bytes = 1_200;
+        global.signaling_messages_sent = 7;
+        global.signaling_reconnects = 1;
+
+        let peer = runtime_peer();
+        StatusSnapshot {
+            assigned_ip: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1),
+            p2p_listen_addr: "0.0.0.0:40000".parse().unwrap(),
+            uptime_secs: 90,
+            global: global.clone(),
+            peers: vec![peer.clone()],
+            network_name: Some("office".to_string()),
+            tun_name: Some("fuckipv6-office".to_string()),
+            networks: vec![NetworkSessionSnapshot {
+                network_name: "office".to_string(),
+                tun_name: "fuckipv6-office".to_string(),
+                assigned_ip: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1),
+                assigned_ipv4: Some(Ipv4Addr::new(10, 8, 0, 1)),
+                p2p_listen_addr: "0.0.0.0:40000".parse().unwrap(),
+                uptime_secs: 90,
+                peers: vec![peer],
+                global,
+            }],
+        }
+    }
+
+    #[test]
+    fn runtime_status_updates_ui_identity_networks_peers_and_traffic() {
+        let mut state = AppUiState::offline();
+        apply_runtime_status(&mut state, &active_status());
+
+        assert!(state.runtime_available);
+        assert_eq!(state.status, "online");
+        assert_eq!(state.virtual_ipv6.as_deref(), Some("fd00::10:1"));
+        assert_eq!(state.virtual_ipv4.as_deref(), Some("10.8.0.1"));
+        assert_eq!(state.network_name.as_deref(), Some("office"));
+        assert_eq!(state.networks.len(), 1);
+        assert_eq!(state.networks[0].peer_count, 1);
+        assert_eq!(state.peers.len(), 1);
+        assert_eq!(state.peers[0].virtual_ipv4.as_deref(), Some("10.8.0.2"));
+        assert_eq!(state.peers[0].network_name.as_deref(), Some("office"));
+
+        let traffic = state.runtime_traffic.expect("runtime traffic snapshot");
+        assert_eq!(traffic.uptime_secs, 90);
+        assert_eq!(traffic.tun_rx_bytes, 2_000);
+        assert_eq!(traffic.p2p_tx_bytes, 1_200);
+        assert_eq!(traffic.signaling_messages_sent, 7);
+    }
+
+    #[test]
+    fn ipc_peer_conversion_preserves_runtime_link_metadata() {
+        let peer = runtime_peer();
+        let snapshot = ipc_peer_to_snapshot(&peer, "default");
+
+        assert_eq!(snapshot.virtual_ipv4, Some(Ipv4Addr::new(10, 8, 0, 2)));
+        assert_eq!(snapshot.endpoints, peer.endpoints);
+        assert_eq!(snapshot.nat_type, "Full Cone");
+        assert_eq!(snapshot.connected_secs, 42);
+        assert_eq!(snapshot.network_name.as_deref(), Some("office"));
+    }
+
+    #[test]
+    fn empty_runtime_status_does_not_mark_client_online() {
+        let mut state = AppUiState::offline();
+        let status = StatusSnapshot {
+            assigned_ip: Ipv6Addr::UNSPECIFIED,
+            p2p_listen_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+            uptime_secs: 0,
+            global: zero_global(),
+            peers: Vec::new(),
+            network_name: None,
+            tun_name: None,
+            networks: Vec::new(),
+        };
+
+        apply_runtime_status(&mut state, &status);
+
+        assert!(!state.runtime_available);
+        assert_eq!(state.status, "offline");
+        assert!(state.runtime_traffic.is_none());
+        assert!(state.peers.is_empty());
     }
 }

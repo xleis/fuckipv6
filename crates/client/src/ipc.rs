@@ -125,6 +125,8 @@ pub struct GlobalStatsSnapshot {
 pub struct PeerSnapshot {
     pub client_id: String,
     pub virtual_ip: Ipv6Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_ipv4: Option<Ipv4Addr>,
     pub endpoints: Vec<SocketAddr>,
     pub nat_type: String,
     pub p2p_active: bool,
@@ -685,6 +687,7 @@ async fn peer_snapshot(stats: &StatsCollector, p2p: &P2pEngine, peer: PeerInfo) 
     PeerSnapshot {
         client_id: peer.client_id,
         virtual_ip: peer.virtual_ip,
+        virtual_ipv4: peer.virtual_ips.ipv4,
         endpoints: peer.endpoints,
         nat_type: peer.nat_type.description().to_string(),
         p2p_active,

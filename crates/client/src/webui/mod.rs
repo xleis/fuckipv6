@@ -13,8 +13,8 @@ use axum::{
 };
 pub use controller::{
     AppController, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
-    CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, UnifiedSnapshotResponse,
-    UpdateRoutingRequest,
+    CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
+    UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
 use fuckipv6_coordinator::webui::{
@@ -130,31 +130,20 @@ async fn handle_peer_probe(
 
 async fn handle_status(State(ctrl): State<Arc<AppController>>) -> Json<serde_json::Value> {
     let state = ctrl.get_state().await;
-    let peers_snapshot = ctrl.get_peers_snapshots().await;
-    let online_count = if state.coordinator_active {
+    let online_count = if state.runtime_available {
+        state.peers.len()
+    } else if state.coordinator_active {
         state.coordinator_online_clients
     } else {
-        peers_snapshot.len()
+        0
     };
-
-    let traffic = state
-        .coordinator_traffic
-        .clone()
-        .unwrap_or(CoordinatorTrafficDto {
-            uptime_secs: 0,
-            signaling_rx_messages: 0,
-            signaling_rx_bytes: 0,
-            signaling_tx_messages: 0,
-            signaling_tx_bytes: 0,
-            relay_packets: 0,
-            relay_payload_bytes: 0,
-            relay_errors: 0,
-        });
 
     Json(serde_json::json!({
         "service": "fuckipv6-unified",
         "online_clients": online_count,
-        "traffic": traffic,
+        "traffic": state.coordinator_traffic,
+        "runtime_available": state.runtime_available,
+        "runtime_traffic": state.runtime_traffic,
         "auth_required": false,
         "status": state.status,
         "virtual_ipv6": state.virtual_ipv6,
@@ -529,15 +518,15 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
             <article class="m-item" data-tone="violet">
               <div class="m-head">
                 <span class="m-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
-                <span class="m-label">中继传输速率</span>
+                <span class="m-label">链路传输速率</span>
               </div>
               <div class="m-num" id="relay-rate">0 B/s</div>
-              <div class="m-hint">实时中继载荷</div>
+              <div class="m-hint">实时 P2P / 中继载荷</div>
             </article>
             <article class="m-item" data-tone="blue">
               <div class="m-head">
                 <span class="m-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8.5" ry="3"/><path d="M3.5 5.5v6c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3v-6"/><path d="M3.5 11.5v6c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3v-6"/></svg></span>
-                <span class="m-label">中继总流量</span>
+                <span class="m-label">链路累计流量</span>
               </div>
               <div class="m-num" id="relay-total">0 B</div>
               <div class="m-hint" id="relay-packets-desc">0 包已转发</div>
@@ -548,7 +537,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
                 <span class="m-label">控制信令速率</span>
               </div>
               <div class="m-num" id="signaling-rate">0 B/s</div>
-              <div class="m-hint">控制层带宽</div>
+              <div class="m-hint">实时消息吞吐</div>
             </article>
             <article class="m-item" data-tone="amber">
               <div class="m-head">
@@ -1077,6 +1066,7 @@ tun_name = "fuckipv6"</div>
     };
 
     let previousTraffic = null;
+    let previousRuntimeTraffic = null;
     let previousTrafficAt = 0;
     let cachedPeers = [];
     let rawLogLines = [];
@@ -1219,11 +1209,58 @@ tun_name = "fuckipv6"</div>
       return `<span class="tag-nat">${formatNatType(natType)}</span>`;
     }
 
-    function renderTraffic(traffic) {
-      if (!traffic) return;
+    function renderTraffic(traffic, runtimeTraffic) {
       const now = Date.now();
       const elapsed = previousTrafficAt ? (now - previousTrafficAt) / 1000 : 0;
-      
+
+      if (runtimeTraffic) {
+        const p2pTotal = (runtimeTraffic.p2p_rx_bytes || 0) + (runtimeTraffic.p2p_tx_bytes || 0);
+        const previousP2PTotal = previousRuntimeTraffic
+          ? (previousRuntimeTraffic.p2p_rx_bytes || 0) + (previousRuntimeTraffic.p2p_tx_bytes || 0)
+          : p2pTotal;
+        const p2pDelta = Math.max(0, p2pTotal - previousP2PTotal);
+        const p2pPackets = (runtimeTraffic.p2p_rx_packets || 0) + (runtimeTraffic.p2p_tx_packets || 0);
+        const msgTotal = (runtimeTraffic.signaling_messages_received || 0) + (runtimeTraffic.signaling_messages_sent || 0);
+        const previousMsgTotal = previousRuntimeTraffic
+          ? (previousRuntimeTraffic.signaling_messages_received || 0) + (previousRuntimeTraffic.signaling_messages_sent || 0)
+          : msgTotal;
+        const msgDelta = Math.max(0, msgTotal - previousMsgTotal);
+        const msgRate = elapsed > 0 ? msgDelta / elapsed : 0;
+        const tunErrors = (runtimeTraffic.tun_read_errors || 0) + (runtimeTraffic.tun_write_errors || 0);
+        const p2pErrors = (runtimeTraffic.p2p_send_errors || 0) + (runtimeTraffic.p2p_recv_errors || 0);
+
+        document.getElementById('relay-rate').textContent = formatRate(p2pDelta, elapsed);
+        document.getElementById('relay-total').textContent = formatBytes(p2pTotal);
+        document.getElementById('relay-packets-desc').textContent = `${p2pPackets.toLocaleString()} 个 P2P 包`;
+        document.getElementById('signaling-rate').textContent = `${msgRate < 10 ? msgRate.toFixed(1) : Math.round(msgRate)} msg/s`;
+        document.getElementById('signaling-total').textContent = msgTotal.toLocaleString();
+        document.getElementById('signaling-sub').textContent = `RX: ${runtimeTraffic.signaling_messages_received || 0} / TX: ${runtimeTraffic.signaling_messages_sent || 0} · 重连 ${runtimeTraffic.signaling_reconnects || 0}`;
+        document.getElementById('health-status').textContent = tunErrors + p2pErrors;
+        document.getElementById('relay-errors-desc').textContent = tunErrors + p2pErrors === 0
+          ? '运行时链路健康良好'
+          : `TUN ${tunErrors} / P2P ${p2pErrors} 次错误`;
+        document.getElementById('uptime-display').textContent = formatDuration(runtimeTraffic.uptime_secs || 0);
+        previousRuntimeTraffic = runtimeTraffic;
+        previousTraffic = null;
+        previousTrafficAt = now;
+        return;
+      }
+
+      previousRuntimeTraffic = null;
+      if (!traffic) {
+        document.getElementById('relay-rate').textContent = '0 B/s';
+        document.getElementById('relay-total').textContent = '0 B';
+        document.getElementById('relay-packets-desc').textContent = '暂无协调中继数据';
+        document.getElementById('signaling-rate').textContent = '0 msg/s';
+        document.getElementById('signaling-total').textContent = '0';
+        document.getElementById('signaling-sub').textContent = '运行时未连接';
+        document.getElementById('health-status').textContent = '--';
+        document.getElementById('relay-errors-desc').textContent = '等待真实运行时数据';
+        document.getElementById('uptime-display').textContent = '--';
+        previousTrafficAt = now;
+        return;
+      }
+
       const relayDelta = previousTraffic ? traffic.relay_payload_bytes - previousTraffic.relay_payload_bytes : 0;
       const signalingTotal = traffic.signaling_rx_bytes + traffic.signaling_tx_bytes;
       const previousSignalingTotal = previousTraffic ? previousTraffic.signaling_rx_bytes + previousTraffic.signaling_tx_bytes : signalingTotal;
@@ -2319,7 +2356,7 @@ tun_name = "fuckipv6"</div>
       document.getElementById('topology-count').textContent = `${onlineCount} 节点在线`;
       document.getElementById('tab-peers-badge').textContent = onlineCount;
 
-      renderTraffic(statusData.traffic);
+      renderTraffic(statusData.traffic, statusData.runtime_traffic);
       renderTopology(peers, statusData.networks); // 兼容 renderTopology(peers)
       renderPeersTable(peers);
       renderMachineBar(statusData);

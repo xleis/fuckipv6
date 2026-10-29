@@ -1,12 +1,14 @@
 //! Transport-independent primitives for the fuckipv6 secure session protocol v2.
 //!
 //! This crate intentionally does not implement the post-quantum handshake yet.
-//! It contains the byte-exact data frame, nonce construction, replay-window
-//! state machine, and allocation-free AEAD packet operations that can be tested
-//! independently from the eventually selected X-Wing and ML-DSA implementations.
+//! It contains the byte-exact data frame, nonce construction, replay window,
+//! bounded epoch lifecycle, and allocation-free AEAD packet operations that can
+//! be tested independently from the eventually selected X-Wing and ML-DSA
+//! implementations.
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -30,6 +32,14 @@ pub const DATA_AAD_LEN: usize = DATA_HEADER_LEN + 2 + SESSION_ID_LEN + 2;
 pub const MAX_PACKETS_PER_EPOCH: u64 = 1 << 32;
 /// Number of packet counters tracked by each replay window.
 pub const REPLAY_WINDOW_SIZE: u64 = 4096;
+/// Hard per-epoch plaintext byte limit from the protocol specification.
+pub const MAX_EPOCH_BYTES: u64 = 1 << 60;
+/// Maximum active epoch lifetime before rekeying is required.
+pub const MAX_EPOCH_LIFETIME: Duration = Duration::from_secs(120);
+/// Time allowed for packets encrypted under the immediately previous epoch.
+pub const RETIRED_EPOCH_GRACE: Duration = Duration::from_secs(5);
+/// Number of retired receive epochs retained for in-flight packets.
+pub const MAX_RETIRED_RECEIVE_EPOCHS: usize = 2;
 const REPLAY_WINDOW_WORDS: usize = (REPLAY_WINDOW_SIZE as usize) / 64;
 
 /// Direction-specific nonce domain.
@@ -363,6 +373,182 @@ impl ReceiveCipher {
     }
 }
 
+struct RetiredReceiveCipher {
+    cipher: ReceiveCipher,
+    discard_at: Instant,
+}
+
+/// Active and recently retired data ciphers for one authenticated v2 session.
+///
+/// `EpochSession` enforces the protocol's time and byte limits, requires a
+/// monotonically increasing epoch on rotation, and retains a bounded number of
+/// previous receive ciphers so in-flight packets can complete after rekeying.
+/// Retired keys are dropped, and therefore zeroized by the AEAD implementation,
+/// as soon as their grace period expires or the retention bound is exceeded.
+pub struct EpochSession {
+    active_send: SendCipher,
+    active_receive: ReceiveCipher,
+    active_started_at: Instant,
+    sent_bytes: u64,
+    retired_receive: [Option<RetiredReceiveCipher>; MAX_RETIRED_RECEIVE_EPOCHS],
+}
+
+impl EpochSession {
+    /// Create a session from matched send and receive ciphers for one epoch.
+    pub fn new(
+        send: SendCipher,
+        receive: ReceiveCipher,
+        now: Instant,
+    ) -> Result<Self, SessionError> {
+        validate_epoch_pair(&send, &receive)?;
+        Ok(Self {
+            active_send: send,
+            active_receive: receive,
+            active_started_at: now,
+            sent_bytes: 0,
+            retired_receive: std::array::from_fn(|_| None),
+        })
+    }
+
+    /// Encrypt a packet under the active epoch.
+    pub fn seal(
+        &mut self,
+        plaintext: &[u8],
+        packet: &mut [u8],
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        self.ensure_active_epoch_usable(plaintext.len(), now)?;
+        let packet_len = self.active_send.seal(plaintext, packet)?;
+        self.sent_bytes = self
+            .sent_bytes
+            .checked_add(plaintext.len() as u64)
+            .ok_or(SessionError::RekeyRequired)?;
+        Ok(packet_len)
+    }
+
+    /// Authenticate and decrypt a packet under the active or a retained epoch.
+    pub fn open_in_place<'a>(
+        &mut self,
+        packet: &'a mut [u8],
+        now: Instant,
+    ) -> Result<&'a mut [u8], SessionError> {
+        self.prune_retired(now);
+        if packet.len() < MIN_DATA_PACKET_LEN {
+            return Err(SessionError::PacketTooShort);
+        }
+        if packet.len() > MAX_DATA_PACKET_LEN {
+            return Err(SessionError::PacketTooLong);
+        }
+        let header = DataHeader::decode(packet)?;
+
+        let retired_index = if receive_matches(&self.active_receive, header) {
+            None
+        } else {
+            self.retired_receive.iter().position(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|retired| receive_matches(&retired.cipher, header))
+            })
+        };
+
+        match retired_index {
+            Some(index) => self.retired_receive[index]
+                .as_mut()
+                .expect("position only returns occupied entries")
+                .cipher
+                .open_in_place(packet),
+            None if receive_matches(&self.active_receive, header) => {
+                self.active_receive.open_in_place(packet)
+            }
+            None => Err(SessionError::UnknownEpoch),
+        }
+    }
+
+    /// Whether the active epoch must be replaced before another packet is sent.
+    pub fn rekey_required(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.active_started_at) >= MAX_EPOCH_LIFETIME
+            || self.sent_bytes >= MAX_EPOCH_BYTES
+    }
+
+    /// Install a new epoch and retain the previous receive cipher for a short grace period.
+    pub fn rotate(
+        &mut self,
+        send: SendCipher,
+        receive: ReceiveCipher,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        validate_epoch_pair(&send, &receive)?;
+        if receive.epoch <= self.active_receive.epoch {
+            return Err(SessionError::EpochRollback);
+        }
+
+        let old_send = std::mem::replace(&mut self.active_send, send);
+        drop(old_send);
+        let old_receive = std::mem::replace(&mut self.active_receive, receive);
+        for index in (1..MAX_RETIRED_RECEIVE_EPOCHS).rev() {
+            self.retired_receive[index] = self.retired_receive[index - 1].take();
+        }
+        self.retired_receive[0] = Some(RetiredReceiveCipher {
+            cipher: old_receive,
+            discard_at: now + RETIRED_EPOCH_GRACE,
+        });
+        self.active_started_at = now;
+        self.sent_bytes = 0;
+        Ok(())
+    }
+
+    fn ensure_active_epoch_usable(
+        &self,
+        plaintext_len: usize,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        if self.rekey_required(now) {
+            return Err(SessionError::RekeyRequired);
+        }
+        let next_bytes = self
+            .sent_bytes
+            .checked_add(plaintext_len as u64)
+            .ok_or(SessionError::RekeyRequired)?;
+        if next_bytes > MAX_EPOCH_BYTES {
+            return Err(SessionError::RekeyRequired);
+        }
+        Ok(())
+    }
+
+    fn prune_retired(&mut self, now: Instant) {
+        for entry in &mut self.retired_receive {
+            if entry
+                .as_ref()
+                .is_some_and(|retired| now >= retired.discard_at)
+            {
+                *entry = None;
+            }
+        }
+    }
+}
+
+fn validate_epoch_pair(send: &SendCipher, receive: &ReceiveCipher) -> Result<(), SessionError> {
+    let opposite_directions = matches!(
+        (send.direction, receive.direction),
+        (
+            Direction::InitiatorToResponder,
+            Direction::ResponderToInitiator
+        ) | (
+            Direction::ResponderToInitiator,
+            Direction::InitiatorToResponder
+        )
+    );
+    if !opposite_directions || send.session_id != receive.session_id || send.epoch != receive.epoch
+    {
+        return Err(SessionError::InvalidEpochState);
+    }
+    Ok(())
+}
+
+fn receive_matches(receive: &ReceiveCipher, header: DataHeader) -> bool {
+    receive.epoch == header.epoch && receive.local_receiver_index == header.receiver_index
+}
+
 fn data_packet_len(plaintext_len: usize) -> Result<usize, SessionError> {
     let packet_len = DATA_HEADER_LEN
         .checked_add(plaintext_len)
@@ -515,6 +701,14 @@ pub enum SessionError {
     ReceiverIndexMismatch,
     #[error("packet epoch does not match this session")]
     EpochMismatch,
+    #[error("packet belongs to an unknown or expired epoch")]
+    UnknownEpoch,
+    #[error("active session epoch must be replaced")]
+    RekeyRequired,
+    #[error("new epoch is not newer than the active epoch")]
+    EpochRollback,
+    #[error("send and receive ciphers do not form a valid epoch pair")]
+    InvalidEpochState,
     #[error("packet authentication failed")]
     AuthenticationFailed,
 }
@@ -546,6 +740,54 @@ mod tests {
                 0x0102_0304,
             ),
         )
+    }
+
+    fn initiator_ciphers(epoch: u16, key_generation: u8) -> (SendCipher, ReceiveCipher) {
+        (
+            SendCipher::new(
+                [0x10 + key_generation; 32],
+                TEST_SESSION_ID,
+                Direction::InitiatorToResponder,
+                epoch,
+                0xa1a2_a3a4,
+            ),
+            ReceiveCipher::new(
+                [0x20 + key_generation; 32],
+                TEST_SESSION_ID,
+                Direction::ResponderToInitiator,
+                epoch,
+                0xb1b2_b3b4,
+            ),
+        )
+    }
+
+    fn responder_ciphers(epoch: u16, key_generation: u8) -> (SendCipher, ReceiveCipher) {
+        (
+            SendCipher::new(
+                [0x20 + key_generation; 32],
+                TEST_SESSION_ID,
+                Direction::ResponderToInitiator,
+                epoch,
+                0xb1b2_b3b4,
+            ),
+            ReceiveCipher::new(
+                [0x10 + key_generation; 32],
+                TEST_SESSION_ID,
+                Direction::InitiatorToResponder,
+                epoch,
+                0xa1a2_a3a4,
+            ),
+        )
+    }
+
+    fn initiator_epoch(epoch: u16, key_generation: u8, now: Instant) -> EpochSession {
+        let (send, receive) = initiator_ciphers(epoch, key_generation);
+        EpochSession::new(send, receive, now).expect("valid initiator epoch")
+    }
+
+    fn responder_epoch(epoch: u16, key_generation: u8, now: Instant) -> EpochSession {
+        let (send, receive) = responder_ciphers(epoch, key_generation);
+        EpochSession::new(send, receive, now).expect("valid responder epoch")
     }
 
     #[test]
@@ -837,6 +1079,154 @@ mod tests {
         assert_eq!(
             sender.seal_in_place(&mut short, usize::MAX),
             Err(SessionError::PacketTooLong)
+        );
+    }
+
+    #[test]
+    fn epoch_session_round_trips_both_directions() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(1, 0, now);
+        let mut responder = responder_epoch(1, 0, now);
+        let mut request = [0u8; 128];
+        let mut response = [0u8; 128];
+
+        let request_len = initiator
+            .seal(b"request", &mut request, now)
+            .expect("seal request");
+        assert_eq!(
+            responder
+                .open_in_place(&mut request[..request_len], now)
+                .expect("open request"),
+            b"request"
+        );
+
+        let response_len = responder
+            .seal(b"response", &mut response, now)
+            .expect("seal response");
+        assert_eq!(
+            initiator
+                .open_in_place(&mut response[..response_len], now)
+                .expect("open response"),
+            b"response"
+        );
+    }
+
+    #[test]
+    fn epoch_session_requires_rekey_at_time_and_byte_limits() {
+        let now = Instant::now();
+        let mut session = initiator_epoch(1, 0, now);
+        let mut packet = [0u8; 128];
+
+        assert!(!session.rekey_required(now + MAX_EPOCH_LIFETIME - Duration::from_millis(1)));
+        assert!(session.rekey_required(now + MAX_EPOCH_LIFETIME));
+        assert_eq!(
+            session.seal(b"late", &mut packet, now + MAX_EPOCH_LIFETIME),
+            Err(SessionError::RekeyRequired)
+        );
+
+        session.active_started_at = now;
+        session.sent_bytes = MAX_EPOCH_BYTES - 1;
+        assert_eq!(
+            session.seal(b"xx", &mut packet, now),
+            Err(SessionError::RekeyRequired)
+        );
+        session.sent_bytes = MAX_EPOCH_BYTES;
+        assert!(session.rekey_required(now));
+    }
+
+    #[test]
+    fn epoch_rotation_accepts_in_flight_old_packets_only_during_grace() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(1, 0, now);
+        let mut responder = responder_epoch(1, 0, now);
+        let mut old_first = [0u8; 128];
+        let mut old_second = [0u8; 128];
+        let first_len = initiator
+            .seal(b"old first", &mut old_first, now)
+            .expect("seal first old packet");
+        let second_len = initiator
+            .seal(b"old second", &mut old_second, now)
+            .expect("seal second old packet");
+
+        let rotate_at = now + Duration::from_secs(1);
+        let (new_send, new_receive) = responder_ciphers(2, 1);
+        responder
+            .rotate(new_send, new_receive, rotate_at)
+            .expect("rotate responder");
+        assert_eq!(
+            responder
+                .open_in_place(&mut old_first[..first_len], rotate_at)
+                .expect("open in-flight packet"),
+            b"old first"
+        );
+        assert_eq!(
+            responder.open_in_place(
+                &mut old_second[..second_len],
+                rotate_at + RETIRED_EPOCH_GRACE
+            ),
+            Err(SessionError::UnknownEpoch)
+        );
+
+        let (new_send, new_receive) = initiator_ciphers(2, 1);
+        initiator
+            .rotate(new_send, new_receive, rotate_at)
+            .expect("rotate initiator");
+        let mut new_packet = [0u8; 128];
+        let new_len = initiator
+            .seal(b"new epoch", &mut new_packet, rotate_at)
+            .expect("seal new epoch");
+        assert_eq!(
+            responder
+                .open_in_place(&mut new_packet[..new_len], rotate_at)
+                .expect("open new epoch"),
+            b"new epoch"
+        );
+    }
+
+    #[test]
+    fn epoch_session_rejects_rollback_and_mismatched_cipher_contexts() {
+        let now = Instant::now();
+        let mut session = responder_epoch(2, 0, now);
+        let (old_send, old_receive) = responder_ciphers(1, 0);
+        assert_eq!(
+            session.rotate(old_send, old_receive, now),
+            Err(SessionError::EpochRollback)
+        );
+
+        let (send, _) = initiator_ciphers(1, 0);
+        let wrong_direction_receive = ReceiveCipher::new(
+            [0x20; 32],
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            1,
+            0xb1b2_b3b4,
+        );
+        assert_eq!(
+            EpochSession::new(send, wrong_direction_receive, now).err(),
+            Some(SessionError::InvalidEpochState)
+        );
+    }
+
+    #[test]
+    fn epoch_session_bounds_retired_receive_keys() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(1, 0, now);
+        let mut responder = responder_epoch(1, 0, now);
+        let mut old_packet = [0u8; 128];
+        let old_len = initiator
+            .seal(b"evicted", &mut old_packet, now)
+            .expect("seal old packet");
+
+        for epoch in 2..=4 {
+            let (send, receive) = responder_ciphers(epoch, epoch as u8 - 1);
+            responder
+                .rotate(send, receive, now + Duration::from_secs(epoch as u64))
+                .expect("rotate through retention bound");
+        }
+
+        assert_eq!(
+            responder.open_in_place(&mut old_packet[..old_len], now + Duration::from_secs(4)),
+            Err(SessionError::UnknownEpoch)
         );
     }
 

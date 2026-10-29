@@ -120,13 +120,51 @@ impl ExitNodeManager {
         None
     }
 
-    /// 判断目的 IP 是否属于应该由出口网关转发的公网流量
+    /// 判断目的地址是否允许由出口网关转发。
+    ///
+    /// 公网地址默认允许；真实私有局域网仅在 `allow_lan_access` 开启时允许。
+    /// 无论配置如何，回环、链路本地、组播、广播、未指定及保留地址始终拒绝。
+    /// 调用方仍需先排除虚拟网络地址，避免把 Mesh 流量误判为 Exit 流量。
     pub fn should_forward_as_exit(&self, dst_ip: IpAddr) -> bool {
         if !self.config.enabled {
             return false;
         }
-        // 目标不能是私有局域网、回环、广播、链路本地地址
-        !fuckipv6_common::routing::is_private_or_local(dst_ip)
+
+        let safe_unicast = match dst_ip {
+            IpAddr::V4(v4) => {
+                !v4.is_unspecified()
+                    && !v4.is_loopback()
+                    && !v4.is_link_local()
+                    && !v4.is_broadcast()
+                    && !v4.is_multicast()
+                    && !v4.is_documentation()
+                    && v4.octets()[0] != 0
+                    && v4.octets()[0] < 240
+            }
+            IpAddr::V6(v6) => {
+                !v6.is_unspecified()
+                    && !v6.is_loopback()
+                    && !v6.is_multicast()
+                    && ((v6.segments()[0] & 0xffc0) != 0xfe80)
+                    && !(v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+            }
+        };
+        if !safe_unicast {
+            return false;
+        }
+
+        if !fuckipv6_common::routing::is_private_or_local(dst_ip) {
+            return true;
+        }
+
+        if !self.config.allow_lan_access {
+            return false;
+        }
+
+        match dst_ip {
+            IpAddr::V4(v4) => v4.is_private(),
+            IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+        }
     }
 }
 
@@ -161,6 +199,44 @@ mod tests {
             region: None,
         });
         assert!(!disabled_manager.is_client_allowed("client-alpha"));
+    }
+
+    #[test]
+    fn exit_forwarding_only_allows_safe_public_destinations_by_default() {
+        let manager = ExitNodeManager::new(ExitNodeConfig {
+            enabled: true,
+            allowed_clients: Vec::new(),
+            allow_lan_access: false,
+            region: None,
+        });
+
+        assert!(manager.should_forward_as_exit("1.1.1.1".parse().unwrap()));
+        assert!(manager.should_forward_as_exit("2606:4700:4700::1111".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("192.168.1.1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("fd12::1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("127.0.0.1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("224.0.0.1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("239.255.255.250".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("ff02::1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("fe80::1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("0.0.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn exit_forwarding_allows_private_lan_only_when_configured() {
+        let manager = ExitNodeManager::new(ExitNodeConfig {
+            enabled: true,
+            allowed_clients: Vec::new(),
+            allow_lan_access: true,
+            region: None,
+        });
+
+        assert!(manager.should_forward_as_exit("10.20.30.40".parse().unwrap()));
+        assert!(manager.should_forward_as_exit("192.168.1.10".parse().unwrap()));
+        assert!(manager.should_forward_as_exit("fd12::1234".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("169.254.1.1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("fe80::1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("224.0.0.1".parse().unwrap()));
     }
 
     #[test]

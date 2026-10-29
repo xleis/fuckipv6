@@ -1,0 +1,118 @@
+   Compiling serde_core v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling zerocopy v0.8.31
+   Compiling serde_json v1.0.148
+   Compiling num-traits v0.2.19
+   Compiling rayon-core v1.13.0
+   Compiling syn v2.0.112
+   Compiling either v1.16.0
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling crypto-common v0.1.7
+   Compiling memchr v2.7.6
+   Compiling regex-automata v0.4.13
+   Compiling clap_builder v4.5.53
+   Compiling cipher v0.4.4
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling itertools v0.10.5
+   Compiling poly1305 v0.8.0
+   Compiling plotters-svg v0.3.7
+   Compiling chacha20 v0.9.1
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling walkdir v2.5.0
+   Compiling chacha20poly1305 v0.10.1
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-deque v0.8.6
+   Compiling plotters v0.3.7
+   Compiling criterion-plot v0.5.0
+   Compiling rayon v1.12.0
+   Compiling regex v1.12.3
+   Compiling clap v4.5.53
+   Compiling zerocopy-derive v0.8.31
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v1.0.69
+   Compiling thiserror v1.0.69
+   Compiling fuckipv6-secure-session v0.3.0 (/home/xlei/project/fuckipv6/crates/secure-session)
+   Compiling serde v1.0.228
+   Compiling tinytemplate v1.2.1
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.5.1
+    Finished `bench` profile [optimized] target(s) in 21.21s
+     Running benches/dataplane.rs (target/release/deps/dataplane-9476ec42efe8c583)
+Gnuplot not found, using plotters backend
+Benchmarking secure_session_v2_64/seal
+Benchmarking secure_session_v2_64/seal: Analyzing
+secure_session_v2_64/seal
+                        time:   [1.5608 µs 1.5673 µs 1.5933 µs]
+                        thrpt:  [38.307 MiB/s 38.943 MiB/s 39.105 MiB/s]
+Benchmarking secure_session_v2_64/open
+Benchmarking secure_session_v2_64/open: Analyzing
+secure_session_v2_64/open
+                        time:   [1.8125 µs 1.8268 µs 1.8841 µs]
+                        thrpt:  [32.396 MiB/s 33.412 MiB/s 33.675 MiB/s]
+Benchmarking secure_session_v2_64/replay_reject
+Benchmarking secure_session_v2_64/replay_reject: Analyzing
+secure_session_v2_64/replay_reject
+                        time:   [4.1601 ns 4.2782 ns 4.3078 ns]
+                        thrpt:  [13.837 GiB/s 13.932 GiB/s 14.328 GiB/s]
+
+Benchmarking secure_session_v2_512/seal
+Benchmarking secure_session_v2_512/seal: Analyzing
+secure_session_v2_512/seal
+                        time:   [1.7749 µs 1.7807 µs 1.8039 µs]
+                        thrpt:  [270.69 MiB/s 274.21 MiB/s 275.10 MiB/s]
+Benchmarking secure_session_v2_512/open
+Benchmarking secure_session_v2_512/open: Analyzing
+secure_session_v2_512/open
+                        time:   [2.0493 µs 2.0898 µs 2.0999 µs]
+                        thrpt:  [232.53 MiB/s 233.65 MiB/s 238.27 MiB/s]
+Benchmarking secure_session_v2_512/replay_reject
+Benchmarking secure_session_v2_512/replay_reject: Analyzing
+secure_session_v2_512/replay_reject
+                        time:   [5.3028 ns 5.4471 ns 5.4832 ns]
+                        thrpt:  [86.963 GiB/s 87.539 GiB/s 89.922 GiB/s]
+
+Benchmarking secure_session_v2_1280/seal
+Benchmarking secure_session_v2_1280/seal: Analyzing
+secure_session_v2_1280/seal
+                        time:   [2.6718 µs 2.7362 µs 2.7523 µs]
+                        thrpt:  [443.51 MiB/s 446.13 MiB/s 456.89 MiB/s]
+Benchmarking secure_session_v2_1280/open
+Benchmarking secure_session_v2_1280/open: Analyzing
+secure_session_v2_1280/open
+                        time:   [2.6973 µs 2.7086 µs 2.7538 µs]
+                        thrpt:  [443.28 MiB/s 450.67 MiB/s 452.56 MiB/s]
+Benchmarking secure_session_v2_1280/replay_reject
+Benchmarking secure_session_v2_1280/replay_reject: Analyzing
+secure_session_v2_1280/replay_reject
+                        time:   [4.2109 ns 4.2538 ns 4.4258 ns]
+                        thrpt:  [269.35 GiB/s 280.24 GiB/s 283.10 GiB/s]
+
+Benchmarking secure_session_v2_1420/seal
+Benchmarking secure_session_v2_1420/seal: Analyzing
+secure_session_v2_1420/seal
+                        time:   [2.6882 µs 2.7959 µs 2.8228 µs]
+                        thrpt:  [479.73 MiB/s 484.35 MiB/s 503.76 MiB/s]
+Benchmarking secure_session_v2_1420/open
+Benchmarking secure_session_v2_1420/open: Analyzing
+secure_session_v2_1420/open
+                        time:   [3.0554 µs 3.0555 µs 3.0560 µs]
+                        thrpt:  [443.13 MiB/s 443.20 MiB/s 443.22 MiB/s]
+Benchmarking secure_session_v2_1420/replay_reject
+Benchmarking secure_session_v2_1420/replay_reject: Analyzing
+secure_session_v2_1420/replay_reject
+                        time:   [3.9566 ns 3.9701 ns 4.0240 ns]
+                        thrpt:  [328.64 GiB/s 333.11 GiB/s 334.25 GiB/s]
+
+Benchmarking secure_session_v2_epoch_overhead/epoch_seal_1420
+Benchmarking secure_session_v2_epoch_overhead/epoch_seal_1420: Analyzing
+secure_session_v2_epoch_overhead/epoch_seal_1420
+                        time:   [2.6695 µs 2.7629 µs 2.7863 µs]
+                        thrpt:  [486.03 MiB/s 490.14 MiB/s 507.29 MiB/s]

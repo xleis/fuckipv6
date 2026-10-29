@@ -897,6 +897,7 @@ name = "fuckipv6-secure-session"
 version = "0.3.0"
 dependencies = [
  "chacha20poly1305",
+ "criterion",
  "thiserror 1.0.69",
  "zeroize",
 ]

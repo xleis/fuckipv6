@@ -1,0 +1,20 @@
+{
+  "benchmark": "secure-session-v2-dataplane",
+  "command": "cargo bench -p fuckipv6-secure-session --bench dataplane -- --quick --noplot",
+  "cpu": "AMD Ryzen 7 5800H with Radeon Graphics",
+  "criterion": "0.5.1",
+  "git_commit": "71d5909cda7ff19dd6f8457939a49a9d0b118691",
+  "git_worktree": "dirty",
+  "kernel": "7.2.11-zen1-1-zen",
+  "load_average": [7.54, 6.97, 6.77],
+  "logical_cpus": 16,
+  "machine": "x86_64",
+  "payload_bytes": [64, 512, 1280, 1420],
+  "quick_mode": true,
+  "release_gate": false,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "timestamp_utc": "20261029T194632Z",
+  "bench_source_sha256": "46eb446ef14ea89928d9231b4ba3a8b5bb84f12e3fb6bf2309631d0a4e37eaec",
+  "raw_output_sha256": "03686a8e240c6ac6cad9246175ff25519ecddf2ae752501d7b8411bf0aad96ec"
+}

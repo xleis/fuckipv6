@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加 Secure Session v2 数据面 Criterion 基准，覆盖 64/512/1280/1420 字节的 seal/open、重放拒绝及 `EpochSession` 包装开销；发布 2026-10-30 开发基线并明确其结果不构成发布性能门禁。
 - 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭，但尚未接入密码学握手、控制通道或真实数据面。完整 X-Wing 握手、PQC 身份和数据面接入仍未实现。
 - 客户端重连时通过 v2 签名请求恢复原虚拟 IPv4/IPv6 租约；协调端内存分配器重启后，只要地址仍空闲即可恢复。
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。

@@ -9,3 +9,10 @@ license.workspace = true
 chacha20poly1305 = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "dataplane"
+harness = false

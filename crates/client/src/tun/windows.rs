@@ -216,8 +216,8 @@ mod ip_helper {
         unsafe { InitializeUnicastIpAddressEntry(&mut row) };
 
         row.InterfaceLuid = luid;
-        row.Address.si_family = AF_INET6 as u16;
-        row.Address.Ipv6.sin6_family = AF_INET6 as u16;
+        row.Address.si_family = AF_INET6;
+        row.Address.Ipv6.sin6_family = AF_INET6;
         row.Address.Ipv6.sin6_addr.u.Byte = ip.octets();
         row.OnLinkPrefixLength = prefix_len;
 
@@ -243,8 +243,8 @@ mod ip_helper {
         unsafe { InitializeUnicastIpAddressEntry(&mut row) };
 
         row.InterfaceLuid = luid;
-        row.Address.si_family = AF_INET6 as u16;
-        row.Address.Ipv6.sin6_family = AF_INET6 as u16;
+        row.Address.si_family = AF_INET6;
+        row.Address.Ipv6.sin6_family = AF_INET6;
         row.Address.Ipv6.sin6_addr.u.Byte = ip.octets();
 
         let ret = unsafe { DeleteUnicastIpAddressEntry(&row) };
@@ -260,8 +260,8 @@ mod ip_helper {
         unsafe { InitializeIpForwardEntry(&mut row) };
 
         row.InterfaceLuid = luid;
-        row.DestinationPrefix.Prefix.si_family = AF_INET6 as u16;
-        row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6 as u16;
+        row.DestinationPrefix.Prefix.si_family = AF_INET6;
+        row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;
         row.DestinationPrefix.Prefix.Ipv6.sin6_addr.u.Byte = prefix.octets();
         row.DestinationPrefix.PrefixLength = prefix_len;
         row.Metric = 256;
@@ -288,8 +288,8 @@ mod ip_helper {
         unsafe { InitializeIpForwardEntry(&mut row) };
 
         row.InterfaceLuid = luid;
-        row.DestinationPrefix.Prefix.si_family = AF_INET6 as u16;
-        row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6 as u16;
+        row.DestinationPrefix.Prefix.si_family = AF_INET6;
+        row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;
         row.DestinationPrefix.Prefix.Ipv6.sin6_addr.u.Byte = prefix.octets();
         row.DestinationPrefix.PrefixLength = prefix_len;
 

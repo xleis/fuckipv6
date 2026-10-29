@@ -546,6 +546,8 @@ def run_gate(args: argparse.Namespace) -> int:
 
 def load_report(path: Path) -> dict[str, Any]:
     document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{path}: report root must be a JSON object")
     if document.get("schema") != EXPECTED_SCHEMA:
         raise ValueError(f"{path}: unsupported report schema")
     if document.get("schema_version") != SCHEMA_VERSION:
@@ -561,7 +563,8 @@ def aggregate_documents(
     platform_reports: dict[str, dict[str, Any]] = {}
     commits: set[str] = set()
     for path, report in reports:
-        label = report.get("platform", {}).get("label")
+        platform_info = report.get("platform")
+        label = platform_info.get("label") if isinstance(platform_info, dict) else None
         if not isinstance(label, str) or not label:
             errors.append(f"{path}: missing platform label")
             continue
@@ -569,18 +572,31 @@ def aggregate_documents(
             errors.append(f"{path}: duplicate platform report for {label}")
             continue
         platform_reports[label] = report
-        summary_status = report.get("summary", {}).get("status")
+        summary_info = report.get("summary")
+        summary = summary_info if isinstance(summary_info, dict) else {}
+        summary_status = summary.get("status")
         if summary_status != "passed":
             errors.append(f"{path}: platform checks did not pass")
-        if report.get("summary", {}).get("release_ready") is not True:
+        if summary.get("release_ready") is not True:
             errors.append(f"{path}: platform report is not release-ready")
-        commit = report.get("source", {}).get("commit")
+        source_info = report.get("source")
+        source = source_info if isinstance(source_info, dict) else {}
+        commit = source.get("commit")
         if not isinstance(commit, str) or not commit:
             errors.append(f"{path}: missing Git commit")
         else:
             commits.add(commit)
-        if report.get("source", {}).get("dirty") is not False:
+        if source.get("dirty") is not False:
             errors.append(f"{path}: source worktree is not clean")
+
+        checks = report.get("checks")
+        if not isinstance(checks, list) or not checks:
+            errors.append(f"{path}: report contains no checks")
+        else:
+            for check in checks:
+                if not isinstance(check, dict) or check.get("status") != "passed":
+                    name = check.get("name") if isinstance(check, dict) else None
+                    errors.append(f"{path}: check {name or '<unknown>'} did not pass")
 
     missing = [name for name in expected_platforms if name not in platform_reports]
     if missing:
@@ -588,21 +604,24 @@ def aggregate_documents(
     if len(commits) != 1:
         errors.append("platform reports were generated from different or unknown commits")
 
-    benchmarks = [
-        (label, report.get("benchmark", {}))
-        for label, report in platform_reports.items()
-        if report.get("benchmark", {}).get("status") == "passed"
-        and valid_benchmark_samples(report.get("benchmark", {}))
-    ]
+    benchmarks: list[tuple[str, dict[str, Any]]] = []
+    for label, report in platform_reports.items():
+        benchmark_info = report.get("benchmark")
+        benchmark = benchmark_info if isinstance(benchmark_info, dict) else {}
+        if benchmark.get("status") == "passed" and valid_benchmark_samples(benchmark):
+            benchmarks.append((label, benchmark))
     if not benchmarks:
         errors.append("no platform contains a successful machine-readable benchmark")
 
     macos = platform_reports.get("macos")
     if macos is not None:
+        macos_checks = macos.get("checks")
         cross_checks = {
             check.get("name"): check.get("status")
-            for check in macos.get("checks", [])
-            if str(check.get("name", "")).startswith("cross-check-")
+            for check in macos_checks
+            if isinstance(macos_checks, list)
+            and isinstance(check, dict)
+            and str(check.get("name", "")).startswith("cross-check-")
         }
         for target in ("x86_64-apple-darwin", "aarch64-apple-darwin"):
             if cross_checks.get(f"cross-check-{target}") != "passed":
@@ -619,9 +638,22 @@ def aggregate_documents(
                 "source": report.get("source"),
                 "toolchain": report.get("toolchain"),
                 "benchmark": {
-                    "status": report.get("benchmark", {}).get("status"),
-                    "mode": report.get("benchmark", {}).get("mode"),
-                    "sample_count": len(report.get("benchmark", {}).get("samples", [])),
+                    "status": (
+                        report.get("benchmark", {}).get("status")
+                        if isinstance(report.get("benchmark"), dict)
+                        else None
+                    ),
+                    "mode": (
+                        report.get("benchmark", {}).get("mode")
+                        if isinstance(report.get("benchmark"), dict)
+                        else None
+                    ),
+                    "sample_count": (
+                        len(report.get("benchmark", {}).get("samples", []))
+                        if isinstance(report.get("benchmark"), dict)
+                        and isinstance(report.get("benchmark", {}).get("samples"), list)
+                        else 0
+                    ),
                 },
             }
             for label, report in sorted(platform_reports.items())

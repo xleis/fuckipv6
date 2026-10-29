@@ -215,7 +215,9 @@ pub(crate) async fn prepare_client_runtime_ext(
     let assigned_ip = assigned_ips.primary_ipv6();
     configure_local_ips(&p2p, &assigned_ips).await;
     let relay = connect_quic_relay(&signaling, &relay_identity, assigned_ip).await;
-    let mut tun = create_tun_device(&config, &assigned_ips).await?;
+    let tun = create_tun_device(&config, &assigned_ips).await?;
+    #[cfg(target_os = "linux")]
+    let mut tun = tun;
     let acl = fuckipv6_common::AclEngine::new(&config.acl);
 
     let mut route_engine = SmartRouteEngine::new(config.routing.mode);
@@ -875,6 +877,7 @@ async fn apply_runtime_routing(
     is_exit_node: bool,
 ) -> std::result::Result<ipc::RoutingUpdateResult, String> {
     let parsed_mode = parse_runtime_routing_mode(mode).map_err(|error| format!("{error:#}"))?;
+    #[cfg(target_os = "linux")]
     let previous_mode = runtime.route_engine.routing_mode();
 
     let mut updated_config = runtime.config.clone();
@@ -1149,6 +1152,7 @@ async fn handle_inbound_payload(
             return;
         }
 
+        #[cfg(target_os = "linux")]
         tracing::debug!(
             "Exit Node 转发已认证数据包: client={}, {} -> {target_dst}, {} 字节",
             peer.client_id,
@@ -1212,9 +1216,13 @@ async fn handle_runtime_signaling_event(
         SignalingAction::Reconnected => {
             runtime.stats.record_signaling_reconnect().await;
         }
-        SignalingAction::PeersUpsert(_)
-        | SignalingAction::PeerRemoved(_)
-        | SignalingAction::None => {}
+        SignalingAction::PeersUpsert(peers) => {
+            tracing::debug!("已更新 {} 个节点的运行时状态", peers.len());
+        }
+        SignalingAction::PeerRemoved(client_id) => {
+            tracing::debug!("已移除节点 {client_id} 的运行时状态");
+        }
+        SignalingAction::None => {}
     }
 
     Ok(())

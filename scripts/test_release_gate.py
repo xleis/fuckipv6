@@ -12,7 +12,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from unittest import mock
 
 SCRIPT = Path(__file__).with_name("release-gate.py")
 SPEC = importlib.util.spec_from_file_location("release_gate", SCRIPT)
@@ -179,6 +178,50 @@ class ReleaseGateTests(unittest.TestCase):
         )
 
         self.assertTrue(any("duplicate platform report for linux" in error for error in errors))
+
+    def test_aggregate_rejects_failed_check_even_if_summary_claims_success(self) -> None:
+        linux = report("linux")
+        linux["checks"].append({"name": "clippy", "status": "failed"})
+        _, errors = GATE.aggregate_documents(
+            loaded(
+                ("linux", linux),
+                ("windows", report("windows")),
+                ("macos", report("macos")),
+            ),
+            GATE.DEFAULT_PLATFORMS,
+        )
+
+        self.assertIn("/reports/linux.json: check clippy did not pass", errors)
+
+    def test_aggregate_tolerates_malformed_optional_sections(self) -> None:
+        linux = report("linux")
+        linux["checks"] = "not-a-list"
+        linux["benchmark"] = None
+        windows = report("windows")
+        windows["source"] = None
+        macos = report("macos")
+        macos["summary"] = None
+
+        _, errors = GATE.aggregate_documents(
+            loaded(
+                ("linux", linux),
+                ("windows", windows),
+                ("macos", macos),
+            ),
+            GATE.DEFAULT_PLATFORMS,
+        )
+
+        self.assertTrue(any("report contains no checks" in error for error in errors))
+        self.assertTrue(any("missing Git commit" in error for error in errors))
+        self.assertTrue(any("platform checks did not pass" in error for error in errors))
+
+    def test_load_report_rejects_non_object_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            path.write_text("[]\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "root must be a JSON object"):
+                GATE.load_report(path)
 
     def test_criterion_samples_are_machine_readable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

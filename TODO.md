@@ -10,12 +10,12 @@
 - [x] **FC-04 真实运行时快照**：WebUI 状态、流量和链路数据优先来自 IPC 运行时快照，不再用全零或模拟值代替。
 - [x] **FC-05 Linux 策略路由生命周期**：在 Linux 启动、路由热切换和退出时安装/更新/回滚 `LinuxRouteManager`。
 - [x] **FC-06 UI 真实性**：对后端未支持的操作禁用或明确标识“仅预览”，成功提示只在后端确认后显示。
-- [ ] **FC-07 文档对齐**：区分“可直接使用”“基础设施已接入（待产品化）”“尚未产品化”，同步 README、NEXTGEN_TODO、API 与架构文档。
+- [x] **FC-07 文档对齐**：区分“可直接使用”“基础设施已接入（待产品化）”“尚未产品化”，同步 README、NEXTGEN_TODO、API 与架构文档。
   - [x] README：标注核心能力、能力边界与各阶段成熟度。
   - [x] CHANGELOG：纠正 Tauri、JWT、Exit Node 与 Overlay 基础设施的历史描述。
-  - [ ] NEXTGEN_TODO：修正用户态 NAT、Tauri 原生桌面和 Agent 5 “已完成”口径。
-  - [ ] API：补充客户端 WebUI/API、免密边界、状态字段与控制接口。
-  - [ ] ARCHITECTURE：同步当前实现边界与“基础设施已接入”状态。
+  - [x] NEXTGEN_TODO：修正用户态 NAT、Tauri 原生桌面和 Agent 5 “已完成”口径。
+  - [x] API：补充客户端 WebUI/API、免密边界、状态字段与控制接口。
+  - [x] ARCHITECTURE：同步当前实现边界与“基础设施已接入”状态。
 - [ ] **FC-08 回归验证**：补充单元/集成测试，执行格式、Clippy、全工作区测试及 Linux/Windows 编译检查。
 
 ## 当前状态总结 ✅

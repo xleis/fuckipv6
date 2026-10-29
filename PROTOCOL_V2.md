@@ -322,6 +322,27 @@ REKEY_INIT -> REKEY_ACCEPT -> REKEY_CONFIRM
 - epoch `0xffff` 是最后一个 epoch；之后必须建立全新会话，不能回绕 `epoch` 或复用旧 `SID`。
 - 消息解析、签名、KEM、KDF 或 key-confirmation 失败必须在进入状态机前拒绝；状态机不把非零占位值视为密码学有效性证明。
 
+重协商控制帧使用固定 8 字节头，整数均为大端序：
+
+```text
+offset  size  field
+0       1     version (v2 = 0x02)
+1       1     kind (INIT = 0x31, ACCEPT = 0x32, CONFIRM = 0x33)
+2       1     flags/reserved (must be zero)
+3       1     reserved (must be zero)
+4       2     body length (exact value for kind)
+6       2     reserved (must be zero)
+8       ...   body
+```
+
+body 依次连接定宽字段，不带可变长整数、填充或尾随字节：
+
+- `REKEY_INIT`（52 字节 body，60 字节 frame）：`base_epoch:u16 || new_epoch:u16 || SID:[16] || NI:[32]`。
+- `REKEY_ACCEPT`（180 字节 body，188 字节 frame）：`INIT-body || NR:[32] || transcript_hash:[32] || responder_confirmation:[32] || expected_initiator_confirmation:[32]`。
+- `REKEY_CONFIRM`（212 字节 body，220 字节 frame）：`ACCEPT-body || initiator_confirmation:[32]`。
+
+解析器必须在读取 body 前限制总长不超过 220 字节，并拒绝版本、kind、body length、保留字节不符，以及截断和尾随字节。该编码只提供规范边界，不提供机密性、完整性和身份认证；控制帧仍必须由当前已认证会话保护，并在进入重协商状态机前完成全部密码学校验。
+
 ## 9. 状态机与失败路径
 
 ```text

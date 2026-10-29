@@ -47,15 +47,17 @@ pub struct RekeyInit {
 
 /// Responder-to-initiator acceptance metadata.
 ///
-/// The digest and responder confirmation must come from a verified handshake
+/// The digest and both confirmation values must come from a verified handshake
 /// transcript. This type only binds the fields; it is not proof of authenticity
-/// on its own.
+/// on its own. `expected_initiator_confirmation` lets the initiator verify that
+/// both sides derived the confirmation for the same direction and transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RekeyAccept {
     pub init: RekeyInit,
     pub responder_nonce: RekeyNonce,
     pub transcript_hash: RekeyDigest,
     pub responder_confirmation: RekeyDigest,
+    pub expected_initiator_confirmation: RekeyDigest,
 }
 
 /// Initiator-to-responder confirmation of a previously accepted rekey.
@@ -123,7 +125,6 @@ enum Pending {
     },
     AwaitConfirm {
         accept: RekeyAccept,
-        expected_initiator_confirmation: RekeyDigest,
         deadline: Instant,
     },
     ConfirmSent {
@@ -286,11 +287,11 @@ impl RekeyStateMachine {
             responder_nonce,
             transcript_hash,
             responder_confirmation,
+            expected_initiator_confirmation,
         };
         self.used_session_ids.push(init.new_session_id);
         self.pending = Some(Pending::AwaitConfirm {
             accept,
-            expected_initiator_confirmation,
             deadline: now + REKEY_TIMEOUT,
         });
         Ok(accept)
@@ -328,6 +329,7 @@ impl RekeyStateMachine {
         validate_nonce(accept.responder_nonce)?;
         validate_transcript_hash(accept.transcript_hash)?;
         validate_confirmation(accept.responder_confirmation)?;
+        validate_confirmation(accept.expected_initiator_confirmation)?;
         validate_confirmation(initiator_confirmation)?;
 
         let confirm = RekeyConfirm {
@@ -359,16 +361,12 @@ impl RekeyStateMachine {
             return Ok(RekeyCompletion::Duplicate);
         }
 
-        let (expected_accept, expected_confirmation) = match &self.pending {
-            Some(Pending::AwaitConfirm {
-                accept,
-                expected_initiator_confirmation,
-                ..
-            }) => (*accept, *expected_initiator_confirmation),
+        let expected_accept = match &self.pending {
+            Some(Pending::AwaitConfirm { accept, .. }) => *accept,
             _ => return Err(RekeyError::UnexpectedMessage),
         };
         if expected_accept != confirm.accept
-            || expected_confirmation != confirm.initiator_confirmation
+            || expected_accept.expected_initiator_confirmation != confirm.initiator_confirmation
         {
             return Err(RekeyError::TransactionMismatch);
         }

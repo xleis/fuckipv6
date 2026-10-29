@@ -8,6 +8,7 @@
 //! implementations.
 
 pub mod rekey;
+pub mod rekey_codec;
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};

@@ -7,7 +7,7 @@
 ## 执行清单
 
 - [x] **SS-01 数据面密码学基准**：为 v2 帧的 seal/open 和重放拒绝建立 Criterion 基准，并记录 64/512/1280/1420 字节开发基线；批量处理仍由 SS-11 实现和测量。
-- [ ] **SS-02 重协商控制帧编解码**：为 `REKEY_INIT/ACCEPT/CONFIRM` 定义有界、版本化、规范编码的控制帧，拒绝截断、超长、尾随字节和非零保留字段。
+- [x] **SS-02 重协商控制帧编解码**：为 `REKEY_INIT/ACCEPT/CONFIRM` 定义 60/188/220 字节的版本化规范控制帧，拒绝截断、超长、尾随字节、非法长度和非零保留字段，并增加固定字节向量。
 - [ ] **SS-03 Transcript 构造器**：实现带域分离和 2 字节长度前缀的 canonical transcript builder，覆盖运行角色、suite、身份、临时公钥、SID、epoch 和 endpoint context。
 - [ ] **SS-04 经典临时握手**：使用 X25519 临时密钥和 Ed25519 长期身份实现攻击者无法重放的 HELLO/ACCEPT 握手，并验证双方 transcript 完全一致。
 - [ ] **SS-05 会话密钥派生**：使用 HKDF-SHA-512 派生独立双向数据密钥和双向确认密钥；秘密输入在使用后 `zeroize`。

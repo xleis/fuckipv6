@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::VirtualIps;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
 
 pub struct LinuxTun {
-    reader: Arc<Mutex<tun::platform::posix::Reader>>,
-    writer: Arc<Mutex<tun::platform::posix::Writer>>,
+    reader: Arc<AsyncFd<tun::platform::posix::Reader>>,
+    writer: Arc<AsyncFd<File>>,
     name: String,
     virtual_ips: VirtualIps,
     cleanup_on_drop: bool,
@@ -95,13 +98,19 @@ impl LinuxTun {
             }
         };
 
-        let (reader, writer) = device.split();
+        let (reader, split_writer) = device.split();
+        drop(split_writer);
+        set_nonblocking(reader.as_raw_fd()).context("设置 TUN 为非阻塞模式失败")?;
+        let writer_fd = duplicate_fd(reader.as_raw_fd()).context("复制 TUN 文件描述符失败")?;
+        // SAFETY: duplicate_fd returned a new owned descriptor, and File assumes
+        // responsibility for closing it exactly once.
+        let writer_file = unsafe { File::from_raw_fd(writer_fd) };
 
         tracing::info!("TUN 设备已完全配置并打开: {}", name);
 
         Ok(Self {
-            reader: Arc::new(Mutex::new(reader)),
-            writer: Arc::new(Mutex::new(writer)),
+            reader: Arc::new(AsyncFd::new(reader).context("注册 TUN 读事件失败")?),
+            writer: Arc::new(AsyncFd::new(writer_file).context("注册 TUN 写事件失败")?),
             name: name.to_string(),
             virtual_ips: virtual_ips.clone(),
             cleanup_on_drop: true,
@@ -123,35 +132,30 @@ impl LinuxTun {
     }
 
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let reader = self.reader.clone();
-        let len = buf.len();
-
-        let (size, data) = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<u8>)> {
-            let mut reader = reader.blocking_lock();
-            let mut temp_buf = vec![0u8; len];
-            let size = reader
-                .read(&mut temp_buf)
-                .context("Failed to read from TUN device")?;
-            Ok((size, temp_buf))
-        })
-        .await
-        .context("TUN read blocking task failed to join")??;
-
-        buf[..size].copy_from_slice(&data[..size]);
-        Ok(size)
+        self.reader
+            .async_io(Interest::READABLE, |reader| {
+                read_fd(reader.as_raw_fd(), buf)
+            })
+            .await
+            .context("Failed to read from TUN device")
     }
 
     pub async fn write(&mut self, packet: &[u8]) -> Result<()> {
-        let writer = self.writer.clone();
-        let packet = packet.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut writer = writer.blocking_lock();
-            writer
-                .write_all(&packet)
-                .context("Failed to write to TUN device")
-        })
-        .await
-        .context("TUN write blocking task failed to join")?
+        let written = self
+            .writer
+            .async_io(Interest::WRITABLE, |writer| {
+                write_fd(writer.as_raw_fd(), packet)
+            })
+            .await
+            .context("Failed to write to TUN device")?;
+        if written != packet.len() {
+            anyhow::bail!(
+                "TUN short write: wrote {} of {} bytes",
+                written,
+                packet.len()
+            );
+        }
+        Ok(())
     }
 
     /// 删除 TUN 设备
@@ -210,6 +214,52 @@ fn validate_tun_inputs(name: &str, mtu: u16) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: buf is valid for writes for buf.len() bytes and fd is a live TUN
+    // descriptor owned by the AsyncFd registration.
+    let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if read < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(read as usize)
+    }
+}
+
+fn write_fd(fd: std::os::fd::RawFd, buf: &[u8]) -> io::Result<usize> {
+    // SAFETY: buf is valid for reads for buf.len() bytes and fd is a live TUN
+    // descriptor owned by the AsyncFd registration.
+    let written = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+    if written < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(written as usize)
+    }
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: fcntl only reads and updates flags for the live TUN descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fd remains live for the duration of this call; O_NONBLOCK does not
+    // alter ownership or close-on-exec state.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn duplicate_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
+    // SAFETY: dup returns a new descriptor on success and -1 on failure.
+    let duplicated = unsafe { libc::dup(fd) };
+    if duplicated < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(duplicated)
+    }
 }
 
 fn classify_create_error(stderr: &str, name: &str) -> String {

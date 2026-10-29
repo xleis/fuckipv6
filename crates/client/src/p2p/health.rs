@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 const BANDWIDTH_WINDOW: Duration = Duration::from_secs(30);
+const BANDWIDTH_BUCKET: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct ConnectionHealthSnapshot {
@@ -33,6 +34,7 @@ pub(crate) struct PeerHealth {
     window_size: usize,
     probes: VecDeque<ProbeSample>,
     traffic_samples: VecDeque<TrafficSample>,
+    traffic_bytes: u64,
     probes_sent: u64,
     probes_acked: u64,
     rtt_us: Option<u64>,
@@ -51,7 +53,7 @@ struct ProbeSample {
 #[derive(Debug, Clone, Copy)]
 struct TrafficSample {
     timestamp: Instant,
-    bytes: usize,
+    bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +70,7 @@ impl PeerHealth {
             window_size: window_size.max(1),
             probes: VecDeque::with_capacity(window_size.max(1)),
             traffic_samples: VecDeque::new(),
+            traffic_bytes: 0,
             probes_sent: 0,
             probes_acked: 0,
             rtt_us: None,
@@ -83,14 +86,32 @@ impl PeerHealth {
     }
 
     pub(crate) fn record_payload(&mut self, bytes: usize) {
-        self.record_inbound();
         let now = Instant::now();
-        self.traffic_samples.push_back(TrafficSample {
-            timestamp: now,
-            bytes,
-        });
+        self.record_inbound_at(now);
         self.prune_traffic(now);
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.traffic_bytes = self.traffic_bytes.saturating_add(bytes);
+
+        if let Some(sample) = self.traffic_samples.back_mut() {
+            if now.duration_since(sample.timestamp) < BANDWIDTH_BUCKET {
+                sample.bytes = sample.bytes.saturating_add(bytes);
+            } else {
+                self.traffic_samples.push_back(TrafficSample {
+                    timestamp: now,
+                    bytes,
+                });
+            }
+        } else {
+            self.traffic_samples.push_back(TrafficSample {
+                timestamp: now,
+                bytes,
+            });
+        }
         self.update_bandwidth(now);
+    }
+
+    fn record_inbound_at(&mut self, now: Instant) {
+        self.last_activity = Some(now);
     }
 
     pub(crate) fn record_remote_quality(
@@ -243,7 +264,9 @@ impl PeerHealth {
             .map(|sample| now.duration_since(sample.timestamp) > BANDWIDTH_WINDOW)
             .unwrap_or(false)
         {
-            self.traffic_samples.pop_front();
+            if let Some(sample) = self.traffic_samples.pop_front() {
+                self.traffic_bytes = self.traffic_bytes.saturating_sub(sample.bytes);
+            }
         }
     }
 
@@ -253,15 +276,10 @@ impl PeerHealth {
             return;
         };
 
-        let total_bytes = self
-            .traffic_samples
-            .iter()
-            .map(|sample| sample.bytes as u64)
-            .sum::<u64>();
         let elapsed = now
             .duration_since(first.timestamp)
             .max(Duration::from_secs(1));
-        self.bandwidth_bps = total_bytes.saturating_mul(8) / elapsed.as_secs();
+        self.bandwidth_bps = self.traffic_bytes.saturating_mul(8) / elapsed.as_secs();
     }
 }
 

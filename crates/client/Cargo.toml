@@ -35,6 +35,9 @@ getrandom = { workspace = true }
 
 anyhow = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 # Windows TUN support
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"

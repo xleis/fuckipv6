@@ -224,6 +224,8 @@ fuckipv6/
 | 内存占用 | <100MB | <50MB |
 | CPU占用 | <20% | <5% (空闲) |
 
+2026-10-30 的同机端到端基线尚未达标：单流 TCP 约 `0.055 Gbit/s`，内核 WireGuard 为 `1.479 Gbit/s`；受控 1420 字节 UDP 为 `0.040 Gbit/s`，WireGuard 为 `0.050 Gbit/s`。当前结果是高负载环境中的噪声较大的基线，不是超越 WireGuard 的证明。原始数据、限制和复现命令见 [`benchmarks/data/2026-10-30-dataplane-baseline`](benchmarks/data/2026-10-30-dataplane-baseline/README.md)。
+
 CPU profiling 可使用 `PROFILE_SECONDS=10 ./scripts/profile-cpu.sh` 对协议/relay 基准采样；脚本优先生成 flamegraph，未安装 `cargo-flamegraph` 时降级输出 `target/profiling/*.perf-report.txt`。
 
 ## 🤝 贡献

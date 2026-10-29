@@ -348,12 +348,15 @@ windows-sys = { version = "0.59", features = [
 - [x] 内存池（TUN reader 使用固定容量 buffer pool 复用入站数据包缓冲区）
 - [x] CPU 性能分析（`PROFILE_SECONDS=1 ./scripts/profile-cpu.sh`，生成 `target/profiling/fuckipv6-common-protocol.perf-report.txt`；未安装 `cargo-flamegraph` 时自动降级为 `perf report`）
 - [x] 压力测试（QUIC relay 100 个已注册客户端并发连接）
+- [x] Linux network namespace 端到端对照（`fuckipv6` / 内核 WireGuard / `wireguard-go`，结果见 `benchmarks/data/2026-10-30-dataplane-baseline`）
 
 **性能目标：**
 - P2P 延迟：<10ms (LAN) / <50ms (WAN)
 - 吞吐量：>100 Mbps (单连接)
 - 内存：<50MB (客户端) / <200MB (服务器)
 - CPU：<5% (空闲) / <20% (满载)
+
+2026-10-30 基线显示，当前数据面性能目标尚未达成，UI 不是主要瓶颈；优先处理 TUN/UDP 热路径、全局锁、逐包分配和序列化。
 
 ---
 
@@ -643,7 +646,7 @@ file = "/var/log/fuckipv6.log"
 - [x] 密钥衍生 Blake3 KDF
 - [x] P2P 直连与 Relay 中继全路径端到端加密覆盖
 - [ ] 临时密钥握手、transcript 身份绑定与前向保密
-- [ ] 64 位计数 Nonce、滑动重放窗口与跨会话 AAD
+- [ ] 将 64 位计数 Nonce、滑动重放窗口与跨会话 AAD 接入数据面（独立原语和测试已提交）
 - [ ] 密钥过期/流量上限、重协商和安全擦除
 - [ ] 混合后量子握手与独立安全审计
 

@@ -24,6 +24,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
+- 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。
 - 修正当前加密能力口径：现有 UDP 数据面是静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，尚未实现前向保密、重放窗口和密钥轮换，不能等同于 WireGuard；完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。
 - 明确能力成熟度口径：区分“可直接使用”“基础设施已接入（待产品化）”与“尚未产品化”。
 - 修正桌面入口描述：当前使用系统浏览器应用窗口或默认浏览器打开 WebUI，尚未接入 Tauri 原生桌面。

@@ -28,6 +28,21 @@
 
 ### 快速数据面基线（非发布结论）
 
+#### 端到端对照（2026-10-30）
+
+已提交可复现数据集：`benchmarks/data/2026-10-30-dataplane-baseline/`。3 次 × 10 秒中位数显示：
+
+| 用例 | fuckipv6 | 内核 WireGuard | wireguard-go |
+|---|---:|---:|---:|
+| TCP 1 flow | 0.0551 Gbit/s | 1.4788 Gbit/s | 2.6436 Gbit/s |
+| TCP 8 flows | 0.0497 Gbit/s | 1.4799 Gbit/s | 2.4687 Gbit/s |
+| UDP 1420 controlled | 0.0405 Gbit/s，丢包 15.0% | 0.0500 Gbit/s，丢包 0% | 0.0500 Gbit/s，丢包 0% |
+| UDP 64 controlled | 0.00352 Gbit/s，丢包 27.8% | 0.00500 Gbit/s，丢包 0% | 0.00500 Gbit/s，丢包 0% |
+
+测试机同时运行桌面和编译任务，`load average` 约为 6.5-9.6；指标是噪声较大的基线，不是发布门禁。即使考虑噪声，TCP 和 64 字节小包性能仍存在数量级或显著差距，UI 不是主要瓶颈。
+
+#### Criterion 微基准
+
 2026-10-30 在 AMD Ryzen 7 5800H、Linux 7.2.11-zen1-1-zen、rustc 1.94.1 上执行：
 
 ```bash
@@ -98,7 +113,7 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 
 ### 基线优先级
 
-1. [ ] 先建立当前项目、Linux 内核 WireGuard、`wireguard-go` 的可重复基准。
+1. [x] 先建立当前项目、Linux 内核 WireGuard、`wireguard-go` 的可重复基准（初版，仍需空闲机器和 CPU pinning 复测）。
 2. [ ] 数据面目标：1420 字节吞吐和 64 字节 PPS 均不低于 WireGuard 的 105%，CPU/byte 不高于 WireGuard。
 3. [ ] 混合后量子握手允许一次性成本增加，但重连和 0-RTT 路径不得因此出现可感知退化。
 4. [ ] 连续运行 24 小时验证无内存增长、密钥泄漏或性能衰减。

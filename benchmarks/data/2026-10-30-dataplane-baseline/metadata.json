@@ -1,0 +1,29 @@
+{
+  "coordinator_binary_sha256": "56bab477f83f55b75728ae1998d28ed183107fc1ef19abf49d371bf266bf6494  /home/xlei/project/fuckipv6/target/release/fuckipv6-coordinator",
+  "cpu": "AMD Ryzen 7 5800H with Radeon Graphics",
+  "fuckipv6_binary_sha256": "eb4a1890d4c3bdbfdfc4d8184787eeca8b4f57fab5af3545a9233180f9347d6f  /home/xlei/project/fuckipv6/target/release/fuckipv6",
+  "git_commit": "b49be00f890a46e01653f6155774816e43d98ea7",
+  "git_worktree": "dirty",
+  "implementations": [
+    "fuckipv6",
+    "wireguard-kernel",
+    "wireguard-go"
+  ],
+  "iperf3": "iperf 3.22 (cJSON 1.7.15)\nLinux archlinux 7.2.11-zen1-1-zen #1 ZEN SMP PREEMPT_DYNAMIC Fri, 16 Oct 2026 00:28:42 +0000 x86_64\nOptional features available: CPU affinity setting, IPv6 flow label, SCTP, TCP congestion algorithm setting, sendfile / zerocopy, socket pacing, authentication, bind to device, support IPv4 don't fragment, POSIX threads, GSO/GRO support",
+  "kernel": "7.2.11-zen1-1-zen",
+  "logical_cpus": "16",
+  "machine": "x86_64",
+  "mtu": 1420,
+  "omitted_seconds": 0,
+  "perf_enabled": true,
+  "perf_scope": "system-wide task-clock/cycles/instructions",
+  "runs": 3,
+  "test_duration_seconds": 10,
+  "timestamp_utc": "20261029T192126Z",
+  "udp_1420_controlled_rate": "50M",
+  "udp_64_controlled_rate": "5M",
+  "underlay_network": "10.213.51.0/24",
+  "virtual_network": "fd00::/64",
+  "wg": "wireguard-tools v1.0.20260223 - https://git.zx2c4.com/wireguard-tools/",
+  "wireguard_go": "wireguard-go v0.0.20250522\n\nUserspace WireGuard daemon for linux-amd64.\nInformation available at https://www.wireguard.com.\nCopyright (C) Jason A. Donenfeld <Jason@zx2c4.com>."
+}

@@ -14,10 +14,10 @@ use tokio::time::{sleep, Duration, Instant};
 use super::health::{ConnectionHealthSnapshot, PeerHealth};
 
 const HEALTH_WINDOW_SIZE: usize = 20;
-const PROBE_RESPONSE_GRACE: Duration = Duration::from_secs(3);
+const PROBE_RESPONSE_GRACE: Duration = Duration::from_secs(1);
 const FAST_PROBE_ATTEMPTS: usize = 20;
 const FAST_PROBE_INTERVAL: Duration = Duration::from_millis(500);
-const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 type IncomingPacket = (IpAddr, Vec<u8>);
 type IncomingReceiver = mpsc::UnboundedReceiver<IncomingPacket>;

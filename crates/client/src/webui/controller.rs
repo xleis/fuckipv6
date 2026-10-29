@@ -40,6 +40,8 @@ pub struct UnifiedSnapshotResponse {
     pub traffic: Option<TrafficSnapshot>,
     pub runtime_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_p2p_addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_traffic: Option<RuntimeTrafficDto>,
     pub peers: Vec<PeerSnapshot>,
     pub auth_required: bool,
@@ -88,6 +90,8 @@ pub struct AppUiState {
     #[serde(default)]
     pub runtime_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_p2p_addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_traffic: Option<RuntimeTrafficDto>,
 }
 
@@ -114,6 +118,7 @@ impl AppUiState {
             coordinator_peers: Vec::new(),
             coordinator_blacklist: Vec::new(),
             runtime_available: false,
+            runtime_p2p_addr: None,
             runtime_traffic: None,
         }
     }
@@ -783,6 +788,7 @@ impl AppController {
             online_clients,
             traffic,
             runtime_available: st.runtime_available,
+            runtime_p2p_addr: st.runtime_p2p_addr,
             runtime_traffic: st.runtime_traffic,
             peers,
             auth_required: false,
@@ -1013,6 +1019,7 @@ fn apply_runtime_status(state: &mut AppUiState, status: &StatusSnapshot) {
     }
 
     state.runtime_available = true;
+    state.runtime_p2p_addr = Some(status.p2p_listen_addr.to_string());
     state.runtime_traffic = Some(runtime_traffic_from_status(status));
 
     let default_network = status
@@ -1058,6 +1065,7 @@ fn apply_runtime_status(state: &mut AppUiState, status: &StatusSnapshot) {
 
 fn clear_runtime_status(state: &mut AppUiState) {
     state.runtime_available = false;
+    state.runtime_p2p_addr = None;
     state.runtime_traffic = None;
     state.peers.clear();
 }
@@ -1162,6 +1170,7 @@ mod tests {
         apply_runtime_status(&mut state, &active_status());
 
         assert!(state.runtime_available);
+        assert_eq!(state.runtime_p2p_addr.as_deref(), Some("0.0.0.0:40000"));
         assert_eq!(state.status, "online");
         assert_eq!(state.virtual_ipv6.as_deref(), Some("fd00::10:1"));
         assert_eq!(state.virtual_ipv4.as_deref(), Some("10.8.0.1"));
@@ -1209,6 +1218,7 @@ mod tests {
 
         assert!(!state.runtime_available);
         assert_eq!(state.status, "offline");
+        assert!(state.runtime_p2p_addr.is_none());
         assert!(state.runtime_traffic.is_none());
         assert!(state.peers.is_empty());
     }

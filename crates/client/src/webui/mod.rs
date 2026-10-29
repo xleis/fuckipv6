@@ -154,6 +154,7 @@ async fn handle_status(State(ctrl): State<Arc<AppController>>) -> Json<serde_jso
         "online_clients": online_count,
         "traffic": state.coordinator_traffic,
         "runtime_available": state.runtime_available,
+        "runtime_p2p_addr": state.runtime_p2p_addr,
         "runtime_traffic": state.runtime_traffic,
         "auth_required": false,
         "status": state.status,
@@ -894,25 +895,25 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2.2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1.5v3M15 1.5v3M9 19.5v3M15 19.5v3M19.5 9h3M19.5 15h3M1.5 9h3M1.5 15h3"/></svg>
                   <span>本地虚拟网卡与引擎状态 · TUN 适配器</span>
                 </span>
-                <span class="section-tag" style="color:var(--green);">运行中</span>
+                <span class="section-tag" id="runtime-card-state" style="color:var(--text-muted);">未连接</span>
               </div>
               <div class="card-body">
                 <div class="form-grid cols-4">
                   <div class="machine-prop">
                     <span class="machine-prop-label">TUN 设备名</span>
-                    <span class="machine-prop-val">fuckipv6</span>
+                      <span class="machine-prop-val" id="runtime-tun-name">--</span>
                   </div>
                   <div class="machine-prop">
-                    <span class="machine-prop-label">链路 MTU</span>
-                    <span class="machine-prop-val">1420 字节</span>
+                      <span class="machine-prop-label">P2P 监听地址</span>
+                      <span class="machine-prop-val" id="runtime-p2p-addr">--</span>
                   </div>
                   <div class="machine-prop">
-                    <span class="machine-prop-label">P2P 直连端口</span>
-                    <span class="machine-prop-val">51820 (UDP)</span>
+                      <span class="machine-prop-label">运行时 uptime</span>
+                      <span class="machine-prop-val" id="runtime-uptime">--</span>
                   </div>
                   <div class="machine-prop">
-                    <span class="machine-prop-label">内核运行时</span>
-                    <span class="machine-prop-val" style="color:var(--green);">Linux x86_64 Musl</span>
+                      <span class="machine-prop-label">数据来源</span>
+                      <span class="machine-prop-val" id="runtime-source">无活动运行时</span>
                   </div>
                 </div>
               </div>
@@ -2393,6 +2394,7 @@ tun_name = "fuckipv6"</div>
       renderTopology(peers, statusData.networks); // 兼容 renderTopology(peers)
       renderPeersTable(peers);
       renderMachineBar(statusData);
+      renderRuntimeCard(statusData);
 
       if (statusData.hosting_ticket) {
         currentTicket = statusData.hosting_ticket;
@@ -2404,7 +2406,7 @@ tun_name = "fuckipv6"</div>
     }
 
     function renderMachineBar(statusData) {
-      currentClientStatus = statusData.status || 'offline';
+      currentClientStatus = statusData.status || statusData.client_status || 'offline';
       const isOnline = currentClientStatus === 'online';
 
       document.getElementById('bar-v6-val').textContent = statusData.virtual_ipv6 || '未分配';
@@ -2440,6 +2442,19 @@ tun_name = "fuckipv6"</div>
       exitSel.innerHTML = opts.join('');
 
       document.getElementById('is-exit-node-check').checked = !!statusData.is_exit_node;
+    }
+
+    function renderRuntimeCard(statusData) {
+      const available = !!statusData.runtime_available;
+      const network = (statusData.networks || [])[0] || {};
+      const traffic = statusData.runtime_traffic || {};
+      const stateTag = document.getElementById('runtime-card-state');
+      stateTag.textContent = available ? '实时运行中' : '未连接';
+      stateTag.style.color = available ? 'var(--green)' : 'var(--text-muted)';
+      document.getElementById('runtime-tun-name').textContent = available ? (network.tun_name || '--') : '--';
+      document.getElementById('runtime-p2p-addr').textContent = available ? (statusData.runtime_p2p_addr || '--') : '--';
+      document.getElementById('runtime-uptime').textContent = available && traffic.uptime_secs != null ? formatDuration(traffic.uptime_secs) : '--';
+      document.getElementById('runtime-source').textContent = available ? 'IPC 实时快照' : '无活动运行时';
     }
 
     function selectRoutingMode(mode, doNotice = true) {
@@ -3060,5 +3075,15 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("!state.hosting_ticket"));
         assert!(!UNIFIED_MASTER_HTML.contains("已下发连接指令"));
         assert!(!UNIFIED_MASTER_HTML.contains("await fetch('/api/host'"));
+    }
+
+    #[test]
+    fn test_runtime_card_uses_ipc_snapshot_instead_of_static_platform_values() {
+        assert!(UNIFIED_MASTER_HTML.contains("renderRuntimeCard"));
+        assert!(UNIFIED_MASTER_HTML.contains("runtime-p2p-addr"));
+        assert!(UNIFIED_MASTER_HTML.contains("runtime-card-state"));
+        assert!(UNIFIED_MASTER_HTML.contains("IPC 实时快照"));
+        assert!(!UNIFIED_MASTER_HTML.contains("1420 字节"));
+        assert!(!UNIFIED_MASTER_HTML.contains("Linux x86_64 Musl"));
     }
 }

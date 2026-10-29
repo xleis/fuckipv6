@@ -48,6 +48,16 @@ struct RuleSpec {
     preference: u32,
 }
 
+#[derive(Debug, Clone)]
+struct RoutePlan {
+    mode: RoutingMode,
+    tun_name: String,
+    assigned_ips: VirtualIps,
+    virtual_cidrs: Vec<IpNet>,
+    direct_cidrs: Vec<IpNet>,
+    control_endpoints: Vec<SocketAddr>,
+}
+
 #[derive(Debug)]
 pub struct LinuxRouteManager {
     tun_name: String,
@@ -61,6 +71,7 @@ pub struct LinuxRouteManager {
     peer_bypasses: HashMap<String, Vec<IpAddr>>,
     next_v4_preference: u32,
     next_v6_preference: u32,
+    plan: Option<RoutePlan>,
 }
 
 impl LinuxRouteManager {
@@ -78,6 +89,14 @@ impl LinuxRouteManager {
         let tun_name = tun_name.into();
         let table_id = table_id_for_interface(&tun_name);
         let active_families = active_families(assigned_ips);
+        let plan = RoutePlan {
+            mode,
+            tun_name: tun_name.clone(),
+            assigned_ips: assigned_ips.clone(),
+            virtual_cidrs: virtual_cidrs.to_vec(),
+            direct_cidrs: direct_cidrs.to_vec(),
+            control_endpoints: control_endpoints.to_vec(),
+        };
         let mut manager = Self {
             tun_name,
             table_id,
@@ -90,9 +109,16 @@ impl LinuxRouteManager {
             peer_bypasses: HashMap::new(),
             next_v4_preference: DYNAMIC_PREFERENCE_START,
             next_v6_preference: DYNAMIC_PREFERENCE_START,
+            plan: Some(plan),
         };
 
-        if mode == RoutingMode::MeshOnly || manager.active_families.is_empty() {
+        if mode == RoutingMode::MeshOnly {
+            // MeshOnly must never own dynamic peer routes. Keeping the assigned
+            // families here made later peer updates install stale bypass rules.
+            manager.active_families.clear();
+            return Ok(manager);
+        }
+        if manager.active_families.is_empty() {
             return Ok(manager);
         }
 
@@ -183,8 +209,8 @@ impl LinuxRouteManager {
     /// Replace the complete policy-routing plan for a live mode switch.
     ///
     /// Existing peer bypasses are restored after the new plan is installed. If
-    /// any step fails, the new plan is rolled back and the manager remains
-    /// inactive rather than claiming the requested mode is active.
+    /// any step fails, the new plan is rolled back and the previous plan is
+    /// reinstalled before an error is returned.
     pub async fn reconfigure(
         &mut self,
         mode: RoutingMode,
@@ -194,37 +220,80 @@ impl LinuxRouteManager {
         direct_cidrs: &[IpNet],
         control_endpoints: &[SocketAddr],
     ) -> Result<()> {
+        let previous_plan = self
+            .plan
+            .clone()
+            .context("当前 Linux 路由管理器缺少原始策略，无法安全热切换")?;
         let preserved_peers = self
             .peer_bypasses
             .iter()
             .map(|(client_id, addresses)| (client_id.clone(), addresses.clone()))
             .collect::<Vec<_>>();
 
-        self.rollback().await;
-        let mut replacement = Self::install(
+        if let Err(error) = self.rollback_checked().await {
+            return Err(error).context("热切换前无法完整移除旧策略路由，未切换新策略");
+        }
+
+        let new_plan = RoutePlan {
             mode,
-            tun_name,
-            assigned_ips,
-            virtual_cidrs,
-            direct_cidrs,
-            control_endpoints,
+            tun_name: tun_name.into(),
+            assigned_ips: assigned_ips.clone(),
+            virtual_cidrs: virtual_cidrs.to_vec(),
+            direct_cidrs: direct_cidrs.to_vec(),
+            control_endpoints: control_endpoints.to_vec(),
+        };
+
+        match Self::install_plan_with_peers(new_plan, &preserved_peers).await {
+            Ok(replacement) => {
+                *self = replacement;
+                Ok(())
+            }
+            Err(update_error) => {
+                match Self::install_plan_with_peers(previous_plan, &preserved_peers).await {
+                    Ok(restored) => {
+                        *self = restored;
+                        Err(update_error).context("热切换策略路由失败，已恢复原策略路由")
+                    }
+                    Err(restore_error) => Err(anyhow::anyhow!(
+                        "热切换策略路由失败: {update_error:#}; 恢复原策略路由也失败: {restore_error:#}"
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn install_plan_with_peers(
+        plan: RoutePlan,
+        peer_bypasses: &[(String, Vec<IpAddr>)],
+    ) -> Result<Self> {
+        let mut manager = Self::install(
+            plan.mode,
+            plan.tun_name.clone(),
+            &plan.assigned_ips,
+            &plan.virtual_cidrs,
+            &plan.direct_cidrs,
+            &plan.control_endpoints,
         )
         .await?;
 
-        for (client_id, addresses) in preserved_peers {
-            if let Err(error) = replacement
-                .add_peer_bypass_addresses(&client_id, &addresses)
+        for (client_id, addresses) in peer_bypasses {
+            if let Err(error) = manager
+                .add_peer_bypass_addresses(client_id, addresses)
                 .await
             {
-                replacement.rollback().await;
-                return Err(error).with_context(|| {
-                    format!("热切换路由后恢复节点 {client_id} 的物理网络旁路失败")
-                });
+                let rollback_error = manager.rollback_checked().await.err();
+                return match rollback_error {
+                    Some(rollback_error) => Err(anyhow::anyhow!(
+                        "恢复节点 {client_id} 的物理网络旁路失败: {error:#}; 回滚新策略也失败: {rollback_error:#}"
+                    )),
+                    None => Err(error).with_context(|| {
+                        format!("恢复节点 {client_id} 的物理网络旁路失败，新策略已回滚")
+                    }),
+                };
             }
         }
 
-        *self = replacement;
-        Ok(())
+        Ok(manager)
     }
 
     /// Ensure all currently reachable peer endpoints bypass the tunnel. If any
@@ -343,25 +412,50 @@ impl LinuxRouteManager {
     /// Remove only routes and rules owned by this manager. Safe to call more
     /// than once.
     pub async fn rollback(&mut self) {
+        if let Err(error) = self.rollback_checked().await {
+            tracing::warn!("策略路由回滚未完全成功: {error:#}");
+        }
+    }
+
+    async fn rollback_checked(&mut self) -> Result<()> {
         let rules = std::mem::take(&mut self.installed_rules);
+        let mut failed_rules = Vec::new();
+        let mut first_error = None;
         for rule in rules.iter().rev() {
             if let Err(error) = run_ip_rule("del", rule).await {
                 tracing::warn!("回滚策略规则失败 (pref={}): {error:#}", rule.preference);
+                failed_rules.push(rule.clone());
+                first_error.get_or_insert(error);
             }
         }
+        failed_rules.reverse();
+        self.installed_rules = failed_rules;
 
         let table_routes = std::mem::take(&mut self.installed_table_routes);
+        let mut failed_table_routes = Vec::new();
         for family in table_routes.into_iter().rev() {
             if let Err(error) = self.remove_table_route(family).await {
                 tracing::warn!("回滚代理路由表失败: {error:#}");
+                failed_table_routes.push(family);
+                first_error.get_or_insert(error);
             }
         }
+        failed_table_routes.reverse();
+        self.installed_table_routes = failed_table_routes;
 
         self.dynamic_rules.clear();
         self.dynamic_references.clear();
         self.peer_bypasses.clear();
         self.active_families.clear();
         self.static_bypasses.clear();
+
+        match first_error {
+            Some(error) => Err(error).context("部分策略路由未能回滚，将在对象销毁时重试"),
+            None => {
+                self.plan = None;
+                Ok(())
+            }
+        }
     }
 
     fn family_active(&self, family: Family) -> bool {
@@ -750,6 +844,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn mesh_only_manager_does_not_claim_or_install_policy_routes() {
+        let mut manager = LinuxRouteManager::install(
+            RoutingMode::MeshOnly,
+            "fuckipv6",
+            &dual_stack_ips(),
+            &[],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert!(!manager.is_active());
+        assert!(manager.installed_rules.is_empty());
+        assert!(manager.installed_table_routes.is_empty());
+        manager
+            .add_peer_bypasses(
+                "peer",
+                &["203.0.113.10:7000".parse().expect("valid endpoint")],
+            )
+            .await
+            .expect("MeshOnly peer update should be a no-op");
+        assert!(manager.peer_bypasses.is_empty());
+        assert_eq!(
+            manager.plan.as_ref().map(|plan| plan.mode),
+            Some(RoutingMode::MeshOnly)
+        );
+    }
+
     #[test]
     fn control_endpoint_becomes_host_route() {
         let bypasses = build_bypass_cidrs(
@@ -777,6 +901,7 @@ mod tests {
             peer_bypasses: HashMap::new(),
             next_v4_preference: DYNAMIC_PREFERENCE_START,
             next_v6_preference: DYNAMIC_PREFERENCE_START,
+            plan: None,
         };
         let addresses = manager.dynamic_addresses(&[
             "185.217.110.15:6667".parse().unwrap(),
@@ -807,6 +932,7 @@ mod tests {
             peer_bypasses: HashMap::new(),
             next_v4_preference: DYNAMIC_PREFERENCE_START,
             next_v6_preference: DYNAMIC_PREFERENCE_START,
+            plan: None,
         };
         assert_eq!(manager.proxy_lookup_table(), 12345);
         assert_eq!(MAIN_TABLE_ID, 254);

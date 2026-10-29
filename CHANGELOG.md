@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- 增加 `common::Identity` 到 Secure Session Ed25519 身份的受控适配：复用同一长期 Ed25519 种子，但不向调用方暴露种子或私钥字节，并用签名互验测试确认注册公钥与 v2 握手身份一致。该适配是客户端 v2 数据面接线的身份基础，不代表数据面已经切换。
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式，尚不代表客户端数据面已经切换。
 
 ### Changed

@@ -101,6 +101,15 @@ impl Identity {
         self.verifying_key.as_bytes().to_vec()
     }
 
+    /// 构造与当前长期身份等价的 Secure Session Ed25519 身份。
+    ///
+    /// 该方法只返回由 Secure Session 类型封装的身份句柄，不暴露种子或
+    /// 签名私钥字节。两条路径使用相同的 Ed25519 种子，因此客户端注册、
+    /// 旧版验签和 v2 握手看到的是同一个长期公钥。
+    pub fn secure_session_identity(&self) -> fuckipv6_secure_session::handshake::Ed25519Identity {
+        fuckipv6_secure_session::handshake::Ed25519Identity::from_seed(self.signing_key.to_bytes())
+    }
+
     /// 签名消息
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)
@@ -240,6 +249,24 @@ mod tests {
             &identity.public_key(),
             message,
             &signature.to_bytes()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn secure_session_identity_uses_the_same_long_term_key() -> anyhow::Result<()> {
+        let identity = Identity::generate()?;
+        let secure_identity = identity.secure_session_identity();
+        let message = b"same long-term identity";
+
+        assert_eq!(
+            secure_identity.verifying_key().as_bytes(),
+            &identity.public_key_bytes()
+        );
+        assert!(Identity::verify(
+            identity.public_key().as_slice(),
+            message,
+            &secure_identity.sign(message).to_bytes(),
         ));
         Ok(())
     }

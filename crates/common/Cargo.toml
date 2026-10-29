@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+fuckipv6-secure-session = { version = "0.3.0", path = "../secure-session" }
 serde = { workspace = true }
 postcard = { workspace = true }
 ed25519-dalek = { workspace = true }

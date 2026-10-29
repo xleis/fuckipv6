@@ -134,6 +134,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     pub(crate) tun_buffer_tx: mpsc::UnboundedSender<Vec<u8>>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
+    pub(crate) config_path: String,
+    pub(crate) config: ClientConfig,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     pub(crate) ipc_task: JoinHandle<()>,
     pub(crate) config_reload_task: JoinHandle<()>,
@@ -329,6 +331,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         tun_packet_rx: tasks.tun_packet_rx,
         tun_buffer_tx: tasks.tun_buffer_tx,
         heartbeat_interval,
+        config_path: config_path.to_string(),
+        config,
         control_rx,
         ipc_task: tasks.ipc_task,
         config_reload_task: tasks.config_reload_task,
@@ -762,6 +766,16 @@ async fn handle_runtime_command(runtime: &mut ClientRuntime, command: ipc::Runti
             let _ = reply.send(result);
             false
         }
+        ipc::RuntimeCommand::UpdateRouting {
+            mode,
+            exit_node,
+            is_exit_node,
+            reply,
+        } => {
+            let result = apply_runtime_routing(runtime, &mode, exit_node, is_exit_node).await;
+            let _ = reply.send(result);
+            false
+        }
         ipc::RuntimeCommand::Disconnect { reply } => {
             tracing::info!("收到本地控制接口的断开请求");
             shutdown_runtime(runtime).await;
@@ -769,6 +783,117 @@ async fn handle_runtime_command(runtime: &mut ClientRuntime, command: ipc::Runti
             true
         }
     }
+}
+
+fn parse_runtime_routing_mode(mode: &str) -> Result<fuckipv6_common::RoutingMode> {
+    match mode.to_lowercase().as_str() {
+        "meshonly" | "mesh-only" | "mesh_only" => Ok(fuckipv6_common::RoutingMode::MeshOnly),
+        "bypassmainland" | "bypass-mainland" | "bypass_mainland" => {
+            Ok(fuckipv6_common::RoutingMode::BypassMainland)
+        }
+        "globalproxy" | "global-proxy" | "global_proxy" => {
+            Ok(fuckipv6_common::RoutingMode::GlobalProxy)
+        }
+        other => {
+            anyhow::bail!("未知路由模式: {other} (可用值: MeshOnly, BypassMainland, GlobalProxy)")
+        }
+    }
+}
+
+async fn apply_runtime_routing(
+    runtime: &mut ClientRuntime,
+    mode: &str,
+    exit_node: Option<String>,
+    is_exit_node: bool,
+) -> std::result::Result<ipc::RoutingUpdateResult, String> {
+    let parsed_mode = parse_runtime_routing_mode(mode).map_err(|error| format!("{error:#}"))?;
+
+    #[cfg(target_os = "linux")]
+    apply_linux_routing_mode(runtime, parsed_mode)
+        .await
+        .map_err(|error| format!("Linux 策略路由热更新失败: {error:#}"))?;
+
+    runtime.route_engine.set_routing_mode(parsed_mode);
+    runtime.exit_node_manager.set_enabled(is_exit_node);
+    runtime.configured_exit_node = exit_node.clone();
+    runtime.config.routing.mode = parsed_mode;
+    runtime.config.routing.exit_node = exit_node.clone();
+    runtime.config.exit_node.enabled = is_exit_node;
+    runtime
+        .config
+        .save_to_file(&runtime.config_path)
+        .map_err(|error| format!("运行态已更新，但持久化配置失败: {error:#}"))?;
+
+    let canonical_mode = format!("{parsed_mode:?}");
+    tracing::info!(
+        "路由分流已热更新: mode={}, exit_node={:?}, is_exit_node={}",
+        canonical_mode,
+        exit_node,
+        is_exit_node
+    );
+    Ok(ipc::RoutingUpdateResult {
+        mode: canonical_mode,
+        exit_node,
+        is_exit_node,
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn apply_linux_routing_mode(
+    runtime: &mut ClientRuntime,
+    mode: fuckipv6_common::RoutingMode,
+) -> Result<()> {
+    use fuckipv6_common::RoutingMode;
+
+    let mut virtual_cidrs = Vec::new();
+    if let Some(network) = runtime
+        .config
+        .network
+        .virtual_network
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+    {
+        virtual_cidrs.push(network);
+    }
+    if let Ok(network) = "10.8.0.0/24".parse() {
+        virtual_cidrs.push(network);
+    }
+    let direct_cidrs: Vec<_> = runtime
+        .config
+        .routing
+        .direct_cidrs
+        .iter()
+        .filter_map(|cidr| cidr.parse().ok())
+        .collect();
+
+    let mut control_endpoints = Vec::new();
+    if mode != RoutingMode::MeshOnly {
+        control_endpoints
+            .extend(resolve_websocket_endpoints(&runtime.config.coordinator_url).await?);
+    }
+    control_endpoints.extend(
+        runtime
+            .signaling
+            .relay_endpoints()
+            .await
+            .into_iter()
+            .map(|endpoint| endpoint.addr),
+    );
+    for peer in runtime.signaling.known_peers().await {
+        control_endpoints.extend(peer.endpoints);
+    }
+
+    runtime
+        .route_manager
+        .reconfigure(
+            mode,
+            runtime.tun.name(),
+            &runtime.assigned_ips,
+            &virtual_cidrs,
+            &direct_cidrs,
+            &control_endpoints,
+        )
+        .await
 }
 
 async fn handle_tun_reader_packet(runtime: &ClientRuntime, packet: &[u8]) {

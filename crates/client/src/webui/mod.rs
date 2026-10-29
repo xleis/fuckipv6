@@ -2397,12 +2397,17 @@ tun_name = "fuckipv6"</div>
       const is_exit_node = document.getElementById('is-exit-node-check').checked;
 
       try {
-        await fetch('/api/routing', {
+        const response = await fetch('/api/routing', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode, exit_node, is_exit_node })
         });
-        showToast(`路由分流策略已生效: ${mode}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+        }
+        const updated = await response.json();
+        currentSelectedRoutingMode = updated.routing_mode || mode;
+        showToast(`路由分流策略已生效: ${currentSelectedRoutingMode}`);
         refresh();
       } catch (e) {
         showToast(`应用分流失败: ${e.message}`);

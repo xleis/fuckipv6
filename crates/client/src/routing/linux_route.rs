@@ -180,6 +180,53 @@ impl LinuxRouteManager {
         self.table_id
     }
 
+    /// Replace the complete policy-routing plan for a live mode switch.
+    ///
+    /// Existing peer bypasses are restored after the new plan is installed. If
+    /// any step fails, the new plan is rolled back and the manager remains
+    /// inactive rather than claiming the requested mode is active.
+    pub async fn reconfigure(
+        &mut self,
+        mode: RoutingMode,
+        tun_name: impl Into<String>,
+        assigned_ips: &VirtualIps,
+        virtual_cidrs: &[IpNet],
+        direct_cidrs: &[IpNet],
+        control_endpoints: &[SocketAddr],
+    ) -> Result<()> {
+        let preserved_peers = self
+            .peer_bypasses
+            .iter()
+            .map(|(client_id, addresses)| (client_id.clone(), addresses.clone()))
+            .collect::<Vec<_>>();
+
+        self.rollback().await;
+        let mut replacement = Self::install(
+            mode,
+            tun_name,
+            assigned_ips,
+            virtual_cidrs,
+            direct_cidrs,
+            control_endpoints,
+        )
+        .await?;
+
+        for (client_id, addresses) in preserved_peers {
+            if let Err(error) = replacement
+                .add_peer_bypass_addresses(&client_id, &addresses)
+                .await
+            {
+                replacement.rollback().await;
+                return Err(error).with_context(|| {
+                    format!("热切换路由后恢复节点 {client_id} 的物理网络旁路失败")
+                });
+            }
+        }
+
+        *self = replacement;
+        Ok(())
+    }
+
     /// Ensure all currently reachable peer endpoints bypass the tunnel. If any
     /// rule cannot be installed, the complete peer update is rolled back.
     pub async fn add_peer_bypasses(
@@ -191,11 +238,26 @@ impl LinuxRouteManager {
             return Ok(());
         }
 
+        let addresses = self.dynamic_addresses(endpoints);
+        self.add_peer_bypass_addresses(client_id, &addresses).await
+    }
+
+    async fn add_peer_bypass_addresses(
+        &mut self,
+        client_id: &str,
+        addresses: &[IpAddr],
+    ) -> Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+
         if self.peer_bypasses.contains_key(client_id) {
             self.remove_peer_bypasses(client_id).await?;
         }
 
-        let addresses = self.dynamic_addresses(endpoints);
+        let mut addresses = addresses.to_vec();
+        addresses.sort_unstable();
+        addresses.dedup();
         let existing_addresses: HashSet<IpAddr> = addresses
             .iter()
             .copied()

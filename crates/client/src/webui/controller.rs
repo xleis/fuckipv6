@@ -603,29 +603,35 @@ impl AppController {
         }
     }
 
-    /// 动态热更新路由分流与出口节点配置
+    /// 动态热更新路由分流与出口节点配置，并等待运行时确认。
     pub async fn update_routing(
         &self,
         mode: String,
         exit_node: Option<String>,
         is_exit_node: bool,
     ) -> Result<()> {
-        let _parsed_mode = match mode.to_lowercase().as_str() {
-            "bypassmainland" | "bypass-mainland" | "bypass_mainland" => RoutingMode::BypassMainland,
-            "globalproxy" | "global-proxy" | "global_proxy" => RoutingMode::GlobalProxy,
-            _ => RoutingMode::MeshOnly,
+        let result = match crate::ipc::request(crate::ipc::IpcRequest::UpdateRouting {
+            mode,
+            exit_node,
+            is_exit_node,
+        })
+        .await?
+        {
+            crate::ipc::IpcResponse::RoutingUpdated(result) => result,
+            crate::ipc::IpcResponse::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("路由更新返回了意外响应: {other:?}"),
         };
 
         {
             let mut st = self.state.write().await;
-            st.routing_mode = mode.clone();
-            st.exit_node = exit_node.clone();
-            st.is_exit_node = is_exit_node;
+            st.routing_mode = result.mode.clone();
+            st.exit_node = result.exit_node.clone();
+            st.is_exit_node = result.is_exit_node;
         }
 
         self.log(format!(
-            "动态应用分流规则: 策略={}, 出口节点={:?}, 声明为出口网关={}",
-            mode, exit_node, is_exit_node
+            "已应用运行时分流规则: 策略={}, 出口节点={:?}, 声明为出口网关={}",
+            result.mode, result.exit_node, result.is_exit_node
         ))
         .await;
 

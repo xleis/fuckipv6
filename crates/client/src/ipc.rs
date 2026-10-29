@@ -17,9 +17,21 @@ use crate::stats::StatsCollector;
 pub enum IpcRequest {
     Status,
     Peers,
-    Logs { lines: usize },
-    StopNetwork { name: Option<String> },
-    ProbePeer { target: String, timeout_ms: u64 },
+    Logs {
+        lines: usize,
+    },
+    StopNetwork {
+        name: Option<String>,
+    },
+    ProbePeer {
+        target: String,
+        timeout_ms: u64,
+    },
+    UpdateRouting {
+        mode: String,
+        exit_node: Option<String>,
+        is_exit_node: bool,
+    },
     Disconnect,
 }
 
@@ -32,8 +44,16 @@ pub enum IpcResponse {
     Logs(Vec<String>),
     MultiStatus(Vec<NetworkSessionSnapshot>),
     PeerProbe(PeerProbeOutcome),
+    RoutingUpdated(RoutingUpdateResult),
     Success { message: String },
     Error { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingUpdateResult {
+    pub mode: String,
+    pub exit_node: Option<String>,
+    pub is_exit_node: bool,
 }
 
 /// Commands delivered from the local control interface to the live runtime.
@@ -42,6 +62,12 @@ pub enum RuntimeCommand {
         target: String,
         timeout_ms: u64,
         reply: oneshot::Sender<Result<PeerProbeOutcome, String>>,
+    },
+    UpdateRouting {
+        mode: String,
+        exit_node: Option<String>,
+        is_exit_node: bool,
+        reply: oneshot::Sender<Result<RoutingUpdateResult, String>>,
     },
     Disconnect {
         reply: oneshot::Sender<Result<(), String>>,
@@ -354,6 +380,11 @@ async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) ->
         Ok(IpcRequest::ProbePeer { target, timeout_ms }) => {
             probe_runtime_peer(&registry, target, timeout_ms).await
         }
+        Ok(IpcRequest::UpdateRouting {
+            mode,
+            exit_node,
+            is_exit_node,
+        }) => update_runtime_routing(&registry, mode, exit_node, is_exit_node).await,
         Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
         Ok(IpcRequest::StopNetwork { name }) => {
             let signaled = registry.send_stop(name.clone()).await;
@@ -412,6 +443,36 @@ async fn probe_runtime_peer(
         Ok(Ok(Err(message))) => IpcResponse::Error { message },
         Ok(Err(_)) | Err(_) => IpcResponse::Error {
             message: "节点探测请求未收到运行时响应".to_string(),
+        },
+    }
+}
+
+async fn update_runtime_routing(
+    registry: &MultiNetworkRegistry,
+    mode: String,
+    exit_node: Option<String>,
+    is_exit_node: bool,
+) -> IpcResponse {
+    let (reply, response) = oneshot::channel();
+    if !registry
+        .send_control(RuntimeCommand::UpdateRouting {
+            mode,
+            exit_node,
+            is_exit_node,
+            reply,
+        })
+        .await
+    {
+        return IpcResponse::Error {
+            message: "运行时不支持路由热更新或控制通道已关闭".to_string(),
+        };
+    }
+
+    match tokio::time::timeout(Duration::from_secs(20), response).await {
+        Ok(Ok(Ok(result))) => IpcResponse::RoutingUpdated(result),
+        Ok(Ok(Err(message))) => IpcResponse::Error { message },
+        Ok(Err(_)) | Err(_) => IpcResponse::Error {
+            message: "路由热更新未收到运行时响应".to_string(),
         },
     }
 }

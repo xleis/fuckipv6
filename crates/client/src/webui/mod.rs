@@ -1093,7 +1093,13 @@ tun_name = "fuckipv6"</div>
       const box = document.getElementById('toast-box');
       const toast = document.createElement('div');
       toast.className = 'toast';
-      toast.innerHTML = `<span style="color:var(--accent);font-size:10px;">•</span><span>${message}</span>`;
+      const marker = document.createElement('span');
+      marker.style.color = 'var(--accent)';
+      marker.style.fontSize = '10px';
+      marker.textContent = '•';
+      const text = document.createElement('span');
+      text.textContent = String(message);
+      toast.append(marker, text);
       box.appendChild(toast);
       setTimeout(() => {
         toast.style.opacity = '0';
@@ -1101,6 +1107,23 @@ tun_name = "fuckipv6"</div>
         toast.style.transition = 'all 0.2s';
         setTimeout(() => toast.remove(), 200);
       }, 2400);
+    }
+
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, options);
+      const contentType = response.headers.get('content-type') || '';
+      let payload = null;
+      if (contentType.includes('application/json')) {
+        payload = await response.json().catch(() => null);
+      } else {
+        const text = await response.text().catch(() => '');
+        payload = text ? { error: text } : null;
+      }
+      if (!response.ok) {
+        const detail = payload && (payload.error || payload.message);
+        throw new Error(detail || `HTTP ${response.status} ${response.statusText}`.trim());
+      }
+      return payload;
     }
 
     const TAB_META = {
@@ -2309,15 +2332,11 @@ tun_name = "fuckipv6"</div>
       const targetLabel = peer ? (peer.virtual_ip || shortId(clientId)) : shortId(clientId);
       showToast(`正在向对等节点 ${targetLabel} 发送真实 P2P 探针...`);
       try {
-        const response = await fetch('/api/peers/probe', {
+        const result = await requestJson('/api/peers/probe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ target: clientId, timeout_ms: 1500 })
         });
-        const result = await response.json();
-        if (!response.ok) {
-          throw new Error(result.error || `HTTP ${response.status}`);
-        }
         if (result.timed_out) {
           showToast(`节点 ${shortId(clientId)} 探针超时，未收到 P2P Pong`);
           return;
@@ -2342,11 +2361,11 @@ tun_name = "fuckipv6"</div>
     async function banClientPrompt(clientId) {
       if (!confirm(`确定要将客户端 ${shortId(clientId)} 加入黑名单并踢出吗？`)) return;
       try {
-        const res = await fetch('/api/blacklist/ban', {
+        const res = await requestJson('/api/blacklist/ban', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ client_id: clientId })
-        }).then(r => r.json());
+        });
         if (res.success) {
           showToast(`客户端 ${shortId(clientId)} 已被拉黑并强制下线`);
           refresh(true);
@@ -2448,15 +2467,11 @@ tun_name = "fuckipv6"</div>
       const is_exit_node = document.getElementById('is-exit-node-check').checked;
 
       try {
-        const response = await fetch('/api/routing', {
+        const updated = await requestJson('/api/routing', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode, exit_node, is_exit_node })
         });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
-        }
-        const updated = await response.json();
         currentSelectedRoutingMode = updated.routing_mode || mode;
         showToast(`路由分流策略已生效: ${currentSelectedRoutingMode}`);
         refresh();
@@ -2483,12 +2498,15 @@ tun_name = "fuckipv6"</div>
       }
       showToast('正在建立对等网络连接...');
       try {
-        await fetch('/api/connect', {
+        const state = await requestJson('/api/connect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ target, routing_mode: currentSelectedRoutingMode })
         });
-        showToast('已下发连接指令');
+        if (!state || state.status !== 'connecting') {
+          throw new Error('后端未确认连接已启动');
+        }
+        showToast('连接已启动，等待运行时分配地址');
         setTimeout(refresh, 800);
       } catch (e) {
         showToast(`连接失败: ${e.message}`);
@@ -2498,7 +2516,10 @@ tun_name = "fuckipv6"</div>
     async function clientDisconnect() {
       showToast('正在断开网络连接...');
       try {
-        await fetch('/api/disconnect', { method: 'POST' });
+        const state = await requestJson('/api/disconnect', { method: 'POST' });
+        if (!state || state.status !== 'offline') {
+          throw new Error('后端未确认运行时已断开');
+        }
         showToast('网络已断开');
         setTimeout(refresh, 500);
       } catch (e) {
@@ -2593,8 +2614,8 @@ tun_name = "fuckipv6"</div>
     async function refresh(isManual = false) {
       try {
         const [statusData, peers] = await Promise.all([
-          fetch('/api/status').then(r => r.json()),
-          fetch('/api/peers').then(r => r.json())
+          requestJson('/api/status'),
+          requestJson('/api/peers')
         ]);
         render(statusData, peers);
         if (isManual) showToast('已拉取最新网络状态');
@@ -2641,8 +2662,8 @@ tun_name = "fuckipv6"</div>
     async function loadConfigAndBlacklist() {
       try {
         const [cfg, bl] = await Promise.all([
-          fetch('/api/config').then(r => r.json()),
-          fetch('/api/blacklist').then(r => r.json())
+          requestJson('/api/config'),
+          requestJson('/api/blacklist')
         ]);
         if (cfg.mode) document.getElementById('net-mode-select').value = cfg.mode;
         if (cfg.ipv4_pool) document.getElementById('net-ipv4-pool').value = cfg.ipv4_pool;
@@ -2679,13 +2700,16 @@ tun_name = "fuckipv6"</div>
 
     async function unbanClient(id) {
       try {
-        const res = await fetch('/api/blacklist/unban', {
+        const res = await requestJson('/api/blacklist/unban', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ client_id: id })
-        }).then(r => r.json());
+        });
+        if (!res || !res.success) {
+          throw new Error((res && res.message) || '后端未确认解封成功');
+        }
         showToast(res.message);
-        loadConfigAndBlacklist();
+        await loadConfigAndBlacklist();
       } catch (e) {
         showToast(`解封失败: ${e.message}`);
       }
@@ -2707,19 +2731,18 @@ tun_name = "fuckipv6"</div>
       const ipv6_pool = document.getElementById('net-ipv6-pool').value.trim();
 
       try {
-        const res = await fetch('/api/config', {
+        const res = await requestJson('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode, ipv4_pool, ipv6_pool })
-        }).then(r => r.json());
+        });
 
-        if (res.success) {
-          showToast('专网参数更新成功并已生效');
-        } else {
-          showToast(`更新失败: ${res.message || '格式错误'}`);
+        if (!res || !res.success) {
+          throw new Error((res && res.message) || '后端未确认更新成功');
         }
+        showToast('专网参数更新成功并已生效');
       } catch (e) {
-        showToast(`请求异常: ${e.message}`);
+        showToast(`更新失败: ${e.message}`);
       }
     }
 
@@ -2807,7 +2830,7 @@ tun_name = "fuckipv6"</div>
       document.getElementById('log-service-badge').textContent = service;
 
       try {
-        const response = await fetch(`/api/logs?service=${encodeURIComponent(service)}&lines=${lines}`).then(r => r.json());
+        const response = await requestJson(`/api/logs?service=${encodeURIComponent(service)}&lines=${lines}`);
         const logsEl = document.getElementById('logs');
         if (response.error) {
           logsEl.innerHTML = `<div style="color:#f87171;padding:12px;">[读取日志错误] ${response.error}</div>`;
@@ -2898,13 +2921,16 @@ tun_name = "fuckipv6"`;
 
       showToast('正在创建并发布专网...');
       try {
-        await fetch('/api/host', {
+        const state = await requestJson('/api/host', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, port, relay_port, auto_connect: true, external_host })
         });
+        if (!state || !state.hosting_ticket) {
+          throw new Error('后端未返回已发布的专网凭证');
+        }
         closeHostModal();
-        showToast('专网创建成功');
+        showToast('专网已创建并发布，正在等待运行时接入');
         refresh();
       } catch (e) {
         showToast(`建网失败: ${e.message}`);
@@ -3023,5 +3049,16 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("manual-ban-id"));
         assert!(UNIFIED_MASTER_HTML.contains("exit-node-select"));
         assert!(UNIFIED_MASTER_HTML.contains("is-exit-node-check"));
+    }
+
+    #[test]
+    fn test_control_actions_only_report_confirmed_success() {
+        assert!(UNIFIED_MASTER_HTML.contains("if (!response.ok)"));
+        assert!(UNIFIED_MASTER_HTML.contains("state.status !== 'connecting'"));
+        assert!(UNIFIED_MASTER_HTML.contains("state.status !== 'offline'"));
+        assert!(UNIFIED_MASTER_HTML.contains("if (!res || !res.success)"));
+        assert!(UNIFIED_MASTER_HTML.contains("!state.hosting_ticket"));
+        assert!(!UNIFIED_MASTER_HTML.contains("已下发连接指令"));
+        assert!(!UNIFIED_MASTER_HTML.contains("await fetch('/api/host'"));
     }
 }

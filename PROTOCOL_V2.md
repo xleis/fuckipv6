@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期、在线重协商协调状态机和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire、原子重协商或真实 UDP/TUN 数据面。完整 X-Wing 握手、PQC 和控制通道线格式也尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire 或真实 UDP/TUN 数据面。完整 X-Wing 握手、PQC 和控制通道线格式也尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -192,7 +192,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation 原语，以及 SS-08 的认证数据 epoch 桥接。`EpochSession::from_handshake` 只有在验证对端方向的 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index；测试验证双方可以双向往返收发。receiver index 是本地路由标签而非认证凭据，调用方仍须从已认证控制消息中正确取得对端索引。当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，桥接也尚未接入真实数据面或原子重协商。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation 原语，以及 SS-08 的认证数据 epoch 桥接。`EpochSession::from_handshake` 只有在验证对端方向的 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index；测试验证双方可以双向往返收发。receiver index 是本地路由标签而非认证凭据，调用方仍须从已认证控制消息中正确取得对端索引。SS-09 另提供 `RekeySession` 将在线重协商状态机与数据 epoch 原子组合。当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，这些桥接也尚未接入真实数据面。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 
@@ -325,9 +325,7 @@ REKEY_INIT -> REKEY_ACCEPT -> REKEY_CONFIRM
 
 ### 8.1 在线重协商协调约束
 
-`fuckipv6-secure-session` 已实现与密码学原语解耦的每会话重协商状态机；它只处理已经由控制通道认证、且由完整 X-Wing/双签名/确认流程验证过的消息。该状态机本身不构成握手认证：
-
-当前尚未实现 SS-09 的 `RekeyStateMachine` 与 `EpochSession` 原子组合：状态机推进不能直接替换在线收发密钥，也不提供旧接收 epoch 的数据面宽限窗口。完成该桥接前，不得把状态机的 `CONFIRM` 接受结果视为新 epoch 已激活。
+`fuckipv6-secure-session` 已实现与密码学原语解耦的每会话重协商状态机；它只处理已经由控制通道认证、且由完整 X-Wing/双签名/确认流程验证过的消息。该状态机本身不构成握手认证，并遵守以下约束：
 
 - 每个会话最多同时存在 1 个半开重协商事务，超时为 5 秒；超时只清除事务，不延长当前数据 epoch 的硬上限。
 - `REKEY_INIT` 必须绑定当前 `base_epoch`、严格递增的 `new_epoch`、全新的 128-bit `SID` 和 256-bit Initiator nonce。
@@ -337,6 +335,16 @@ REKEY_INIT -> REKEY_ACCEPT -> REKEY_CONFIRM
 - 已尝试的 `SID` 在会话内永久保留，超时或失败的 `SID` 也不得复用。
 - epoch `0xffff` 是最后一个 epoch；之后必须建立全新会话，不能回绕 `epoch` 或复用旧 `SID`。
 - 消息解析、签名、KEM、KDF 或 key-confirmation 失败必须在进入状态机前拒绝；状态机不把非零占位值视为密码学有效性证明。
+
+SS-09 已提供 `RekeySession` 作为 `RekeyStateMachine` 与 `EpochSession` 的唯一原子组合入口：
+
+- 所有候选密钥必须同时匹配提议中的 SID、epoch，形成合法的相反方向 send/receive 对，并严格高于当前 epoch；任一项不符都不会推进状态机或替换在线密钥。
+- Initiator 在认证并验证 ACCEPT 中的 Responder confirmation 后才安装新收发密钥；Responder 在 ACCEPT 阶段仅暂存密钥，只有验证匹配的 CONFIRM 后才安装。重复 ACCEPT/CONFIRM 保持幂等。
+- 安装通过 `EpochSession::rotate` 一次替换 send 与 receive 状态，并将旧 receive cipher 放入有界宽限窗口；超过期限或淘汰上限后旧密钥被丢弃。
+- 失败确认、材料不匹配和超时均保留当前 epoch；超时后立即开始的新事务会清除旧暂存材料，不能跨事务复用。
+- 若状态机已推进但底层 epoch 安装返回内部错误，会话进入不可用状态并失败关闭，而不是继续使用不一致的 epoch。
+
+该包装层仍要求调用方先认证控制帧、验证签名/KEM/KDF/confirmation，并正确推导数据密钥。它尚未接入实际控制通道、UDP/TUN 快路径或并发会话表。
 
 重协商控制帧使用固定 8 字节头，整数均为大端序：
 

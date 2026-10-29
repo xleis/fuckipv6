@@ -13,6 +13,7 @@ pub mod handshake_epoch;
 pub mod key_schedule;
 pub mod rekey;
 pub mod rekey_codec;
+pub mod rekey_session;
 pub mod transcript;
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
@@ -234,6 +235,14 @@ impl SendCipher {
         self.next_send_counter
     }
 
+    pub(crate) const fn session_id(&self) -> [u8; SESSION_ID_LEN] {
+        self.session_id
+    }
+
+    pub(crate) const fn epoch(&self) -> u16 {
+        self.epoch
+    }
+
     /// Encrypt a caller-provided plaintext into a packet buffer without allocating.
     ///
     /// The returned length is `DATA_HEADER_LEN + plaintext.len() + AEAD_TAG_LEN`.
@@ -332,6 +341,14 @@ impl ReceiveCipher {
             local_receiver_index,
             replay_window: ReplayWindow::new(),
         }
+    }
+
+    pub(crate) const fn session_id(&self) -> [u8; SESSION_ID_LEN] {
+        self.session_id
+    }
+
+    pub(crate) const fn epoch(&self) -> u16 {
+        self.epoch
     }
 
     /// Authenticate and decrypt a v2 data packet in place without allocating.
@@ -496,10 +513,7 @@ impl EpochSession {
         receive: ReceiveCipher,
         now: Instant,
     ) -> Result<(), SessionError> {
-        validate_epoch_pair(&send, &receive)?;
-        if receive.epoch <= self.active_receive.epoch {
-            return Err(SessionError::EpochRollback);
-        }
+        self.validate_rotation(&send, &receive)?;
 
         let old_send = std::mem::replace(&mut self.active_send, send);
         drop(old_send);
@@ -513,6 +527,18 @@ impl EpochSession {
         });
         self.active_started_at = now;
         self.sent_bytes = 0;
+        Ok(())
+    }
+
+    pub(crate) fn validate_rotation(
+        &self,
+        send: &SendCipher,
+        receive: &ReceiveCipher,
+    ) -> Result<(), SessionError> {
+        validate_epoch_pair(send, receive)?;
+        if receive.epoch <= self.active_receive.epoch {
+            return Err(SessionError::EpochRollback);
+        }
         Ok(())
     }
 

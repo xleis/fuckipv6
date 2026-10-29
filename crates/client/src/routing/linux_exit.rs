@@ -13,6 +13,7 @@ use tokio::process::Command;
 
 const ROUTE_PROTOCOL: &str = "99";
 const IPTABLES_WAIT_SECONDS: &str = "5";
+const MAX_STALE_JUMP_RULES: usize = 32;
 
 #[derive(Debug, Clone)]
 struct IptablesRule {
@@ -54,9 +55,10 @@ impl LinuxExitForwarder {
             .await
             .context("无法检测 Exit Node 的 IPv4 默认出口网卡")?;
         let external_v6_interface = default_route_interface(true).await.ok();
-        let chain_seed = format!("{tun_name}:{}", std::process::id());
-        let forward_chain = chain_name("F", &chain_seed);
-        let nat_chain = chain_name("N", &chain_seed);
+        // Chain ownership is keyed by TUN name rather than PID so a crash and
+        // restart can discover and purge resources left by the previous process.
+        let forward_chain = chain_name("F", tun_name);
+        let nat_chain = chain_name("N", tun_name);
 
         let mut manager = Self {
             tun_name: tun_name.to_string(),
@@ -130,21 +132,21 @@ impl LinuxExitForwarder {
 
             if let Some(address) = virtual_ips.ipv4 {
                 let source = host_prefix(IpAddr::V4(address))?;
-                self.add_client_rules(
-                    "iptables",
-                    &self.external_v4_interface,
-                    &source,
-                    &mut state.rules,
-                )
-                .await?;
+                self.add_client_rules("iptables", &source, &mut state.rules)
+                    .await?;
             }
 
             if let (Some(address), Some(interface)) =
                 (virtual_ips.ipv6, self.external_v6_interface.as_deref())
             {
                 let source = host_prefix(IpAddr::V6(address))?;
-                self.add_client_rules("ip6tables", interface, &source, &mut state.rules)
-                    .await?;
+                self.add_client_rules_for_interface(
+                    "ip6tables",
+                    interface,
+                    &source,
+                    &mut state.rules,
+                )
+                .await?;
             }
 
             Ok::<(), anyhow::Error>(())
@@ -186,6 +188,7 @@ impl LinuxExitForwarder {
         }
 
         self.purge_stale_chains().await?;
+        self.purge_stale_return_routes().await?;
         run_iptables(
             "iptables",
             Some("filter"),
@@ -193,6 +196,7 @@ impl LinuxExitForwarder {
         )
         .await?;
         run_iptables("iptables", Some("nat"), &["-N", self.nat_chain.as_str()]).await?;
+        self.install_terminal_drops("iptables").await?;
         run_iptables(
             "iptables",
             Some("filter"),
@@ -214,6 +218,7 @@ impl LinuxExitForwarder {
             )
             .await?;
             run_iptables("ip6tables", Some("nat"), &["-N", self.nat_chain.as_str()]).await?;
+            self.install_terminal_drops("ip6tables").await?;
             run_iptables(
                 "ip6tables",
                 Some("filter"),
@@ -234,62 +239,73 @@ impl LinuxExitForwarder {
         Ok(())
     }
 
+    async fn install_terminal_drops(&self, program: &'static str) -> Result<()> {
+        for args in terminal_forward_drop_rules(&self.forward_chain, &self.tun_name) {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            run_iptables(program, Some("filter"), &refs).await?;
+        }
+        Ok(())
+    }
+
     async fn add_client_rules(
+        &self,
+        program: &'static str,
+        source: &str,
+        rules: &mut Vec<IptablesRule>,
+    ) -> Result<()> {
+        self.add_client_rules_for_interface(program, &self.external_v4_interface, source, rules)
+            .await
+    }
+
+    async fn add_client_rules_for_interface(
         &self,
         program: &'static str,
         external_interface: &str,
         source: &str,
         rules: &mut Vec<IptablesRule>,
     ) -> Result<()> {
-        let forward_rules = [
-            vec![
-                "-A".to_string(),
-                self.forward_chain.clone(),
-                "-i".to_string(),
-                self.tun_name.clone(),
-                "-o".to_string(),
-                external_interface.to_string(),
-                "-s".to_string(),
-                source.to_string(),
-                "-m".to_string(),
-                "conntrack".to_string(),
-                "--ctstate".to_string(),
-                "NEW,ESTABLISHED,RELATED".to_string(),
-                "-j".to_string(),
-                "ACCEPT".to_string(),
-            ],
-            vec![
-                "-A".to_string(),
-                self.forward_chain.clone(),
-                "-i".to_string(),
-                external_interface.to_string(),
-                "-o".to_string(),
-                self.tun_name.clone(),
-                "-d".to_string(),
-                source.to_string(),
-                "-m".to_string(),
-                "conntrack".to_string(),
-                "--ctstate".to_string(),
-                "ESTABLISHED,RELATED".to_string(),
-                "-j".to_string(),
-                "ACCEPT".to_string(),
-            ],
-        ];
-        let nat_rule = vec![
-            "-A".to_string(),
-            self.nat_chain.clone(),
-            "-s".to_string(),
-            source.to_string(),
-            "-o".to_string(),
-            external_interface.to_string(),
-            "-j".to_string(),
-            "MASQUERADE".to_string(),
-        ];
-
-        for args in forward_rules {
-            append_iptables_rule(program, Some("filter"), args, rules).await?;
+        // The terminal DROP rules stay at the bottom of the chain. Insert each
+        // authenticated client exception above them so rules added while the
+        // Exit Node is live remain reachable.
+        for args in client_forward_rules(&self.forward_chain, &self.tun_name, source) {
+            install_iptables_rule(program, Some("filter"), args, rules).await?;
         }
-        append_iptables_rule(program, Some("nat"), nat_rule, rules).await?;
+        let nat_rule = nat_masquerade_rule(&self.nat_chain, source, external_interface);
+        install_iptables_rule(program, Some("nat"), nat_rule, rules).await?;
+        Ok(())
+    }
+
+    async fn purge_stale_return_routes(&self) -> Result<()> {
+        let mut families = vec![false];
+        if self.external_v6_interface.is_some() {
+            families.push(true);
+        }
+        for ipv6 in families {
+            let mut command = Command::new("ip");
+            if ipv6 {
+                command.arg("-6");
+            }
+            let output = command
+                .args([
+                    "route",
+                    "flush",
+                    "table",
+                    "main",
+                    "proto",
+                    ROUTE_PROTOCOL,
+                    "dev",
+                    &self.tun_name,
+                ])
+                .output()
+                .await
+                .context("清理 Exit Node 残留回程路由时无法执行 ip 命令")?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "清理 Exit Node 残留回程路由失败: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -368,7 +384,7 @@ impl Drop for LinuxExitForwarder {
     }
 }
 
-async fn append_iptables_rule(
+async fn install_iptables_rule(
     program: &'static str,
     table: Option<&'static str>,
     args: Vec<String>,
@@ -434,6 +450,75 @@ fn parse_default_route_interface(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn client_forward_rules(forward_chain: &str, tun_name: &str, source: &str) -> [Vec<String>; 2] {
+    [
+        vec![
+            "-I".to_string(),
+            forward_chain.to_string(),
+            "1".to_string(),
+            "-i".to_string(),
+            tun_name.to_string(),
+            "-s".to_string(),
+            source.to_string(),
+            "-m".to_string(),
+            "conntrack".to_string(),
+            "--ctstate".to_string(),
+            "NEW,ESTABLISHED,RELATED".to_string(),
+            "-j".to_string(),
+            "ACCEPT".to_string(),
+        ],
+        vec![
+            "-I".to_string(),
+            forward_chain.to_string(),
+            "1".to_string(),
+            "-o".to_string(),
+            tun_name.to_string(),
+            "-d".to_string(),
+            source.to_string(),
+            "-m".to_string(),
+            "conntrack".to_string(),
+            "--ctstate".to_string(),
+            "ESTABLISHED,RELATED".to_string(),
+            "-j".to_string(),
+            "ACCEPT".to_string(),
+        ],
+    ]
+}
+
+fn terminal_forward_drop_rules(forward_chain: &str, tun_name: &str) -> [Vec<String>; 2] {
+    [
+        vec![
+            "-A".to_string(),
+            forward_chain.to_string(),
+            "-i".to_string(),
+            tun_name.to_string(),
+            "-j".to_string(),
+            "DROP".to_string(),
+        ],
+        vec![
+            "-A".to_string(),
+            forward_chain.to_string(),
+            "-o".to_string(),
+            tun_name.to_string(),
+            "-j".to_string(),
+            "DROP".to_string(),
+        ],
+    ]
+}
+
+fn nat_masquerade_rule(nat_chain: &str, source: &str, external_interface: &str) -> Vec<String> {
+    vec![
+        "-A".to_string(),
+        nat_chain.to_string(),
+        "-s".to_string(),
+        source.to_string(),
+        "-o".to_string(),
+        external_interface.to_string(),
+        "-j".to_string(),
+        "MASQUERADE".to_string(),
+    ]
 }
 
 fn chain_name(kind: &str, seed: &str) -> String {
@@ -582,24 +667,27 @@ async fn purge_iptables_chain(
     builtin: &str,
     chain: &str,
 ) -> Result<()> {
-    for args in [
-        vec!["-D", builtin, "-j", chain],
-        vec!["-F", chain],
-        vec!["-X", chain],
-    ] {
-        let _ = run_iptables(program, Some(table), &args).await;
+    for _ in 0..MAX_STALE_JUMP_RULES {
+        if run_iptables(program, Some(table), &["-D", builtin, "-j", chain])
+            .await
+            .is_err()
+        {
+            break;
+        }
     }
+    let _ = run_iptables(program, Some(table), &["-F", chain]).await;
+    let _ = run_iptables(program, Some(table), &["-X", chain]).await;
     Ok(())
 }
 
 fn cleanup_iptables_chain_sync(program: &str, table: &str, builtin: &str, chain: &str) {
-    for args in [
-        vec!["-D", builtin, "-j", chain],
-        vec!["-F", chain],
-        vec!["-X", chain],
-    ] {
-        let _ = run_iptables_sync(program, Some(table), &args);
+    for _ in 0..MAX_STALE_JUMP_RULES {
+        if run_iptables_sync(program, Some(table), &["-D", builtin, "-j", chain]).is_err() {
+            break;
+        }
     }
+    let _ = run_iptables_sync(program, Some(table), &["-F", chain]);
+    let _ = run_iptables_sync(program, Some(table), &["-X", chain]);
 }
 
 async fn run_iptables(program: &str, table: Option<&str>, args: &[&str]) -> Result<()> {
@@ -623,13 +711,22 @@ async fn run_iptables(program: &str, table: Option<&str>, args: &[&str]) -> Resu
     )
 }
 
-async fn run_iptables_delete(rule: &IptablesRule) -> Result<()> {
+fn iptables_delete_args(rule: &IptablesRule) -> Vec<String> {
     let mut args = rule.args.clone();
-    if let Some(action) = args.first_mut() {
-        if action == "-A" {
-            *action = "-D".to_string();
+    match args.first().map(String::as_str) {
+        Some("-A") => args[0] = "-D".to_string(),
+        Some("-I") if args.len() >= 3 => {
+            args[0] = "-D".to_string();
+            // -I CHAIN POSITION MATCHES... -> -D CHAIN MATCHES...
+            args.remove(2);
         }
+        _ => {}
     }
+    args
+}
+
+async fn run_iptables_delete(rule: &IptablesRule) -> Result<()> {
+    let args = iptables_delete_args(rule);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_iptables(rule.program, rule.table, &refs).await
 }
@@ -655,12 +752,7 @@ fn run_iptables_sync(program: &str, table: Option<&str>, args: &[&str]) -> Resul
 }
 
 fn run_iptables_sync_delete(rule: &IptablesRule) -> Result<()> {
-    let mut args = rule.args.clone();
-    if let Some(action) = args.first_mut() {
-        if action == "-A" {
-            *action = "-D".to_string();
-        }
-    }
+    let args = iptables_delete_args(rule);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_iptables_sync(rule.program, rule.table, &refs)
 }
@@ -697,11 +789,40 @@ mod tests {
 
     #[test]
     fn chain_names_are_stable_and_short() {
-        let first = chain_name("F", "fkexit:1234");
-        let second = chain_name("F", "fkexit:1234");
+        let first = chain_name("F", "fkexit");
+        let second = chain_name("F", "fkexit");
         assert_eq!(first, second);
-        assert_eq!(first, "FKV6F-9FE3C880");
+        assert_ne!(first, chain_name("F", "fkexit-2"));
+        assert!(first.starts_with("FKV6F-"));
         assert!(first.len() <= 28);
+    }
+
+    #[test]
+    fn client_rules_precede_terminal_tun_drops() {
+        let accepted = client_forward_rules("FKV6F-TEST", "fuckipv6", "10.8.0.2/32");
+        assert_eq!(accepted[0][0], "-I");
+        assert_eq!(accepted[0][2], "1");
+        assert!(accepted[0].windows(2).any(|pair| pair == ["-j", "ACCEPT"]));
+
+        let dropped = terminal_forward_drop_rules("FKV6F-TEST", "fuckipv6");
+        assert_eq!(dropped[0][0], "-A");
+        assert_eq!(dropped[0][2], "-i");
+        assert_eq!(dropped[1][2], "-o");
+        assert!(dropped
+            .iter()
+            .all(|rule| rule.ends_with(&["DROP".to_string()])));
+    }
+
+    #[test]
+    fn inserted_client_rules_are_deleted_without_rule_position() {
+        let rule = IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: client_forward_rules("FKV6F-TEST", "fuckipv6", "10.8.0.2/32")[0].clone(),
+        };
+        let args = iptables_delete_args(&rule);
+        assert_eq!(&args[..3], ["-D", "FKV6F-TEST", "-i"]);
+        assert!(!args.contains(&"1".to_string()));
     }
 
     #[test]

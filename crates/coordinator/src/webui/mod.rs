@@ -1087,22 +1087,22 @@ tun_name = "fuckipv6"</div>
         return `<span class="tag-nat cone">全锥型 NAT</span>`;
       }
       if (t.includes('port')) {
-        return `<span class="tag-nat" style="background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.3);">端口受限</span>`;
+        return `<span class="tag-nat port">端口受限</span>`;
       }
       if (t.includes('restricted')) {
-        return `<span class="tag-nat" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.3);">受限锥型</span>`;
+        return `<span class="tag-nat restricted">受限锥型</span>`;
       }
       if (t.includes('symmetric') || t.includes('sym')) {
         return `<span class="tag-nat sym">对称型 NAT</span>`;
       }
       if (t.includes('open')) {
-        return `<span class="tag-nat" style="background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.3);">公网开放</span>`;
+        return `<span class="tag-nat open">公网开放</span>`;
       }
       if (t.includes('direct')) {
         return `<span class="tag-nat cone">P2P 直连</span>`;
       }
       if (t.includes('relay')) {
-        return `<span class="tag-nat" style="background:rgba(14,165,233,0.15);color:#38bdf8;border:1px solid rgba(14,165,233,0.3);">QUIC 中继</span>`;
+        return `<span class="tag-nat relay">QUIC 中继</span>`;
       }
       return `<span class="tag-nat">${formatNatType(natType)}</span>`;
     }

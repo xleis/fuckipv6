@@ -1431,10 +1431,29 @@ td .btn {
   color: var(--green);
 }
 
-.tag-nat.sym {
-  border-color: rgba(251, 191, 36, 0.28);
+.tag-nat.sym,
+.tag-nat.port {
+  border-color: var(--border-strong);
   background: var(--amber-soft);
   color: var(--amber);
+}
+
+.tag-nat.restricted {
+  border-color: var(--border-strong);
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+.tag-nat.open {
+  border-color: var(--border-strong);
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.tag-nat.relay {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .idle-pip {

@@ -701,7 +701,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
           </div>
           <p>QUIC 信令 · 流量中继<br>JWT 鉴权可配置启用</p>
         </div>
-        <div class="sidebar-version"><span>协调中枢</span><span>v0.1.0</span></div>
+        <div class="sidebar-version"><span>协调中枢</span><span>v0.3.0</span></div>
       </div>
     </aside>
 
@@ -2775,6 +2775,7 @@ mod tests {
         assert!(INDEX_HTML.contains("renderTopology(peers)"));
         assert!(INDEX_HTML.contains("id=\"relay-rate\""));
         assert!(INDEX_HTML.contains("id=\"signaling-rate\""));
+        assert!(INDEX_HTML.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]

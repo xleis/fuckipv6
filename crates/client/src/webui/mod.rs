@@ -435,7 +435,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
           </div>
           <p>QUIC · TLS 1.3 隧道<br>信令与中继链路全程加密</p>
         </div>
-        <div class="sidebar-version"><span>控制台</span><span>v0.1.0</span></div>
+        <div class="sidebar-version"><span>控制台</span><span>v0.3.0</span></div>
       </div>
     </aside>
 
@@ -2880,6 +2880,7 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("app-shell"));
         assert!(UNIFIED_MASTER_HTML.contains("sidebar"));
         assert!(UNIFIED_MASTER_HTML.contains("panel-head"));
+        assert!(UNIFIED_MASTER_HTML.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(UNIFIED_MASTER_HTML.contains("/assets/webui.css"));
         assert!(WEBUI_CSS.contains("--sidebar-w"));
         assert!(WEBUI_CSS.contains("--panel"));

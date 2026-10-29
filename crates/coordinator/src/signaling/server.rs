@@ -493,11 +493,36 @@ async fn handle_relay_packet(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
 ) -> Result<()> {
-    if client_id.is_none() {
+    let Some(client_id) = client_id.as_deref() else {
         session_manager.record_relay_error();
         let error = SignalingMessage::protocol_error(
             ErrorCode::Unauthorized,
             "Client must register before relay",
+        );
+        send_binary(tx, session_manager, error)?;
+        return Ok(());
+    };
+
+    let Some(session) = session_manager.get_peer_info(&client_id.to_string()).await else {
+        session_manager.record_relay_error();
+        let error = SignalingMessage::protocol_error(
+            ErrorCode::Unauthorized,
+            "Relay source has no active registration",
+        );
+        send_binary(tx, session_manager, error)?;
+        return Ok(());
+    };
+    if !session.matches_ip(src_ip) {
+        tracing::warn!(
+            "拒绝客户端 {} 伪造中继源地址 {} (已分配: {:?})",
+            client_id,
+            src_ip,
+            session.virtual_ips
+        );
+        session_manager.record_relay_error();
+        let error = SignalingMessage::protocol_error(
+            ErrorCode::Unauthorized,
+            "Relay source IP is not assigned to this client",
         );
         send_binary(tx, session_manager, error)?;
         return Ok(());

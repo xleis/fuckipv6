@@ -78,6 +78,20 @@ async fn websocket_registration_and_relay_flow() -> Result<()> {
     assert_eq!(dst_ip, std::net::IpAddr::V6(ip_b));
     assert_eq!(got_payload, payload);
 
+    // A registered client must not be able to claim another peer's virtual IP.
+    send_msg(
+        &mut ws_a,
+        SignalingMessage::relay_packet(ip_b, ip_a, vec![0xde, 0xad]),
+    )
+    .await?;
+    let rejected = recv_msg(&mut ws_a).await?;
+    match rejected {
+        SignalingMessage::Error { code, .. } => {
+            assert_eq!(code, fuckipv6_common::ErrorCode::Unauthorized.as_u16());
+        }
+        other => anyhow::bail!("expected spoofed relay rejection, got {other:?}"),
+    }
+
     server_task.abort();
     Ok(())
 }

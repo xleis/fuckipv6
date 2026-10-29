@@ -18,7 +18,7 @@
 - [x] **EQ-05 v2 线格式恶意输入测试**：补齐握手、重协商、Cookie、数据帧和 key confirmation 的长度边界、尾随字节、保留字段、非零填充及随机输入不 panic 测试。
 - [x] **EQ-06 持续模糊测试入口**：增加适用于 `cargo fuzz` 的握手、重协商、Cookie 和数据帧 harness，并提供可复现的短时 smoke 命令与 CI 策略。
 - [x] **EQ-07 供应链审计门禁**：固定 `cargo-deny 0.20.2`，覆盖主 workspace 与 fuzz workspace 的依赖漏洞、许可证、重复依赖、通配版本和禁用源检查；产出可上传日志并接入 Verify CI。
-- [ ] **EQ-08 发布 SBOM 与校验材料**：为发布产物生成 SPDX/CycloneDX SBOM、SHA256 清单和来源信息，并纳入 CI 产物。
+- [x] **EQ-08 发布 SBOM 与校验材料**：每个发布归档生成 CycloneDX 1.5、SPDX 2.3、逐产物 SHA256、汇总清单和明确未签名的来源元数据，并随 CI/GitHub Release 发布。
 - [ ] **EQ-09 基准回归比较器**：实现带阈值、噪声/样本检查和基线选择的 Criterion 报告比较器，防止性能无声回退。
 - [ ] **EQ-10 文档链接与状态一致性检查**：自动检查仓库内 Markdown 链接、关键安全声明和 TODO/README/CHANGELOG 的已知冲突。
 - [ ] **EQ-11 会话驱动适配层**：为 secure-session 提供可嵌入客户端的数据面驱动接口，覆盖建链、收发、重协商、旧 epoch 宽限和失败关闭，并有集成测试。

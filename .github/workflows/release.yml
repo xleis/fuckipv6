@@ -62,7 +62,19 @@ jobs:
           cp examples/client.toml.example examples/coordinator.toml.example "dist/${package}/examples/"
           cp scripts/install-client.sh scripts/install-coordinator.sh scripts/fuckipv6-client.service scripts/fuckipv6-coordinator.service "dist/${package}/scripts/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          sha256sum "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+
+      - name: Generate SBOM, provenance, and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package="fuckipv6-linux-x86_64-${version}"
+          python3 scripts/release-material.py \
+            --artifact "dist/${package}.tar.gz" \
+            --output-dir dist \
+            --target x86_64-unknown-linux-gnu \
+            --platform linux \
+            --release-version "${version}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -70,7 +82,9 @@ jobs:
           name: linux-package
           path: |
             dist/*.tar.gz
+            dist/*.json
             dist/*.sha256
+            dist/*.SHA256SUMS
 
   windows:
     name: Windows x86_64 package
@@ -116,7 +130,19 @@ jobs:
           cp setup_windows.ps1 setup_windows.bat README_WINDOWS.md QUICKSTART_WINDOWS.md WINDOWS_TEST_CHECKLIST.md "dist/${package}/"
           cp examples/client.toml.example examples/coordinator.toml.example "dist/${package}/"
           (cd dist && zip -r "${package}.zip" "${package}")
-          sha256sum "dist/${package}.zip" > "dist/${package}.zip.sha256"
+
+      - name: Generate SBOM, provenance, and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package="fuckipv6-windows-x86_64-${version}"
+          python3 scripts/release-material.py \
+            --artifact "dist/${package}.zip" \
+            --output-dir dist \
+            --target x86_64-pc-windows-gnu \
+            --platform windows \
+            --release-version "${version}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -124,7 +150,9 @@ jobs:
           name: windows-package
           path: |
             dist/*.zip
+            dist/*.json
             dist/*.sha256
+            dist/*.SHA256SUMS
 
   macos:
     name: macOS ${{ matrix.arch }} package
@@ -176,7 +204,19 @@ jobs:
           cp examples/client.toml.example examples/coordinator.toml.example "dist/${package}/examples/"
           cp scripts/install-macos-client.sh scripts/install-macos-coordinator.sh scripts/fuckipv6-client.plist scripts/fuckipv6-coordinator.plist "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+
+      - name: Generate SBOM, provenance, and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package="fuckipv6-macos-${{ matrix.arch }}-${version}"
+          python3 scripts/release-material.py \
+            --artifact "dist/${package}.tar.gz" \
+            --output-dir dist \
+            --target "${{ matrix.target }}" \
+            --platform "macos-${{ matrix.arch }}" \
+            --release-version "${version}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -184,7 +224,9 @@ jobs:
           name: macos-${{ matrix.arch }}-package
           path: |
             dist/*.tar.gz
+            dist/*.json
             dist/*.sha256
+            dist/*.SHA256SUMS
 
   publish:
     name: Publish GitHub Release
@@ -216,4 +258,6 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.json
             dist/*.sha256
+            dist/*.SHA256SUMS

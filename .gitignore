@@ -26,6 +26,7 @@ Thumbs.db
 *.log
 
 # 生成物与本地工作区
+/dist/
 /test_workspace/
 /release/*.zip
 /release/fuckipv6-windows/*.exe

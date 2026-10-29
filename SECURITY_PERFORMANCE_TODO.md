@@ -102,7 +102,7 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 - [x] 为握手输入、v2/PQ 解析器和数据帧接收路径提供 `cargo fuzz` harness、短时 smoke 脚本及 PR/周定时 CI；长期持续 fuzz 和 panic=abort 生产路径仍待补充。
 - [ ] 增加依赖审计、SBOM、许可证检查和已知漏洞扫描。
   - [x] 使用固定版本 `cargo-deny` 审计主 workspace 与 fuzz workspace 的已知漏洞、许可证、重复版本和依赖来源，并接入 CI。
-  - [ ] 为发布产物生成 SBOM 和来源证明。
+  - [x] 为发布产物生成 CycloneDX/SPDX SBOM、SHA256 清单和未签名来源元数据；签名证明与 SLSA 证明仍未实现。
 - [ ] 邀请独立密码学/协议团队审计并公开审计范围与结论。
 - [ ] 提供可复现的安全测试向量和协议兼容性测试套件。
 

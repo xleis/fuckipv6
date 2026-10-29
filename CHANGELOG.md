@@ -13,6 +13,10 @@ All notable changes are documented here. The project follows semantic versioning
 ### Added
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 
+### Fixed
+- 修复 Linux Global Proxy / BypassMainland 策略表的默认路由未绑定虚拟源地址，导致 Exit Node 将合法的 IPv4 出站包误判为源地址伪造的问题。
+- 修复 Exit Node 返回的公网响应被客户端统一内层源地址校验丢弃的问题；仅已配置且已认证的 Exit Peer 可向本机虚拟 IP 返回公网单播源，普通 Mesh 流量仍保持严格的虚拟源地址绑定。
+
 ### Documentation
 - 明确能力成熟度口径：区分“可直接使用”“基础设施已接入（待产品化）”与“尚未产品化”。
 - 修正桌面入口描述：当前使用系统浏览器应用窗口或默认浏览器打开 WebUI，尚未接入 Tauri 原生桌面。

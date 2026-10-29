@@ -141,7 +141,12 @@ impl LinuxRouteManager {
             // A table route has no effect until the catch-all rule is installed.
             for family in [Family::V4, Family::V6] {
                 if manager.active_families.contains(&family) {
-                    manager.install_table_route(family).await?;
+                    let source = match family {
+                        Family::V4 => assigned_ips.ipv4.map(IpAddr::V4),
+                        Family::V6 => assigned_ips.ipv6.map(IpAddr::V6),
+                    }
+                    .context("代理默认路由缺少对应地址族的虚拟源地址")?;
+                    manager.install_table_route(family, source).await?;
                 }
             }
 
@@ -484,19 +489,14 @@ impl LinuxRouteManager {
         addresses.into_iter().collect()
     }
 
-    async fn install_table_route(&mut self, family: Family) -> Result<()> {
+    async fn install_table_route(&mut self, family: Family, source: IpAddr) -> Result<()> {
         let mut command = family_command(family);
-        command.args([
-            "route",
+        command.args(table_route_args(
             "add",
-            "table",
-            &self.table_id.to_string(),
-            "default",
-            "dev",
+            self.table_id,
             &self.tun_name,
-            "proto",
-            ROUTE_PROTOCOL,
-        ]);
+            source,
+        ));
         run_command(command, "添加代理默认路由").await?;
         self.installed_table_routes.push(family);
         Ok(())
@@ -700,6 +700,22 @@ fn table_id_for_interface(interface: &str) -> u32 {
         hash = hash.wrapping_mul(16_777_619);
     }
     TABLE_ID_BASE + hash % 40_000
+}
+
+fn table_route_args(action: &str, table_id: u32, tun_name: &str, source: IpAddr) -> Vec<String> {
+    vec![
+        "route".to_string(),
+        action.to_string(),
+        "table".to_string(),
+        table_id.to_string(),
+        "default".to_string(),
+        "dev".to_string(),
+        tun_name.to_string(),
+        "src".to_string(),
+        source.to_string(),
+        "proto".to_string(),
+        ROUTE_PROTOCOL.to_string(),
+    ]
 }
 
 fn family_command(family: Family) -> Command {
@@ -936,6 +952,18 @@ mod tests {
         };
         assert_eq!(manager.proxy_lookup_table(), 12345);
         assert_eq!(MAIN_TABLE_ID, 254);
+    }
+
+    #[test]
+    fn proxy_table_route_uses_assigned_virtual_source() {
+        let ipv4 = table_route_args("add", 12345, "fuckipv6", "10.8.0.2".parse().unwrap());
+        assert!(ipv4.windows(2).any(|pair| pair == ["src", "10.8.0.2"]));
+        assert!(ipv4
+            .windows(2)
+            .any(|pair| pair == ["proto", ROUTE_PROTOCOL]));
+
+        let ipv6 = table_route_args("add", 12345, "fuckipv6", "fd00::1002".parse().unwrap());
+        assert!(ipv6.windows(2).any(|pair| pair == ["src", "fd00::1002"]));
     }
 
     #[test]

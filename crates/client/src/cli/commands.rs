@@ -1065,7 +1065,16 @@ async fn handle_inbound_payload(
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return;
     };
-    let Some(packet_src) = authenticated_inbound_source(&plain_payload, &peer) else {
+    let peers = runtime.p2p.get_peers().await;
+    let trusted_exit_peer = runtime
+        .exit_node_manager
+        .resolve_exit_node_from_slice(&peers, runtime.configured_exit_node.as_deref());
+    let Some(packet_src) = authenticated_inbound_source(
+        &plain_payload,
+        &peer,
+        &runtime.assigned_ips,
+        trusted_exit_peer,
+    ) else {
         match tun_packet_source(&plain_payload) {
             Some(packet_src) => tracing::warn!(
                 "丢弃节点 {} 的伪造内层源地址 {} (外层: {})",
@@ -1426,9 +1435,53 @@ fn tun_packet_destination(packet: &[u8]) -> Option<IpAddr> {
     }
 }
 
-fn authenticated_inbound_source(packet: &[u8], peer: &PeerInfo) -> Option<IpAddr> {
+fn authenticated_inbound_source(
+    packet: &[u8],
+    peer: &PeerInfo,
+    assigned_ips: &VirtualIps,
+    trusted_exit_peer: Option<Ipv6Addr>,
+) -> Option<IpAddr> {
     let source = tun_packet_source(packet)?;
-    peer.matches_ip(source).then_some(source)
+    if peer.matches_ip(source) {
+        return Some(source);
+    }
+
+    // An authenticated Exit peer is the only peer permitted to return packets
+    // with a non-virtual source. Restrict those packets to public unicast
+    // sources and destinations assigned to this client, so a compromised or
+    // misconfigured ordinary peer cannot inject arbitrary traffic into the TUN.
+    if trusted_exit_peer != Some(peer.virtual_ip) {
+        return None;
+    }
+    let destination = tun_packet_destination(packet)?;
+    if !assigned_ips.contains(destination) || !is_public_exit_return_source(source) {
+        return None;
+    }
+    Some(source)
+}
+
+fn is_public_exit_return_source(source: IpAddr) -> bool {
+    match source {
+        IpAddr::V4(v4) => {
+            !v4.is_unspecified()
+                && !v4.is_loopback()
+                && !v4.is_private()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_multicast()
+                && !v4.is_documentation()
+                && v4.octets()[0] != 0
+                && v4.octets()[0] < 240
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_unspecified()
+                && !v6.is_loopback()
+                && !v6.is_multicast()
+                && ((v6.segments()[0] & 0xffc0) != 0xfe80)
+                && ((v6.segments()[0] & 0xfe00) != 0xfc00)
+                && !(v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+        }
+    }
 }
 
 fn tun_packet_source(packet: &[u8]) -> Option<IpAddr> {
@@ -2892,9 +2945,11 @@ mod tests {
 
     #[test]
     fn inbound_inner_source_must_match_authenticated_peer() {
+        let virtual_ips =
+            VirtualIps::dual_stack("10.8.0.2".parse().unwrap(), "fd00::1002".parse().unwrap());
         let peer = PeerInfo::new_with_ips(
             "peer-a".to_string(),
-            VirtualIps::dual_stack("10.8.0.2".parse().unwrap(), "fd00::1002".parse().unwrap()),
+            virtual_ips.clone(),
             vec![0; 32],
             Vec::new(),
             NatType::FullCone,
@@ -2904,13 +2959,76 @@ mod tests {
         packet[12..16].copy_from_slice(&[10, 8, 0, 2]);
         packet[16..20].copy_from_slice(&[1, 1, 1, 1]);
         assert_eq!(
-            authenticated_inbound_source(&packet, &peer),
+            authenticated_inbound_source(&packet, &peer, &virtual_ips, None),
             Some("10.8.0.2".parse().unwrap())
         );
 
         packet[12..16].copy_from_slice(&[10, 8, 0, 99]);
-        assert_eq!(authenticated_inbound_source(&packet, &peer), None);
-        assert_eq!(authenticated_inbound_source(&packet[..19], &peer), None);
+        assert_eq!(
+            authenticated_inbound_source(&packet, &peer, &virtual_ips, None),
+            None
+        );
+        assert_eq!(
+            authenticated_inbound_source(&packet[..19], &peer, &virtual_ips, None),
+            None
+        );
+    }
+
+    #[test]
+    fn only_configured_exit_peer_may_return_public_sources_to_local_virtual_ips() {
+        let local_ips =
+            VirtualIps::dual_stack("10.8.0.2".parse().unwrap(), "fd00::1002".parse().unwrap());
+        let exit_peer = PeerInfo::new_with_ips(
+            "relay".to_string(),
+            VirtualIps::dual_stack("10.8.0.1".parse().unwrap(), "fd00::1001".parse().unwrap()),
+            vec![0; 32],
+            Vec::new(),
+            NatType::FullCone,
+        );
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[12..16].copy_from_slice(&[149, 154, 175, 55]);
+        packet[16..20].copy_from_slice(&[10, 8, 0, 2]);
+
+        assert_eq!(
+            authenticated_inbound_source(
+                &packet,
+                &exit_peer,
+                &local_ips,
+                Some(exit_peer.virtual_ip)
+            ),
+            Some("149.154.175.55".parse().unwrap())
+        );
+        assert_eq!(
+            authenticated_inbound_source(&packet, &exit_peer, &local_ips, None),
+            None,
+            "ordinary Mesh traffic must retain virtual-source binding"
+        );
+
+        packet[16..20].copy_from_slice(&[10, 8, 0, 3]);
+        assert_eq!(
+            authenticated_inbound_source(
+                &packet,
+                &exit_peer,
+                &local_ips,
+                Some(exit_peer.virtual_ip)
+            ),
+            None,
+            "an Exit return must be destined to this client"
+        );
+
+        packet[16..20].copy_from_slice(&[10, 8, 0, 2]);
+        packet[12..16].copy_from_slice(&[192, 168, 1, 1]);
+        assert_eq!(
+            authenticated_inbound_source(
+                &packet,
+                &exit_peer,
+                &local_ips,
+                Some(exit_peer.virtual_ip)
+            ),
+            None,
+            "private return sources are outside the public Exit contract"
+        );
     }
 
     #[test]

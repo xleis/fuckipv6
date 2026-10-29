@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import shutil
@@ -264,6 +265,17 @@ def default_cross_targets(platform_label: str) -> list[str]:
 def apply_run_defaults(args: argparse.Namespace) -> None:
     if args.platform is None:
         args.platform = detect_platform_label()
+    if args.benchmark == "none" and args.benchmark_baseline:
+        raise ValueError("--benchmark-baseline requires Criterion benchmarking")
+    if args.benchmark_min_samples < 1:
+        raise ValueError("--benchmark-min-samples must be at least 1")
+    for option, value in (
+        ("--max-regression-percent", args.max_regression_percent),
+        ("--noise-percent", args.noise_percent),
+        ("--noise-sigmas", args.noise_sigmas),
+    ):
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{option} must be finite and non-negative")
     targets = [] if args.no_default_cross_targets else default_cross_targets(args.platform)
     for target in args.cross_target:
         if target not in targets:
@@ -280,6 +292,7 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
                 sys.executable,
                 "-m",
                 "unittest",
+                "scripts/test_bench_compare.py",
                 "scripts/test_bench_summarize.py",
                 "scripts/test_release_gate.py",
                 "scripts/test_release_material.py",
@@ -338,6 +351,17 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
             arguments.append("--quick")
         arguments.append("--noplot")
         benchmark = {"name": "benchmark", "arguments": arguments}
+    comparison = None
+    if args.benchmark_baseline:
+        comparison = {
+            "name": "benchmark-comparison",
+            "arguments": benchmark_comparison_arguments(
+                args,
+                baseline=Path(args.benchmark_baseline).resolve(),
+                current=Path("<criterion-artifact-directory>"),
+                output=Path("<benchmark-comparison-report>"),
+            ),
+        }
     return {
         "platform": args.platform,
         "toolchain": args.toolchain or "PATH cargo",
@@ -352,7 +376,34 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark": args.benchmark,
         "commands": commands,
         "benchmark_command": benchmark,
+        "benchmark_comparison_command": comparison,
     }
+
+
+def benchmark_comparison_arguments(
+    args: argparse.Namespace, *, baseline: Path, current: Path, output: Path
+) -> list[str]:
+    return [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "bench-compare.py"),
+        "compare",
+        "--baseline",
+        str(baseline),
+        "--current",
+        str(current),
+        "--output",
+        str(output),
+        "--max-regression-percent",
+        str(args.max_regression_percent),
+        "--noise-percent",
+        str(args.noise_percent),
+        "--min-samples",
+        str(args.benchmark_min_samples),
+        "--noise-sigmas",
+        str(args.noise_sigmas),
+        "--missing-baseline",
+        args.missing_baseline,
+    ]
 
 
 def hardware_info() -> dict[str, Any]:
@@ -408,6 +459,7 @@ def run_gate(args: argparse.Namespace) -> int:
                 sys.executable,
                 "-m",
                 "unittest",
+                "scripts/test_bench_compare.py",
                 "scripts/test_bench_summarize.py",
                 "scripts/test_release_gate.py",
                 "scripts/test_release_material.py",
@@ -455,6 +507,11 @@ def run_gate(args: argparse.Namespace) -> int:
         "status": "not_run",
         "mode": args.benchmark,
         "samples": [],
+        "comparison": {
+            "status": "not_run",
+            "baseline": None,
+            "reason": "no Criterion baseline configured",
+        },
     }
     if args.benchmark != "none":
         criterion_dir = artifact_root / "criterion"
@@ -489,6 +546,38 @@ def run_gate(args: argparse.Namespace) -> int:
         if benchmark_result["status"] == "passed" and not valid_samples:
             benchmark["status"] = "failed"
             benchmark["error"] = "Criterion produced no valid machine-readable samples"
+        if args.benchmark_baseline:
+            comparison_path = artifact_root / "benchmark-comparison.json"
+            comparison_result = run_logged(
+                "benchmark-comparison",
+                benchmark_comparison_arguments(
+                    args,
+                    baseline=Path(args.benchmark_baseline).resolve(),
+                    current=criterion_dir,
+                    output=comparison_path,
+                ),
+                artifact_root / "benchmark-comparison.log",
+                env=env,
+            )
+            comparison: dict[str, Any] = {
+                "status": comparison_result["status"],
+                "baseline": str(Path(args.benchmark_baseline).resolve()),
+                "report": str(comparison_path.relative_to(PROJECT_ROOT)),
+                "command": comparison_result["command"],
+                "exit_code": comparison_result["exit_code"],
+            }
+            try:
+                comparison_report = json.loads(
+                    comparison_path.read_text(encoding="utf-8")
+                )
+                comparison["report_summary"] = comparison_report.get("summary")
+            except (OSError, json.JSONDecodeError) as error:
+                comparison["report_error"] = str(error)
+                comparison["status"] = "failed"
+            benchmark["comparison"] = comparison
+            if comparison["status"] != "passed" and benchmark["status"] == "passed":
+                benchmark["status"] = "failed"
+                benchmark["error"] = "Criterion regression comparison failed"
 
     source_end = source_checkpoint()
     dirty = source_end["dirty"]
@@ -755,6 +844,40 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("quick", "full", "none"),
         default="quick",
         help="Criterion benchmark mode (default: quick)",
+    )
+    run_parser.add_argument(
+        "--benchmark-baseline",
+        help="Criterion directory or bench-compare snapshot used as the regression baseline",
+    )
+    run_parser.add_argument(
+        "--max-regression-percent",
+        type=float,
+        default=5.0,
+        help="allowed mean regression before noise margins (default: 5)",
+    )
+    run_parser.add_argument(
+        "--noise-percent",
+        type=float,
+        default=1.0,
+        help="additional relative noise allowance (default: 1)",
+    )
+    run_parser.add_argument(
+        "--benchmark-min-samples",
+        type=int,
+        default=10,
+        help="minimum Criterion samples required per benchmark (default: 10)",
+    )
+    run_parser.add_argument(
+        "--noise-sigmas",
+        type=float,
+        default=3.0,
+        help="standard-error margin used to suppress noise (default: 3)",
+    )
+    run_parser.add_argument(
+        "--missing-baseline",
+        choices=("fail", "warn"),
+        default="fail",
+        help="fail or warn when current has a benchmark absent from the baseline",
     )
     clean_group = run_parser.add_mutually_exclusive_group()
     clean_group.add_argument(

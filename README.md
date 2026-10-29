@@ -186,7 +186,7 @@ fuckipv6/
 ### ✅ Phase 5 - 安全与策略（基础能力可用）
 
 - [x] X25519 + ChaCha20-Poly1305 端到端加密与 Blake3 KDF（基础实现）
-- [ ] 将已实现的 Secure Session v2 临时握手、计数 Nonce、重放窗口与密钥轮换接入真实 UDP/TUN 数据面（WireGuard 基线；见 `SECURITY_PERFORMANCE_TODO.md`）
+- [ ] 将已实现的 Secure Session v2 临时握手、确认帧、计数 Nonce、重放窗口与密钥轮换接入生产 `P2pEngine` 的 UDP/TUN 数据面（独立 UDP 适配器及本地集成测试已完成；见 `SECURITY_PERFORMANCE_TODO.md`）
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
 - [x] IPv4/IPv6 双栈虚拟地址与 Coordinator JWT 鉴权

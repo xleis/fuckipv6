@@ -18,7 +18,7 @@
 
 ### 必须补齐的差距
 
-- [ ] **前向保密**：普通 UDP P2P 仍由双方长期身份执行静态 X25519 DH；长期私钥泄漏后可解密历史流量。v2 的临时 X25519 握手已实现并通过单元测试，但客户端尚未依赖或调用 `fuckipv6-secure-session`。
+- [ ] **前向保密**：普通 UDP P2P 仍由双方长期身份执行静态 X25519 DH；长期私钥泄漏后可解密历史流量。v2 的临时 X25519 握手已实现并通过单元测试，客户端也已有独立 UDP 适配器，但生产 `P2pEngine` 尚未切换到 v2。
 - [ ] **重放保护**：当前生产数据包使用随机 Nonce，接收端没有滑动窗口、计数器或重复包拒绝。v2 的 4096 包窗口仅是未接入数据面的本地原语。
 - [ ] **密钥生命周期**：已有带 120 秒/2^60 字节硬上限、epoch 回滚拒绝、旧接收密钥短期宽限和过期擦除的状态机，但尚未接入握手与数据面。
 - [ ] **握手认证**：v2 已实现绑定双方身份、临时公钥、算法套件、SID、epoch 和 endpoint context 的签名 transcript 与 key confirmation；生产 UDP 路径仍未使用该握手。
@@ -28,7 +28,7 @@
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 
-已实现但尚未接入客户端数据面的 Secure Session v2 基础原语包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口、批量 seal/open、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码和原子 epoch 轮换。运输无关的 `SessionDriver` 已将这些步骤收束为建链、数据收发、重协商、旧 epoch 宽限、运行时计数和失败关闭接口，并有本地集成测试；但 `fuckipv6-client` 当前没有依赖 `fuckipv6-secure-session`，生产 UDP/TUN 路径仍使用静态密钥方案。可选 `pq` feature 另提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
+已实现但尚未接入生产 `P2pEngine` 数据面的 Secure Session v2 基础原语包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口、批量 seal/open、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码和原子 epoch 轮换。运输无关的 `SessionDriver` 已将这些步骤收束为建链、数据收发、重协商、旧 epoch 宽限、运行时计数和失败关闭接口。`fuckipv6-client` 已依赖该 crate，并提供专用 UDP 握手/数据适配器及本地集成测试；但 `P2pEngine` 的生产 UDP/TUN 路径仍使用静态密钥方案，尚无实际 relay 互操作证据。可选 `pq` feature 另提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
 
 ### 快速数据面基线（非发布结论）
 

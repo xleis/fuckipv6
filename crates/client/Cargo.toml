@@ -12,6 +12,10 @@ path = "src/main.rs"
 [dependencies]
 fuckipv6-common = { version = "0.3.0", path = "../common" }
 fuckipv6-coordinator = { version = "0.3.0", path = "../coordinator" }
+fuckipv6-secure-session = { version = "0.3.0", path = "../secure-session" }
+
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
 
 tokio = { workspace = true }
 tun = { workspace = true }

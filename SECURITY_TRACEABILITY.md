@@ -10,7 +10,7 @@
 |---|---|---|
 | UDP/TUN 生产路径使用 AEAD 加密 | 是，静态 X25519 派生密钥 | 客户端现有数据面路径 |
 | 拥有可测试的临时握手、重放窗口、重协商和运输无关会话驱动 v2 原语 | 是 | `crates/secure-session`；`driver.rs` 与集成测试 |
-| 客户端生产路径已使用 v2 临时握手和计数 Nonce | 否 | `fuckipv6-client` 未依赖 `fuckipv6-secure-session` |
+| 客户端生产路径已使用 v2 临时握手和计数 Nonce | 否 | `fuckipv6-client` 已依赖该 crate 并有独立 UDP 适配器，但生产 `P2pEngine` 尚未切换 |
 | 已具备端到端后量子机密性和身份认证 | 否 | 仅完成 ML-KEM/ML-DSA 原语适配，未接入 X-Wing、复合身份或握手 |
 | QUIC 双向身份已统一 | 否 | 服务端尚未要求客户端证书，应用层身份未与证书绑定 |
 | 已达到 WireGuard 安全等级 | 否 | 生产数据面、独立审计和 QUIC 身份等缺口仍在 |
@@ -37,7 +37,7 @@
 
 在以下条件满足前，T-01 至 T-09、T-12 只能标记为“本地原语已测试”，不能标记为生产安全属性：
 
-1. `fuckipv6-client` 显式依赖并调用 `fuckipv6-secure-session`，不再让 UDP/TUN 路径回退到静态长期密钥。
+1. 将已验证的 `fuckipv6-client` 独立 UDP 适配器接入生产 `P2pEngine` UDP/TUN 路径，明确 v1/v2 兼容策略，并禁止静默回退到静态长期密钥。
 2. 握手身份来源、Coordinator 公钥目录、endpoint context、时间源和能力协商完成端到端绑定。
 3. Cookie、有界重放缓存、每源/每身份限速和全局背压接入真实握手入口。
 4. 重协商控制帧进入真实控制通道，旧 epoch 宽限、超时和失败关闭有网络级集成测试。

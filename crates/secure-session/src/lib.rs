@@ -20,6 +20,7 @@ pub mod rekey;
 pub mod rekey_codec;
 pub mod rekey_session;
 pub mod transcript;
+pub mod wire;
 
 use data_cipher::AeadCipher;
 pub use data_cipher::DataCipherSuite;

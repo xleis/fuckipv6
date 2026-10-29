@@ -28,3 +28,11 @@ Thumbs.db
 /test_workspace/
 /release/*.zip
 /release/fuckipv6-windows/*.exe
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local release binaries
+/release/fuckipv6-linux-*
+/release/fuckipv6-coordinator-linux-*

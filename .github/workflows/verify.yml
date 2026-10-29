@@ -1,0 +1,142 @@
+name: Verify
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,x86_64-pc-windows-gnu
+
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release gate
+        run: >-
+          python3 scripts/release-gate.py run
+          --platform linux
+          --toolchain stable
+          --require-clean
+          --benchmark quick
+          --report target/release-gate/linux.json
+
+      - name: Upload Linux report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-linux
+          path: target/release-gate
+          if-no-files-found: warn
+
+  windows:
+    name: Windows gate
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release gate
+        run: >-
+          python scripts/release-gate.py run
+          --platform windows
+          --toolchain stable
+          --require-clean
+          --benchmark none
+          --report target/release-gate/windows.json
+
+      - name: Upload Windows report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-windows
+          path: target/release-gate
+          if-no-files-found: warn
+
+  macos:
+    name: macOS gate
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release gate
+        run: >-
+          python3 scripts/release-gate.py run
+          --platform macos
+          --toolchain stable
+          --require-clean
+          --benchmark none
+          --cross-target x86_64-apple-darwin
+          --cross-target aarch64-apple-darwin
+          --report target/release-gate/macos.json
+
+      - name: Upload macOS report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-macos
+          path: target/release-gate
+          if-no-files-found: warn
+
+  aggregate:
+    name: Aggregate release decision
+    if: always()
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download platform reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-gate-*
+          path: target/release-gate
+          merge-multiple: true
+
+      - name: Aggregate reports
+        shell: bash
+        run: >-
+          python3 scripts/release-gate.py aggregate
+          --reports target/release-gate/*.json
+          --output target/release-gate/aggregate.json
+
+      - name: Upload aggregate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-aggregate
+          path: target/release-gate/aggregate.json
+          if-no-files-found: warn

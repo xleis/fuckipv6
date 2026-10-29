@@ -281,8 +281,17 @@ docker compose --profile client up -d client
 
 GitHub Actions 提供两个工作流：
 
-- `.github/workflows/ci.yml`：每次 push/PR 执行 Linux、macOS、Windows 编译和测试，并执行 Docker 构建。
-- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时，打包 Linux x86_64、macOS x86_64、macOS arm64 和 Windows x86_64 产物，生成 SHA256，并上传到 GitHub Release。
+- `.github/workflows/ci.yml`：每次 push/PR 调用 `verify.yml`，在 Linux、Windows、macOS 执行发布门禁并聚合报告。
+- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时先复用 `verify.yml`；三平台门禁通过后才打包 Linux x86_64、macOS x86_64、macOS arm64 和 Windows x86_64 产物，生成 SHA256 并上传到 GitHub Release。
+
+发布门禁也可以在本机执行。正式检查默认要求干净工作区；禁止用 `--allow-dirty` 的产物作为发布依据。
+
+```bash
+python3 scripts/release-gate.py run --platform linux --print-plan
+python3 scripts/release-gate.py run --platform linux --toolchain stable
+```
+
+Linux 门禁默认额外检查 musl 和 Windows GNU target，需提前安装对应 Rust target 及 MinGW。报告位于 `target/release-gate/linux.json`，完整日志和 Criterion 原始估计值位于 `target/release-gate/linux-artifacts/`。门禁报告只覆盖工程构建、测试、lint 和基准可执行性，不代表独立安全审计通过，也不构成超越 WireGuard 的性能证明。
 
 创建发布：
 

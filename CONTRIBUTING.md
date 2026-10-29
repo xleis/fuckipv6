@@ -7,6 +7,7 @@ Thanks for working on fuckipv6. This project is still pre-1.0, so changes should
 Requirements:
 
 - Rust stable
+- Python 3
 - Linux for full TUN runtime testing, or Windows with administrator access and WinTun for Windows client work
 - `iproute2` on Linux when testing TUN setup
 
@@ -17,6 +18,14 @@ cargo fmt --check
 cargo test --workspace
 cargo build --release
 ```
+
+Before treating a build as a release candidate, run the clean-worktree engineering gate:
+
+```bash
+python3 scripts/release-gate.py run --platform linux --toolchain stable
+```
+
+The gate pins Cargo to one coherent rustup toolchain and executes formatting, helper-script tests, all-feature check/test/Clippy, a release build, platform cross-checks, and a Criterion benchmark. Use `--print-plan` to inspect commands first. `--allow-dirty` is diagnostic only and can never produce a release-ready report.
 
 Run clippy when touching shared logic or before a release:
 

@@ -6,83 +6,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  linux:
-    name: Linux checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --check
-
-      - name: Check
-        run: cargo check --workspace
-
-      - name: Test
-        run: cargo test --workspace
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Build release
-        run: cargo build --release --workspace
-
-  windows:
-    name: Windows checks
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check
-        run: cargo check --workspace
-
-      - name: Test
-        run: cargo test --workspace
-
-  macos:
-    name: macOS checks
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check native
-        run: cargo check --workspace
-
-      - name: Test native
-        run: cargo test --workspace
-
-      - name: Check macOS x86_64 target
-        run: cargo check --workspace --target x86_64-apple-darwin
-
-      - name: Check macOS arm64 target
-        run: cargo check --workspace --target aarch64-apple-darwin
+  verify:
+    name: Release verification
+    uses: ./.github/workflows/verify.yml
 
   docker:
     name: Docker builds
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

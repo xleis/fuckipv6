@@ -178,7 +178,7 @@ fuckipv6/
 
 ### 🚧 Phase 4 - 生产就绪（持续验证）
 
-- [x] 安全审计（`cargo audit` 无漏洞/告警；人工安全审计仍建议在生产前执行）
+- [ ] 独立安全审计（仅完成依赖漏洞扫描；人工协议与密码学审计尚未执行）
 - [x] 压力测试（QUIC relay 100 个已注册客户端并发连接）
 - [x] 监控和日志
 - [x] 部署工具（systemd、安装脚本、Docker、CI、Release 自动发布）
@@ -227,6 +227,20 @@ fuckipv6/
 2026-10-30 的同机端到端基线尚未达标：单流 TCP 约 `0.055 Gbit/s`，内核 WireGuard 为 `1.479 Gbit/s`；受控 1420 字节 UDP 为 `0.040 Gbit/s`，WireGuard 为 `0.050 Gbit/s`。当前结果是高负载环境中的噪声较大的基线，不是超越 WireGuard 的证明。原始数据、限制和复现命令见 [`benchmarks/data/2026-10-30-dataplane-baseline`](benchmarks/data/2026-10-30-dataplane-baseline/README.md)。
 
 CPU profiling 可使用 `PROFILE_SECONDS=10 ./scripts/profile-cpu.sh` 对协议/relay 基准采样；脚本优先生成 flamegraph，未安装 `cargo-flamegraph` 时降级输出 `target/profiling/*.perf-report.txt`。
+
+## ✅ 发布门禁
+
+发布门禁要求工作区干净，并依次执行格式检查、辅助脚本测试、workspace check/Clippy/test、release build、平台交叉编译检查和 Criterion quick 快速基准。Linux 默认额外检查 `x86_64-unknown-linux-musl` 与 `x86_64-pc-windows-gnu`。
+
+```bash
+# 先查看解析后的命令计划，不执行编译
+python3 scripts/release-gate.py run --platform linux --print-plan
+
+# 正式门禁；结果写入 target/release-gate/linux.json，日志写入同级 artifacts 目录
+python3 scripts/release-gate.py run --platform linux --toolchain stable
+```
+
+诊断脏工作区时可使用 `--allow-dirty`，但报告的 `release_ready` 必定为 `false`。CI 会用 `verify.yml` 汇总 Linux、Windows、macOS 报告，只有三平台同 commit、干净且至少一个平台产生机器可读基准结果时才允许发布。门禁只证明工程检查可执行和基准可运行，不证明已达到 WireGuard 性能对等，也不替代真实跨平台网络测试、协议审查或独立密码学审计。
 
 ## 🤝 贡献
 

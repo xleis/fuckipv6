@@ -984,9 +984,9 @@ tun_name = "fuckipv6"</div>
       <div class="form-group">
         <label>网络运行模式</label>
         <select class="form-control" id="net-mode-select">
-          <option value="dual_stack">IPv4 + IPv6 双栈模式 (DualStack)</option>
-          <option value="ipv6_only">仅 IPv6 模式 (Ipv6Only)</option>
-          <option value="ipv4_only">仅 IPv4 模式 (Ipv4Only)</option>
+          <option value="dual_stack">IPv4 + IPv6 双栈模式</option>
+          <option value="ipv6_only">仅分配 IPv6 单栈</option>
+          <option value="ipv4_only">仅分配 IPv4 单栈</option>
         </select>
       </div>
       <div class="form-group">

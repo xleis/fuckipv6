@@ -18,9 +18,10 @@
 //!
 //! The replay cache is per responder instance. It is bounded and fails closed
 //! when no slot can be reclaimed. Persistent replay state across process
-//! restarts, stateless cookies, key-confirmation wire encoding, and data-plane
-//! key installation are out of scope for this profile stage and remain tracked
-//! by the security sprint.
+//! restarts, key-confirmation wire encoding, and data-plane key installation
+//! are out of scope for this profile stage and remain tracked by the security
+//! sprint. A stateless cookie primitive exists in [`crate::cookie`], but it is
+//! not yet connected to a control-channel `HELLO`/retry exchange.
 
 use crate::transcript::{
     HandshakeTranscript, IdentityId, TranscriptError, TranscriptHash, ENDPOINT_CONTEXT_HASH_LEN,

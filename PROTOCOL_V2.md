@@ -213,20 +213,45 @@ Responder 验证 `TH2_hash` 和确认值后才允许该 epoch 接收 Initiator �
 
 ### 4.5 Cookie/Retry
 
-Responder 在全局或每源握手速率超过阈值时，不验证昂贵的双签名和 KEM，而是返回：
+Responder 在全局或每源握手速率超过阈值时，可以不验证昂贵的双签名和 KEM，而返回无状态 cookie challenge。实现使用以下固定编码：
 
 ```text
-RETRY { cookie = MAC(K_cookie, peer_context || TH1_without_signatures || time_window) }
+CHALLENGE {
+  kind: u8 = 0x21,
+  protocol_version: u8 = 2,
+  cookie: {
+    version: u8 = 1,
+    issued_at: u64be,
+    mac: HMAC-SHA-256[32]
+  }
+}
 ```
+
+`CHALLENGE` 固定为 43 字节，其中 cookie 固定为 41 字节。Initiator 必须在重发的 `HELLO.cookie_or_zero` 中携带该 41 字节 cookie；不能只回送 challenge 头部。
+
+MAC 输入使用独立域 `L("fuckipv6-v2 stateless cookie mac")`，随后按顺序写入以下每个字段，字段均编码为 `L(x)`，其中 `L(x) = len(x):u16be || x`：
+
+```text
+protocol_version, cookie_version,
+source_address, initiator_identity, responder_identity,
+sha256_ephemeral_public_key, issued_at
+```
+
+- `source_address` 为 19 字节：地址族（IPv4=`4`，IPv6=`6`）、端口、IP 地址。必须绑定观察到的 IP 和端口；“只绑定 IP”或忽略地址族都不合规。
+- `sha256_ephemeral_public_key = SHA-256(L("fuckipv6-v2 ephemeral key hash") || L(EPK_I))`。哈希接口接受变长公钥字节，以便未来接入 X-Wing 公钥，不自行解释密钥组编码。
+- 默认 cookie 有效期为 30 秒，允许 2 秒未来时钟偏差；可配置有效期上限为 300 秒，未来偏差不得超过有效期。边界语义为 `issued_at <= now + skew` 且 `now - issued_at <= lifetime`。
+- 验证端必须先以常量时间校验完整 MAC，再检查时间窗口；截断、尾随字节、版本错误、时间无效、跨源、跨身份或跨 `EPK_I` 均失败关闭。
+- cookie 不创建会话、不进入全局会话表。challenge 响应不得大于触发它的完整请求；小于 43 字节的触发包不得产生响应，以防止反射放大。
+- Initiator 重发 `HELLO` 时，Responder 必须重新验证 cookie 和全部握手字段。符合速率预算的首次握手仍可直接进入验证，但受全局 CPU、内存和半开状态上限约束。
+- cookie 只证明源地址可达性，不认证 peer。精确的 `HELLO` 重放在 cookie 生命周期内仍可能被转发，必须由签名验证后的有界握手重放缓存拒绝；调用方仍须执行每源/每身份速率限制。
+
+当前 `fuckipv6-secure-session` 已实现上述 cookie、challenge 编解码和负向测试；控制通道 `HELLO/retry` 的实际接入、cookie key 轮换和真实 UDP 发包路径仍待完成，不能把这些原语等同于已经部署的 DoS 防护。
 
 规则：
 
 - `K_cookie` 至少 256-bit，由 CSPRNG 生成，每 60 秒轮换并接受前一代。
-- cookie 绑定控制通道认证身份、源地址/中继路径、`NI`、`EPK_I` hash、`TH1_without_signatures` 和时间窗口。
-- cookie 不创建会话、不入全局表；验证失败返回统一错误或静默丢弃。
-- Initiator 重发 `HELLO` 时携带 cookie；Responder 重新验证所有字段。
-- 无状态挑战包响应不得大于触发包，防止反射放大。
-- 符合速率预算的首次握手可以直接进入验证，但仍受全局 CPU、内存和半开状态上限约束。
+- cookie 密钥不得全部为零，并必须经过 CSPRNG 生成；轮换期间只能同时接受当前和前一代密钥。
+- 验证失败返回统一错误或静默丢弃，不得通过不同的错误内容和时序泄露身份是否存在。
 
 ## 5. 密钥派生
 

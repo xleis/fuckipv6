@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加 Secure Session v2 无状态源可达性 cookie 原语：41 字节 cookie 使用 HMAC-SHA-256 绑定协议版本、源 IP/端口、地址族、双方身份、ephemeral 公钥哈希和签发时间；43 字节 challenge 使用独立控制帧类型，拒绝截断、尾随、错误版本、篡改、过期/未来时间、跨源和跨身份使用，并在响应前阻止反射放大。默认有效期 30 秒、未来偏差 2 秒、可配置上限 300 秒；cookie 仅证明源可达，仍须签名验证、有界重放缓存和限速。当前尚未接入控制通道或真实 UDP 数据面。
 - 增加 Secure Session v2 连续 stride 缓冲批量 seal/open 快路径：调用方预分配整批数据、明文切片表和包长度表，布局在写入/解密前完整校验；批量 send counter 与 epoch 字节预算一次性检查，receive 采用 fail-fast 且只提交成功前缀的 replay 状态，热路径不逐包分配。新增 32 包 1280/1420 字节 Criterion 对照基线；当前仍为内存原语基准，尚未接入真实 UDP/TUN 数据面。
 - 增加 Secure Session v2 运行时数据密码套件抽象：AES-256-GCM（`0x0201`）与 ChaCha20-Poly1305（`0x0202`）共用固定 16 字节头、方向 Nonce、长度绑定 AAD、16 字节标签和 4096 包重放窗口；握手安装数据 epoch 时只使用已认证 transcript 中的 suite ID，数据包不能自行改选算法。新增双套件往返、跨套件拒绝、pair suite 不一致、AAD/tag 篡改、方向反射和失败不消费重放计数测试；当前仍为实验性 classic profile，尚未接入真实 UDP/TUN 数据面。
 - 增加 Secure Session v2 原子在线重协商桥接：`RekeySession` 独占组合 `RekeyStateMachine` 与 `EpochSession`，校验新密钥的 SID、epoch、方向和单调性；Responder 在 `REKEY_ACCEPT` 阶段仅暂存密钥，验证 `REKEY_CONFIRM` 后才安装，Initiator 在认证 ACCEPT 后安装。切换同时替换双向密钥，并通过 `EpochSession::rotate` 保留旧接收 epoch 的有界在途宽限；错误确认/材料、超时和重复消息均有回归测试。当前仍未接入真实控制通道或 UDP/TUN 数据面。

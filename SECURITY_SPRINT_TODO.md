@@ -17,7 +17,7 @@
 - [x] **SS-09 原子重协商桥接**：将 `RekeyStateMachine` 与 `EpochSession` 组合，只有确认完成后才原子切换收发密钥并保留旧接收 epoch 宽限。
 - [x] **SS-10 密码套件抽象**：提供 ChaCha20-Poly1305 与 AES-256-GCM 数据套件及运行时选择，两个套件共享相同 AAD/nonce 语义和负向测试。
 - [x] **SS-11 批量快路径**：实现预分配缓冲上的批量 seal/open 接口，禁止逐包分配；基准比较单包与批量吞吐。
-- [ ] **SS-12 无状态 Cookie**：实现绑定源地址、身份、ephemeral key hash 和时间窗的 MAC cookie，覆盖过期、跨源、重放和反射放大限制。
+- [x] **SS-12 无状态 Cookie**：实现绑定源地址、身份、ephemeral key hash 和时间窗的 MAC cookie，覆盖过期、跨源、重放和反射放大限制。
 - [ ] **SS-13 PQC 原语适配**：锁定 ML-KEM-768/ML-DSA-65 标准 crate 版本与许可证，增加可选 `pq` feature、known-answer 测试和 zeroize 检查；不自行实现格密码数学。
 - [ ] **SS-14 性能与发布门禁**：新增可执行门禁，要求测试、跨平台编译、基准成功并把结果写入机器可读报告；仍不得在独立审计前宣称超越 WireGuard。
 

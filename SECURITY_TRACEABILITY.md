@@ -1,16 +1,16 @@
 # 安全威胁—控制—测试追踪矩阵
 
 > 状态：工程追踪文档，不是独立安全审计结论。  
-> 基线：`3f2f127` 之后的 Secure Session v2 本地原语。  
+> 基线：`64556d2` 之后的生产 Secure Session v2 classic 数据面。
 > 判定口径：源码存在不等于生产路径已接入；单元测试通过不等于协议已获独立评审。
 
 ## 1. 结论先行
 
 | 声明 | 当前是否成立 | 依据 |
 |---|---|---|
-| UDP/TUN 生产路径使用 AEAD 加密 | 是，静态 X25519 派生密钥 | 客户端现有数据面路径 |
+| UDP/TUN 生产路径使用 AEAD 加密 | 是，Secure Session v2 classic 临时会话密钥 | `P2pEngine` v2 握手/数据路由与双引擎真实 UDP 测试 |
 | 拥有可测试的临时握手、重放窗口、重协商和运输无关会话驱动 v2 原语 | 是 | `crates/secure-session`；`driver.rs` 与集成测试 |
-| 客户端生产路径已使用 v2 临时握手和计数 Nonce | 否 | `fuckipv6-client` 已依赖该 crate 并有独立 UDP 适配器，但生产 `P2pEngine` 尚未切换 |
+| 客户端生产路径已使用 v2 临时握手和计数 Nonce | 是 | `P2pEngine` 使用共享 UDP socket 完成 HELLO/ACCEPT/CONFIRM 并将 v2 密文交给 TUN/ACL 路径 |
 | 已具备端到端后量子机密性和身份认证 | 否 | 仅完成 ML-KEM/ML-DSA 原语适配，未接入 X-Wing、复合身份或握手 |
 | QUIC 双向身份已统一 | 否 | 服务端尚未要求客户端证书，应用层身份未与证书绑定 |
 | 已达到 WireGuard 安全等级 | 否 | 生产数据面、独立审计和 QUIC 身份等缺口仍在 |
@@ -20,11 +20,11 @@
 
 | ID | 威胁/失败模式 | 预期安全不变量 | 当前控制与代码 | 主要测试 | 当前状态与剩余缺口 |
 |---|---|---|---|---|---|
-| T-01 | 被动窃听、长期私钥日后泄漏 | 每次会话使用独立临时密钥；长期私钥泄漏不能解密历史流量 | `handshake.rs` 的临时 X25519/Ed25519 握手；`key_schedule.rs` 从 transcript 和共享秘密派生会话密钥；秘密使用 `Zeroizing`/`zeroize` | `both_endpoints_establish_the_same_transcript_and_x25519_secret`、`both_handshake_endpoints_derive_identical_keys`、`explicit_erase_zeroizes_all_output_keys` | 本地原语已验证；生产客户端仍走静态 X25519，未获得前向保密 |
+| T-01 | 被动窃听、长期私钥日后泄漏 | 每次会话使用独立临时密钥；长期私钥泄漏不能解密历史流量 | `secure_runtime.rs` 在生产连接中驱动临时 X25519 + Ed25519 握手；`key_schedule.rs` 从 transcript 和共享秘密派生会话密钥；秘密使用 `Zeroizing`/`zeroize` | `test_p2p_engine_data_transfer`、`both_endpoints_establish_the_same_transcript_and_x25519_secret`、`explicit_erase_zeroizes_all_output_keys` | 生产路径已接入临时握手；仍需独立密码学/协议审计和生产运行时密钥生命周期验证 |
 | T-02 | 恶意 Coordinator/Relay 或主动攻击者替换公钥、临时密钥或会话字段 | 双方直接验证长期身份签名；所有握手字段绑定到同一 transcript；临时密钥替换必须失败 | `handshake.rs` 校验 HELLO/ACCEPT 身份、签名、transcript、时间和 endpoint context；`transcript.rs` 使用长度前缀与域分离 | `mitm_ephemeral_key_substitution_fails_in_both_directions`、`hello_signature_tampering_fails_closed`、`accept_signature_tampering_fails_closed`、`wrong_identity_and_wrong_endpoint_are_rejected` | 经典握手原语覆盖较强；尚未接入客户端身份目录和真实控制通道 |
 | T-03 | 算法套件降级、算法混淆或协商结果被替换 | 数据套件只由已认证 transcript 决定；未知或降级套件失败关闭；双方套件必须一致 | `handshake.rs`、`transcript.rs` 固定 suite；`handshake_epoch.rs` 从认证握手选择数据套件；`lib.rs` 拒绝跨套件状态 | `protocol_downgrade_attempts_fail_even_with_a_valid_responder_signature`、`unsupported_suite_and_zero_ephemeral_key_are_rejected`、`aes_suite_is_selected_from_the_authenticated_handshake`、`mixed_suite_epoch_pairs_are_rejected` | classic profile 已有本地验证；混合后量子能力协商和迁移策略未实现 |
 | T-04 | Transcript 边界歧义、跨会话拼接或角色/epoch/SID 错绑 | 每个字段无歧义编码；角色、双方身份、临时公钥、suite、SID、epoch、endpoint 和 PSK 状态均被绑定 | `transcript.rs` canonical builder；`handshake.rs` 校验 ACCEPT 与 HELLO 一致；`handshake_epoch.rs` 再校验确认值 | `canonical_transcript_matches_the_fixed_vector`、`every_bound_field_changes_the_hash`、`length_prefixes_prevent_field_boundary_ambiguity`、`a_different_transcript_cannot_authorize_installation` | 固定向量和字段敏感性已覆盖；独立协议评审、模糊测试和跨语言向量未完成 |
-| T-05 | 数据帧重放、重排、跨方向反射、跨会话拼接或计数器复用 | `(session_id, direction, counter)` 每密钥最多使用一次；未认证包不推进窗口；旧包只在窗口/宽限内接受 | `lib.rs` 固定头、方向 Nonce、长度绑定 AAD、4096 包窗口和 32-bit 包上限；接收状态仅在认证成功后提交 | `data_aad_binds_header_session_and_payload_length`、`suite_mismatch_tampering_and_reflection_fail_without_consuming_counters`、`authenticated_packet_cannot_be_replayed`、`packets_can_be_opened_out_of_order`、`packet_counter_never_wraps` | 本地快路径覆盖充分；生产 UDP/TUN 仍使用随机 Nonce 且无重放窗口 |
+| T-05 | 数据帧重放、重排、跨方向反射、跨会话拼接或计数器复用 | `(session_id, direction, counter)` 每密钥最多使用一次；未认证包不推进窗口；旧包只在窗口/宽限内接受 | `lib.rs` 固定头、方向 Nonce、长度绑定 AAD、4096 包窗口和 32-bit 包上限；生产 `P2pEngine` 在 TUN/ACL 前调用认证 open，接收状态仅在认证成功后提交 | `test_p2p_engine_data_transfer`、`data_aad_binds_header_session_and_payload_length`、`suite_mismatch_tampering_and_reflection_fail_without_consuming_counters`、`authenticated_packet_cannot_be_replayed` | 生产 UDP/TUN 和 relay 已覆盖篡改/重放失败关闭；仍需真实 WAN、跨平台与长期 fuzz 证据 |
 | T-06 | 重协商回滚、半开事务耗尽、旧 epoch 密钥泄漏或错误确认激活新密钥 | Responder 在确认前不安装新密钥；epoch/SID 单调；超时失败关闭；旧接收密钥仅短期宽限；重复消息有界幂等 | `rekey.rs` 状态机；`rekey_codec.rs` 固定帧；`rekey_session.rs` 暂存并原子安装；`EpochSession::rotate` 管理宽限 | `rekey_frames_round_trip_with_canonical_lengths`、`all_frame_types_reject_truncated_and_trailing_bytes`、`rekey_installs_both_endpoints_only_after_confirmation_and_graces_old_receive`、`mismatched_material_and_bad_confirm_preserve_the_old_epoch`、`timeout_discards_staged_responder_keys_without_rotation` | 本地状态机与 epoch 桥接已实现；未接入真实控制通道、密钥提供方和数据面轮换 |
 | T-07 | 握手反射放大、CPU 耗尽、内存耗尽或重放缓存污染 | 未验证请求不创建昂贵会话；cookie 绑定源地址/身份/临时密钥/时间；缓存和半开事务有上限；无效输入在分配前拒绝 | `cookie.rs` 41 字节 HMAC cookie 和有界策略；`handshake.rs` 有界 replay cache；`rekey.rs` 半开事务上限；各 decoder 边界检查 | `challenge_never_amplifies_and_has_a_canonical_frame`、`cookie_validates_only_the_original_source_identity_and_ephemeral_key`、`cookie_rejects_expired_future_and_wrong_key_values`、`replay_cache_fails_closed_when_full`、`decoder_rejects_oversized_unknown_and_mismatched_frames` | cookie 和缓存原语存在；尚无生产握手限速、每源预算、全局背压和持续模糊测试 |
 | T-08 | 密钥、Nonce、PSK 或签名秘密进入内存转储、日志、panic 或 Debug | 秘密及时清零；认证比较恒定时间；日志和 Debug 只暴露公开标识；错误不包含秘密 | `zeroize` 包装和显式擦除；`pq.rs` 脱敏 Debug；各校验路径在状态变更前完成认证 | `explicit_erase_zeroizes_all_output_keys`、`secret_debug_output_is_redacted`、`fixed_tag`/KAT 测试、各 `fail_closed` 负向测试 | 本地原语有清理和脱敏测试；生产运行时日志、panic hook、core dump 和长期身份生命周期未系统验证 |
@@ -37,8 +37,8 @@
 
 在以下条件满足前，T-01 至 T-09、T-12 只能标记为“本地原语已测试”，不能标记为生产安全属性：
 
-1. 将已验证的 `fuckipv6-client` 独立 UDP 适配器接入生产 `P2pEngine` UDP/TUN 路径，明确 v1/v2 兼容策略，并禁止静默回退到静态长期密钥。
-2. 握手身份来源、Coordinator 公钥目录、endpoint context、时间源和能力协商完成端到端绑定。
+1. [x] 将已验证的 UDP 会话适配器接入生产 `P2pEngine` UDP/TUN 与 relay 密文路径；legacy/static 数据失败关闭，不提供静默降级。
+2. [ ] 握手身份来源、Coordinator 公钥目录、endpoint context、时间源和完整能力协商完成端到端绑定；当前经典套件与 PeerInfo 公钥路径仍待审计。
 3. Cookie、有界重放缓存、每源/每身份限速和全局背压接入真实握手入口。
 4. 重协商控制帧进入真实控制通道，旧 epoch 宽限、超时和失败关闭有网络级集成测试。
 5. 生产路径具备运行时计数：握手成功/失败、降级拒绝、重放拒绝、cookie 拒绝、重协商延迟和密钥销毁。

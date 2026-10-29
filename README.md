@@ -6,7 +6,7 @@
 
 - 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
-- 🛡️ **安全与 ACL 策略**: ChaCha20-Poly1305 端到端数据加密（当前为静态 X25519 会话密钥，尚未具备前向保密与重放窗口）、声明式入出站 ACL、Coordinator 准入黑名单
+- 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。该 profile 尚未完成独立密码学审计，后量子身份与密钥组合尚未接入，不能据此宣称安全等级或性能超过 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
 - 🔒 **身份与鉴权**: Ed25519 签名验证；Coordinator Web/API 可配置 JWT，客户端本地 WebUI/API 当前免密并只应绑定本机或受信网络
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
@@ -98,7 +98,7 @@ sudo ./scripts/test-netns.sh
 1. 客户端连接协调服务器，获取虚拟IP（如`fd00::1001`）
 2. 协调服务器通知所有客户端新节点上线
 3. 客户端之间通过 UDP 探测和多中继测速验证可达端点
-4. 应用流量优先通过 TUN → QUIC Stream Mesh → 对端 TUN；QUIC 不适用时使用加密 UDP 直连
+4. 应用流量先封装为 v2 密文，再按路径选择 QUIC Stream Mesh 或 UDP 直连；两种传输均不会接受静态密钥或明文降级
 5. 如果 P2P 不可用，客户端优先通过 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令中继
 
 ## 📦 项目结构
@@ -185,8 +185,9 @@ fuckipv6/
 
 ### ✅ Phase 5 - 安全与策略（基础能力可用）
 
-- [x] X25519 + ChaCha20-Poly1305 端到端加密与 Blake3 KDF（基础实现）
-- [ ] 将已实现的 Secure Session v2 临时握手、确认帧、计数 Nonce、重放窗口与密钥轮换接入生产 `P2pEngine` 的 UDP/TUN 数据面（独立 UDP 适配器及本地集成测试已完成；见 `SECURITY_PERFORMANCE_TODO.md`）
+- [x] Secure Session v2 classic（临时 X25519 + Ed25519、确认帧、计数 Nonce、重放窗口）已接入生产 `P2pEngine` 的 UDP/TUN 数据面；旧版静态密钥数据包失败关闭，QUIC 与 relay 只承载同一 v2 密文
+- [ ] 接入 v2 在线重协商控制通道、无状态 Cookie 与限速，并完成独立密码学审计；当前 epoch 达到时限/字节上限后失败关闭而不是在线换钥
+- [ ] 接入 X25519 + ML-KEM-768 与 Ed25519 + ML-DSA-65 混合握手；当前生产路径不具备端到端后量子机密性或后量子身份认证
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
 - [x] IPv4/IPv6 双栈虚拟地址与 Coordinator JWT 鉴权
@@ -211,7 +212,7 @@ fuckipv6/
   - QUIC 中继与 WebSocket 信令 fallback
   - TUN/TAP (虚拟网卡)
 - **序列化**: postcard
-- **加密**: Ed25519-dalek、X25519-dalek、ChaCha20-Poly1305、Blake3；安全增强路线见 `SECURITY_PERFORMANCE_TODO.md`
+- **加密**: Secure Session v2 classic（临时 X25519、Ed25519、HKDF-SHA-512、HMAC-SHA-256、ChaCha20-Poly1305 / AES-256-GCM）；后量子迁移与审计边界见 `SECURITY_PERFORMANCE_TODO.md`
 - **CLI**: clap
 
 ## 📊 性能目标

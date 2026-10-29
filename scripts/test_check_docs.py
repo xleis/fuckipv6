@@ -24,13 +24,12 @@ class CheckDocsTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "README.md").write_text(
             "# Readme\n\n"
-            "当前为静态 X25519 会话密钥，尚未具备前向保密与重放窗口。\n\n"
-            "- [ ] 将 Secure Session v2 临时握手接入生产 UDP/TUN 数据面。\n\n"
+            "Secure Session v2 classic 已接入生产 UDP/TUN 数据面；尚未完成独立密码学审计，后量子组合尚未接入。\n\n"
             "当前结果不是超越 WireGuard 的证明。\n",
             encoding="utf-8",
         )
         (self.root / "SECURITY_PERFORMANCE_TODO.md").write_text(
-            "生产 `P2pEngine` 的 UDP/TUN 路径仍使用静态密钥方案。\n",
+            "Secure Session v2 已接入生产 `P2pEngine`，仍需独立密码学审计。\n",
             encoding="utf-8",
         )
         (self.root / "CHANGELOG.md").write_text(
@@ -116,8 +115,8 @@ class CheckDocsTests(unittest.TestCase):
         result = DOCS.check_documents(self.root, self.files())
         codes = {issue["code"] for issue in result["issues"]}
 
-        self.assertIn("readme-static-session-boundary", codes)
-        self.assertIn("readme-v2-not-production", codes)
+        self.assertIn("readme-v2-production-boundary", codes)
+        self.assertIn("readme-no-wireguard-performance-claim", codes)
 
     def test_completed_item_requires_completed_prerequisites(self) -> None:
         (self.root / "EXECUTION_QUEUE.md").write_text(

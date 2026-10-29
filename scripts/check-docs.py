@@ -2,8 +2,9 @@
 """Check tracked Markdown links, anchors, and critical status invariants.
 
 External URLs are syntax-checked but never fetched. The status checks encode
-the project's current release boundary: Secure Session v2 is not yet in the
-production data plane and the project has not proven parity with WireGuard.
+the project's current release boundary: Secure Session v2 classic is in the
+production data plane, but it lacks independent audit and post-quantum
+integration, and the project has not proven parity with WireGuard.
 """
 
 from __future__ import annotations
@@ -29,16 +30,10 @@ PREREQUISITES = {
 }
 SECURITY_INVARIANTS = (
     (
-        "readme-static-session-boundary",
+        "readme-v2-production-boundary",
         "README.md",
-        r"当前为静态 X25519[^\n]*尚未具备前向保密",
-        "README must disclose the static-session and no-forward-secrecy boundary",
-    ),
-    (
-        "readme-v2-not-production",
-        "README.md",
-        r"Secure Session v2[^\n]*接入生产[^\n]*UDP/TUN 数据面",
-        "README must list production v2 data-plane integration as pending",
+        r"Secure Session v2 classic[^\n]*UDP/TUN[^\n]*尚未完成独立密码学审计[^\n]*后量子",
+        "README must distinguish production v2 from its audit and PQ boundaries",
     ),
     (
         "readme-no-wireguard-performance-claim",
@@ -47,10 +42,10 @@ SECURITY_INVARIANTS = (
         "README must not turn current microbenchmarks into a WireGuard performance claim",
     ),
     (
-        "todo-production-v2-not-wired",
+        "todo-production-v2-audit-boundary",
         "SECURITY_PERFORMANCE_TODO.md",
-        r"生产\s*`P2pEngine`[^\n]*仍使用静态密钥方案",
-        "security TODO must disclose that the production P2pEngine still uses the static-key path",
+        r"Secure Session v2[^\n]*生产\s*`P2pEngine`[^\n]*独立(?:协议与)?密码学审计",
+        "security TODO must record production v2 integration and its audit boundary",
     ),
     (
         "changelog-pq-boundary",

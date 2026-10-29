@@ -7,28 +7,30 @@
 
 威胁、代码控制、测试证据和生产缺口的逐项映射见 [`SECURITY_TRACEABILITY.md`](SECURITY_TRACEABILITY.md)。
 
-## 当前基线（2026-10-30，基于 `2d3c7fc`）
+## 当前基线（2026-10-30，基于 `64556d2`）
 
 ### 已有能力
 
 - Ed25519 长期身份、注册消息签名验证和公钥指纹。
-- X25519、BLAKE3 与 ChaCha20-Poly1305 数据面加密。
+- Secure Session v2 classic 已接入生产 `P2pEngine`：临时 X25519 + Ed25519 握手、双向 key confirmation、按长期公钥确定性选角色、认证 endpoint 绑定、计数 Nonce、4096 包重放窗口及 AEAD 失败关闭；该接入尚未完成独立密码学审计。
+- QUIC Mesh、QUIC relay 与信令 relay 只运输同一 v2 密文；静态 X25519 与 legacy data 帧不会进入生产接收队列。
+- HKDF-SHA-512 会话密钥派生、HMAC-SHA-256 confirmation，以及 ChaCha20-Poly1305 / AES-256-GCM 数据套件。
 - QUIC/TLS 1.3 通道、证书公钥 pin 和 0-RTT 自检。
 - ACL、准入黑名单、配置加密和 Exit Node 源地址校验。
 
 ### 必须补齐的差距
 
-- [ ] **前向保密**：普通 UDP P2P 仍由双方长期身份执行静态 X25519 DH；长期私钥泄漏后可解密历史流量。v2 的临时 X25519 握手已实现并通过单元测试，客户端也已有独立 UDP 适配器，但生产 `P2pEngine` 尚未切换到 v2。
-- [ ] **重放保护**：当前生产数据包使用随机 Nonce，接收端没有滑动窗口、计数器或重复包拒绝。v2 的 4096 包窗口仅是未接入数据面的本地原语。
-- [ ] **密钥生命周期**：已有带 120 秒/2^60 字节硬上限、epoch 回滚拒绝、旧接收密钥短期宽限和过期擦除的状态机，但尚未接入握手与数据面。
-- [ ] **握手认证**：v2 已实现绑定双方身份、临时公钥、算法套件、SID、epoch 和 endpoint context 的签名 transcript 与 key confirmation；生产 UDP 路径仍未使用该握手。
+- [x] **前向保密**：生产 UDP/TUN 路径已使用每次会话独立的临时 X25519 握手；长期 Ed25519 私钥泄漏不再直接解密历史会话。该结论仍需独立协议与密码学审计。
+- [x] **重放保护**：生产 v2 数据帧使用方向分离的计数 Nonce 和 4096 包重放窗口，未认证或重复数据在进入 TUN/ACL 前失败关闭；真实 UDP 双引擎测试覆盖重放与篡改。
+- [ ] **密钥生命周期**：初始 epoch 已有 120 秒/2^60 字节硬上限、回滚拒绝和过期擦除，达到上限后失败关闭；在线 `REKEY_INIT/ACCEPT/CONFIRM` 尚未接入生产控制通道，因此持续流量达到时限后不能无缝换钥。
+- [x] **握手认证**：生产 UDP 路径已使用绑定双方身份、临时公钥、算法套件、SID、epoch 和 endpoint context 的签名 transcript 与双向 key confirmation；不安全或未完成的会话无法发送数据。
 - [ ] **抗量子握手与身份**：生产数据面仍只使用 X25519 和 Ed25519；可选 `pq` feature 已适配 ML-KEM-768/ML-DSA-65 并通过 ACVP KAT，但尚未接入 X-Wing、复合签名或握手，因此尚不具备端到端后量子机密性或后量子身份认证。
 - [ ] **QUIC 双向身份**：当前 QUIC 服务端未启用客户端证书认证，应用层身份与服务端证书未统一绑定。
 - [ ] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie，但尚未接入握手控制通道；生产路径仍缺少握手速率控制和无效包成本上限。
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 
-已实现但尚未接入生产 `P2pEngine` 数据面的 Secure Session v2 基础原语包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口、批量 seal/open、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码和原子 epoch 轮换。运输无关的 `SessionDriver` 已将这些步骤收束为建链、数据收发、重协商、旧 epoch 宽限、运行时计数和失败关闭接口。`fuckipv6-client` 已依赖该 crate，并提供专用 UDP 握手/数据适配器及本地集成测试；但 `P2pEngine` 的生产 UDP/TUN 路径仍使用静态密钥方案，尚无实际 relay 互操作证据。可选 `pq` feature 另提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
+已接入生产 `P2pEngine` 的 Secure Session v2 能力包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口，以及共享 UDP socket 上的握手/控制/数据多路复用。`send_to`、QUIC Mesh、QUIC relay 与信令 relay 调用同一 v2 seal/open 路径；未握手、未认证、legacy data 和静态 X25519 输入均失败关闭。双引擎真实 UDP 测试覆盖建链、双向数据、篡改、重放和未建链拒绝。批量快路径、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码与原子 epoch 轮换仍主要是 crate 内原语，尚未全部接入生产控制通道。可选 `pq` feature 提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，但上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
 
 ### 快速数据面基线（非发布结论）
 
@@ -129,9 +131,9 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 - [x] **SP-00 初始安全审计**：记录现有密码学与数据面差距。
 - [ ] **SP-01 威胁模型与 v2 协议规范**：先完成设计评审，再写握手代码。
 - [x] **SP-02 性能基准框架**：已加入 crypto、wire format、端到端和 WireGuard 对照基准；脚本支持控制面、客户端和服务端 CPU 绑定及静默宿主复测。
-- [ ] **SP-03 临时密钥握手**：Ed25519 身份 + X25519 临时密钥 + transcript 绑定。
+- [x] **SP-03 临时密钥握手**：Ed25519 身份 + X25519 临时密钥 + transcript 绑定。
   - [x] 实现 HELLO/ACCEPT 线格式、签名 transcript、临时密钥握手、HKDF 密钥派生和双向 key confirmation，并覆盖负向测试。
-  - [ ] 接入真实客户端控制通道、身份来源、能力协商和 UDP/TUN 数据面。
+  - [x] 接入真实客户端共享 UDP socket、身份来源、经典数据套件选择、认证 endpoint 路由和 UDP/TUN 数据面；legacy/static 数据失败关闭。
 - [ ] **SP-04 重放与重协商**：计数器 Nonce、滑动窗口、密钥过期和安全擦除。
   - [x] 实现数据帧重放窗口、发送/接收状态分离和可测试的 epoch 轮换生命周期。
   - [x] 实现 REKEY_INIT/ACCEPT/CONFIRM 每会话协调状态机、5 秒超时、重复消息幂等、半开事务上限、SID 防复用和失败关闭测试。
@@ -141,7 +143,7 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
   - [ ] 接入 X-Wing 组合、复合签名、握手 transcript、能力协商及端到端容量测试；上游未审计前不得用于生产。
 - [ ] **SP-06 数据面快路径**：固定帧格式、预计算 Peer 状态、缓冲池、批处理和零拷贝。
   - [x] 实现 v2 固定帧、预分配批量 seal/open 和禁止逐包分配的本地快路径基准。
-  - [ ] 接入真实 UDP/TUN 路径，并完成 Peer 热状态、缓冲池和端到端 profiling。
+  - [ ] v2 固定帧已进入真实 UDP/TUN 路径；仍需完成 Peer 热状态、缓冲池、批量 I/O 和端到端 profiling。
 - [ ] **SP-07 QUIC 统一身份**：双向认证、证书/公钥绑定、0-RTT 重放限制。
 - [ ] **SP-08 审计与发布门禁**：模糊测试、外部审计、跨平台验证和性能回归门禁。
   - [x] 增加默认拒绝脏工作区的发布门禁、Linux musl/Windows GNU 编译检查和 Linux/Windows/macOS CI 报告聚合。

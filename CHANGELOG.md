@@ -5,9 +5,10 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
-- 增加 Secure Session v2 独立 UDP 适配器及本地真实 socket 集成测试：完整执行 `HELLO -> ACCEPT -> CONFIRM`，固定对端地址与有序套件策略，设置握手/数据超时，复用 HELLO 重放缓存，并提供运行时会话与拒绝计数；测试覆盖双向数据、AEAD 篡改、重放、错误确认、不支持套件和旧版本拒绝。该适配器仍使用独立 socket，生产 `P2pEngine` 的 UDP/TUN 数据面尚未切换，因此不构成 WireGuard 安全或性能结论。
-- 增加 `common::Identity` 到 Secure Session Ed25519 身份的受控适配：复用同一长期 Ed25519 种子，但不向调用方暴露种子或私钥字节，并用签名互验测试确认注册公钥与 v2 握手身份一致。该适配是客户端 v2 数据面接线的身份基础，不代表数据面已经切换。
-- 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式，尚不代表客户端数据面已经切换。
+- 将 Secure Session v2 classic 接入生产 `P2pEngine`：使用长期 Ed25519 公钥字典序选择 Initiator/Responder，在共享 UDP socket 上完成 `HELLO -> ACCEPT -> CONFIRM`，仅接受注册 endpoint 的握手与数据，并在 TUN/ACL 前执行 AEAD 认证和重放检查；QUIC Mesh、QUIC relay 与信令 relay 统一运输 v2 密文，未建链、legacy data 和静态 X25519 输入失败关闭。双引擎真实 UDP 测试覆盖双向收发、篡改、relay 重放与未建链拒绝。生产在线重协商、Cookie/限速、后量子组合和独立密码学审计仍未完成，也不构成 WireGuard 安全或性能超越结论。
+- 增加 Secure Session v2 独立 UDP 适配器及本地真实 socket 集成测试：完整执行 `HELLO -> ACCEPT -> CONFIRM`，固定对端地址与有序套件策略，设置握手/数据超时，复用 HELLO 重放缓存，并提供运行时会话与拒绝计数；测试覆盖双向数据、AEAD 篡改、重放、错误确认、不支持套件和旧版本拒绝。该适配器当前保留用于独立 socket 集成测试；生产 `P2pEngine` 已由后续条目接入共享 socket v2 数据面。该独立适配器本身不构成 WireGuard 安全或性能结论。
+- 增加 `common::Identity` 到 Secure Session Ed25519 身份的受控适配：复用同一长期 Ed25519 种子，但不向调用方暴露种子或私钥字节，并用签名互验测试确认注册公钥与 v2 握手身份一致。该适配为客户端 v2 数据面接线提供身份基础；生产数据面接入已由后续条目完成。
+- 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
 - **WebUI 全面重构**:
@@ -16,27 +17,27 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
-- 增加 Secure Session v2 运输无关会话驱动适配层：把实验性 classic 握手、HKDF 密钥派生、双向 HMAC key confirmation、数据包收发、原子在线重协商、旧 epoch 短期宽限和本地材料失配后的失败关闭收束到一个 `SessionDriver` 接口，并提供建链、篡改/重放拒绝、错误确认拒绝、重协商和关闭后拒绝操作的集成测试。该驱动尚未被 `fuckipv6-client` 依赖或接入真实 UDP/TUN 数据面；当前 profile 仍非后量子，测试结果也不构成 WireGuard 安全等级或性能超越结论。
-- 增加文档一致性门禁：校验受跟踪 Markdown 的相对链接与标题锚点，拒绝 `file://`/越界路径，并持续检查 Secure Session v2 未接入真实数据面、未证明 WireGuard 性能对等及后量子边界等关键声明；同时校验执行队列依赖状态。独立 `docs` CI job 运行 8 个单元测试并上传 JSON 报告，补齐 Cargo 元数据声明的 MIT `LICENSE`。
+- 增加 Secure Session v2 运输无关会话驱动适配层：把实验性 classic 握手、HKDF 密钥派生、双向 HMAC key confirmation、数据包收发、原子在线重协商、旧 epoch 短期宽限和本地材料失配后的失败关闭收束到一个 `SessionDriver` 接口，并提供建链、篡改/重放拒绝、错误确认拒绝、重协商和关闭后拒绝操作的集成测试。该驱动是后续集成的基础；`fuckipv6-client` 后续已依赖该 crate 并接入共享 socket v2 数据面。当前 profile 仍非后量子，测试结果也不构成 WireGuard 安全等级或性能超越结论。
+- 增加文档一致性门禁：校验受跟踪 Markdown 的相对链接与标题锚点，拒绝 `file://`/越界路径，并持续检查 Secure Session v2 已接入生产数据面但未完成独立审计、未证明 WireGuard 性能对等及后量子边界等关键声明；同时校验执行队列依赖状态。独立 `docs` CI job 运行辅助脚本单元测试并上传 JSON 报告，补齐 Cargo 元数据声明的 MIT `LICENSE`。
 - 增加 Criterion 基准回归门禁：`scripts/criterion_compare.py` 接受原始 Criterion 目录、`bench-compare` 快照和 release-gate 报告，支持多平台基线选择，并默认拒绝平台错配、缺失/新增基准、未知或不足样本、未知标准误、高噪声和超过阈值的平均延迟回退；`scripts/release-gate.py --benchmark-baseline` 可重复指定基线并将比较失败计入发布门禁。未提供基线时报告明确记录 `not_run`，该比较只检测匹配硬件上的相对回退，不构成 WireGuard 性能对等或超越结论。
 - 发布流程为每个 Linux、Windows 和 macOS 归档生成 CycloneDX 1.5 与 SPDX 2.3 SBOM、逐产物 SHA256、汇总 `SHA256SUMS` 和未签名来源元数据；这些材料随 GitHub Release 发布，但不构成签名证明、SLSA 证明或独立安全审计。
 - 增加供应链门禁：固定 `cargo-deny 0.20.2`，同时审计主 workspace 与独立 fuzz workspace 的已知漏洞、许可证、重复版本、通配版本要求和依赖来源；报告写入 `target/supply-chain/` 并由 CI 上传。该检查不生成 SBOM，也不替代对上游 crate 的人工安全审计。
 - 增加独立 `cargo fuzz` workspace 与三个崩溃可复现 harness：通用 v2/PQ 解码器、握手输入与签名验证路径、加密数据帧接收路径；提供 `scripts/fuzz-smoke.sh`，并在 secure-session 相关 PR、`main` 推送和每周定时任务中运行 2000 次短时 smoke。该入口仅证明当前语料范围内未发现 panic/越界/认证绕过，不代表密码学审计或长期 fuzz 覆盖率已经充分。
 - 增加可执行发布门禁 `scripts/release-gate.py`：默认拒绝脏工作区，执行格式、辅助脚本测试、workspace check/Clippy/test、release build、Linux musl/Windows GNU 交叉检查及 Criterion quick 基准，输出包含 commit、工具链、硬件、命令、退出码、耗时、日志路径和基准估计值的 JSON 报告；GitHub Actions 对 Linux/Windows/macOS 报告执行同 commit 聚合。`--allow-dirty` 仅供诊断且 `release_ready=false`。该门禁不证明 WireGuard 性能对等、生产安全或独立审计完成。
 - 增加 Secure Session v2 可选 `pq` feature 的 FIPS 203 ML-KEM-768 与 FIPS 204 ML-DSA-65 原语适配：锁定 `ml-kem 0.3.3` / `ml-dsa 0.1.1`（Apache-2.0 OR MIT，MSRV 1.85），提供严格定长编解码、私钥/临时随机数/shared secret 清零和脱敏 Debug，并通过 NIST ACVP keygen、encapsulation 与 sigGen KAT。两个上游 crate 均明确标注未经独立安全审计；当前仅完成原语适配，未接入 X-Wing、Ed25519 + ML-DSA-65 复合签名、`HELLO/ACCEPT` 或真实数据面，不得据此宣称已具备后量子安全或超越 WireGuard。
-- 增加 Secure Session v2 无状态源可达性 cookie 原语：41 字节 cookie 使用 HMAC-SHA-256 绑定协议版本、源 IP/端口、地址族、双方身份、ephemeral 公钥哈希和签发时间；43 字节 challenge 使用独立控制帧类型，拒绝截断、尾随、错误版本、篡改、过期/未来时间、跨源和跨身份使用，并在响应前阻止反射放大。默认有效期 30 秒、未来偏差 2 秒、可配置上限 300 秒；cookie 仅证明源可达，仍须签名验证、有界重放缓存和限速。当前尚未接入控制通道或真实 UDP 数据面。
-- 增加 Secure Session v2 连续 stride 缓冲批量 seal/open 快路径：调用方预分配整批数据、明文切片表和包长度表，布局在写入/解密前完整校验；批量 send counter 与 epoch 字节预算一次性检查，receive 采用 fail-fast 且只提交成功前缀的 replay 状态，热路径不逐包分配。新增 32 包 1280/1420 字节 Criterion 对照基线；当前仍为内存原语基准，尚未接入真实 UDP/TUN 数据面。
-- 增加 Secure Session v2 运行时数据密码套件抽象：AES-256-GCM（`0x0201`）与 ChaCha20-Poly1305（`0x0202`）共用固定 16 字节头、方向 Nonce、长度绑定 AAD、16 字节标签和 4096 包重放窗口；握手安装数据 epoch 时只使用已认证 transcript 中的 suite ID，数据包不能自行改选算法。新增双套件往返、跨套件拒绝、pair suite 不一致、AAD/tag 篡改、方向反射和失败不消费重放计数测试；当前仍为实验性 classic profile，尚未接入真实 UDP/TUN 数据面。
-- 增加 Secure Session v2 原子在线重协商桥接：`RekeySession` 独占组合 `RekeyStateMachine` 与 `EpochSession`，校验新密钥的 SID、epoch、方向和单调性；Responder 在 `REKEY_ACCEPT` 阶段仅暂存密钥，验证 `REKEY_CONFIRM` 后才安装，Initiator 在认证 ACCEPT 后安装。切换同时替换双向密钥，并通过 `EpochSession::rotate` 保留旧接收 epoch 的有界在途宽限；错误确认/材料、超时和重复消息均有回归测试。当前仍未接入真实控制通道或 UDP/TUN 数据面。
-- 增加 Secure Session v2 握手到数据 epoch 的认证桥接：双方验证对端方向的 HMAC-SHA-256 confirmation 后，才将 HKDF-SHA-512 派生密钥、SID、epoch 和本地/对端 receiver index 装入 `EpochSession`；错误角色、交换方向、单比特篡改和其他 transcript 的确认均拒绝安装，并验证初始化双方可完成双向往返数据收发。当前尚未接入 `HELLO/ACCEPT` wire 字段、原子重协商或真实 UDP/TUN 数据面。
+- 增加 Secure Session v2 无状态源可达性 cookie 原语：41 字节 cookie 使用 HMAC-SHA-256 绑定协议版本、源 IP/端口、地址族、双方身份、ephemeral 公钥哈希和签发时间；43 字节 challenge 使用独立控制帧类型，拒绝截断、尾随、错误版本、篡改、过期/未来时间、跨源和跨身份使用，并在响应前阻止反射放大。默认有效期 30 秒、未来偏差 2 秒、可配置上限 300 秒；cookie 仅证明源可达，仍须签名验证、有界重放缓存和限速。当前尚未接入生产握手控制通道；生产 v2 数据帧路径已按后续条目接入。
+- 增加 Secure Session v2 连续 stride 缓冲批量 seal/open 快路径：调用方预分配整批数据、明文切片表和包长度表，布局在写入/解密前完整校验；批量 send counter 与 epoch 字节预算一次性检查，receive 采用 fail-fast 且只提交成功前缀的 replay 状态，热路径不逐包分配。新增 32 包 1280/1420 字节 Criterion 对照基线；该项是内存原语基准；生产 v2 固定帧已接入真实 UDP/TUN 路径，但批量 I/O 与快路径优化仍未完成。
+- 增加 Secure Session v2 运行时数据密码套件抽象：AES-256-GCM（`0x0201`）与 ChaCha20-Poly1305（`0x0202`）共用固定 16 字节头、方向 Nonce、长度绑定 AAD、16 字节标签和 4096 包重放窗口；握手安装数据 epoch 时只使用已认证 transcript 中的 suite ID，数据包不能自行改选算法。新增双套件往返、跨套件拒绝、pair suite 不一致、AAD/tag 篡改、方向反射和失败不消费重放计数测试；该 classic profile 已由后续条目接入真实 UDP/TUN 数据面，但仍不属于后量子 profile。
+- 增加 Secure Session v2 原子在线重协商桥接：`RekeySession` 独占组合 `RekeyStateMachine` 与 `EpochSession`，校验新密钥的 SID、epoch、方向和单调性；Responder 在 `REKEY_ACCEPT` 阶段仅暂存密钥，验证 `REKEY_CONFIRM` 后才安装，Initiator 在认证 ACCEPT 后安装。切换同时替换双向密钥，并通过 `EpochSession::rotate` 保留旧接收 epoch 的有界在途宽限；错误确认/材料、超时和重复消息均有回归测试。当前仍未接入生产控制通道；初始 UDP/TUN 数据面已由后续条目使用同一 v2 认证帧接入。
+- 增加 Secure Session v2 握手到数据 epoch 的认证桥接：双方验证对端方向的 HMAC-SHA-256 confirmation 后，才将 HKDF-SHA-512 派生密钥、SID、epoch 和本地/对端 receiver index 装入 `EpochSession`；错误角色、交换方向、单比特篡改和其他 transcript 的确认均拒绝安装，并验证初始化双方可完成双向往返数据收发。`HELLO/ACCEPT` wire 字段和初始数据面已由后续条目接入；生产在线原子重协商仍未接入。
 - 增加 Secure Session v2 HKDF-SHA-512 会话密钥派生：从完整签名握手绑定生成独立的双向数据密钥和双向确认密钥，支持可选 32-byte PSK，并只使用固定标签和长度前缀上下文；共享秘密、PSK、IKM、PRK 和输出密钥均纳入清零生命周期。
-- 增加 Secure Session v2 双向 HMAC-SHA-256 key confirmation：Initiator/Responder 使用独立派生密钥确认同一 transcript，固定 32-byte 编码并使用常量时间验证；错误角色、交换方向、不同密钥调度、错误 transcript、截断/超长和单比特篡改均失败关闭。当前为密码学原语和测试，尚未接入 wire 握手或数据面激活。
+- 增加 Secure Session v2 双向 HMAC-SHA-256 key confirmation：Initiator/Responder 使用独立派生密钥确认同一 transcript，固定 32-byte 编码并使用常量时间验证；错误角色、交换方向、不同密钥调度、错误 transcript、截断/超长和单比特篡改均失败关闭。该原语后续已接入 wire 握手和数据面激活。
 - 增加 Secure Session v2 classic 握手负向回归：覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、错误 epoch、零 SID、单比特签名字段篡改和失败后 responder 状态恢复；所有路径均在数据密钥激活前失败关闭。
-- 增加实验性 Secure Session v2 classic 握手 profile：使用 X25519 临时密钥与 Ed25519 长期身份生成签名 `HELLO/ACCEPT`，绑定双方身份、临时公钥、套件、SID、epoch 和 endpoint context，并在双方派生一致的 X25519 共享秘密与 SHA-512 transcript；60 秒时间窗、4096 项有界重放缓存和非 contributory 密钥交换均失败关闭。该 profile 明确不包含 X-Wing/ML-DSA-65，不可作为生产后量子套件宣传。
+- 增加实验性 Secure Session v2 classic 握手 profile：使用 X25519 临时密钥与 Ed25519 长期身份生成签名 `HELLO/ACCEPT`，绑定双方身份、临时公钥、套件、SID、epoch 和 endpoint context，并在双方派生一致的 X25519 共享秘密与 SHA-512 transcript；60 秒时间窗、4096 项有界重放缓存和非 contributory 密钥交换均失败关闭。该 profile 已作为当前生产迁移 profile 使用，但明确不包含 X-Wing/ML-DSA-65，不可作为生产后量子套件宣传。
 - 增加 Secure Session v2 canonical handshake transcript 构造器：使用独立协议域、两字节长度前缀和固定角色顺序绑定套件、双方身份/临时公钥、SID、epoch 及 endpoint context；未知套件、空字段、重复身份和超限输入在 SHA-512 前拒绝。
 - 增加 Secure Session v2 `REKEY_INIT/ACCEPT/CONFIRM` 有界、版本化控制帧编解码与固定字节向量；解析失败关闭截断、超长、尾随字节、非法长度、未知版本/类型和非零保留字段。帧本身仍需由已认证控制通道保护。
 - 增加 Secure Session v2 数据面 Criterion 基准，覆盖 64/512/1280/1420 字节的 seal/open、重放拒绝及 `EpochSession` 包装开销；发布 2026-10-30 开发基线并明确其结果不构成发布性能门禁。
-- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭，但尚未接入密码学握手、控制通道或真实数据面。完整 X-Wing 握手、PQC 身份和数据面接入仍未实现。
+- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭；初始 v2 握手与数据面此后已接入生产路径，但在线重协商仍等待接入真实控制通道。完整 X-Wing 握手和 PQC 身份仍未实现。
 - 客户端重连时通过 v2 签名请求恢复原虚拟 IPv4/IPv6 租约；协调端内存分配器重启后，只要地址仍空闲即可恢复。
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 
@@ -51,7 +52,7 @@ All notable changes are documented here. The project follows semantic versioning
 
 ### Documentation
 - 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。
-- 修正当前加密能力口径：现有 UDP 数据面是静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，尚未实现前向保密、重放窗口和密钥轮换，不能等同于 WireGuard；完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。
+- 记录 v2 接入前的加密能力口径：当时 UDP 数据面使用静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，没有前向保密、重放窗口和密钥轮换；当前生产路径已切换为 v2 classic 临时会话，但独立审计、后量子组合和在线重协商仍未完成，完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。
 - 明确能力成熟度口径：区分“可直接使用”“基础设施已接入（待产品化）”与“尚未产品化”。
 - 修正桌面入口描述：当前使用系统浏览器应用窗口或默认浏览器打开 WebUI，尚未接入 Tauri 原生桌面。
 - 明确 JWT 仅用于 Coordinator Web/API；客户端本地 WebUI/API 当前免密，只适合本机或受信网络。

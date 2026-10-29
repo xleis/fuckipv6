@@ -1,9 +1,10 @@
 //! Experimental client adapter for the transport-independent Secure Session v2 driver.
 //!
-//! This module provides a dedicated-socket UDP handshake and data channel. It is
-//! deliberately not wired into [`super::connection::P2pEngine`] yet: that path is
-//! shared with the concurrent CLI/WebUI work and must be migrated only after the
-//! adapter's behavior is validated independently.
+//! This module provides a dedicated-socket UDP handshake and data channel used
+//! to validate the transport-independent driver. The production shared-socket
+//! integration lives in [`super::secure_runtime`] and
+//! [`super::connection::P2pEngine`], which reuse the same wire protocol and
+//! fail-closed data-plane behavior.
 //!
 //! The adapter fails closed on malformed control frames, unsupported suites,
 //! wrong peers, bad key confirmations, authentication failures and replays. A

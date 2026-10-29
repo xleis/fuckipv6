@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire 或真实 UDP/TUN 数据面。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 独立原语适配和 NIST ACVP KAT，但完整 X-Wing 握手、复合签名、PQC 握手 profile 和控制通道线格式尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。在线重协商控制通道、Cookie/限速和完整后量子套件仍未接入。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 独立原语适配和 NIST ACVP KAT，但完整 X-Wing 握手、复合签名、PQC 握手 profile 和控制通道线格式尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -199,7 +199,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 
 #### 4.3.1 实验性 classic profile
 
-`crates/secure-session/src/handshake.rs` 当前实现一个仅供内部迁移和后续集成测试的 classic profile，标记为 `CLASSIC_PROFILE_ID = 1`。它不是本文生产候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
+`crates/secure-session/src/handshake.rs` 实现 `CLASSIC_PROFILE_ID = 1`，并已由 `P2pEngine` 接入生产 UDP/TUN 路径。它是当前可运行的迁移 profile，但不是本文最终混合后量子候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
 
 - `HELLO` 使用 Ed25519 长期身份签名，包含双方 `IdentityId`、X25519 临时公钥、256-bit `NI`、Unix 时间、endpoint context hash、协议版本、profile 和候选数据套件；`ACCEPT` 包含 SID、epoch、双方临时公钥、`NI/NR`、时间和 Responder 签名。
 - `IdentityId = SHA-512(L("fuckipv6-v2 classic ed25519 identity") || L(Ed25519PublicKey))[0..32]`。验证方必须同时校验公钥对应的 IdentityId 与消息字段。
@@ -207,7 +207,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation 原语，以及 SS-08 的认证数据 epoch 桥接。`EpochSession::from_handshake` 只有在验证对端方向的 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index；测试验证双方可以双向往返收发。receiver index 是本地路由标签而非认证凭据，调用方仍须从已认证控制消息中正确取得对端索引。SS-09 另提供 `RekeySession` 将在线重协商状态机与数据 epoch 原子组合；SS-10 使该桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，这些桥接也尚未接入真实数据面。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation，以及 SS-08 的认证数据 epoch 桥接。canonical `ACCEPT` 携带 Responder confirmation，`CONFIRM` 携带 Initiator confirmation；只有验证对端方向 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index。SS-10 使桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。生产 `P2pEngine` 已使用共享 UDP socket 完成该握手、按认证 endpoint 路由数据并在 TUN/ACL 前认证解密；SS-09 的在线重协商、无状态 Cookie 与限速仍未接入生产控制通道。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 
@@ -390,7 +390,7 @@ SS-09 已提供 `RekeySession` 作为 `RekeyStateMachine` 与 `EpochSession` 的
 - 失败确认、材料不匹配和超时均保留当前 epoch；超时后立即开始的新事务会清除旧暂存材料，不能跨事务复用。
 - 若状态机已推进但底层 epoch 安装返回内部错误，会话进入不可用状态并失败关闭，而不是继续使用不一致的 epoch。
 
-该包装层仍要求调用方先认证控制帧、验证签名/KEM/KDF/confirmation，并正确推导数据密钥。它尚未接入实际控制通道、UDP/TUN 快路径或并发会话表。
+该包装层仍要求调用方先认证控制帧、验证签名/KEM/KDF/confirmation，并正确推导数据密钥。生产 `P2pEngine` 已接入初始 v2 会话与 UDP/TUN 数据路径，但尚未接入在线重协商控制帧、快路径缓冲池或完整并发会话表。
 
 重协商控制帧使用固定 8 字节头，整数均为大端序：
 
@@ -500,8 +500,8 @@ Idle
 
 ## 12. 迁移策略
 
-1. 保留现有 v1 协议作为**显式兼容模式**，UI 和日志标记“不具备前向保密/重放窗口”。
-2. 新增 v2 协议与测试向量，不修改 v1 的线路语义。
+1. 当前生产 `P2pEngine` 已采用 **v2-only 失败关闭**：未完成 v2 确认、legacy data 和静态 X25519 输入均不会进入数据接收队列；可配置的 v1 兼容模式尚未提供。
+2. 保留 v2 固定向量与线路语义；未来若增加显式 v1 兼容模式，UI 和日志必须标记“不具备前向保密/重放窗口”，且不得静默回退。
 3. Coordinator 注册与发现增加 v2 复合身份和套件能力字段；旧客户端不得被当成 v2。
 4. 网络策略可以选择 `v2-required`、`v2-preferred`、`v1-compat`。
 5. `v2-required` 下没有共同 v2 套件时失败，不回退。

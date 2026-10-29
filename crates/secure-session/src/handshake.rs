@@ -42,6 +42,8 @@ pub const IDENTITY_DOMAIN: &[u8] = b"fuckipv6-v2 classic ed25519 identity";
 pub const HELLO_SIGNING_DOMAIN: &[u8] = b"fuckipv6-v2 classic hello";
 /// Domain for the responder `ACCEPT` signature input.
 pub const ACCEPT_SIGNING_DOMAIN: &[u8] = b"fuckipv6-v2 classic accept";
+/// Domain for the post-signature transcript consumed by key derivation.
+pub const KEY_SCHEDULE_TRANSCRIPT_DOMAIN: &[u8] = b"fuckipv6-v2 classic key schedule";
 /// Maximum accepted difference between a handshake timestamp and local time.
 pub const HANDSHAKE_TIMESTAMP_WINDOW_SECS: u64 = 60;
 /// Default maximum number of authenticated half-open `HELLO` digests retained.
@@ -237,6 +239,7 @@ pub struct EstablishedHandshake {
     pub identity: HandshakeIdentity,
     pub hello_hash: TranscriptHash,
     pub accept_hash: TranscriptHash,
+    pub key_schedule_hash: TranscriptHash,
     secret: SharedHandshakeSecret,
 }
 
@@ -259,6 +262,7 @@ impl fmt::Debug for EstablishedHandshake {
             .field("identity", &self.identity)
             .field("hello_hash", &self.hello_hash)
             .field("accept_hash", &self.accept_hash)
+            .field("key_schedule_hash", &self.key_schedule_hash)
             .field("shared_secret", &"<redacted>")
             .finish()
     }
@@ -361,11 +365,13 @@ impl ClassicInitiator {
 
         let transcript_hash = transcript_hash(&self.hello, accept)?;
         let identity = handshake_identity(accept, transcript_hash);
+        let key_schedule_hash = key_schedule_hash(&accept_hash, &accept.signature);
 
         Ok(EstablishedHandshake {
             identity,
             hello_hash,
             accept_hash,
+            key_schedule_hash,
             secret: SharedHandshakeSecret {
                 bytes: *shared.as_bytes(),
             },
@@ -519,6 +525,7 @@ impl ClassicResponder {
 
         let transcript_hash = transcript_hash(hello, &accept)?;
         let identity = handshake_identity(&accept, transcript_hash);
+        let key_schedule_hash = key_schedule_hash(&accept_hash, &accept.signature);
 
         self.replay_cache.insert(
             hello_hash,
@@ -531,6 +538,7 @@ impl ClassicResponder {
                 identity,
                 hello_hash,
                 accept_hash,
+                key_schedule_hash,
                 secret: SharedHandshakeSecret {
                     bytes: *shared.as_bytes(),
                 },
@@ -733,6 +741,16 @@ fn validate_accept_matches_hello(hello: &Hello, accept: &Accept) -> Result<(), H
     validate_nonce(&accept.responder_nonce, "responder")
 }
 
+fn key_schedule_hash(
+    accept_hash: &TranscriptHash,
+    accept_signature: &[u8; ED25519_SIGNATURE_LEN],
+) -> TranscriptHash {
+    sha512(&canonical_bytes(
+        KEY_SCHEDULE_TRANSCRIPT_DOMAIN,
+        &[accept_hash, accept_signature],
+    ))
+}
+
 fn transcript_hash(hello: &Hello, accept: &Accept) -> Result<TranscriptHash, TranscriptError> {
     HandshakeTranscript {
         suite_id: accept.suite_id,
@@ -829,6 +847,7 @@ mod tests {
         assert_eq!(initiator.identity, responder.identity);
         assert_eq!(initiator.hello_hash, responder.hello_hash);
         assert_eq!(initiator.accept_hash, responder.accept_hash);
+        assert_eq!(initiator.key_schedule_hash, responder.key_schedule_hash);
         assert_eq!(
             initiator.shared_secret().expose_secret(),
             responder.shared_secret().expose_secret()

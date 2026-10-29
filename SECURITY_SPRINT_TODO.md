@@ -10,7 +10,7 @@
 - [x] **SS-02 重协商控制帧编解码**：为 `REKEY_INIT/ACCEPT/CONFIRM` 定义 60/188/220 字节的版本化规范控制帧，拒绝截断、超长、尾随字节、非法长度和非零保留字段，并增加固定字节向量。
 - [x] **SS-03 Transcript 构造器**：实现 SHA-512 canonical transcript builder，所有字段使用 2 字节长度前缀，固定绑定 Initiator/Responder 角色、suite、双方身份与临时公钥、SID、epoch 和 endpoint context，并增加固定向量、边界歧义与全字段敏感性测试。
 - [x] **SS-04 经典临时握手**：使用 X25519 临时密钥和 Ed25519 长期身份实现攻击者无法重放的 HELLO/ACCEPT 握手，并验证双方 transcript 完全一致；实现包含时间窗、有界认证重放缓存、低阶/全零 X25519 点拒绝和双方共享秘密一致性测试。
-- [ ] **SS-05 会话密钥派生**：使用 HKDF-SHA-512 派生独立双向数据密钥和双向确认密钥；秘密输入在使用后 `zeroize`。
+- [x] **SS-05 会话密钥派生**：使用 HKDF-SHA-512 派生独立双向数据密钥和双向确认密钥；秘密输入在使用后 `zeroize`。
 - [ ] **SS-06 Key confirmation**：使用 HMAC-SHA-256 验证双向确认值，错误、交换方向和截断确认必须失败关闭。
 - [ ] **SS-07 握手负向测试**：覆盖 MITM、错误身份、套件降级、错误 epoch/SID、重放、乱序、单比特篡改和跨 endpoint context。
 - [ ] **SS-08 握手接入数据 epoch**：把握手派生密钥、receiver index、epoch 和 SID 装入 `EpochSession`，验证认证双方可以双向收发。

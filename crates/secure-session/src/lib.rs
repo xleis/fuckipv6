@@ -8,6 +8,7 @@
 //! implementations.
 
 pub mod handshake;
+pub mod key_schedule;
 pub mod rekey;
 pub mod rekey_codec;
 pub mod transcript;

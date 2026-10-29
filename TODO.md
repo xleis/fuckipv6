@@ -635,13 +635,19 @@ file = "/var/log/fuckipv6.log"
 
 ---
 
-## Phase 5: 企业级特性与自主化升级 ✅ **全部完成**
+## Phase 5: 企业级特性与自主化升级 🚧 **基础能力可用，安全性待加强**
 
-### 1. WireGuard 级数据平面端到端加密（E2EE） ✅ **已完成**
-- [x] Curve25519 X25519 Diffie-Hellman 会话密钥协商
+### 1. 数据平面端到端加密（E2EE） 🚧 **基础实现完成，未达到 WireGuard 基线**
+- [x] 静态 Curve25519 X25519 Diffie-Hellman 会话密钥协商
 - [x] ChaCha20-Poly1305 AEAD 载荷数据加密与完整性认证
 - [x] 密钥衍生 Blake3 KDF
 - [x] P2P 直连与 Relay 中继全路径端到端加密覆盖
+- [ ] 临时密钥握手、transcript 身份绑定与前向保密
+- [ ] 64 位计数 Nonce、滑动重放窗口与跨会话 AAD
+- [ ] 密钥过期/流量上限、重协商和安全擦除
+- [ ] 混合后量子握手与独立安全审计
+
+完整路线与性能验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。
 
 ### 2. 高级 ICE 候选端点收集与 UDP 打洞协同 ✅ **已完成**
 - [x] 本地 LAN IPv4/IPv6 网卡端点发现与探测

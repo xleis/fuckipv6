@@ -6,7 +6,7 @@
 
 - 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
-- 🛡️ **安全与 ACL 策略**: WireGuard 级端到端加密 (ChaCha20-Poly1305 + Blake3)、声明式入出站 ACL、Coordinator 准入黑名单
+- 🛡️ **安全与 ACL 策略**: ChaCha20-Poly1305 端到端数据加密（当前为静态 X25519 会话密钥，尚未具备前向保密与重放窗口）、声明式入出站 ACL、Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
 - 🔒 **身份与鉴权**: Ed25519 签名验证；Coordinator Web/API 可配置 JWT，客户端本地 WebUI/API 当前免密并只应绑定本机或受信网络
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
@@ -185,7 +185,8 @@ fuckipv6/
 
 ### ✅ Phase 5 - 安全与策略（基础能力可用）
 
-- [x] X25519 + ChaCha20-Poly1305 端到端加密与 Blake3 KDF
+- [x] X25519 + ChaCha20-Poly1305 端到端加密与 Blake3 KDF（基础实现）
+- [ ] 临时密钥握手、前向保密、计数 Nonce、重放窗口与密钥轮换（WireGuard 基线；见 `SECURITY_PERFORMANCE_TODO.md`）
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
 - [x] IPv4/IPv6 双栈虚拟地址与 Coordinator JWT 鉴权
@@ -210,7 +211,7 @@ fuckipv6/
   - QUIC 中继与 WebSocket 信令 fallback
   - TUN/TAP (虚拟网卡)
 - **序列化**: postcard
-- **加密**: Ed25519-dalek, Blake3
+- **加密**: Ed25519-dalek、X25519-dalek、ChaCha20-Poly1305、Blake3；安全增强路线见 `SECURITY_PERFORMANCE_TODO.md`
 - **CLI**: clap
 
 ## 📊 性能目标

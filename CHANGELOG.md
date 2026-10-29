@@ -11,7 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
-- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装和 4096 包重放窗口基础原语；握手、PQC 身份、在线密钥轮换和数据面接入仍未实现。
+- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口，以及发送端对端接收索引/接收端本端索引分离的基础原语；握手、PQC 身份、在线密钥轮换和数据面接入仍未实现。
 - 客户端重连时通过 v2 签名请求恢复原虚拟 IPv4/IPv6 租约；协调端内存分配器重启后，只要地址仍空闲即可恢复。
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 

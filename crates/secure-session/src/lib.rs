@@ -168,34 +168,33 @@ impl DataHeader {
     }
 }
 
-/// State for encrypting or decrypting one direction of a v2 session epoch.
+/// Sending state for one direction of a v2 session epoch.
 ///
-/// The outgoing counter starts at zero and never wraps. Incoming packets are
-/// checked against a replay window before AEAD verification and only marked as
-/// received after successful authentication. The underlying AEAD implementation
-/// zeroizes its expanded key material when this value is dropped.
-pub struct PacketCipher {
+/// The outgoing counter starts at zero and never wraps. `peer_receiver_index`
+/// is the receiver index advertised by the peer and is written into every
+/// outgoing header. The underlying AEAD implementation zeroizes its expanded
+/// key material when this value is dropped.
+pub struct SendCipher {
     cipher: ChaCha20Poly1305,
     session_id: [u8; SESSION_ID_LEN],
     direction: Direction,
     epoch: u16,
-    receiver_index: u32,
+    peer_receiver_index: u32,
     next_send_counter: u64,
-    replay_window: ReplayWindow,
 }
 
-impl PacketCipher {
-    /// Create a one-direction packet cipher from a 32-byte derived epoch key.
+impl SendCipher {
+    /// Create send state from a 32-byte derived epoch key.
     ///
-    /// `receiver_index` is the index expected by the receiving side and placed
-    /// in outgoing headers. The input key is zeroized after the AEAD state has
-    /// been initialized.
+    /// `peer_receiver_index` must be the local receiver index advertised by the
+    /// peer, not the sender's own index. The input key is zeroized after the
+    /// AEAD state has been initialized.
     pub fn new(
         mut key: [u8; 32],
         session_id: [u8; SESSION_ID_LEN],
         direction: Direction,
         epoch: u16,
-        receiver_index: u32,
+        peer_receiver_index: u32,
     ) -> Self {
         let cipher = ChaCha20Poly1305::new_from_slice(&key)
             .expect("ChaCha20-Poly1305 requires a 32-byte key");
@@ -206,9 +205,8 @@ impl PacketCipher {
             session_id,
             direction,
             epoch,
-            receiver_index,
+            peer_receiver_index,
             next_send_counter: 0,
-            replay_window: ReplayWindow::new(),
         }
     }
 
@@ -256,7 +254,7 @@ impl PacketCipher {
         }
 
         let counter = self.next_send_counter;
-        let header = DataHeader::new(self.receiver_index, self.epoch, counter);
+        let header = DataHeader::new(self.peer_receiver_index, self.epoch, counter);
         packet[..DATA_HEADER_LEN].copy_from_slice(&header.encode());
         let aad = data_aad(header, self.session_id, plaintext_len as u16);
         let nonce = nonce_for(self.direction, counter);
@@ -272,6 +270,49 @@ impl PacketCipher {
         packet[DATA_HEADER_LEN + plaintext_len..packet_len].copy_from_slice(&tag);
         self.next_send_counter += 1;
         Ok(())
+    }
+}
+
+/// Receiving state for one direction of a v2 session epoch.
+///
+/// Incoming packets are checked against `local_receiver_index` and a replay
+/// window before AEAD verification. A counter is marked received only after
+/// successful authentication. The underlying AEAD implementation zeroizes its
+/// expanded key material when this value is dropped.
+pub struct ReceiveCipher {
+    cipher: ChaCha20Poly1305,
+    session_id: [u8; SESSION_ID_LEN],
+    direction: Direction,
+    epoch: u16,
+    local_receiver_index: u32,
+    replay_window: ReplayWindow,
+}
+
+impl ReceiveCipher {
+    /// Create receive state from a 32-byte derived epoch key.
+    ///
+    /// `local_receiver_index` is the index assigned by this endpoint and must
+    /// match the `receiver_index` field written by the peer. The input key is
+    /// zeroized after the AEAD state has been initialized.
+    pub fn new(
+        mut key: [u8; 32],
+        session_id: [u8; SESSION_ID_LEN],
+        direction: Direction,
+        epoch: u16,
+        local_receiver_index: u32,
+    ) -> Self {
+        let cipher = ChaCha20Poly1305::new_from_slice(&key)
+            .expect("ChaCha20-Poly1305 requires a 32-byte key");
+        key.zeroize();
+
+        Self {
+            cipher,
+            session_id,
+            direction,
+            epoch,
+            local_receiver_index,
+            replay_window: ReplayWindow::new(),
+        }
     }
 
     /// Authenticate and decrypt a v2 data packet in place without allocating.
@@ -291,7 +332,7 @@ impl PacketCipher {
         }
 
         let header = DataHeader::decode(packet)?;
-        if header.receiver_index != self.receiver_index {
+        if header.receiver_index != self.local_receiver_index {
             return Err(SessionError::ReceiverIndexMismatch);
         }
         if header.epoch != self.epoch {
@@ -488,16 +529,16 @@ mod tests {
         0x0f,
     ];
 
-    fn cipher_pair() -> (PacketCipher, PacketCipher) {
+    fn cipher_pair() -> (SendCipher, ReceiveCipher) {
         (
-            PacketCipher::new(
+            SendCipher::new(
                 TEST_KEY,
                 TEST_SESSION_ID,
                 Direction::InitiatorToResponder,
                 17,
                 0x0102_0304,
             ),
-            PacketCipher::new(
+            ReceiveCipher::new(
                 TEST_KEY,
                 TEST_SESSION_ID,
                 Direction::InitiatorToResponder,
@@ -571,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_cipher_round_trips_and_writes_expected_header() {
+    fn send_and_receive_ciphers_round_trip_and_write_expected_header() {
         let (mut sender, mut receiver) = cipher_pair();
         let mut packet = [0u8; 128];
 
@@ -594,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_cipher_supports_empty_plaintext() {
+    fn send_and_receive_ciphers_support_empty_plaintext() {
         let (mut sender, mut receiver) = cipher_pair();
         let mut packet = [0u8; MIN_DATA_PACKET_LEN];
 
@@ -668,12 +709,12 @@ mod tests {
     }
 
     #[test]
-    fn packet_cipher_binds_direction_session_epoch_and_receiver_index() {
+    fn receive_cipher_binds_direction_session_epoch_and_receiver_index() {
         let (mut sender, _) = cipher_pair();
         let mut packet = [0u8; 128];
         let packet_len = sender.seal(b"bound", &mut packet).expect("seal");
 
-        let mut wrong_direction = PacketCipher::new(
+        let mut wrong_direction = ReceiveCipher::new(
             TEST_KEY,
             TEST_SESSION_ID,
             Direction::ResponderToInitiator,
@@ -685,7 +726,7 @@ mod tests {
             Err(SessionError::AuthenticationFailed)
         );
 
-        let mut wrong_session = PacketCipher::new(
+        let mut wrong_session = ReceiveCipher::new(
             TEST_KEY,
             [0xff; SESSION_ID_LEN],
             Direction::InitiatorToResponder,
@@ -697,7 +738,7 @@ mod tests {
             Err(SessionError::AuthenticationFailed)
         );
 
-        let mut wrong_epoch = PacketCipher::new(
+        let mut wrong_epoch = ReceiveCipher::new(
             TEST_KEY,
             TEST_SESSION_ID,
             Direction::InitiatorToResponder,
@@ -709,7 +750,7 @@ mod tests {
             Err(SessionError::EpochMismatch)
         );
 
-        let mut wrong_index = PacketCipher::new(
+        let mut wrong_index = ReceiveCipher::new(
             TEST_KEY,
             TEST_SESSION_ID,
             Direction::InitiatorToResponder,
@@ -719,6 +760,40 @@ mod tests {
         assert_eq!(
             wrong_index.open_in_place(&mut packet[..packet_len]),
             Err(SessionError::ReceiverIndexMismatch)
+        );
+    }
+
+    #[test]
+    fn send_and_receive_cipher_indices_are_distinct_roles() {
+        const PEER_INDEX: u32 = 0xa1a2_a3a4;
+        const LOCAL_INDEX: u32 = 0xb1b2_b3b4;
+
+        let mut initiator_send = SendCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            PEER_INDEX,
+        );
+        let mut initiator_receive = ReceiveCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            LOCAL_INDEX,
+        );
+        let mut packet = [0u8; 128];
+        let packet_len = initiator_send
+            .seal(b"index roles", &mut packet)
+            .expect("seal");
+
+        assert_eq!(
+            initiator_receive.open_in_place(&mut packet[..packet_len]),
+            Err(SessionError::ReceiverIndexMismatch)
+        );
+        assert_eq!(
+            DataHeader::decode(&packet).expect("header").receiver_index,
+            PEER_INDEX
         );
     }
 
@@ -748,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_cipher_rejects_short_and_oversized_buffers() {
+    fn send_and_receive_ciphers_reject_short_and_oversized_buffers() {
         let (mut sender, mut receiver) = cipher_pair();
         let mut short = [0u8; MIN_DATA_PACKET_LEN - 1];
         assert_eq!(

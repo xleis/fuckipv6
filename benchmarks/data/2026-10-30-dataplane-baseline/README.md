@@ -51,7 +51,10 @@ python3 scripts/bench-summarize.py \
   --csv /tmp/fuckipv6-bench/summary.csv
 ```
 
-正式性能结论必须在空闲机器上固定 CPU、关闭无关后台负载并重复运行；当前脚本尚未实现 CPU pinning。
+正式性能结论必须在空闲机器上固定 CPU、关闭无关后台负载并重复运行。脚本现已支持
+`--control-cpus`、`--client-cpus` 和 `--server-cpus`，例如
+`--control-cpus 0 --client-cpus 2 --server-cpus 3`；本历史数据集未启用 CPU 绑定，
+因此不能用它证明正式性能。
 
 ## 文件
 

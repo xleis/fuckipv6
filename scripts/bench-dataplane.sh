@@ -26,6 +26,9 @@ UDP_1420_RATE="50M"
 UDP_64_RATE="5M"
 USE_PERF=1
 OUTPUT_DIR=""
+CLIENT_CPUS=""
+SERVER_CPUS=""
+CONTROL_CPUS=""
 
 usage() {
     cat <<'EOF'
@@ -39,6 +42,9 @@ Options:
   --mtu BYTES          TUN interface MTU (default: 1420)
   --udp-1420-rate RATE Controlled UDP 1420-byte offered rate (default: 50M)
   --udp-64-rate RATE   Controlled UDP 64-byte offered rate (default: 5M)
+  --client-cpus LIST   Pin client-side processes with taskset (for example: 2 or 2-3)
+  --server-cpus LIST   Pin server-side processes with taskset (for example: 3 or 3-4)
+  --control-cpus LIST  Pin the coordinator with taskset (for example: 0)
   --output DIR         Result directory (default: target/benchmarks/dataplane-TIMESTAMP)
   --no-perf            Skip system-wide CPU/perf counters
   -h, --help           Show this help
@@ -87,6 +93,18 @@ while [ "$#" -gt 0 ]; do
             ;;
         --udp-64-rate)
             UDP_64_RATE="${2:?--udp-64-rate requires a value}"
+            shift 2
+            ;;
+        --client-cpus)
+            CLIENT_CPUS="${2:?--client-cpus requires a value}"
+            shift 2
+            ;;
+        --server-cpus)
+            SERVER_CPUS="${2:?--server-cpus requires a value}"
+            shift 2
+            ;;
+        --control-cpus)
+            CONTROL_CPUS="${2:?--control-cpus requires a value}"
             shift 2
             ;;
         --output)
@@ -138,6 +156,15 @@ require_command() {
 for command in ip iperf3 ping python3 wg; do
     require_command "$command"
 done
+if [ -n "$CLIENT_CPUS$SERVER_CPUS$CONTROL_CPUS" ]; then
+    require_command taskset
+fi
+[ -z "$CLIENT_CPUS" ] || taskset -c "$CLIENT_CPUS" true \
+    || fail "Invalid --client-cpus value: $CLIENT_CPUS"
+[ -z "$SERVER_CPUS" ] || taskset -c "$SERVER_CPUS" true \
+    || fail "Invalid --server-cpus value: $SERVER_CPUS"
+[ -z "$CONTROL_CPUS" ] || taskset -c "$CONTROL_CPUS" true \
+    || fail "Invalid --control-cpus value: $CONTROL_CPUS"
 [ -x "$SUMMARIZER" ] || fail "Summarizer is not executable: $SUMMARIZER"
 [ -x "$FUCKIPV6_BIN" ] || fail "Missing release client: $FUCKIPV6_BIN (build it first)"
 [ -x "$COORDINATOR_BIN" ] || fail "Missing release coordinator: $COORDINATOR_BIN (build it first)"
@@ -184,6 +211,12 @@ WG_IF2="fipwg2$SUFFIX"
 READY=0
 CLIENT_PIDS=()
 OTHER_PIDS=()
+CLIENT_AFFINITY=()
+SERVER_AFFINITY=()
+CONTROL_AFFINITY=()
+[ -z "$CLIENT_CPUS" ] || CLIENT_AFFINITY=(taskset -c "$CLIENT_CPUS")
+[ -z "$SERVER_CPUS" ] || SERVER_AFFINITY=(taskset -c "$SERVER_CPUS")
+[ -z "$CONTROL_CPUS" ] || CONTROL_AFFINITY=(taskset -c "$CONTROL_CPUS")
 
 read -r SIGNALING_PORT RELAY_PORT WEBUI_PORT IPERF_PORT < <(
     python3 - <<'PY'
@@ -318,7 +351,7 @@ wait_for_ping() {
 
 start_fuckipv6() {
     local coordinator_log="$LOG_DIR/fuckipv6-coordinator.log"
-    RUST_LOG=info "$COORDINATOR_BIN" \
+    "${CONTROL_AFFINITY[@]}" env RUST_LOG=info "$COORDINATOR_BIN" \
         --bind "0.0.0.0:${SIGNALING_PORT}" \
         --relay-bind "0.0.0.0:${RELAY_PORT}" \
         --webui-bind "127.0.0.1:${WEBUI_PORT}" \
@@ -332,10 +365,10 @@ start_fuckipv6() {
     write_client_config "$NS1" "$(( IPERF_PORT + 1 ))"
     write_client_config "$NS2" "$(( IPERF_PORT + 2 ))"
 
-    ip netns exec "$NS1" env RUST_LOG=info "$FUCKIPV6_BIN" \
+    ip netns exec "$NS1" "${CLIENT_AFFINITY[@]}" env RUST_LOG=info "$FUCKIPV6_BIN" \
         start --config "$WORK_DIR/${NS1}.toml" >"$LOG_DIR/$NS1.log" 2>&1 &
     CLIENT_PIDS+=("$!")
-    ip netns exec "$NS2" env RUST_LOG=info "$FUCKIPV6_BIN" \
+    ip netns exec "$NS2" "${SERVER_AFFINITY[@]}" env RUST_LOG=info "$FUCKIPV6_BIN" \
         start --config "$WORK_DIR/${NS2}.toml" >"$LOG_DIR/$NS2.log" 2>&1 &
     CLIENT_PIDS+=("$!")
 
@@ -405,10 +438,10 @@ start_wireguard_go() {
     local wg_port1=$(( IPERF_PORT + 10 ))
     local wg_port2=$(( IPERF_PORT + 11 ))
 
-    ip netns exec "$NS1" "$WG_GO_BIN" -f "$WG_IF1" \
+    ip netns exec "$NS1" "${CLIENT_AFFINITY[@]}" "$WG_GO_BIN" -f "$WG_IF1" \
         >"$LOG_DIR/${NS1}-wireguard-go.log" 2>&1 &
     OTHER_PIDS+=("$!")
-    ip netns exec "$NS2" "$WG_GO_BIN" -f "$WG_IF2" \
+    ip netns exec "$NS2" "${SERVER_AFFINITY[@]}" "$WG_GO_BIN" -f "$WG_IF2" \
         >"$LOG_DIR/${NS2}-wireguard-go.log" 2>&1 &
     OTHER_PIDS+=("$!")
 
@@ -434,7 +467,8 @@ start_wireguard_go() {
 }
 
 start_iperf_server() {
-    ip netns exec "$NS2" iperf3 -s -6 -B "$VIRTUAL_IP2" -p "$IPERF_PORT" \
+    ip netns exec "$NS2" "${SERVER_AFFINITY[@]}" \
+        iperf3 -s -6 -B "$VIRTUAL_IP2" -p "$IPERF_PORT" \
         >"$LOG_DIR/iperf3-server.log" 2>&1 &
     local iperf_pid="$!"
     OTHER_PIDS+=("$iperf_pid")
@@ -505,6 +539,11 @@ metadata = {
     'mtu': int('$MTU'),
     'udp_1420_controlled_rate': '$UDP_1420_RATE',
     'udp_64_controlled_rate': '$UDP_64_RATE',
+    'cpu_affinity': {
+        'control_cpus': '$CONTROL_CPUS' or None,
+        'client_cpus': '$CLIENT_CPUS' or None,
+        'server_cpus': '$SERVER_CPUS' or None,
+    },
     'underlay_network': '$UNDERLAY_NET',
     'virtual_network': 'fd00::/64',
     'iperf3': command('iperf3', '--version'),
@@ -546,7 +585,10 @@ record_result() {
         --field "offered_rate=$offered_rate"
         --field "duration_seconds=$DURATION"
         --field "omit_seconds=$OMIT"
-        --field "cpu_seconds=$cpu_seconds")
+        --field "cpu_seconds=$cpu_seconds"
+        --field "client_cpus=$CLIENT_CPUS"
+        --field "server_cpus=$SERVER_CPUS"
+        --field "control_cpus=$CONTROL_CPUS")
     if [ "$USE_PERF" -eq 1 ]; then
         summarize+=(--perf-csv "$perf_csv")
     fi
@@ -569,7 +611,7 @@ execute_case() {
         local stderr_log="$LOG_DIR/${impl}__${test}__run${run}.stderr"
         local cpu_before cpu_after cpu_seconds
         cpu_before="$(awk '/^cpu / { total=0; for (i=2; i<=9; i++) total+=$i; print total, $5+$6 }' /proc/stat)"
-        local cmd=(ip netns exec "$NS1" iperf3 -6 -J -c "$VIRTUAL_IP2" \
+        local cmd=(ip netns exec "$NS1" "${CLIENT_AFFINITY[@]}" iperf3 -6 -J -c "$VIRTUAL_IP2" \
             -p "$IPERF_PORT" -t "$DURATION")
         if [ "$OMIT" -gt 0 ]; then
             cmd+=(-O "$OMIT")

@@ -122,7 +122,7 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 
 - [x] **SP-00 初始安全审计**：记录现有密码学与数据面差距。
 - [ ] **SP-01 威胁模型与 v2 协议规范**：先完成设计评审，再写握手代码。
-- [ ] **SP-02 性能基准框架**：加入 crypto、wire format、端到端和 WireGuard 对照基准。
+- [x] **SP-02 性能基准框架**：已加入 crypto、wire format、端到端和 WireGuard 对照基准；脚本支持控制面、客户端和服务端 CPU 绑定及静默宿主复测。
 - [ ] **SP-03 临时密钥握手**：Ed25519 身份 + X25519 临时密钥 + transcript 绑定。
 - [ ] **SP-04 重放与重协商**：计数器 Nonce、滑动窗口、密钥过期和安全擦除。
 - [ ] **SP-05 混合后量子握手**：X25519 + ML-KEM-768，Ed25519 + ML-DSA-65。

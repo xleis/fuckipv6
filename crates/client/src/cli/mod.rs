@@ -33,6 +33,10 @@ pub struct Cli {
     #[arg(long)]
     pub external_host: Option<String>,
 
+    /// 将本机持久标记为 Exit Node（可写 --is-exit-node=false）
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub is_exit_node: Option<bool>,
+
     /// 协调服务启动后本机自动作为客户端加入
     #[arg(long, default_value_t = true)]
     pub auto_connect: bool,
@@ -82,6 +86,10 @@ pub enum Commands {
         #[arg(long)]
         exit_node: Option<String>,
 
+        /// 将本机持久标记为 Exit Node（可写 --is-exit-node=false）
+        #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        is_exit_node: Option<bool>,
+
         /// 强制无头模式 (运行内置 Axum WebUI 守护进程)
         #[arg(long)]
         headless: bool,
@@ -115,6 +123,10 @@ pub enum Commands {
         /// 出口节点 (虚拟 IPv6, 虚拟 IPv4 或 ClientId)
         #[arg(long)]
         exit_node: Option<String>,
+
+        /// 将本机持久标记为 Exit Node（可写 --is-exit-node=false）
+        #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        is_exit_node: Option<bool>,
 
         /// 强制无头模式
         #[arg(long)]
@@ -151,6 +163,10 @@ pub enum Commands {
         #[arg(long)]
         exit_node: Option<String>,
 
+        /// 将本机持久标记为 Exit Node（可写 --is-exit-node=false）
+        #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        is_exit_node: Option<bool>,
+
         /// 强制无头模式
         #[arg(long)]
         headless: bool,
@@ -181,6 +197,10 @@ pub enum Commands {
         /// 出口节点 (虚拟 IPv6, 虚拟 IPv4 或 ClientId)
         #[arg(long)]
         exit_node: Option<String>,
+
+        /// 将本机持久标记为 Exit Node（可写 --is-exit-node=false）
+        #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        is_exit_node: Option<bool>,
 
         /// 强制无头模式
         #[arg(long)]
@@ -234,6 +254,10 @@ pub enum Commands {
         /// 出口节点 (虚拟 IPv6, 虚拟 IPv4 或 ClientId)
         #[arg(long)]
         exit_node: Option<String>,
+
+        /// 将本机持久标记为 Exit Node（可写 --is-exit-node=false）
+        #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        is_exit_node: Option<bool>,
 
         /// 强制无头模式 (运行内置 Axum WebUI 守护进程)
         #[arg(long)]
@@ -360,6 +384,7 @@ pub async fn run() -> Result<()> {
             cli.host_relay_port,
             cli.auto_connect,
             cli.external_host,
+            cli.is_exit_node,
         )
         .await
     }
@@ -376,11 +401,17 @@ pub async fn run_default_app(
     host_relay_port: u16,
     auto_connect: bool,
     external_host: Option<String>,
+    is_exit_node: Option<bool>,
 ) -> Result<()> {
     logging::init_default()?;
     let ui_mode = crate::ui::detect_ui_mode(headless, gui);
 
     let controller = std::sync::Arc::new(crate::webui::AppController::new());
+    if let Some(enabled) = is_exit_node {
+        controller
+            .update_state(|state| state.is_exit_node = enabled)
+            .await;
+    }
     let _server_handle = crate::webui::start_app_webui(port, controller.clone()).await?;
 
     if host {
@@ -474,6 +505,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             auto_connect,
             routing_mode,
             exit_node,
+            is_exit_node,
             headless,
             gui,
             webui_port,
@@ -481,6 +513,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             let options = commands::RuntimeOptions {
                 routing_mode,
                 exit_node,
+                is_exit_node,
                 headless,
                 gui,
                 webui_port,
@@ -501,6 +534,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             start,
             routing_mode,
             exit_node,
+            is_exit_node,
             headless,
             gui,
             webui_port,
@@ -508,6 +542,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             let options = commands::RuntimeOptions {
                 routing_mode,
                 exit_node,
+                is_exit_node,
                 headless,
                 gui,
                 webui_port,
@@ -520,6 +555,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             temp,
             routing_mode,
             exit_node,
+            is_exit_node,
             headless,
             gui,
             webui_port,
@@ -527,6 +563,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             let options = commands::RuntimeOptions {
                 routing_mode,
                 exit_node,
+                is_exit_node,
                 headless,
                 gui,
                 webui_port,
@@ -538,6 +575,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             all,
             routing_mode,
             exit_node,
+            is_exit_node,
             headless,
             gui,
             webui_port,
@@ -545,6 +583,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
             let options = commands::RuntimeOptions {
                 routing_mode,
                 exit_node,
+                is_exit_node,
                 headless,
                 gui,
                 webui_port,
@@ -576,6 +615,7 @@ async fn run_runtime_command(command: Commands) -> Result<()> {
             config,
             routing_mode,
             exit_node,
+            is_exit_node,
             headless,
             gui,
             webui_port,
@@ -583,6 +623,7 @@ async fn run_runtime_command(command: Commands) -> Result<()> {
             let options = commands::RuntimeOptions {
                 routing_mode,
                 exit_node,
+                is_exit_node,
                 headless,
                 gui,
                 webui_port,
@@ -672,4 +713,35 @@ fn load_client_config(path: &str) -> Result<ClientConfig> {
 fn config_passphrase_from_env() -> Result<String> {
     std::env::var("FUCKIPV6_CONFIG_PASSPHRASE")
         .map_err(|_| anyhow::anyhow!("加密配置需要设置环境变量 FUCKIPV6_CONFIG_PASSPHRASE"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_exit_node_boolean_flag_forms() {
+        let bare = Cli::try_parse_from(["fuckipv6", "--is-exit-node"]).unwrap();
+        assert_eq!(bare.is_exit_node, Some(true));
+
+        let explicit_true = Cli::try_parse_from(["fuckipv6", "--is-exit-node=true"]).unwrap();
+        assert_eq!(explicit_true.is_exit_node, Some(true));
+
+        let explicit_false = Cli::try_parse_from(["fuckipv6", "--is-exit-node=false"]).unwrap();
+        assert_eq!(explicit_false.is_exit_node, Some(false));
+    }
+
+    #[test]
+    fn parses_exit_node_flag_on_host_command() {
+        let cli =
+            Cli::try_parse_from(["fuckipv6", "host", "--name", "relay", "--is-exit-node=true"])
+                .unwrap();
+
+        match cli.command {
+            Some(Commands::Host { is_exit_node, .. }) => {
+                assert_eq!(is_exit_node, Some(true));
+            }
+            _ => panic!("expected host command"),
+        }
+    }
 }

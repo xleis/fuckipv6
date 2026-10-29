@@ -464,6 +464,7 @@ impl AppController {
             _ => RoutingMode::MeshOnly,
         };
 
+        let is_exit_node = self.state.read().await.is_exit_node;
         let config = ClientConfig {
             client_id: None,
             coordinator_url,
@@ -480,7 +481,7 @@ impl AppController {
                 proxy_cidrs: Vec::new(),
             },
             exit_node: fuckipv6_common::ExitNodeConfig {
-                enabled: self.state.read().await.is_exit_node,
+                enabled: is_exit_node,
                 ..Default::default()
             },
         };
@@ -499,6 +500,7 @@ impl AppController {
             let options = RuntimeOptions {
                 routing_mode,
                 exit_node,
+                is_exit_node: Some(is_exit_node),
                 headless: true,
                 gui: false,
                 webui_port: 0,

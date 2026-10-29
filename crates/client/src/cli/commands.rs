@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::recent_error_log_lines;
 use fuckipv6_common::{
-    decrypt_config_file, encrypt_config_file, ClientConfig, Identity, NatType, PeerInfo,
-    RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
+    decrypt_config_file, encrypt_config_file, is_encrypted_config_path, ClientConfig, Identity,
+    NatType, PeerInfo, RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
 };
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
@@ -35,6 +35,7 @@ const TUN_BUFFER_POOL_SIZE: usize = 64;
 pub struct RuntimeOptions {
     pub routing_mode: Option<String>,
     pub exit_node: Option<String>,
+    pub is_exit_node: Option<bool>,
     pub headless: bool,
     pub gui: bool,
     pub webui_port: u16,
@@ -54,6 +55,47 @@ pub async fn start_with_config(config_path: &str, config: ClientConfig) -> Resul
     start_with_config_and_options(config_path, config, RuntimeOptions::default()).await
 }
 
+fn persist_runtime_options(
+    config_path: &str,
+    config: &mut ClientConfig,
+    options: &RuntimeOptions,
+) -> Result<bool> {
+    let changed = apply_runtime_options_to_config(config, options)?;
+    if !changed {
+        return Ok(false);
+    }
+
+    if is_encrypted_config_path(config_path) {
+        tracing::warn!("加密配置文件不支持原地持久化 CLI 路由覆盖，本次仅在运行态生效");
+    } else {
+        config
+            .save_to_file(config_path)
+            .context("持久化 CLI 路由与 Exit Node 配置失败")?;
+    }
+    Ok(true)
+}
+
+pub(crate) fn apply_runtime_options_to_config(
+    config: &mut ClientConfig,
+    options: &RuntimeOptions,
+) -> Result<bool> {
+    let mut changed = false;
+    if let Some(mode) = options.routing_mode.as_deref() {
+        let parsed = parse_runtime_routing_mode(mode)?;
+        changed |= config.routing.mode != parsed;
+        config.routing.mode = parsed;
+    }
+    if let Some(exit_node) = options.exit_node.as_ref() {
+        changed |= config.routing.exit_node.as_ref() != Some(exit_node);
+        config.routing.exit_node = Some(exit_node.clone());
+    }
+    if let Some(enabled) = options.is_exit_node {
+        changed |= config.exit_node.enabled != enabled;
+        config.exit_node.enabled = enabled;
+    }
+    Ok(changed)
+}
+
 pub async fn start_with_config_and_options(
     config_path: &str,
     mut config: ClientConfig,
@@ -61,25 +103,7 @@ pub async fn start_with_config_and_options(
 ) -> Result<()> {
     tracing::info!("启动客户端: {}", config_path);
 
-    if let Some(mode_str) = &options.routing_mode {
-        match mode_str.to_lowercase().as_str() {
-            "mesh-only" | "meshonly" | "mesh_only" => {
-                config.routing.mode = fuckipv6_common::RoutingMode::MeshOnly
-            }
-            "bypass-mainland" | "bypassmainland" | "bypass_mainland" => {
-                config.routing.mode = fuckipv6_common::RoutingMode::BypassMainland
-            }
-            "global-proxy" | "globalproxy" | "global_proxy" => {
-                config.routing.mode = fuckipv6_common::RoutingMode::GlobalProxy
-            }
-            other => anyhow::bail!(
-                "未知路由模式: {other} (可用值: mesh-only, bypass-mainland, global-proxy)"
-            ),
-        }
-    }
-    if let Some(exit) = &options.exit_node {
-        config.routing.exit_node = Some(exit.clone());
-    }
+    persist_runtime_options(config_path, &mut config, &options)?;
 
     let ui_mode = crate::ui::detect_ui_mode(options.headless, options.gui);
     let webui_port = options.webui_port;
@@ -2703,6 +2727,124 @@ fn normalize_service_name(service: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempPath(PathBuf);
+
+    impl TempPath {
+        fn new(extension: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "fuckipv6-cli-test-{}-{nonce}.{extension}",
+                std::process::id()
+            )))
+        }
+
+        fn as_path(&self) -> &Path {
+            &self.0
+        }
+
+        fn as_str(&self) -> &str {
+            self.0.to_str().expect("temporary path must be UTF-8")
+        }
+    }
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn test_config() -> ClientConfig {
+        ClientConfig {
+            client_id: None,
+            coordinator_url: "ws://127.0.0.1:6666".to_string(),
+            private_key_path: "client_key.pem".into(),
+            network: Default::default(),
+            tun: Default::default(),
+            p2p: Default::default(),
+            log: Default::default(),
+            acl: Default::default(),
+            routing: Default::default(),
+            exit_node: Default::default(),
+        }
+    }
+
+    #[test]
+    fn runtime_options_update_and_reset_exit_node() -> Result<()> {
+        let temp = TempPath::new("toml");
+        test_config().save_to_file(temp.as_path())?;
+        let mut config = ClientConfig::from_file(temp.as_path())?;
+
+        let enable = RuntimeOptions {
+            routing_mode: Some("global-proxy".to_string()),
+            exit_node: Some("fd00::1001".to_string()),
+            is_exit_node: Some(true),
+            ..Default::default()
+        };
+        assert!(persist_runtime_options(
+            temp.as_str(),
+            &mut config,
+            &enable
+        )?);
+        let saved = ClientConfig::from_file(temp.as_path())?;
+        assert_eq!(
+            saved.routing.mode,
+            fuckipv6_common::RoutingMode::GlobalProxy
+        );
+        assert_eq!(saved.routing.exit_node.as_deref(), Some("fd00::1001"));
+        assert!(saved.exit_node.enabled);
+
+        let disable = RuntimeOptions {
+            is_exit_node: Some(false),
+            ..Default::default()
+        };
+        assert!(persist_runtime_options(
+            temp.as_str(),
+            &mut config,
+            &disable
+        )?);
+        let saved = ClientConfig::from_file(temp.as_path())?;
+        assert!(!saved.exit_node.enabled);
+        assert_eq!(
+            saved.routing.mode,
+            fuckipv6_common::RoutingMode::GlobalProxy
+        );
+
+        assert!(!persist_runtime_options(
+            temp.as_str(),
+            &mut config,
+            &RuntimeOptions::default()
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_config_is_not_overwritten_by_runtime_options() -> Result<()> {
+        let plaintext = TempPath::new("toml");
+        let encrypted = TempPath::new("toml.enc");
+        test_config().save_to_file(plaintext.as_path())?;
+        encrypt_config_file(plaintext.as_path(), encrypted.as_path(), "secret")?;
+        let original = std::fs::read(encrypted.as_path())?;
+        let mut config = ClientConfig::from_file(plaintext.as_path())?;
+
+        let options = RuntimeOptions {
+            is_exit_node: Some(true),
+            ..Default::default()
+        };
+        assert!(persist_runtime_options(
+            encrypted.as_str(),
+            &mut config,
+            &options
+        )?);
+        assert!(config.exit_node.enabled);
+        assert_eq!(std::fs::read(encrypted.as_path())?, original);
+        Ok(())
+    }
 
     #[test]
     fn parses_runtime_routing_modes() {

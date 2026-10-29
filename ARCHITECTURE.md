@@ -1,6 +1,6 @@
 # Architecture
 
-fuckipv6 is a dual-stack overlay network. Clients create a local TUN interface and exchange raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. A coordinator provides discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback.
+fuckipv6 is a dual-stack overlay network. Clients create a local TUN interface and exchange raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. A coordinator provides discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback. Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products.
 
 ## Components
 
@@ -13,7 +13,7 @@ fuckipv6 is a dual-stack overlay network. Clients create a local TUN interface a
 - `crypto.rs`: Ed25519 identity generation, persistence, signing, verification, and public-key fingerprint client IDs.
 - `config.rs`: client and coordinator config structures plus validation/defaults.
 - `routing.rs`: embedded CN-CIDR routing rules and routing-mode evaluation.
-- `dht.rs`, `onion.rs`, `chunk.rs`: distributed discovery, layered circuits, and encrypted chunk transfer primitives.
+- `dht.rs`, `onion.rs`, `chunk.rs`: integrated DHT routing/storage, layered circuit, and chunk-transfer primitives; CLI/WebUI product workflows are still pending.
 
 ### coordinator
 
@@ -31,7 +31,7 @@ fuckipv6 is a dual-stack overlay network. Clients create a local TUN interface a
 - `tun/` creates and tears down OS TUN devices. Linux uses `ip tuntap`; macOS uses `utun`; Windows uses native embedded WinTun driver with pure Rust Windows IP Helper API for address/route configuration (zero external DLL and zero `netsh.exe` dependency).
 - `p2p/connection.rs` runs the encrypted UDP engine, endpoint probing, ping/pong, health checks, and fallback decisions.
 - `p2p/quic.rs` provides the pinned TLS 1.3 QUIC mesh and multiplexed stream transport.
-- `p2p/overlay.rs` coordinates the DHT, onion, and chunk-transfer infrastructure.
+- `p2p/overlay.rs` dispatches DHT, onion, chunk-transfer, and direct-message datagrams inside the P2P engine.
 - `routing/` implements smart routing and Exit Node selection.
 - `signaling/client.rs` manages the coordinator WebSocket, registration, reconnect, re-register, and event delivery.
 - `symmetric/mod.rs` embeds the coordinator actor for symmetric `host`/`join` networks.
@@ -93,7 +93,7 @@ Coordinator-side observability:
 
 ## Security & Governance
 
-1. **Coordinator WebUI & API JWT Authentication**:
+1. **Coordinator WebUI & API JWT Authentication** (not applied to the client-local WebUI/API):
    - Lightweight RFC 2104 HMAC-SHA256 token manager with token expiration and claims.
    - Protected endpoints require Bearer Token authorization or token query param.
    - Zero-dependency login flow supporting admin passwords and dynamic secret rotation.
@@ -119,24 +119,38 @@ Coordinator-side observability:
 
 3. **Multi-Relay Mesh & Optimal Selection**:
    - Coordinator advertises distributed QUIC relay clusters in `RegisterAck`.
-   - Clients perform concurrent RTT latency probing and connect to the optimal relay node.
+   - Clients perform concurrent RTT/handshake probing at connection time and connect to the selected relay; this is not continuous migration or dynamic load balancing.
 
 ## Current Boundaries
 
-Implemented today:
+### Directly usable
 
 - WebSocket signaling and cryptographic registration challenge authentication.
-- Linux, macOS (`utun`), and Windows (embedded WinTun) dual-stack TUN drivers.
+- Linux, macOS (`utun`), and Windows (embedded WinTun) dual-stack TUN drivers, subject to target-platform runtime validation.
 - WireGuard-grade ChaCha20-Poly1305 / X25519 end-to-end encryption.
-- Direct dual-mode P2P (QUIC Stream Mesh + Encrypted Raw UDP).
+- Direct dual-mode P2P (QUIC Stream Mesh + encrypted raw UDP) and QUIC/signaling relay fallback.
 - RFC 6886 NAT-PMP and UPnP IGD automatic router port mapping.
-- Packet-level ACL filtering engine and coordinator admission blacklist.
-- Distributed multi-relay mesh with latency-based concurrent selection.
-- Coordinator WebUI management dashboard, REST API, logs API, and JWT authentication.
-- Multi-network saved client profiles.
-- Symmetric `host`/`join` networking with embedded coordinator and `fk://` tickets.
-- Smart routing, Exit Node forwarding, three-hop onion circuits, and DHT/chunk infrastructure.
-- Adaptive WebUI/desktop startup and full Chinese runtime logging.
+- Packet-level ACL filtering and coordinator admission blacklist.
+- Multi-relay selection at connection time using concurrent RTT/handshake probing.
+- Coordinator WebUI/API with optional JWT, plus client CLI and local WebUI.
+- The client web desktop entry uses a browser `--app` window when available and falls back to the default browser; it is not a Tauri application.
+- Linux Exit Node forwarding through kernel IP forwarding, policy routing, and iptables/NAT rules.
+- Multi-network saved profiles and symmetric `host`/`join` networking with an embedded coordinator.
+- Smart routing (`MeshOnly`, `BypassMainland`, `GlobalProxy`) and full Chinese runtime logging.
+
+### Infrastructure integrated, pending productization
+
+- Three-hop onion circuit and layered encryption primitives.
+- Kademlia DHT routing and storage primitives.
+- Blake3 chunk hashes, chunk assembly, and transfer primitives.
+- Complete CLI/WebUI workflows for creating circuits, browsing/publishing DHT records, or publishing/fetching files have not been implemented.
+
+### Not productized
+
+- Tauri native desktop integration.
+- User-space NAT; the current Exit Node path is Linux kernel-based.
+- Windows/macOS Exit Node parity with the Linux implementation.
+- Repeatable real cross-host NAT, production WAN scale, independent security audit, and target-platform runtime validation.
 
 ## Verification Baseline
 

@@ -13,12 +13,21 @@ use super::session::SessionManager;
 fn verify_registration(
     client_id: &str,
     public_key: &[u8],
+    requested_ips: Option<&fuckipv6_common::VirtualIps>,
     p2p_port: u16,
     timestamp: u64,
     signature: &[u8],
 ) -> bool {
-    let challenge =
-        SignalingMessage::register_challenge(client_id, public_key, p2p_port, timestamp);
+    let challenge = match requested_ips {
+        Some(ips) => SignalingMessage::register_challenge_with_ips(
+            client_id,
+            public_key,
+            Some(ips),
+            p2p_port,
+            timestamp,
+        ),
+        None => SignalingMessage::register_challenge(client_id, public_key, p2p_port, timestamp),
+    };
 
     Identity::verify_peer_fingerprint(public_key, client_id)
         && Identity::verify(public_key, &challenge, signature)
@@ -362,12 +371,22 @@ async fn handle_register_message(
         candidate_endpoints,
         timestamp,
         signature,
+        requested_ips,
     } = msg
     else {
         unreachable!("handle_register_message only accepts Register messages");
     };
 
-    if !verify_registration(&id, &public_key, p2p_port, timestamp, &signature) {
+    // Only the v2 field is signed. The legacy virtual_ip hint was never part
+    // of the v1 registration challenge, so it must not be trusted as a lease.
+    if !verify_registration(
+        &id,
+        &public_key,
+        requested_ips.as_ref(),
+        p2p_port,
+        timestamp,
+        &signature,
+    ) {
         let error = SignalingMessage::protocol_error(
             ErrorCode::Unauthorized,
             "Invalid registration signature",
@@ -394,6 +413,7 @@ async fn handle_register_message(
             p2p_port,
             nat_type,
             candidate_endpoints,
+            requested_ips,
             tx.clone(),
         )
         .await
@@ -564,6 +584,7 @@ mod tests {
         assert!(verify_registration(
             &client_id,
             &public_key,
+            None,
             p2p_port,
             timestamp,
             &signature
@@ -572,6 +593,7 @@ mod tests {
         assert!(!verify_registration(
             &client_id,
             &public_key,
+            None,
             p2p_port + 1,
             timestamp,
             &signature
@@ -580,9 +602,40 @@ mod tests {
         assert!(!verify_registration(
             "wrong-client-id",
             &public_key,
+            None,
             p2p_port,
             timestamp,
             &signature
+        ));
+
+        let requested_ips =
+            fuckipv6_common::VirtualIps::dual_stack("10.8.0.42".parse()?, "fd00::42".parse()?);
+        let lease_challenge = SignalingMessage::register_challenge_with_ips(
+            &client_id,
+            &public_key,
+            Some(&requested_ips),
+            p2p_port,
+            timestamp,
+        );
+        let lease_signature = identity.sign(&lease_challenge).to_bytes().to_vec();
+        assert!(verify_registration(
+            &client_id,
+            &public_key,
+            Some(&requested_ips),
+            p2p_port,
+            timestamp,
+            &lease_signature
+        ));
+
+        let tampered =
+            fuckipv6_common::VirtualIps::dual_stack("10.8.0.43".parse()?, "fd00::42".parse()?);
+        assert!(!verify_registration(
+            &client_id,
+            &public_key,
+            Some(&tampered),
+            p2p_port,
+            timestamp,
+            &lease_signature
         ));
         Ok(())
     }

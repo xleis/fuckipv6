@@ -50,6 +50,9 @@ pub enum SignalingMessage {
         candidate_endpoints: Vec<SocketAddr>,
         timestamp: u64,
         signature: Vec<u8>,
+        /// 重连时请求保留的虚拟双栈地址。字段位于末尾以兼容旧客户端。
+        #[serde(default)]
+        requested_ips: Option<VirtualIps>,
     },
 
     /// 服务器确认注册
@@ -175,6 +178,7 @@ impl SignalingMessage {
             candidate_endpoints,
             timestamp,
             signature,
+            requested_ips: None,
         }
     }
 
@@ -200,6 +204,7 @@ impl SignalingMessage {
             candidate_endpoints,
             timestamp,
             signature,
+            requested_ips: virtual_ips,
         }
     }
 
@@ -216,6 +221,37 @@ impl SignalingMessage {
         challenge.extend_from_slice(public_key);
         challenge.extend_from_slice(&p2p_port.to_be_bytes());
         challenge.extend_from_slice(&timestamp.to_be_bytes());
+        challenge
+    }
+
+    /// 构造包含虚拟双栈租约请求的注册签名规范字节串。
+    pub fn register_challenge_with_ips(
+        client_id: &str,
+        public_key: &[u8],
+        requested_ips: Option<&VirtualIps>,
+        p2p_port: u16,
+        timestamp: u64,
+    ) -> Vec<u8> {
+        let mut challenge = Vec::with_capacity(client_id.len() + public_key.len() + 39);
+        challenge.extend_from_slice(b"fuckipv6-register-v2");
+        challenge.extend_from_slice(client_id.as_bytes());
+        challenge.extend_from_slice(public_key);
+        challenge.extend_from_slice(&p2p_port.to_be_bytes());
+        challenge.extend_from_slice(&timestamp.to_be_bytes());
+        match requested_ips.and_then(|ips| ips.ipv4) {
+            Some(ipv4) => {
+                challenge.push(1);
+                challenge.extend_from_slice(&ipv4.octets());
+            }
+            None => challenge.push(0),
+        }
+        match requested_ips.and_then(|ips| ips.ipv6) {
+            Some(ipv6) => {
+                challenge.push(1);
+                challenge.extend_from_slice(&ipv6.octets());
+            }
+            None => challenge.push(0),
+        }
         challenge
     }
 
@@ -491,6 +527,74 @@ mod tests {
             }
             _ => panic!("Wrong message type"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn registration_lease_request_is_bound_to_signature() -> anyhow::Result<()> {
+        let identity = Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let requested_ips = VirtualIps::dual_stack("10.8.0.42".parse()?, "fd00:1234::42".parse()?);
+        let challenge = SignalingMessage::register_challenge_with_ips(
+            &client_id,
+            &public_key,
+            Some(&requested_ips),
+            51820,
+            123,
+        );
+        let signature = identity.sign(&challenge).to_bytes().to_vec();
+
+        assert!(Identity::verify(&public_key, &challenge, &signature));
+
+        let changed_ipv4 = VirtualIps::dual_stack(
+            "10.8.0.43".parse()?,
+            requested_ips.ipv6.expect("IPv6 request should exist"),
+        );
+        let tampered_ipv4 = SignalingMessage::register_challenge_with_ips(
+            &client_id,
+            &public_key,
+            Some(&changed_ipv4),
+            51820,
+            123,
+        );
+        assert!(!Identity::verify(&public_key, &tampered_ipv4, &signature));
+
+        let changed_ipv6 = VirtualIps::dual_stack(
+            requested_ips.ipv4.expect("IPv4 request should exist"),
+            "fd00:1234::43".parse()?,
+        );
+        let tampered_ipv6 = SignalingMessage::register_challenge_with_ips(
+            &client_id,
+            &public_key,
+            Some(&changed_ipv6),
+            51820,
+            123,
+        );
+        assert!(!Identity::verify(&public_key, &tampered_ipv6, &signature));
+
+        let message = SignalingMessage::register_with_ips(
+            client_id,
+            public_key,
+            Some(requested_ips.clone()),
+            51820,
+            NatType::Restricted,
+            Vec::new(),
+            123,
+            signature,
+        );
+        let encoded = crate::codec::encode(&message)?;
+        let decoded: SignalingMessage = crate::codec::decode(&encoded)?;
+        let SignalingMessage::Register {
+            virtual_ip,
+            requested_ips: decoded_request,
+            ..
+        } = decoded
+        else {
+            panic!("expected register message");
+        };
+        assert_eq!(decoded_request, Some(requested_ips.clone()));
+        assert_eq!(virtual_ip, requested_ips.ipv6);
         Ok(())
     }
 

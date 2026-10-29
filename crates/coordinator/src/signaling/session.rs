@@ -25,6 +25,7 @@ pub struct ClientSession {
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<ClientId, ClientSession>>>,
     ip_allocator: Arc<RwLock<IpAllocator>>,
+    leases: Arc<RwLock<HashMap<ClientId, VirtualIps>>>,
     traffic: Arc<TrafficCounters>,
     blacklist: Arc<RwLock<BlacklistConfig>>,
 }
@@ -81,6 +82,7 @@ struct RegistrationInput {
     endpoint: SocketAddr,
     candidate_endpoints: Vec<SocketAddr>,
     nat_type: NatType,
+    requested_ips: Option<VirtualIps>,
     tx: mpsc::UnboundedSender<Message>,
     now: Instant,
 }
@@ -192,6 +194,7 @@ impl SessionManager {
         Ok(Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             ip_allocator: Arc::new(RwLock::new(ip_allocator)),
+            leases: Arc::new(RwLock::new(HashMap::new())),
             traffic: Arc::new(TrafficCounters::new()),
             blacklist: Arc::new(RwLock::new(BlacklistConfig::default())),
         })
@@ -212,6 +215,7 @@ impl SessionManager {
         Ok(Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             ip_allocator: Arc::new(RwLock::new(ip_allocator)),
+            leases: Arc::new(RwLock::new(HashMap::new())),
             traffic: Arc::new(TrafficCounters::new()),
             blacklist: Arc::new(RwLock::new(blacklist)),
         })
@@ -289,6 +293,7 @@ impl SessionManager {
             p2p_port,
             nat_type,
             Vec::new(),
+            None,
             tx,
         )
         .await
@@ -304,6 +309,7 @@ impl SessionManager {
         p2p_port: u16,
         nat_type: NatType,
         candidate_endpoints: Vec<SocketAddr>,
+        requested_ips: Option<VirtualIps>,
         tx: mpsc::UnboundedSender<Message>,
     ) -> Result<VirtualIps> {
         tracing::debug!("开始注册客户端: {}", client_id);
@@ -314,6 +320,7 @@ impl SessionManager {
             endpoint: SocketAddr::new(observed_addr.ip(), p2p_port),
             candidate_endpoints,
             nat_type,
+            requested_ips,
             tx,
             now: Instant::now(),
         };
@@ -367,7 +374,13 @@ impl SessionManager {
 
     async fn insert_new_session(&self, input: RegistrationInput) -> Result<RegistrationResult> {
         tracing::debug!("准备分配虚拟IP...");
-        let virtual_ips = self.ip_allocator.write().await.allocate()?;
+        let remembered = self.leases.read().await.get(&input.client_id).cloned();
+        let requested = input.requested_ips.clone().or(remembered);
+        let virtual_ips = self
+            .ip_allocator
+            .write()
+            .await
+            .allocate_preferred(requested.as_ref())?;
         tracing::debug!("虚拟IP分配成功: {:?}", virtual_ips);
 
         let session = build_client_session(&input, virtual_ips.clone());
@@ -376,6 +389,10 @@ impl SessionManager {
             Entry::Vacant(entry) => {
                 let peer_info = session.peer_info.clone();
                 entry.insert(session);
+                self.leases
+                    .write()
+                    .await
+                    .insert(input.client_id.clone(), virtual_ips.clone());
                 Ok(RegistrationResult {
                     peer_info,
                     is_reconnect: false,
@@ -677,15 +694,34 @@ impl Ipv4SubnetAllocator {
         (1u32 << host_bits).saturating_sub(2)
     }
 
-    fn offset_to_ip(&self, offset: u32) -> Ipv4Addr {
-        let base_u32 = u32::from(self.base);
-        let mask = if self.prefix_len == 0 {
+    fn network_mask(&self) -> u32 {
+        if self.prefix_len == 0 {
             0
         } else {
             !((1u32 << (32 - self.prefix_len)) - 1)
-        };
-        let net_base = base_u32 & mask;
+        }
+    }
+
+    fn offset_to_ip(&self, offset: u32) -> Ipv4Addr {
+        let net_base = u32::from(self.base) & self.network_mask();
         Ipv4Addr::from(net_base | offset)
+    }
+
+    fn reserve(&mut self, ip: Ipv4Addr) -> bool {
+        let mask = self.network_mask();
+        let net_base = u32::from(self.base) & mask;
+        let offset = u32::from(ip) & !mask;
+        if u32::from(ip) & mask != net_base || !(1..=self.max_hosts()).contains(&offset) {
+            return false;
+        }
+
+        match self.allocated.entry(ip) {
+            Entry::Vacant(entry) => {
+                entry.insert(true);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
     }
 
     fn allocate(&mut self) -> Result<Ipv4Addr> {
@@ -781,6 +817,31 @@ impl Ipv6SubnetAllocator {
         )
     }
 
+    fn reserve(&mut self, ip: Ipv6Addr) -> bool {
+        let prefix_len = self.prefix_len as u32;
+        let mask = if prefix_len == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix_len)
+        };
+        let net_base = u128::from(self.base) & mask;
+        let offset = u128::from(ip) & !mask;
+        if u128::from(ip) & mask != net_base
+            || offset == 0
+            || offset > u128::from(self.max_offsets())
+        {
+            return false;
+        }
+
+        match self.allocated.entry(ip) {
+            Entry::Vacant(entry) => {
+                entry.insert(true);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
     fn allocate(&mut self) -> Result<Ipv6Addr> {
         let max_offsets = self.max_offsets();
         if max_offsets == 0 {
@@ -870,16 +931,52 @@ impl IpAllocator {
     }
 
     pub fn allocate(&mut self) -> Result<VirtualIps> {
-        let ipv4 = if let Some(v4) = &mut self.v4_allocator {
-            Some(v4.allocate()?)
-        } else {
-            None
+        self.allocate_preferred(None)
+    }
+
+    /// Allocate the requested addresses when they are valid and free. If a
+    /// request cannot be honored, fall back to a fresh address so the client
+    /// can detect the assignment change and fail closed instead of silently
+    /// forwarding traffic from a stale TUN address.
+    pub fn allocate_preferred(&mut self, requested: Option<&VirtualIps>) -> Result<VirtualIps> {
+        let ipv4 = match (&mut self.v4_allocator, requested.and_then(|ips| ips.ipv4)) {
+            (Some(allocator), Some(ip)) => {
+                if allocator.reserve(ip) {
+                    Some(ip)
+                } else {
+                    Some(allocator.allocate()?)
+                }
+            }
+            (Some(allocator), None) => Some(allocator.allocate()?),
+            (None, _) => None,
         };
 
-        let ipv6 = if let Some(v6) = &mut self.v6_allocator {
-            Some(v6.allocate()?)
-        } else {
-            None
+        let ipv6 = match (&mut self.v6_allocator, requested.and_then(|ips| ips.ipv6)) {
+            (Some(allocator), Some(ip)) => {
+                if allocator.reserve(ip) {
+                    Some(ip)
+                } else {
+                    match allocator.allocate() {
+                        Ok(ip) => Some(ip),
+                        Err(error) => {
+                            if let (Some(allocator), Some(ipv4)) = (&mut self.v4_allocator, ipv4) {
+                                allocator.release(ipv4);
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            (Some(allocator), None) => match allocator.allocate() {
+                Ok(ip) => Some(ip),
+                Err(error) => {
+                    if let (Some(allocator), Some(ipv4)) = (&mut self.v4_allocator, ipv4) {
+                        allocator.release(ipv4);
+                    }
+                    return Err(error);
+                }
+            },
+            (None, _) => None,
         };
 
         if ipv4.is_none() && ipv6.is_none() {
@@ -955,6 +1052,64 @@ mod tests {
         let ips_dual = allocator.allocate()?;
         assert!(ips_dual.ipv4.is_some());
         assert!(ips_dual.ipv6.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn allocate_preferred_restores_lease_and_falls_back_on_conflict() -> Result<()> {
+        let mut allocator = IpAllocator::new("fd00::1000/120")?;
+        let requested = VirtualIps::dual_stack("10.8.0.42".parse()?, "fd00::1042".parse()?);
+
+        let restored = allocator.allocate_preferred(Some(&requested))?;
+        assert_eq!(restored, requested);
+
+        let fallback = allocator.allocate_preferred(Some(&requested))?;
+        assert_ne!(fallback.ipv4, requested.ipv4);
+        assert_ne!(fallback.ipv6, requested.ipv6);
+
+        let outside_pool = VirtualIps::dual_stack("192.0.2.42".parse()?, "fd00:ffff::42".parse()?);
+        let fallback = allocator.allocate_preferred(Some(&outside_pool))?;
+        assert_ne!(fallback.ipv4, outside_pool.ipv4);
+        assert_ne!(fallback.ipv6, outside_pool.ipv6);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_lease_survives_coordinator_allocator_restart() -> Result<()> {
+        let client_id = "lease-client".to_string();
+        let public_key = vec![7; 32];
+        let observed: SocketAddr = "192.0.2.10:41000".parse()?;
+
+        let first_manager = SessionManager::new("fd00::1000/120")?;
+        let (first_tx, _first_rx) = mpsc::unbounded_channel();
+        let assigned = first_manager
+            .register_client(
+                client_id.clone(),
+                public_key.clone(),
+                observed,
+                51820,
+                NatType::Open,
+                first_tx,
+            )
+            .await?;
+        drop(first_manager);
+
+        let restarted_manager = SessionManager::new("fd00::1000/120")?;
+        let (restarted_tx, _restarted_rx) = mpsc::unbounded_channel();
+        let restored = restarted_manager
+            .register_client_with_candidates(
+                client_id,
+                public_key,
+                observed,
+                51820,
+                NatType::Open,
+                Vec::new(),
+                Some(assigned.clone()),
+                restarted_tx,
+            )
+            .await?;
+
+        assert_eq!(restored, assigned);
         Ok(())
     }
 

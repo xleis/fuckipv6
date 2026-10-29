@@ -1,6 +1,6 @@
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// 路由分流动作
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +139,27 @@ static CN_IPV6_PREFIXES: &[(u128, u8)] = &[
     (0x2400_3200_0000_0000_0000_0000_0000_0000, 32), // 2400:3200::/32 (阿里云 DNS)
     (0x2402_4e00_0000_0000_0000_0000_0000_0000, 32), // 2402:4e00::/32 (腾讯云 DNS)
 ];
+
+/// 返回内置的中国大陆 IPv4/IPv6 直连网段。
+///
+/// 该列表与 [`is_mainland_china_ip`] 使用同一份前缀数据。系统路由接管
+/// 需要把这些网段明确旁路到物理网络，避免仅靠用户态判定时丢包。
+pub fn mainland_china_cidrs() -> Vec<IpNet> {
+    let mut networks = Vec::with_capacity(CN_IPV4_PREFIXES.len() + CN_IPV6_PREFIXES.len());
+
+    for &(prefix, prefix_len) in CN_IPV4_PREFIXES {
+        if let Ok(network) = Ipv4Net::new(Ipv4Addr::from(prefix), prefix_len) {
+            networks.push(IpNet::V4(network));
+        }
+    }
+    for &(prefix, prefix_len) in CN_IPV6_PREFIXES {
+        if let Ok(network) = Ipv6Net::new(Ipv6Addr::from(prefix), prefix_len) {
+            networks.push(IpNet::V6(network));
+        }
+    }
+
+    networks
+}
 
 /// 判断指定 IP 是否属于中国大陆 IP 地址段
 pub fn is_mainland_china_ip(ip: IpAddr) -> bool {
@@ -303,6 +324,20 @@ mod tests {
         assert!(!is_mainland_china_ip(
             "2001:4860:4860::8888".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn mainland_china_cidrs_match_detection() {
+        let networks = mainland_china_cidrs();
+        assert!(networks
+            .iter()
+            .any(|network| network.contains(&"114.114.114.114".parse().unwrap())));
+        assert!(networks
+            .iter()
+            .any(|network| network.contains(&"240e:1f:1::1".parse().unwrap())));
+        assert!(!networks
+            .iter()
+            .any(|network| network.contains(&"8.8.8.8".parse().unwrap())));
     }
 
     #[test]

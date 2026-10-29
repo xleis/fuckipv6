@@ -30,9 +30,7 @@ impl NetworkMode {
 /// 客户端双栈虚拟 IP 配置
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct VirtualIps {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ipv4: Option<Ipv4Addr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ipv6: Option<Ipv6Addr>,
 }
 

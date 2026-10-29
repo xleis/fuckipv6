@@ -531,6 +531,21 @@ mod tests {
     }
 
     #[test]
+    fn virtual_ips_roundtrip_supports_partial_stacks() -> anyhow::Result<()> {
+        let values = [
+            VirtualIps::from_ipv6("fd00::42".parse()?),
+            VirtualIps::from_ipv4("10.8.0.42".parse()?),
+            VirtualIps::dual_stack("10.8.0.42".parse()?, "fd00::42".parse()?),
+        ];
+        for value in values {
+            let encoded = crate::codec::encode(&value)?;
+            let decoded: VirtualIps = crate::codec::decode(&encoded)?;
+            assert_eq!(decoded, value);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn registration_lease_request_is_bound_to_signature() -> anyhow::Result<()> {
         let identity = Identity::generate()?;
         let client_id = identity.client_id().to_string();

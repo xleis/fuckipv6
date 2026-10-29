@@ -9,6 +9,7 @@
 
 pub mod confirmation;
 pub mod handshake;
+pub mod handshake_epoch;
 pub mod key_schedule;
 pub mod rekey;
 pub mod rekey_codec;
@@ -416,6 +417,16 @@ impl EpochSession {
             sent_bytes: 0,
             retired_receive: std::array::from_fn(|_| None),
         })
+    }
+
+    /// Session identifier installed in both active ciphers.
+    pub const fn session_id(&self) -> [u8; SESSION_ID_LEN] {
+        self.active_send.session_id
+    }
+
+    /// Active data epoch.
+    pub const fn epoch(&self) -> u16 {
+        self.active_send.epoch
     }
 
     /// Encrypt a packet under the active epoch.

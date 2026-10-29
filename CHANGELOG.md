@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加 Secure Session v2 握手到数据 epoch 的认证桥接：双方验证对端方向的 HMAC-SHA-256 confirmation 后，才将 HKDF-SHA-512 派生密钥、SID、epoch 和本地/对端 receiver index 装入 `EpochSession`；错误角色、交换方向、单比特篡改和其他 transcript 的确认均拒绝安装，并验证初始化双方可完成双向往返数据收发。当前尚未接入 `HELLO/ACCEPT` wire 字段、原子重协商或真实 UDP/TUN 数据面。
 - 增加 Secure Session v2 HKDF-SHA-512 会话密钥派生：从完整签名握手绑定生成独立的双向数据密钥和双向确认密钥，支持可选 32-byte PSK，并只使用固定标签和长度前缀上下文；共享秘密、PSK、IKM、PRK 和输出密钥均纳入清零生命周期。
 - 增加 Secure Session v2 双向 HMAC-SHA-256 key confirmation：Initiator/Responder 使用独立派生密钥确认同一 transcript，固定 32-byte 编码并使用常量时间验证；错误角色、交换方向、不同密钥调度、错误 transcript、截断/超长和单比特篡改均失败关闭。当前为密码学原语和测试，尚未接入 wire 握手或数据面激活。
 - 增加 Secure Session v2 classic 握手负向回归：覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、错误 epoch、零 SID、单比特签名字段篡改和失败后 responder 状态恢复；所有路径均在数据密钥激活前失败关闭。

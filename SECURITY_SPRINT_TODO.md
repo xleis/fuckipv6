@@ -13,7 +13,7 @@
 - [x] **SS-05 会话密钥派生**：使用 HKDF-SHA-512 派生独立双向数据密钥和双向确认密钥；秘密输入在使用后 `zeroize`。
 - [x] **SS-06 Key confirmation**：使用 HMAC-SHA-256 验证双向确认值，错误、交换方向和截断确认必须失败关闭。
 - [x] **SS-07 握手负向测试**：覆盖 MITM、错误身份、套件降级、错误 epoch/SID、重放、乱序、单比特篡改和跨 endpoint context。
-- [ ] **SS-08 握手接入数据 epoch**：把握手派生密钥、receiver index、epoch 和 SID 装入 `EpochSession`，验证认证双方可以双向收发。
+- [x] **SS-08 握手接入数据 epoch**：把握手派生密钥、receiver index、epoch 和 SID 装入 `EpochSession`，验证认证双方可以双向收发。
 - [ ] **SS-09 原子重协商桥接**：将 `RekeyStateMachine` 与 `EpochSession` 组合，只有确认完成后才原子切换收发密钥并保留旧接收 epoch 宽限。
 - [ ] **SS-10 密码套件抽象**：提供 ChaCha20-Poly1305 与 AES-256-GCM 数据套件及运行时选择，两个套件共享相同 AAD/nonce 语义和负向测试。
 - [ ] **SS-11 批量快路径**：实现预分配缓冲上的批量 seal/open 接口，禁止逐包分配；基准比较单包与批量吞吐。

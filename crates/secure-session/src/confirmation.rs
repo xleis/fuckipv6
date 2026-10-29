@@ -26,6 +26,16 @@ pub enum ConfirmationRole {
     Responder,
 }
 
+impl ConfirmationRole {
+    /// Return the opposite endpoint role.
+    pub const fn peer(self) -> Self {
+        match self {
+            Self::Initiator => Self::Responder,
+            Self::Responder => Self::Initiator,
+        }
+    }
+}
+
 /// A 256-bit key-confirmation tag.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationTag([u8; CONFIRMATION_LEN]);

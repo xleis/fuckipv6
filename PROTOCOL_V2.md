@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期、在线重协商协调状态机和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；完整 X-Wing 握手、PQC、重协商密码学、控制通道线格式与数据面接入尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期、在线重协商协调状态机和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire、原子重协商或真实 UDP/TUN 数据面。完整 X-Wing 握手、PQC 和控制通道线格式也尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -192,7 +192,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生和 SS-06 的双向 HMAC-SHA-256 key confirmation 原语；当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，数据面也未安装密钥。X-Wing、ML-KEM、ML-DSA-65、wire encoding、数据面密钥安装和原子轮换仍须分别完成 SS-08 至 SS-13，并通过独立评审后才能进入生产声明。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation 原语，以及 SS-08 的认证数据 epoch 桥接。`EpochSession::from_handshake` 只有在验证对端方向的 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index；测试验证双方可以双向往返收发。receiver index 是本地路由标签而非认证凭据，调用方仍须从已认证控制消息中正确取得对端索引。当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，桥接也尚未接入真实数据面或原子重协商。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 
@@ -326,6 +326,8 @@ REKEY_INIT -> REKEY_ACCEPT -> REKEY_CONFIRM
 ### 8.1 在线重协商协调约束
 
 `fuckipv6-secure-session` 已实现与密码学原语解耦的每会话重协商状态机；它只处理已经由控制通道认证、且由完整 X-Wing/双签名/确认流程验证过的消息。该状态机本身不构成握手认证：
+
+当前尚未实现 SS-09 的 `RekeyStateMachine` 与 `EpochSession` 原子组合：状态机推进不能直接替换在线收发密钥，也不提供旧接收 epoch 的数据面宽限窗口。完成该桥接前，不得把状态机的 `CONFIRM` 接受结果视为新 epoch 已激活。
 
 - 每个会话最多同时存在 1 个半开重协商事务，超时为 5 秒；超时只清除事务，不延长当前数据 epoch 的硬上限。
 - `REKEY_INIT` 必须绑定当前 `base_epoch`、严格递增的 `new_epoch`、全新的 128-bit `SID` 和 256-bit Initiator nonce。

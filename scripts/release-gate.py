@@ -72,6 +72,35 @@ def git_output(*arguments: str) -> str | None:
     return command_output(("git", *arguments))
 
 
+def source_checkpoint() -> dict[str, Any]:
+    return {
+        "commit": git_output("rev-parse", "HEAD"),
+        "branch": git_output("branch", "--show-current"),
+        "dirty": bool(git_output("status", "--porcelain", "--untracked-files=normal")),
+    }
+
+
+def source_stability_check(
+    start: dict[str, Any], end: dict[str, Any]
+) -> dict[str, Any]:
+    start_commit = start.get("commit")
+    end_commit = end.get("commit")
+    stable = isinstance(start_commit, str) and start_commit == end_commit
+    result: dict[str, Any] = {
+        "name": "stable-source",
+        "command": ["git", "rev-parse", "HEAD"],
+        "status": "passed" if stable else "failed",
+        "exit_code": 0 if stable else 1,
+        "duration_seconds": 0.0,
+        "log": None,
+        "start_commit": start_commit,
+        "end_commit": end_commit,
+    }
+    if not stable:
+        result["error"] = "Git HEAD changed while the release gate was running"
+    return result
+
+
 def base_environment() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("CARGO_TERM_COLOR", "never")
@@ -339,6 +368,7 @@ def run_gate(args: argparse.Namespace) -> int:
         print(json.dumps(build_run_plan(args), indent=2, sort_keys=True))
         return 0
 
+    source_start = source_checkpoint()
     report_path = (
         Path(args.report).resolve()
         if args.report
@@ -458,12 +488,15 @@ def run_gate(args: argparse.Namespace) -> int:
             benchmark["status"] = "failed"
             benchmark["error"] = "Criterion produced no valid machine-readable samples"
 
-    dirty = bool(git_output("status", "--porcelain", "--untracked-files=normal"))
+    source_end = source_checkpoint()
+    dirty = source_end["dirty"]
     source = {
-        "commit": git_output("rev-parse", "HEAD"),
-        "branch": git_output("branch", "--show-current"),
+        "commit": source_end["commit"],
+        "commit_at_start": source_start["commit"],
+        "branch": source_end["branch"],
         "dirty": dirty,
     }
+    checks.append(source_stability_check(source_start, source_end))
     if args.require_clean and dirty:
         checks.append(
             {

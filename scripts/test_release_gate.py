@@ -223,6 +223,24 @@ class ReleaseGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "root must be a JSON object"):
                 GATE.load_report(path)
 
+    def test_source_stability_check_accepts_an_unchanged_head(self) -> None:
+        source = {"commit": "a" * 40, "branch": "main", "dirty": False}
+
+        check = GATE.source_stability_check(source, source.copy())
+
+        self.assertEqual(check["status"], "passed")
+        self.assertEqual(check["start_commit"], "a" * 40)
+        self.assertEqual(check["end_commit"], "a" * 40)
+
+    def test_source_stability_check_rejects_head_changes_during_gate(self) -> None:
+        start = {"commit": "a" * 40, "branch": "main", "dirty": False}
+        end = {"commit": "b" * 40, "branch": "main", "dirty": False}
+
+        check = GATE.source_stability_check(start, end)
+
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("HEAD changed", check["error"])
+
     def test_criterion_samples_are_machine_readable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             criterion = Path(directory)

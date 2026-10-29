@@ -329,17 +329,15 @@ class ReleaseGateTests(unittest.TestCase):
                 "--benchmark",
                 "full",
                 "--benchmark-baseline",
-                "target/baseline.json",
-                "--max-regression-percent",
+                "target/linux.json",
+                "--benchmark-baseline",
+                "target/windows.json",
+                "--benchmark-max-regression-percent",
                 "4",
-                "--noise-percent",
+                "--benchmark-max-noise-percent",
                 "2",
                 "--benchmark-min-samples",
                 "25",
-                "--noise-sigmas",
-                "4",
-                "--missing-baseline",
-                "warn",
             ]
         )
         GATE.apply_run_defaults(args)
@@ -347,10 +345,15 @@ class ReleaseGateTests(unittest.TestCase):
 
         comparison = plan["benchmark_comparison_command"]
         self.assertIsNotNone(comparison)
-        self.assertIn("scripts/bench-compare.py", comparison["arguments"][1])
-        self.assertEqual(comparison["arguments"][-1], "warn")
+        self.assertIn("scripts/criterion_compare.py", comparison["arguments"][1])
+        self.assertEqual(
+            comparison["arguments"].count("--baseline"),
+            2,
+        )
         self.assertIn("4.0", comparison["arguments"])
+        self.assertIn("2.0", comparison["arguments"])
         self.assertIn("25", comparison["arguments"])
+        self.assertEqual(plan["benchmark_quality"]["min_samples"], 25)
 
     def test_benchmark_comparison_requires_benchmarking(self) -> None:
         parser = GATE.build_parser()
@@ -372,6 +375,13 @@ class ReleaseGateTests(unittest.TestCase):
         args = parser.parse_args(["run", "--benchmark-min-samples", "0"])
 
         with self.assertRaisesRegex(ValueError, "must be at least 1"):
+            GATE.apply_run_defaults(args)
+
+    def test_benchmark_comparison_rejects_invalid_noise_policy(self) -> None:
+        parser = GATE.build_parser()
+        args = parser.parse_args(["run", "--benchmark-max-noise-percent", "101"])
+
+        with self.assertRaisesRegex(ValueError, "must be in"):
             GATE.apply_run_defaults(args)
 
     def test_linux_defaults_include_musl_and_windows_cross_checks(self) -> None:

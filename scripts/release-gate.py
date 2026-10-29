@@ -9,6 +9,7 @@ independent security audit.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -35,6 +36,15 @@ SECURITY_RELEASE_BLOCKERS = (
     "An independent cryptographic and protocol security audit has not been completed.",
     "Long-duration WAN, DPI/QoS resistance, and real Windows/macOS runtime validation are incomplete.",
 )
+
+_COMPARATOR_SCRIPT = Path(__file__).with_name("criterion_compare.py")
+_COMPARATOR_SPEC = importlib.util.spec_from_file_location(
+    "criterion_compare", _COMPARATOR_SCRIPT
+)
+assert _COMPARATOR_SPEC is not None and _COMPARATOR_SPEC.loader is not None
+criterion_compare = importlib.util.module_from_spec(_COMPARATOR_SPEC)
+sys.modules[_COMPARATOR_SPEC.name] = criterion_compare
+_COMPARATOR_SPEC.loader.exec_module(criterion_compare)
 
 
 def utc_now() -> str:
@@ -209,22 +219,32 @@ def parse_criterion_samples(criterion_dir: Path) -> list[dict[str, Any]]:
             relative = estimate_path.parent.parent.relative_to(criterion_dir)
             mean = estimate["mean"]
             median = estimate["median"]
-            samples.append(
-                {
-                    "benchmark": "/".join(relative.parts),
-                    "mean_ns": mean["point_estimate"],
-                    "mean_ci_ns": [
-                        mean["confidence_interval"]["lower_bound"],
-                        mean["confidence_interval"]["upper_bound"],
-                    ],
-                    "median_ns": median["point_estimate"],
-                    "median_ci_ns": [
-                        median["confidence_interval"]["lower_bound"],
-                        median["confidence_interval"]["upper_bound"],
-                    ],
-                    "standard_error_ns": mean["standard_error"],
-                }
-            )
+            sample_path = estimate_path.with_name("sample.json")
+            sample_count = None
+            if sample_path.is_file():
+                sample_document = json.loads(
+                    sample_path.read_text(encoding="utf-8")
+                )
+                times = sample_document.get("times")
+                if isinstance(times, list) and times:
+                    sample_count = len(times)
+            sample = {
+                "benchmark": "/".join(relative.parts),
+                "mean_ns": mean["point_estimate"],
+                "mean_ci_ns": [
+                    mean["confidence_interval"]["lower_bound"],
+                    mean["confidence_interval"]["upper_bound"],
+                ],
+                "median_ns": median["point_estimate"],
+                "median_ci_ns": [
+                    median["confidence_interval"]["lower_bound"],
+                    median["confidence_interval"]["upper_bound"],
+                ],
+                "standard_error_ns": mean["standard_error"],
+            }
+            if sample_count is not None:
+                sample["sample_count"] = sample_count
+            samples.append(sample)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
             samples.append(
                 {
@@ -269,13 +289,18 @@ def apply_run_defaults(args: argparse.Namespace) -> None:
         raise ValueError("--benchmark-baseline requires Criterion benchmarking")
     if args.benchmark_min_samples < 1:
         raise ValueError("--benchmark-min-samples must be at least 1")
-    for option, value in (
-        ("--max-regression-percent", args.max_regression_percent),
-        ("--noise-percent", args.noise_percent),
-        ("--noise-sigmas", args.noise_sigmas),
+    if (
+        not math.isfinite(args.benchmark_max_regression_percent)
+        or args.benchmark_max_regression_percent < 0
     ):
-        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-            raise ValueError(f"{option} must be finite and non-negative")
+        raise ValueError(
+            "--benchmark-max-regression-percent must be finite and non-negative"
+        )
+    if (
+        not math.isfinite(args.benchmark_max_noise_percent)
+        or not 0 < args.benchmark_max_noise_percent <= 100
+    ):
+        raise ValueError("--benchmark-max-noise-percent must be in (0, 100]")
     targets = [] if args.no_default_cross_targets else default_cross_targets(args.platform)
     for target in args.cross_target:
         if target not in targets:
@@ -294,6 +319,7 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "unittest",
                 "scripts/test_bench_compare.py",
                 "scripts/test_bench_summarize.py",
+                "scripts/test_criterion_compare.py",
                 "scripts/test_release_gate.py",
                 "scripts/test_release_material.py",
                 "-v",
@@ -357,8 +383,8 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
             "name": "benchmark-comparison",
             "arguments": benchmark_comparison_arguments(
                 args,
-                baseline=Path(args.benchmark_baseline).resolve(),
-                current=Path("<criterion-artifact-directory>"),
+                baselines=[Path(path).resolve() for path in args.benchmark_baseline],
+                candidate=Path("<benchmark-candidate-report>"),
                 output=Path("<benchmark-comparison-report>"),
             ),
         }
@@ -374,6 +400,12 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "require_clean": args.require_clean,
         "cross_targets": list(args.cross_target),
         "benchmark": args.benchmark,
+        "benchmark_baselines": [str(Path(path).resolve()) for path in args.benchmark_baseline],
+        "benchmark_quality": {
+            "max_regression_percent": args.benchmark_max_regression_percent,
+            "max_noise_percent": args.benchmark_max_noise_percent,
+            "min_samples": args.benchmark_min_samples,
+        },
         "commands": commands,
         "benchmark_command": benchmark,
         "benchmark_comparison_command": comparison,
@@ -381,29 +413,33 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def benchmark_comparison_arguments(
-    args: argparse.Namespace, *, baseline: Path, current: Path, output: Path
+    args: argparse.Namespace,
+    *,
+    baselines: Sequence[Path],
+    candidate: Path,
+    output: Path,
 ) -> list[str]:
-    return [
+    arguments = [
         sys.executable,
-        str(PROJECT_ROOT / "scripts" / "bench-compare.py"),
-        "compare",
-        "--baseline",
-        str(baseline),
-        "--current",
-        str(current),
-        "--output",
-        str(output),
-        "--max-regression-percent",
-        str(args.max_regression_percent),
-        "--noise-percent",
-        str(args.noise_percent),
-        "--min-samples",
-        str(args.benchmark_min_samples),
-        "--noise-sigmas",
-        str(args.noise_sigmas),
-        "--missing-baseline",
-        args.missing_baseline,
+        str(PROJECT_ROOT / "scripts" / "criterion_compare.py"),
     ]
+    for baseline in baselines:
+        arguments.extend(("--baseline", str(baseline)))
+    arguments.extend(
+        (
+            "--candidate",
+            str(candidate),
+            "--output",
+            str(output),
+            "--max-regression-percent",
+            str(args.benchmark_max_regression_percent),
+            "--max-noise-percent",
+            str(args.benchmark_max_noise_percent),
+            "--min-samples",
+            str(args.benchmark_min_samples),
+        )
+    )
+    return arguments
 
 
 def hardware_info() -> dict[str, Any]:
@@ -461,6 +497,7 @@ def run_gate(args: argparse.Namespace) -> int:
                 "unittest",
                 "scripts/test_bench_compare.py",
                 "scripts/test_bench_summarize.py",
+                "scripts/test_criterion_compare.py",
                 "scripts/test_release_gate.py",
                 "scripts/test_release_material.py",
                 "-v",
@@ -546,38 +583,62 @@ def run_gate(args: argparse.Namespace) -> int:
         if benchmark_result["status"] == "passed" and not valid_samples:
             benchmark["status"] = "failed"
             benchmark["error"] = "Criterion produced no valid machine-readable samples"
-        if args.benchmark_baseline:
-            comparison_path = artifact_root / "benchmark-comparison.json"
-            comparison_result = run_logged(
-                "benchmark-comparison",
-                benchmark_comparison_arguments(
-                    args,
-                    baseline=Path(args.benchmark_baseline).resolve(),
-                    current=criterion_dir,
-                    output=comparison_path,
-                ),
-                artifact_root / "benchmark-comparison.log",
-                env=env,
-            )
-            comparison: dict[str, Any] = {
-                "status": comparison_result["status"],
-                "baseline": str(Path(args.benchmark_baseline).resolve()),
-                "report": str(comparison_path.relative_to(PROJECT_ROOT)),
-                "command": comparison_result["command"],
-                "exit_code": comparison_result["exit_code"],
+
+        if valid_samples:
+            candidate_document = {
+                "schema": EXPECTED_SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "platform": {"label": args.platform},
+                "hardware": hardware_info(),
+                "benchmark": benchmark,
             }
-            try:
-                comparison_report = json.loads(
-                    comparison_path.read_text(encoding="utf-8")
+            candidate_path = artifact_root / "benchmark-candidate.json"
+            write_json(candidate_path, candidate_document)
+            if args.benchmark_baseline:
+                comparison_path = artifact_root / "benchmark-comparison.json"
+                comparison_result = run_logged(
+                    "benchmark-comparison",
+                    benchmark_comparison_arguments(
+                        args,
+                        baselines=[
+                            Path(path).resolve()
+                            for path in args.benchmark_baseline
+                        ],
+                        candidate=candidate_path,
+                        output=comparison_path,
+                    ),
+                    artifact_root / "benchmark-comparison.log",
+                    env=env,
                 )
-                comparison["report_summary"] = comparison_report.get("summary")
-            except (OSError, json.JSONDecodeError) as error:
-                comparison["report_error"] = str(error)
-                comparison["status"] = "failed"
-            benchmark["comparison"] = comparison
-            if comparison["status"] != "passed" and benchmark["status"] == "passed":
-                benchmark["status"] = "failed"
-                benchmark["error"] = "Criterion regression comparison failed"
+                checks.append(comparison_result)
+                comparison: dict[str, Any] = {
+                    "status": comparison_result["status"],
+                    "baselines": [
+                        str(Path(path).resolve())
+                        for path in args.benchmark_baseline
+                    ],
+                    "candidate": str(candidate_path.relative_to(PROJECT_ROOT)),
+                    "report": str(comparison_path.relative_to(PROJECT_ROOT)),
+                    "command": comparison_result["command"],
+                    "exit_code": comparison_result["exit_code"],
+                }
+                try:
+                    comparison_report = json.loads(
+                        comparison_path.read_text(encoding="utf-8")
+                    )
+                    comparison["report_summary"] = comparison_report.get("summary")
+                    comparison["selected_baseline"] = comparison_report.get(
+                        "baseline"
+                    )
+                except (OSError, json.JSONDecodeError) as error:
+                    comparison["report_error"] = str(error)
+                    comparison["status"] = "failed"
+                benchmark["comparison"] = comparison
+                if comparison["status"] != "passed":
+                    benchmark["status"] = "failed"
+                    benchmark["error"] = (
+                        "Criterion baseline comparison failed"
+                    )
 
     source_end = source_checkpoint()
     dirty = source_end["dirty"]
@@ -847,37 +908,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--benchmark-baseline",
-        help="Criterion directory or bench-compare snapshot used as the regression baseline",
+        action="append",
+        default=[],
+        help=(
+            "accepted release-gate report, bench-compare snapshot, or Criterion "
+            "directory; may be repeated"
+        ),
     )
     run_parser.add_argument(
-        "--max-regression-percent",
+        "--benchmark-max-regression-percent",
         type=float,
-        default=5.0,
-        help="allowed mean regression before noise margins (default: 5)",
+        default=criterion_compare.DEFAULT_MAX_REGRESSION_PERCENT,
+        help="maximum allowed mean latency regression (default: 10)",
     )
     run_parser.add_argument(
-        "--noise-percent",
+        "--benchmark-max-noise-percent",
         type=float,
-        default=1.0,
-        help="additional relative noise allowance (default: 1)",
+        default=criterion_compare.DEFAULT_MAX_NOISE_PERCENT,
+        help="maximum accepted relative standard error (default: 5)",
     )
     run_parser.add_argument(
         "--benchmark-min-samples",
         type=int,
-        default=10,
-        help="minimum Criterion samples required per benchmark (default: 10)",
-    )
-    run_parser.add_argument(
-        "--noise-sigmas",
-        type=float,
-        default=3.0,
-        help="standard-error margin used to suppress noise (default: 3)",
-    )
-    run_parser.add_argument(
-        "--missing-baseline",
-        choices=("fail", "warn"),
-        default="fail",
-        help="fail or warn when current has a benchmark absent from the baseline",
+        default=criterion_compare.DEFAULT_MIN_SAMPLES,
+        help="minimum Criterion samples per benchmark (default: 10)",
     )
     clean_group = run_parser.add_mutually_exclusive_group()
     clean_group.add_argument(

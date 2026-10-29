@@ -396,7 +396,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
         </div>
         <div class="brand-text">
           <h1>fuckipv6</h1>
-          <span class="sub">Mesh Hub</span>
+          <span class="sub">分布式拓扑中枢</span>
         </div>
       </div>
 
@@ -620,9 +620,9 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               </div>
               <select class="select-pill" id="nat-filter" onchange="filterPeersTable()">
                 <option value="">全部 NAT 穿透类型</option>
-                <option value="Cone">Cone 全锥型</option>
-                <option value="Symmetric">Symmetric 对称型</option>
-                <option value="Restricted">Restricted 受限型</option>
+                <option value="Cone">全锥型 NAT</option>
+                <option value="Symmetric">对称型 NAT</option>
+                <option value="Restricted">受限型 NAT</option>
               </select>
             </div>
             <div class="table-responsive">
@@ -642,14 +642,14 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 3.2-2.2 4.5-5.2 4.5H8.5"/></svg>
               <span>原生三档分流策略</span>
             </h2>
-            <span class="section-tag" id="current-routing-mode-tag">MeshOnly</span>
+            <span class="section-tag" id="current-routing-mode-tag">仅对等专网</span>
           </div>
 
           <div class="routing-modes-grid">
             <div class="mode-card active" id="mode-card-mesh" onclick="selectRoutingMode('MeshOnly')">
               <div class="mode-badge green">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>仅对等专网 · MeshOnly</span>
+                <span>仅对等专网 · 内网互通</span>
               </div>
               <div class="mode-title">纯内网加密组网</div>
               <div class="mode-desc">仅在虚拟专网内部各对等节点之间直接建立加密通道互联，常规外网访问使用本地物理网络直连，不走代理。</div>
@@ -657,15 +657,15 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
             <div class="mode-card" id="mode-card-bypass" onclick="selectRoutingMode('BypassMainland')">
               <div class="mode-badge purple">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>绕过大陆 · BypassMainland</span>
+                <span>智能分流 · 绕过大陆</span>
               </div>
               <div class="mode-title">大陆直连 · 海外加速</div>
-              <div class="mode-desc">自动检测中国大陆 IP 网段与大陆域名走本地直连，海外流量与受限站点自动路由至指定 Exit Node 出口网关加速。</div>
+              <div class="mode-desc">自动检测中国大陆 IP 网段与大陆域名走本地直连，海外流量与受限站点自动路由至指定流量出口网关加速。</div>
             </div>
             <div class="mode-card" id="mode-card-global" onclick="selectRoutingMode('GlobalProxy')">
               <div class="mode-badge blue">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>全局代理 · GlobalProxy</span>
+                <span>全局代理 · 流量中转</span>
               </div>
               <div class="mode-title">全局流量代理出境</div>
               <div class="mode-desc">本机全部公网网络流量 100% 路由至虚拟对等网络中的出口节点代理中转，实现全局匿名与跨境访问。</div>
@@ -676,13 +676,13 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
             <div class="card-header">
               <span class="card-title">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
-                <span>出口节点与出境网关控制 · Exit Node</span>
+                <span>流量出口网关节点控制</span>
               </span>
             </div>
             <div class="card-body">
               <div class="form-row">
                 <div class="form-group">
-                  <label>指定流量出口节点 (Exit Node)</label>
+                  <label>指定流量出口网关节点</label>
                   <select class="form-control" id="exit-node-select">
                     <option value="">(自动寻找网络中可用出口网关)</option>
                   </select>
@@ -709,7 +709,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <div class="card-header">
                 <span class="card-title">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-                  <span>对等网络接入目标 · Connect Target</span>
+                  <span>对等网络接入目标</span>
                 </span>
                 <button class="btn" onclick="openHostModal()">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
@@ -738,7 +738,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <div class="card-header">
                 <span class="card-title">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-1.5 1.5L14 9l-1.5-1.5L11 9l-1.5-1.5L8 9 3 14v7h7l5-5 1.5 1.5L18 16l1.5-1.5L18 13l3.5-3.5a2.12 2.12 0 0 0 0-3L21 2z"/></svg>
-                  <span>网络邀请凭证与终端加入 · Network Ticket</span>
+                  <span>网络邀请凭证与终端接入</span>
                 </span>
                 <button class="btn btn-primary" onclick="copyNetworkTicket()">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2.2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -762,7 +762,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <div class="card-header">
                 <span class="card-title">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="19" height="7" rx="2"/><rect x="2.5" y="14.5" width="19" height="7" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg>
-                  <span>专网 IP 地址池 · IP Pools</span>
+                  <span>专网 IP 地址池</span>
                 </span>
                 <button class="btn btn-primary" onclick="saveNetworkSettings()">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
@@ -774,9 +774,9 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
                   <div class="form-group">
                     <label>运行模式</label>
                     <select class="form-control" id="net-mode-select">
-                      <option value="dual_stack">DualStack (IPv4 + IPv6 双栈)</option>
-                      <option value="ipv6_only">Ipv6Only (仅分配 IPv6)</option>
-                      <option value="ipv4_only">Ipv4Only (仅分配 IPv4)</option>
+                      <option value="dual_stack">IPv4 + IPv6 双栈模式</option>
+                      <option value="ipv6_only">仅分配 IPv6 单栈</option>
+                      <option value="ipv4_only">仅分配 IPv4 单栈</option>
                     </select>
                   </div>
                   <div class="form-group">
@@ -795,7 +795,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <div class="card-header">
                 <span class="card-title">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>
-                  <span>协调中枢与服务端口 · Endpoints</span>
+                  <span>协调中枢服务端口配置</span>
                 </span>
                 <button class="btn" onclick="openHostModal()">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
@@ -828,15 +828,15 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <div class="card-header">
                 <span class="card-title">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m5.5 5.5 13 13"/></svg>
-                  <span>安全黑名单封禁管理 · Blacklist</span>
+                  <span>黑名单访问控制管理</span>
                 </span>
                 <span class="section-tag">访问控制名单</span>
               </div>
               <div class="card-body">
                 <div class="form-row" style="margin-bottom:14px;">
                   <div class="form-group">
-                    <label>手动添加封禁客户端 (Client ID)</label>
-                    <input type="text" class="form-control" id="manual-ban-id" placeholder="输入要强制封禁踢出的 Client ID...">
+                    <label>手动添加封禁客户端标识 (Client ID)</label>
+                    <input type="text" class="form-control" id="manual-ban-id" placeholder="输入要强制封禁踢出的客户端标识 (Client ID)...">
                   </div>
                   <button class="btn btn-danger" onclick="manualBanClient()">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m5.5 5.5 13 13"/></svg>
@@ -904,9 +904,9 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
               <div class="console-toolbar">
                 <div>
                   <select class="select-pill" id="log-service-select" onchange="refreshLogs()">
-                    <option value="coordinator">协调中枢服务 (coordinator)</option>
-                    <option value="client">客户端服务 (client)</option>
-                    <option value="memory">异常错误 (errors)</option>
+                    <option value="coordinator">协调中枢服务</option>
+                    <option value="client">客户端服务</option>
+                    <option value="memory">异常错误日志</option>
                   </select>
                   <select class="select-pill" id="log-level-filter" onchange="applyLogFilter()">
                     <option value="all" selected>全部日志级别</option>
@@ -949,8 +949,8 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
         </div>
 
         <footer class="app-footer">
-          <div>FUCKIPV6 MESH OVERLAY · DISTRIBUTED QUIC NETWORK</div>
-          <div>CONTROL PLANE · REAL-TIME TELEMETRY</div>
+          <div>FUCKIPV6 虚拟专网 · 分布式 QUIC 网络</div>
+          <div>控制平面 · 实时遥测态势</div>
         </footer>
       </main>
     </div>
@@ -1547,7 +1547,7 @@ tun_name = "fuckipv6"</div>
             { divider: true },
             { svg: SVG_ICONS.target, label: '锁定聚焦遥测卡片', shortcut: 'HUD', onClick: () => focusPeerHUD(cid) },
             { svg: SVG_ICONS.zap, label: '网络测速 (Ping)', onClick: () => pingPeer(cid) },
-            { svg: SVG_ICONS.shield, label: '设为出口节点 (Exit Node)', onClick: () => setAsExitNode(cid) },
+            { svg: SVG_ICONS.shield, label: '设为流量出口节点', onClick: () => setAsExitNode(cid) },
             { svg: SVG_ICONS.location, label: '在表格中定位', onClick: () => highlightPeerRow(cid) },
             { divider: true },
             { svg: SVG_ICONS.ban, label: '踢出并加入黑名单', danger: true, onClick: () => banClientPrompt(cid) },
@@ -1984,7 +1984,7 @@ tun_name = "fuckipv6"</div>
       let dotColor = '#10b981';
 
       if (isCore) {
-        title = 'fuckipv6 协调中枢 (HUB)';
+        title = 'fuckipv6 分布式协调中枢';
         dotColor = '#38bdf8';
         const activePeerCount = nodes.filter(n => !n.isCore && !n.isNetwork).length;
         const netCount = knownNetworks.size;
@@ -2193,11 +2193,11 @@ tun_name = "fuckipv6"</div>
         { divider: true },
         { svg: SVG_ICONS.target, label: '在拓扑中聚焦此节点', onClick: () => focusPeerHUD(clientId) },
         { svg: SVG_ICONS.zap, label: '连通性测试 (Ping)', onClick: () => pingPeer(clientId) },
-        { svg: SVG_ICONS.shield, label: '设为出口节点 (Exit Node)', onClick: () => setAsExitNode(clientId) },
+        { svg: SVG_ICONS.shield, label: '设为流量出口节点', onClick: () => setAsExitNode(clientId) },
         { divider: true },
         { svg: SVG_ICONS.ban, label: '移入黑名单并踢出', danger: true, onClick: () => banClientPrompt(clientId) },
       ];
-      showContextMenu(e, `客户端 · ${shortId(clientId)}`, p.nat_type || 'ONLINE', items);
+      showContextMenu(e, `客户端 · ${shortId(clientId)}`, p.nat_type ? formatNatType(p.nat_type) : '在线', items);
     }
 
     function handleLogsContextMenu(e) {
@@ -2304,7 +2304,7 @@ tun_name = "fuckipv6"</div>
       barStatus.style.color = isOnline ? 'var(--green)' : 'var(--text-muted)';
 
       const mode = statusData.routing_mode || 'MeshOnly';
-      const modeZh = mode === 'MeshOnly' ? '仅对等专网 (MeshOnly)' : (mode === 'BypassMainland' ? '绕过大陆智能加速 (BypassMainland)' : '全局对等代理 (GlobalProxy)');
+      const modeZh = mode === 'MeshOnly' ? '仅对等专网' : (mode === 'BypassMainland' ? '绕过大陆智能分流' : '全局对等代理');
       document.getElementById('bar-routing-val').textContent = modeZh;
       selectRoutingMode(mode, false);
 
@@ -2574,7 +2574,7 @@ tun_name = "fuckipv6"</div>
       `).join('');
       c.innerHTML = `
         <table>
-          <thead><tr><th>被封禁的 Client ID</th><th>操作</th></tr></thead>
+          <thead><tr><th>被封禁的客户端标识 (Client ID)</th><th>操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       `;
@@ -2597,7 +2597,7 @@ tun_name = "fuckipv6"</div>
     async function manualBanClient() {
       const id = document.getElementById('manual-ban-id').value.trim();
       if (!id) {
-        showToast('请输入要封禁的 Client ID');
+        showToast('请输入要封禁的客户端标识');
         return;
       }
       banClientPrompt(id);

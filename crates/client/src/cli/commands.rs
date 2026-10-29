@@ -819,6 +819,23 @@ fn parse_runtime_routing_mode(mode: &str) -> Result<fuckipv6_common::RoutingMode
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitForwardingAction {
+    Keep,
+    Install,
+    Remove,
+}
+
+#[cfg(target_os = "linux")]
+fn exit_forwarding_action(enabled: bool, has_forwarder: bool) -> ExitForwardingAction {
+    match (enabled, has_forwarder) {
+        (true, false) => ExitForwardingAction::Install,
+        (false, true) => ExitForwardingAction::Remove,
+        _ => ExitForwardingAction::Keep,
+    }
+}
+
 async fn apply_runtime_routing(
     runtime: &mut ClientRuntime,
     mode: &str,
@@ -833,16 +850,39 @@ async fn apply_runtime_routing(
     updated_config.routing.exit_node = exit_node.clone();
     updated_config.exit_node.enabled = is_exit_node;
 
+    // Stage new kernel resources before changing policy routes. A disabled Exit
+    // Node keeps its current resources until persistence succeeds, so a failed
+    // config write can leave the old runtime completely untouched.
     #[cfg(target_os = "linux")]
-    apply_linux_routing_mode(runtime, parsed_mode)
-        .await
-        .map_err(|error| format!("Linux 策略路由热更新失败: {error:#}"))?;
+    let exit_action = exit_forwarding_action(is_exit_node, runtime.exit_forwarder.is_some());
+    #[cfg(target_os = "linux")]
+    let mut staged_exit_forwarder = if exit_action == ExitForwardingAction::Install {
+        let forwarder = LinuxExitForwarder::install(&updated_config.exit_node, runtime.tun.name())
+            .await
+            .map_err(|error| format!("安装 Exit Node 内核转发失败: {error:#}"))?;
+        Some(forwarder.ok_or_else(|| "Exit Node 配置已启用，但未创建内核转发器".to_string())?)
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "linux")]
+    if let Err(error) = apply_linux_routing_mode(runtime, parsed_mode).await {
+        if let Some(mut forwarder) = staged_exit_forwarder.take() {
+            forwarder.rollback();
+        }
+        return Err(format!("Linux 策略路由热更新失败: {error:#}"));
+    }
 
     if let Err(error) = updated_config.save_to_file(&runtime.config_path) {
         #[cfg(target_os = "linux")]
         let rollback_error = apply_linux_routing_mode(runtime, previous_mode).await.err();
         #[cfg(not(target_os = "linux"))]
         let rollback_error: Option<anyhow::Error> = None;
+
+        #[cfg(target_os = "linux")]
+        if let Some(mut forwarder) = staged_exit_forwarder.take() {
+            forwarder.rollback();
+        }
 
         return match rollback_error {
             Some(rollback_error) => Err(format!(
@@ -856,6 +896,19 @@ async fn apply_runtime_routing(
     runtime.exit_node_manager.set_enabled(is_exit_node);
     runtime.configured_exit_node = exit_node.clone();
     runtime.config = updated_config;
+
+    #[cfg(target_os = "linux")]
+    match exit_action {
+        ExitForwardingAction::Install => {
+            runtime.exit_forwarder = staged_exit_forwarder.take();
+        }
+        ExitForwardingAction::Remove => {
+            if let Some(mut forwarder) = runtime.exit_forwarder.take() {
+                forwarder.rollback();
+            }
+        }
+        ExitForwardingAction::Keep => {}
+    }
 
     let canonical_mode = format!("{parsed_mode:?}");
     tracing::info!(
@@ -2668,6 +2721,27 @@ mod tests {
         let error = parse_runtime_routing_mode("not-a-route-mode")
             .expect_err("unknown modes must not silently fall back");
         assert!(error.to_string().contains("未知路由模式"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exit_forwarder_transitions_are_idempotent() {
+        assert_eq!(
+            exit_forwarding_action(true, false),
+            ExitForwardingAction::Install
+        );
+        assert_eq!(
+            exit_forwarding_action(true, true),
+            ExitForwardingAction::Keep
+        );
+        assert_eq!(
+            exit_forwarding_action(false, true),
+            ExitForwardingAction::Remove
+        );
+        assert_eq!(
+            exit_forwarding_action(false, false),
+            ExitForwardingAction::Keep
+        );
     }
 
     #[test]

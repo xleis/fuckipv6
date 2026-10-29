@@ -2,9 +2,12 @@
 //!
 //! This crate intentionally does not implement the post-quantum handshake yet.
 //! It contains the byte-exact data frame, nonce construction, replay window,
-//! bounded epoch lifecycle, and allocation-free AEAD packet operations that can
-//! be tested independently from the eventually selected X-Wing and ML-DSA
+//! bounded epoch lifecycle, allocation-free AEAD packet operations, and the
+//! online `REKEY_INIT`/`REKEY_ACCEPT`/`REKEY_CONFIRM` state machine that can be
+//! tested independently from the eventually selected X-Wing and ML-DSA
 //! implementations.
+
+pub mod rekey;
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};

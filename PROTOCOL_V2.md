@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口和本地 epoch 生命周期状态机已实现并有单元测试；握手、PQC、在线轮换消息与数据面接入尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期和在线重协商协调状态机已实现并有单元测试；完整 X-Wing 握手、PQC、重协商密码学、控制通道消息与数据面接入尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -308,6 +308,19 @@ REKEY_INIT -> REKEY_ACCEPT -> REKEY_CONFIRM
 - 重协商期间必须限制半开 epoch 数量和握手 CPU 预算。
 
 不能只通过 `HKDF(old_key, counter)` 做无限重钥，因为这会让当前密钥泄漏反向解密旧 epoch。
+
+### 8.1 在线重协商协调约束
+
+`fuckipv6-secure-session` 已实现与密码学原语解耦的每会话重协商状态机；它只处理已经由控制通道认证、且由完整 X-Wing/双签名/确认流程验证过的消息。该状态机本身不构成握手认证：
+
+- 每个会话最多同时存在 1 个半开重协商事务，超时为 5 秒；超时只清除事务，不延长当前数据 epoch 的硬上限。
+- `REKEY_INIT` 必须绑定当前 `base_epoch`、严格递增的 `new_epoch`、全新的 128-bit `SID` 和 256-bit Initiator nonce。
+- `REKEY_ACCEPT` 必须逐字段绑定 `REKEY_INIT`，并携带 Responder nonce、最终 transcript hash、Responder confirmation 和本地推导出的 Initiator confirmation。
+- `REKEY_CONFIRM` 必须逐字段绑定 `REKEY_ACCEPT`；只有确认值与 Responder 预先推导的期望值完全一致时才激活新 epoch。
+- 重传的完全相同的 `INIT`/`ACCEPT`/`CONFIRM` 在 5 秒窗口内按幂等处理，不创建第二个 epoch；字段不完全相同的重复消息不得覆盖已有事务。
+- 已尝试的 `SID` 在会话内永久保留，超时或失败的 `SID` 也不得复用。
+- epoch `0xffff` 是最后一个 epoch；之后必须建立全新会话，不能回绕 `epoch` 或复用旧 `SID`。
+- 消息解析、签名、KEM、KDF 或 key-confirmation 失败必须在进入状态机前拒绝；状态机不把非零占位值视为密码学有效性证明。
 
 ## 9. 状态机与失败路径
 

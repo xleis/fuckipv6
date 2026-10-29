@@ -835,6 +835,10 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>
                   <span>协调中枢服务端口配置</span>
                 </span>
+                <button class="btn btn-danger" id="btn-stop-host" onclick="stopHostNetwork()" style="display:none;">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+                  <span>停止自建网络</span>
+                </button>
                 <button class="btn" onclick="openHostModal()">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
                   <span>重置 / 新建</span>
@@ -844,19 +848,19 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
                 <div class="form-grid cols-2">
                   <div class="form-group">
                     <label>信令监听端口</label>
-                    <input type="text" class="form-control" id="hub-signal-port" value="6666" readonly>
+                    <input type="text" class="form-control" id="hub-signal-port" value="--" readonly>
                   </div>
                   <div class="form-group">
                     <label>QUIC 中继端口</label>
-                    <input type="text" class="form-control" id="hub-relay-port" value="6667" readonly>
+                    <input type="text" class="form-control" id="hub-relay-port" value="--" readonly>
                   </div>
                   <div class="form-group">
-                    <label>外部公网主机 / 域名</label>
-                    <input type="text" class="form-control" id="hub-external-host" value="relay.xlei.cc" readonly>
+                    <label>外部公网端点</label>
+                    <input type="text" class="form-control" id="hub-external-host" value="由邀请票据决定" readonly>
                   </div>
                   <div class="form-group">
                     <label>网络标识名</label>
-                    <input type="text" class="form-control" id="hub-network-name" value="default" readonly>
+                    <input type="text" class="form-control" id="hub-network-name" value="--" readonly>
                   </div>
                 </div>
               </div>
@@ -2395,6 +2399,7 @@ tun_name = "fuckipv6"</div>
       renderPeersTable(peers);
       renderMachineBar(statusData);
       renderRuntimeCard(statusData);
+      renderCoordinatorSettings(statusData);
 
       if (statusData.hosting_ticket) {
         currentTicket = statusData.hosting_ticket;
@@ -2455,6 +2460,20 @@ tun_name = "fuckipv6"</div>
       document.getElementById('runtime-p2p-addr').textContent = available ? (statusData.runtime_p2p_addr || '--') : '--';
       document.getElementById('runtime-uptime').textContent = available && traffic.uptime_secs != null ? formatDuration(traffic.uptime_secs) : '--';
       document.getElementById('runtime-source').textContent = available ? 'IPC 实时快照' : '无活动运行时';
+    }
+
+    function endpointPort(value) {
+      if (!value) return '--';
+      const index = value.lastIndexOf(':');
+      return index >= 0 ? value.slice(index + 1) : value;
+    }
+
+    function renderCoordinatorSettings(statusData) {
+      const active = !!statusData.coordinator_active;
+      document.getElementById('btn-stop-host').style.display = active ? 'inline-flex' : 'none';
+      document.getElementById('hub-signal-port').value = active ? endpointPort(statusData.coordinator_signaling_addr) : '--';
+      document.getElementById('hub-relay-port').value = active ? endpointPort(statusData.coordinator_relay_addr) : '--';
+      document.getElementById('hub-network-name').value = active ? (statusData.network_name || '--') : '--';
     }
 
     function selectRoutingMode(mode, doNotice = true) {
@@ -2928,6 +2947,21 @@ tun_name = "fuckipv6"`;
     function openHostModal() { document.getElementById('host-modal').classList.add('active'); }
     function closeHostModal() { document.getElementById('host-modal').classList.remove('active'); }
 
+    async function stopHostNetwork() {
+      if (!confirm('确定停止本地自建网络并断开当前客户端运行时吗？')) return;
+      showToast('正在停止自建网络...');
+      try {
+        const state = await requestJson('/api/stop_host', { method: 'POST' });
+        if (!state || state.coordinator_active) {
+          throw new Error('后端未确认自建网络已停止');
+        }
+        showToast('自建网络已停止');
+        refresh();
+      } catch (e) {
+        showToast(`停止自建网络失败: ${e.message}`);
+      }
+    }
+
     async function submitHostNetwork() {
       const name = document.getElementById('host-net-name').value.trim() || 'default';
       const port = Number(document.getElementById('host-net-port').value) || 6666;
@@ -3085,5 +3119,15 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("IPC 实时快照"));
         assert!(!UNIFIED_MASTER_HTML.contains("1420 字节"));
         assert!(!UNIFIED_MASTER_HTML.contains("Linux x86_64 Musl"));
+    }
+
+    #[test]
+    fn test_host_lifecycle_controls_require_runtime_confirmation() {
+        assert!(UNIFIED_MASTER_HTML.contains("stopHostNetwork"));
+        assert!(UNIFIED_MASTER_HTML.contains("/api/stop_host"));
+        assert!(UNIFIED_MASTER_HTML.contains("state.coordinator_active"));
+        assert!(UNIFIED_MASTER_HTML.contains("renderCoordinatorSettings"));
+        assert!(!UNIFIED_MASTER_HTML.contains("value=\"6666\" readonly"));
+        assert!(!UNIFIED_MASTER_HTML.contains("value=\"relay.xlei.cc\" readonly"));
     }
 }

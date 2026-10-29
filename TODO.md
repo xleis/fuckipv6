@@ -16,7 +16,13 @@
   - [x] NEXTGEN_TODO：修正用户态 NAT、Tauri 原生桌面和 Agent 5 “已完成”口径。
   - [x] API：补充客户端 WebUI/API、免密边界、状态字段与控制接口。
   - [x] ARCHITECTURE：同步当前实现边界与“基础设施已接入”状态。
-- [ ] **FC-08 回归验证**：补充单元/集成测试，执行格式、Clippy、全工作区测试及 Linux/Windows 编译检查。
+- [x] **FC-08 回归验证**：补充单元/集成测试，执行格式、Clippy、全工作区测试及 Linux/Windows 编译检查。
+  - [x] `cargo fmt --all -- --check`
+  - [x] `cargo check --workspace`
+  - [x] `cargo clippy --workspace --all-targets -- -D warnings`
+  - [x] `cargo test --workspace`
+  - [x] `cargo check --workspace --target x86_64-unknown-linux-musl`（rustup stable 工具链）
+  - [x] `cargo check --workspace --target x86_64-pc-windows-gnu`（rustup stable 工具链）
 
 ## 当前状态总结 ✅
 

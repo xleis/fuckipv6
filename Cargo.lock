@@ -893,6 +893,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuckipv6-secure-session"
+version = "0.3.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"

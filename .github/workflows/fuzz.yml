@@ -1,0 +1,47 @@
+name: Fuzz smoke
+
+on:
+  pull_request:
+    paths:
+      - "crates/secure-session/**"
+      - "fuzz/**"
+      - "scripts/fuzz-smoke.sh"
+      - ".github/workflows/fuzz.yml"
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "crates/secure-session/**"
+      - "fuzz/**"
+      - "scripts/fuzz-smoke.sh"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target\nfuzz -> target"
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run fuzz smoke
+        env:
+          FUZZ_RUNS: 2000
+          RUST_BACKTRACE: 1
+        run: ./scripts/fuzz-smoke.sh
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

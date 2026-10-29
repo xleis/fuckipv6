@@ -778,7 +778,7 @@ const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-1.5 1.5L14 9l-1.5-1.5L11 9l-1.5-1.5L8 9 3 14v7h7l5-5 1.5 1.5L18 16l1.5-1.5L18 13l3.5-3.5a2.12 2.12 0 0 0 0-3L21 2z"/></svg>
                   <span>网络邀请凭证与终端接入</span>
                 </span>
-                <button class="btn btn-primary" onclick="copyNetworkTicket()">
+                <button class="btn btn-primary" id="btn-copy-network-ticket" onclick="copyNetworkTicket()" style="display:none;">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2.2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                   <span>复制凭证</span>
                 </button>
@@ -1093,6 +1093,7 @@ tun_name = "fuckipv6"</div>
     let currentSelectedRoutingMode = 'MeshOnly';
     let currentTicket = '';
     let currentClientStatus = 'offline';
+    let lastStatusData = null;
 
     function showToast(message) {
       const box = document.getElementById('toast-box');
@@ -1406,6 +1407,7 @@ tun_name = "fuckipv6"</div>
 
     function renderTopology(peers, networks = null) {
       if (!width) resizeCanvas();
+      const coordinatorActive = !!(lastStatusData && (lastStatusData.runtime_available || lastStatusData.coordinator_active));
       
       // 1. 整理与更新已知虚拟网络
       const discoveredNets = new Map();
@@ -1470,6 +1472,8 @@ tun_name = "fuckipv6"</div>
         core.x = width / 2;
         core.y = height / 2;
       }
+      core.label = '协调中心 (HUB)';
+      core.sub = coordinatorActive ? '实时状态可用' : '未连接';
       newNodes.push(core);
 
       // 虚拟网络核心节点 (Network Nexuses)
@@ -1623,16 +1627,24 @@ tun_name = "fuckipv6"</div>
 
       if (targetNode) {
         if (targetNode.isCore) {
-          const host = window.location.host;
-          const items = [
-            { svg: SVG_ICONS.copy, label: '复制当前网络邀请凭证 (fk://)', onClick: () => copyNetworkTicket() },
-            { svg: SVG_ICONS.copy, label: '复制信令服务地址', onClick: () => copyText(`ws://${host}/ws`, '信令服务地址') },
-            { svg: SVG_ICONS.copy, label: '复制 QUIC 中继端点', onClick: () => copyText(`${window.location.hostname}:6667`, 'QUIC 中继端点') },
-            { divider: true },
+          const status = lastStatusData || {};
+          const items = [];
+          if (currentTicket) {
+            items.push({ svg: SVG_ICONS.copy, label: '复制当前网络邀请凭证 (fk://)', onClick: () => copyNetworkTicket() });
+          }
+          if (status.coordinator_active && status.coordinator_signaling_addr) {
+            items.push({ svg: SVG_ICONS.copy, label: '复制信令服务地址', onClick: () => copyText(status.coordinator_signaling_addr, '信令服务地址') });
+          }
+          if (status.coordinator_active && status.coordinator_relay_addr) {
+            items.push({ svg: SVG_ICONS.copy, label: '复制 QUIC 中继端点', onClick: () => copyText(status.coordinator_relay_addr, 'QUIC 中继端点') });
+          }
+          if (items.length) items.push({ divider: true });
+          items.push(
             { svg: SVG_ICONS.refresh, label: '立即刷新全网拓扑', onClick: () => refresh(true) },
             { svg: SVG_ICONS.target, label: '视口节点居中归位', onClick: () => resetCanvasView() },
-          ];
-          showContextMenu(e, 'HUB · 协调中枢', 'CORE', items);
+          );
+          const connected = !!(status.runtime_available || status.coordinator_active);
+          showContextMenu(e, `HUB · ${connected ? '协调中枢' : '未连接'}`, connected ? 'CORE' : 'OFFLINE', items);
         } else if (targetNode.isNetwork) {
           const net = targetNode.netData || {};
           const items = [
@@ -2098,17 +2110,26 @@ tun_name = "fuckipv6"</div>
 
       if (isCore) {
         title = 'fuckipv6 分布式协调中枢';
-        dotColor = '#38bdf8';
+        const status = lastStatusData || {};
+        const coordinatorActive = !!(status.runtime_available || status.coordinator_active);
+        dotColor = coordinatorActive ? '#10b981' : '#64748b';
         const activePeerCount = nodes.filter(n => !n.isCore && !n.isNetwork).length;
         const netCount = knownNetworks.size;
         lines = [
-          { k: '服务功能', v: '信令协调 (WS) · 流量中继 (QUIC)' },
-          { k: '服务端口', v: 'UDP:6667 (QUIC) · TCP:8080 (WebUI)' },
+          { k: '连接状态', v: coordinatorActive ? '● 实时运行时可用' : '○ 当前无活动连接', color: coordinatorActive ? '#10b981' : '#64748b' },
           { k: '专网拓扑', v: `${netCount} 个专网 · ${activePeerCount} 个终端互联` },
-          { k: '运行状态', v: '● 核心协调网络运行中', color: '#10b981' },
         ];
-        if (previousTraffic && previousTraffic.uptime_secs) {
-          lines.push({ k: '运行时间', v: formatDuration(previousTraffic.uptime_secs) });
+        if (status.coordinator_active) {
+          lines.push(
+            { k: '信令监听', v: status.coordinator_signaling_addr || '--' },
+            { k: 'QUIC 中继', v: status.coordinator_relay_addr || '--' }
+          );
+        }
+        const uptime = status.runtime_traffic && status.runtime_traffic.uptime_secs != null
+          ? status.runtime_traffic.uptime_secs
+          : (status.traffic && status.traffic.uptime_secs);
+        if (coordinatorActive && uptime != null) {
+          lines.push({ k: '运行时间', v: formatDuration(uptime) });
         }
       } else if (isNetwork) {
         const net = targetNode.netData || {};
@@ -2386,6 +2407,7 @@ tun_name = "fuckipv6"</div>
        渲染总调度
        ======================================================== */
     function render(statusData, peers) {
+      lastStatusData = statusData;
       cachedPeers = peers || [];
       const onlineCount = statusData.online_clients || 0;
 
@@ -2401,12 +2423,19 @@ tun_name = "fuckipv6"</div>
       renderRuntimeCard(statusData);
       renderCoordinatorSettings(statusData);
 
-      if (statusData.hosting_ticket) {
-        currentTicket = statusData.hosting_ticket;
+      const activeTicket = statusData.coordinator_active ? statusData.hosting_ticket : null;
+      if (activeTicket) {
+        currentTicket = activeTicket;
         const disp = document.getElementById('display-network-ticket');
         if (disp) disp.textContent = currentTicket;
-        const btn = document.getElementById('btn-copy-ticket');
+        const btn = document.getElementById('btn-copy-network-ticket');
         if (btn) btn.style.display = 'inline-flex';
+      } else {
+        currentTicket = '';
+        const disp = document.getElementById('display-network-ticket');
+        if (disp) disp.textContent = '当前未托管自建网络';
+        const btn = document.getElementById('btn-copy-network-ticket');
+        if (btn) btn.style.display = 'none';
       }
     }
 
@@ -3129,5 +3158,16 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("renderCoordinatorSettings"));
         assert!(!UNIFIED_MASTER_HTML.contains("value=\"6666\" readonly"));
         assert!(!UNIFIED_MASTER_HTML.contains("value=\"relay.xlei.cc\" readonly"));
+    }
+
+    #[test]
+    fn test_offline_ui_does_not_retain_stale_tickets_or_coordinator_status() {
+        assert!(UNIFIED_MASTER_HTML.contains(
+            "const activeTicket = statusData.coordinator_active ? statusData.hosting_ticket : null"
+        ));
+        assert!(UNIFIED_MASTER_HTML.contains("当前未托管自建网络"));
+        assert!(UNIFIED_MASTER_HTML.contains("status.coordinator_signaling_addr || '--'"));
+        assert!(!UNIFIED_MASTER_HTML.contains("核心协调网络运行中"));
+        assert!(!UNIFIED_MASTER_HTML.contains("UDP:6667 (QUIC)"));
     }
 }

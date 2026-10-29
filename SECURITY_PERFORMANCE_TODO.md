@@ -55,7 +55,7 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 
 - [x] 明确防护目标：被动窃听、主动 MITM、重放、篡改、身份冒用、密钥泄漏、DoS、元数据关联和量子攻击者。见 `SECURITY_MODEL.md`。
 - [x] 定义信任边界：Coordinator、Relay、Exit Node、普通 Peer 分别能看到和不能看到什么。见 `SECURITY_MODEL.md`。
-- [ ] 固定算法套件、版本号、域名分离字符串、密钥推导输入和 transcript 定义。
+- [x] 固定算法套件、版本号、域名分离字符串、密钥推导输入和 transcript 定义（草案见 `PROTOCOL_V2.md`，待独立评审）。
 - [ ] 在实现前完成协议状态机、消息格式和失败路径评审。
 
 ### S1：达到并超过 WireGuard 的基础安全属性

@@ -13,6 +13,8 @@ pub mod data_cipher;
 pub mod handshake;
 pub mod handshake_epoch;
 pub mod key_schedule;
+#[cfg(feature = "pq")]
+pub mod pq;
 pub mod rekey;
 pub mod rekey_codec;
 pub mod rekey_session;

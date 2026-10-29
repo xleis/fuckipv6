@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire 或真实 UDP/TUN 数据面。完整 X-Wing 握手、PQC 和控制通道线格式也尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire 或真实 UDP/TUN 数据面。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 独立原语适配和 NIST ACVP KAT，但完整 X-Wing 握手、复合签名、PQC 握手 profile 和控制通道线格式尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -63,6 +63,21 @@ IdentityId = BLAKE3("fuckipv6-v2 identity" || len(EdPk) || EdPk || len(PqPk) || 
 4. 不接受空、截断或可选的后量子签名。
 
 迁移期可以存在“仅经典身份”的显式配置，但它不得使用 `0x0201`/`0x0202` 套件，也不得被宣传为 v2 安全会话。
+
+### 2.4 后量子原语适配状态
+
+`fuckipv6-secure-session` 的默认构建不启用后量子依赖；只有显式启用 `pq` feature 时才编译 ML-KEM-768/ML-DSA-65 适配层。当前锁定的 RustCrypto crate 为 `ml-kem 0.3.3` 与 `ml-dsa 0.1.1`，许可证为 `Apache-2.0 OR MIT`，MSRV 为 1.85。
+
+适配层只暴露 FIPS 203/204 固定尺寸编解码、密钥生成、封装/解封装、签名和验证，并提供 NIST ACVP known-answer 测试。ML-KEM 公钥、密文和 shared secret 分别为 1184、1088、32 字节；ML-DSA-65 公钥和签名分别为 1952、3309 字节。私钥 seed、临时随机数和 shared secret 使用清零容器，私钥 Debug 输出脱敏。
+
+该适配层**不是**下面任一能力：
+
+- X-Wing 组合 KEM 或其线格式。
+- Ed25519 + ML-DSA-65 复合身份/双签名。
+- `HELLO/ACCEPT` 后量子握手 profile。
+- 真实 UDP/TUN 数据面或生产密码套件接入。
+
+两个上游 crate 均明确声明尚未经过独立安全审计。SS-13 的测试通过只证明适配和标准向量一致，不构成安全认证；在完成组合协议评审、依赖审计、跨平台验证和端到端基准前，不得宣称后量子安全或性能超越 WireGuard。
 
 ## 3. 握手承载
 

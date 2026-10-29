@@ -30,6 +30,7 @@ use crate::tun::TunDevice;
 
 const TUN_PACKET_BUFFER_SIZE: usize = 65536;
 const TUN_BUFFER_POOL_SIZE: usize = 64;
+const QUIC_RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeOptions {
@@ -1006,7 +1007,7 @@ async fn apply_linux_routing_mode(
         .await
 }
 
-async fn handle_tun_reader_packet(runtime: &ClientRuntime, packet: &[u8]) {
+async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: &[u8]) {
     if runtime.acl.is_enabled()
         && runtime.acl.check_outbound(packet) == fuckipv6_common::AclAction::Deny
     {
@@ -1014,7 +1015,7 @@ async fn handle_tun_reader_packet(runtime: &ClientRuntime, packet: &[u8]) {
         return;
     }
     runtime.stats.record_tun_rx(packet.len()).await;
-    handle_tun_packet(
+    let relay_failed = handle_tun_packet(
         &runtime.p2p,
         &runtime.signaling,
         runtime.relay.as_ref(),
@@ -1026,6 +1027,12 @@ async fn handle_tun_reader_packet(runtime: &ClientRuntime, packet: &[u8]) {
         packet,
     )
     .await;
+
+    if relay_failed {
+        if let Some(relay) = runtime.relay.take() {
+            relay.close().await;
+        }
+    }
 }
 
 fn recycle_tun_buffer(runtime: &ClientRuntime, mut packet: Vec<u8>) {
@@ -1339,9 +1346,9 @@ async fn handle_tun_packet(
     exit_node_mgr: &ExitNodeManager,
     configured_exit_node: Option<&str>,
     packet: &[u8],
-) {
+) -> bool {
     let Some(dst_ip) = tun_packet_destination(packet) else {
-        return;
+        return false;
     };
 
     let peers = p2p.get_peers().await;
@@ -1358,11 +1365,11 @@ async fn handle_tun_packet(
             RoutingAction::Mesh => dst_ip,
             RoutingAction::Direct => {
                 tracing::trace!("智能分流判定为 Direct 直连，跳过封装: {}", dst_ip);
-                return;
+                return false;
             }
             RoutingAction::Reject => {
                 tracing::debug!("智能分流判定为 Reject 阻断: {}", dst_ip);
-                return;
+                return false;
             }
             RoutingAction::Proxy => {
                 if let Some(target_v6) =
@@ -1379,7 +1386,7 @@ async fn handle_tun_packet(
                         "智能分流判定为 Proxy 但未找到可用 Exit Node，丢弃数据包至 {}",
                         dst_ip
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -1387,7 +1394,7 @@ async fn handle_tun_packet(
 
     if !should_forward_tun_destination(target_dst) {
         tracing::trace!("忽略发往非对等节点的 TUN 数据包: {}", target_dst);
-        return;
+        return false;
     }
 
     let src_ip = get_packet_src_ip(packet, assigned_ips);
@@ -1402,14 +1409,18 @@ async fn handle_tun_packet(
 
     // 发送到对等节点 (P2P 会自动进行端到端加密)
     if send_tun_packet_p2p(p2p, stats, src_ip, target_dst, packet).await {
-        return;
+        return false;
     }
 
-    if send_tun_packet_quic_relay(p2p, relay, stats, src_ip, target_dst, packet).await {
-        return;
-    }
+    let relay_failed =
+        match send_tun_packet_quic_relay(p2p, relay, stats, src_ip, target_dst, packet).await {
+            QuicRelaySendOutcome::Sent => return false,
+            QuicRelaySendOutcome::Failed => true,
+            QuicRelaySendOutcome::NotAttempted => false,
+        };
 
     send_tun_packet_signaling(p2p, signaling, stats, src_ip, target_dst, packet).await;
+    relay_failed
 }
 
 fn tun_packet_destination(packet: &[u8]) -> Option<IpAddr> {
@@ -1556,6 +1567,13 @@ async fn send_tun_packet_p2p(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuicRelaySendOutcome {
+    Sent,
+    Failed,
+    NotAttempted,
+}
+
 async fn send_tun_packet_quic_relay(
     p2p: &P2pEngine,
     relay: Option<&QuicRelayClient>,
@@ -1563,32 +1581,42 @@ async fn send_tun_packet_quic_relay(
     src_ip: IpAddr,
     dst_ip: IpAddr,
     packet: &[u8],
-) -> bool {
+) -> QuicRelaySendOutcome {
     let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) = (src_ip, dst_ip) else {
-        return false;
+        return QuicRelaySendOutcome::NotAttempted;
     };
     let Some(relay) = relay else {
-        return false;
+        return QuicRelaySendOutcome::NotAttempted;
     };
 
     let encrypted = match p2p.encrypt_for_peer(dst_ip, packet).await {
         Ok(payload) => payload,
         Err(error) => {
             tracing::warn!("无法为 QUIC relay 认证加密数据包: {error:#}");
-            return false;
+            return QuicRelaySendOutcome::Failed;
         }
     };
-    match relay.send_packet(0, src_v6, dst_v6, &encrypted).await {
-        Ok(()) => {
+    match tokio::time::timeout(
+        QUIC_RELAY_SEND_TIMEOUT,
+        relay.send_packet(0, src_v6, dst_v6, &encrypted),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
             stats.record_p2p_tx(dst_ip, packet.len()).await;
-            true
+            QuicRelaySendOutcome::Sent
         }
-        Err(err) => {
+        Ok(Err(err)) => {
+            tracing::warn!("QUIC 中继转发 {} 失败，降级到信令中继: {err:#}", dst_ip);
+            QuicRelaySendOutcome::Failed
+        }
+        Err(_) => {
             tracing::warn!(
-                "Failed to relay packet to {} over QUIC, falling back to signaling: {err:#}",
-                dst_ip
+                "QUIC 中继转发 {} 超过 {:?} 未确认，降级到信令中继",
+                dst_ip,
+                QUIC_RELAY_SEND_TIMEOUT
             );
-            false
+            QuicRelaySendOutcome::Failed
         }
     }
 }

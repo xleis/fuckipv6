@@ -177,7 +177,7 @@ impl P2pEngine {
             match local_identity.derive_shared_secret(&peer_info.public_key) {
                 Ok(key) => {
                     tracing::info!(
-                        "已与节点 {} 建立 WireGuard-grade E2EE 对称会话秘钥",
+                        "已从节点 {} 公钥派生静态 X25519 会话密钥（无前向保密）",
                         client_id
                     );
                     Some(key)

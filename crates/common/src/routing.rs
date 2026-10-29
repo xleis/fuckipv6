@@ -228,6 +228,11 @@ impl SmartRouteEngine {
         self.mode
     }
 
+    /// 热更新分流模式，不影响已配置的自定义 CIDR 与虚拟网络前缀。
+    pub fn set_routing_mode(&mut self, mode: RoutingMode) {
+        self.mode = mode;
+    }
+
     /// 设置虚拟网络前缀（用于准确判定 Mesh 流量）
     pub fn set_virtual_networks(&mut self, v6: Option<Ipv6Net>, v4: Option<Ipv4Net>) {
         self.virtual_network_v6 = v6;
@@ -306,6 +311,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn routing_mode_can_be_hot_updated() {
+        let mut engine = SmartRouteEngine::new(RoutingMode::MeshOnly);
+        assert_eq!(
+            engine.evaluate("8.8.8.8".parse().unwrap()),
+            RoutingAction::Direct
+        );
+        engine.set_routing_mode(RoutingMode::GlobalProxy);
+        assert_eq!(
+            engine.evaluate("8.8.8.8".parse().unwrap()),
+            RoutingAction::Proxy
+        );
+    }
+
+    #[test]
     fn test_mainland_china_ip_detection() {
         // 114.114.114.114 (南京电信)
         assert!(is_mainland_china_ip("114.114.114.114".parse().unwrap()));
@@ -331,13 +350,13 @@ mod tests {
         let networks = mainland_china_cidrs();
         assert!(networks
             .iter()
-            .any(|network| network.contains(&"114.114.114.114".parse().unwrap())));
+            .any(|network| network.contains(&"114.114.114.114".parse::<IpAddr>().unwrap())));
         assert!(networks
             .iter()
-            .any(|network| network.contains(&"240e:1f:1::1".parse().unwrap())));
+            .any(|network| network.contains(&"240e:1f:1::1".parse::<IpAddr>().unwrap())));
         assert!(!networks
             .iter()
-            .any(|network| network.contains(&"8.8.8.8".parse().unwrap())));
+            .any(|network| network.contains(&"8.8.8.8".parse::<IpAddr>().unwrap())));
     }
 
     #[test]

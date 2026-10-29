@@ -24,6 +24,11 @@ impl ExitNodeManager {
         self.config.enabled
     }
 
+    /// 热更新本机出口网关声明，保留白名单与其他出口配置。
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.config.enabled = enabled;
+    }
+
     /// 校验指定客户端是否有权限通过当前节点作为出口上网
     pub fn is_client_allowed(&self, client_id: &str) -> bool {
         if !self.config.enabled {

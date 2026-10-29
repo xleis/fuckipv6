@@ -35,6 +35,11 @@ def _iperf_summary(document: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _iperf_sent_summary(document: dict[str, Any]) -> dict[str, Any]:
+    sent = document.get("end", {}).get("sum_sent")
+    return sent if isinstance(sent, dict) else {}
+
+
 def _time_factor(unit: str) -> float:
     return {
         "ns": 1e-9,
@@ -74,21 +79,38 @@ def parse_perf(path: Path | None) -> dict[str, float]:
 def record(args: argparse.Namespace) -> None:
     document = json.loads(args.iperf_json.read_text(encoding="utf-8"))
     summary = _iperf_summary(document)
+    sent_summary = _iperf_sent_summary(document)
     throughput_bps = _as_float(summary.get("bits_per_second"))
+    offered_throughput_bps = _as_float(sent_summary.get("bits_per_second"))
     transferred_bytes = _as_int(summary.get("bytes"))
+    sent_bytes = _as_int(sent_summary.get("bytes"))
     elapsed_seconds = _as_float(summary.get("seconds"))
+    sent_elapsed_seconds = _as_float(sent_summary.get("seconds"))
     packet_count = _as_int(summary.get("packets"))
     lost_packets = _as_int(summary.get("lost_packets"))
+    sent_packet_count = _as_int(sent_summary.get("packets"))
     perf = parse_perf(args.perf_csv)
 
-    packets_per_second = None
-    if packet_count is not None and elapsed_seconds and elapsed_seconds > 0:
-        packets_per_second = packet_count / elapsed_seconds
+    # iperf3 reports the offered UDP packet count, not the delivered count,
+    # even in sum_received. Derive delivered packets from packets - lost.
+    received_packet_count = None
+    if packet_count is not None:
+        received_packet_count = max(0, packet_count - (lost_packets or 0))
 
-    cpu_utilization_percent = None
-    task_clock = perf.get("task_clock_seconds")
-    if task_clock is not None and elapsed_seconds and elapsed_seconds > 0:
-        cpu_utilization_percent = 100.0 * task_clock / elapsed_seconds
+    packets_per_second = None
+    if (
+        received_packet_count is not None
+        and elapsed_seconds
+        and elapsed_seconds > 0
+    ):
+        packets_per_second = received_packet_count / elapsed_seconds
+
+    sent_packets_per_second = None
+    if sent_packet_count is not None and sent_elapsed_seconds and sent_elapsed_seconds > 0:
+        sent_packets_per_second = sent_packet_count / sent_elapsed_seconds
+
+    metadata = dict(item.split("=", 1) for item in args.field)
+    cpu_seconds = _as_float(metadata.get("cpu_seconds"))
 
     cycles_per_byte = None
     if transferred_bytes and perf.get("cycles") is not None:
@@ -97,8 +119,10 @@ def record(args: argparse.Namespace) -> None:
     instructions_per_byte = None
     if transferred_bytes and perf.get("instructions") is not None:
         instructions_per_byte = perf["instructions"] / transferred_bytes
+    cpu_seconds_per_byte = None
+    if transferred_bytes and cpu_seconds is not None:
+        cpu_seconds_per_byte = cpu_seconds / transferred_bytes
 
-    metadata = dict(item.split("=", 1) for item in args.field)
     result = {
         **metadata,
         "impl": args.impl,
@@ -108,13 +132,22 @@ def record(args: argparse.Namespace) -> None:
             "throughput_gbps": throughput_bps / 1e9
             if throughput_bps is not None
             else None,
+            "offered_throughput_gbps": offered_throughput_bps / 1e9
+            if offered_throughput_bps is not None
+            else None,
             "packets_per_second": packets_per_second,
+            "sent_packets_per_second": sent_packets_per_second,
             "transferred_bytes": transferred_bytes,
+            "sent_bytes": sent_bytes,
+            "received_packets": received_packet_count,
+            "sent_packets": sent_packet_count,
             "elapsed_seconds": elapsed_seconds,
             "jitter_ms": _as_float(summary.get("jitter_ms")),
             "lost_packets": lost_packets,
             "lost_percent": _as_float(summary.get("lost_percent")),
-            "cpu_utilization_percent": cpu_utilization_percent,
+            "cpu_seconds": cpu_seconds,
+            "cpu_seconds_per_byte": cpu_seconds_per_byte,
+            "perf_task_clock_seconds": perf.get("task_clock_seconds"),
             "cycles_per_byte": cycles_per_byte,
             "instructions_per_byte": instructions_per_byte,
         },
@@ -140,7 +173,8 @@ def _median(records: list[dict[str, Any]], metric: str) -> float | None:
 
 
 def _format(value: float | None) -> str:
-    return "" if value is None else f"{value:.6f}"
+    # Keep very small CPU/byte values visible instead of rounding them to zero.
+    return "" if value is None else f"{value:.12g}"
 
 
 def aggregate(args: argparse.Namespace) -> None:
@@ -156,10 +190,13 @@ def aggregate(args: argparse.Namespace) -> None:
 
     metrics = [
         "throughput_gbps",
+        "offered_throughput_gbps",
         "packets_per_second",
+        "sent_packets_per_second",
         "jitter_ms",
         "lost_percent",
-        "cpu_utilization_percent",
+        "cpu_seconds",
+        "cpu_seconds_per_byte",
         "cycles_per_byte",
         "instructions_per_byte",
     ]

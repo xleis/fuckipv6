@@ -1474,12 +1474,12 @@ fn is_public_exit_return_source(source: IpAddr) -> bool {
                 && v4.octets()[0] < 240
         }
         IpAddr::V6(v6) => {
-            !v6.is_unspecified()
-                && !v6.is_loopback()
-                && !v6.is_multicast()
-                && ((v6.segments()[0] & 0xffc0) != 0xfe80)
-                && ((v6.segments()[0] & 0xfe00) != 0xfc00)
-                && !(v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8))
         }
     }
 }

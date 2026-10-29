@@ -142,11 +142,11 @@ impl ExitNodeManager {
                     && v4.octets()[0] < 240
             }
             IpAddr::V6(v6) => {
-                !v6.is_unspecified()
-                    && !v6.is_loopback()
-                    && !v6.is_multicast()
-                    && ((v6.segments()[0] & 0xffc0) != 0xfe80)
-                    && !(v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+                !(v6.is_unspecified()
+                    || v6.is_loopback()
+                    || v6.is_multicast()
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+                    || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8))
             }
         };
         if !safe_unicast {
@@ -219,6 +219,7 @@ mod tests {
         assert!(!manager.should_forward_as_exit("239.255.255.250".parse().unwrap()));
         assert!(!manager.should_forward_as_exit("ff02::1".parse().unwrap()));
         assert!(!manager.should_forward_as_exit("fe80::1".parse().unwrap()));
+        assert!(!manager.should_forward_as_exit("2001:db8::1".parse().unwrap()));
         assert!(!manager.should_forward_as_exit("0.0.0.0".parse().unwrap()));
     }
 

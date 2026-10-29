@@ -10,7 +10,7 @@ name = "fuckipv6-coordinator"
 path = "src/main.rs"
 
 [dependencies]
-fuckipv6-common = { path = "../common" }
+fuckipv6-common = { version = "0.3.0", path = "../common" }
 
 tokio = { workspace = true }
 quinn = { workspace = true }

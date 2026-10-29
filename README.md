@@ -1,6 +1,6 @@
 # fuckipv6 - IPv6虚拟局域网组网软件
 
-基于IPv6的虚拟局域网组网软件，支持P2P直连和中继fallback，优化实时应用场景。
+基于 IPv4/IPv6 双栈虚拟地址的组网软件，支持 UDP/QUIC P2P 直连、多中继 fallback 与智能分流。
 
 ## ✨ 特性
 
@@ -78,7 +78,7 @@ sudo ./scripts/test-netns.sh
     ┌──────┴──────┐
     │             │
 ┌───▼────┐   ┌───▼────┐
-│Client A│◄──┤Client B│  ← UDP P2P直连
+│Client A│◄──┤Client B│  ← UDP/QUIC P2P
 │        │   │        │
 │TUN设备 │   │TUN设备 │
 │fd00::1 │   │fd00::2 │
@@ -89,9 +89,9 @@ sudo ./scripts/test-netns.sh
 
 1. 客户端连接协调服务器，获取虚拟IP（如`fd00::1001`）
 2. 协调服务器通知所有客户端新节点上线
-3. 客户端之间通过UDP探测包验证可达端点
-4. 应用流量通过TUN设备 → UDP P2P通道 → 对端TUN设备
-5. 如果P2P端点尚未验证或发送失败，客户端优先通过协调服务器 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令通道中继
+3. 客户端之间通过 UDP 探测和多中继测速验证可达端点
+4. 应用流量优先通过 TUN → QUIC Stream Mesh → 对端 TUN；QUIC 不适用时使用加密 UDP 直连
+5. 如果 P2P 不可用，客户端优先通过 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令中继
 
 ## 📦 项目结构
 
@@ -138,8 +138,8 @@ fuckipv6/
 
 **当前可用功能**：
 - 客户端注册到协调服务器
-- 自动分配虚拟IPv6地址
-- 客户端间UDP P2P直连，失败时信令中继
+- 自动分配虚拟 IPv4/IPv6 双栈地址
+- 客户端间 UDP/QUIC P2P 直连，失败时 QUIC/信令中继
 - 通过虚拟IP进行通信（ping、SSH、文件传输）
 - WebSocket 信令断线自动重连并重新注册
 - `fuckipv6 status` / `fuckipv6 peers` 查看运行时状态、RTT、丢包率、带宽估计和 P2P 健康状态
@@ -148,11 +148,11 @@ fuckipv6/
 - `fuckipv6 join/list/default/connect/leave` 管理并切换多个已保存网络配置
 - `http://<coordinator>:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
 
-### 🚧 Phase 2 - 核心功能（规划中）
+### ✅ Phase 2 - 核心功能（已完成）
 
 - [x] 基础UDP打洞探测
 - [x] 完整NAT类型检测（STUN/RFC5780）
-- [x] QUIC协议能力（证书/pin/双向流、多路复用、0-RTT 自检；P2P 直连数据面当前仍为 UDP，失败时走 QUIC relay）
+- [x] QUIC 协议能力（证书/pin、双向流、多路复用、0-RTT 自检与 QUIC P2P 直连）
 - [x] 信令通道中继服务（P2P失败时）
 - [x] 独立 QUIC 中继服务（注册、转发、限速、并发控制和 loopback 集成测试；更大规模真实 WAN 压测仍建议补充）
 - [x] 连接质量监控（RTT、丢包率、健康阈值）
@@ -160,7 +160,7 @@ fuckipv6/
 - [x] Windows WinTun 支持
 - [x] macOS utun 支持
 
-### 📅 Phase 3 - 优化和UI（规划中）
+### ✅ Phase 3 - 优化和 UI（已完成）
 
 - [x] Web管理界面（在线节点/API）
 - [x] 性能优化
@@ -168,20 +168,38 @@ fuckipv6/
 - [x] `status` / `peers` 运行时IPC
 - [x] `route` / `logs` 等扩展CLI命令
 
-### 🔮 Phase 4 - 生产就绪（规划中）
+### 🚧 Phase 4 - 生产就绪（持续验证）
 
 - [x] 安全审计（`cargo audit` 无漏洞/告警；人工安全审计仍建议在生产前执行）
 - [x] 压力测试（QUIC relay 100 个已注册客户端并发连接）
 - [x] 监控和日志
 - [x] 部署工具（systemd、安装脚本、Docker、CI、Release 自动发布）
 
+### ✅ Phase 5 - 企业级能力（已完成）
+
+- [x] X25519 + ChaCha20-Poly1305 端到端加密与 Blake3 KDF
+- [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
+- [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
+- [x] IPv4/IPv6 双栈虚拟地址与 JWT 鉴权
+- [x] 声明式 ACL、准入黑名单与多中继智能选路
+
+### ✅ Phase 6 - 下一代架构（已完成）
+
+- [x] 智能分流（MeshOnly / BypassMainland / GlobalProxy）与 Exit Node
+- [x] `fuckipv6 host` 一键建网与 `fk://` 邀请票据
+- [x] 多网络并发、独立 TUN 与路由隔离
+- [x] 自适应 WebUI/桌面模式与统一控制台
+- [x] 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输基础设施
+
+生产发布前仍建议完成真实跨公网/跨 NAT、Windows/macOS 实机、更大规模 WAN 压测和外部安全审计。
+
 ## 🛠️ 技术栈
 
 - **语言**: Rust 2021
 - **异步运行时**: Tokio
 - **网络**:
-  - UDP P2P数据面（当前）→ QUIC（规划）
-  - WebSocket信令和fallback中继
+  - QUIC Stream Mesh 与加密 UDP 双模 P2P 直连
+  - QUIC 中继与 WebSocket 信令 fallback
   - TUN/TAP (虚拟网卡)
 - **序列化**: postcard
 - **加密**: Ed25519-dalek, Blake3
@@ -206,8 +224,8 @@ CPU profiling 可使用 `PROFILE_SECONDS=10 ./scripts/profile-cpu.sh` 对协议/
 ## ⚠️ 注意事项
 
 - **Linux需要 root 权限或 CAP_NET_ADMIN** 创建 TUN 设备；macOS 需要 sudo/root 创建 utun 并配置路由；Windows 需要管理员权限和 WinTun
-- **虚拟网络只承载IPv6**，但信令/P2P endpoint支持IPv4或IPv6传输
-- **NAT 类型检测依赖可访问的 STUN/RFC5780 服务器**；检测失败会标记为 `Unknown`，数据转发仍会在 P2P 失败时走信令中继
+- **虚拟网络支持 IPv4/IPv6 双栈地址**，信令与 P2P endpoint 也可使用 IPv4 或 IPv6 传输
+- **NAT 类型检测依赖可访问的 STUN/RFC5780 服务器**；检测失败会标记为 `Unknown`，数据转发仍会在 P2P 失败时走 QUIC/信令中继
 
 ## FAQ
 
@@ -221,7 +239,7 @@ CPU profiling 可使用 `PROFILE_SECONDS=10 ./scripts/profile-cpu.sh` 对协议/
 
 **P2P 失败会怎样？**
 
-客户端会在端点未验证、发送失败或健康阈值不达标时通过协调服务器 WebSocket 信令通道发送 `RelayPacket`。这保证可达性优先，但吞吐不等同于专用中继服务。
+客户端会在端点未验证、发送失败或健康阈值不达标时优先切换到 QUIC 中继；QUIC 中继不可用时再通过协调服务器 WebSocket 信令通道发送 `RelayPacket`。
 
 **为什么默认 MTU 是 1280？**
 
@@ -249,5 +267,5 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 ---
 
-**当前版本**: v0.1.0 (Phase 1 MVP)
-**最后更新**: 2026-01-01
+**当前版本**: v0.3.0（Phase 6 功能阶段）
+**最后更新**: 2026-10-30

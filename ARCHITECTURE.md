@@ -1,6 +1,6 @@
 # Architecture
 
-fuckipv6 is an IPv6 overlay network. Clients create a local TUN interface and exchange raw IPv6 packets over a P2P UDP data plane. A coordinator provides client discovery, virtual address allocation, health cleanup, WebSocket signaling, and a signaling-channel relay fallback.
+fuckipv6 is a dual-stack overlay network. Clients create a local TUN interface and exchange raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. A coordinator provides discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback.
 
 ## Components
 
@@ -12,6 +12,8 @@ fuckipv6 is an IPv6 overlay network. Clients create a local TUN interface and ex
 - `types.rs`: `PeerInfo`, NAT type labels, route entries, and connection quality helpers.
 - `crypto.rs`: Ed25519 identity generation, persistence, signing, verification, and public-key fingerprint client IDs.
 - `config.rs`: client and coordinator config structures plus validation/defaults.
+- `routing.rs`: embedded CN-CIDR routing rules and routing-mode evaluation.
+- `dht.rs`, `onion.rs`, `chunk.rs`: distributed discovery, layered circuits, and encrypted chunk transfer primitives.
 
 ### coordinator
 
@@ -20,15 +22,19 @@ fuckipv6 is an IPv6 overlay network. Clients create a local TUN interface and ex
 - `signaling/server.rs` accepts WebSocket connections and handles registration, connect requests, heartbeats, and `RelayPacket` fallback.
 - `signaling/session.rs` owns online sessions, virtual IPv6 allocation, peer snapshots, heartbeat timestamps, and coordinator traffic counters.
 - `webui/mod.rs` exposes the HTML dashboard, REST APIs, logs API, and realtime WebSocket snapshots.
-- `relay/server.rs` documents the planned dedicated relay service. Current relay fallback is implemented through the signaling WebSocket.
+- `relay/server.rs` runs the dedicated QUIC relay service with registration, forwarding, concurrency limits, and rate controls. The signaling WebSocket remains the final fallback path.
 
 ### client
 
 `crates/client` is the node process.
 
 - `tun/` creates and tears down OS TUN devices. Linux uses `ip tuntap`; macOS uses `utun`; Windows uses native embedded WinTun driver with pure Rust Windows IP Helper API for address/route configuration (zero external DLL and zero `netsh.exe` dependency).
-- `p2p/connection.rs` runs the UDP P2P engine, endpoint probing, ping/pong, health checks, active endpoint selection, and fallback decisions.
+- `p2p/connection.rs` runs the encrypted UDP engine, endpoint probing, ping/pong, health checks, and fallback decisions.
+- `p2p/quic.rs` provides the pinned TLS 1.3 QUIC mesh and multiplexed stream transport.
+- `p2p/overlay.rs` coordinates the DHT, onion, and chunk-transfer infrastructure.
+- `routing/` implements smart routing and Exit Node selection.
 - `signaling/client.rs` manages the coordinator WebSocket, registration, reconnect, re-register, and event delivery.
+- `symmetric/mod.rs` embeds the coordinator actor for symmetric `host`/`join` networks.
 - `cli/commands.rs` wires TUN, P2P, signaling, stats, graceful shutdown, and operator commands.
 - `config_manager.rs` manages saved multi-network profiles under the user config directory.
 - `ipc.rs` exposes local runtime status for `status` and `peers`.
@@ -36,37 +42,37 @@ fuckipv6 is an IPv6 overlay network. Clients create a local TUN interface and ex
 ## Startup Flow
 
 1. The coordinator starts the signaling listener, Web UI listener, heartbeat cleanup task, and virtual IP allocator.
-2. The client loads config, initializes logging, loads or creates an Ed25519 identity, starts the UDP P2P engine, and connects to the coordinator.
+2. The client loads config, initializes logging, loads or creates an Ed25519 identity, starts the dual-mode UDP/QUIC P2P engine, and connects to the coordinator.
 3. The client sends `Register` with public key, P2P port, timestamp, and an Ed25519 signature over the registration challenge.
 4. The coordinator verifies that `client_id` matches the public-key fingerprint and that the signature is valid.
-5. The coordinator allocates a virtual IPv6 address, returns `RegisterAck`, and broadcasts `PeerOnline` to existing clients.
+5. The coordinator allocates virtual IPv4/IPv6 addresses, returns `RegisterAck` with relay information, and broadcasts `PeerOnline` to existing clients.
 6. The client creates/configures the TUN interface and enters the packet forwarding loop.
 
 ## Data Path
 
 Outbound packets:
 
-1. An application sends IPv6 traffic to a virtual peer address.
+1. An application sends IPv4 or IPv6 traffic to a virtual peer or routed destination.
 2. The OS routes the packet into the TUN interface.
-3. The client reads the raw IPv6 packet, extracts destination IPv6, and looks up a known peer.
-4. If the peer has a healthy verified UDP endpoint, the packet is serialized as `P2pDatagram::Data(DataPacket)` and sent over UDP.
-5. If P2P is unavailable or unhealthy, the packet is sent to the coordinator as `SignalingMessage::RelayPacket`.
+3. The client reads the packet and applies ACL and smart-routing rules.
+4. Mesh traffic uses a healthy pinned QUIC stream when available, otherwise the encrypted UDP path.
+5. Routed traffic may use a selected Exit Node; non-direct traffic falls back to a QUIC relay and finally to signaling `RelayPacket`.
 
 Inbound packets:
 
-1. UDP P2P `Data` packets or signaling `RelayPacket` events are decoded by the client.
-2. The raw IPv6 payload is written back to the local TUN device.
+1. QUIC stream frames, UDP P2P datagrams, QUIC relay frames, or signaling `RelayPacket` events are decoded by the client.
+2. The authenticated raw payload is written back to the local TUN device.
 3. The OS delivers it to the local application stack.
 
 ## P2P Health And Fallback
 
-The current data plane uses UDP datagrams. Clients probe all advertised endpoints, respond to ping/pong messages, track RTT, recent probe loss, payload traffic samples, and remote quality reports. A peer is eligible for direct P2P only when the endpoint is verified and health thresholds are satisfied.
+The direct data plane supports pinned QUIC streams and encrypted raw UDP. Clients probe all advertised endpoints, respond to ping/pong messages, track RTT, recent probe loss, payload traffic samples, and remote quality reports. A peer is eligible for direct P2P only when the endpoint is verified and health thresholds are satisfied.
 
-Fallback uses the signaling WebSocket. The coordinator routes `RelayPacket` messages by destination virtual IPv6 address. Coordinator traffic counters track signaling messages/bytes, relayed packet count, relayed payload bytes, and relay errors.
+Fallback first selects a healthy QUIC relay by measured latency. If no QUIC relay is usable, the signaling WebSocket routes `RelayPacket` messages by destination virtual address. Counters track signaling messages/bytes, relayed packet count, relayed payload bytes, and relay errors.
 
 ## Addressing
 
-The coordinator allocates virtual IPv6 addresses from the configured pool, defaulting to `fd00::1000/120`. Client endpoints may be IPv4 or IPv6 socket addresses; the overlay payload itself is IPv6.
+The coordinator allocates dual-stack virtual addresses. IPv6 defaults to `fd00::1000/120`; IPv4 uses the configured allocation pool. Client endpoints may also use IPv4 or IPv6 socket addresses.
 
 ## Observability
 
@@ -128,3 +134,10 @@ Implemented today:
 - Distributed multi-relay mesh with latency-based concurrent selection.
 - Coordinator WebUI management dashboard, REST API, logs API, and JWT authentication.
 - Multi-network saved client profiles.
+- Symmetric `host`/`join` networking with embedded coordinator and `fk://` tickets.
+- Smart routing, Exit Node forwarding, three-hop onion circuits, and DHT/chunk infrastructure.
+- Adaptive WebUI/desktop startup and full Chinese runtime logging.
+
+## Verification Baseline
+
+The repository quality gate expects `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and Linux musl plus Windows GNU compile checks. Real cross-host NAT, privileged TUN, Windows/macOS runtime, large-scale WAN load, and independent security audit remain pre-production validation work.

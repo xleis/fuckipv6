@@ -807,22 +807,36 @@ async fn apply_runtime_routing(
     is_exit_node: bool,
 ) -> std::result::Result<ipc::RoutingUpdateResult, String> {
     let parsed_mode = parse_runtime_routing_mode(mode).map_err(|error| format!("{error:#}"))?;
+    let previous_mode = runtime.route_engine.routing_mode();
+
+    let mut updated_config = runtime.config.clone();
+    updated_config.routing.mode = parsed_mode;
+    updated_config.routing.exit_node = exit_node.clone();
+    updated_config.exit_node.enabled = is_exit_node;
 
     #[cfg(target_os = "linux")]
     apply_linux_routing_mode(runtime, parsed_mode)
         .await
         .map_err(|error| format!("Linux 策略路由热更新失败: {error:#}"))?;
 
+    if let Err(error) = updated_config.save_to_file(&runtime.config_path) {
+        #[cfg(target_os = "linux")]
+        let rollback_error = apply_linux_routing_mode(runtime, previous_mode).await.err();
+        #[cfg(not(target_os = "linux"))]
+        let rollback_error: Option<anyhow::Error> = None;
+
+        return match rollback_error {
+            Some(rollback_error) => Err(format!(
+                "持久化路由配置失败，且恢复原策略路由也失败: {error:#}; 回滚错误: {rollback_error:#}"
+            )),
+            None => Err(format!("持久化路由配置失败，运行态已回滚: {error:#}")),
+        };
+    }
+
     runtime.route_engine.set_routing_mode(parsed_mode);
     runtime.exit_node_manager.set_enabled(is_exit_node);
     runtime.configured_exit_node = exit_node.clone();
-    runtime.config.routing.mode = parsed_mode;
-    runtime.config.routing.exit_node = exit_node.clone();
-    runtime.config.exit_node.enabled = is_exit_node;
-    runtime
-        .config
-        .save_to_file(&runtime.config_path)
-        .map_err(|error| format!("运行态已更新，但持久化配置失败: {error:#}"))?;
+    runtime.config = updated_config;
 
     let canonical_mode = format!("{parsed_mode:?}");
     tracing::info!(
@@ -2524,6 +2538,29 @@ fn normalize_service_name(service: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_runtime_routing_modes() {
+        assert_eq!(
+            parse_runtime_routing_mode("GlobalProxy").unwrap(),
+            fuckipv6_common::RoutingMode::GlobalProxy
+        );
+        assert_eq!(
+            parse_runtime_routing_mode("bypass-mainland").unwrap(),
+            fuckipv6_common::RoutingMode::BypassMainland
+        );
+        assert_eq!(
+            parse_runtime_routing_mode("mesh_only").unwrap(),
+            fuckipv6_common::RoutingMode::MeshOnly
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_runtime_routing_mode() {
+        let error = parse_runtime_routing_mode("not-a-route-mode")
+            .expect_err("unknown modes must not silently fall back");
+        assert!(error.to_string().contains("未知路由模式"));
+    }
 
     #[test]
     fn tun_forwarding_skips_non_peer_ipv6_destinations() -> anyhow::Result<()> {

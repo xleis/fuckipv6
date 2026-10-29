@@ -3,7 +3,7 @@ use fuckipv6_common::{recent_error_log_lines, PeerInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -164,8 +164,8 @@ pub struct NetworkSessionHandle {
 #[derive(Clone, Default)]
 pub struct MultiNetworkRegistry {
     sessions: Arc<RwLock<HashMap<String, NetworkSessionHandle>>>,
-    stop_tx: Arc<RwLock<Option<mpsc::UnboundedSender<Option<String>>>>>,
-    control_tx: Arc<RwLock<Option<mpsc::UnboundedSender<RuntimeCommand>>>>,
+    stop_tx: Arc<StdRwLock<Option<mpsc::UnboundedSender<Option<String>>>>>,
+    control_tx: Arc<StdRwLock<Option<mpsc::UnboundedSender<RuntimeCommand>>>>,
 }
 
 impl MultiNetworkRegistry {
@@ -178,20 +178,25 @@ impl MultiNetworkRegistry {
         map.insert(session.network_name.clone(), session);
         Self {
             sessions: Arc::new(RwLock::new(map)),
-            stop_tx: Arc::new(RwLock::new(None)),
-            control_tx: Arc::new(RwLock::new(None)),
+            stop_tx: Arc::new(StdRwLock::new(None)),
+            control_tx: Arc::new(StdRwLock::new(None)),
         }
     }
 
     pub fn set_control_sender(&self, tx: mpsc::UnboundedSender<RuntimeCommand>) {
-        let control_tx = self.control_tx.clone();
-        tokio::spawn(async move {
-            *control_tx.write().await = Some(tx);
-        });
+        *self
+            .control_tx
+            .write()
+            .expect("IPC control sender lock poisoned") = Some(tx);
     }
 
-    pub async fn send_control(&self, command: RuntimeCommand) -> bool {
-        if let Some(tx) = self.control_tx.read().await.as_ref() {
+    pub fn send_control(&self, command: RuntimeCommand) -> bool {
+        if let Some(tx) = self
+            .control_tx
+            .read()
+            .expect("IPC control sender lock poisoned")
+            .as_ref()
+        {
             tx.send(command).is_ok()
         } else {
             false
@@ -199,10 +204,7 @@ impl MultiNetworkRegistry {
     }
 
     pub fn set_stop_sender(&self, tx: mpsc::UnboundedSender<Option<String>>) {
-        let stop_tx = self.stop_tx.clone();
-        tokio::spawn(async move {
-            *stop_tx.write().await = Some(tx);
-        });
+        *self.stop_tx.write().expect("IPC stop sender lock poisoned") = Some(tx);
     }
 
     pub async fn register(&self, session: NetworkSessionHandle) {
@@ -227,8 +229,13 @@ impl MultiNetworkRegistry {
         r.is_empty()
     }
 
-    pub async fn send_stop(&self, name: Option<String>) -> bool {
-        if let Some(tx) = self.stop_tx.read().await.as_ref() {
+    pub fn send_stop(&self, name: Option<String>) -> bool {
+        if let Some(tx) = self
+            .stop_tx
+            .read()
+            .expect("IPC stop sender lock poisoned")
+            .as_ref()
+        {
             tx.send(name).is_ok()
         } else {
             false
@@ -310,8 +317,8 @@ fn spawn_multi_server_with_control_at(
     registry: MultiNetworkRegistry,
     control_tx: mpsc::UnboundedSender<RuntimeCommand>,
 ) -> JoinHandle<()> {
+    registry.set_control_sender(control_tx);
     tokio::spawn(async move {
-        registry.set_control_sender(control_tx);
         if let Err(e) = serve(&addr, registry).await {
             tracing::warn!("本地 IPC 服务已停止: {:?}", e);
         }
@@ -387,7 +394,7 @@ async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) ->
         }) => update_runtime_routing(&registry, mode, exit_node, is_exit_node).await,
         Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
         Ok(IpcRequest::StopNetwork { name }) => {
-            let signaled = registry.send_stop(name.clone()).await;
+            let signaled = registry.send_stop(name.clone());
             if signaled {
                 IpcResponse::Success {
                     message: match &name {
@@ -425,14 +432,11 @@ async fn probe_runtime_peer(
 ) -> IpcResponse {
     let timeout_ms = timeout_ms.clamp(100, 5_000);
     let (reply, response) = oneshot::channel();
-    if !registry
-        .send_control(RuntimeCommand::ProbePeer {
-            target,
-            timeout_ms,
-            reply,
-        })
-        .await
-    {
+    if !registry.send_control(RuntimeCommand::ProbePeer {
+        target,
+        timeout_ms,
+        reply,
+    }) {
         return IpcResponse::Error {
             message: "运行时不支持节点探测或控制通道已关闭".to_string(),
         };
@@ -454,15 +458,12 @@ async fn update_runtime_routing(
     is_exit_node: bool,
 ) -> IpcResponse {
     let (reply, response) = oneshot::channel();
-    if !registry
-        .send_control(RuntimeCommand::UpdateRouting {
-            mode,
-            exit_node,
-            is_exit_node,
-            reply,
-        })
-        .await
-    {
+    if !registry.send_control(RuntimeCommand::UpdateRouting {
+        mode,
+        exit_node,
+        is_exit_node,
+        reply,
+    }) {
         return IpcResponse::Error {
             message: "运行时不支持路由热更新或控制通道已关闭".to_string(),
         };
@@ -479,10 +480,7 @@ async fn update_runtime_routing(
 
 async fn disconnect_runtime(registry: &MultiNetworkRegistry) -> IpcResponse {
     let (reply, response) = oneshot::channel();
-    if !registry
-        .send_control(RuntimeCommand::Disconnect { reply })
-        .await
-    {
+    if !registry.send_control(RuntimeCommand::Disconnect { reply }) {
         return IpcResponse::Error {
             message: "运行时不支持远程断开或控制通道已关闭".to_string(),
         };
@@ -758,6 +756,21 @@ mod tests {
     use fuckipv6_common::{NatType, PeerInfo};
     use std::net::IpAddr;
     use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn control_sender_is_visible_immediately_after_registration() {
+        let registry = MultiNetworkRegistry::new();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+
+        let (reply, _response) = oneshot::channel();
+        assert!(registry.send_control(RuntimeCommand::Disconnect { reply }));
+
+        match control_rx.try_recv() {
+            Ok(RuntimeCommand::Disconnect { .. }) => {}
+            _ => panic!("control command was not delivered synchronously"),
+        }
+    }
 
     #[tokio::test]
     async fn test_ipc_status_and_peers() -> anyhow::Result<()> {

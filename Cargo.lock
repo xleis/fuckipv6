@@ -898,6 +898,7 @@ version = "0.3.0"
 dependencies = [
  "chacha20poly1305",
  "criterion",
+ "sha2",
  "thiserror 1.0.69",
  "zeroize",
 ]

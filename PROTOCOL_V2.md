@@ -343,6 +343,26 @@ body 依次连接定宽字段，不带可变长整数、填充或尾随字节：
 
 解析器必须在读取 body 前限制总长不超过 220 字节，并拒绝版本、kind、body length、保留字节不符，以及截断和尾随字节。该编码只提供规范边界，不提供机密性、完整性和身份认证；控制帧仍必须由当前已认证会话保护，并在进入重协商状态机前完成全部密码学校验。
 
+### 8.2 Canonical handshake transcript
+
+经典握手和未来混合握手共用独立的 canonical transcript 构造。所有字段（包括版本、套件、角色和定宽标识）统一编码为两字节大端长度前缀 `L(x) = len(x):u16be || x`，不允许省略长度或使用分隔符。字段按以下固定顺序写入 SHA-512：
+
+```text
+SHA-512(
+  L("fuckipv6-v2 handshake transcript") ||
+  L(version) || L(suite_id) ||
+  L(0x01) || L(CI) || L(EPK_I) ||
+  L(0x02) || L(CR) || L(EPK_R) ||
+  L(SID) || L(epoch) || L(endpoint_context_hash)
+)
+```
+
+- `0x01` 和 `0x02` 分别是 Initiator/Responder 角色标记；顺序固定，调用方本地的运行角色不改变字段顺序，双方必须得到相同 transcript。
+- 当前允许 `suite_id = 0x0201`（AES-256-GCM）或 `0x0202`（ChaCha20-Poly1305）；未知套件、全零身份、相同身份、空临时公钥和全零 endpoint context 在哈希前拒绝。
+- `endpoint_context_hash` 由调用方对网络 ID、双方虚拟 IP 和预期 endpoint 集合做域分离哈希得到，长度为 32 字节。
+- 单个字段最长 65535 字节，整个 canonical transcript 最多 512 KiB；超限在继续追加前拒绝。
+- 该 transcript 只负责字段绑定和歧义消除，不代替签名、KEM 验证或 key confirmation。固定测试向量由 `transcript.rs` 单元测试维护。
+
 ## 9. 状态机与失败路径
 
 ```text

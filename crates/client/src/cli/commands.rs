@@ -1041,19 +1041,18 @@ async fn handle_inbound_payload(
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return;
     };
-    let Some(packet_src) = tun_packet_source(&plain_payload) else {
-        tracing::debug!("丢弃来源 {src_ip} 的非 IP 入站载荷");
+    let Some(packet_src) = authenticated_inbound_source(&plain_payload, &peer) else {
+        match tun_packet_source(&plain_payload) {
+            Some(packet_src) => tracing::warn!(
+                "丢弃节点 {} 的伪造内层源地址 {} (外层: {})",
+                peer.client_id,
+                packet_src,
+                src_ip
+            ),
+            None => tracing::debug!("丢弃来源 {src_ip} 的非 IP 入站载荷"),
+        }
         return;
     };
-    if !peer.matches_ip(packet_src) {
-        tracing::warn!(
-            "丢弃节点 {} 的伪造内层源地址 {} (外层: {})",
-            peer.client_id,
-            packet_src,
-            src_ip
-        );
-        return;
-    }
     let Some(target_dst) = tun_packet_destination(&plain_payload) else {
         tracing::debug!("丢弃来源 {src_ip} 的无目的地址入站载荷");
         return;
@@ -1401,6 +1400,11 @@ fn tun_packet_destination(packet: &[u8]) -> Option<IpAddr> {
         }
         _ => None,
     }
+}
+
+fn authenticated_inbound_source(packet: &[u8], peer: &PeerInfo) -> Option<IpAddr> {
+    let source = tun_packet_source(packet)?;
+    peer.matches_ip(source).then_some(source)
 }
 
 fn tun_packet_source(packet: &[u8]) -> Option<IpAddr> {
@@ -2742,6 +2746,29 @@ mod tests {
             exit_forwarding_action(false, false),
             ExitForwardingAction::Keep
         );
+    }
+
+    #[test]
+    fn inbound_inner_source_must_match_authenticated_peer() {
+        let peer = PeerInfo::new_with_ips(
+            "peer-a".to_string(),
+            VirtualIps::dual_stack("10.8.0.2".parse().unwrap(), "fd00::1002".parse().unwrap()),
+            vec![0; 32],
+            Vec::new(),
+            NatType::FullCone,
+        );
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[12..16].copy_from_slice(&[10, 8, 0, 2]);
+        packet[16..20].copy_from_slice(&[1, 1, 1, 1]);
+        assert_eq!(
+            authenticated_inbound_source(&packet, &peer),
+            Some("10.8.0.2".parse().unwrap())
+        );
+
+        packet[12..16].copy_from_slice(&[10, 8, 0, 99]);
+        assert_eq!(authenticated_inbound_source(&packet, &peer), None);
+        assert_eq!(authenticated_inbound_source(&packet[..19], &peer), None);
     }
 
     #[test]

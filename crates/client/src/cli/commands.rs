@@ -4,6 +4,8 @@ use fuckipv6_common::{
     decrypt_config_file, encrypt_config_file, ClientConfig, Identity, NatType, PeerInfo,
     RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
 };
+#[cfg(target_os = "linux")]
+use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -15,6 +17,8 @@ use crate::p2p::connection::P2pEngine;
 use crate::p2p::punching;
 use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
+#[cfg(target_os = "linux")]
+use crate::routing::linux_route::LinuxRouteManager;
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
 use crate::routing::ExitNodeManager;
@@ -117,6 +121,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) p2p: P2pEngine,
     pub(crate) identity: Identity,
     pub(crate) relay: Option<QuicRelayClient>,
+    #[cfg(target_os = "linux")]
+    pub(crate) route_manager: LinuxRouteManager,
     pub(crate) tun: TunDevice,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -177,7 +183,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     let assigned_ip = assigned_ips.primary_ipv6();
     configure_local_ips(&p2p, &assigned_ips).await;
     let relay = connect_quic_relay(&signaling, &relay_identity, assigned_ip).await;
-    let tun = create_tun_device(&config, &assigned_ips).await?;
+    let mut tun = create_tun_device(&config, &assigned_ips).await?;
     let acl = fuckipv6_common::AclEngine::new(&config.acl);
 
     let mut route_engine = SmartRouteEngine::new(config.routing.mode);
@@ -201,6 +207,80 @@ pub(crate) async fn prepare_client_runtime_ext(
     }
     let exit_node_manager = ExitNodeManager::new(config.exit_node.clone());
     let configured_exit_node = config.routing.exit_node.clone();
+
+    #[cfg(target_os = "linux")]
+    let route_manager = {
+        let mut virtual_cidrs = Vec::new();
+        if let Some(network) = config
+            .network
+            .virtual_network
+            .as_deref()
+            .and_then(|value| value.parse().ok())
+        {
+            virtual_cidrs.push(network);
+        }
+        if let Ok(network) = "10.8.0.0/24".parse() {
+            virtual_cidrs.push(network);
+        }
+
+        let direct_cidrs: Vec<_> = config
+            .routing
+            .direct_cidrs
+            .iter()
+            .filter_map(|cidr| cidr.parse().ok())
+            .collect();
+        let mut control_endpoints = Vec::new();
+        if config.routing.mode != fuckipv6_common::RoutingMode::MeshOnly {
+            control_endpoints.extend(resolve_websocket_endpoints(&config.coordinator_url).await?);
+        }
+        control_endpoints.extend(
+            signaling
+                .relay_endpoints()
+                .await
+                .into_iter()
+                .map(|endpoint| endpoint.addr),
+        );
+        for peer in signaling.known_peers().await {
+            control_endpoints.extend(peer.endpoints);
+        }
+
+        let mut manager = match LinuxRouteManager::install(
+            config.routing.mode,
+            tun.name(),
+            &assigned_ips,
+            &virtual_cidrs,
+            &direct_cidrs,
+            &control_endpoints,
+        )
+        .await
+        {
+            Ok(manager) => manager,
+            Err(error) => {
+                signaling.shutdown();
+                if let Some(relay) = relay.as_ref() {
+                    relay.close().await;
+                }
+                let _ = tun.delete().await;
+                return Err(error).context("安装 Linux 代理路由失败");
+            }
+        };
+
+        for peer in signaling.known_peers().await {
+            if let Err(error) = manager
+                .add_peer_bypasses(&peer.client_id, &peer.endpoints)
+                .await
+            {
+                manager.rollback().await;
+                signaling.shutdown();
+                if let Some(relay) = relay.as_ref() {
+                    relay.close().await;
+                }
+                let _ = tun.delete().await;
+                return Err(error).context("安装节点物理网络旁路失败");
+            }
+        }
+        manager
+    };
 
     // 创建性能统计收集器
     let stats = StatsCollector::new();
@@ -233,6 +313,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         p2p,
         identity: relay_identity,
         relay,
+        #[cfg(target_os = "linux")]
+        route_manager,
         tun,
         assigned_ip,
         assigned_ips,
@@ -248,6 +330,69 @@ pub(crate) async fn prepare_client_runtime_ext(
         config_reload_task: tasks.config_reload_task,
         tun_reader_task: tasks.tun_reader_task,
     })
+}
+
+#[cfg(target_os = "linux")]
+async fn resolve_websocket_endpoints(url: &str) -> Result<Vec<SocketAddr>> {
+    let (host, port) = websocket_host_port(url)?;
+    let mut endpoints: Vec<_> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .with_context(|| format!("无法解析协调服务器地址 {host}:{port}"))?
+        .collect();
+    endpoints.sort_unstable();
+    endpoints.dedup();
+    if endpoints.is_empty() {
+        anyhow::bail!("协调服务器地址未解析到任何 IP: {host}:{port}");
+    }
+    Ok(endpoints)
+}
+
+#[cfg(target_os = "linux")]
+fn websocket_host_port(url: &str) -> Result<(String, u16)> {
+    let url = url.trim();
+    let (scheme, rest) = url
+        .split_once("://")
+        .with_context(|| format!("协调服务器 URL 缺少协议: {url}"))?;
+    let default_port = match scheme.to_ascii_lowercase().as_str() {
+        "ws" => 80,
+        "wss" => 443,
+        other => anyhow::bail!("不支持的协调服务器协议: {other}"),
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|authority| !authority.is_empty())
+        .with_context(|| format!("协调服务器 URL 缺少主机: {url}"))?;
+
+    if let Some(authority) = authority.strip_prefix('[') {
+        let (host, suffix) = authority
+            .split_once(']')
+            .with_context(|| format!("IPv6 协调服务器 URL 缺少右方括号: {url}"))?;
+        let port = if suffix.is_empty() {
+            default_port
+        } else {
+            suffix
+                .strip_prefix(':')
+                .and_then(|value| value.parse().ok())
+                .with_context(|| format!("协调服务器 URL 端口无效: {url}"))?
+        };
+        return Ok((host.to_string(), port));
+    }
+
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.contains(':') {
+            anyhow::bail!("IPv6 协调服务器地址必须使用方括号: {url}");
+        }
+        let port = port
+            .parse()
+            .with_context(|| format!("协调服务器 URL 端口无效: {url}"))?;
+        if host.is_empty() {
+            anyhow::bail!("协调服务器 URL 缺少主机: {url}");
+        }
+        return Ok((host.to_string(), port));
+    }
+
+    Ok((authority.to_string(), default_port))
 }
 
 async fn prepare_client_runtime(config_path: &str, config: ClientConfig) -> Result<ClientRuntime> {
@@ -642,14 +787,59 @@ async fn handle_inbound_payload(
 
 async fn handle_runtime_signaling_event(runtime: &mut ClientRuntime, event: SignalingEvent) {
     runtime.stats.record_signaling_received().await;
-    match handle_signaling_event(event, &runtime.p2p, &runtime.stats).await {
+    let action = handle_signaling_event(event, &runtime.p2p, &runtime.stats).await;
+
+    #[cfg(target_os = "linux")]
+    match &action {
+        SignalingAction::PeersUpsert(peers) => {
+            for peer in peers {
+                if let Err(error) = runtime
+                    .route_manager
+                    .add_peer_bypasses(&peer.client_id, &peer.endpoints)
+                    .await
+                {
+                    tracing::warn!("无法更新节点 {} 的物理网络旁路: {error:#}", peer.client_id);
+                }
+            }
+            sync_linux_relay_bypasses(runtime).await;
+        }
+        SignalingAction::PeerRemoved(client_id) => {
+            if let Err(error) = runtime.route_manager.remove_peer_bypasses(client_id).await {
+                tracing::warn!("无法删除节点 {client_id} 的物理网络旁路: {error:#}");
+            }
+        }
+        SignalingAction::Reconnected | SignalingAction::RelayedPacket { .. } => {}
+        SignalingAction::None => {}
+    }
+
+    match action {
         SignalingAction::RelayedPacket { src_ip, payload } => {
             handle_inbound_payload(runtime, src_ip, &payload, "signaling relay packet").await;
         }
         SignalingAction::Reconnected => {
             runtime.stats.record_signaling_reconnect().await;
         }
-        SignalingAction::None => {}
+        SignalingAction::PeersUpsert(_)
+        | SignalingAction::PeerRemoved(_)
+        | SignalingAction::None => {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn sync_linux_relay_bypasses(runtime: &mut ClientRuntime) {
+    let endpoints: Vec<SocketAddr> = runtime
+        .signaling
+        .relay_endpoints()
+        .await
+        .into_iter()
+        .map(|endpoint| endpoint.addr)
+        .collect();
+    if let Err(error) = runtime
+        .route_manager
+        .add_peer_bypasses("@relay-endpoints", &endpoints)
+        .await
+    {
+        tracing::warn!("无法更新 QUIC 中继物理网络旁路: {error:#}");
     }
 }
 
@@ -671,6 +861,9 @@ async fn write_payload_to_tun(
 }
 
 async fn shutdown_runtime(runtime: &mut ClientRuntime) {
+    #[cfg(target_os = "linux")]
+    runtime.route_manager.rollback().await;
+
     if let Err(e) = runtime.signaling.close().await {
         tracing::warn!("关闭信令连接失败: {:?}", e);
     }
@@ -1007,6 +1200,8 @@ fn should_forward_tun_destination(dst_ip: IpAddr) -> bool {
 enum SignalingAction {
     None,
     Reconnected,
+    PeersUpsert(Vec<PeerInfo>),
+    PeerRemoved(String),
     RelayedPacket { src_ip: IpAddr, payload: Vec<u8> },
 }
 
@@ -1021,21 +1216,25 @@ async fn handle_signaling_event(
         } => {
             tracing::info!("已注册，虚拟 IP: {}", assigned_ip);
             tracing::info!("发现 {} 个在线节点", peers.len());
-            add_registered_peers(p2p, peers).await;
+            add_registered_peers(p2p, peers.clone()).await;
+            return SignalingAction::PeersUpsert(peers);
         }
 
         SignalingEvent::PeerOnline { peer } => {
             tracing::info!("节点上线: {} ({})", peer.client_id, peer.virtual_ip);
-            add_peer_from_signaling(p2p, peer).await;
+            add_peer_from_signaling(p2p, peer.clone()).await;
+            return SignalingAction::PeersUpsert(vec![peer]);
         }
 
         SignalingEvent::PeerOffline { client_id } => {
-            remove_offline_peer(p2p, stats, client_id).await;
+            remove_offline_peer(p2p, stats, client_id.clone()).await;
+            return SignalingAction::PeerRemoved(client_id);
         }
 
         SignalingEvent::ConnectInfo { peer } | SignalingEvent::ConnectNotify { peer } => {
             tracing::debug!("收到连接信息: {} ({})", peer.client_id, peer.virtual_ip);
-            add_peer_from_signaling(p2p, peer).await;
+            add_peer_from_signaling(p2p, peer.clone()).await;
+            return SignalingAction::PeersUpsert(vec![peer]);
         }
 
         SignalingEvent::HeartbeatAck { timestamp } => {
@@ -2155,6 +2354,26 @@ mod tests {
         assert!(!should_forward_tun_destination("ff02::2".parse()?));
         assert!(!should_forward_tun_destination("::1".parse()?));
         assert!(!should_forward_tun_destination("::".parse()?));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_websocket_coordinator_endpoints() -> anyhow::Result<()> {
+        assert_eq!(
+            websocket_host_port("ws://relay.xlei.cc/connect")?,
+            ("relay.xlei.cc".to_string(), 80)
+        );
+        assert_eq!(
+            websocket_host_port("wss://relay.xlei.cc:6666/connect")?,
+            ("relay.xlei.cc".to_string(), 6666)
+        );
+        assert_eq!(
+            websocket_host_port("ws://[2001:db8::1]:7777/ws")?,
+            ("2001:db8::1".to_string(), 7777)
+        );
+        assert!(websocket_host_port("http://relay.xlei.cc").is_err());
+        assert!(websocket_host_port("ws://2001:db8::1").is_err());
         Ok(())
     }
 

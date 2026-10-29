@@ -20,6 +20,7 @@ pub struct SignalingClient {
     assigned_virtual_ips_rx: watch::Receiver<Option<VirtualIps>>,
     relay_endpoint_rx: watch::Receiver<Option<RelayEndpoint>>,
     relay_endpoints_rx: watch::Receiver<Vec<RelayEndpoint>>,
+    known_peers_rx: watch::Receiver<Vec<PeerInfo>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -54,6 +55,7 @@ struct ConnectionChannels<'a> {
     assigned_virtual_ips_tx: &'a watch::Sender<Option<VirtualIps>>,
     relay_endpoint_tx: &'a watch::Sender<Option<RelayEndpoint>>,
     relay_endpoints_tx: &'a watch::Sender<Vec<RelayEndpoint>>,
+    known_peers_tx: &'a watch::Sender<Vec<PeerInfo>>,
 }
 
 struct ConnectionState {
@@ -97,6 +99,7 @@ impl SignalingClient {
         let (assigned_virtual_ips_tx, assigned_virtual_ips_rx) = watch::channel(None);
         let (relay_endpoint_tx, relay_endpoint_rx) = watch::channel(None);
         let (relay_endpoints_tx, relay_endpoints_rx) = watch::channel(Vec::new());
+        let (known_peers_tx, known_peers_rx) = watch::channel(Vec::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let registration = RegistrationIdentity {
@@ -123,6 +126,7 @@ impl SignalingClient {
             assigned_virtual_ips_tx,
             relay_endpoint_tx,
             relay_endpoints_tx,
+            known_peers_tx,
             shutdown_rx,
         ));
 
@@ -133,6 +137,7 @@ impl SignalingClient {
             assigned_virtual_ips_rx,
             relay_endpoint_rx,
             relay_endpoints_rx,
+            known_peers_rx,
             shutdown_tx,
         };
 
@@ -156,6 +161,11 @@ impl SignalingClient {
 
     pub async fn relay_endpoints(&self) -> Vec<RelayEndpoint> {
         self.relay_endpoints_rx.borrow().clone()
+    }
+
+    /// 获取信令层已知的在线节点快照。
+    pub async fn known_peers(&self) -> Vec<PeerInfo> {
+        self.known_peers_rx.borrow().clone()
     }
 
     /// 发送消息
@@ -219,6 +229,7 @@ async fn connection_manager(
     assigned_virtual_ips_tx: watch::Sender<Option<VirtualIps>>,
     relay_endpoint_tx: watch::Sender<Option<RelayEndpoint>>,
     relay_endpoints_tx: watch::Sender<Vec<RelayEndpoint>>,
+    known_peers_tx: watch::Sender<Vec<PeerInfo>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let channels = ConnectionChannels {
@@ -227,6 +238,7 @@ async fn connection_manager(
         assigned_virtual_ips_tx: &assigned_virtual_ips_tx,
         relay_endpoint_tx: &relay_endpoint_tx,
         relay_endpoints_tx: &relay_endpoints_tx,
+        known_peers_tx: &known_peers_tx,
     };
     let mut pending_outbound = Vec::new();
     let mut state = ConnectionState {
@@ -399,6 +411,7 @@ where
                 runtime.channels.assigned_virtual_ips_tx,
                 runtime.channels.relay_endpoint_tx,
                 runtime.channels.relay_endpoints_tx,
+                runtime.channels.known_peers_tx,
             )?;
         }
         Ok(Message::Ping(data)) => {
@@ -458,6 +471,7 @@ fn handle_incoming_message(
     assigned_virtual_ips_tx: &watch::Sender<Option<VirtualIps>>,
     relay_endpoint_tx: &watch::Sender<Option<RelayEndpoint>>,
     relay_endpoints_tx: &watch::Sender<Vec<RelayEndpoint>>,
+    known_peers_tx: &watch::Sender<Vec<PeerInfo>>,
 ) -> Result<()> {
     if let SignalingMessage::RegisterAck {
         assigned_ip,
@@ -482,11 +496,41 @@ fn handle_incoming_message(
         }
     }
 
+    update_known_peers(&msg, known_peers_tx);
+
     if let Some(event) = signaling_message_to_event(msg) {
         let _ = event_tx.send(event);
     }
 
     Ok(())
+}
+
+fn update_known_peers(msg: &SignalingMessage, known_peers_tx: &watch::Sender<Vec<PeerInfo>>) {
+    match msg {
+        SignalingMessage::RegisterAck { peers, .. } => {
+            let _ = known_peers_tx.send(peers.clone());
+        }
+        SignalingMessage::PeerOnline { peer }
+        | SignalingMessage::ConnectInfo { peer }
+        | SignalingMessage::ConnectNotify { peer } => {
+            let mut peers = known_peers_tx.borrow().clone();
+            if let Some(existing) = peers
+                .iter_mut()
+                .find(|known| known.client_id == peer.client_id)
+            {
+                *existing = peer.clone();
+            } else {
+                peers.push(peer.clone());
+            }
+            let _ = known_peers_tx.send(peers);
+        }
+        SignalingMessage::PeerOffline { client_id } => {
+            let mut peers = known_peers_tx.borrow().clone();
+            peers.retain(|peer| peer.client_id != *client_id);
+            let _ = known_peers_tx.send(peers);
+        }
+        _ => {}
+    }
 }
 
 fn build_register_message(
@@ -680,6 +724,7 @@ mod tests {
         let (assigned_virtual_ips_tx, _assigned_virtual_ips_rx) = watch::channel(None);
         let (relay_endpoint_tx, _relay_endpoint_rx) = watch::channel(None);
         let (relay_endpoints_tx, _relay_endpoints_rx) = watch::channel(Vec::new());
+        let (known_peers_tx, _known_peers_rx) = watch::channel(Vec::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let server_task = tokio::spawn(async move {
@@ -715,6 +760,7 @@ mod tests {
             assigned_virtual_ips_tx,
             relay_endpoint_tx,
             relay_endpoints_tx,
+            known_peers_tx,
             shutdown_rx,
         ));
 

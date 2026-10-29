@@ -18,6 +18,8 @@ use crate::p2p::punching;
 use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
 #[cfg(target_os = "linux")]
+use crate::routing::linux_exit::LinuxExitForwarder;
+#[cfg(target_os = "linux")]
 use crate::routing::linux_route::LinuxRouteManager;
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
@@ -123,6 +125,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) relay: Option<QuicRelayClient>,
     #[cfg(target_os = "linux")]
     pub(crate) route_manager: LinuxRouteManager,
+    #[cfg(target_os = "linux")]
+    pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
     pub(crate) tun: TunDevice,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -212,7 +216,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     let configured_exit_node = config.routing.exit_node.clone();
 
     #[cfg(target_os = "linux")]
-    let route_manager = {
+    let (route_manager, exit_forwarder) = {
         let mut virtual_cidrs = Vec::new();
         if let Some(network) = config
             .network
@@ -282,7 +286,20 @@ pub(crate) async fn prepare_client_runtime_ext(
                 return Err(error).context("安装节点物理网络旁路失败");
             }
         }
-        manager
+        let exit_forwarder = match LinuxExitForwarder::install(&config.exit_node, tun.name()).await
+        {
+            Ok(forwarder) => forwarder,
+            Err(error) => {
+                manager.rollback().await;
+                signaling.shutdown();
+                if let Some(relay) = relay.as_ref() {
+                    relay.close().await;
+                }
+                let _ = tun.delete().await;
+                return Err(error).context("安装 Exit Node 内核转发失败");
+            }
+        };
+        (manager, exit_forwarder)
     };
 
     // 创建性能统计收集器
@@ -320,6 +337,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         relay,
         #[cfg(target_os = "linux")]
         route_manager,
+        #[cfg(target_os = "linux")]
+        exit_forwarder,
         tun,
         assigned_ip,
         assigned_ips,
@@ -965,18 +984,78 @@ async fn handle_inbound_payload(
         .record_p2p_rx(src_ip, plain_payload.len())
         .await;
 
-    // 如果本机声明为 Exit Node 出口网关，且收到目的地址为公网 IP 的数据包，记录并交给 TUN 触发内核转发/NAT
-    if runtime.exit_node_manager.is_exit_node() {
-        if let Some(target_dst) = tun_packet_destination(&plain_payload) {
-            if runtime.exit_node_manager.should_forward_as_exit(target_dst) {
-                tracing::debug!(
-                    "Exit Node 收到来自 {} 发往公网 {} 的转发数据包 ({} 字节)",
-                    src_ip,
-                    target_dst,
-                    plain_payload.len()
+    let Some(peer) = runtime.p2p.peer_by_ip(src_ip).await else {
+        tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
+        return;
+    };
+    let Some(packet_src) = tun_packet_source(&plain_payload) else {
+        tracing::debug!("丢弃来源 {src_ip} 的非 IP 入站载荷");
+        return;
+    };
+    if !peer.matches_ip(packet_src) {
+        tracing::warn!(
+            "丢弃节点 {} 的伪造内层源地址 {} (外层: {})",
+            peer.client_id,
+            packet_src,
+            src_ip
+        );
+        return;
+    }
+    let Some(target_dst) = tun_packet_destination(&plain_payload) else {
+        tracing::debug!("丢弃来源 {src_ip} 的无目的地址入站载荷");
+        return;
+    };
+
+    // Virtual-network destinations remain ordinary Mesh traffic. Any other
+    // destination is privileged exit traffic and must pass every policy check.
+    if !runtime.route_engine.is_virtual_network(target_dst) {
+        if !runtime.exit_node_manager.is_exit_node() {
+            tracing::debug!("本机未启用 Exit Node，丢弃 {} -> {target_dst}", packet_src);
+            return;
+        }
+        if !runtime.exit_node_manager.should_forward_as_exit(target_dst) {
+            tracing::debug!("Exit Node 策略拒绝目标地址 {target_dst}");
+            return;
+        }
+        if !runtime.exit_node_manager.is_client_allowed(&peer.client_id) {
+            tracing::warn!("Exit Node 拒绝未授权客户端 {}", peer.client_id);
+            return;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let Some(forwarder) = runtime.exit_forwarder.as_mut() else {
+                tracing::warn!("Exit Node 已启用但转发器尚未安装，丢弃数据包");
+                return;
+            };
+            if !forwarder.supports(target_dst) {
+                tracing::debug!("Exit Node 没有目标地址族 {target_dst} 的出站路径");
+                return;
+            }
+            if let Err(error) = forwarder
+                .allow_client(&peer.client_id, &peer.virtual_ips)
+                .await
+            {
+                tracing::warn!(
+                    "无法为客户端 {} 安装 Exit Node 转发规则: {error:#}",
+                    peer.client_id
                 );
+                return;
             }
         }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            tracing::warn!("当前平台不支持内核 Exit Node 转发，丢弃数据包");
+            return;
+        }
+
+        tracing::debug!(
+            "Exit Node 转发已认证数据包: client={}, {} -> {target_dst}, {} 字节",
+            peer.client_id,
+            packet_src,
+            plain_payload.len()
+        );
     }
 
     write_payload_to_tun(&mut runtime.tun, &runtime.stats, &plain_payload, source).await;
@@ -1003,6 +1082,11 @@ async fn handle_runtime_signaling_event(runtime: &mut ClientRuntime, event: Sign
         SignalingAction::PeerRemoved(client_id) => {
             if let Err(error) = runtime.route_manager.remove_peer_bypasses(client_id).await {
                 tracing::warn!("无法删除节点 {client_id} 的物理网络旁路: {error:#}");
+            }
+            if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
+                if let Err(error) = forwarder.remove_client(client_id).await {
+                    tracing::warn!("无法删除节点 {client_id} 的 Exit Node 转发规则: {error:#}");
+                }
             }
         }
         SignalingAction::Reconnected | SignalingAction::RelayedPacket { .. } => {}
@@ -1059,7 +1143,13 @@ async fn write_payload_to_tun(
 
 async fn shutdown_runtime(runtime: &mut ClientRuntime) {
     #[cfg(target_os = "linux")]
-    runtime.route_manager.rollback().await;
+    {
+        if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
+            forwarder.rollback();
+        }
+        runtime.exit_forwarder = None;
+        runtime.route_manager.rollback().await;
+    }
 
     if let Err(e) = runtime.signaling.close().await {
         tracing::warn!("关闭信令连接失败: {:?}", e);

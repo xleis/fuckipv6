@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows semantic versioning
 ### Added
 - 增加 Secure Session v2 HKDF-SHA-512 会话密钥派生：从完整签名握手绑定生成独立的双向数据密钥和双向确认密钥，支持可选 32-byte PSK，并只使用固定标签和长度前缀上下文；共享秘密、PSK、IKM、PRK 和输出密钥均纳入清零生命周期。
 - 增加 Secure Session v2 双向 HMAC-SHA-256 key confirmation：Initiator/Responder 使用独立派生密钥确认同一 transcript，固定 32-byte 编码并使用常量时间验证；错误角色、交换方向、不同密钥调度、错误 transcript、截断/超长和单比特篡改均失败关闭。当前为密码学原语和测试，尚未接入 wire 握手或数据面激活。
+- 增加 Secure Session v2 classic 握手负向回归：覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、错误 epoch、零 SID、单比特签名字段篡改和失败后 responder 状态恢复；所有路径均在数据密钥激活前失败关闭。
 - 增加实验性 Secure Session v2 classic 握手 profile：使用 X25519 临时密钥与 Ed25519 长期身份生成签名 `HELLO/ACCEPT`，绑定双方身份、临时公钥、套件、SID、epoch 和 endpoint context，并在双方派生一致的 X25519 共享秘密与 SHA-512 transcript；60 秒时间窗、4096 项有界重放缓存和非 contributory 密钥交换均失败关闭。该 profile 明确不包含 X-Wing/ML-DSA-65，不可作为生产后量子套件宣传。
 - 增加 Secure Session v2 canonical handshake transcript 构造器：使用独立协议域、两字节长度前缀和固定角色顺序绑定套件、双方身份/临时公钥、SID、epoch 及 endpoint context；未知套件、空字段、重复身份和超限输入在 SHA-512 前拒绝。
 - 增加 Secure Session v2 `REKEY_INIT/ACCEPT/CONFIRM` 有界、版本化控制帧编解码与固定字节向量；解析失败关闭截断、超长、尾随字节、非法长度、未知版本/类型和非零保留字段。帧本身仍需由已认证控制通道保护。

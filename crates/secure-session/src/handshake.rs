@@ -1036,6 +1036,156 @@ mod tests {
         );
     }
 
+    fn signed_accept_fixture() -> (ClassicInitiator, Hello, Accept) {
+        let initiator = start();
+        let hello = initiator.hello().clone();
+        let mut responder =
+            ClassicResponder::new(responder_identity(), initiator_identity().verifying_key())
+                .expect("responder");
+        let accepted = responder
+            .accept(&hello, ENDPOINT, EPOCH, NOW)
+            .expect("accept handshake");
+        (initiator, hello, accepted.accept)
+    }
+
+    fn resign_accept(accept: &mut Accept, hello: &Hello, signer: &Ed25519Identity) {
+        accept.signature = [0; ED25519_SIGNATURE_LEN];
+        let accept_hash = accept.signing_hash(&hello.signing_hash(), &hello.signature);
+        accept.signature = signer.sign(&accept_hash).to_bytes();
+    }
+
+    #[test]
+    fn cross_session_accept_replay_and_out_of_order_messages_fail_closed() {
+        let first = start();
+        let second = start();
+        let first_hello = first.hello().clone();
+        let second_hello = second.hello().clone();
+        let mut responder =
+            ClassicResponder::new(responder_identity(), initiator_identity().verifying_key())
+                .expect("responder");
+        let first_accept = responder
+            .accept(&first_hello, ENDPOINT, EPOCH, NOW)
+            .expect("first accept");
+        let second_accept = responder
+            .accept(&second_hello, ENDPOINT, EPOCH, NOW)
+            .expect("second accept");
+
+        assert_eq!(
+            first.finish(&second_accept.accept, NOW).unwrap_err(),
+            HandshakeError::AcceptMismatch
+        );
+        assert_eq!(
+            second.finish(&first_accept.accept, NOW).unwrap_err(),
+            HandshakeError::AcceptMismatch
+        );
+    }
+
+    #[test]
+    fn mitm_ephemeral_key_substitution_fails_in_both_directions() {
+        let attacker_identity = Ed25519Identity::from_seed([0x77; 32]);
+        let attacker_ephemeral = StaticSecret::from([0x88; 32]);
+        let attacker_public = X25519PublicKey::from(&attacker_ephemeral).to_bytes();
+
+        let initiator = start();
+        let mut hello = initiator.hello().clone();
+        hello.initiator_ephemeral_public = attacker_public;
+        hello.signature = attacker_identity.sign(&hello.signing_hash()).to_bytes();
+        let mut responder =
+            ClassicResponder::new(responder_identity(), initiator_identity().verifying_key())
+                .expect("responder");
+        assert_eq!(
+            responder.accept(&hello, ENDPOINT, EPOCH, NOW).unwrap_err(),
+            HandshakeError::InvalidSignature("initiator")
+        );
+
+        let (initiator, hello, mut accept) = signed_accept_fixture();
+        accept.responder_ephemeral_public = attacker_public;
+        resign_accept(&mut accept, &hello, &attacker_identity);
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::InvalidSignature("responder")
+        );
+    }
+
+    #[test]
+    fn protocol_downgrade_attempts_fail_even_with_a_valid_responder_signature() {
+        let (initiator, hello, mut accept) = signed_accept_fixture();
+        accept.suite_id = SUITE_AES_256_GCM;
+        resign_accept(&mut accept, &hello, &responder_identity());
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::AcceptMismatch
+        );
+
+        let (initiator, hello, mut accept) = signed_accept_fixture();
+        accept.version = 1;
+        resign_accept(&mut accept, &hello, &responder_identity());
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::UnsupportedVersion(1)
+        );
+
+        let (initiator, hello, mut accept) = signed_accept_fixture();
+        accept.profile = 2;
+        resign_accept(&mut accept, &hello, &responder_identity());
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::UnsupportedProfile(2)
+        );
+    }
+
+    #[test]
+    fn wrong_epoch_and_zero_session_id_fail_closed() {
+        let initiator = start();
+        let hello = initiator.hello().clone();
+        let mut responder =
+            ClassicResponder::new(responder_identity(), initiator_identity().verifying_key())
+                .expect("responder");
+        let wrong_epoch = responder
+            .accept(&hello, ENDPOINT, EPOCH + 1, NOW)
+            .expect("accept wrong epoch");
+        assert_eq!(
+            initiator.finish(&wrong_epoch.accept, NOW).unwrap_err(),
+            HandshakeError::AcceptMismatch
+        );
+
+        let (initiator, hello, mut accept) = signed_accept_fixture();
+        accept.session_id = [0; SESSION_ID_LEN];
+        resign_accept(&mut accept, &hello, &responder_identity());
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::InvalidSessionId
+        );
+    }
+
+    #[test]
+    fn one_bit_signed_field_tampering_and_state_recovery() {
+        let initiator = start();
+        let hello = initiator.hello().clone();
+        let mut responder =
+            ClassicResponder::new(responder_identity(), initiator_identity().verifying_key())
+                .expect("responder");
+
+        let mut tampered = hello.clone();
+        tampered.initiator_ephemeral_public[17] ^= 1;
+        assert_eq!(
+            responder
+                .accept(&tampered, ENDPOINT, EPOCH, NOW)
+                .unwrap_err(),
+            HandshakeError::InvalidSignature("initiator")
+        );
+        responder
+            .accept(&hello, ENDPOINT, EPOCH, NOW)
+            .expect("invalid HELLO must not consume replay state");
+
+        let (initiator, _hello, mut accept) = signed_accept_fixture();
+        accept.responder_nonce[9] ^= 1;
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::InvalidSignature("responder")
+        );
+    }
+
     #[test]
     fn canonical_hello_signing_hash_matches_fixed_vector() {
         let hello = Hello {

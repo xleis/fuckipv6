@@ -111,6 +111,17 @@ struct ApiError {
     error: String,
 }
 
+type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: message.into(),
+        }),
+    )
+}
+
 async fn handle_peer_probe(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<ProbePeerRequest>,
@@ -293,27 +304,27 @@ async fn ws_stream(mut socket: WebSocket, ctrl: Arc<AppController>) {
 async fn handle_connect(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<ConnectRequest>,
-) -> Result<Json<AppUiState>, StatusCode> {
+) -> ApiResult<AppUiState> {
     match ctrl
         .connect(payload.target, payload.routing_mode, payload.exit_node)
         .await
     {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("连接网络失败: {e:#}")).await;
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let message = format!("连接网络失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
         }
     }
 }
 
-async fn handle_disconnect(
-    State(ctrl): State<Arc<AppController>>,
-) -> Result<Json<AppUiState>, StatusCode> {
+async fn handle_disconnect(State(ctrl): State<Arc<AppController>>) -> ApiResult<AppUiState> {
     match ctrl.disconnect().await {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("断开网络失败: {e:#}")).await;
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let message = format!("断开网络失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
         }
     }
 }
@@ -321,7 +332,7 @@ async fn handle_disconnect(
 async fn handle_host(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<HostRequest>,
-) -> Result<Json<AppUiState>, StatusCode> {
+) -> ApiResult<AppUiState> {
     match ctrl
         .host_network(
             payload.name,
@@ -334,20 +345,20 @@ async fn handle_host(
     {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("自建网络失败: {e:#}")).await;
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let message = format!("自建网络失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
         }
     }
 }
 
-async fn handle_stop_host(
-    State(ctrl): State<Arc<AppController>>,
-) -> Result<Json<AppUiState>, StatusCode> {
+async fn handle_stop_host(State(ctrl): State<Arc<AppController>>) -> ApiResult<AppUiState> {
     match ctrl.stop_host().await {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("停止自建网络失败: {e:#}")).await;
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let message = format!("停止自建网络失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
         }
     }
 }
@@ -355,12 +366,13 @@ async fn handle_stop_host(
 async fn handle_coordinator_ban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BanRequest>,
-) -> Result<Json<AppUiState>, StatusCode> {
+) -> ApiResult<AppUiState> {
     match ctrl.ban_client(payload.client_id).await {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("封禁客户端失败: {e:#}")).await;
-            Err(StatusCode::BAD_REQUEST)
+            let message = format!("封禁客户端失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::BAD_REQUEST, message))
         }
     }
 }
@@ -368,12 +380,13 @@ async fn handle_coordinator_ban(
 async fn handle_coordinator_unban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BanRequest>,
-) -> Result<Json<AppUiState>, StatusCode> {
+) -> ApiResult<AppUiState> {
     match ctrl.unban_client(&payload.client_id).await {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("解封客户端失败: {e:#}")).await;
-            Err(StatusCode::BAD_REQUEST)
+            let message = format!("解封客户端失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::BAD_REQUEST, message))
         }
     }
 }
@@ -381,15 +394,16 @@ async fn handle_coordinator_unban(
 async fn handle_routing(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<UpdateRoutingRequest>,
-) -> Result<Json<AppUiState>, StatusCode> {
+) -> ApiResult<AppUiState> {
     match ctrl
         .update_routing(payload.mode, payload.exit_node, payload.is_exit_node)
         .await
     {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
-            ctrl.log(format!("路由分流策略更新失败: {e:#}")).await;
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let message = format!("路由分流策略更新失败: {e:#}");
+            ctrl.log(message.clone()).await;
+            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
         }
     }
 }

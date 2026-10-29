@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案，尚未实现，尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD 和 AEAD 原语已实现并有单元测试；握手、PQC、密钥轮换与数据面接入尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -264,13 +264,15 @@ AEAD 参数：
 
 ```text
 nonce = direction_prefix[4] || counter_be[8]
-aad   = header[0..16] || L(SID) || L(ciphertext_length)
+aad   = header[0..16] || L(SID) || L(payload_length)
 ```
+
+`payload_length` 为明文/密文载荷长度，不包含 16 字节固定头和 16 字节认证标签；长度编码为两字节大端整数。
 
 要求：
 
 - `direction_prefix` 固定为 `0x00000001`（I→R）或 `0x00000002`（R→I）；方向密钥本身也不同，两个方向不能共用密钥空间。
-- `counter` 严格递增，重协商后新 epoch 使用新的密钥和计数器零点。
+- `counter` 严格递增，重协商后新 epoch 使用新的密钥和计数器零点。每个 epoch 只允许 `0..2^32-1`，达到上限必须重新握手，不能回绕。
 - `receiver_index` 是本地 32-bit 索引，仅在当前 epoch 有效；不能作为会话身份或认证凭据。
 - `flags` 保留位必须为零；未知位直接拒绝。
 - `epoch` 为 16-bit。达到 `0xffff` 后必须建立新会话，不能回绕；按 120 秒重协商上限可覆盖约 91 天连续会话。

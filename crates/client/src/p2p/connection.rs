@@ -3,6 +3,7 @@ use fuckipv6_common::crypto::Identity;
 use fuckipv6_common::{
     codec, ControlMessage, DataPacket, FallbackThreshold, P2pDatagram, PeerInfo,
 };
+use fuckipv6_secure_session::wire::{decode_control, is_data_packet, CONTROL_MAGIC};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -12,12 +13,14 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
 use super::health::{ConnectionHealthSnapshot, PeerHealth};
+use super::secure_runtime::SecurePeerState;
 
 const HEALTH_WINDOW_SIZE: usize = 20;
 const PROBE_RESPONSE_GRACE: Duration = Duration::from_secs(1);
 const FAST_PROBE_ATTEMPTS: usize = 20;
 const FAST_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const SECURE_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 type IncomingPacket = (IpAddr, Vec<u8>);
 type IncomingReceiver = mpsc::UnboundedReceiver<IncomingPacket>;
@@ -39,7 +42,7 @@ struct PeerConnection {
     endpoints: Vec<SocketAddr>,
     active_endpoint: Option<SocketAddr>,
     health: PeerHealth,
-    session_key: Option<[u8; 32]>,
+    secure: Arc<SecurePeerState>,
 }
 
 /// P2P引擎
@@ -173,30 +176,27 @@ impl P2pEngine {
             endpoints
         );
 
-        let session_key = if let Some(local_identity) = &*self.local_identity.read().await {
-            match local_identity.derive_shared_secret(&peer_info.public_key) {
-                Ok(key) => {
-                    tracing::info!(
-                        "已从节点 {} 公钥派生静态 X25519 会话密钥（无前向保密）",
-                        client_id
-                    );
-                    Some(key)
-                }
-                Err(e) => {
-                    tracing::warn!("与节点 {} 秘钥协商失败: {e:#}", client_id);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let local_identity = self
+            .local_identity
+            .read()
+            .await
+            .clone()
+            .context("必须先设置本地身份再添加对等节点")?;
+        let local_ip =
+            (*self.local_ip.read().await).context("必须先设置本地虚拟 IP 再添加对等节点")?;
+        let secure = SecurePeerState::new(
+            local_identity.secure_session_identity(),
+            &[local_ip],
+            &peer_info,
+        )
+        .with_context(|| format!("无法初始化与节点 {client_id} 的 Secure Session v2"))?;
 
         let connection = PeerConnection {
             peer_info: peer_info.clone(),
             active_endpoint: None,
             endpoints,
             health: PeerHealth::new(HEALTH_WINDOW_SIZE),
-            session_key,
+            secure: secure.clone(),
         };
 
         // 注册双栈 IP 路由映射
@@ -219,15 +219,23 @@ impl P2pEngine {
             .virtual_ips
             .primary_ip()
             .unwrap_or(IpAddr::V6(peer_info.virtual_ip));
-        self.start_endpoint_probing(client_id, primary_ip);
+        self.start_endpoint_probing(client_id.clone(), primary_ip);
+        if secure.is_initiator() {
+            spawn_secure_initiator(
+                self.socket.clone(),
+                self.connections.clone(),
+                client_id,
+                secure,
+            );
+        }
 
         Ok(())
     }
 
-    /// Encrypt a payload for a registered peer using its authenticated session key.
+    /// Seal a payload for a registered peer with its established Secure Session v2.
     ///
-    /// Relay and Exit Node traffic must never silently fall back to plaintext when
-    /// key negotiation is unavailable.
+    /// Relay and Exit Node traffic must never silently fall back to plaintext or
+    /// the legacy static-X25519 format when key negotiation is unavailable.
     pub async fn encrypt_for_peer(
         &self,
         dst_ip: impl crate::stats::ToIpAddr,
@@ -242,18 +250,21 @@ impl P2pEngine {
             anyhow::bail!("No connection to peer {dst_ip}");
         };
 
-        let session_key = {
+        let secure = {
             let connections = self.connections.read().await;
             connections
                 .get(&client_id)
-                .and_then(|connection| connection.session_key)
+                .map(|connection| connection.secure.clone())
         };
-        let Some(key) = session_key else {
-            anyhow::bail!("No authenticated session key for peer {dst_ip}");
+        let Some(secure) = secure else {
+            anyhow::bail!("No connection to peer {dst_ip}");
         };
 
-        fuckipv6_common::crypto::encrypt_payload(&key, payload)
-            .with_context(|| format!("无法加密发往对等节点 {dst_ip} 的数据包"))
+        let (_, packet) = secure
+            .seal(payload)
+            .await
+            .with_context(|| format!("无法加密发往对等节点 {dst_ip} 的数据包"))?;
+        Ok(packet)
     }
 
     /// Decrypt and authenticate a payload received from a registered peer.
@@ -275,29 +286,32 @@ impl P2pEngine {
             anyhow::bail!("No registered peer for source {src_ip}");
         };
 
-        let session_key = {
+        let secure = {
             let connections = self.connections.read().await;
             connections
                 .get(&client_id)
-                .and_then(|connection| connection.session_key)
+                .map(|connection| connection.secure.clone())
         };
-        let Some(key) = session_key else {
-            anyhow::bail!("No authenticated session key for peer {src_ip}");
+        let Some(secure) = secure else {
+            anyhow::bail!("No registered peer for source {src_ip}");
         };
 
-        fuckipv6_common::crypto::decrypt_payload(&key, payload)
-            .with_context(|| format!("来自对等节点 {src_ip} 的数据包认证失败"))
+        let plaintext = secure
+            .open_from_session(payload.to_vec())
+            .await
+            .with_context(|| format!("来自对等节点 {src_ip} 的数据包认证失败"))?;
+        record_peer_payload(&self.connections, &client_id, payload.len()).await;
+        Ok(plaintext)
     }
 
     /// 发送数据包到对等节点 (支持 IPv4 / IPv6)
     pub async fn send_to(
         &self,
         dst_ip: impl Into<IpAddr>,
-        src_ip: impl Into<IpAddr>,
+        _src_ip: impl Into<IpAddr>,
         payload: &[u8],
     ) -> Result<()> {
         let dst_ip = dst_ip.into();
-        let src_ip = src_ip.into();
 
         let client_id = {
             let idx = self.ip_index.read().await;
@@ -308,53 +322,36 @@ impl P2pEngine {
             anyhow::bail!("No connection to peer {}", dst_ip);
         };
 
-        let connections = self.connections.read().await;
-        if let Some(conn) = connections.get(&client_id) {
-            let endpoints = endpoint_attempt_order(conn);
-            let has_active_endpoint = conn.active_endpoint.is_some();
-            let threshold = self.fallback_threshold.read().await.clone();
-            let p2p_healthy =
-                conn.health
-                    .is_healthy(now_micros(), PROBE_RESPONSE_GRACE, &threshold);
-            let session_key = conn.session_key;
-            drop(connections);
-
-            let key =
-                session_key.context("对等节点缺少已认证的端到端会话密钥，拒绝发送明文数据")?;
-            let payload_to_send = fuckipv6_common::crypto::encrypt_payload(&key, payload)
-                .context("无法对出站数据包进行端到端加密")?;
-
-            // 优先尝试端到端 QUIC 直连通道 (如果对端为 IPv6 且已就绪)
-            if let IpAddr::V6(dst_v6) = dst_ip {
-                if let Some(mesh) = self.quic_mesh.read().await.as_ref() {
-                    if mesh.has_peer(&dst_v6).await
-                        && mesh.send_packet(&dst_v6, &payload_to_send).await.is_ok()
-                    {
-                        record_peer_payload(&self.connections, &client_id, payload_to_send.len())
-                            .await;
-                        return Ok(());
-                    }
-                }
-            }
-
-            if has_active_endpoint {
-                if !p2p_healthy {
-                    anyhow::bail!("P2P endpoint for peer {} is unhealthy", dst_ip);
-                }
-                let packet = DataPacket::new(src_ip, dst_ip, payload_to_send);
-                let data = codec::encode(&P2pDatagram::Data(packet))?;
-                send_to_first_available(&self.socket, &data, &endpoints).await?;
-                record_peer_payload(&self.connections, &client_id, data.len()).await;
-                Ok(())
-            } else {
-                let packet = DataPacket::new(src_ip, dst_ip, payload_to_send);
-                let data = codec::encode(&P2pDatagram::Data(packet))?;
-                send_to_all_candidates(&self.socket, &data, &endpoints).await?;
-                anyhow::bail!("No validated P2P endpoint for peer {}", dst_ip)
-            }
-        } else {
-            anyhow::bail!("No connection to peer {}", dst_ip)
+        let secure = {
+            let connections = self.connections.read().await;
+            connections
+                .get(&client_id)
+                .map(|connection| connection.secure.clone())
         }
+        .ok_or_else(|| anyhow::anyhow!("No connection to peer {dst_ip}"))?;
+
+        let (destination, data) = secure
+            .seal(payload)
+            .await
+            .context("对等节点尚无已确认的 Secure Session v2，拒绝发送数据")?;
+
+        // QUIC is only a transport here; the same v2 ciphertext is required on
+        // every path so relay or direct transport cannot downgrade protection.
+        if let IpAddr::V6(dst_v6) = dst_ip {
+            if let Some(mesh) = self.quic_mesh.read().await.as_ref() {
+                if mesh.has_peer(&dst_v6).await && mesh.send_packet(&dst_v6, &data).await.is_ok() {
+                    record_peer_payload(&self.connections, &client_id, data.len()).await;
+                    return Ok(());
+                }
+            }
+        }
+
+        self.socket
+            .send_to(&data, destination)
+            .await
+            .with_context(|| format!("无法向对等节点 {dst_ip} 发送 Secure Session v2 数据包"))?;
+        record_peer_payload(&self.connections, &client_id, data.len()).await;
+        Ok(())
     }
 
     /// 接收数据包 (支持 IPv4 / IPv6)
@@ -429,6 +426,27 @@ impl P2pEngine {
                 .is_some()
         } else {
             false
+        }
+    }
+
+    /// Whether the peer has completed Secure Session v2 key confirmation.
+    pub async fn has_established_session_by_ip(&self, ip: IpAddr) -> bool {
+        let client_id = {
+            let idx = self.ip_index.read().await;
+            idx.get(&ip).cloned()
+        };
+        let Some(client_id) = client_id else {
+            return false;
+        };
+        let secure = {
+            let connections = self.connections.read().await;
+            connections
+                .get(&client_id)
+                .map(|connection| connection.secure.clone())
+        };
+        match secure {
+            Some(secure) => secure.is_established().await,
+            None => false,
         }
     }
 
@@ -582,6 +600,100 @@ impl P2pEngine {
     }
 }
 
+fn spawn_secure_initiator(
+    socket: Arc<UdpSocket>,
+    connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    client_id: String,
+    secure: Arc<SecurePeerState>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let endpoints = {
+                let connections = connections.read().await;
+                let Some(connection) = connections.get(&client_id) else {
+                    return;
+                };
+                if !Arc::ptr_eq(&connection.secure, &secure) {
+                    return;
+                }
+                connection.endpoints.clone()
+            };
+
+            if secure.is_established().await {
+                return;
+            }
+
+            match secure.initiate_frame().await {
+                Ok(Some(frame)) => {
+                    for endpoint in endpoints {
+                        if let Err(error) = socket.send_to(&frame, endpoint).await {
+                            tracing::debug!(
+                                "无法向节点 {} 的候选地址 {} 发送 Secure Session v2 HELLO: {}",
+                                client_id,
+                                endpoint,
+                                error
+                            );
+                        }
+                    }
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!("无法为节点 {} 启动 Secure Session v2: {error}", client_id);
+                }
+            }
+
+            sleep(SECURE_HANDSHAKE_RETRY_INTERVAL).await;
+        }
+    });
+}
+
+fn canonical_udp_endpoint(endpoint: SocketAddr) -> SocketAddr {
+    match endpoint {
+        SocketAddr::V6(addr) => match addr.ip().to_ipv4_mapped() {
+            Some(ipv4) => SocketAddr::new(IpAddr::V4(ipv4), addr.port()),
+            None => endpoint,
+        },
+        SocketAddr::V4(_) => endpoint,
+    }
+}
+
+async fn peer_id_for_endpoint(
+    connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
+    endpoint: SocketAddr,
+) -> Option<String> {
+    let endpoint = canonical_udp_endpoint(endpoint);
+    let connections = connections.read().await;
+    connections.iter().find_map(|(client_id, connection)| {
+        connection
+            .endpoints
+            .iter()
+            .copied()
+            .map(canonical_udp_endpoint)
+            .any(|candidate| candidate == endpoint)
+            .then(|| client_id.clone())
+    })
+}
+
+async fn peer_accepts_endpoint(
+    connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
+    client_id: &str,
+    endpoint: SocketAddr,
+) -> bool {
+    let endpoint = canonical_udp_endpoint(endpoint);
+    let connections = connections.read().await;
+    connections
+        .get(client_id)
+        .map(|connection| {
+            connection
+                .endpoints
+                .iter()
+                .copied()
+                .map(canonical_udp_endpoint)
+                .any(|candidate| candidate == endpoint)
+        })
+        .unwrap_or(false)
+}
+
 fn spawn_udp_receiver(
     socket: Arc<UdpSocket>,
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
@@ -627,6 +739,23 @@ async fn dispatch_udp_packet(
     addr: SocketAddr,
     bytes: &[u8],
 ) {
+    if bytes.starts_with(&CONTROL_MAGIC) {
+        match decode_control(bytes) {
+            Ok(message) => {
+                dispatch_secure_control(socket, connections, addr, message).await;
+            }
+            Err(error) => {
+                tracing::debug!("丢弃来自 {addr} 的非法 Secure Session v2 控制帧: {error}");
+            }
+        }
+        return;
+    }
+
+    if is_data_packet(bytes) {
+        dispatch_secure_data(connections, incoming_tx, addr, bytes).await;
+        return;
+    }
+
     if let Ok(datagram) = codec::decode::<P2pDatagram>(bytes) {
         dispatch_p2p_datagram(
             socket,
@@ -644,6 +773,95 @@ async fn dispatch_udp_packet(
     } else {
         tracing::warn!("无法反序列化来自 {} 的数据包", addr);
     }
+}
+
+async fn dispatch_secure_control(
+    socket: &UdpSocket,
+    connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
+    addr: SocketAddr,
+    message: fuckipv6_secure_session::wire::ControlMessage,
+) {
+    let Some(client_id) = peer_id_for_endpoint(connections, addr).await else {
+        tracing::debug!("丢弃来自未注册端点的 Secure Session v2 控制帧: {addr}");
+        return;
+    };
+
+    let secure = {
+        let connections = connections.read().await;
+        connections
+            .get(&client_id)
+            .map(|connection| connection.secure.clone())
+    };
+    let Some(secure) = secure else {
+        return;
+    };
+
+    match secure.handle_control(addr, message).await {
+        Ok(actions) => {
+            update_peer_endpoint(connections, &client_id, addr).await;
+            record_peer_inbound(connections, &client_id).await;
+            for action in actions {
+                tracing::debug!(
+                    "发送 Secure Session v2 {} 到 {} (节点 {})",
+                    action.kind,
+                    action.destination,
+                    client_id
+                );
+                if let Err(error) = socket.send_to(&action.frame, action.destination).await {
+                    tracing::warn!(
+                        "无法向节点 {} 发送 Secure Session v2 {}: {}",
+                        client_id,
+                        action.kind,
+                        error
+                    );
+                }
+            }
+            if secure.is_established().await {
+                tracing::info!("Secure Session v2 已与节点 {} 建立", client_id);
+            }
+        }
+        Err(error) => {
+            tracing::debug!("拒绝来自 {addr} 的 Secure Session v2 控制帧: {error}");
+        }
+    }
+}
+
+async fn dispatch_secure_data(
+    connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
+    incoming_tx: &mpsc::UnboundedSender<IncomingPacket>,
+    addr: SocketAddr,
+    bytes: &[u8],
+) {
+    let Some(client_id) = peer_id_for_endpoint(connections, addr).await else {
+        tracing::debug!("丢弃来自未注册端点的 Secure Session v2 数据帧: {addr}");
+        return;
+    };
+
+    let (secure, src_ip) = {
+        let connections = connections.read().await;
+        let Some(connection) = connections.get(&client_id) else {
+            return;
+        };
+        (
+            connection.secure.clone(),
+            connection
+                .peer_info
+                .virtual_ips
+                .primary_ip()
+                .unwrap_or(IpAddr::V6(connection.peer_info.virtual_ip)),
+        )
+    };
+
+    if !secure.is_established().await {
+        tracing::debug!("丢弃节点 {client_id} 在握手完成前发送的数据帧");
+        return;
+    }
+
+    update_peer_endpoint(connections, &client_id, addr).await;
+    // `recv` intentionally exposes ciphertext. The production event loop calls
+    // `decrypt_from_peer`, which performs AEAD authentication and replay checks
+    // before any packet reaches the TUN/ACL path.
+    let _ = incoming_tx.send((src_ip, bytes.to_vec()));
 }
 
 async fn dispatch_legacy_data_packet(
@@ -668,24 +886,11 @@ async fn dispatch_p2p_datagram(
     datagram: P2pDatagram,
 ) {
     match datagram {
-        P2pDatagram::Data(packet) => {
-            let client_id = {
-                let idx = ip_index.read().await;
-                idx.get(&packet.src_ip).cloned()
-            };
-            if let Some(ref id) = client_id {
-                update_peer_endpoint(connections, id, addr).await;
-                record_peer_payload(connections, id, packet.payload.len()).await;
-            }
-            tracing::debug!(
-                "Received packet from {} -> {}",
-                packet.src_ip,
-                packet.dst_ip
-            );
-            // Decryption is deliberately centralized in `decrypt_from_peer`
-            // so no receive path can accidentally treat unauthenticated bytes as
-            // validated traffic.
-            let _ = incoming_tx.send((packet.src_ip, packet.payload));
+        P2pDatagram::Data(_) => {
+            // Legacy data carried static-X25519 ciphertext without the v2
+            // transcript confirmation and replay window. Never feed it into the
+            // production receive queue, even if it decodes successfully.
+            tracing::debug!("丢弃来自 {addr} 的旧版 P2P 数据包");
         }
         P2pDatagram::Control { src_ip, message } => {
             let client_id = {
@@ -693,8 +898,10 @@ async fn dispatch_p2p_datagram(
                 idx.get(&src_ip).cloned()
             };
             if let Some(ref id) = client_id {
-                update_peer_endpoint(connections, id, addr).await;
-                handle_control_message(connections, id, message).await;
+                if peer_accepts_endpoint(connections, id, addr).await {
+                    update_peer_endpoint(connections, id, addr).await;
+                    handle_control_message(connections, id, message).await;
+                }
             }
         }
         P2pDatagram::Ping { src_ip, timestamp } => {
@@ -703,8 +910,18 @@ async fn dispatch_p2p_datagram(
                 idx.get(&src_ip).cloned()
             };
             if let Some(ref id) = client_id {
-                handle_ping_datagram(socket, connections, local_ip, addr, id, src_ip, timestamp)
+                if peer_accepts_endpoint(connections, id, addr).await {
+                    handle_ping_datagram(
+                        socket,
+                        connections,
+                        local_ip,
+                        addr,
+                        id,
+                        src_ip,
+                        timestamp,
+                    )
                     .await;
+                }
             }
         }
         P2pDatagram::Pong { src_ip, timestamp } => {
@@ -713,8 +930,18 @@ async fn dispatch_p2p_datagram(
                 idx.get(&src_ip).cloned()
             };
             if let Some(ref id) = client_id {
-                handle_pong_datagram(socket, connections, local_ip, addr, id, src_ip, timestamp)
+                if peer_accepts_endpoint(connections, id, addr).await {
+                    handle_pong_datagram(
+                        socket,
+                        connections,
+                        local_ip,
+                        addr,
+                        id,
+                        src_ip,
+                        timestamp,
+                    )
                     .await;
+                }
             }
         }
         P2pDatagram::Onion(cell) => {
@@ -926,73 +1153,6 @@ async fn send_quality_report(
     }
 }
 
-fn endpoint_attempt_order(conn: &PeerConnection) -> Vec<SocketAddr> {
-    let mut endpoints = Vec::with_capacity(conn.endpoints.len());
-
-    if let Some(active) = conn.active_endpoint {
-        endpoints.push(active);
-    }
-
-    for endpoint in &conn.endpoints {
-        if !endpoints.contains(endpoint) {
-            endpoints.push(*endpoint);
-        }
-    }
-
-    endpoints
-}
-
-async fn send_to_first_available(
-    socket: &UdpSocket,
-    data: &[u8],
-    endpoints: &[SocketAddr],
-) -> Result<()> {
-    let mut last_error = None;
-
-    for endpoint in endpoints {
-        match socket.send_to(data, endpoint).await {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                last_error = Some(e);
-            }
-        }
-    }
-
-    if let Some(e) = last_error {
-        Err(e).context("无法发送 UDP 数据包到任何候选端点")
-    } else {
-        anyhow::bail!("没有可用的候选端点")
-    }
-}
-
-async fn send_to_all_candidates(
-    socket: &UdpSocket,
-    data: &[u8],
-    endpoints: &[SocketAddr],
-) -> Result<()> {
-    let mut sent = false;
-    let mut last_error = None;
-
-    for endpoint in endpoints {
-        match socket.send_to(data, endpoint).await {
-            Ok(_) => {
-                sent = true;
-            }
-            Err(e) => {
-                last_error = Some(e);
-            }
-        }
-    }
-
-    if sent {
-        Ok(())
-    } else if let Some(e) = last_error {
-        Err(e).context("无法发送 UDP 数据包到任何候选端点")
-    } else {
-        anyhow::bail!("没有可用的候选端点")
-    }
-}
-
 fn now_micros() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1010,6 +1170,60 @@ mod tests {
     async fn test_p2p_engine_create() -> Result<()> {
         let engine = P2pEngine::new(0).await?;
         assert!(engine.local_addr().port() > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_peer_requires_local_identity_and_virtual_ip() -> Result<()> {
+        let engine = P2pEngine::new(0).await?;
+        let local = Identity::generate()?;
+        let peer = Identity::generate()?;
+        let peer_info = PeerInfo::new(
+            peer.client_id().to_string(),
+            "fd00::2".parse()?,
+            peer.public_key(),
+            vec![SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 49001)],
+            fuckipv6_common::NatType::Open,
+        );
+
+        assert!(engine.add_peer(peer_info.clone()).await.is_err());
+        engine.set_identity(local).await;
+        assert!(engine.add_peer(peer_info.clone()).await.is_err());
+        engine.set_local_ip("fd00::1".parse::<Ipv6Addr>()?).await;
+        engine.add_peer(peer_info).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_before_session_confirmation_fails_closed() -> Result<()> {
+        let engine = P2pEngine::new(0).await?;
+        let local = Identity::generate()?;
+        let peer = Identity::generate()?;
+        let local_ip = "fd00::1".parse::<Ipv6Addr>()?;
+        let peer_ip = "fd00::2".parse::<Ipv6Addr>()?;
+        engine.set_identity(local).await;
+        engine.set_local_ip(local_ip).await;
+        engine
+            .add_peer(PeerInfo::new(
+                peer.client_id().to_string(),
+                peer_ip,
+                peer.public_key(),
+                vec![SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    engine.local_addr().port(),
+                )],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+
+        assert!(engine
+            .send_to(peer_ip, local_ip, b"must not leak")
+            .await
+            .is_err());
+        assert!(engine
+            .decrypt_from_peer(peer_ip, b"must not be accepted")
+            .await
+            .is_err());
         Ok(())
     }
 
@@ -1059,7 +1273,13 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if engine_a.has_active_peer(&ip_b).await && engine_b.has_active_peer(&ip_a).await {
+                if engine_a
+                    .has_established_session_by_ip(IpAddr::V6(ip_b))
+                    .await
+                    && engine_b
+                        .has_established_session_by_ip(IpAddr::V6(ip_a))
+                        .await
+                {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -1091,6 +1311,22 @@ mod tests {
 
         let encrypted = engine_a.encrypt_for_peer(ip_b, &payload).await?;
         assert_eq!(engine_b.decrypt_from_peer(ip_a, &encrypted).await?, payload);
+        assert!(
+            engine_b.decrypt_from_peer(ip_a, &encrypted).await.is_err(),
+            "relay ciphertext replay must be rejected"
+        );
+
+        let mut relay_tampered = encrypted;
+        *relay_tampered
+            .last_mut()
+            .expect("relay ciphertext should not be empty") ^= 0x80;
+        assert!(
+            engine_b
+                .decrypt_from_peer(ip_a, &relay_tampered)
+                .await
+                .is_err(),
+            "tampered relay ciphertext must be rejected"
+        );
 
         let health = tokio::time::timeout(Duration::from_secs(1), async {
             loop {

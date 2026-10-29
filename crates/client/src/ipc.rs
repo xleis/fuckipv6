@@ -779,15 +779,18 @@ mod tests {
     async fn test_ipc_status_and_peers() -> anyhow::Result<()> {
         let stats = StatsCollector::new();
         let p2p = P2pEngine::new(0).await?;
+        let local_identity = fuckipv6_common::crypto::Identity::generate()?;
+        let peer_identity = fuckipv6_common::crypto::Identity::generate()?;
+        p2p.set_identity(local_identity).await;
         let assigned_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1);
         p2p.set_local_ip(assigned_ip).await;
 
         let peer_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 2);
         let endpoint = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 50000);
         p2p.add_peer(PeerInfo::new(
-            "peer".to_string(),
+            peer_identity.client_id().to_string(),
             peer_ip,
-            vec![1; 32],
+            peer_identity.public_key(),
             vec![endpoint],
             NatType::Open,
         ))

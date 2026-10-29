@@ -5,17 +5,17 @@
 //! [`super::connection::P2pEngine`], where one UDP receiver must multiplex
 //! handshake, encrypted data and legacy control traffic.
 //!
-//! Role selection is deterministic: the lexicographically smaller Client ID is
-//! the initiator. This avoids simultaneous-open glare and gives both endpoints
-//! the same receiver-index mapping without adding an unauthenticated negotiation
-//! field to the wire format.
-#![allow(dead_code)] // Removed by the P2pEngine integration in the next commit.
+//! Role selection is deterministic: the lexicographically smaller long-term
+//! Ed25519 public key is the initiator. This avoids simultaneous-open glare and
+//! gives both endpoints the same receiver-index mapping without trusting an
+//! unauthenticated negotiated role field.
 
 use ed25519_dalek::VerifyingKey;
 use fuckipv6_common::PeerInfo;
+#[cfg(test)]
+use fuckipv6_secure_session::driver::DriverStats;
 use fuckipv6_secure_session::driver::{
-    DriverError, DriverStats, InitiatorHandshake, ResponderHandshake, SessionDriver,
-    SessionInstallConfig,
+    DriverError, InitiatorHandshake, ResponderHandshake, SessionDriver, SessionInstallConfig,
 };
 use fuckipv6_secure_session::handshake::{
     ClassicResponder, Ed25519Identity, HandshakeError, Hello,
@@ -66,6 +66,7 @@ pub(crate) enum SecureRuntimeError {
     EmptyEndpointSet,
     #[error("datagram source {actual} is not a registered endpoint for this peer")]
     UnregisteredEndpoint { actual: SocketAddr },
+    #[cfg(test)]
     #[error(
         "datagram source {actual} does not match the authenticated session endpoint {expected}"
     )]
@@ -119,7 +120,6 @@ impl SecurePeerState {
     /// are distinct and that the registered endpoint set is non-empty.
     pub(crate) fn new(
         local_identity: Ed25519Identity,
-        local_client_id: &str,
         local_virtual_ips: &[IpAddr],
         peer: &PeerInfo,
     ) -> Result<Arc<Self>, SecureRuntimeError> {
@@ -151,7 +151,7 @@ impl SecurePeerState {
             ));
         }
 
-        let initiator = local_client_id < peer.client_id.as_str();
+        let initiator = local_identity.verifying_key().as_bytes() < expected_peer.as_bytes();
         let (initiator_public, responder_public) = if initiator {
             (local_identity.verifying_key(), expected_peer)
         } else {
@@ -225,11 +225,13 @@ impl SecurePeerState {
     }
 
     /// Endpoint authenticated by the completed handshake.
+    #[cfg(test)]
     pub(crate) async fn authenticated_peer(&self) -> Option<SocketAddr> {
         self.state.lock().await.authenticated_peer
     }
 
     /// Session identifier for diagnostics and tests.
+    #[cfg(test)]
     pub(crate) async fn session_id(&self) -> Option<[u8; fuckipv6_secure_session::SESSION_ID_LEN]> {
         self.state
             .lock()
@@ -240,6 +242,7 @@ impl SecurePeerState {
     }
 
     /// Driver counters for diagnostics and tests.
+    #[cfg(test)]
     pub(crate) async fn stats(&self) -> Option<DriverStats> {
         self.state
             .lock()
@@ -366,10 +369,13 @@ impl SecurePeerState {
             }
         }
 
-        let mut responder = ClassicResponder::new(self.local_identity.clone(), self.expected_peer)?;
+        let responder = state
+            .responder
+            .as_mut()
+            .ok_or(SecureRuntimeError::InvalidRole)?;
         let issued_at = unix_timestamp()?;
         let (handshake, accept) = ResponderHandshake::accept(
-            &mut responder,
+            responder,
             &hello,
             self.endpoint_context,
             1,
@@ -422,6 +428,7 @@ impl SecurePeerState {
     }
 
     /// Authenticate and decrypt one v2 data datagram from the session endpoint.
+    #[cfg(test)]
     pub(crate) async fn open(
         &self,
         source: SocketAddr,
@@ -444,6 +451,20 @@ impl SecurePeerState {
         Ok(driver.open_in_place(&mut packet, Instant::now())?.to_vec())
     }
 
+    /// Authenticate and decrypt a v2 data datagram carried over a relay.
+    ///
+    /// Relay transports do not expose the peer's original UDP source address,
+    /// so callers must resolve the virtual source IP to the registered peer
+    /// before invoking this method. AEAD authentication and replay protection
+    /// still fail closed.
+    pub(crate) async fn open_from_session(
+        &self,
+        packet: Vec<u8>,
+    ) -> Result<Vec<u8>, SecureRuntimeError> {
+        let mut state = self.state.lock().await;
+        open_with_driver(&mut state, packet)
+    }
+
     fn ensure_registered(&self, source: SocketAddr) -> Result<(), SecureRuntimeError> {
         let source = canonical_endpoint(source);
         if self.registered_endpoints.contains(&source) {
@@ -452,6 +473,17 @@ impl SecurePeerState {
             Err(SecureRuntimeError::UnregisteredEndpoint { actual: source })
         }
     }
+}
+
+fn open_with_driver(
+    state: &mut SecureState,
+    mut packet: Vec<u8>,
+) -> Result<Vec<u8>, SecureRuntimeError> {
+    let driver = state
+        .driver
+        .as_mut()
+        .ok_or(SecureRuntimeError::NotEstablished)?;
+    Ok(driver.open_in_place(&mut packet, Instant::now())?.to_vec())
 }
 
 fn derive_receiver_indices(initiator: &[u8; 32], responder: &[u8; 32]) -> (u32, u32) {
@@ -536,9 +568,8 @@ mod tests {
         let responder_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41002);
         let initiator_ip: IpAddr = "fd00::2".parse().expect("initiator IP");
         let responder_ip: IpAddr = "fd00::1".parse().expect("responder IP");
-        let initiator = SecurePeerState::new(
+        let state_a = SecurePeerState::new(
             initiator_identity.clone(),
-            "a-initiator",
             &[initiator_ip],
             &peer(
                 "b-responder",
@@ -547,10 +578,9 @@ mod tests {
                 responder_addr,
             ),
         )
-        .expect("initiator state");
-        let responder = SecurePeerState::new(
+        .expect("state A");
+        let state_b = SecurePeerState::new(
             responder_identity,
-            "b-responder",
             &[responder_ip],
             &peer(
                 "a-initiator",
@@ -559,8 +589,12 @@ mod tests {
                 initiator_addr,
             ),
         )
-        .expect("responder state");
-        (initiator, responder, initiator_addr, responder_addr)
+        .expect("state B");
+        if state_a.is_initiator() {
+            (state_a, state_b, initiator_addr, responder_addr)
+        } else {
+            (state_b, state_a, responder_addr, initiator_addr)
+        }
     }
 
     async fn establish(
@@ -612,6 +646,8 @@ mod tests {
         assert_eq!(initiator.session_id().await, responder.session_id().await);
         assert!(initiator.is_established().await);
         assert!(responder.is_established().await);
+        assert_eq!(initiator.authenticated_peer().await, Some(responder_addr));
+        assert_eq!(responder.authenticated_peer().await, Some(initiator_addr));
 
         let (destination, packet) = initiator.seal(b"request").await.expect("seal request");
         assert_eq!(destination, responder_addr);

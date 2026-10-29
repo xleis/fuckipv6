@@ -52,6 +52,15 @@ cargo test --workspace
 cargo build --release
 ```
 
+For changes to `crates/secure-session`, install `cargo-fuzz` once and run the bounded fuzz smoke suite:
+
+```bash
+cargo install cargo-fuzz --locked
+FUZZ_RUNS=2000 ./scripts/fuzz-smoke.sh
+```
+
+The script pins a coherent nightly toolchain for sanitizer flags and is the same entry used by the fuzz CI workflow. A crash artifact must become a minimized regression test before the underlying issue is fixed.
+
 For networking changes, also test the relevant runtime path:
 
 - Coordinator registration and WebSocket reconnect.

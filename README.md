@@ -1,16 +1,24 @@
 # fuckipv6 - IPv6虚拟局域网组网软件
 
-基于 IPv4/IPv6 双栈虚拟地址的组网软件，支持 UDP/QUIC P2P 直连、多中继 fallback 与智能分流。
+基于 IPv4/IPv6 双栈虚拟地址的组网软件，当前可直接用于受控环境组网。洋葱路由、Kademlia DHT 与分块传输已作为 P2P 基础设施接入，但尚未形成完整的用户产品流程。
 
-## ✨ 特性
+## ✨ 核心能力
 
 - 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
-- 🔄 **Multi-Relay 拓扑与智能选路**: 并发多中继探测与 RTT 自动寻优，双重兜底保活
+- 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
 - 🛡️ **安全与 ACL 策略**: WireGuard 级端到端加密 (ChaCha20-Poly1305 + Blake3)、声明式入出站 ACL、Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
-- 🔒 **身份与鉴权**: Ed25519 签名验证、Coordinator JWT Web/API 鉴权
-- 🌐 **全平台自主化**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（免外部依赖）
-- 📊 **可观测性**: 现代化 Web 管理面板、实时拓扑与流量监控、本地 IPC 控制台
+- 🔒 **身份与鉴权**: Ed25519 签名验证；Coordinator Web/API 可配置 JWT，客户端本地 WebUI/API 当前免密并只应绑定本机或受信网络
+- 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
+- 📊 **可观测性**: Coordinator Web 管理面板、客户端 WebUI/浏览器应用窗口、实时拓扑、流量监控与本地IPC控制台
+
+## 📌 能力状态
+
+| 状态 | 当前范围 |
+|------|----------|
+| **可直接使用** | 双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、Coordinator WebUI、客户端 CLI/本地 WebUI、`host`/`join` 与多网络配置 |
+| **基础设施已接入（待产品化）** | 多中继连接时择优、3-Hop 洋葱电路、Kademlia DHT、Blake3 分块传输；已有引擎接入与单元测试，但缺少完整 CLI/WebUI 用户流程 |
+| **尚未产品化** | Tauri 原生桌面应用、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
 
 ## 📖 快速开始
 
@@ -121,7 +129,7 @@ fuckipv6/
 
 ## 🎯 开发状态
 
-### ✅ Phase 1 - MVP (已完成)
+### ✅ Phase 1 - 核心组网（可直接使用）
 
 - [x] 信令服务器 (WebSocket)
 - [x] IPv6地址分配器
@@ -148,7 +156,7 @@ fuckipv6/
 - `fuckipv6 join/list/default/connect/leave` 管理并切换多个已保存网络配置
 - `http://<coordinator>:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
 
-### ✅ Phase 2 - 核心功能（已完成）
+### ✅ Phase 2 - 传输与穿透（可直接使用）
 
 - [x] 基础UDP打洞探测
 - [x] 完整NAT类型检测（STUN/RFC5780）
@@ -160,7 +168,7 @@ fuckipv6/
 - [x] Windows WinTun 支持
 - [x] macOS utun 支持
 
-### ✅ Phase 3 - 优化和 UI（已完成）
+### ✅ Phase 3 - 管理与可观测性（可直接使用）
 
 - [x] Web管理界面（在线节点/API）
 - [x] 性能优化
@@ -175,21 +183,21 @@ fuckipv6/
 - [x] 监控和日志
 - [x] 部署工具（systemd、安装脚本、Docker、CI、Release 自动发布）
 
-### ✅ Phase 5 - 企业级能力（已完成）
+### ✅ Phase 5 - 安全与策略（基础能力可用）
 
 - [x] X25519 + ChaCha20-Poly1305 端到端加密与 Blake3 KDF
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
-- [x] IPv4/IPv6 双栈虚拟地址与 JWT 鉴权
+- [x] IPv4/IPv6 双栈虚拟地址与 Coordinator JWT 鉴权
 - [x] 声明式 ACL、准入黑名单与多中继智能选路
 
-### ✅ Phase 6 - 下一代架构（已完成）
+### 🚧 Phase 6 - 下一代能力（基础设施已接入，待产品化）
 
-- [x] 智能分流（MeshOnly / BypassMainland / GlobalProxy）与 Exit Node
+- [x] 智能分流（MeshOnly / BypassMainland / GlobalProxy）与 Linux Exit Node 内核转发/NAT
 - [x] `fuckipv6 host` 一键建网与 `fk://` 邀请票据
 - [x] 多网络并发、独立 TUN 与路由隔离
-- [x] 自适应 WebUI/桌面模式与统一控制台
-- [x] 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输基础设施
+- [x] 自适应 WebUI 与浏览器应用窗口（不是 Tauri 原生桌面）
+- [x] 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输基础设施（引擎与测试已接入，尚无完整用户操作流程）
 
 生产发布前仍建议完成真实跨公网/跨 NAT、Windows/macOS 实机、更大规模 WAN 压测和外部安全审计。
 

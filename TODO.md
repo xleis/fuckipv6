@@ -10,7 +10,12 @@
 - [x] **FC-04 真实运行时快照**：WebUI 状态、流量和链路数据优先来自 IPC 运行时快照，不再用全零或模拟值代替。
 - [x] **FC-05 Linux 策略路由生命周期**：在 Linux 启动、路由热切换和退出时安装/更新/回滚 `LinuxRouteManager`。
 - [x] **FC-06 UI 真实性**：对后端未支持的操作禁用或明确标识“仅预览”，成功提示只在后端确认后显示。
-- [ ] **FC-07 文档对齐**：区分“可直接使用”“基础设施”“尚未产品化”，同步 README、NEXTGEN_TODO 与 API 文档。
+- [ ] **FC-07 文档对齐**：区分“可直接使用”“基础设施已接入（待产品化）”“尚未产品化”，同步 README、NEXTGEN_TODO、API 与架构文档。
+  - [x] README：标注核心能力、能力边界与各阶段成熟度。
+  - [x] CHANGELOG：纠正 Tauri、JWT、Exit Node 与 Overlay 基础设施的历史描述。
+  - [ ] NEXTGEN_TODO：修正用户态 NAT、Tauri 原生桌面和 Agent 5 “已完成”口径。
+  - [ ] API：补充客户端 WebUI/API、免密边界、状态字段与控制接口。
+  - [ ] ARCHITECTURE：同步当前实现边界与“基础设施已接入”状态。
 - [ ] **FC-08 回归验证**：补充单元/集成测试，执行格式、Clippy、全工作区测试及 Linux/Windows 编译检查。
 
 ## 当前状态总结 ✅
@@ -690,11 +695,11 @@ file = "/var/log/fuckipv6.log"
 - [x] 出口节点访问控制白名单与 `--exit-node` / `--routing-mode` CLI 参数全打通
 - [x] 境外服务器 `relay.xlei.cc` 出口网关、内核 IP 转发与 MASQUERADE NAT 规则实测上线
 
-### 3. Agent 3: 单一二进制自适应双模 (Tauri 原生桌面 + Axum WebUI) ✅ **已完成**
+### 3. Agent 3: 单一二进制自适应双模 (浏览器应用窗口 + Axum WebUI) ✅ **可直接使用**
 - [x] 启动时环境智能检测（Wayland / X11 / Headless / Windows 服务）
 - [x] 内嵌现代可视化响应式控制台，无头环境自动挂载 WebUI (`0.0.0.0:8088`)
 - [x] 零停机热切换分流模式与出口节点的 REST API (`/api/status`, `/api/peers`, `/api/routing`)
-- [x] 桌面环境自动桥接 Tauri 原生 GUI 窗口与控制台提示
+- [x] 桌面环境通过系统浏览器应用窗口或默认浏览器打开 WebUI；Tauri 原生桌面尚未接入
 
 ### 4. Agent 4: 对称对等节点网络与一键建网 (Symmetric Mesh) ✅ **已完成**
 - [x] 协调端与 QUIC 中继 Actor 嵌入客户端主程序，节点对称化
@@ -702,17 +707,21 @@ file = "/var/log/fuckipv6.log"
 - [x] 一键建网命令 `fuckipv6 host --name <NAME>` 与加入命令 `fuckipv6 join <Ticket>`
 - [x] 多网络 (Multi-Network) 并发共存与路由隔离 (`fuckipv6 up [NETWORKS...]`, `fk-<net>` 隔离 TUN 与独立路由)
 
-### 5. Agent 5: 洋葱多跳路由与海量 P2P 基础设施 (暗网级) ✅ **已完成**
+### 5. Agent 5: 洋葱多跳路由与海量 P2P 基础设施 (暗网级) 🚧 **基础设施已接入，待产品化**
 - [x] 3-Hop 电路协商协议与多层嵌套洋葱解密（洋葱剥皮）
 - [x] Kademlia DHT 无中心分布式寻址与 TTL 键值存储
-- [x] 基于 Blake3 分块的去中心化 P2P 文件传输与公钥即地址 E2EE 签名加密通信
+- [x] 基于 Blake3 分块的传输原语、分块组装与公钥寻址 E2EE 消息基础设施（尚无完整文件浏览/发布/拉取产品流程）
 - [x] 客户端统一 Overlay 调度引擎集成与全协议单元测试通过
 
 ---
 
 ## 总结
 
-✅ **已完成：** Phase 1 MVP、核心 NAT/P2P/relay fallback、Linux/macOS/Windows TUN 支持、WireGuard 级 E2EE 加密、ICE 候选端点收集、Windows 纯 Rust IP Helper 路由、Web/CLI 观测、双栈支持、JWT 鉴权、公网跨广域网实测双向互通、Phase 6 下一代全能隐私网络架构演进（智能分流、Exit Node、自适应双模、对称网络、洋葱基础设施）、现代化 Apple/Linear 极简拓扑设计、全量中文日志及纯 SVG 矢量右键菜单。
+**可直接使用：** Phase 1 核心组网、UDP/QUIC P2P、QUIC/信令中继 fallback、Linux/macOS/Windows TUN、E2EE、ICE/NAT 穿透、Coordinator JWT、Web/CLI 观测、智能分流、Linux Exit Node 内核转发/NAT、浏览器 WebUI 与对称建网。
+
+**基础设施已接入（待产品化）：** 多中继连接时择优、3-Hop 洋葱路由、Kademlia DHT、Blake3 分块传输。已有引擎接入和单测覆盖，但缺少完整 CLI/WebUI 用户流程。
+
+**尚未产品化：** Tauri 原生桌面、用户态 NAT、其他平台与 Linux 同等级的 Exit Node 验证。生产上线前仍需真实跨公网/跨 NAT、Windows/macOS 实机、更大规模 WAN 压测和外部安全审计。
 
 ---
 

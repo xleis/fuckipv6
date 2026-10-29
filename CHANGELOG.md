@@ -13,6 +13,13 @@ All notable changes are documented here. The project follows semantic versioning
 ### Added
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 
+### Documentation
+- 明确能力成熟度口径：区分“可直接使用”“基础设施已接入（待产品化）”与“尚未产品化”。
+- 修正桌面入口描述：当前使用系统浏览器应用窗口或默认浏览器打开 WebUI，尚未接入 Tauri 原生桌面。
+- 明确 JWT 仅用于 Coordinator Web/API；客户端本地 WebUI/API 当前免密，只适合本机或受信网络。
+- 明确 Exit Node 当前依赖 Linux 内核转发与 NAT 规则，不是用户态 NAT；其他平台尚未证明同等级可用。
+- 明确 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输是已接入且具备测试的基础设施，不是完整用户产品。
+
 ## 0.3.0 - 2026-10-29
 
 ### Added
@@ -22,11 +29,11 @@ All notable changes are documented here. The project follows semantic versioning
   - 画布节点、在线列表及日志终端全量支持纯 SVG 矢量图标高档右键快捷菜单。
 - **下一代核心架构演进 (Phase 6)**:
   - 纯 Rust CN-CIDR / GeoIP 基数树 Trie 智能分流与规则引擎 (`MeshOnly`, `BypassMainland`, `GlobalProxy`)。
-  - Exit Node 出口网关管理，支持白名单鉴权、内核 NAT 转发及远程云服务器一键代理。
-  - 单一二进制自适应双模：无头服务器端自动挂载 Axum WebUI，桌面端自动桥接 Tauri 原生窗口。
+  - Exit Node 出口网关管理，支持白名单鉴权与 Linux 内核转发/NAT；其他平台的同等级产品化仍未验证。
+  - 单一二进制自适应双模：无头服务器端自动挂载 Axum WebUI，桌面端使用系统浏览器应用窗口，不包含 Tauri 原生窗口。
   - 节点完全对称 (Symmetric Mesh)：客户端内嵌 Coordinator Actor，提供一键建网 (`fuckipv6 host`) 与 Ticket 凭证解析 (`fuckipv6 join fk://...`)。
   - 多网络隔离并发 (`fuckipv6 up`, `fk-<net>` 独立 TUN 与路由隔离)。
-  - 3-Hop 洋葱多跳路由协议、Kademlia DHT 无中心分布式寻址、Blake3 分块 P2P 加密通信。
+  - 3-Hop 洋葱多跳路由、Kademlia DHT 与 Blake3 分块传输基础设施（已接入 P2P 引擎，完整用户流程待产品化）。
 - **全系统日志中文本地化**:
   - 协调端与客户端运行日志、信令交互、TUN 创建与路由事件全量翻译为规范易读中文。
   - WebUI 日志解析器内置中文字典智能归一化系统级日志。
@@ -49,10 +56,10 @@ All notable changes are documented here. The project follows semantic versioning
 - 高级 ICE 候选端点收集（本地网卡、STUN WAN、UPnP IGD、RFC 6886 NAT-PMP）。
 - Windows 平台纯 Rust IP Helper 替代外部 netsh，集成内嵌自解压 WinTun 驱动。
 - 双栈 IPv4/IPv6 虚拟网络协同分配。
-- HMAC-SHA256 JWT Token 鉴权与 Web 管理界面/API 访问控制。
+- Coordinator Web 管理界面/API 的 HMAC-SHA256 JWT Token 鉴权；客户端本地 API 不在此范围内。
 - 声明式入站/出站 ACL 访问控制与黑名单实时踢出机制。
 - 多中继拓扑并发测速与最优选路。
-- 公网真实 WAN 节点双向连通性测试通过 (`relay.xlei.cc`)。
+- 历史记录：公网 WAN 节点 (`relay.xlei.cc`) 曾完成双向连通性验证；该结果不是本仓库可重复自动验证的测试。
 
 ---
 

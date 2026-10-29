@@ -1,0 +1,32 @@
+{
+  "benchmark": "secure-session-v2-batch-fastpath",
+  "command": "taskset -c 2 cargo bench -p fuckipv6-secure-session --bench dataplane -- batch --sample-size 20 --warm-up-time 1 --measurement-time 3 --noplot",
+  "cpu": "AMD Ryzen 7 5800H with Radeon Graphics",
+  "pinned_cpu": 2,
+  "logical_cpus": 16,
+  "machine": "x86_64",
+  "kernel": "7.2.11-zen1-1-zen",
+  "load_average": [
+    4.69,
+    4.75,
+    5.34
+  ],
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "criterion": "0.5.1",
+  "base_commit": "aab695a4db17c3e511cec24f3adcdfabf3507e18",
+  "git_worktree": "dirty",
+  "timestamp_utc": "20261029T201718Z",
+  "batch_packets": 32,
+  "payload_bytes": [
+    1280,
+    1420
+  ],
+  "sample_size": 20,
+  "warm_up_seconds": 1,
+  "measurement_seconds": 3,
+  "quick_mode": false,
+  "release_gate": false,
+  "bench_source_sha256": "609c85d8bd5818229c74dba4d7797ab75dc81bcaf4acf041bdc7168692c7a965",
+  "raw_output_sha256": "fdada274ab4ba5d3f3bc2f4a3670009304c5436ff0e4a894c443f4d3fa5ebd1e"
+}

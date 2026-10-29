@@ -333,6 +333,61 @@ impl SendCipher {
         self.next_send_counter += 1;
         Ok(())
     }
+
+    /// Seal multiple independent plaintexts into one preallocated contiguous buffer.
+    ///
+    /// Packet `i` begins at `packets[i * stride]`, and each slot must be large
+    /// enough for its header, plaintext and authentication tag. The method
+    /// performs all layout and counter checks before writing any packet, so a
+    /// layout error does not partially advance the send counter. The caller owns
+    /// all input and output storage; this method performs no per-packet
+    /// allocation.
+    ///
+    /// Returns the number of sealed packets.
+    pub fn seal_batch(
+        &mut self,
+        plaintexts: &[&[u8]],
+        packets: &mut [u8],
+        stride: usize,
+    ) -> Result<usize, SessionError> {
+        if plaintexts.is_empty() {
+            return Ok(0);
+        }
+        let packet_count =
+            u64::try_from(plaintexts.len()).map_err(|_| SessionError::PacketTooLong)?;
+        if self
+            .next_send_counter
+            .checked_add(packet_count)
+            .is_none_or(|next| next > MAX_PACKETS_PER_EPOCH)
+        {
+            return Err(SessionError::CounterExhausted);
+        }
+
+        for (index, plaintext) in plaintexts.iter().enumerate() {
+            let packet_len = data_packet_len(plaintext.len())?;
+            if packet_len > stride {
+                return Err(SessionError::BufferTooSmall);
+            }
+            let offset = index
+                .checked_mul(stride)
+                .ok_or(SessionError::PacketTooLong)?;
+            let end = offset
+                .checked_add(stride)
+                .ok_or(SessionError::PacketTooLong)?;
+            if end > packets.len() {
+                return Err(SessionError::BufferTooSmall);
+            }
+        }
+
+        for (index, plaintext) in plaintexts.iter().enumerate() {
+            let offset = index
+                .checked_mul(stride)
+                .ok_or(SessionError::PacketTooLong)?;
+            let slot = &mut packets[offset..offset + stride];
+            self.seal(plaintext, slot)?;
+        }
+        Ok(plaintexts.len())
+    }
 }
 
 /// Receiving state for one direction of a v2 session epoch.
@@ -461,6 +516,40 @@ impl ReceiveCipher {
         self.replay_window.mark_authenticated(header.counter)?;
         Ok(plaintext)
     }
+
+    /// Authenticate and decrypt multiple packets from one preallocated buffer.
+    ///
+    /// `packet_lengths[i]` is the exact datagram length at
+    /// `packets[i * stride]`. The complete layout is validated before any
+    /// packet is decrypted. Authentication errors are fail-fast: packets before
+    /// the failing index may already be decrypted and marked in the replay
+    /// window, while the failing packet does not consume its counter. The caller
+    /// owns all storage; this method performs no per-packet allocation.
+    ///
+    /// Returns the total number of authenticated plaintext bytes.
+    pub fn open_batch_in_place(
+        &mut self,
+        packets: &mut [u8],
+        packet_lengths: &[usize],
+        stride: usize,
+    ) -> Result<usize, SessionError> {
+        if packet_lengths.is_empty() {
+            return Ok(0);
+        }
+        validate_batch_layout(packets.len(), packet_lengths, stride)?;
+
+        let mut plaintext_bytes = 0usize;
+        for (index, packet_len) in packet_lengths.iter().copied().enumerate() {
+            let offset = index
+                .checked_mul(stride)
+                .ok_or(SessionError::PacketTooLong)?;
+            let plaintext = self.open_in_place(&mut packets[offset..offset + packet_len])?;
+            plaintext_bytes = plaintext_bytes
+                .checked_add(plaintext.len())
+                .ok_or(SessionError::PacketTooLong)?;
+        }
+        Ok(plaintext_bytes)
+    }
 }
 
 struct RetiredReceiveCipher {
@@ -529,6 +618,59 @@ impl EpochSession {
             .checked_add(plaintext.len() as u64)
             .ok_or(SessionError::RekeyRequired)?;
         Ok(packet_len)
+    }
+
+    /// Seal multiple packets into one preallocated contiguous buffer.
+    ///
+    /// All plaintext lengths are charged to the active epoch before any packet
+    /// is written. The buffer layout is identical to
+    /// [`SendCipher::seal_batch`]; no per-packet allocation is performed.
+    pub fn seal_batch(
+        &mut self,
+        plaintexts: &[&[u8]],
+        packets: &mut [u8],
+        stride: usize,
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        let plaintext_bytes = plaintexts.iter().try_fold(0u64, |total, plaintext| {
+            total.checked_add(plaintext.len() as u64)
+        });
+        let plaintext_bytes = plaintext_bytes.ok_or(SessionError::RekeyRequired)?;
+        self.ensure_active_epoch_bytes(plaintext_bytes, now)?;
+        let sealed = self.active_send.seal_batch(plaintexts, packets, stride)?;
+        self.sent_bytes = self
+            .sent_bytes
+            .checked_add(plaintext_bytes)
+            .ok_or(SessionError::RekeyRequired)?;
+        Ok(sealed)
+    }
+
+    /// Authenticate and decrypt a batch, routing each packet to its epoch.
+    ///
+    /// The complete buffer layout is validated first. Per-packet authentication
+    /// is fail-fast with the same committed-prefix semantics as
+    /// [`ReceiveCipher::open_batch_in_place`]. No per-packet allocation is
+    /// performed.
+    pub fn open_batch_in_place(
+        &mut self,
+        packets: &mut [u8],
+        packet_lengths: &[usize],
+        stride: usize,
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        validate_batch_layout(packets.len(), packet_lengths, stride)?;
+        self.prune_retired(now);
+        let mut plaintext_bytes = 0usize;
+        for (index, packet_len) in packet_lengths.iter().copied().enumerate() {
+            let offset = index
+                .checked_mul(stride)
+                .ok_or(SessionError::PacketTooLong)?;
+            let plaintext = self.open_in_place(&mut packets[offset..offset + packet_len], now)?;
+            plaintext_bytes = plaintext_bytes
+                .checked_add(plaintext.len())
+                .ok_or(SessionError::PacketTooLong)?;
+        }
+        Ok(plaintext_bytes)
     }
 
     /// Authenticate and decrypt a packet under the active or a retained epoch.
@@ -616,12 +758,20 @@ impl EpochSession {
         plaintext_len: usize,
         now: Instant,
     ) -> Result<(), SessionError> {
+        self.ensure_active_epoch_bytes(plaintext_len as u64, now)
+    }
+
+    fn ensure_active_epoch_bytes(
+        &self,
+        plaintext_len: u64,
+        now: Instant,
+    ) -> Result<(), SessionError> {
         if self.rekey_required(now) {
             return Err(SessionError::RekeyRequired);
         }
         let next_bytes = self
             .sent_bytes
-            .checked_add(plaintext_len as u64)
+            .checked_add(plaintext_len)
             .ok_or(SessionError::RekeyRequired)?;
         if next_bytes > MAX_EPOCH_BYTES {
             return Err(SessionError::RekeyRequired);
@@ -664,6 +814,34 @@ fn validate_epoch_pair(send: &SendCipher, receive: &ReceiveCipher) -> Result<(),
 
 fn receive_matches(receive: &ReceiveCipher, header: DataHeader) -> bool {
     receive.epoch == header.epoch && receive.local_receiver_index == header.receiver_index
+}
+
+fn validate_batch_layout(
+    buffer_len: usize,
+    packet_lengths: &[usize],
+    stride: usize,
+) -> Result<(), SessionError> {
+    for (index, packet_len) in packet_lengths.iter().copied().enumerate() {
+        if packet_len < MIN_DATA_PACKET_LEN {
+            return Err(SessionError::PacketTooShort);
+        }
+        if packet_len > MAX_DATA_PACKET_LEN {
+            return Err(SessionError::PacketTooLong);
+        }
+        if packet_len > stride {
+            return Err(SessionError::BufferTooSmall);
+        }
+        let offset = index
+            .checked_mul(stride)
+            .ok_or(SessionError::PacketTooLong)?;
+        let end = offset
+            .checked_add(packet_len)
+            .ok_or(SessionError::PacketTooLong)?;
+        if end > buffer_len {
+            return Err(SessionError::BufferTooSmall);
+        }
+    }
+    Ok(())
 }
 
 fn data_packet_len(plaintext_len: usize) -> Result<usize, SessionError> {
@@ -1131,6 +1309,126 @@ mod tests {
                 .expect_err("direction reflection must fail"),
             SessionError::AuthenticationFailed
         );
+    }
+
+    #[test]
+    fn batch_cipher_paths_use_one_preallocated_contiguous_buffer() {
+        let plaintexts: [&[u8]; 3] = [b"alpha", b"batch-payload", b"omega"];
+        let stride = 64usize;
+        let mut packets = vec![0u8; stride * plaintexts.len()];
+        let mut sender = SendCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        assert_eq!(
+            sender
+                .seal_batch(&plaintexts, &mut packets, stride)
+                .expect("seal contiguous batch"),
+            plaintexts.len()
+        );
+        assert_eq!(sender.next_send_counter(), plaintexts.len() as u64);
+
+        let packet_lengths: Vec<usize> = plaintexts
+            .iter()
+            .map(|plaintext| DATA_HEADER_LEN + plaintext.len() + AEAD_TAG_LEN)
+            .collect();
+        for (index, packet_len) in packet_lengths.iter().copied().enumerate() {
+            let offset = index * stride;
+            let header = DataHeader::decode(&packets[offset..offset + packet_len])
+                .expect("decode batch packet");
+            assert_eq!(header.counter, index as u64);
+            assert_eq!(header.receiver_index, 0x0102_0304);
+        }
+
+        let mut receiver = ReceiveCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut packets, &packet_lengths, stride)
+                .expect("open contiguous batch"),
+            plaintexts.iter().map(|plaintext| plaintext.len()).sum()
+        );
+        for (index, expected) in plaintexts.iter().enumerate() {
+            let offset = index * stride + DATA_HEADER_LEN;
+            assert_eq!(&packets[offset..offset + expected.len()], *expected);
+        }
+    }
+
+    #[test]
+    fn batch_layout_failure_does_not_advance_or_decrypt_partial_prefix() {
+        let mut sender = SendCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let mut too_narrow = [0u8; 64];
+        assert_eq!(
+            sender
+                .seal_batch(&[b"payload that does not fit"], &mut too_narrow, 16)
+                .expect_err("stride must hold every packet"),
+            SessionError::BufferTooSmall
+        );
+        assert_eq!(sender.next_send_counter(), 0);
+
+        let mut packet = [0u8; 64];
+        let packet_len = sender
+            .seal(b"one packet", &mut packet)
+            .expect("seal fixture");
+        let mut receiver = ReceiveCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let original = packet;
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut packet, &[packet_len, packet_len], packet_len)
+                .expect_err("declared second packet exceeds buffer"),
+            SessionError::BufferTooSmall
+        );
+        assert_eq!(packet, original);
+    }
+
+    #[test]
+    fn epoch_batch_round_trip_routes_all_packets_across_directions() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(17, 0, now);
+        let mut responder = responder_epoch(17, 0, now);
+        let plaintexts: [&[u8]; 4] = [b"one", b"two", b"three", b"four"];
+        let stride = 64usize;
+        let mut packets = vec![0u8; stride * plaintexts.len()];
+        assert_eq!(
+            initiator
+                .seal_batch(&plaintexts, &mut packets, stride, now)
+                .expect("epoch seal batch"),
+            plaintexts.len()
+        );
+        let packet_lengths: Vec<usize> = plaintexts
+            .iter()
+            .map(|plaintext| DATA_HEADER_LEN + plaintext.len() + AEAD_TAG_LEN)
+            .collect();
+        assert_eq!(
+            responder
+                .open_batch_in_place(&mut packets, &packet_lengths, stride, now)
+                .expect("epoch open batch"),
+            plaintexts.iter().map(|plaintext| plaintext.len()).sum()
+        );
+        for (index, expected) in plaintexts.iter().enumerate() {
+            let offset = index * stride + DATA_HEADER_LEN;
+            assert_eq!(&packets[offset..offset + expected.len()], *expected);
+        }
     }
 
     #[test]

@@ -1,0 +1,157 @@
+{
+  "benchmark": "secure-session-v2-batch-fastpath",
+  "results": [
+    {
+      "payload_bytes": 1280,
+      "packets": 32,
+      "operation": "seal",
+      "implementation": "single_x32",
+      "total_us": {
+        "lower": 71.047,
+        "median": 71.5,
+        "upper": 72.166
+      },
+      "per_packet_us": {
+        "median": 2.2344
+      },
+      "throughput_mib_s": {
+        "lower": 541.29,
+        "median": 546.33,
+        "upper": 549.81
+      }
+    },
+    {
+      "payload_bytes": 1280,
+      "packets": 32,
+      "operation": "seal",
+      "implementation": "batch_x32",
+      "total_us": {
+        "lower": 71.605,
+        "median": 72.687,
+        "upper": 74.21
+      },
+      "per_packet_us": {
+        "median": 2.2715
+      },
+      "throughput_mib_s": {
+        "lower": 526.37,
+        "median": 537.41,
+        "upper": 545.53
+      }
+    },
+    {
+      "payload_bytes": 1280,
+      "packets": 32,
+      "operation": "open",
+      "implementation": "single_x32",
+      "total_us": {
+        "lower": 74.883,
+        "median": 77.036,
+        "upper": 80.521
+      },
+      "per_packet_us": {
+        "median": 2.4074
+      },
+      "throughput_mib_s": {
+        "lower": 485.12,
+        "median": 507.07,
+        "upper": 521.65
+      }
+    },
+    {
+      "payload_bytes": 1280,
+      "packets": 32,
+      "operation": "open",
+      "implementation": "batch_x32",
+      "total_us": {
+        "lower": 74.574,
+        "median": 76.095,
+        "upper": 78.141
+      },
+      "per_packet_us": {
+        "median": 2.378
+      },
+      "throughput_mib_s": {
+        "lower": 499.9,
+        "median": 513.34,
+        "upper": 523.81
+      }
+    },
+    {
+      "payload_bytes": 1420,
+      "packets": 32,
+      "operation": "seal",
+      "implementation": "single_x32",
+      "total_us": {
+        "lower": 81.361,
+        "median": 82.361,
+        "upper": 83.277
+      },
+      "per_packet_us": {
+        "median": 2.5738
+      },
+      "throughput_mib_s": {
+        "lower": 520.37,
+        "median": 526.16,
+        "upper": 532.63
+      }
+    },
+    {
+      "payload_bytes": 1420,
+      "packets": 32,
+      "operation": "seal",
+      "implementation": "batch_x32",
+      "total_us": {
+        "lower": 79.762,
+        "median": 80.068,
+        "upper": 80.36
+      },
+      "per_packet_us": {
+        "median": 2.5021
+      },
+      "throughput_mib_s": {
+        "lower": 539.26,
+        "median": 541.23,
+        "upper": 543.31
+      }
+    },
+    {
+      "payload_bytes": 1420,
+      "packets": 32,
+      "operation": "open",
+      "implementation": "single_x32",
+      "total_us": {
+        "lower": 82.616,
+        "median": 86.229,
+        "upper": 91.362
+      },
+      "per_packet_us": {
+        "median": 2.6947
+      },
+      "throughput_mib_s": {
+        "lower": 474.32,
+        "median": 502.56,
+        "upper": 524.54
+      }
+    },
+    {
+      "payload_bytes": 1420,
+      "packets": 32,
+      "operation": "open",
+      "implementation": "batch_x32",
+      "total_us": {
+        "lower": 82.051,
+        "median": 82.441,
+        "upper": 83.093
+      },
+      "per_packet_us": {
+        "median": 2.5763
+      },
+      "throughput_mib_s": {
+        "lower": 521.52,
+        "median": 525.65,
+        "upper": 528.15
+      }
+    }
+  ]
+}

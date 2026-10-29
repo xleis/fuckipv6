@@ -1,0 +1,129 @@
+   Compiling proc-macro2 v1.0.104
+   Compiling libc v0.2.178
+   Compiling unicode-ident v1.0.22
+   Compiling quote v1.0.42
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling semver v1.0.27
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling autocfg v1.5.0
+   Compiling zmij v1.0.5
+   Compiling serde_json v1.0.148
+   Compiling getrandom v0.3.4
+   Compiling thiserror v1.0.69
+   Compiling rustc_version v0.4.1
+   Compiling generic-array v0.14.7
+   Compiling num-traits v0.2.19
+   Compiling curve25519-dalek v4.1.3
+   Compiling syn v2.0.112
+   Compiling getrandom v0.2.16
+   Compiling is-terminal v0.4.17
+   Compiling plotters v0.3.7
+   Compiling rand_core v0.6.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling inout v0.1.4
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling digest v0.10.7
+   Compiling polyval v0.6.2
+   Compiling poly1305 v0.8.0
+   Compiling ghash v0.5.1
+   Compiling hmac v0.12.1
+   Compiling sha2 v0.10.9
+   Compiling hkdf v0.12.4
+   Compiling zeroize_derive v1.5.0
+   Compiling zerocopy-derive v0.8.31
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v1.0.69
+   Compiling zeroize v1.8.2
+   Compiling cipher v0.4.4
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling chacha20 v0.9.1
+   Compiling chacha20poly1305 v0.10.1
+   Compiling zerocopy v0.8.31
+   Compiling aes-gcm v0.10.3
+   Compiling ed25519-dalek v2.2.0
+   Compiling x25519-dalek v2.0.1
+   Compiling fuckipv6-secure-session v0.3.0 (/home/xlei/project/fuckipv6/crates/secure-session)
+   Compiling tinytemplate v1.2.1
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.5.1
+    Finished `bench` profile [optimized] target(s) in 17.70s
+     Running benches/dataplane.rs (target/release/deps/dataplane-8d0137ac1f9709fb)
+Gnuplot not found, using plotters backend
+Benchmarking secure_session_v2_batch_1280/seal_single_x32
+Benchmarking secure_session_v2_batch_1280/seal_single_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1280/seal_single_x32: Collecting 20 samples in estimated 3.0082 s (42k iterations)
+Benchmarking secure_session_v2_batch_1280/seal_single_x32: Analyzing
+secure_session_v2_batch_1280/seal_single_x32
+                        time:   [71.047 µs 71.500 µs 72.166 µs]
+                        thrpt:  [541.29 MiB/s 546.33 MiB/s 549.81 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking secure_session_v2_batch_1280/seal_batch_x32
+Benchmarking secure_session_v2_batch_1280/seal_batch_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1280/seal_batch_x32: Collecting 20 samples in estimated 3.0074 s (41k iterations)
+Benchmarking secure_session_v2_batch_1280/seal_batch_x32: Analyzing
+secure_session_v2_batch_1280/seal_batch_x32
+                        time:   [71.605 µs 72.687 µs 74.210 µs]
+                        thrpt:  [526.37 MiB/s 537.41 MiB/s 545.53 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking secure_session_v2_batch_1280/open_single_x32
+Benchmarking secure_session_v2_batch_1280/open_single_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1280/open_single_x32: Collecting 20 samples in estimated 3.0097 s (39k iterations)
+Benchmarking secure_session_v2_batch_1280/open_single_x32: Analyzing
+secure_session_v2_batch_1280/open_single_x32
+                        time:   [74.883 µs 77.036 µs 80.521 µs]
+                        thrpt:  [485.12 MiB/s 507.07 MiB/s 521.65 MiB/s]
+Benchmarking secure_session_v2_batch_1280/open_batch_x32
+Benchmarking secure_session_v2_batch_1280/open_batch_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1280/open_batch_x32: Collecting 20 samples in estimated 3.0115 s (38k iterations)
+Benchmarking secure_session_v2_batch_1280/open_batch_x32: Analyzing
+secure_session_v2_batch_1280/open_batch_x32
+                        time:   [74.574 µs 76.095 µs 78.141 µs]
+                        thrpt:  [499.90 MiB/s 513.34 MiB/s 523.81 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking secure_session_v2_batch_1420/seal_single_x32
+Benchmarking secure_session_v2_batch_1420/seal_single_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1420/seal_single_x32: Collecting 20 samples in estimated 3.0017 s (36k iterations)
+Benchmarking secure_session_v2_batch_1420/seal_single_x32: Analyzing
+secure_session_v2_batch_1420/seal_single_x32
+                        time:   [81.361 µs 82.361 µs 83.277 µs]
+                        thrpt:  [520.37 MiB/s 526.16 MiB/s 532.63 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking secure_session_v2_batch_1420/seal_batch_x32
+Benchmarking secure_session_v2_batch_1420/seal_batch_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1420/seal_batch_x32: Collecting 20 samples in estimated 3.0173 s (35k iterations)
+Benchmarking secure_session_v2_batch_1420/seal_batch_x32: Analyzing
+secure_session_v2_batch_1420/seal_batch_x32
+                        time:   [79.762 µs 80.068 µs 80.360 µs]
+                        thrpt:  [539.26 MiB/s 541.23 MiB/s 543.31 MiB/s]
+Benchmarking secure_session_v2_batch_1420/open_single_x32
+Benchmarking secure_session_v2_batch_1420/open_single_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1420/open_single_x32: Collecting 20 samples in estimated 3.0090 s (35k iterations)
+Benchmarking secure_session_v2_batch_1420/open_single_x32: Analyzing
+secure_session_v2_batch_1420/open_single_x32
+                        time:   [82.616 µs 86.229 µs 91.362 µs]
+                        thrpt:  [474.32 MiB/s 502.56 MiB/s 524.54 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking secure_session_v2_batch_1420/open_batch_x32
+Benchmarking secure_session_v2_batch_1420/open_batch_x32: Warming up for 1.0000 s
+Benchmarking secure_session_v2_batch_1420/open_batch_x32: Collecting 20 samples in estimated 3.0183 s (34k iterations)
+Benchmarking secure_session_v2_batch_1420/open_batch_x32: Analyzing
+secure_session_v2_batch_1420/open_batch_x32
+                        time:   [82.051 µs 82.441 µs 83.093 µs]
+                        thrpt:  [521.52 MiB/s 525.65 MiB/s 528.15 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe

@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
 use super::health::{ConnectionHealthSnapshot, PeerHealth};
 
@@ -20,6 +20,17 @@ const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 
 type IncomingPacket = (IpAddr, Vec<u8>);
 type IncomingReceiver = mpsc::UnboundedReceiver<IncomingPacket>;
+
+/// 一次主动 P2P 探针的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerProbeOutcome {
+    pub client_id: String,
+    pub virtual_ip: Ipv6Addr,
+    pub endpoint: Option<SocketAddr>,
+    pub rtt_us: Option<u64>,
+    pub p2p_active: bool,
+    pub timed_out: bool,
+}
 
 /// P2P连接
 struct PeerConnection {
@@ -406,6 +417,88 @@ impl P2pEngine {
             })
         } else {
             None
+        }
+    }
+
+    /// 立即向指定节点发送 P2P 探针并等待真实 Pong。
+    ///
+    /// `target` 可以是 Client ID、虚拟 IPv6 或虚拟 IPv4。找不到目标时返回
+    /// `None`；目标存在但未在超时内回复时返回 `timed_out = true`。
+    pub async fn probe_peer_now(
+        &self,
+        target: &str,
+        timeout: Duration,
+    ) -> Option<PeerProbeOutcome> {
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+
+        let client_id = if let Ok(ip) = target.parse::<IpAddr>() {
+            self.ip_index.read().await.get(&ip).cloned()
+        } else {
+            let connections = self.connections.read().await;
+            connections.contains_key(target).then(|| target.to_string())
+        }?;
+
+        let src_ip = (*self.local_ip.read().await)?;
+        let threshold = self.fallback_threshold.read().await.clone();
+        let (peer_info, endpoints, active_endpoint, before_acked) = {
+            let connections = self.connections.read().await;
+            let conn = connections.get(&client_id)?;
+            let health = conn
+                .health
+                .snapshot(now_micros(), PROBE_RESPONSE_GRACE, &threshold);
+            (
+                conn.peer_info.clone(),
+                conn.endpoints.clone(),
+                conn.active_endpoint,
+                health.probes_acked,
+            )
+        };
+
+        let ping = P2pDatagram::ping(src_ip);
+        let timestamp = match ping {
+            P2pDatagram::Ping { timestamp, .. } => timestamp,
+            _ => return None,
+        };
+        let data = codec::encode(&ping).ok()?;
+
+        record_peer_probe_sent(&self.connections, &client_id, timestamp).await;
+        for endpoint in &endpoints {
+            let _ = self.socket.send_to(&data, endpoint).await;
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let health = self.peer_health(&peer_info.virtual_ip).await?;
+            if health.probes_acked > before_acked {
+                let connection = self.connections.read().await;
+                let active_endpoint = connection
+                    .get(&client_id)
+                    .and_then(|conn| conn.active_endpoint)
+                    .or(active_endpoint);
+                return Some(PeerProbeOutcome {
+                    client_id,
+                    virtual_ip: peer_info.virtual_ip,
+                    endpoint: active_endpoint.or_else(|| endpoints.first().copied()),
+                    rtt_us: health.rtt_us,
+                    p2p_active: active_endpoint.is_some(),
+                    timed_out: false,
+                });
+            }
+
+            if Instant::now() >= deadline {
+                return Some(PeerProbeOutcome {
+                    client_id,
+                    virtual_ip: peer_info.virtual_ip,
+                    endpoint: active_endpoint.or_else(|| endpoints.first().copied()),
+                    rtt_us: None,
+                    p2p_active: active_endpoint.is_some(),
+                    timed_out: true,
+                });
+            }
+            sleep(Duration::from_millis(25)).await;
         }
     }
 
@@ -985,6 +1078,15 @@ mod tests {
         assert!(health.probes_acked > 0);
         assert_eq!(health.loss_rate, 0.0);
         assert!(health.bandwidth_bps > 0);
+
+        let probe = engine_a
+            .probe_peer_now("b", Duration::from_secs(1))
+            .await
+            .expect("known peer should produce a probe result");
+        assert!(!probe.timed_out);
+        assert!(probe.p2p_active);
+        assert!(probe.rtt_us.is_some());
+        assert_eq!(probe.virtual_ip, ip_b);
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {

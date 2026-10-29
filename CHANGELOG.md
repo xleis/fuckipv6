@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows semantic versioning
   - 客户端标签页与主题支持 `?tab=` / `?theme=` 深链，切换标签不再触发页面滚动；协调端新增侧栏滚动定位。
 
 ### Added
+- 增加文档一致性门禁：校验受跟踪 Markdown 的相对链接与标题锚点，拒绝 `file://`/越界路径，并持续检查 Secure Session v2 未接入真实数据面、未证明 WireGuard 性能对等及后量子边界等关键声明；同时校验执行队列依赖状态。独立 `docs` CI job 运行 8 个单元测试并上传 JSON 报告，补齐 Cargo 元数据声明的 MIT `LICENSE`。
 - 增加 Criterion 基准回归门禁：`scripts/bench-compare.py` 可保存可复用基线快照，并按相对阈值、噪声余量、标准误和最小样本数比较当前结果；`scripts/release-gate.py --benchmark-baseline` 会把比较失败计入发布门禁。未提供基线时报告明确记录 `not_run`，该比较只检测匹配硬件上的相对回退，不构成 WireGuard 性能对等或超越结论。
 - 发布流程为每个 Linux、Windows 和 macOS 归档生成 CycloneDX 1.5 与 SPDX 2.3 SBOM、逐产物 SHA256、汇总 `SHA256SUMS` 和未签名来源元数据；这些材料随 GitHub Release 发布，但不构成签名证明、SLSA 证明或独立安全审计。
 - 增加供应链门禁：固定 `cargo-deny 0.20.2`，同时审计主 workspace 与独立 fuzz workspace 的已知漏洞、许可证、重复版本、通配版本要求和依赖来源；报告写入 `target/supply-chain/` 并由 CI 上传。该检查不生成 SBOM，也不替代对上游 crate 的人工安全审计。

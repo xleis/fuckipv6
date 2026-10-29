@@ -698,7 +698,7 @@ file = "/var/log/fuckipv6.log"
 
 ## Phase 6: 下一代核心演进（智能分流、Exit Node、单二进制双模、对称网络、洋葱基础设施） 🚧
 
-> 详细子 Agent 并行开发规划与实施技术规范见专项文档：[NEXTGEN_TODO.md](file:///home/xlei/project/fuckipv6/NEXTGEN_TODO.md)
+> 详细子 Agent 并行开发规划与实施技术规范见专项文档：[NEXTGEN_TODO.md](NEXTGEN_TODO.md)
 
 ### 1. Agent 1: 智能分流与规则引擎 (GeoIP / CN-CIDR) ✅ **已完成**
 - [x] 纯 Rust 高性能 CN-CIDR / GeoIP 基数树 Trie 匹配 (三大运营商 IPv4/IPv6 聚合网段零外部依赖)

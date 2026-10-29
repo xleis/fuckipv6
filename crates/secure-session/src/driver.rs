@@ -17,7 +17,8 @@ use crate::handshake_epoch::HandshakeEpochError;
 use crate::key_schedule::{derive_session_keys, DerivedSession, KeyScheduleError};
 use crate::rekey::{RekeyAccept, RekeyCompletion, RekeyConfirm, RekeyInit, RekeyNonce, RekeyPhase};
 use crate::rekey_session::{RekeyAcceptOffer, RekeySession, RekeySessionError};
-use crate::transcript::ENDPOINT_CONTEXT_HASH_LEN;
+use crate::transcript::{TranscriptHash, ENDPOINT_CONTEXT_HASH_LEN};
+use crate::wire::{AcceptFrame, ConfirmFrame};
 use crate::{DataCipherSuite, EpochSession, SessionError, SESSION_ID_LEN};
 use std::time::Instant;
 use thiserror::Error;
@@ -53,6 +54,12 @@ pub enum DriverError {
     /// A rekey operation failed.
     #[error("secure session rekey operation failed: {0}")]
     Rekey(#[from] RekeySessionError),
+    /// A confirmation frame referred to a different negotiated session.
+    #[error("CONFIRM session id does not match the pending handshake")]
+    ConfirmSessionMismatch,
+    /// A confirmation frame did not bind the pending handshake transcript.
+    #[error("CONFIRM transcript hash does not match the pending handshake")]
+    ConfirmTranscriptMismatch,
 }
 
 /// Observable packet and rekey counters for one installed driver.
@@ -377,13 +384,43 @@ impl InitiatorHandshake {
         issued_at: u64,
         now: Instant,
     ) -> Result<(SessionDriver, ConfirmationTag), DriverError> {
+        self.complete_inner(accept, peer_confirmation, issued_at, now)
+            .map(|(driver, confirm)| (driver, confirm.initiator_confirmation))
+    }
+
+    /// Complete from a decoded `ACCEPT` wire frame and return the canonical
+    /// `CONFIRM` frame required by the responder.
+    ///
+    /// This is the preferred transport integration API. It verifies the
+    /// responder confirmation before installing the driver and binds both the
+    /// negotiated session ID and full transcript hash into the returned frame.
+    pub fn complete_wire(
+        self,
+        accept: &AcceptFrame,
+        issued_at: u64,
+        now: Instant,
+    ) -> Result<(SessionDriver, ConfirmFrame), DriverError> {
+        self.complete_inner(
+            &accept.accept,
+            &accept.responder_confirmation,
+            issued_at,
+            now,
+        )
+    }
+
+    fn complete_inner(
+        self,
+        accept: &Accept,
+        peer_confirmation: &ConfirmationTag,
+        issued_at: u64,
+        now: Instant,
+    ) -> Result<(SessionDriver, ConfirmFrame), DriverError> {
         let established = self.handshake.finish(accept, issued_at)?;
         let derived = derive_session_keys(established, self.psk.as_deref())?;
-        let local_confirmation = compute_confirmation(
-            &derived.keys,
-            ConfirmationRole::Initiator,
-            &derived.identity.transcript_hash,
-        );
+        let session_id = derived.identity.session_id;
+        let transcript_hash = derived.identity.transcript_hash;
+        let local_confirmation =
+            compute_confirmation(&derived.keys, ConfirmationRole::Initiator, &transcript_hash);
         let driver = SessionDriver::from_handshake(
             derived,
             ConfirmationRole::Initiator,
@@ -391,7 +428,14 @@ impl InitiatorHandshake {
             peer_confirmation,
             now,
         )?;
-        Ok((driver, local_confirmation))
+        Ok((
+            driver,
+            ConfirmFrame {
+                session_id,
+                transcript_hash,
+                initiator_confirmation: local_confirmation,
+            },
+        ))
     }
 }
 
@@ -438,6 +482,35 @@ impl ResponderHandshake {
     /// This endpoint's confirmation tag, which must be sent to the initiator.
     pub const fn local_confirmation(&self) -> ConfirmationTag {
         self.local_confirmation
+    }
+
+    /// Negotiated session identifier that a `CONFIRM` frame must match.
+    pub const fn session_id(&self) -> [u8; SESSION_ID_LEN] {
+        self.derived.identity.session_id
+    }
+
+    /// Full transcript hash that a `CONFIRM` frame must match.
+    pub const fn transcript_hash(&self) -> TranscriptHash {
+        self.derived.identity.transcript_hash
+    }
+
+    /// Verify a decoded `CONFIRM` frame and install a ready data-plane driver.
+    ///
+    /// Both the session identifier and transcript hash are checked before the
+    /// confirmation tag is verified. A valid tag from a different transcript or
+    /// session therefore cannot activate this handshake.
+    pub fn complete_wire(
+        self,
+        confirm: &ConfirmFrame,
+        now: Instant,
+    ) -> Result<(SessionDriver, ConfirmationTag), DriverError> {
+        if confirm.session_id != self.derived.identity.session_id {
+            return Err(DriverError::ConfirmSessionMismatch);
+        }
+        if confirm.transcript_hash != self.derived.identity.transcript_hash {
+            return Err(DriverError::ConfirmTranscriptMismatch);
+        }
+        self.complete(&confirm.initiator_confirmation, now)
     }
 
     /// Verify the initiator confirmation and install a ready data-plane driver.

@@ -1,6 +1,7 @@
 use fuckipv6_secure_session::confirmation::ConfirmationTag;
 use fuckipv6_secure_session::cookie::{decode_cookie_challenge, Cookie};
 use fuckipv6_secure_session::rekey::{RekeyAccept, RekeyConfirm, RekeyInit};
+use fuckipv6_secure_session::wire::decode_control;
 use fuckipv6_secure_session::{
     DataCipherSuite, DataHeader, Direction, ReceiveCipher, AEAD_TAG_LEN, DATA_HEADER_LEN,
     MAX_PACKETS_PER_EPOCH, MIN_DATA_PACKET_LEN, SESSION_ID_LEN,
@@ -56,6 +57,7 @@ fn every_public_v2_decoder_accepts_arbitrary_bytes_without_panicking() {
         let _ = RekeyInit::decode(&bytes);
         let _ = RekeyAccept::decode(&bytes);
         let _ = RekeyConfirm::decode(&bytes);
+        let _ = decode_control(&bytes);
         let _ = ConfirmationTag::from_slice(&bytes);
     }
 }

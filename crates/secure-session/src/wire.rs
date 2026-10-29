@@ -11,9 +11,12 @@ use crate::handshake::{
     Accept, Hello, ED25519_PUBLIC_KEY_LEN, ED25519_SIGNATURE_LEN, HANDSHAKE_NONCE_LEN,
     X25519_PUBLIC_KEY_LEN,
 };
-use crate::transcript::{ENDPOINT_CONTEXT_HASH_LEN, IDENTITY_ID_LEN};
+use crate::transcript::{
+    TranscriptHash, ENDPOINT_CONTEXT_HASH_LEN, IDENTITY_ID_LEN, TRANSCRIPT_HASH_LEN,
+};
 use crate::{PROTOCOL_VERSION, SESSION_ID_LEN};
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
 use thiserror::Error;
 
 /// Four-byte prefix identifying a handshake control datagram.
@@ -45,7 +48,7 @@ pub const ACCEPT_BODY_LEN: usize = 1
     + ED25519_SIGNATURE_LEN
     + CONFIRMATION_LEN;
 /// Canonical encoded initiator confirmation body length.
-pub const CONFIRM_BODY_LEN: usize = SESSION_ID_LEN + CONFIRMATION_LEN;
+pub const CONFIRM_BODY_LEN: usize = SESSION_ID_LEN + TRANSCRIPT_HASH_LEN + CONFIRMATION_LEN;
 /// Largest accepted handshake control frame.
 pub const MAX_CONTROL_FRAME_LEN: usize = CONTROL_HEADER_LEN + ACCEPT_BODY_LEN;
 
@@ -103,10 +106,11 @@ pub struct AcceptFrame {
     pub responder_confirmation: ConfirmationTag,
 }
 
-/// Initiator key confirmation bound to the negotiated session identifier.
+/// Initiator key confirmation bound to the negotiated session and transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmFrame {
     pub session_id: [u8; SESSION_ID_LEN],
+    pub transcript_hash: TranscriptHash,
     pub initiator_confirmation: ConfirmationTag,
 }
 
@@ -131,6 +135,12 @@ pub enum ControlCodecError {
     TrailingBytes { trailing: usize },
     #[error("handshake public key must be exactly {expected} bytes")]
     InvalidPublicKeyLength { expected: usize },
+    #[error("endpoint context network ID must not be empty")]
+    EmptyNetworkId,
+    #[error("endpoint context {0} must contain at least one virtual IP")]
+    MissingVirtualIps(&'static str),
+    #[error("endpoint context field {0} exceeds the 65535-byte limit")]
+    ContextFieldTooLong(&'static str),
 }
 
 impl Hello {
@@ -252,6 +262,7 @@ impl ConfirmFrame {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = new_frame(ControlKind::Confirm);
         out.extend_from_slice(&self.session_id);
+        out.extend_from_slice(&self.transcript_hash);
         out.extend_from_slice(self.initiator_confirmation.as_bytes());
         out
     }
@@ -259,11 +270,13 @@ impl ConfirmFrame {
     fn decode(body: &[u8]) -> Self {
         let mut cursor = Cursor::new(body);
         let session_id = cursor.array::<SESSION_ID_LEN>();
+        let transcript_hash = cursor.array::<TRANSCRIPT_HASH_LEN>();
         let initiator_confirmation = ConfirmationTag::from_slice(cursor.bytes(CONFIRMATION_LEN))
             .expect("fixed-size confirmation");
         debug_assert!(cursor.is_finished());
         Self {
             session_id,
+            transcript_hash,
             initiator_confirmation,
         }
     }
@@ -290,35 +303,130 @@ pub fn is_data_packet(bytes: &[u8]) -> bool {
     bytes.first() == Some(&crate::DATA_PACKET_KIND)
 }
 
-/// Derive an order-independent endpoint context from the two Ed25519 public keys.
+/// Inputs bound by the experimental classic profile's endpoint context.
 ///
-/// The classic migration profile binds both identities and sorts their public
-/// keys before hashing, so both endpoints derive the same non-zero context even
-/// when they have not yet learned each other's candidate socket addresses.
+/// Slices are normalized by sorting and removing duplicates, so peers may
+/// provide their candidate addresses in any order. Endpoint lists may be empty
+/// for relay-only operation, but both virtual IP lists must contain at least
+/// one address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassicEndpointContextInput<'a> {
+    pub network_id: &'a [u8],
+    pub initiator_public_key: &'a [u8],
+    pub responder_public_key: &'a [u8],
+    pub initiator_virtual_ips: &'a [IpAddr],
+    pub responder_virtual_ips: &'a [IpAddr],
+    pub initiator_endpoints: &'a [SocketAddr],
+    pub responder_endpoints: &'a [SocketAddr],
+}
+
+/// Derive a canonical, order-independent classic endpoint context.
+///
+/// The SHA-256 input is domain separated and length-prefixed. It binds the
+/// network, both Ed25519 public keys, both virtual IP sets, and both direct
+/// endpoint sets. This context complements the identity signatures; it does
+/// not replace identity verification or authenticate a UDP source address.
 pub fn classic_endpoint_context(
-    first_public_key: &[u8],
-    second_public_key: &[u8],
+    input: &ClassicEndpointContextInput<'_>,
 ) -> Result<[u8; ENDPOINT_CONTEXT_HASH_LEN], ControlCodecError> {
-    if first_public_key.len() != ED25519_PUBLIC_KEY_LEN
-        || second_public_key.len() != ED25519_PUBLIC_KEY_LEN
-    {
+    if input.network_id.is_empty() {
+        return Err(ControlCodecError::EmptyNetworkId);
+    }
+    if input.initiator_virtual_ips.is_empty() {
+        return Err(ControlCodecError::MissingVirtualIps("initiator"));
+    }
+    if input.responder_virtual_ips.is_empty() {
+        return Err(ControlCodecError::MissingVirtualIps("responder"));
+    }
+    validate_context_public_key(input.initiator_public_key)?;
+    validate_context_public_key(input.responder_public_key)?;
+
+    let initiator_ips = encode_ip_set(input.initiator_virtual_ips)?;
+    let responder_ips = encode_ip_set(input.responder_virtual_ips)?;
+    let initiator_endpoints = encode_endpoint_set(input.initiator_endpoints)?;
+    let responder_endpoints = encode_endpoint_set(input.responder_endpoints)?;
+
+    let mut hasher = Sha256::new();
+    hash_context_field(&mut hasher, b"fuckipv6-v2 classic endpoint context v2")?;
+    hash_context_field(&mut hasher, input.network_id)?;
+    hash_context_field(&mut hasher, b"initiator")?;
+    hash_context_field(&mut hasher, input.initiator_public_key)?;
+    hash_context_field(&mut hasher, &initiator_ips)?;
+    hash_context_field(&mut hasher, &initiator_endpoints)?;
+    hash_context_field(&mut hasher, b"responder")?;
+    hash_context_field(&mut hasher, input.responder_public_key)?;
+    hash_context_field(&mut hasher, &responder_ips)?;
+    hash_context_field(&mut hasher, &responder_endpoints)?;
+    Ok(hasher.finalize().into())
+}
+
+fn validate_context_public_key(public_key: &[u8]) -> Result<(), ControlCodecError> {
+    if public_key.len() != ED25519_PUBLIC_KEY_LEN {
         return Err(ControlCodecError::InvalidPublicKeyLength {
             expected: ED25519_PUBLIC_KEY_LEN,
         });
     }
+    Ok(())
+}
 
-    let (first, second) = if first_public_key <= second_public_key {
-        (first_public_key, second_public_key)
-    } else {
-        (second_public_key, first_public_key)
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(b"fuckipv6-v2 classic endpoint context");
-    hasher.update((ED25519_PUBLIC_KEY_LEN as u16).to_be_bytes());
-    hasher.update(first);
-    hasher.update((ED25519_PUBLIC_KEY_LEN as u16).to_be_bytes());
-    hasher.update(second);
-    Ok(hasher.finalize().into())
+fn hash_context_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), ControlCodecError> {
+    let len = u16::try_from(bytes.len())
+        .map_err(|_| ControlCodecError::ContextFieldTooLong("component"))?;
+    hasher.update(len.to_be_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn encode_ip_set(ips: &[IpAddr]) -> Result<Vec<u8>, ControlCodecError> {
+    let mut ips = ips.to_vec();
+    ips.sort_unstable();
+    ips.dedup();
+    let mut encoded = Vec::with_capacity(ips.len() * 17);
+    for ip in ips {
+        match ip {
+            IpAddr::V4(ip) => {
+                encoded.push(4);
+                encoded.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                encoded.push(6);
+                encoded.extend_from_slice(&ip.octets());
+            }
+        }
+    }
+    if encoded.len() > u16::MAX as usize {
+        return Err(ControlCodecError::ContextFieldTooLong("virtual IP set"));
+    }
+    Ok(encoded)
+}
+
+fn encode_endpoint_set(endpoints: &[SocketAddr]) -> Result<Vec<u8>, ControlCodecError> {
+    let mut encoded_endpoints = endpoints
+        .iter()
+        .copied()
+        .map(|endpoint| {
+            let mut encoded = Vec::with_capacity(19);
+            encoded.extend_from_slice(&endpoint.port().to_be_bytes());
+            match endpoint.ip() {
+                IpAddr::V4(ip) => {
+                    encoded.push(4);
+                    encoded.extend_from_slice(&ip.octets());
+                }
+                IpAddr::V6(ip) => {
+                    encoded.push(6);
+                    encoded.extend_from_slice(&ip.octets());
+                }
+            }
+            encoded
+        })
+        .collect::<Vec<_>>();
+    encoded_endpoints.sort_unstable();
+    encoded_endpoints.dedup();
+    let encoded = encoded_endpoints.concat();
+    if encoded.len() > u16::MAX as usize {
+        return Err(ControlCodecError::ContextFieldTooLong("endpoint set"));
+    }
+    Ok(encoded)
 }
 
 fn new_frame(kind: ControlKind) -> Vec<u8> {
@@ -470,6 +578,7 @@ mod tests {
     fn confirm() -> ConfirmFrame {
         ConfirmFrame {
             session_id: [0x77; SESSION_ID_LEN],
+            transcript_hash: [0xdd; TRANSCRIPT_HASH_LEN],
             initiator_confirmation: ConfirmationTag::from_slice(&[0xcc; CONFIRMATION_LEN]).unwrap(),
         }
     }
@@ -589,19 +698,220 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_context_is_order_independent_and_rejects_bad_keys() {
-        let first = [0x11; ED25519_PUBLIC_KEY_LEN];
-        let second = [0x22; ED25519_PUBLIC_KEY_LEN];
-        let a = classic_endpoint_context(&first, &second).unwrap();
-        let b = classic_endpoint_context(&second, &first).unwrap();
+    fn canonical_control_frames_match_fixed_sha256_vectors() {
+        assert_eq!(hello().encode_control().len(), 248);
+        assert_eq!(accept().encode().len(), 370);
+        assert_eq!(confirm().encode().len(), 124);
+
+        for (frame, expected) in [
+            (
+                hello().encode_control(),
+                "09e7cf433b1e34142451ade5e70bca051c92d546eb4672600d63b97dd10c352e",
+            ),
+            (
+                accept().encode(),
+                "f817d6316effa499ee96e7698ec58b3ee35e4468d0afa05290b4d74bb80ba77c",
+            ),
+            (
+                confirm().encode(),
+                "8c02b61faf32ac3f7181e9d68b25596f77a9586828d7e7a63bf62468a6226e10",
+            ),
+        ] {
+            let digest = Sha256::digest(&frame);
+            assert_eq!(format!("{digest:x}"), expected);
+        }
+    }
+
+    #[test]
+    fn confirm_frame_binds_session_and_transcript_hash() {
+        let original = confirm();
+        let mut decoded = match decode_control(&original.encode()).expect("decode") {
+            ControlMessage::Confirm(frame) => frame,
+            _ => panic!("wrong frame kind"),
+        };
+        assert_eq!(decoded, original);
+
+        decoded.session_id[0] ^= 1;
+        assert_ne!(decoded, original);
+        decoded = original;
+        decoded.transcript_hash[0] ^= 1;
+        assert_ne!(decoded, original);
+        decoded = original;
+        let mut tag = *decoded.initiator_confirmation.as_bytes();
+        tag[0] ^= 1;
+        decoded.initiator_confirmation = ConfirmationTag::from_slice(&tag).expect("tag");
+        assert_ne!(decoded, original);
+    }
+
+    #[test]
+    fn endpoint_context_binds_every_context_field() {
+        let initiator_ips = ["10.8.0.2".parse().unwrap(), "fd00::2".parse().unwrap()];
+        let responder_ips = ["10.8.0.1".parse().unwrap(), "fd00::1".parse().unwrap()];
+        let initiator_endpoints = [
+            "198.51.100.2:51820".parse().unwrap(),
+            "[2001:db8::2]:51820".parse().unwrap(),
+        ];
+        let responder_endpoints = [
+            "198.51.100.1:51820".parse().unwrap(),
+            "[2001:db8::1]:51820".parse().unwrap(),
+        ];
+        let initiator_key = [0x11; ED25519_PUBLIC_KEY_LEN];
+        let responder_key = [0x22; ED25519_PUBLIC_KEY_LEN];
+        let baseline = ClassicEndpointContextInput {
+            network_id: b"network-a",
+            initiator_public_key: &initiator_key,
+            responder_public_key: &responder_key,
+            initiator_virtual_ips: &initiator_ips,
+            responder_virtual_ips: &responder_ips,
+            initiator_endpoints: &initiator_endpoints,
+            responder_endpoints: &responder_endpoints,
+        };
+        let expected = classic_endpoint_context(&baseline).expect("baseline context");
+
+        let other_initiator_key = [0x12; ED25519_PUBLIC_KEY_LEN];
+        let other_responder_key = [0x23; ED25519_PUBLIC_KEY_LEN];
+        let other_initiator_ips = ["10.8.0.3".parse().unwrap()];
+        let other_responder_ips = ["10.8.0.4".parse().unwrap()];
+        let other_initiator_endpoints = ["198.51.100.3:51820".parse().unwrap()];
+        let other_responder_endpoints = ["198.51.100.4:51820".parse().unwrap()];
+        let variants = [
+            ClassicEndpointContextInput {
+                network_id: b"network-b",
+                ..baseline
+            },
+            ClassicEndpointContextInput {
+                initiator_public_key: &other_initiator_key,
+                ..baseline
+            },
+            ClassicEndpointContextInput {
+                responder_public_key: &other_responder_key,
+                ..baseline
+            },
+            ClassicEndpointContextInput {
+                initiator_virtual_ips: &other_initiator_ips,
+                ..baseline
+            },
+            ClassicEndpointContextInput {
+                responder_virtual_ips: &other_responder_ips,
+                ..baseline
+            },
+            ClassicEndpointContextInput {
+                initiator_endpoints: &other_initiator_endpoints,
+                ..baseline
+            },
+            ClassicEndpointContextInput {
+                responder_endpoints: &other_responder_endpoints,
+                ..baseline
+            },
+        ];
+        for variant in variants {
+            assert_ne!(
+                classic_endpoint_context(&variant).expect("variant context"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_context_normalizes_set_order_and_duplicates() {
+        let initiator_ips = [
+            "fd00::2".parse().unwrap(),
+            "10.8.0.2".parse().unwrap(),
+            "fd00::2".parse().unwrap(),
+        ];
+        let responder_ips = ["10.8.0.1".parse().unwrap(), "fd00::1".parse().unwrap()];
+        let initiator_endpoints = [
+            "[2001:db8::2]:51820".parse().unwrap(),
+            "198.51.100.2:51820".parse().unwrap(),
+            "[2001:db8::2]:51820".parse().unwrap(),
+        ];
+        let responder_endpoints = [
+            "198.51.100.1:51820".parse().unwrap(),
+            "[2001:db8::1]:51820".parse().unwrap(),
+        ];
+        let initiator_key = [0x11; ED25519_PUBLIC_KEY_LEN];
+        let responder_key = [0x22; ED25519_PUBLIC_KEY_LEN];
+        let a = classic_endpoint_context(&ClassicEndpointContextInput {
+            network_id: b"network-a",
+            initiator_public_key: &initiator_key,
+            responder_public_key: &responder_key,
+            initiator_virtual_ips: &initiator_ips,
+            responder_virtual_ips: &responder_ips,
+            initiator_endpoints: &initiator_endpoints,
+            responder_endpoints: &responder_endpoints,
+        })
+        .expect("context a");
+
+        let reordered_initiator_ips = [initiator_ips[1], initiator_ips[0]];
+        let reordered_initiator_endpoints = [initiator_endpoints[1], initiator_endpoints[0]];
+        let reordered_responder_endpoints = [responder_endpoints[1], responder_endpoints[0]];
+        let b = classic_endpoint_context(&ClassicEndpointContextInput {
+            network_id: b"network-a",
+            initiator_public_key: &initiator_key,
+            responder_public_key: &responder_key,
+            initiator_virtual_ips: &reordered_initiator_ips,
+            responder_virtual_ips: &responder_ips,
+            initiator_endpoints: &reordered_initiator_endpoints,
+            responder_endpoints: &reordered_responder_endpoints,
+        })
+        .expect("context b");
         assert_eq!(a, b);
-        assert_ne!(a, [0; ENDPOINT_CONTEXT_HASH_LEN]);
+    }
+
+    #[test]
+    fn endpoint_context_rejects_invalid_inputs() {
+        let initiator_ips = ["10.8.0.2".parse().unwrap()];
+        let responder_ips = ["10.8.0.1".parse().unwrap()];
+        let endpoints = ["198.51.100.1:51820".parse().unwrap()];
+        let valid_key = [0x11; ED25519_PUBLIC_KEY_LEN];
+        let input = ClassicEndpointContextInput {
+            network_id: b"network",
+            initiator_public_key: &valid_key,
+            responder_public_key: &valid_key,
+            initiator_virtual_ips: &initiator_ips,
+            responder_virtual_ips: &responder_ips,
+            initiator_endpoints: &endpoints,
+            responder_endpoints: &endpoints,
+        };
+
         assert_eq!(
-            classic_endpoint_context(&first[..31], &second),
+            classic_endpoint_context(&ClassicEndpointContextInput {
+                network_id: &[],
+                ..input
+            }),
+            Err(ControlCodecError::EmptyNetworkId)
+        );
+        assert_eq!(
+            classic_endpoint_context(&ClassicEndpointContextInput {
+                initiator_virtual_ips: &[],
+                ..input
+            }),
+            Err(ControlCodecError::MissingVirtualIps("initiator"))
+        );
+        assert_eq!(
+            classic_endpoint_context(&ClassicEndpointContextInput {
+                responder_virtual_ips: &[],
+                ..input
+            }),
+            Err(ControlCodecError::MissingVirtualIps("responder"))
+        );
+        assert_eq!(
+            classic_endpoint_context(&ClassicEndpointContextInput {
+                initiator_public_key: &valid_key[..31],
+                ..input
+            }),
             Err(ControlCodecError::InvalidPublicKeyLength {
                 expected: ED25519_PUBLIC_KEY_LEN
             })
         );
+
+        // Endpoint lists are optional for relay-only deployments.
+        let relay_only = classic_endpoint_context(&ClassicEndpointContextInput {
+            initiator_endpoints: &[],
+            responder_endpoints: &[],
+            ..input
+        });
+        assert!(relay_only.is_ok());
     }
 
     #[test]

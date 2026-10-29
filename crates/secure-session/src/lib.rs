@@ -8,6 +8,7 @@
 //! implementations.
 
 pub mod confirmation;
+pub mod data_cipher;
 pub mod handshake;
 pub mod handshake_epoch;
 pub mod key_schedule;
@@ -16,8 +17,8 @@ pub mod rekey_codec;
 pub mod rekey_session;
 pub mod transcript;
 
-use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
+use data_cipher::AeadCipher;
+pub use data_cipher::DataCipherSuite;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -195,7 +196,8 @@ impl DataHeader {
 /// outgoing header. The underlying AEAD implementation zeroizes its expanded
 /// key material when this value is dropped.
 pub struct SendCipher {
-    cipher: ChaCha20Poly1305,
+    suite: DataCipherSuite,
+    cipher: AeadCipher,
     session_id: [u8; SESSION_ID_LEN],
     direction: Direction,
     epoch: u16,
@@ -204,23 +206,50 @@ pub struct SendCipher {
 }
 
 impl SendCipher {
-    /// Create send state from a 32-byte derived epoch key.
+    /// Create ChaCha20-Poly1305 send state from a 32-byte derived epoch key.
+    ///
+    /// This compatibility constructor is equivalent to
+    /// [`new_with_suite`](Self::new_with_suite) with
+    /// [`DataCipherSuite::ChaCha20Poly1305`]. New handshake integrations must
+    /// pass the suite negotiated by the authenticated handshake.
     ///
     /// `peer_receiver_index` must be the local receiver index advertised by the
     /// peer, not the sender's own index. The input key is zeroized after the
     /// AEAD state has been initialized.
     pub fn new(
+        key: [u8; 32],
+        session_id: [u8; SESSION_ID_LEN],
+        direction: Direction,
+        epoch: u16,
+        peer_receiver_index: u32,
+    ) -> Self {
+        Self::new_with_suite(
+            DataCipherSuite::ChaCha20Poly1305,
+            key,
+            session_id,
+            direction,
+            epoch,
+            peer_receiver_index,
+        )
+    }
+
+    /// Create send state for a negotiated data-cipher suite.
+    ///
+    /// The suite must come from the authenticated handshake; it is not encoded
+    /// in or selected by an individual data packet.
+    pub fn new_with_suite(
+        suite: DataCipherSuite,
         mut key: [u8; 32],
         session_id: [u8; SESSION_ID_LEN],
         direction: Direction,
         epoch: u16,
         peer_receiver_index: u32,
     ) -> Self {
-        let cipher = ChaCha20Poly1305::new_from_slice(&key)
-            .expect("ChaCha20-Poly1305 requires a 32-byte key");
+        let cipher = AeadCipher::new(suite, &key);
         key.zeroize();
 
         Self {
+            suite,
             cipher,
             session_id,
             direction,
@@ -228,6 +257,11 @@ impl SendCipher {
             peer_receiver_index,
             next_send_counter: 0,
         }
+    }
+
+    /// Negotiated data-cipher suite.
+    pub const fn suite(&self) -> DataCipherSuite {
+        self.suite
     }
 
     /// Next outgoing packet counter.
@@ -289,7 +323,7 @@ impl SendCipher {
         let tag = self
             .cipher
             .encrypt_in_place_detached(
-                Nonce::from_slice(&nonce),
+                &nonce,
                 &aad,
                 &mut packet[DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext_len],
             )
@@ -308,7 +342,8 @@ impl SendCipher {
 /// successful authentication. The underlying AEAD implementation zeroizes its
 /// expanded key material when this value is dropped.
 pub struct ReceiveCipher {
-    cipher: ChaCha20Poly1305,
+    suite: DataCipherSuite,
+    cipher: AeadCipher,
     session_id: [u8; SESSION_ID_LEN],
     direction: Direction,
     epoch: u16,
@@ -317,23 +352,50 @@ pub struct ReceiveCipher {
 }
 
 impl ReceiveCipher {
-    /// Create receive state from a 32-byte derived epoch key.
+    /// Create ChaCha20-Poly1305 receive state from a 32-byte derived epoch key.
+    ///
+    /// This compatibility constructor is equivalent to
+    /// [`new_with_suite`](Self::new_with_suite) with
+    /// [`DataCipherSuite::ChaCha20Poly1305`]. New handshake integrations must
+    /// pass the suite negotiated by the authenticated handshake.
     ///
     /// `local_receiver_index` is the index assigned by this endpoint and must
     /// match the `receiver_index` field written by the peer. The input key is
     /// zeroized after the AEAD state has been initialized.
     pub fn new(
+        key: [u8; 32],
+        session_id: [u8; SESSION_ID_LEN],
+        direction: Direction,
+        epoch: u16,
+        local_receiver_index: u32,
+    ) -> Self {
+        Self::new_with_suite(
+            DataCipherSuite::ChaCha20Poly1305,
+            key,
+            session_id,
+            direction,
+            epoch,
+            local_receiver_index,
+        )
+    }
+
+    /// Create receive state for a negotiated data-cipher suite.
+    ///
+    /// The suite must come from the authenticated handshake; it is not encoded
+    /// in or selected by an individual data packet.
+    pub fn new_with_suite(
+        suite: DataCipherSuite,
         mut key: [u8; 32],
         session_id: [u8; SESSION_ID_LEN],
         direction: Direction,
         epoch: u16,
         local_receiver_index: u32,
     ) -> Self {
-        let cipher = ChaCha20Poly1305::new_from_slice(&key)
-            .expect("ChaCha20-Poly1305 requires a 32-byte key");
+        let cipher = AeadCipher::new(suite, &key);
         key.zeroize();
 
         Self {
+            suite,
             cipher,
             session_id,
             direction,
@@ -341,6 +403,11 @@ impl ReceiveCipher {
             local_receiver_index,
             replay_window: ReplayWindow::new(),
         }
+    }
+
+    /// Negotiated data-cipher suite.
+    pub const fn suite(&self) -> DataCipherSuite {
+        self.suite
     }
 
     pub(crate) const fn session_id(&self) -> [u8; SESSION_ID_LEN] {
@@ -385,13 +452,10 @@ impl ReceiveCipher {
         let (_, tail) = packet.split_at_mut(DATA_HEADER_LEN);
         let (plaintext, tag) = tail.split_at_mut(plaintext_len);
 
+        let mut encoded_tag = [0u8; AEAD_TAG_LEN];
+        encoded_tag.copy_from_slice(tag);
         self.cipher
-            .decrypt_in_place_detached(
-                Nonce::from_slice(&nonce),
-                &aad,
-                plaintext,
-                Tag::from_slice(tag),
-            )
+            .decrypt_in_place_detached(&nonce, &aad, plaintext, &encoded_tag)
             .map_err(|_| SessionError::AuthenticationFailed)?;
 
         self.replay_window.mark_authenticated(header.counter)?;
@@ -444,6 +508,11 @@ impl EpochSession {
     /// Active data epoch.
     pub const fn epoch(&self) -> u16 {
         self.active_send.epoch
+    }
+
+    /// Negotiated data-cipher suite for the active epoch.
+    pub const fn suite(&self) -> DataCipherSuite {
+        self.active_send.suite
     }
 
     /// Encrypt a packet under the active epoch.
@@ -583,7 +652,10 @@ fn validate_epoch_pair(send: &SendCipher, receive: &ReceiveCipher) -> Result<(),
             Direction::InitiatorToResponder
         )
     );
-    if !opposite_directions || send.session_id != receive.session_id || send.epoch != receive.epoch
+    if !opposite_directions
+        || send.session_id != receive.session_id
+        || send.epoch != receive.epoch
+        || send.suite != receive.suite
     {
         return Err(SessionError::InvalidEpochState);
     }
@@ -756,6 +828,8 @@ pub enum SessionError {
     InvalidEpochState,
     #[error("packet authentication failed")]
     AuthenticationFailed,
+    #[error("unsupported v2 data-cipher suite {0:#06x}")]
+    UnsupportedCipherSuite(u16),
 }
 
 #[cfg(test)]
@@ -919,6 +993,169 @@ mod tests {
             .open_in_place(&mut packet[..packet_len])
             .expect("open");
         assert_eq!(plaintext, b"hello wireguard");
+    }
+
+    #[test]
+    fn both_data_suites_share_framing_and_round_trip() {
+        for suite in [
+            DataCipherSuite::Aes256Gcm,
+            DataCipherSuite::ChaCha20Poly1305,
+        ] {
+            let mut sender = SendCipher::new_with_suite(
+                suite,
+                TEST_KEY,
+                TEST_SESSION_ID,
+                Direction::InitiatorToResponder,
+                17,
+                0x0102_0304,
+            );
+            let mut receiver = ReceiveCipher::new_with_suite(
+                suite,
+                TEST_KEY,
+                TEST_SESSION_ID,
+                Direction::InitiatorToResponder,
+                17,
+                0x0102_0304,
+            );
+            assert_eq!(sender.suite(), suite);
+            assert_eq!(receiver.suite(), suite);
+
+            let mut packet = [0u8; 128];
+            let packet_len = sender
+                .seal(b"suite-neutral data frame", &mut packet)
+                .expect("seal with negotiated suite");
+            assert_eq!(
+                packet_len,
+                DATA_HEADER_LEN + b"suite-neutral data frame".len() + AEAD_TAG_LEN
+            );
+            assert_eq!(
+                DataHeader::decode(&packet).expect("decode shared header"),
+                DataHeader::new(0x0102_0304, 17, 0)
+            );
+            assert_eq!(
+                receiver
+                    .open_in_place(&mut packet[..packet_len])
+                    .expect("open with negotiated suite"),
+                b"suite-neutral data frame"
+            );
+            assert_eq!(
+                receiver
+                    .open_in_place(&mut packet[..packet_len])
+                    .expect_err("replay must fail"),
+                SessionError::ReplayDetected
+            );
+        }
+    }
+
+    #[test]
+    fn suite_mismatch_tampering_and_reflection_fail_without_consuming_counters() {
+        let mut sender = SendCipher::new_with_suite(
+            DataCipherSuite::ChaCha20Poly1305,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let mut packet = [0u8; 128];
+        let packet_len = sender
+            .seal(b"authenticated bytes", &mut packet)
+            .expect("seal");
+        let original = packet;
+
+        let mut wrong_suite = ReceiveCipher::new_with_suite(
+            DataCipherSuite::Aes256Gcm,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let mut cross_suite_packet = original;
+        assert_eq!(
+            wrong_suite
+                .open_in_place(&mut cross_suite_packet[..packet_len])
+                .expect_err("cross-suite packet must fail"),
+            SessionError::AuthenticationFailed
+        );
+
+        let mut receiver = ReceiveCipher::new_with_suite(
+            DataCipherSuite::ChaCha20Poly1305,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let mut tampered_header = original;
+        tampered_header[15] ^= 1;
+        assert_eq!(
+            receiver
+                .open_in_place(&mut tampered_header[..packet_len])
+                .expect_err("header tampering must fail"),
+            SessionError::AuthenticationFailed
+        );
+
+        let mut tampered_tag = original;
+        tampered_tag[packet_len - 1] ^= 1;
+        assert_eq!(
+            receiver
+                .open_in_place(&mut tampered_tag[..packet_len])
+                .expect_err("tag tampering must fail"),
+            SessionError::AuthenticationFailed
+        );
+
+        let mut valid = original;
+        assert_eq!(
+            receiver
+                .open_in_place(&mut valid[..packet_len])
+                .expect("failed attempts must not consume the counter"),
+            b"authenticated bytes"
+        );
+
+        let mut reflected = [0u8; 128];
+        let reflected_len = sender
+            .seal(b"direction reflection", &mut reflected)
+            .expect("seal second packet");
+        let mut wrong_direction = ReceiveCipher::new_with_suite(
+            DataCipherSuite::ChaCha20Poly1305,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::ResponderToInitiator,
+            17,
+            0x0102_0304,
+        );
+        assert_eq!(
+            wrong_direction
+                .open_in_place(&mut reflected[..reflected_len])
+                .expect_err("direction reflection must fail"),
+            SessionError::AuthenticationFailed
+        );
+    }
+
+    #[test]
+    fn mixed_suite_epoch_pairs_are_rejected() {
+        let send = SendCipher::new_with_suite(
+            DataCipherSuite::ChaCha20Poly1305,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0xa1a2_a3a4,
+        );
+        let receive = ReceiveCipher::new_with_suite(
+            DataCipherSuite::Aes256Gcm,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::ResponderToInitiator,
+            17,
+            0xb1b2_b3b4,
+        );
+        assert_eq!(
+            EpochSession::new(send, receive, Instant::now()).err(),
+            Some(SessionError::InvalidEpochState)
+        );
+        assert_eq!(DataCipherSuite::from_id(0x9999), None);
     }
 
     #[test]

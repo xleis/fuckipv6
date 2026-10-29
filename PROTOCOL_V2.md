@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AEAD、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire 或真实 UDP/TUN 数据面。完整 X-Wing 握手、PQC 和控制通道线格式也尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；已提供“确认成功后安装 `EpochSession`”的桥接，但尚未接入 `HELLO/ACCEPT` wire 或真实 UDP/TUN 数据面。完整 X-Wing 握手、PQC 和控制通道线格式也尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -192,7 +192,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation 原语，以及 SS-08 的认证数据 epoch 桥接。`EpochSession::from_handshake` 只有在验证对端方向的 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index；测试验证双方可以双向往返收发。receiver index 是本地路由标签而非认证凭据，调用方仍须从已认证控制消息中正确取得对端索引。SS-09 另提供 `RekeySession` 将在线重协商状态机与数据 epoch 原子组合。当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，这些桥接也尚未接入真实数据面。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation 原语，以及 SS-08 的认证数据 epoch 桥接。`EpochSession::from_handshake` 只有在验证对端方向的 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index；测试验证双方可以双向往返收发。receiver index 是本地路由标签而非认证凭据，调用方仍须从已认证控制消息中正确取得对端索引。SS-09 另提供 `RekeySession` 将在线重协商状态机与数据 epoch 原子组合；SS-10 使该桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。当前 `HELLO/ACCEPT` wire 消息尚不携带确认值，这些桥接也尚未接入真实数据面。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 
@@ -282,6 +282,8 @@ aad   = header[0..16] || L(SID) || L(payload_length)
 ```
 
 `payload_length` 为明文/密文载荷长度，不包含 16 字节固定头和 16 字节认证标签；长度编码为两字节大端整数。
+
+`suite_id` 不写入数据头，而是由已认证握手/重协商消息绑定到收发 cipher 状态。AES-256-GCM 与 ChaCha20-Poly1305 必须共用上述 header、Nonce、AAD、标签和重放语义；接收端只使用协商套件解密，不能用单个数据包切换算法。混合套件的 `EpochSession` 收发 pair 必须在安装前拒绝。
 
 要求：
 

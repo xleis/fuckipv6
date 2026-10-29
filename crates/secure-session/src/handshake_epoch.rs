@@ -10,7 +10,7 @@ use crate::confirmation::{
     verify_confirmation, ConfirmationError, ConfirmationRole, ConfirmationTag,
 };
 use crate::key_schedule::DerivedSession;
-use crate::{Direction, EpochSession, ReceiveCipher, SendCipher, SessionError};
+use crate::{DataCipherSuite, Direction, EpochSession, ReceiveCipher, SendCipher, SessionError};
 use std::time::Instant;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -52,16 +52,21 @@ impl EpochSession {
             ),
         };
 
+        let suite = DataCipherSuite::from_id(identity.suite_id)
+            .ok_or(SessionError::UnsupportedCipherSuite(identity.suite_id))
+            .map_err(HandshakeEpochError::Session)?;
         let send_key = Zeroizing::new(*keys.data_key(send_direction));
         let receive_key = Zeroizing::new(*keys.data_key(receive_direction));
-        let send = SendCipher::new(
+        let send = SendCipher::new_with_suite(
+            suite,
             *send_key,
             identity.session_id,
             send_direction,
             identity.epoch,
             peer_receiver_index,
         );
-        let receive = ReceiveCipher::new(
+        let receive = ReceiveCipher::new_with_suite(
+            suite,
             *receive_key,
             identity.session_id,
             receive_direction,
@@ -92,7 +97,9 @@ mod tests {
     use crate::confirmation::{compute_confirmation, ConfirmationRole};
     use crate::handshake::{ClassicInitiator, ClassicResponder, Ed25519Identity};
     use crate::key_schedule::derive_session_keys;
-    use crate::transcript::{ENDPOINT_CONTEXT_HASH_LEN, SUITE_CHACHA20_POLY1305};
+    use crate::transcript::{
+        ENDPOINT_CONTEXT_HASH_LEN, SUITE_AES_256_GCM, SUITE_CHACHA20_POLY1305,
+    };
 
     const NOW: u64 = 1_700_000_000;
     const EPOCH: u16 = 7;
@@ -111,12 +118,16 @@ mod tests {
     }
 
     fn established_session() -> (DerivedSession, DerivedSession) {
+        established_session_with_suite(SUITE_CHACHA20_POLY1305)
+    }
+
+    fn established_session_with_suite(suite_id: u16) -> (DerivedSession, DerivedSession) {
         let initiator_identity = Ed25519Identity::from_seed([0x11; 32]);
         let responder_identity = Ed25519Identity::from_seed([0x22; 32]);
         let initiator = ClassicInitiator::start(
             &initiator_identity,
             responder_identity.verifying_key(),
-            SUITE_CHACHA20_POLY1305,
+            suite_id,
             ENDPOINT,
             EPOCH,
             NOW,
@@ -196,6 +207,49 @@ mod tests {
                 .open_in_place(&mut response[..response_len], now)
                 .expect("open response"),
             b"authenticated response"
+        );
+    }
+
+    #[test]
+    fn aes_suite_is_selected_from_the_authenticated_handshake() {
+        let (initiator, responder) = established_session_with_suite(SUITE_AES_256_GCM);
+        let transcript = initiator.identity.transcript_hash;
+        let initiator_confirmation =
+            compute_confirmation(&initiator.keys, ConfirmationRole::Initiator, &transcript);
+        let responder_confirmation =
+            compute_confirmation(&responder.keys, ConfirmationRole::Responder, &transcript);
+        let now = Instant::now();
+
+        let mut initiator = EpochSession::from_handshake(
+            initiator,
+            ConfirmationRole::Initiator,
+            INITIATOR_RECEIVE_INDEX,
+            RESPONDER_RECEIVE_INDEX,
+            &responder_confirmation,
+            now,
+        )
+        .expect("install AES initiator epoch");
+        let mut responder = EpochSession::from_handshake(
+            responder,
+            ConfirmationRole::Responder,
+            RESPONDER_RECEIVE_INDEX,
+            INITIATOR_RECEIVE_INDEX,
+            &initiator_confirmation,
+            now,
+        )
+        .expect("install AES responder epoch");
+        assert_eq!(initiator.suite(), DataCipherSuite::Aes256Gcm);
+        assert_eq!(responder.suite(), DataCipherSuite::Aes256Gcm);
+
+        let mut packet = [0u8; 128];
+        let packet_len = initiator
+            .seal(b"negotiated AES data", &mut packet, now)
+            .expect("seal AES packet");
+        assert_eq!(
+            responder
+                .open_in_place(&mut packet[..packet_len], now)
+                .expect("open AES packet"),
+            b"negotiated AES data"
         );
     }
 

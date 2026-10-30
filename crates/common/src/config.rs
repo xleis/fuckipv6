@@ -274,6 +274,13 @@ pub struct CoordinatorConfig {
     #[serde(default = "default_heartbeat_timeout_secs")]
     pub heartbeat_timeout_secs: u64,
 
+    /// 本协调器所属网络的稳定随机标识。
+    ///
+    /// 该值保存在配置内容中，不依赖配置文件路径。旧配置缺少此字段时由协调器
+    /// 首次加载时生成并迁移旧版路径哈希撤销记录。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub network_id: String,
+
     /// 虚拟网络分配
     pub network: NetworkAllocation,
 
@@ -312,6 +319,7 @@ impl Default for CoordinatorConfig {
             relay_bind: default_relay_bind(),
             webui_bind: default_webui_bind(),
             heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
+            network_id: String::new(),
             network: NetworkAllocation::default(),
             tls: None,
             log: LogConfig::default(),
@@ -349,6 +357,13 @@ impl CoordinatorConfig {
 
         if self.heartbeat_timeout_secs == 0 {
             anyhow::bail!("heartbeat_timeout_secs 必须大于 0");
+        }
+
+        if (!self.network_id.is_empty() && self.network_id.trim().is_empty())
+            || self.network_id.len() > 256
+            || self.network_id.chars().any(char::is_control)
+        {
+            anyhow::bail!("network_id 必须是不超过 256 字节且不含控制字符的稳定标识");
         }
 
         for revocation in &self.authorization_revocations {
@@ -941,6 +956,7 @@ mod tests {
             relay_bind: "[::]:6667".to_string(),
             webui_bind: "0.0.0.0:8080".to_string(),
             heartbeat_timeout_secs: 120,
+            network_id: String::new(),
             network: NetworkAllocation {
                 mode: NetworkMode::DualStack,
                 ipv4_pool: "10.8.0.0/24".to_string(),

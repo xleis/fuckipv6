@@ -769,6 +769,10 @@ mod tests {
     }
 
     impl BlacklistStore for MemoryAuthorizationStore {
+        fn supports_authorization_revocations(&self) -> bool {
+            true
+        }
+
         fn load(&self) -> Result<BlacklistConfig> {
             Ok(BlacklistConfig::default())
         }
@@ -822,8 +826,8 @@ mod tests {
             Ok(revocations.len() != original_len)
         }
 
-        fn authorization_network_id(&self) -> String {
-            "test-network".to_string()
+        fn authorization_network_id(&self) -> Result<String> {
+            Ok("test-network".to_string())
         }
     }
 

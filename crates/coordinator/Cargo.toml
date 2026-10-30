@@ -23,3 +23,5 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 sha2 = { workspace = true }
+getrandom = { workspace = true }
+fs2 = { workspace = true }

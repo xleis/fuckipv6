@@ -34,6 +34,7 @@ pub struct SessionManager {
     blacklist_store: StdRwLock<Option<SharedBlacklistStore>>,
     blacklist_write_lock: TokioMutex<()>,
     authorization_directory: StdRwLock<Option<Arc<NetworkAuthorizationDirectory>>>,
+    registration_authorization_gate: Arc<RwLock<()>>,
     certificate_allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
 }
 
@@ -99,6 +100,92 @@ struct TrafficCounters {
     relay_packets: AtomicU64,
     relay_payload_bytes: AtomicU64,
     relay_errors: AtomicU64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct EphemeralAuthorizationStore {
+    revocations: StdRwLock<Vec<fuckipv6_common::NetworkAuthorizationRevocation>>,
+}
+
+#[cfg(test)]
+impl super::blacklist::BlacklistStore for EphemeralAuthorizationStore {
+    fn supports_authorization_revocations(&self) -> bool {
+        true
+    }
+
+    fn load(&self) -> Result<BlacklistConfig> {
+        Ok(BlacklistConfig::default())
+    }
+
+    fn save(&self, _blacklist: &BlacklistConfig) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_authorization_revocations(
+        &self,
+    ) -> Result<Vec<fuckipv6_common::NetworkAuthorizationRevocation>> {
+        self.revocations
+            .read()
+            .map(|records| records.clone())
+            .map_err(|_| anyhow!("测试授权撤销存储锁已损坏"))
+    }
+
+    fn revoke_authorization(
+        &self,
+        record: &fuckipv6_common::NetworkAuthorizationRevocation,
+    ) -> Result<bool> {
+        let mut records = self
+            .revocations
+            .write()
+            .map_err(|_| anyhow!("测试授权撤销存储锁已损坏"))?;
+        if records.iter().any(|existing| {
+            existing.network_id == record.network_id
+                && (existing.client_id == record.client_id
+                    || existing.public_key_fingerprint == record.public_key_fingerprint)
+        }) {
+            return Ok(false);
+        }
+        records.push(record.clone());
+        Ok(true)
+    }
+
+    fn lift_authorization(
+        &self,
+        network_id: &str,
+        client_id: &str,
+        public_key_fingerprint: &str,
+    ) -> Result<bool> {
+        let mut records = self
+            .revocations
+            .write()
+            .map_err(|_| anyhow!("测试授权撤销存储锁已损坏"))?;
+        let original_len = records.len();
+        records.retain(|record| {
+            !(record.network_id == network_id
+                && (record.client_id == client_id
+                    || record.public_key_fingerprint == public_key_fingerprint))
+        });
+        Ok(records.len() != original_len)
+    }
+
+    fn authorization_network_id(&self) -> Result<String> {
+        Ok("test-network".to_string())
+    }
+}
+
+fn initial_authorization_directory() -> Result<Option<Arc<NetworkAuthorizationDirectory>>> {
+    #[cfg(test)]
+    {
+        Ok(Some(Arc::new(NetworkAuthorizationDirectory::new(
+            "test-network",
+            Arc::new(EphemeralAuthorizationStore::default()),
+        )?)))
+    }
+    #[cfg(not(test))]
+    {
+        Ok(None)
+    }
 }
 
 struct RegistrationInput {
@@ -224,7 +311,8 @@ impl SessionManager {
             blacklist: Arc::new(RwLock::new(BlacklistConfig::default())),
             blacklist_store: StdRwLock::new(None),
             blacklist_write_lock: TokioMutex::new(()),
-            authorization_directory: StdRwLock::new(None),
+            authorization_directory: StdRwLock::new(initial_authorization_directory()?),
+            registration_authorization_gate: Arc::new(RwLock::new(())),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
@@ -249,7 +337,8 @@ impl SessionManager {
             blacklist: Arc::new(RwLock::new(blacklist)),
             blacklist_store: StdRwLock::new(None),
             blacklist_write_lock: TokioMutex::new(()),
-            authorization_directory: StdRwLock::new(None),
+            authorization_directory: StdRwLock::new(initial_authorization_directory()?),
+            registration_authorization_gate: Arc::new(RwLock::new(())),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
@@ -306,12 +395,23 @@ impl SessionManager {
             .await
             .context("等待持久黑名单加载任务失败")??;
 
-        let network_id = store.authorization_network_id();
-        let authorization_directory = Arc::new(NetworkAuthorizationDirectory::new(
-            network_id,
-            store.clone(),
-        )?);
+        let authorization_directory = if store.supports_authorization_revocations() {
+            let network_id = store.authorization_network_id()?;
+            let directory = Arc::new(NetworkAuthorizationDirectory::new(
+                network_id,
+                store.clone(),
+            )?);
+            let probe_store = store.clone();
+            tokio::task::spawn_blocking(move || probe_store.load_authorization_revocations())
+                .await
+                .context("等待授权撤销存储探测任务失败")??;
+            Some(directory)
+        } else {
+            tracing::warn!("持久化存储不支持授权撤销，节点注册将保持失败关闭");
+            None
+        };
 
+        let _authorization_guard = self.registration_authorization_gate.write().await;
         *self.blacklist.write().await = blacklist.clone();
         {
             let mut store_slot = self
@@ -325,10 +425,19 @@ impl SessionManager {
                 .authorization_directory
                 .write()
                 .map_err(|_| anyhow!("授权撤销目录锁已损坏"))?;
-            *directory = Some(authorization_directory);
+            *directory = authorization_directory;
         }
 
         self.disconnect_blacklisted_sessions(&blacklist).await;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn detach_authorization_directory_for_test(&self) -> Result<()> {
+        *self
+            .authorization_directory
+            .write()
+            .map_err(|_| anyhow!("授权撤销目录锁已损坏"))? = None;
         Ok(())
     }
 
@@ -347,7 +456,7 @@ impl SessionManager {
             .clone();
         match directory {
             Some(directory) => directory.is_revoked(client_id, public_key).await,
-            None => Ok(false),
+            None => bail!("授权撤销存储尚未配置，拒绝节点注册"),
         }
     }
 
@@ -364,6 +473,7 @@ impl SessionManager {
 
     /// 持久撤销节点，并在提交成功后立即断开该节点的现有会话。
     pub async fn try_revoke_node(&self, client_id: &str, public_key: &[u8]) -> Result<bool> {
+        let _authorization_guard = self.registration_authorization_gate.write().await;
         let directory = self
             .authorization_directory
             .read()
@@ -378,6 +488,7 @@ impl SessionManager {
 
     /// 从持久撤销目录移除节点；不会自动恢复已断开的会话。
     pub async fn try_lift_revocation(&self, client_id: &str, public_key: &[u8]) -> Result<bool> {
+        let _authorization_guard = self.registration_authorization_gate.write().await;
         let directory = self
             .authorization_directory
             .read()
@@ -576,6 +687,9 @@ impl SessionManager {
     ) -> Result<VirtualIps> {
         tracing::debug!("开始注册客户端: {}", client_id);
 
+        // 与撤销共享同一进程内读写门。注册释放该门之前，撤销不能提交并清理
+        // allowlist；撤销先获得写门时，注册会在首次持久目录查询处失败。
+        let _authorization_guard = self.registration_authorization_gate.read().await;
         self.ensure_registration_authorized(&client_id, &public_key)
             .await?;
 
@@ -1329,6 +1443,10 @@ mod tests {
     }
 
     impl super::super::blacklist::BlacklistStore for MemoryBlacklistStore {
+        fn supports_authorization_revocations(&self) -> bool {
+            true
+        }
+
         fn load(&self) -> Result<BlacklistConfig> {
             self.state
                 .read()
@@ -1397,8 +1515,20 @@ mod tests {
             Ok(revocations.len() != original_len)
         }
 
-        fn authorization_network_id(&self) -> String {
-            "test-network".to_string()
+        fn authorization_network_id(&self) -> Result<String> {
+            Ok("test-network".to_string())
+        }
+    }
+
+    struct BlacklistOnlyStore;
+
+    impl super::super::blacklist::BlacklistStore for BlacklistOnlyStore {
+        fn load(&self) -> Result<BlacklistConfig> {
+            Ok(BlacklistConfig::default())
+        }
+
+        fn save(&self, _blacklist: &BlacklistConfig) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -2124,6 +2254,130 @@ mod tests {
             manager.get_peer_info(&client_id).await.is_none(),
             "a registration racing with revocation must not remain active"
         );
+        let public_key_bytes: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        assert!(
+            !manager
+                .client_certificate_authorizer()
+                .is_authorized(&public_key_bytes),
+            "revocation must not be followed by certificate allowlist reinstatement"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_store_rejects_registration_without_state_changes() -> Result<()>
+    {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager.detach_authorization_directory_for_test()?;
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let public_key_bytes: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let error = manager
+            .register_client(
+                client_id.clone(),
+                public_key,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await
+            .expect_err("a missing revocation store must fail registration closed");
+        assert!(error.to_string().contains("授权撤销存储尚未配置"));
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        assert!(!manager
+            .client_certificate_authorizer()
+            .is_authorized(&public_key_bytes));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blacklist_only_store_keeps_registration_fail_closed() -> Result<()> {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager
+            .attach_blacklist_store(Arc::new(BlacklistOnlyStore))
+            .await
+            .expect("blacklist-only stores must remain usable for blacklist management");
+
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = manager
+            .register_client(
+                client_id.clone(),
+                public_key,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await
+            .expect_err("a missing revocation directory must reject registration");
+        assert!(error.to_string().contains("授权撤销存储尚未配置"));
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revoked_node_cannot_reenable_certificate_allowlist_by_registering_again() -> Result<()>
+    {
+        let store = Arc::new(MemoryBlacklistStore::default());
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager.attach_blacklist_store(store).await?;
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let public_key_bytes: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        let (first_tx, _first_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                client_id.clone(),
+                public_key.clone(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                first_tx,
+            )
+            .await?;
+        assert!(manager
+            .client_certificate_authorizer()
+            .is_authorized(&public_key_bytes));
+
+        assert!(manager.try_revoke_node(&client_id, &public_key).await?);
+        assert!(!manager
+            .client_certificate_authorizer()
+            .is_authorized(&public_key_bytes));
+
+        let (second_tx, _second_rx) = mpsc::unbounded_channel();
+        let error = manager
+            .register_client(
+                client_id.clone(),
+                public_key,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41001),
+                51821,
+                NatType::Open,
+                second_tx,
+            )
+            .await
+            .expect_err("a revoked node must not register again");
+        assert!(error.to_string().contains("撤销"));
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        assert!(!manager
+            .client_certificate_authorizer()
+            .is_authorized(&public_key_bytes));
         Ok(())
     }
 }

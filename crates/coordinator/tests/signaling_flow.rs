@@ -1,15 +1,20 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::{codec, Identity, NatType, SignalingMessage};
+use fuckipv6_common::{codec, CoordinatorConfig, Identity, NatType, SignalingMessage};
+use fuckipv6_coordinator::signaling::blacklist::CoordinatorConfigBlacklistStore;
 use fuckipv6_coordinator::signaling::server::SignalingServer;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[tokio::test]
 async fn websocket_registration_and_relay_flow() -> Result<()> {
     let bind_addr = free_loopback_addr().await?;
-    let server = SignalingServer::new(bind_addr.to_string(), "fd00::1000/120")?;
+    let (server, config_dir) = test_signaling_server(bind_addr).await?;
     let server_task = tokio::spawn(server.run());
 
     let url = format!("ws://{}", bind_addr);
@@ -93,13 +98,14 @@ async fn websocket_registration_and_relay_flow() -> Result<()> {
     }
 
     server_task.abort();
+    std::fs::remove_dir_all(config_dir)?;
     Ok(())
 }
 
 #[tokio::test]
 async fn websocket_duplicate_registration_refreshes_nat_mapping() -> Result<()> {
     let bind_addr = free_loopback_addr().await?;
-    let server = SignalingServer::new(bind_addr.to_string(), "fd00::1000/120")?;
+    let (server, config_dir) = test_signaling_server(bind_addr).await?;
     let server_task = tokio::spawn(server.run());
 
     let url = format!("ws://{}", bind_addr);
@@ -192,7 +198,31 @@ async fn websocket_duplicate_registration_refreshes_nat_mapping() -> Result<()> 
     assert_eq!(got_payload, payload);
 
     server_task.abort();
+    std::fs::remove_dir_all(config_dir)?;
     Ok(())
+}
+
+static TEST_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+async fn test_signaling_server(bind_addr: SocketAddr) -> Result<(SignalingServer, PathBuf)> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = TEST_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let config_dir = std::env::temp_dir().join(format!(
+        "fuckipv6-signaling-flow-{}-{unique}-{sequence}",
+        std::process::id()
+    ));
+    let config_path = config_dir.join("coordinator.toml");
+    std::fs::create_dir_all(&config_dir)?;
+    CoordinatorConfig::default().save_to_file(&config_path)?;
+    let server = SignalingServer::new(bind_addr.to_string(), "fd00::1000/120")?;
+    server
+        .session_manager()
+        .attach_blacklist_store(Arc::new(CoordinatorConfigBlacklistStore::new(config_path)))
+        .await?;
+    Ok((server, config_dir))
 }
 
 async fn free_loopback_addr() -> Result<SocketAddr> {

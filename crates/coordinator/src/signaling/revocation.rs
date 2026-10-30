@@ -149,19 +149,29 @@ mod tests {
         path: &std::path::Path,
         network_id: &str,
     ) -> Result<NetworkAuthorizationDirectory> {
-        let store: SharedBlacklistStore = Arc::new(CoordinatorConfigBlacklistStore::new(path));
+        if !path.exists() {
+            let config = CoordinatorConfig {
+                network_id: network_id.to_string(),
+                ..CoordinatorConfig::default()
+            };
+            config.save_to_file(path)?;
+        }
+        let concrete = CoordinatorConfigBlacklistStore::new(path);
+        assert_eq!(concrete.authorization_network_id()?, network_id);
+        let store: SharedBlacklistStore = Arc::new(concrete);
         NetworkAuthorizationDirectory::new(network_id, store)
     }
 
     #[tokio::test]
     async fn revocations_survive_restart_and_do_not_cross_network_boundaries() -> Result<()> {
-        let path = test_config_path("network-isolation");
+        let path_a = test_config_path("network-isolation-a");
+        let path_b = test_config_path("network-isolation-b");
         let identity = Identity::generate()?;
         let client_id = identity.client_id();
         let public_key = identity.public_key();
 
-        let network_a = directory(&path, "network-a")?;
-        let network_b = directory(&path, "network-b")?;
+        let network_a = directory(&path_a, "network-a")?;
+        let network_b = directory(&path_b, "network-b")?;
         assert!(!network_a.is_revoked(client_id, &public_key).await?);
         assert!(network_a.revoke(client_id, &public_key).await?);
         assert!(network_a.is_revoked(client_id, &public_key).await?);
@@ -170,45 +180,145 @@ mod tests {
             "revocation in one network must not apply to another network"
         );
 
-        let restarted = directory(&path, "network-a")?;
+        let restarted = directory(&path_a, "network-a")?;
         assert!(restarted.is_revoked(client_id, &public_key).await?);
         assert_eq!(restarted.list().await?.len(), 1);
+
+        std::fs::remove_file(path_a)?;
+        std::fs::remove_file(path_b)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_revocations_from_independent_store_instances_preserve_all_updates(
+    ) -> Result<()> {
+        let path = test_config_path("concurrent");
+        let config = CoordinatorConfig {
+            network_id: "network-a".to_string(),
+            ..CoordinatorConfig::default()
+        };
+        config.save_to_file(&path)?;
+        let mut identities = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let identity = Identity::generate()?;
+            let client_id = identity.client_id().to_string();
+            let public_key = identity.public_key();
+            identities.push((client_id.clone(), public_key.clone()));
+            let task_path = path.clone();
+            tasks.push(tokio::spawn(async move {
+                let store = CoordinatorConfigBlacklistStore::new(task_path);
+                let network = NetworkAuthorizationDirectory::new(
+                    "network-a",
+                    Arc::new(store) as SharedBlacklistStore,
+                )?;
+                network.revoke(&client_id, &public_key).await
+            }));
+        }
+        for task in tasks {
+            assert!(task.await??);
+        }
+
+        let persisted = CoordinatorConfig::from_file(&path)?;
+        assert_eq!(persisted.authorization_revocations.len(), identities.len());
+        let store = CoordinatorConfigBlacklistStore::new(&path);
+        let network = NetworkAuthorizationDirectory::new(
+            "network-a",
+            Arc::new(store) as SharedBlacklistStore,
+        )?;
+        for (client_id, public_key) in identities {
+            assert!(network.is_revoked(&client_id, &public_key).await?);
+        }
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn subprocess_revocation_writer() -> Result<()> {
+        let Ok(path) = std::env::var("FUCKIPV6_REVOCATION_CHILD_PATH") else {
+            return Ok(());
+        };
+        let store = CoordinatorConfigBlacklistStore::new(path);
+        let network_id = store.authorization_network_id()?;
+        let identity = Identity::generate()?;
+        let record = NetworkAuthorizationRevocation {
+            network_id,
+            client_id: identity.client_id().to_string(),
+            public_key_fingerprint: Identity::public_key_fingerprint(&identity.public_key()),
+        };
+        assert!(store.revoke_authorization(&record)?);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_revocations_from_separate_processes_preserve_all_updates() -> Result<()> {
+        const WRITERS: usize = 12;
+        let path = test_config_path("concurrent-processes");
+        let config = CoordinatorConfig {
+            network_id: "network-a".to_string(),
+            ..CoordinatorConfig::default()
+        };
+        config.save_to_file(&path)?;
+
+        let executable = std::env::current_exe().context("获取测试进程路径失败")?;
+        let mut children = Vec::with_capacity(WRITERS);
+        for _ in 0..WRITERS {
+            children.push(
+                std::process::Command::new(&executable)
+                    .args([
+                        "--exact",
+                        "signaling::revocation::tests::subprocess_revocation_writer",
+                        "--test-threads=1",
+                    ])
+                    .env("FUCKIPV6_REVOCATION_CHILD_PATH", &path)
+                    .spawn()
+                    .context("启动授权撤销子进程失败")?,
+            );
+        }
+        for child in children {
+            let output = child.wait_with_output().context("等待授权撤销子进程失败")?;
+            assert!(
+                output.status.success(),
+                "授权撤销子进程失败: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let persisted = CoordinatorConfig::from_file(&path)?;
+        assert_eq!(persisted.authorization_revocations.len(), WRITERS);
 
         std::fs::remove_file(path)?;
         Ok(())
     }
 
     #[tokio::test]
-    async fn concurrent_revocations_preserve_all_networks() -> Result<()> {
-        let path = test_config_path("concurrent");
-        let store: SharedBlacklistStore = Arc::new(CoordinatorConfigBlacklistStore::new(&path));
-        let network_a = NetworkAuthorizationDirectory::new("network-a", store.clone())?;
-        let network_b = NetworkAuthorizationDirectory::new("network-b", store)?;
-        let identity_a = Identity::generate()?;
-        let identity_b = Identity::generate()?;
-        let public_key_a = identity_a.public_key();
-        let public_key_b = identity_b.public_key();
-        let (result_a, result_b) = tokio::join!(
-            network_a.revoke(identity_a.client_id(), &public_key_a),
-            network_b.revoke(identity_b.client_id(), &public_key_b)
-        );
-        assert!(result_a?);
-        assert!(result_b?);
-
-        let persisted = CoordinatorConfig::from_file(&path)?;
-        assert_eq!(persisted.authorization_revocations.len(), 2);
+    async fn missing_config_fails_closed_for_revocation_reads_and_writes() -> Result<()> {
+        let path = test_config_path("missing-config");
+        let store = CoordinatorConfigBlacklistStore::new(&path);
+        assert!(store.load_authorization_revocations().is_err());
         assert!(
-            network_a
-                .is_revoked(identity_a.client_id(), &identity_a.public_key())
-                .await?
-        );
-        assert!(
-            network_b
-                .is_revoked(identity_b.client_id(), &identity_b.public_key())
-                .await?
+            !path.exists(),
+            "a failed revocation read must not create a config"
         );
 
-        std::fs::remove_file(path)?;
+        let directory = NetworkAuthorizationDirectory::new(
+            "network-a",
+            Arc::new(store) as SharedBlacklistStore,
+        )?;
+        let identity = Identity::generate()?;
+        assert!(directory
+            .is_revoked(identity.client_id(), &identity.public_key())
+            .await
+            .is_err());
+        assert!(directory
+            .revoke(identity.client_id(), &identity.public_key())
+            .await
+            .is_err());
+        assert!(
+            !path.exists(),
+            "a failed revocation write must not create a config"
+        );
         Ok(())
     }
 
@@ -220,7 +330,7 @@ mod tests {
             banned_clients: vec!["node-bad".to_string()],
         })?;
         let identity = Identity::generate()?;
-        let network_id = store.authorization_network_id();
+        let network_id = store.authorization_network_id()?;
         let record = NetworkAuthorizationRevocation {
             network_id,
             client_id: identity.client_id().to_string(),
@@ -231,6 +341,34 @@ mod tests {
         let persisted = CoordinatorConfig::from_file(&path)?;
         assert_eq!(persisted.blacklist.banned_clients, vec!["node-bad"]);
         assert_eq!(persisted.authorization_revocations, vec![record]);
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn coordinator_store_rejects_cross_network_revocation_writes() -> Result<()> {
+        let path = test_config_path("cross-network-write");
+        let config = CoordinatorConfig {
+            network_id: "network-a".to_string(),
+            ..CoordinatorConfig::default()
+        };
+        config.save_to_file(&path)?;
+        let store = CoordinatorConfigBlacklistStore::new(&path);
+        let identity = Identity::generate()?;
+        let record = NetworkAuthorizationRevocation {
+            network_id: "network-b".to_string(),
+            client_id: identity.client_id().to_string(),
+            public_key_fingerprint: Identity::public_key_fingerprint(&identity.public_key()),
+        };
+
+        let error = store
+            .revoke_authorization(&record)
+            .expect_err("cross-network revocation writes must be rejected");
+        assert!(error.to_string().contains("当前网络"));
+        assert!(CoordinatorConfig::from_file(&path)?
+            .authorization_revocations
+            .is_empty());
 
         std::fs::remove_file(path)?;
         Ok(())

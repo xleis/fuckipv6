@@ -76,6 +76,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # 错误处理
 anyhow = "1"
 thiserror = "1"
+fs2 = "0.4"
 
 # 实用工具
 futures = "0.3"

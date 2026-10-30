@@ -1,12 +1,13 @@
 # QUIC 统一身份执行清单（EQ-14）
 
 > 范围：中继 QUIC 的双向 TLS、应用身份绑定和 0-RTT 策略。
+> 威胁模型：[`QUIC_IDENTITY_THREAT_MODEL.md`](QUIC_IDENTITY_THREAT_MODEL.md)。
 > 边界：本清单只涉及 `crates/common`、`crates/coordinator`、非受保护的 P2P QUIC/连接代码与文档。不得修改用户正在处理的 `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs`。
 > 结论口径：代码和测试通过不等于独立安全审计；在该清单全部完成且独立复核前，不得宣称 QUIC 身份层或项目安全性超过 WireGuard。
 
 ## 执行清单
 
-- [ ] **QI-01 威胁模型与版本边界**：明确 QUIC TLS、应用 Ed25519 身份、relay 注册和 0-RTT 的攻击面；记录兼容边界与不承诺项。
+- [x] **QI-01 威胁模型与版本边界**：明确 QUIC TLS、应用 Ed25519 身份、relay 注册和 0-RTT 的攻击面；记录兼容边界与不承诺项。
 - [x] **QI-02 身份证书生成**：由长期 Ed25519 身份确定性派生 QUIC 客户端证书，证书公钥必须与应用签名公钥一致，私钥不落盘、不打印。
 - [x] **QI-03 强制客户端证书校验**：服务端启用 mandatory client auth，只接受满足客户端用途且能完成 TLS proof-of-possession 的证书。
 - [x] **QI-04 客户端认证配置**：提供带客户端证书的 pinned 客户端配置，并保持现有无客户端证书配置仅供显式 legacy/自检路径使用。

@@ -87,6 +87,8 @@ Relay 不能：
 
 Relay 可以丢弃、延迟、复制、重排或篡改密文；协议必须把它们视为不可信网络行为并安全丢弃。Relay 的可用性不构成端到端安全保证。
 
+QUIC 双向证书、应用身份和 0-RTT 的攻击面及版本边界见 [`QUIC_IDENTITY_THREAT_MODEL.md`](QUIC_IDENTITY_THREAT_MODEL.md)。
+
 ### 4.4 Exit Node
 
 Exit Node 是目标流量的实际出口，因此它能看到经过它解密/转发的外层流量、目标地址、协议元数据和源虚拟地址。Exit Node 不是匿名代理，也不能对目标隐藏 Exit Node 自己的公网地址。

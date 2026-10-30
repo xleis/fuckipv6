@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot};
+use crate::ui::UiModeResolution;
 
 /// Stable, transport-neutral state rendered by every node UI adapter.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct NodeSnapshot {
     pub permissions: NodePermissionSnapshot,
     #[serde(default)]
     pub embedded_services: Vec<NodeEmbeddedServiceSnapshot>,
+    #[serde(default)]
+    pub ui_mode: Option<UiModeResolution>,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     pub logs: Vec<NodeLogEntry>,
@@ -378,17 +381,19 @@ impl NodeStateStore {
     /// Attach the shared event bus so every state revision is also emitted as a
     /// `StateChanged` event for streaming adapters.
     pub fn with_events(events: NodeEventBus) -> Self {
-        Self::with_events_and_identity(events, None)
+        Self::with_events_identity_and_ui(events, None, None)
     }
 
-    /// Construct the canonical store with public node identity metadata already
-    /// present, so zero-network startup never exposes an anonymous control plane.
-    pub(crate) fn with_events_and_identity(
+    /// Construct the canonical store with node identity and the resolved UI
+    /// mode that is actually active for this process.
+    pub(crate) fn with_events_identity_and_ui(
         events: NodeEventBus,
         identity: Option<NodeIdentitySnapshot>,
+        ui_mode: Option<UiModeResolution>,
     ) -> Self {
         let snapshot = NodeSnapshot {
             identity,
+            ui_mode,
             ..NodeSnapshot::default()
         };
         let (updates, _) = watch::channel(snapshot.clone());
@@ -553,6 +558,29 @@ mod tests {
         assert!(violations.contains(&"offline_network_has_peers:offline".into()));
         assert!(violations.contains(&"peer_for_offline_network:offline".into()));
         assert!(violations.contains(&"peer_for_unknown_network:unknown".into()));
+    }
+
+    #[tokio::test]
+    async fn state_store_exposes_the_effective_ui_mode() {
+        let resolution = crate::ui::resolve_ui_mode(
+            crate::ui::UiModeRequest::WebUi,
+            crate::ui::UiCapabilities {
+                display: crate::ui::DisplayEnvironment::LinuxWayland,
+                gpui_available: false,
+            },
+        )
+        .expect("desktop WebUI should resolve");
+        let state = NodeStateStore::with_events_identity_and_ui(
+            NodeEventBus::default(),
+            None,
+            Some(resolution),
+        );
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.ui_mode, Some(resolution));
+        let encoded = serde_json::to_value(snapshot).expect("serialize snapshot");
+        assert_eq!(encoded["ui_mode"]["effective"], "web_ui");
+        assert_eq!(encoded["ui_mode"]["requested"], "web_ui");
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use crate::node::{
     NodeNetworkStatus, NodePeerSnapshot, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
 };
 use crate::symmetric::EmbeddedServiceManager;
+use crate::ui::UiModeResolution;
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
 /// Linux IFNAMSIZ 限制为 16 字节（包含空终止符 \0），最大有效长度为 15 字符。
@@ -70,6 +71,7 @@ pub struct MultiNetworkSupervisor {
     commands: NodeCommandBus,
     services: EmbeddedServiceManager,
     runtimes: NetworkRuntimeManager,
+    ui_mode: UiModeResolution,
 }
 
 impl MultiNetworkSupervisor {
@@ -81,13 +83,18 @@ impl MultiNetworkSupervisor {
         options: RuntimeOptions,
         configs: ConfigManager,
     ) -> Result<Self> {
+        let ui_mode = crate::ui::resolve_legacy_ui_mode(options.headless, options.gui)?;
         let events = NodeEventBus::default();
         let registry = MultiNetworkRegistry::new();
         let identity = runtime_metadata::identity_snapshot(
             &configs.load_node_identity()?,
             configs.node_display_name()?,
         );
-        let state = NodeStateStore::with_events_and_identity(events.clone(), Some(identity));
+        let state = NodeStateStore::with_events_identity_and_ui(
+            events.clone(),
+            Some(identity),
+            Some(ui_mode),
+        );
         let services = EmbeddedServiceManager::spawn(8);
         let lifecycle = NodeLifecycle::new();
         let runtimes = NetworkRuntimeManager::spawn(
@@ -115,6 +122,7 @@ impl MultiNetworkSupervisor {
             commands,
             services,
             runtimes,
+            ui_mode,
         })
     }
 
@@ -227,7 +235,6 @@ impl MultiNetworkSupervisor {
             ipc::spawn_multi_server_with_commands(self.registry.clone(), self.commands.clone());
 
         let webui_port = self.options.webui_port;
-        let ui_mode = crate::ui::detect_ui_mode(self.options.headless, self.options.gui);
         if webui_port > 0 {
             let app_ctrl = Arc::new(crate::webui::AppController::new());
             if let Err(error) = crate::webui::start_app_webui(webui_port, app_ctrl.clone()).await {
@@ -292,8 +299,8 @@ impl MultiNetworkSupervisor {
         }
         println!("══════════════════════════════════════════════════════════════════════════════");
 
-        if ui_mode.is_gui() && webui_port > 0 {
-            let _ = crate::ui::run_desktop_gui(webui_port).await;
+        if self.ui_mode.effective.is_web_ui() && webui_port > 0 {
+            let _ = crate::ui::run_webui_window(webui_port).await;
         }
 
         // Ctrl+C/SIGTERM and the legacy IPC shutdown command end the node.

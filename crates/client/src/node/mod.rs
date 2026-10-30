@@ -5,6 +5,7 @@ mod plan;
 mod runtime_handler;
 pub(crate) mod runtime_metadata;
 mod state;
+mod ui_manifest;
 
 pub use command::{
     validate_network_name, NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandFuture,
@@ -20,4 +21,9 @@ pub use state::{
     NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel, NodeNetworkRole, NodeNetworkSnapshot,
     NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeSnapshot,
     NodeStateStore, NodeTrafficSnapshot,
+};
+pub use ui_manifest::{
+    node_ui_manifest, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiCommandKind,
+    NodeUiConfirmation, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiPermission,
+    NodeUiValidation, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };

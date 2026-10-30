@@ -1,0 +1,648 @@
+use serde::{Deserialize, Serialize};
+
+pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
+
+/// Declarative contract shared by WebUI and the future native GPUI surface.
+///
+/// Adapters may choose different widgets and rendering, but page availability,
+/// commands, fields, validation, confirmations, permission classes and backend
+/// maturity come from this manifest rather than duplicated UI business logic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUiManifest {
+    pub schema_version: u16,
+    pub pages: Vec<NodeUiPage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUiPage {
+    pub id: String,
+    pub nav_label_key: String,
+    pub title_key: String,
+    pub actions: Vec<NodeUiAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUiAction {
+    pub id: String,
+    pub label_key: String,
+    pub command: NodeUiCommandKind,
+    pub backend_status: NodeUiBackendStatus,
+    pub permission: NodeUiPermission,
+    pub availability: NodeUiAvailability,
+    pub fields: Vec<NodeUiField>,
+    pub confirmation: Option<NodeUiConfirmation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUiField {
+    pub id: String,
+    pub label_key: String,
+    pub input: NodeUiInputKind,
+    pub required: bool,
+    pub validation: NodeUiValidation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUiConfirmation {
+    pub title_key: String,
+    pub consequence_key: String,
+    pub destructive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiCommandKind {
+    GetSnapshot,
+    StartNetworks,
+    StopNetworks,
+    CreateNetwork,
+    JoinNetwork,
+    UpdateRouting,
+    SetNetworkRole,
+    ProbePeer,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiBackendStatus {
+    /// The production command handler currently accepts this command.
+    Implemented,
+    /// The shared command exists, but the runtime backend rejects it as unavailable.
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiPermission {
+    ViewState,
+    ManageNetworks,
+    ChangeRouting,
+    ManageRoles,
+    ProbePeers,
+    StopNode,
+    ViewLogs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiAvailability {
+    Always,
+    NodeRunning,
+    NetworkOnline,
+    NetworkSelected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiInputKind {
+    Boolean,
+    ExternalHost,
+    NetworkName,
+    NetworkSelection,
+    PeerTarget,
+    Port,
+    Role,
+    RoutingMode,
+    UrlOrTicket,
+    TimeoutMs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiValidation {
+    None,
+    NonEmpty,
+    NetworkName,
+    Port,
+    DistinctPorts,
+    NetworkSelection,
+    Role,
+    RoutingMode,
+    PositiveTimeout,
+}
+
+pub fn node_ui_manifest() -> NodeUiManifest {
+    NodeUiManifest {
+        schema_version: NODE_UI_MANIFEST_SCHEMA_VERSION,
+        pages: vec![
+            page(
+                "overview",
+                "nav.overview",
+                "page.overview",
+                vec![action(
+                    "refresh_snapshot",
+                    "action.refresh_snapshot",
+                    NodeUiCommandKind::GetSnapshot,
+                    NodeUiBackendStatus::Implemented,
+                    NodeUiPermission::ViewState,
+                    NodeUiAvailability::Always,
+                    vec![],
+                    None,
+                )],
+            ),
+            page(
+                "networks",
+                "nav.networks",
+                "page.networks",
+                vec![
+                    action(
+                        "create_network",
+                        "action.create_network",
+                        NodeUiCommandKind::CreateNetwork,
+                        NodeUiBackendStatus::Unavailable,
+                        NodeUiPermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "signaling_port",
+                                "field.signaling_port",
+                                NodeUiInputKind::Port,
+                                true,
+                                NodeUiValidation::Port,
+                            ),
+                            field(
+                                "relay_port",
+                                "field.relay_port",
+                                NodeUiInputKind::Port,
+                                true,
+                                NodeUiValidation::DistinctPorts,
+                            ),
+                            field(
+                                "external_host",
+                                "field.external_host",
+                                NodeUiInputKind::ExternalHost,
+                                false,
+                                NodeUiValidation::None,
+                            ),
+                            field(
+                                "auto_connect",
+                                "field.auto_connect",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "join_network",
+                        "action.join_network",
+                        NodeUiCommandKind::JoinNetwork,
+                        NodeUiBackendStatus::Unavailable,
+                        NodeUiPermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "target",
+                                "field.ticket_or_url",
+                                NodeUiInputKind::UrlOrTicket,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                false,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "start",
+                                "field.start_after_join",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "start_networks",
+                        "action.start_networks",
+                        NodeUiCommandKind::StartNetworks,
+                        NodeUiBackendStatus::Unavailable,
+                        NodeUiPermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![field(
+                            "selection",
+                            "field.network_selection",
+                            NodeUiInputKind::NetworkSelection,
+                            true,
+                            NodeUiValidation::NetworkSelection,
+                        )],
+                        None,
+                    ),
+                    action(
+                        "stop_networks",
+                        "action.stop_networks",
+                        NodeUiCommandKind::StopNetworks,
+                        NodeUiBackendStatus::Implemented,
+                        NodeUiPermission::ManageNetworks,
+                        NodeUiAvailability::NetworkOnline,
+                        vec![
+                            field(
+                                "networks",
+                                "field.network_selection",
+                                NodeUiInputKind::NetworkSelection,
+                                false,
+                                NodeUiValidation::NetworkSelection,
+                            ),
+                            field(
+                                "all",
+                                "field.all_networks",
+                                NodeUiInputKind::Boolean,
+                                false,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        Some(confirmation(
+                            "confirm.stop_networks.title",
+                            "confirm.stop_networks.consequence",
+                            false,
+                        )),
+                    ),
+                ],
+            ),
+            page(
+                "peers",
+                "nav.peers",
+                "page.peers",
+                vec![action(
+                    "probe_peer",
+                    "action.probe_peer",
+                    NodeUiCommandKind::ProbePeer,
+                    NodeUiBackendStatus::Implemented,
+                    NodeUiPermission::ProbePeers,
+                    NodeUiAvailability::NetworkOnline,
+                    vec![
+                        field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        ),
+                        field(
+                            "target",
+                            "field.peer_target",
+                            NodeUiInputKind::PeerTarget,
+                            true,
+                            NodeUiValidation::NonEmpty,
+                        ),
+                        field(
+                            "timeout_ms",
+                            "field.timeout_ms",
+                            NodeUiInputKind::TimeoutMs,
+                            true,
+                            NodeUiValidation::PositiveTimeout,
+                        ),
+                    ],
+                    None,
+                )],
+            ),
+            page("topology", "nav.topology", "page.topology", vec![]),
+            page("traffic", "nav.traffic", "page.traffic", vec![]),
+            page(
+                "routing",
+                "nav.routing",
+                "page.routing",
+                vec![action(
+                    "update_routing",
+                    "action.update_routing",
+                    NodeUiCommandKind::UpdateRouting,
+                    NodeUiBackendStatus::Unavailable,
+                    NodeUiPermission::ChangeRouting,
+                    NodeUiAvailability::NetworkSelected,
+                    vec![
+                        field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        ),
+                        field(
+                            "mode",
+                            "field.routing_mode",
+                            NodeUiInputKind::RoutingMode,
+                            true,
+                            NodeUiValidation::RoutingMode,
+                        ),
+                        field(
+                            "exit_node",
+                            "field.exit_node",
+                            NodeUiInputKind::PeerTarget,
+                            false,
+                            NodeUiValidation::None,
+                        ),
+                        field(
+                            "is_exit_node",
+                            "field.is_exit_node",
+                            NodeUiInputKind::Boolean,
+                            true,
+                            NodeUiValidation::None,
+                        ),
+                    ],
+                    Some(confirmation(
+                        "confirm.update_routing.title",
+                        "confirm.update_routing.consequence",
+                        false,
+                    )),
+                )],
+            ),
+            page(
+                "exit_node",
+                "nav.exit_node",
+                "page.exit_node",
+                vec![action(
+                    "set_exit_node_role",
+                    "action.set_exit_node_role",
+                    NodeUiCommandKind::SetNetworkRole,
+                    NodeUiBackendStatus::Unavailable,
+                    NodeUiPermission::ManageRoles,
+                    NodeUiAvailability::NetworkSelected,
+                    vec![
+                        field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        ),
+                        field(
+                            "role",
+                            "field.role",
+                            NodeUiInputKind::Role,
+                            true,
+                            NodeUiValidation::Role,
+                        ),
+                        field(
+                            "enabled",
+                            "field.enabled",
+                            NodeUiInputKind::Boolean,
+                            true,
+                            NodeUiValidation::None,
+                        ),
+                    ],
+                    Some(confirmation(
+                        "confirm.set_exit_node_role.title",
+                        "confirm.set_exit_node_role.consequence",
+                        false,
+                    )),
+                )],
+            ),
+            page(
+                "relay",
+                "nav.relay",
+                "page.relay",
+                vec![action(
+                    "set_relay_role",
+                    "action.set_relay_role",
+                    NodeUiCommandKind::SetNetworkRole,
+                    NodeUiBackendStatus::Unavailable,
+                    NodeUiPermission::ManageRoles,
+                    NodeUiAvailability::NetworkSelected,
+                    vec![
+                        field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        ),
+                        field(
+                            "role",
+                            "field.role",
+                            NodeUiInputKind::Role,
+                            true,
+                            NodeUiValidation::Role,
+                        ),
+                        field(
+                            "enabled",
+                            "field.enabled",
+                            NodeUiInputKind::Boolean,
+                            true,
+                            NodeUiValidation::None,
+                        ),
+                    ],
+                    Some(confirmation(
+                        "confirm.set_relay_role.title",
+                        "confirm.set_relay_role.consequence",
+                        false,
+                    )),
+                )],
+            ),
+            page("logs", "nav.logs", "page.logs", vec![]),
+            page("identity", "nav.identity", "page.identity", vec![]),
+            page(
+                "settings",
+                "nav.settings",
+                "page.settings",
+                vec![action(
+                    "shutdown_node",
+                    "action.shutdown_node",
+                    NodeUiCommandKind::Shutdown,
+                    NodeUiBackendStatus::Implemented,
+                    NodeUiPermission::StopNode,
+                    NodeUiAvailability::NodeRunning,
+                    vec![],
+                    Some(confirmation(
+                        "confirm.shutdown_node.title",
+                        "confirm.shutdown_node.consequence",
+                        true,
+                    )),
+                )],
+            ),
+        ],
+    }
+}
+
+fn page(id: &str, nav_label_key: &str, title_key: &str, actions: Vec<NodeUiAction>) -> NodeUiPage {
+    NodeUiPage {
+        id: id.into(),
+        nav_label_key: nav_label_key.into(),
+        title_key: title_key.into(),
+        actions,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn action(
+    id: &str,
+    label_key: &str,
+    command: NodeUiCommandKind,
+    backend_status: NodeUiBackendStatus,
+    permission: NodeUiPermission,
+    availability: NodeUiAvailability,
+    fields: Vec<NodeUiField>,
+    confirmation: Option<NodeUiConfirmation>,
+) -> NodeUiAction {
+    NodeUiAction {
+        id: id.into(),
+        label_key: label_key.into(),
+        command,
+        backend_status,
+        permission,
+        availability,
+        fields,
+        confirmation,
+    }
+}
+
+fn field(
+    id: &str,
+    label_key: &str,
+    input: NodeUiInputKind,
+    required: bool,
+    validation: NodeUiValidation,
+) -> NodeUiField {
+    NodeUiField {
+        id: id.into(),
+        label_key: label_key.into(),
+        input,
+        required,
+        validation,
+    }
+}
+
+fn confirmation(title_key: &str, consequence_key: &str, destructive: bool) -> NodeUiConfirmation {
+    NodeUiConfirmation {
+        title_key: title_key.into(),
+        consequence_key: consequence_key.into(),
+        destructive,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn manifest_declares_the_complete_required_page_set_once() {
+        let manifest = node_ui_manifest();
+        let pages: HashSet<_> = manifest.pages.iter().map(|page| page.id.as_str()).collect();
+        let expected = HashSet::from([
+            "overview",
+            "networks",
+            "peers",
+            "topology",
+            "traffic",
+            "routing",
+            "exit_node",
+            "relay",
+            "logs",
+            "identity",
+            "settings",
+        ]);
+
+        assert_eq!(manifest.schema_version, NODE_UI_MANIFEST_SCHEMA_VERSION);
+        assert_eq!(pages.len(), manifest.pages.len());
+        assert_eq!(pages, expected);
+    }
+
+    #[test]
+    fn page_and_action_ids_are_unique_and_fields_are_validated() {
+        let manifest = node_ui_manifest();
+        let mut action_ids = HashSet::new();
+
+        for page in &manifest.pages {
+            for action in &page.actions {
+                assert!(
+                    action_ids.insert(action.id.as_str()),
+                    "duplicate {}",
+                    action.id
+                );
+                for field in &action.fields {
+                    assert!(
+                        !(field.required
+                            && field.input != NodeUiInputKind::Boolean
+                            && field.validation == NodeUiValidation::None),
+                        "required field {} has no validation",
+                        field.id
+                    );
+                }
+                if action.backend_status == NodeUiBackendStatus::Unavailable {
+                    assert!(!action.fields.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_backend_status_matches_the_live_command_handler() {
+        let manifest = node_ui_manifest();
+        let status = |command| {
+            manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .filter(|action| action.command == command)
+                .map(|action| action.backend_status)
+                .collect::<HashSet<_>>()
+        };
+
+        assert_eq!(
+            status(NodeUiCommandKind::GetSnapshot),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        assert_eq!(
+            status(NodeUiCommandKind::StopNetworks),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        assert_eq!(
+            status(NodeUiCommandKind::ProbePeer),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        assert_eq!(
+            status(NodeUiCommandKind::Shutdown),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        for command in [
+            NodeUiCommandKind::StartNetworks,
+            NodeUiCommandKind::CreateNetwork,
+            NodeUiCommandKind::JoinNetwork,
+            NodeUiCommandKind::UpdateRouting,
+            NodeUiCommandKind::SetNetworkRole,
+        ] {
+            assert_eq!(
+                status(command),
+                HashSet::from([NodeUiBackendStatus::Unavailable])
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_actions_require_explicit_confirmation() {
+        let manifest = node_ui_manifest();
+        let shutdown = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeUiCommandKind::Shutdown)
+            .expect("shutdown action");
+
+        assert!(shutdown
+            .confirmation
+            .as_ref()
+            .is_some_and(|confirmation| confirmation.destructive));
+    }
+
+    #[test]
+    fn manifest_does_not_introduce_product_client_server_identities() {
+        let encoded = serde_json::to_string(&node_ui_manifest()).expect("serialize manifest");
+
+        assert!(!encoded.contains("client_mode"));
+        assert!(!encoded.contains("server_mode"));
+        assert!(encoded.contains("set_exit_node_role"));
+        assert!(encoded.contains("set_relay_role"));
+    }
+}

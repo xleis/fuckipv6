@@ -395,6 +395,31 @@ async fn handle_register_message(
         return Ok(());
     }
 
+    match session_manager
+        .is_registration_revoked(&id, &public_key)
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => {
+            tracing::warn!("拒绝已撤销授权节点注册请求: {}", id);
+            let error = SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Node authorization has been revoked for this network",
+            );
+            send_binary(tx, session_manager, error)?;
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::error!("授权撤销目录查询失败，拒绝节点注册 {}: {error:#}", id);
+            let error = SignalingMessage::protocol_error(
+                ErrorCode::Internal,
+                "Authorization revocation check failed",
+            );
+            send_binary(tx, session_manager, error)?;
+            return Ok(());
+        }
+    }
+
     if session_manager.is_blacklisted(&id, &public_key).await {
         tracing::warn!("拒绝黑名单客户端注册请求: {}", id);
         let error = SignalingMessage::protocol_error(

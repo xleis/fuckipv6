@@ -375,6 +375,20 @@ impl RelayServer {
         virtual_ip: Ipv6Addr,
         public_key: &[u8],
     ) -> Result<()> {
+        match self
+            .session_manager
+            .is_registration_revoked(client_id, public_key)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                anyhow::bail!("客户端身份已撤销，拒绝 QUIC 中继注册: {client_id}");
+            }
+            Err(error) => {
+                anyhow::bail!("授权撤销目录查询失败，拒绝 QUIC 中继注册 {client_id}: {error:#}");
+            }
+        }
+
         if self
             .session_manager
             .is_blacklisted(client_id, public_key)

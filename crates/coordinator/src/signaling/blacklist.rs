@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
-use fuckipv6_common::{BlacklistConfig, CoordinatorConfig};
+use anyhow::{bail, Context, Result};
+use fuckipv6_common::{BlacklistConfig, CoordinatorConfig, NetworkAuthorizationRevocation};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 黑名单持久化边界。
 ///
@@ -9,6 +10,33 @@ use std::sync::Arc;
 pub trait BlacklistStore: Send + Sync {
     fn load(&self) -> Result<BlacklistConfig>;
     fn save(&self, blacklist: &BlacklistConfig) -> Result<()>;
+
+    /// 加载持久化撤销目录。调用方必须把读取错误视为拒绝，而不能当作空目录。
+    fn load_authorization_revocations(&self) -> Result<Vec<NetworkAuthorizationRevocation>> {
+        bail!("当前持久化存储不支持授权撤销目录")
+    }
+
+    /// 原子地新增一条网络作用域撤销记录。
+    fn revoke_authorization(&self, _record: &NetworkAuthorizationRevocation) -> Result<bool> {
+        bail!("当前持久化存储不支持授权撤销")
+    }
+
+    /// 原子地移除指定网络中的撤销记录。
+    fn lift_authorization(
+        &self,
+        _network_id: &str,
+        _client_id: &str,
+        _public_key_fingerprint: &str,
+    ) -> Result<bool> {
+        bail!("当前持久化存储不支持授权撤销")
+    }
+
+    /// 当前协调器配置所属的持久网络作用域。
+    ///
+    /// 具体存储应覆盖此方法并返回重启后稳定的网络标识。
+    fn authorization_network_id(&self) -> String {
+        "default".to_string()
+    }
 }
 
 /// 将协调端黑名单持久化到 `CoordinatorConfig` 的 `blacklist` 字段。
@@ -16,6 +44,7 @@ pub trait BlacklistStore: Send + Sync {
 pub struct CoordinatorConfigBlacklistStore {
     path: PathBuf,
     default_config: CoordinatorConfig,
+    update_lock: Arc<Mutex<()>>,
 }
 
 impl CoordinatorConfigBlacklistStore {
@@ -23,6 +52,7 @@ impl CoordinatorConfigBlacklistStore {
         Self {
             path: path.into(),
             default_config: CoordinatorConfig::default(),
+            update_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -33,50 +63,148 @@ impl CoordinatorConfigBlacklistStore {
         Self {
             path: path.into(),
             default_config,
+            update_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
 
-impl BlacklistStore for CoordinatorConfigBlacklistStore {
-    fn load(&self) -> Result<BlacklistConfig> {
+    fn load_config(&self) -> Result<CoordinatorConfig> {
         match CoordinatorConfig::from_file(&self.path) {
-            Ok(config) => Ok(config.blacklist),
-            Err(error) if is_not_found(&error) => Ok(self.default_config.blacklist.clone()),
+            Ok(config) => Ok(config),
+            Err(error) if is_not_found(&error) => Ok(self.default_config.clone()),
             Err(error) => Err(error).with_context(|| {
-                format!("读取协调端持久黑名单失败: {}", self.path.to_string_lossy())
+                format!("读取协调端持久配置失败: {}", self.path.to_string_lossy())
             }),
         }
     }
 
-    fn save(&self, blacklist: &BlacklistConfig) -> Result<()> {
-        let mut config = match CoordinatorConfig::from_file(&self.path) {
-            Ok(config) => config,
-            Err(error) if is_not_found(&error) => self.default_config.clone(),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "更新持久黑名单前读取协调端配置失败: {}",
-                        self.path.to_string_lossy()
-                    )
-                });
-            }
-        };
-        if config.blacklist == *blacklist {
-            return Ok(());
-        }
-        config.blacklist = blacklist.clone();
-        config.validate().context("持久黑名单配置校验失败")?;
+    fn save_config(&self, config: &CoordinatorConfig) -> Result<()> {
+        config.validate().context("持久协调端配置校验失败")?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建协调端配置目录失败: {}", parent.to_string_lossy()))?;
         }
         config
             .save_to_file(&self.path)
-            .with_context(|| format!("写入协调端持久黑名单失败: {}", self.path.to_string_lossy()))
+            .with_context(|| format!("写入协调端持久配置失败: {}", self.path.to_string_lossy()))
+    }
+
+    fn update_guard(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.update_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("协调端配置写入锁已损坏"))
+    }
+}
+
+impl BlacklistStore for CoordinatorConfigBlacklistStore {
+    fn load(&self) -> Result<BlacklistConfig> {
+        self.load_config()
+            .map(|config| config.blacklist)
+            .with_context(|| format!("读取协调端持久黑名单失败: {}", self.path.to_string_lossy()))
+    }
+
+    fn save(&self, blacklist: &BlacklistConfig) -> Result<()> {
+        let _guard = self.update_guard()?;
+        let mut config = self.load_config().with_context(|| {
+            format!(
+                "更新持久黑名单前读取协调端配置失败: {}",
+                self.path.to_string_lossy()
+            )
+        })?;
+        if config.blacklist == *blacklist {
+            return Ok(());
+        }
+        config.blacklist = blacklist.clone();
+        self.save_config(&config).context("持久黑名单配置写入失败")
+    }
+
+    fn load_authorization_revocations(&self) -> Result<Vec<NetworkAuthorizationRevocation>> {
+        self.load_config()
+            .map(|config| config.authorization_revocations)
+            .with_context(|| {
+                format!(
+                    "读取协调端持久授权撤销目录失败: {}",
+                    self.path.to_string_lossy()
+                )
+            })
+    }
+
+    fn revoke_authorization(&self, record: &NetworkAuthorizationRevocation) -> Result<bool> {
+        record.validate()?;
+        let _guard = self.update_guard()?;
+        let mut config = self.load_config().with_context(|| {
+            format!(
+                "更新授权撤销目录前读取协调端配置失败: {}",
+                self.path.to_string_lossy()
+            )
+        })?;
+
+        let already_revoked = config.authorization_revocations.iter().any(|existing| {
+            existing.network_id == record.network_id
+                && (existing.client_id == record.client_id
+                    || existing.public_key_fingerprint == record.public_key_fingerprint)
+        });
+        if already_revoked {
+            return Ok(false);
+        }
+
+        config.authorization_revocations.push(record.clone());
+        config.authorization_revocations.sort_by(|left, right| {
+            (
+                &left.network_id,
+                &left.client_id,
+                &left.public_key_fingerprint,
+            )
+                .cmp(&(
+                    &right.network_id,
+                    &right.client_id,
+                    &right.public_key_fingerprint,
+                ))
+        });
+        config.authorization_revocations.dedup();
+        self.save_config(&config)
+            .context("持久授权撤销目录写入失败")?;
+        Ok(true)
+    }
+
+    fn lift_authorization(
+        &self,
+        network_id: &str,
+        client_id: &str,
+        public_key_fingerprint: &str,
+    ) -> Result<bool> {
+        let _guard = self.update_guard()?;
+        let mut config = self.load_config().with_context(|| {
+            format!(
+                "移除授权撤销记录前读取协调端配置失败: {}",
+                self.path.to_string_lossy()
+            )
+        })?;
+        let original_len = config.authorization_revocations.len();
+        config.authorization_revocations.retain(|record| {
+            !(record.network_id == network_id
+                && (record.client_id == client_id
+                    || record.public_key_fingerprint == public_key_fingerprint))
+        });
+        if config.authorization_revocations.len() == original_len {
+            return Ok(false);
+        }
+
+        self.save_config(&config)
+            .context("持久授权撤销目录写入失败")?;
+        Ok(true)
+    }
+
+    fn authorization_network_id(&self) -> String {
+        let digest = Sha256::digest(self.path.to_string_lossy().as_bytes());
+        let encoded = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("coordinator-config:{encoded}")
     }
 }
 
@@ -123,6 +251,7 @@ mod tests {
             log: LogConfig::default(),
             auth: CoordinatorAuthConfig::default(),
             blacklist: BlacklistConfig::default(),
+            authorization_revocations: Vec::new(),
             relay_endpoints: Vec::new(),
         }
     }

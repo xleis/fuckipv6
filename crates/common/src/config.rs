@@ -293,6 +293,13 @@ pub struct CoordinatorConfig {
     #[serde(default)]
     pub blacklist: crate::acl::BlacklistConfig,
 
+    /// 按网络保存的节点授权撤销记录。
+    ///
+    /// 每条记录必须包含明确的网络作用域；查询方不得将一个网络的撤销结论
+    /// 复用于另一个网络。旧配置缺少该字段时按空目录加载。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorization_revocations: Vec<NetworkAuthorizationRevocation>,
+
     /// 分布式 QUIC 中继网格节点列表 (可选)
     #[serde(default)]
     pub relay_endpoints: Vec<crate::protocol::RelayEndpoint>,
@@ -310,6 +317,7 @@ impl Default for CoordinatorConfig {
             log: LogConfig::default(),
             auth: CoordinatorAuthConfig::default(),
             blacklist: crate::acl::BlacklistConfig::default(),
+            authorization_revocations: Vec::new(),
             relay_endpoints: Vec::new(),
         }
     }
@@ -343,6 +351,10 @@ impl CoordinatorConfig {
             anyhow::bail!("heartbeat_timeout_secs 必须大于 0");
         }
 
+        for revocation in &self.authorization_revocations {
+            revocation.validate()?;
+        }
+
         if let Some(tls) = &self.tls {
             if tls.cert_path.as_os_str().is_empty() {
                 anyhow::bail!("tls.cert_path 不能为空");
@@ -363,6 +375,32 @@ impl CoordinatorConfig {
         let content = toml::to_string_pretty(self).context("序列化协调端配置失败")?;
         atomic_write(path, content.as_bytes())
             .with_context(|| format!("写入协调端配置失败: {}", path.display()))
+    }
+}
+
+/// 网络作用域内的节点授权撤销记录。
+///
+/// `client_id` 与公钥指纹同时保存，便于在同一网络内识别节点 ID 复用或密钥
+/// 轮换。持久化与查询都必须保留 `network_id`，禁止跨网络套用撤销结论。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkAuthorizationRevocation {
+    pub network_id: String,
+    pub client_id: String,
+    pub public_key_fingerprint: String,
+}
+
+impl NetworkAuthorizationRevocation {
+    pub fn validate(&self) -> Result<()> {
+        if self.network_id.trim().is_empty() {
+            anyhow::bail!("authorization revocation network_id 不能为空");
+        }
+        if self.client_id.trim().is_empty() {
+            anyhow::bail!("authorization revocation client_id 不能为空");
+        }
+        if self.public_key_fingerprint.trim().is_empty() {
+            anyhow::bail!("authorization revocation public_key_fingerprint 不能为空");
+        }
+        Ok(())
     }
 }
 
@@ -913,6 +951,7 @@ mod tests {
             log: LogConfig::default(),
             auth: CoordinatorAuthConfig::default(),
             blacklist: Default::default(),
+            authorization_revocations: Default::default(),
             relay_endpoints: Default::default(),
         };
 

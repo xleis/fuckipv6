@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::blacklist::SharedBlacklistStore;
+use super::revocation::NetworkAuthorizationDirectory;
 
 /// 客户端会话
 pub struct ClientSession {
@@ -32,6 +33,7 @@ pub struct SessionManager {
     blacklist: Arc<RwLock<BlacklistConfig>>,
     blacklist_store: StdRwLock<Option<SharedBlacklistStore>>,
     blacklist_write_lock: TokioMutex<()>,
+    authorization_directory: StdRwLock<Option<Arc<NetworkAuthorizationDirectory>>>,
     certificate_allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
 }
 
@@ -222,6 +224,7 @@ impl SessionManager {
             blacklist: Arc::new(RwLock::new(BlacklistConfig::default())),
             blacklist_store: StdRwLock::new(None),
             blacklist_write_lock: TokioMutex::new(()),
+            authorization_directory: StdRwLock::new(None),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
@@ -246,6 +249,7 @@ impl SessionManager {
             blacklist: Arc::new(RwLock::new(blacklist)),
             blacklist_store: StdRwLock::new(None),
             blacklist_write_lock: TokioMutex::new(()),
+            authorization_directory: StdRwLock::new(None),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
@@ -302,6 +306,12 @@ impl SessionManager {
             .await
             .context("等待持久黑名单加载任务失败")??;
 
+        let network_id = store.authorization_network_id();
+        let authorization_directory = Arc::new(NetworkAuthorizationDirectory::new(
+            network_id,
+            store.clone(),
+        )?);
+
         *self.blacklist.write().await = blacklist.clone();
         {
             let mut store_slot = self
@@ -310,9 +320,71 @@ impl SessionManager {
                 .map_err(|_| anyhow!("持久黑名单存储锁已损坏"))?;
             *store_slot = Some(store);
         }
+        {
+            let mut directory = self
+                .authorization_directory
+                .write()
+                .map_err(|_| anyhow!("授权撤销目录锁已损坏"))?;
+            *directory = Some(authorization_directory);
+        }
 
         self.disconnect_blacklisted_sessions(&blacklist).await;
         Ok(())
+    }
+
+    /// 查询当前网络是否已持久撤销该节点身份。
+    ///
+    /// 存储读取失败会原样返回错误；注册调用方必须失败关闭。
+    pub async fn is_registration_revoked(
+        &self,
+        client_id: &str,
+        public_key: &[u8],
+    ) -> Result<bool> {
+        let directory = self
+            .authorization_directory
+            .read()
+            .map_err(|_| anyhow!("授权撤销目录锁已损坏"))?
+            .clone();
+        match directory {
+            Some(directory) => directory.is_revoked(client_id, public_key).await,
+            None => Ok(false),
+        }
+    }
+
+    async fn ensure_registration_authorized(
+        &self,
+        client_id: &str,
+        public_key: &[u8],
+    ) -> Result<()> {
+        if self.is_registration_revoked(client_id, public_key).await? {
+            bail!("节点身份已在当前网络中撤销");
+        }
+        Ok(())
+    }
+
+    /// 持久撤销节点，并在提交成功后立即断开该节点的现有会话。
+    pub async fn try_revoke_node(&self, client_id: &str, public_key: &[u8]) -> Result<bool> {
+        let directory = self
+            .authorization_directory
+            .read()
+            .map_err(|_| anyhow!("授权撤销目录锁已损坏"))?
+            .clone()
+            .ok_or_else(|| anyhow!("授权撤销目录尚未配置"))?;
+        let changed = directory.revoke(client_id, public_key).await?;
+        self.disconnect_revoked_sessions(client_id, public_key)
+            .await;
+        Ok(changed)
+    }
+
+    /// 从持久撤销目录移除节点；不会自动恢复已断开的会话。
+    pub async fn try_lift_revocation(&self, client_id: &str, public_key: &[u8]) -> Result<bool> {
+        let directory = self
+            .authorization_directory
+            .read()
+            .map_err(|_| anyhow!("授权撤销目录锁已损坏"))?
+            .clone()
+            .ok_or_else(|| anyhow!("授权撤销目录尚未配置"))?;
+        directory.lift(client_id, public_key).await
     }
 
     async fn persist_blacklist_state(&self, blacklist: &BlacklistConfig) -> Result<()> {
@@ -349,6 +421,29 @@ impl SessionManager {
             let _ = tx.send(Message::Close(None));
             self.unregister_client(&client_id).await;
             tracing::warn!("黑名单客户端已强制断开并踢出: {}", client_id);
+        }
+    }
+
+    async fn disconnect_revoked_sessions(&self, client_id: &str, public_key: &[u8]) {
+        let fingerprint = fuckipv6_common::Identity::public_key_fingerprint(public_key);
+        let sessions_to_disconnect: Vec<(ClientId, mpsc::UnboundedSender<Message>)> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|session| {
+                    session.peer_info.client_id == client_id
+                        || fuckipv6_common::Identity::public_key_fingerprint(
+                            &session.peer_info.public_key,
+                        ) == fingerprint
+                })
+                .map(|session| (session.peer_info.client_id.clone(), session.tx.clone()))
+                .collect()
+        };
+
+        for (client_id, tx) in sessions_to_disconnect {
+            let _ = tx.send(Message::Close(None));
+            self.unregister_client(&client_id).await;
+            tracing::warn!("授权已撤销节点已强制断开并踢出: {}", client_id);
         }
     }
 
@@ -481,6 +576,9 @@ impl SessionManager {
     ) -> Result<VirtualIps> {
         tracing::debug!("开始注册客户端: {}", client_id);
 
+        self.ensure_registration_authorized(&client_id, &public_key)
+            .await?;
+
         let input = RegistrationInput {
             client_id,
             public_key,
@@ -492,6 +590,20 @@ impl SessionManager {
             now: Instant::now(),
         };
         let result = self.register_or_refresh_session(input).await?;
+
+        // 撤销可能发生在首次准入检查与插入之间。插入后再次读取持久目录，
+        // 保证撤销完成后不会留下已在线但未授权的会话。
+        if let Err(error) = self
+            .ensure_registration_authorized(
+                &result.peer_info.client_id,
+                &result.peer_info.public_key,
+            )
+            .await
+        {
+            self.unregister_client(&result.peer_info.client_id).await;
+            return Err(error);
+        }
+
         self.set_client_certificate_authorization(
             &result.peer_info.client_id,
             &result.peer_info.public_key,
@@ -1189,12 +1301,15 @@ impl IpAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::RwLock as TestRwLock;
 
     #[derive(Default)]
     struct MemoryBlacklistStore {
         state: TestRwLock<BlacklistConfig>,
         fail_save: bool,
+        revocations: TestRwLock<Vec<fuckipv6_common::NetworkAuthorizationRevocation>>,
+        fail_revocation_reads: AtomicBool,
     }
 
     impl MemoryBlacklistStore {
@@ -1202,7 +1317,14 @@ mod tests {
             Self {
                 state: TestRwLock::new(initial),
                 fail_save,
+                revocations: TestRwLock::new(Vec::new()),
+                fail_revocation_reads: AtomicBool::new(false),
             }
+        }
+
+        fn set_fail_revocation_reads(&self, fail: bool) {
+            self.fail_revocation_reads
+                .store(fail, AtomicOrdering::SeqCst);
         }
     }
 
@@ -1223,6 +1345,60 @@ mod tests {
                 .write()
                 .map_err(|_| anyhow!("test blacklist store lock poisoned"))? = blacklist.clone();
             Ok(())
+        }
+
+        fn load_authorization_revocations(
+            &self,
+        ) -> Result<Vec<fuckipv6_common::NetworkAuthorizationRevocation>> {
+            if self.fail_revocation_reads.load(AtomicOrdering::SeqCst) {
+                bail!("injected authorization directory read failure");
+            }
+            self.revocations
+                .read()
+                .map(|revocations| revocations.clone())
+                .map_err(|_| anyhow!("test authorization directory lock poisoned"))
+        }
+
+        fn revoke_authorization(
+            &self,
+            record: &fuckipv6_common::NetworkAuthorizationRevocation,
+        ) -> Result<bool> {
+            let mut revocations = self
+                .revocations
+                .write()
+                .map_err(|_| anyhow!("test authorization directory lock poisoned"))?;
+            if revocations.iter().any(|existing| {
+                existing.network_id == record.network_id
+                    && (existing.client_id == record.client_id
+                        || existing.public_key_fingerprint == record.public_key_fingerprint)
+            }) {
+                return Ok(false);
+            }
+            revocations.push(record.clone());
+            Ok(true)
+        }
+
+        fn lift_authorization(
+            &self,
+            network_id: &str,
+            client_id: &str,
+            public_key_fingerprint: &str,
+        ) -> Result<bool> {
+            let mut revocations = self
+                .revocations
+                .write()
+                .map_err(|_| anyhow!("test authorization directory lock poisoned"))?;
+            let original_len = revocations.len();
+            revocations.retain(|record| {
+                !(record.network_id == network_id
+                    && (record.client_id == client_id
+                        || record.public_key_fingerprint == public_key_fingerprint))
+            });
+            Ok(revocations.len() != original_len)
+        }
+
+        fn authorization_network_id(&self) -> String {
+            "test-network".to_string()
         }
     }
 
@@ -1810,6 +1986,144 @@ mod tests {
             rx.try_recv(),
             Ok(Message::Close(_)) | Err(mpsc::error::TryRecvError::Empty)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revoked_identity_is_rejected_after_restart_and_active_session_is_disconnected(
+    ) -> Result<()> {
+        let store = Arc::new(MemoryBlacklistStore::default());
+        let first = SessionManager::new("fd00::1000/120")?;
+        first.attach_blacklist_store(store.clone()).await?;
+        let authorizer = first.client_certificate_authorizer();
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let public_key_bytes: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        first
+            .register_client(
+                client_id.clone(),
+                public_key.clone(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+        assert!(authorizer.is_authorized(&public_key_bytes));
+
+        assert!(first.try_revoke_node(&client_id, &public_key).await?);
+        assert!(first.get_peer_info(&client_id).await.is_none());
+        assert!(!authorizer.is_authorized(&public_key_bytes));
+        assert!(matches!(rx.try_recv(), Ok(Message::Close(_))));
+
+        let restarted = SessionManager::new("fd00::1000/120")?;
+        restarted.attach_blacklist_store(store).await?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = restarted
+            .register_client(
+                client_id,
+                public_key,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41001),
+                51821,
+                NatType::Open,
+                tx,
+            )
+            .await
+            .expect_err("persisted revocation must reject registration after restart");
+        assert!(error.to_string().contains("撤销"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authorization_directory_read_failure_denies_registration_without_state_changes(
+    ) -> Result<()> {
+        let store = Arc::new(MemoryBlacklistStore::default());
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager.attach_blacklist_store(store.clone()).await?;
+        store.set_fail_revocation_reads(true);
+
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let public_key_bytes: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = manager
+            .register_client(
+                client_id.clone(),
+                public_key,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await
+            .expect_err("authorization storage errors must fail registration closed");
+        assert!(error
+            .to_string()
+            .contains("authorization directory read failure"));
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        assert!(!manager
+            .client_certificate_authorizer()
+            .is_authorized(&public_key_bytes));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_registration_and_revocation_leave_no_authorized_session() -> Result<()> {
+        let store = Arc::new(MemoryBlacklistStore::default());
+        let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        manager.attach_blacklist_store(store.clone()).await?;
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let registration_manager = manager.clone();
+        let registration_id = client_id.clone();
+        let registration_key = public_key.clone();
+        let revocation_manager = manager.clone();
+        let revocation_id = client_id.clone();
+        let revocation_key = public_key.clone();
+
+        let (registration, revocation) = tokio::join!(
+            async move {
+                registration_manager
+                    .register_client(
+                        registration_id,
+                        registration_key,
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                        51820,
+                        NatType::Open,
+                        tx,
+                    )
+                    .await
+            },
+            async move {
+                revocation_manager
+                    .try_revoke_node(&revocation_id, &revocation_key)
+                    .await
+            }
+        );
+
+        let _ = registration;
+        assert!(revocation?);
+        assert!(
+            manager
+                .is_registration_revoked(&client_id, &public_key)
+                .await?,
+            "revocation must be durable after concurrent registration"
+        );
+        assert!(
+            manager.get_peer_info(&client_id).await.is_none(),
+            "a registration racing with revocation must not remain active"
+        );
         Ok(())
     }
 }

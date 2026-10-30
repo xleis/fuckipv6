@@ -235,7 +235,16 @@ impl RelayServer {
                     accepted: false,
                     message: err.to_string(),
                 };
-                let _ = send_relay_message(&mut send, RELAY_REGISTER_STREAM_ID, &ack).await;
+                if send_relay_message(&mut send, RELAY_REGISTER_STREAM_ID, &ack)
+                    .await
+                    .is_ok()
+                {
+                    // `send_relay_message` finishes the stream. Wait until the peer's QUIC
+                    // stack acknowledges the rejection frame before this connection handle is
+                    // dropped; otherwise the client can observe CONNECTION_CLOSE first and
+                    // never surface the concrete registration error.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), send.stopped()).await;
+                }
                 Err(err)
             }
         }
@@ -633,9 +642,243 @@ fn verify_relay_registration(
 mod tests {
     use super::*;
     use fuckipv6_common::relay_client::QuicRelayClient;
-    use fuckipv6_common::{Identity, NatType};
+    use fuckipv6_common::{
+        build_pinned_quic_client_config_with_auth, export_quic_relay_channel_binding,
+        recv_relay_message, send_relay_message, Identity, NatType, QuicCertificate, RelayMessage,
+        RelayRegistrationBinding,
+    };
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::sync::mpsc;
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct RegisterBindingOverrides {
+        server_public_key_pin: Option<[u8; 32]>,
+        client_certificate_public_key_pin: Option<[u8; 32]>,
+        tls_channel_binding: Option<[u8; 32]>,
+    }
+
+    async fn send_raw_registration<F>(
+        relay_addr: SocketAddr,
+        expected_server_pin: [u8; 32],
+        tls_identity: &Identity,
+        application_identity: &Identity,
+        virtual_ip: Ipv6Addr,
+        overrides: RegisterBindingOverrides,
+        mutate: F,
+    ) -> Result<RelayMessage>
+    where
+        F: FnOnce(&mut RelayMessage),
+    {
+        let client_certificate = QuicCertificate::from_identity(tls_identity)?;
+        let mut endpoint =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        endpoint.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            expected_server_pin,
+            &client_certificate,
+        )?);
+        let connection = endpoint
+            .connect(relay_addr, "fuckipv6.local")?
+            .await
+            .context("raw registration client handshake failed")?;
+
+        let public_key = application_identity.public_key();
+        let registration = RelayRegistrationBinding {
+            client_id: application_identity.client_id(),
+            virtual_ip,
+            public_key: &public_key,
+            timestamp: 123,
+            server_public_key_pin: overrides
+                .server_public_key_pin
+                .unwrap_or(expected_server_pin),
+            client_certificate_public_key_pin: overrides
+                .client_certificate_public_key_pin
+                .unwrap_or(client_certificate.public_key_pin),
+            tls_channel_binding: overrides
+                .tls_channel_binding
+                .unwrap_or(export_quic_relay_channel_binding(&connection)?),
+        };
+        let signature = application_identity
+            .sign(&registration.challenge())
+            .to_bytes()
+            .to_vec();
+        let mut message = RelayMessage::Register {
+            client_id: application_identity.client_id().to_string(),
+            virtual_ip,
+            public_key: public_key.clone(),
+            timestamp: registration.timestamp,
+            server_public_key_pin: registration.server_public_key_pin,
+            client_certificate_public_key_pin: registration.client_certificate_public_key_pin,
+            tls_channel_binding: registration.tls_channel_binding,
+            signature,
+        };
+        mutate(&mut message);
+
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send_relay_message(&mut send, RELAY_REGISTER_STREAM_ID, &message).await?;
+        let (_, response) = recv_relay_message(&mut recv).await?;
+        connection.close(0u32.into(), b"test-done");
+        endpoint.wait_idle().await;
+        Ok(response)
+    }
+
+    async fn assert_no_relay_state(server: &RelayServer, session_manager: &Arc<SessionManager>) {
+        assert!(server.state.clients.read().await.is_empty());
+        assert!(server.state.limits.read().await.is_empty());
+        let traffic = session_manager.snapshot().await.traffic;
+        assert_eq!(traffic.relay_packets, 0);
+        assert_eq!(traffic.relay_payload_bytes, 0);
+        assert_eq!(traffic.relay_errors, 0);
+    }
+
+    fn assert_registration_rejected(response: RelayMessage, expected_message: &str) {
+        match response {
+            RelayMessage::RegisterAck {
+                accepted: false,
+                message,
+            } => assert!(
+                message.contains(expected_message),
+                "unexpected rejection message: {message}"
+            ),
+            other => panic!("expected rejected RegisterAck, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn quic_relay_rejects_valid_tls_certificate_with_another_application_identity(
+    ) -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let application_identity = Identity::generate()?;
+        let tls_identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                application_identity.client_id().to_string(),
+                application_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let response = send_raw_registration(
+            relay_addr,
+            server_pin,
+            &tls_identity,
+            &application_identity,
+            virtual_ip,
+            RegisterBindingOverrides::default(),
+            |_| {},
+        )
+        .await?;
+        assert_registration_rejected(response, "证书公钥");
+        assert_no_relay_state(&server, &session_manager).await;
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_rejects_tampered_registration_fields_without_state_changes() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let response = send_raw_registration(
+            relay_addr,
+            server_pin,
+            &identity,
+            &identity,
+            virtual_ip,
+            RegisterBindingOverrides::default(),
+            |message| {
+                let RelayMessage::Register { timestamp, .. } = message else {
+                    panic!("expected Register message");
+                };
+                *timestamp ^= 1;
+            },
+        )
+        .await?;
+        assert_registration_rejected(response, "签名无效");
+        assert_no_relay_state(&server, &session_manager).await;
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_rejects_missing_registration_binding_without_state_changes() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let response = send_raw_registration(
+            relay_addr,
+            server_pin,
+            &identity,
+            &identity,
+            virtual_ip,
+            RegisterBindingOverrides {
+                server_public_key_pin: Some([0; 32]),
+                client_certificate_public_key_pin: Some([0; 32]),
+                tls_channel_binding: Some([0; 32]),
+            },
+            |_| {},
+        )
+        .await?;
+        assert_registration_rejected(response, "SPKI pin");
+        assert_no_relay_state(&server, &session_manager).await;
+
+        server_task.abort();
+        Ok(())
+    }
 
     #[tokio::test]
     async fn quic_relay_forwards_packets_between_registered_clients() -> Result<()> {

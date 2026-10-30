@@ -30,6 +30,11 @@ pub async fn detect_nat_type(
     Ok(report.nat_type)
 }
 
+/// Probe NAT behavior on a temporary socket bound to the same local address.
+///
+/// This preserves the original API for callers that only know the engine's
+/// local address. New callers should use [`detect_nat_type_report_on_socket`]
+/// so STUN observes the exact socket advertised by the P2P transport.
 pub async fn detect_nat_type_report(
     config: &NatDetectionConfig,
     local_addr: SocketAddr,
@@ -42,9 +47,25 @@ pub async fn detect_nat_type_report(
         });
     }
 
+    let socket = bind_detection_socket(local_addr).await?;
+    detect_nat_type_report_on_socket(config, &socket).await
+}
+
+/// Probe NAT behavior using the supplied transport socket.
+pub async fn detect_nat_type_report_on_socket(
+    config: &NatDetectionConfig,
+    socket: &UdpSocket,
+) -> Result<NatDetectionReport> {
+    if !config.enabled {
+        return Ok(NatDetectionReport {
+            nat_type: NatType::Unknown,
+            mapped_addresses: Vec::new(),
+            filtering_allows_changed_addr: false,
+        });
+    }
+
     let servers = resolve_stun_servers(&config.stun_servers).await?;
     let timeout_duration = Duration::from_millis(config.timeout_ms);
-    let socket = bind_detection_socket(local_addr).await?;
     let local_probe_addr = socket
         .local_addr()
         .context("无法读取 NAT 检测 UDP socket 地址")?;
@@ -53,7 +74,7 @@ pub async fn detect_nat_type_report(
     let mut filtering_allows_changed_addr = false;
 
     for server in servers {
-        if let Ok(response) = stun_binding_request(&socket, server, false, timeout_duration).await {
+        if let Ok(response) = stun_binding_request(socket, server, false, timeout_duration).await {
             if !mapped_addresses.contains(&response.mapped_addr) {
                 mapped_addresses.push(response.mapped_addr);
             }
@@ -61,7 +82,7 @@ pub async fn detect_nat_type_report(
 
         if !filtering_allows_changed_addr {
             filtering_allows_changed_addr =
-                stun_binding_request(&socket, server, true, timeout_duration)
+                stun_binding_request(socket, server, true, timeout_duration)
                     .await
                     .is_ok();
         }
@@ -78,6 +99,36 @@ pub async fn detect_nat_type_report(
         mapped_addresses,
         filtering_allows_changed_addr,
     })
+}
+
+async fn bind_detection_socket(local_addr: SocketAddr) -> Result<UdpSocket> {
+    let (domain, bind_addr) = match local_addr {
+        SocketAddr::V4(addr) => (
+            socket2::Domain::IPV4,
+            SocketAddr::new(IpAddr::V4(*addr.ip()), 0),
+        ),
+        SocketAddr::V6(addr) => (
+            socket2::Domain::IPV6,
+            SocketAddr::new(IpAddr::V6(*addr.ip()), 0),
+        ),
+    };
+
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+        .context("无法创建 NAT 检测 UDP socket")?;
+    if local_addr.is_ipv6() {
+        socket
+            .set_only_v6(false)
+            .context("无法启用 NAT 检测 UDP 双栈模式")?;
+    }
+    socket
+        .set_nonblocking(true)
+        .context("无法设置 NAT 检测 UDP socket 为非阻塞")?;
+    socket
+        .bind(&bind_addr.into())
+        .context("无法绑定 NAT 检测 UDP socket")?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket).context("无法创建 Tokio NAT 检测 UDP socket")
 }
 
 fn classify_nat_type(
@@ -144,36 +195,6 @@ async fn resolve_stun_servers(servers: &[String]) -> Result<Vec<SocketAddr>> {
     }
 
     Ok(addresses)
-}
-
-async fn bind_detection_socket(local_addr: SocketAddr) -> Result<UdpSocket> {
-    let (domain, bind_addr) = match local_addr {
-        SocketAddr::V4(addr) => (
-            socket2::Domain::IPV4,
-            SocketAddr::new(IpAddr::V4(*addr.ip()), 0),
-        ),
-        SocketAddr::V6(addr) => (
-            socket2::Domain::IPV6,
-            SocketAddr::new(IpAddr::V6(*addr.ip()), 0),
-        ),
-    };
-
-    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
-        .context("无法创建 NAT 检测 UDP socket")?;
-    if local_addr.is_ipv6() {
-        socket
-            .set_only_v6(false)
-            .context("无法启用 NAT 检测 UDP 双栈模式")?;
-    }
-    socket
-        .set_nonblocking(true)
-        .context("无法设置 NAT 检测 UDP socket 为非阻塞")?;
-    socket
-        .bind(&bind_addr.into())
-        .context("无法绑定 NAT 检测 UDP socket")?;
-
-    let std_socket: std::net::UdpSocket = socket.into();
-    UdpSocket::from_std(std_socket).context("无法创建 Tokio NAT 检测 UDP socket")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +536,35 @@ pub async fn gather_candidate_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::p2p::connection::P2pEngine;
+
+    #[tokio::test]
+    async fn nat_probe_and_engine_reuse_the_same_transport_port() -> Result<()> {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let server_addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move {
+            let mut request = [0u8; 512];
+            let (size, source) = server.recv_from(&mut request).await?;
+            let transaction_id: [u8; 12] = request[8..20]
+                .try_into()
+                .context("STUN request transaction id")?;
+            let response = build_test_response(source, transaction_id, true);
+            server.send_to(&response, source).await?;
+            anyhow::Ok((source, size))
+        });
+
+        let config = NatDetectionConfig {
+            enabled: true,
+            stun_servers: vec![server_addr.to_string()],
+            timeout_ms: 100,
+        };
+        let (engine, report) = P2pEngine::new_with_nat_detection(&config, 0).await?;
+        let (observed_source, _) = server_task.await??;
+
+        assert_eq!(observed_source.port(), engine.local_addr().port());
+        assert_eq!(report.mapped_addresses, vec![observed_source]);
+        Ok(())
+    }
 
     #[test]
     fn classifies_nat_types_from_mapping_and_filtering() -> Result<()> {

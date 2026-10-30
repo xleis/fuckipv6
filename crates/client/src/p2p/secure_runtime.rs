@@ -24,7 +24,7 @@ use fuckipv6_secure_session::wire::{
     classic_endpoint_context, AcceptFrame, ClassicEndpointContextInput, ControlCodecError,
     ControlMessage,
 };
-use fuckipv6_secure_session::{AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DATA_PACKET_LEN};
+use fuckipv6_secure_session::{DataHeader, AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DATA_PACKET_LEN};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -64,8 +64,6 @@ pub(crate) enum SecureRuntimeError {
     InvalidRole,
     #[error("peer has no registered UDP endpoint")]
     EmptyEndpointSet,
-    #[error("datagram source {actual} is not a registered endpoint for this peer")]
-    UnregisteredEndpoint { actual: SocketAddr },
     #[cfg(test)]
     #[error(
         "datagram source {actual} does not match the authenticated session endpoint {expected}"
@@ -111,7 +109,7 @@ pub(crate) struct SecurePeerState {
     policy: SessionPolicy,
     install_config: SessionInstallConfig,
     initiator: bool,
-    registered_endpoints: Vec<SocketAddr>,
+    local_receiver_index: u32,
     state: Mutex<SecureState>,
 }
 
@@ -120,7 +118,7 @@ impl SecurePeerState {
     /// are distinct and that the registered endpoint set is non-empty.
     pub(crate) fn new(
         local_identity: Ed25519Identity,
-        local_virtual_ips: &[IpAddr],
+        local_virtual_ip: IpAddr,
         peer: &PeerInfo,
     ) -> Result<Arc<Self>, SecureRuntimeError> {
         let peer_public: [u8; 32] = peer
@@ -138,18 +136,14 @@ impl SecurePeerState {
             ));
         }
 
-        let mut peer_virtual_ips = vec![IpAddr::V6(peer.virtual_ip)];
-        if let Some(ipv6) = peer.virtual_ips.ipv6 {
-            push_unique(&mut peer_virtual_ips, IpAddr::V6(ipv6));
-        }
-        if let Some(ipv4) = peer.virtual_ips.ipv4 {
-            push_unique(&mut peer_virtual_ips, IpAddr::V4(ipv4));
-        }
-        if peer_virtual_ips.is_empty() {
-            return Err(SecureRuntimeError::Handshake(
-                HandshakeError::InvalidEndpointContext,
-            ));
-        }
+        // The shared P2P runtime currently tracks one primary virtual address
+        // per peer (`P2pEngine::local_ip`). Bind the same canonical address on
+        // both sides instead of hashing the remote's full dual-stack metadata
+        // while hashing only our local primary address. Otherwise two peers
+        // with different `PeerInfo::virtual_ips` populate the transcript
+        // asymmetrically and reject each other's HELLO.
+        let peer_virtual_ips = [IpAddr::V6(peer.virtual_ip)];
+        let local_virtual_ips = [local_virtual_ip];
 
         let initiator = local_identity.verifying_key().as_bytes() < expected_peer.as_bytes();
         let (initiator_public, responder_public) = if initiator {
@@ -172,9 +166,9 @@ impl SecurePeerState {
         };
 
         let (initiator_virtual_ips, responder_virtual_ips) = if initiator {
-            (local_virtual_ips, peer_virtual_ips.as_slice())
+            (local_virtual_ips.as_slice(), peer_virtual_ips.as_slice())
         } else {
-            (peer_virtual_ips.as_slice(), local_virtual_ips)
+            (peer_virtual_ips.as_slice(), local_virtual_ips.as_slice())
         };
         let endpoint_context = classic_endpoint_context(&ClassicEndpointContextInput {
             network_id: P2P_NETWORK_CONTEXT,
@@ -199,6 +193,14 @@ impl SecurePeerState {
             )?)
         };
 
+        tracing::info!(
+            local_identity = %hex_prefix(local_identity.verifying_key().as_bytes()),
+            peer_identity = %hex_prefix(expected_peer.as_bytes()),
+            role = if initiator { "initiator" } else { "responder" },
+            endpoints = ?registered_endpoints,
+            "Secure Session v2 对等状态已初始化"
+        );
+
         Ok(Arc::new(Self {
             local_identity,
             expected_peer,
@@ -206,7 +208,7 @@ impl SecurePeerState {
             policy: SessionPolicy::default(),
             install_config,
             initiator,
-            registered_endpoints,
+            local_receiver_index: install_config.local_receiver_index,
             state: Mutex::new(SecureState {
                 responder,
                 ..SecureState::default()
@@ -284,6 +286,12 @@ impl SecurePeerState {
             None,
         )?;
         let hello_frame = hello.encode_control();
+        tracing::debug!(
+            peer_identity = %hex_prefix(self.expected_peer.as_bytes()),
+            issued_at = now,
+            frame_len = hello_frame.len(),
+            "已生成 Secure Session v2 HELLO"
+        );
         state.pending_initiator = Some(PendingInitiator {
             handshake,
             issued_at: now,
@@ -298,7 +306,14 @@ impl SecurePeerState {
         source: SocketAddr,
         message: ControlMessage,
     ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
-        self.ensure_registered(source)?;
+        let source = canonical_endpoint(source);
+        tracing::debug!(
+            %source,
+            peer_identity = %hex_prefix(self.expected_peer.as_bytes()),
+            role = if self.initiator { "initiator" } else { "responder" },
+            frame = control_variant(&message),
+            "收到 Secure Session v2 控制帧"
+        );
         let mut state = self.state.lock().await;
         match message {
             ControlMessage::Hello(hello) => {
@@ -315,9 +330,16 @@ impl SecurePeerState {
                         expected: "HELLO or CONFIRM",
                     });
                 }
-                let Some(pending) = state.pending_initiator.take() else {
+                let Some(pending) = state.pending_initiator.as_ref() else {
                     return Err(SecureRuntimeError::UnexpectedFrame { expected: "HELLO" });
                 };
+                pending
+                    .handshake
+                    .validate_accept_wire(&accept, pending.issued_at)?;
+                let pending = state
+                    .pending_initiator
+                    .take()
+                    .expect("validated pending initiator");
                 let (driver, confirm) =
                     pending
                         .handshake
@@ -339,9 +361,14 @@ impl SecurePeerState {
                     // CONFIRM retransmissions are harmless after installation.
                     return Ok(Vec::new());
                 }
-                let Some(pending) = state.pending_responder.take() else {
+                let Some(pending) = state.pending_responder.as_ref() else {
                     return Err(SecureRuntimeError::UnexpectedFrame { expected: "HELLO" });
                 };
+                pending.handshake.validate_wire(&confirm)?;
+                let pending = state
+                    .pending_responder
+                    .take()
+                    .expect("validated pending responder");
                 let (driver, _) = pending.handshake.complete_wire(&confirm, Instant::now())?;
                 state.driver = Some(driver);
                 state.authenticated_peer = Some(source);
@@ -357,7 +384,9 @@ impl SecurePeerState {
         hello: Hello,
     ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
         if state.driver.is_some() {
-            return Ok(Vec::new());
+            return Err(SecureRuntimeError::UnexpectedFrame {
+                expected: "CONFIRM",
+            });
         }
         if let Some(pending) = state.pending_responder.as_ref() {
             if pending.hello == hello {
@@ -465,13 +494,60 @@ impl SecurePeerState {
         open_with_driver(&mut state, packet)
     }
 
-    fn ensure_registered(&self, source: SocketAddr) -> Result<(), SecureRuntimeError> {
-        let source = canonical_endpoint(source);
-        if self.registered_endpoints.contains(&source) {
-            Ok(())
-        } else {
-            Err(SecureRuntimeError::UnregisteredEndpoint { actual: source })
+    /// Authenticate one direct UDP data packet and bind the peer's new source
+    /// endpoint only after AEAD and replay validation have succeeded.
+    pub(crate) async fn open_from_source(
+        &self,
+        source: SocketAddr,
+        packet: Vec<u8>,
+    ) -> Result<Vec<u8>, SecureRuntimeError> {
+        let mut state = self.state.lock().await;
+        let plaintext = open_with_driver(&mut state, packet)?;
+        state.authenticated_peer = Some(canonical_endpoint(source));
+        Ok(plaintext)
+    }
+
+    /// Return whether this state can own a control frame before its signature
+    /// or key confirmation has been checked. The subsequent `handle_control`
+    /// call remains responsible for all authentication.
+    pub(crate) async fn matches_control(&self, message: &ControlMessage) -> bool {
+        let local_identity = self.local_identity.identity_id();
+        let peer_identity = fuckipv6_secure_session::handshake::identity_id(&self.expected_peer);
+        match message {
+            ControlMessage::Hello(hello) => {
+                !self.initiator
+                    && hello.initiator_identity == peer_identity
+                    && hello.responder_identity == local_identity
+            }
+            ControlMessage::Accept(accept) => {
+                self.initiator
+                    && accept.accept.initiator_identity == local_identity
+                    && accept.accept.responder_identity == peer_identity
+            }
+            ControlMessage::Confirm(confirm) => {
+                if self.initiator {
+                    return false;
+                }
+                let state = self.state.lock().await;
+                state
+                    .driver
+                    .as_ref()
+                    .and_then(SessionDriver::session_id)
+                    .is_some_and(|session_id| session_id == confirm.session_id)
+                    || state
+                        .pending_responder
+                        .as_ref()
+                        .is_some_and(|pending| pending.handshake.session_id() == confirm.session_id)
+            }
         }
+    }
+
+    /// Return whether an encrypted frame targets this endpoint's receiver
+    /// index. This is only a routing hint; `open_from_source` authenticates the
+    /// complete packet before callers may trust it or change its endpoint.
+    pub(crate) fn handles_data_packet(&self, packet: &[u8]) -> bool {
+        DataHeader::decode(packet)
+            .is_ok_and(|header| header.receiver_index == self.local_receiver_index)
     }
 }
 
@@ -525,6 +601,22 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     }
 }
 
+fn hex_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn control_variant(message: &ControlMessage) -> &'static str {
+    match message {
+        ControlMessage::Hello(_) => "HELLO",
+        ControlMessage::Accept(_) => "ACCEPT",
+        ControlMessage::Confirm(_) => "CONFIRM",
+    }
+}
+
 fn unix_timestamp() -> Result<u64, SecureRuntimeError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -570,7 +662,7 @@ mod tests {
         let responder_ip: IpAddr = "fd00::1".parse().expect("responder IP");
         let state_a = SecurePeerState::new(
             initiator_identity.clone(),
-            &[initiator_ip],
+            initiator_ip,
             &peer(
                 "b-responder",
                 &responder_identity,
@@ -581,7 +673,7 @@ mod tests {
         .expect("state A");
         let state_b = SecurePeerState::new(
             responder_identity,
-            &[responder_ip],
+            responder_ip,
             &peer(
                 "a-initiator",
                 &initiator_identity,
@@ -636,6 +728,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dual_stack_peer_metadata_uses_the_same_single_address_context() {
+        let initiator_identity = Ed25519Identity::from_seed(INITIATOR_SEED);
+        let responder_identity = Ed25519Identity::from_seed(RESPONDER_SEED);
+        let initiator_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41101);
+        let responder_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41102);
+        let initiator_ip: IpAddr = "fd00::1003".parse().expect("initiator IP");
+        let responder_ip: IpAddr = "fd00::1001".parse().expect("responder IP");
+
+        let initiator_peer = PeerInfo::new_with_ips(
+            "responder".to_string(),
+            fuckipv6_common::VirtualIps::dual_stack(
+                "10.66.0.1".parse().expect("responder IPv4"),
+                "fd00::1001".parse().expect("responder IPv6"),
+            ),
+            responder_identity.verifying_key().to_bytes().to_vec(),
+            vec![responder_addr],
+            NatType::Open,
+        );
+        let responder_peer = PeerInfo::new_with_ips(
+            "initiator".to_string(),
+            fuckipv6_common::VirtualIps::dual_stack(
+                "10.66.0.2".parse().expect("initiator IPv4"),
+                "fd00::1003".parse().expect("initiator IPv6"),
+            ),
+            initiator_identity.verifying_key().to_bytes().to_vec(),
+            vec![initiator_addr],
+            NatType::Open,
+        );
+        let state_a = SecurePeerState::new(initiator_identity, initiator_ip, &initiator_peer)
+            .expect("initiator state");
+        let state_b = SecurePeerState::new(responder_identity, responder_ip, &responder_peer)
+            .expect("responder state");
+        let (initiator, responder, initiator_addr, responder_addr) = if state_a.is_initiator() {
+            (state_a, state_b, initiator_addr, responder_addr)
+        } else {
+            (state_b, state_a, responder_addr, initiator_addr)
+        };
+
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+        assert!(initiator.is_established().await);
+        assert!(responder.is_established().await);
+    }
+
+    #[tokio::test]
     async fn shared_state_establishes_and_exchanges_encrypted_data() {
         let (initiator, responder, initiator_addr, responder_addr) = pair();
         assert!(initiator.is_initiator());
@@ -671,6 +807,182 @@ mod tests {
         );
         assert_eq!(initiator.stats().await.expect("stats").packets_sent, 1);
         assert_eq!(responder.stats().await.expect("stats").packets_received, 1);
+    }
+
+    #[tokio::test]
+    async fn control_frames_follow_authenticated_source_rebinding() {
+        let (initiator, responder, registered_initiator_addr, registered_responder_addr) = pair();
+        let hello_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42001);
+        let accept_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42002);
+        let confirm_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42003);
+        assert_ne!(hello_addr, registered_initiator_addr);
+        assert_ne!(accept_addr, registered_responder_addr);
+
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let hello_message =
+            fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+        assert!(responder.matches_control(&hello_message).await);
+        let accept = responder
+            .handle_control(hello_addr, hello_message)
+            .await
+            .expect("accept rebound hello");
+        assert_eq!(accept.len(), 1);
+        assert_eq!(accept[0].destination, hello_addr);
+
+        let accept_message =
+            fuckipv6_secure_session::wire::decode_control(&accept[0].frame).expect("decode accept");
+        assert!(initiator.matches_control(&accept_message).await);
+        let confirm = initiator
+            .handle_control(accept_addr, accept_message)
+            .await
+            .expect("accept rebound accept");
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(confirm[0].destination, accept_addr);
+        assert_eq!(initiator.authenticated_peer().await, Some(accept_addr));
+
+        let confirm_message = fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+            .expect("decode confirm");
+        assert!(responder.matches_control(&confirm_message).await);
+        responder
+            .handle_control(confirm_addr, confirm_message)
+            .await
+            .expect("accept rebound confirm");
+        assert!(responder.is_established().await);
+        assert_eq!(responder.authenticated_peer().await, Some(confirm_addr));
+    }
+
+    #[tokio::test]
+    async fn data_authentication_migrates_endpoint_only_after_success() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+
+        let (_, packet) = initiator.seal(b"rebound").await.expect("seal");
+        assert!(responder.handles_data_packet(&packet));
+        assert!(!initiator.handles_data_packet(&packet));
+        let rebound_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 43001);
+        assert_eq!(
+            responder
+                .open_from_source(rebound_addr, packet.clone())
+                .await
+                .expect("authenticate rebound packet"),
+            b"rebound"
+        );
+        assert_eq!(responder.authenticated_peer().await, Some(rebound_addr));
+
+        let replay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 43002);
+        assert!(responder
+            .open_from_source(replay_addr, packet)
+            .await
+            .is_err());
+        assert_eq!(responder.authenticated_peer().await, Some(rebound_addr));
+
+        let (_, mut tampered) = initiator.seal(b"tampered").await.expect("seal");
+        *tampered.last_mut().expect("authentication tag") ^= 1;
+        let attacker_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 43003);
+        assert!(responder
+            .open_from_source(attacker_addr, tampered)
+            .await
+            .is_err());
+        assert_eq!(responder.authenticated_peer().await, Some(rebound_addr));
+    }
+
+    #[tokio::test]
+    async fn forged_accept_and_confirm_do_not_consume_pending_handshakes() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let accepted = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("accept hello");
+        assert_eq!(accepted.len(), 1);
+
+        let valid_accept = fuckipv6_secure_session::wire::decode_control(&accepted[0].frame)
+            .expect("decode accept");
+        let forged_accept = match valid_accept.clone() {
+            ControlMessage::Accept(mut accept) => {
+                accept.responder_confirmation =
+                    fuckipv6_secure_session::confirmation::ConfirmationTag::from_slice(
+                        &[0x42; fuckipv6_secure_session::confirmation::CONFIRMATION_LEN],
+                    )
+                    .expect("confirmation tag");
+                ControlMessage::Accept(accept)
+            }
+            _ => panic!("expected accept"),
+        };
+        assert!(initiator
+            .handle_control(responder_addr, forged_accept)
+            .await
+            .is_err());
+
+        let confirm = initiator
+            .handle_control(responder_addr, valid_accept)
+            .await
+            .expect("forged ACCEPT must not consume pending initiator state");
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(initiator.authenticated_peer().await, Some(responder_addr));
+
+        let valid_confirm = fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+            .expect("decode confirm");
+        let forged_confirm = match valid_confirm {
+            ControlMessage::Confirm(mut confirm) => {
+                confirm.initiator_confirmation =
+                    fuckipv6_secure_session::confirmation::ConfirmationTag::from_slice(
+                        &[0x43; fuckipv6_secure_session::confirmation::CONFIRMATION_LEN],
+                    )
+                    .expect("confirmation tag");
+                ControlMessage::Confirm(confirm)
+            }
+            _ => panic!("expected confirm"),
+        };
+        assert!(responder
+            .handle_control(initiator_addr, forged_confirm)
+            .await
+            .is_err());
+
+        responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+                    .expect("decode valid confirm"),
+            )
+            .await
+            .expect("forged CONFIRM must not consume pending responder state");
+        assert!(responder.is_established().await);
+        assert_eq!(responder.authenticated_peer().await, Some(initiator_addr));
+    }
+
+    #[tokio::test]
+    async fn routing_hint_does_not_accept_forged_hello() {
+        let (initiator, responder, initiator_addr, _responder_addr) = pair();
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let mut hello_message =
+            fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+        let fuckipv6_secure_session::wire::ControlMessage::Hello(ref mut hello) = hello_message
+        else {
+            panic!("expected hello");
+        };
+        hello.signature[0] ^= 1;
+        assert!(responder.matches_control(&hello_message).await);
+        assert!(responder
+            .handle_control(initiator_addr, hello_message)
+            .await
+            .is_err());
+        assert_eq!(responder.authenticated_peer().await, None);
     }
 
     #[tokio::test]

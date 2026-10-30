@@ -25,6 +25,7 @@ ipnet = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+blake3 = { workspace = true }
 
 axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true, features = ["util"] }

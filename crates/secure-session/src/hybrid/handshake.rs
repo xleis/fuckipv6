@@ -15,6 +15,7 @@ use super::identity::{
     CompositeIdentity, CompositePublicKey, CompositeSignature, IdentityError, IdentityId,
     COMPOSITE_IDENTITY_PUBLIC_KEY_LEN, COMPOSITE_SIGNATURE_LEN,
 };
+use super::profile::{HybridProfilePolicy, NegotiatedHybridProfile, ProfileNegotiationError};
 use super::xwing::{
     XWingCiphertext, XWingDecapsulationKey, XWingEncapsulationKey, XWingError, XWingSharedSecret,
     XWING_CIPHERTEXT_LEN, XWING_ENCAPSULATION_KEY_LEN,
@@ -410,6 +411,7 @@ pub struct HybridInitiator {
     ephemeral_secret: XWingDecapsulationKey,
     expected_responder: CompositePublicKey,
     requested_epoch: u16,
+    profile: NegotiatedHybridProfile,
 }
 
 impl HybridInitiator {
@@ -418,14 +420,13 @@ impl HybridInitiator {
     pub fn start(
         local_identity: &CompositeIdentity,
         expected_responder: CompositePublicKey,
-        suite_id: u16,
+        profile: NegotiatedHybridProfile,
         endpoint_context_hash: [u8; ENDPOINT_CONTEXT_HASH_LEN],
         epoch: u16,
         psk_mode: u8,
         cookie: [u8; HYBRID_COOKIE_LEN],
         issued_at: u64,
     ) -> Result<Self, HybridHandshakeError> {
-        validate_suite(suite_id)?;
         validate_endpoint_context(endpoint_context_hash)?;
         validate_psk_mode(psk_mode)?;
         let initiator_identity = local_identity.identity_id();
@@ -440,9 +441,9 @@ impl HybridInitiator {
         validate_nonce(&initiator_nonce, "initiator")?;
 
         let mut hello = HybridHello {
-            version: PROTOCOL_VERSION,
-            profile: HYBRID_PROFILE_ID,
-            suite_id,
+            version: profile.version(),
+            profile: profile.profile_id(),
+            suite_id: profile.suite_id(),
             initiator_identity,
             responder_identity,
             initiator_public_key: local_identity.public_key(),
@@ -462,6 +463,7 @@ impl HybridInitiator {
             ephemeral_secret,
             expected_responder,
             requested_epoch: epoch,
+            profile,
         })
     }
 
@@ -517,15 +519,8 @@ impl HybridInitiator {
     }
 
     fn validate_accept(&self, accept: &HybridAccept, now: u64) -> Result<(), HybridHandshakeError> {
-        if accept.version != PROTOCOL_VERSION {
-            return Err(HybridHandshakeError::UnsupportedVersion(accept.version));
-        }
-        if accept.profile != HYBRID_PROFILE_ID {
-            return Err(HybridHandshakeError::UnsupportedProfile(accept.profile));
-        }
-        if accept.suite_id != self.hello.suite_id {
-            return Err(HybridHandshakeError::AcceptMismatch);
-        }
+        self.profile
+            .validate(accept.version, accept.profile, accept.suite_id)?;
         if accept.initiator_identity != self.hello.initiator_identity
             || accept.responder_identity != self.hello.responder_identity
         {
@@ -549,6 +544,7 @@ impl fmt::Debug for HybridInitiator {
             .debug_struct("HybridInitiator")
             .field("hello", &self.hello)
             .field("requested_epoch", &self.requested_epoch)
+            .field("profile", &self.profile)
             .field("ephemeral_secret", &"<redacted>")
             .finish_non_exhaustive()
     }
@@ -602,6 +598,7 @@ pub struct HybridResponder {
     local_identity: CompositeIdentity,
     expected_initiator: CompositePublicKey,
     psk: Option<Zeroizing<[u8; 32]>>,
+    policy: HybridProfilePolicy,
     replay_cache: ReplayCache,
 }
 
@@ -611,11 +608,13 @@ impl HybridResponder {
         local_identity: CompositeIdentity,
         expected_initiator: CompositePublicKey,
         psk: Option<[u8; 32]>,
+        policy: HybridProfilePolicy,
     ) -> Result<Self, HybridHandshakeError> {
         Self::with_replay_capacity(
             local_identity,
             expected_initiator,
             psk,
+            policy,
             DEFAULT_HYBRID_REPLAY_CAPACITY,
         )
     }
@@ -625,6 +624,7 @@ impl HybridResponder {
         local_identity: CompositeIdentity,
         expected_initiator: CompositePublicKey,
         psk: Option<[u8; 32]>,
+        policy: HybridProfilePolicy,
         capacity: usize,
     ) -> Result<Self, HybridHandshakeError> {
         if capacity == 0 {
@@ -637,6 +637,7 @@ impl HybridResponder {
             local_identity,
             expected_initiator,
             psk: psk.map(Zeroizing::new),
+            policy,
             replay_cache: ReplayCache::new(capacity),
         })
     }
@@ -730,13 +731,8 @@ impl HybridResponder {
         expected_endpoint_context: [u8; ENDPOINT_CONTEXT_HASH_LEN],
         now: u64,
     ) -> Result<(), HybridHandshakeError> {
-        if hello.version != PROTOCOL_VERSION {
-            return Err(HybridHandshakeError::UnsupportedVersion(hello.version));
-        }
-        if hello.profile != HYBRID_PROFILE_ID {
-            return Err(HybridHandshakeError::UnsupportedProfile(hello.profile));
-        }
-        validate_suite(hello.suite_id)?;
+        self.policy
+            .negotiate(hello.version, hello.profile, hello.suite_id)?;
         if hello.initiator_public_key != self.expected_initiator {
             return Err(HybridHandshakeError::IdentityMismatch("initiator"));
         }
@@ -769,6 +765,7 @@ impl fmt::Debug for HybridResponder {
             .field("local_identity", &self.local_identity)
             .field("expected_initiator", &self.expected_initiator)
             .field("psk", &self.psk.as_ref().map(|_| "<redacted>"))
+            .field("profile_policy", &self.policy)
             .field("replay_cache_entries", &self.replay_cache.entries.len())
             .finish_non_exhaustive()
     }
@@ -891,6 +888,8 @@ pub enum HybridHandshakeError {
     Identity(#[from] IdentityError),
     #[error(transparent)]
     XWing(#[from] XWingError),
+    #[error(transparent)]
+    Profile(#[from] ProfileNegotiationError),
     #[error(transparent)]
     KeySchedule(#[from] KeyScheduleError),
     #[error(transparent)]
@@ -1128,6 +1127,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::profile::HybridSuite;
     use super::*;
     use crate::hybrid::xwing::XWING_SEED_LEN;
     use crate::transcript::{ENDPOINT_CONTEXT_HASH_LEN, SUITE_CHACHA20_POLY1305};
@@ -1137,6 +1137,10 @@ mod tests {
     const EPOCH: u16 = 7;
     const ENDPOINT: [u8; ENDPOINT_CONTEXT_HASH_LEN] = [0x5a; ENDPOINT_CONTEXT_HASH_LEN];
     const EMPTY_COOKIE: [u8; HYBRID_COOKIE_LEN] = [0u8; HYBRID_COOKIE_LEN];
+    const SELECTED_PROFILE: NegotiatedHybridProfile =
+        NegotiatedHybridProfile::required(HybridSuite::ChaCha20Poly1305);
+    const PROFILE_POLICY: HybridProfilePolicy =
+        HybridProfilePolicy::require(HybridSuite::ChaCha20Poly1305);
 
     struct Fixture {
         initiator_public: CompositePublicKey,
@@ -1167,7 +1171,7 @@ mod tests {
         HybridInitiator::start(
             &identity,
             fixture.responder_public.clone(),
-            SUITE_CHACHA20_POLY1305,
+            SELECTED_PROFILE,
             ENDPOINT,
             EPOCH,
             0,
@@ -1178,8 +1182,13 @@ mod tests {
     }
 
     fn responder(fixture: &Fixture) -> HybridResponder {
-        HybridResponder::new(responder_identity(), fixture.initiator_public.clone(), None)
-            .expect("responder")
+        HybridResponder::new(
+            responder_identity(),
+            fixture.initiator_public.clone(),
+            None,
+            PROFILE_POLICY,
+        )
+        .expect("responder")
     }
 
     fn complete(fixture: &Fixture) -> (HybridAccept, HybridFinished, HybridAccepted) {
@@ -1349,14 +1358,21 @@ mod tests {
         suite.suite_id = SUITE_AES_256_GCM;
         assert!(matches!(
             responder(&fixture).accept(&suite, ENDPOINT, EPOCH, NOW),
-            Err(HybridHandshakeError::Identity(_))
+            Err(HybridHandshakeError::Profile(
+                ProfileNegotiationError::SuiteMismatch { .. }
+            ))
         ));
 
         let mut profile = hello.clone();
         profile.profile = 1;
         assert!(matches!(
             responder(&fixture).accept(&profile, ENDPOINT, EPOCH, NOW),
-            Err(HybridHandshakeError::UnsupportedProfile(1))
+            Err(HybridHandshakeError::Profile(
+                ProfileNegotiationError::ProfileMismatch {
+                    expected: HYBRID_PROFILE_ID,
+                    found: 1
+                }
+            ))
         ));
 
         let mut endpoint = hello.clone();
@@ -1395,7 +1411,9 @@ mod tests {
         suite.suite_id = SUITE_AES_256_GCM;
         assert!(matches!(
             initiator1.finish(&suite, NOW, None),
-            Err(HybridHandshakeError::AcceptMismatch)
+            Err(HybridHandshakeError::Profile(
+                ProfileNegotiationError::SuiteMismatch { .. }
+            ))
         ));
 
         let fixture2 = fixture();
@@ -1412,7 +1430,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             initiator2.finish(&downgraded, NOW, None),
-            Err(HybridHandshakeError::AcceptMismatch)
+            Err(HybridHandshakeError::Profile(
+                ProfileNegotiationError::SuiteMismatch { .. }
+            ))
         ));
 
         let mut signature = accept.clone();
@@ -1478,7 +1498,7 @@ mod tests {
         let initiator = HybridInitiator::start(
             &initiator_identity(),
             fixture.responder_public.clone(),
-            SUITE_CHACHA20_POLY1305,
+            SELECTED_PROFILE,
             ENDPOINT,
             EPOCH,
             1,
@@ -1491,6 +1511,7 @@ mod tests {
             responder_identity(),
             fixture.initiator_public.clone(),
             Some(psk),
+            PROFILE_POLICY,
         )
         .unwrap();
         let accepted = responder.accept(&hello, ENDPOINT, EPOCH, NOW).unwrap();
@@ -1502,7 +1523,7 @@ mod tests {
         let initiator = HybridInitiator::start(
             &initiator_identity(),
             fixture.responder_public.clone(),
-            SUITE_CHACHA20_POLY1305,
+            SELECTED_PROFILE,
             ENDPOINT,
             EPOCH,
             0,
@@ -1515,6 +1536,7 @@ mod tests {
                 responder_identity(),
                 fixture.initiator_public.clone(),
                 Some(psk),
+                PROFILE_POLICY,
             )
             .unwrap()
             .accept(initiator.hello(), ENDPOINT, EPOCH, NOW),
@@ -1543,6 +1565,7 @@ mod tests {
             responder_identity(),
             fixture.initiator_public.clone(),
             Some(psk),
+            PROFILE_POLICY,
         )
         .unwrap();
         let debug = format!("{responder:?}");

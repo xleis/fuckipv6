@@ -8,6 +8,7 @@
 
 pub mod handshake;
 pub mod identity;
+pub mod profile;
 pub mod xwing;
 
 pub use handshake::{
@@ -18,6 +19,10 @@ pub use handshake::{
 pub use identity::{
     CompositeIdentity, CompositePublicKey, CompositeSignature, IdentityError, IdentityId,
     COMPOSITE_IDENTITY_PUBLIC_KEY_LEN, COMPOSITE_SIGNATURE_LEN, IDENTITY_ID_LEN,
+};
+pub use profile::{
+    DataAead, HandshakeKdf, HybridProfilePolicy, HybridSuite, KemAlgorithm,
+    NegotiatedHybridProfile, ProfileNegotiationError, SignatureAlgorithm, XWING_DRAFT_VERSION,
 };
 pub use xwing::{
     XWingCiphertext, XWingDecapsulationKey, XWingEncapsulationKey, XWingError, XWingSharedSecret,

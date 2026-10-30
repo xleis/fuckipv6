@@ -3,6 +3,7 @@ mod event;
 mod lifecycle;
 mod plan;
 mod runtime_handler;
+pub(crate) mod runtime_metadata;
 mod state;
 
 pub use command::{

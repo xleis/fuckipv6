@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
+use crate::node::runtime_metadata;
 use crate::node::{
     NodeCommandBus, NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot,
     NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus,
@@ -158,8 +159,29 @@ impl MultiNetworkSupervisor {
         }
     }
 
+    async fn record_identity(&self, identity: &fuckipv6_common::Identity) {
+        let candidate = runtime_metadata::identity_snapshot(identity);
+        if let Some(existing) = self.state.snapshot().await.identity {
+            if existing != candidate {
+                tracing::warn!(
+                    "节点运行时检测到不同的网络身份，共享节点快照继续使用首次加载的身份"
+                );
+            }
+            return;
+        }
+
+        self.state
+            .update(|snapshot| {
+                if snapshot.identity.is_none() {
+                    snapshot.identity = Some(candidate);
+                }
+            })
+            .await;
+    }
+
     async fn refresh_runtime_state(&self) {
         let runtime = ipc::multi_status_snapshot(&self.registry).await;
+        let logs = runtime_metadata::recent_log_entries();
         self.state
             .update(|snapshot| {
                 for network in &runtime.networks {
@@ -175,6 +197,7 @@ impl MultiNetworkSupervisor {
                 // An empty runtime means all peers are gone. Replacing the
                 // collection also removes peers from networks stopped earlier.
                 snapshot.peers = runtime.peers.iter().map(node_peer_snapshot).collect();
+                snapshot.logs = logs;
             })
             .await;
     }
@@ -311,6 +334,8 @@ impl MultiNetworkSupervisor {
             let p2p_listen_addr = p2p.local_addr();
             let stats = runtime.stats.clone();
 
+            self.record_identity(&runtime.identity).await;
+
             println!(
                 "  ✓ [{}] 成功就绪 | TUN: {} | 虚拟 IPv6: {} | P2P 端口: {}",
                 net_name,
@@ -399,6 +424,7 @@ impl MultiNetworkSupervisor {
             .running(started_networks, failed_networks)
             .await;
         self.sync_lifecycle(lifecycle).await;
+        self.refresh_runtime_state().await;
 
         println!("══════════════════════════════════════════════════════════════════════════════");
         if started_networks == 0 {

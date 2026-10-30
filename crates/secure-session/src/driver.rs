@@ -21,7 +21,7 @@ use crate::rekey::{RekeyAccept, RekeyCompletion, RekeyConfirm, RekeyInit, RekeyN
 use crate::rekey_session::{RekeyAcceptOffer, RekeySession, RekeySessionError};
 use crate::transcript::{TranscriptHash, ENDPOINT_CONTEXT_HASH_LEN};
 use crate::wire::{AcceptFrame, ConfirmFrame};
-use crate::{DataCipherSuite, EpochSession, SessionError, SESSION_ID_LEN};
+use crate::{DataCipherSuite, EpochSession, RekeyMargins, SessionError, SESSION_ID_LEN};
 use std::time::Instant;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -165,6 +165,15 @@ impl SessionDriver {
         self.session
             .as_ref()
             .is_none_or(|session| session.rekey_required(now))
+    }
+
+    /// Whether the active epoch is within a configured pre-expiry safety margin.
+    ///
+    /// A closed driver always reports `true`.
+    pub fn rekey_due(&self, now: Instant, margins: RekeyMargins) -> bool {
+        self.session
+            .as_ref()
+            .is_none_or(|session| session.rekey_due(now, margins))
     }
 
     /// Return a snapshot of packet and rekey counters.

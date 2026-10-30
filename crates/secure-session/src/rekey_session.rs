@@ -14,7 +14,8 @@ use crate::rekey::{
     RekeyStateMachine,
 };
 use crate::{
-    DataCipherSuite, EpochSession, ReceiveCipher, SendCipher, SessionError, SESSION_ID_LEN,
+    DataCipherSuite, EpochSession, ReceiveCipher, RekeyMargins, SendCipher, SessionError,
+    SESSION_ID_LEN,
 };
 use std::time::Instant;
 use thiserror::Error;
@@ -141,6 +142,11 @@ impl RekeySession {
     /// Whether the active epoch must be replaced before more data is sent.
     pub fn rekey_required(&self, now: Instant) -> bool {
         self.poisoned || self.session.rekey_required(now)
+    }
+
+    /// Whether the active epoch is within a configured pre-expiry safety margin.
+    pub fn rekey_due(&self, now: Instant, margins: RekeyMargins) -> bool {
+        self.poisoned || self.session.rekey_due(now, margins)
     }
 
     /// Encrypt a packet under the active epoch.

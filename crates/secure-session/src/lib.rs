@@ -61,6 +61,46 @@ pub const RETIRED_EPOCH_GRACE: Duration = Duration::from_secs(5);
 pub const MAX_RETIRED_RECEIVE_EPOCHS: usize = 2;
 const REPLAY_WINDOW_WORDS: usize = (REPLAY_WINDOW_SIZE as usize) / 64;
 
+/// Safety margins used to schedule a rekey before an epoch is exhausted.
+///
+/// The active epoch is due for replacement when any remaining time, plaintext
+/// byte, or packet-counter budget is less than or equal to its corresponding
+/// margin. Callers should choose a time margin that leaves enough time to
+/// complete the authenticated rekey exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RekeyMargins {
+    /// Time remaining before the hard epoch deadline.
+    pub time: Duration,
+    /// Plaintext bytes remaining before the hard per-epoch byte limit.
+    pub bytes: u64,
+    /// Outgoing packet counters remaining before counter exhaustion.
+    pub packets: u64,
+}
+
+impl RekeyMargins {
+    /// Zero margins schedule a rekey only once a hard limit has been reached.
+    pub const ZERO: Self = Self {
+        time: Duration::ZERO,
+        bytes: 0,
+        packets: 0,
+    };
+
+    /// Construct explicit time, byte, and packet-counter safety margins.
+    pub const fn new(time: Duration, bytes: u64, packets: u64) -> Self {
+        Self {
+            time,
+            bytes,
+            packets,
+        }
+    }
+}
+
+impl Default for RekeyMargins {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 /// Direction-specific nonce domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -720,9 +760,31 @@ impl EpochSession {
     }
 
     /// Whether the active epoch must be replaced before another packet is sent.
+    ///
+    /// This fails closed at the exact time, plaintext-byte, or outgoing packet
+    /// counter limit. Receive processing remains available for the active and
+    /// retained receive epochs.
     pub fn rekey_required(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.active_started_at) >= MAX_EPOCH_LIFETIME
             || self.sent_bytes >= MAX_EPOCH_BYTES
+            || self.active_send.next_send_counter() >= MAX_PACKETS_PER_EPOCH
+    }
+
+    /// Whether the active epoch is within any pre-expiry safety margin.
+    ///
+    /// This is a scheduling signal, not permission to keep sending. The data
+    /// path still fails closed independently at the hard limits enforced by
+    /// [`rekey_required`](Self::rekey_required).
+    pub fn rekey_due(&self, now: Instant, margins: RekeyMargins) -> bool {
+        let elapsed = now.saturating_duration_since(self.active_started_at);
+        let remaining_time = MAX_EPOCH_LIFETIME.saturating_sub(elapsed);
+        let remaining_bytes = MAX_EPOCH_BYTES.saturating_sub(self.sent_bytes);
+        let remaining_packets =
+            MAX_PACKETS_PER_EPOCH.saturating_sub(self.active_send.next_send_counter());
+
+        remaining_time <= margins.time
+            || remaining_bytes <= margins.bytes
+            || remaining_packets <= margins.packets
     }
 
     /// Install a new epoch and retain the previous receive cipher for a short grace period.
@@ -1718,6 +1780,47 @@ mod tests {
         );
         session.sent_bytes = MAX_EPOCH_BYTES;
         assert!(session.rekey_required(now));
+
+        session.sent_bytes = 0;
+        session.active_send.next_send_counter = MAX_PACKETS_PER_EPOCH;
+        assert!(session.rekey_required(now));
+        assert_eq!(
+            session.seal(b"counter exhausted", &mut packet, now),
+            Err(SessionError::RekeyRequired)
+        );
+    }
+
+    #[test]
+    fn epoch_session_schedules_rekey_at_time_byte_and_counter_margins() {
+        let now = Instant::now();
+        let mut session = initiator_epoch(1, 0, now);
+
+        let time_margin = Duration::from_secs(10);
+        let margins = RekeyMargins::new(time_margin, 0, 0);
+        assert!(!session.rekey_due(
+            now + MAX_EPOCH_LIFETIME - time_margin - Duration::from_nanos(1),
+            margins
+        ));
+        assert!(session.rekey_due(now + MAX_EPOCH_LIFETIME - time_margin, margins));
+
+        let byte_margin = 4096;
+        let margins = RekeyMargins::new(Duration::ZERO, byte_margin, 0);
+        session.sent_bytes = MAX_EPOCH_BYTES - byte_margin - 1;
+        assert!(!session.rekey_due(now, margins));
+        session.sent_bytes = MAX_EPOCH_BYTES - byte_margin;
+        assert!(session.rekey_due(now, margins));
+
+        let packet_margin = 64;
+        let margins = RekeyMargins::new(Duration::ZERO, 0, packet_margin);
+        session.sent_bytes = 0;
+        session.active_send.next_send_counter = MAX_PACKETS_PER_EPOCH - packet_margin - 1;
+        assert!(!session.rekey_due(now, margins));
+        session.active_send.next_send_counter = MAX_PACKETS_PER_EPOCH - packet_margin;
+        assert!(session.rekey_due(now, margins));
+
+        assert!(!session.rekey_due(now, RekeyMargins::ZERO));
+        session.active_send.next_send_counter = MAX_PACKETS_PER_EPOCH;
+        assert!(session.rekey_due(now, RekeyMargins::ZERO));
     }
 
     #[test]

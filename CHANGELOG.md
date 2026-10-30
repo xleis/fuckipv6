@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- **节点快照一致性诊断**: `NodeSnapshot::invariant_violations()` 集中报告网络、配置和内嵌服务重名、运行网络缺少配置、Peer 引用未知/离线网络及 `peer_count` 不一致。运行网络停止、自然退出和创建失败回滚均清理对应 Peer；共享 revision 在 `u64::MAX` 饱和而不回绕。UI 只可展示诊断结果，不得在本地修复或维护平行状态机。
 - **内嵌服务状态快照**: `NodeSnapshot` 新增无敏感信息的 `embedded_services`，按网络发布内嵌信令/中继服务的 `Starting/Running/Stopping/Stopped/Failed` 状态及运行中监听地址；服务生命周期变化通过 `EmbeddedServiceChanged` 事件同步，测试覆盖创建、启动失败、按网络停止、全量关闭以及票据/私钥/配置路径不入快照。
 - **UI 契约命令通道**: 新增 `NodeCommand::GetUiManifest` 与 `NodeCommandOutcome::UiManifest`，让 CLI、IPC、WebUI 和后续 GPUI 通过同一个节点命令总线获取版本化 manifest；测试覆盖 JSON 往返、11 个页面和当前 schema 版本。该命令只传输 UI 契约，不代表 WebUI/GPUI 已完成适配。
 - 完成 QUIC 中继统一身份控制：生产服务端强制 Ed25519 客户端证书并验证私钥持有证明；Relay Register 签名绑定 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter；服务端在写入 relay 状态前逐字节核对证书 SPKI 与应用公钥。生产中继禁用 0-RTT，恢复会话回退到 1-RTT；负向测试覆盖缺失/错误证书、错误 pin、合法证书错绑应用身份、Register 篡改/缺失绑定及无 relay 状态副作用。客户端证书 CA/allowlist/撤销策略和独立安全审计仍未完成。

@@ -193,6 +193,9 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                             network.uptime_secs = 0;
                             network.peer_count = 0;
                         }
+                        snapshot
+                            .peers
+                            .retain(|peer| peer.network_name != network_name);
                     })
                     .await;
                 events.publish(NodeEventKind::NetworkChanged {
@@ -615,18 +618,23 @@ impl NetworkRuntimeActor {
                 )));
             }
         };
+        let config = match ClientConfig::from_file(&config_file) {
+            Ok(config) => config,
+            Err(error) => {
+                self.rollback_created_network(&command.name).await;
+                return Err(RuntimeControlError::Persistence(format!(
+                    "读取新网络 [{}] 配置失败，已回滚: {error:#}",
+                    command.name
+                )));
+            }
+        };
+        self.record_network_config(runtime_metadata::network_config_snapshot(
+            &command.name,
+            &config,
+        ))
+        .await;
 
         if command.auto_connect {
-            let config = match ClientConfig::from_file(&config_file) {
-                Ok(config) => config,
-                Err(error) => {
-                    self.rollback_created_network(&command.name).await;
-                    return Err(RuntimeControlError::Persistence(format!(
-                        "读取新网络 [{}] 配置失败，已回滚: {error:#}",
-                        command.name
-                    )));
-                }
-            };
             let spec = super::NodeNetworkSpec {
                 name: command.name.clone(),
                 config_path: config_file,
@@ -843,6 +851,9 @@ impl NetworkRuntimeActor {
                 snapshot
                     .embedded_services
                     .retain(|service| service.network_name != network_name);
+                snapshot
+                    .peers
+                    .retain(|peer| peer.network_name != network_name);
                 if snapshot
                     .last_error
                     .as_ref()
@@ -979,9 +990,17 @@ impl NetworkRuntimeActor {
         let snapshot = self
             .state
             .update(|snapshot| {
+                if status == NodeNetworkStatus::Offline {
+                    snapshot
+                        .peers
+                        .retain(|peer| network_name.is_none_or(|name| peer.network_name != name));
+                }
                 for network in &mut snapshot.networks {
                     if network_name.is_none_or(|name| network.name == name) {
                         network.status = status;
+                        if status == NodeNetworkStatus::Offline {
+                            network.peer_count = 0;
+                        }
                     }
                 }
             })
@@ -1068,7 +1087,7 @@ fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::NodeEvent;
+    use crate::node::{NodeEvent, NodePeerSnapshot};
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
@@ -1222,6 +1241,22 @@ mod tests {
         }
     }
 
+    fn peer_snapshot(network_name: &str) -> NodePeerSnapshot {
+        NodePeerSnapshot {
+            peer_id: format!("peer-{network_name}"),
+            network_name: network_name.into(),
+            virtual_ipv6: Ipv6Addr::LOCALHOST,
+            virtual_ipv4: None,
+            endpoints: Vec::new(),
+            online: true,
+            p2p_active: true,
+            p2p_healthy: true,
+            rtt_us: Some(1_000),
+            loss_rate: 0.0,
+            traffic: NodeTrafficSnapshot::default(),
+        }
+    }
+
     fn embedded_service_events(
         receiver: &mut broadcast::Receiver<NodeEvent>,
         network_name: &str,
@@ -1326,6 +1361,12 @@ mod tests {
         assert_eq!(service.status, NodeEmbeddedServiceStatus::Running);
         assert!(service.signaling_addr.is_some());
         assert!(service.relay_addr.is_some());
+        assert!(snapshot
+            .configuration
+            .networks
+            .iter()
+            .any(|network| network.network_name == "local"));
+        assert!(snapshot.invariant_violations().is_empty());
 
         let encoded = serde_json::to_string(&snapshot).expect("serialize node snapshot");
         assert!(!encoded.contains("ticket"));
@@ -1386,6 +1427,24 @@ mod tests {
             harness.services.list().await.expect("list services").len(),
             1
         );
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "owned")
+                    .expect("running network state");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("owned"));
+            })
+            .await;
+        assert!(harness
+            .state
+            .snapshot()
+            .await
+            .invariant_violations()
+            .is_empty());
         let mut events = harness.events.subscribe();
 
         let stopped = harness
@@ -1405,8 +1464,12 @@ mod tests {
 
         let snapshot = harness.state.snapshot().await;
         assert!(snapshot.networks.iter().any(|network| {
-            network.name == "owned" && network.status == NodeNetworkStatus::Offline
+            network.name == "owned"
+                && network.status == NodeNetworkStatus::Offline
+                && network.peer_count == 0
         }));
+        assert!(snapshot.peers.is_empty());
+        assert!(snapshot.invariant_violations().is_empty());
         let service = snapshot
             .embedded_services
             .iter()
@@ -1538,6 +1601,11 @@ mod tests {
             .embedded_services
             .iter()
             .any(|service| service.network_name == "broken"));
+        assert!(!snapshot
+            .peers
+            .iter()
+            .any(|peer| peer.network_name == "broken"));
+        assert!(snapshot.invariant_violations().is_empty());
 
         harness.shutdown().await;
     }

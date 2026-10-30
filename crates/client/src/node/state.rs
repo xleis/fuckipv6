@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -21,6 +22,94 @@ pub struct NodeSnapshot {
     pub peers: Vec<NodePeerSnapshot>,
     pub logs: Vec<NodeLogEntry>,
     pub last_error: Option<NodeProblem>,
+}
+
+impl NodeSnapshot {
+    /// Returns machine-readable consistency violations for diagnostics and
+    /// tests. UI adapters may surface these values, but must never repair state
+    /// locally or derive a parallel state machine from them.
+    pub fn invariant_violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+
+        collect_duplicate_names(
+            self.networks.iter().map(|network| network.name.as_str()),
+            "duplicate_network",
+            &mut violations,
+        );
+        collect_duplicate_names(
+            self.configuration
+                .networks
+                .iter()
+                .map(|network| network.network_name.as_str()),
+            "duplicate_configuration",
+            &mut violations,
+        );
+        collect_duplicate_names(
+            self.embedded_services
+                .iter()
+                .map(|service| service.network_name.as_str()),
+            "duplicate_embedded_service",
+            &mut violations,
+        );
+
+        let configured = self
+            .configuration
+            .networks
+            .iter()
+            .map(|network| network.network_name.as_str())
+            .collect::<HashSet<_>>();
+        let networks = self
+            .networks
+            .iter()
+            .map(|network| (network.name.as_str(), network))
+            .collect::<HashMap<_, _>>();
+
+        for network in &self.networks {
+            if !configured.contains(network.name.as_str()) {
+                violations.push(format!("missing_network_configuration:{}", network.name));
+            }
+
+            let expected_peers = self
+                .peers
+                .iter()
+                .filter(|peer| peer.network_name == network.name)
+                .count();
+            if network.peer_count != expected_peers {
+                violations.push(format!(
+                    "peer_count_mismatch:{}:expected={expected_peers}:actual={}",
+                    network.name, network.peer_count
+                ));
+            }
+            if network.status == NodeNetworkStatus::Offline && expected_peers > 0 {
+                violations.push(format!("offline_network_has_peers:{}", network.name));
+            }
+        }
+
+        for peer in &self.peers {
+            match networks.get(peer.network_name.as_str()) {
+                None => violations.push(format!("peer_for_unknown_network:{}", peer.network_name)),
+                Some(network) if network.status == NodeNetworkStatus::Offline => {
+                    violations.push(format!("peer_for_offline_network:{}", peer.network_name));
+                }
+                Some(_) => {}
+            }
+        }
+
+        violations
+    }
+}
+
+fn collect_duplicate_names<'a>(
+    names: impl Iterator<Item = &'a str>,
+    code: &str,
+    violations: &mut Vec<String>,
+) {
+    let mut seen = HashSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            violations.push(format!("{code}:{name}"));
+        }
+    }
 }
 
 /// Effective, non-secret network configuration exposed to every UI adapter.
@@ -311,7 +400,7 @@ impl NodeStateStore {
     {
         let mut snapshot = self.snapshot.write().await;
         update(&mut snapshot);
-        snapshot.revision = snapshot.revision.wrapping_add(1);
+        snapshot.revision = snapshot.revision.saturating_add(1);
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
@@ -336,6 +425,121 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
+        NodeNetworkSnapshot {
+            name: name.into(),
+            tun_name: format!("fk-{name}"),
+            status,
+            assigned_ipv6: None,
+            assigned_ipv4: None,
+            p2p_listen_addr: None,
+            uptime_secs: 0,
+            roles: vec![NodeNetworkRole::Member],
+            peer_count: 0,
+            traffic: NodeTrafficSnapshot::default(),
+        }
+    }
+
+    fn configuration(name: &str) -> NodeNetworkConfigSnapshot {
+        NodeNetworkConfigSnapshot {
+            network_name: name.into(),
+            coordinator_url: "ws://127.0.0.1:6666".into(),
+            virtual_mode: None,
+            preferred_ipv4: None,
+            preferred_ipv6: None,
+            virtual_network: None,
+            tun_name: format!("fk-{name}"),
+            mtu: 1420,
+            p2p_listen_port: 0,
+            p2p_connect_timeout_secs: 30,
+            p2p_heartbeat_interval_secs: 5,
+            routing_mode: NodeRoutingMode::MeshOnly,
+            exit_node: None,
+            direct_cidrs: Vec::new(),
+            proxy_cidrs: Vec::new(),
+            exit_node_enabled: false,
+            exit_node_allowed_clients: Vec::new(),
+            exit_node_allow_lan_access: false,
+            exit_node_region: None,
+            acl_enabled: false,
+            acl_default_action: fuckipv6_common::AclAction::Allow,
+            acl_rule_count: 0,
+            log_level: "info".into(),
+            log_file_configured: false,
+            identity_configured: true,
+        }
+    }
+
+    fn embedded_service(name: &str) -> NodeEmbeddedServiceSnapshot {
+        NodeEmbeddedServiceSnapshot {
+            network_name: name.into(),
+            status: NodeEmbeddedServiceStatus::Stopped,
+            signaling_addr: None,
+            relay_addr: None,
+        }
+    }
+
+    fn peer(network_name: &str) -> NodePeerSnapshot {
+        NodePeerSnapshot {
+            peer_id: format!("peer-{network_name}"),
+            network_name: network_name.into(),
+            virtual_ipv6: Ipv6Addr::LOCALHOST,
+            virtual_ipv4: None,
+            endpoints: Vec::new(),
+            online: true,
+            p2p_active: true,
+            p2p_healthy: true,
+            rtt_us: Some(1_000),
+            loss_rate: 0.0,
+            traffic: NodeTrafficSnapshot::default(),
+        }
+    }
+
+    #[test]
+    fn default_snapshot_has_no_invariant_violations() {
+        assert!(NodeSnapshot::default().invariant_violations().is_empty());
+    }
+
+    #[test]
+    fn duplicate_names_are_reported_for_every_snapshot_collection() {
+        let snapshot = NodeSnapshot {
+            configuration: NodeConfigurationSnapshot {
+                networks: vec![configuration("home"), configuration("home")],
+            },
+            embedded_services: vec![embedded_service("home"), embedded_service("home")],
+            networks: vec![network("home", NodeNetworkStatus::Online); 2],
+            ..NodeSnapshot::default()
+        };
+
+        let violations = snapshot.invariant_violations();
+        assert!(violations.contains(&"duplicate_network:home".into()));
+        assert!(violations.contains(&"duplicate_configuration:home".into()));
+        assert!(violations.contains(&"duplicate_embedded_service:home".into()));
+    }
+
+    #[test]
+    fn network_configuration_and_peer_relationships_are_checked() {
+        let mut offline_without_config = network("offline", NodeNetworkStatus::Offline);
+        offline_without_config.peer_count = 1;
+        let mut count_mismatch = network("mismatch", NodeNetworkStatus::Online);
+        count_mismatch.peer_count = 3;
+        let snapshot = NodeSnapshot {
+            configuration: NodeConfigurationSnapshot {
+                networks: vec![configuration("mismatch")],
+            },
+            networks: vec![offline_without_config, count_mismatch],
+            peers: vec![peer("offline"), peer("unknown")],
+            ..NodeSnapshot::default()
+        };
+
+        let violations = snapshot.invariant_violations();
+        assert!(violations.contains(&"missing_network_configuration:offline".into()));
+        assert!(violations.contains(&"peer_count_mismatch:mismatch:expected=0:actual=3".into()));
+        assert!(violations.contains(&"offline_network_has_peers:offline".into()));
+        assert!(violations.contains(&"peer_for_offline_network:offline".into()));
+        assert!(violations.contains(&"peer_for_unknown_network:unknown".into()));
+    }
 
     #[tokio::test]
     async fn state_store_publishes_atomic_revisions() {
@@ -379,6 +583,20 @@ mod tests {
             receiver.recv().await.expect("state event").kind,
             NodeEventKind::StateChanged { revision: 1 }
         );
+    }
+
+    #[tokio::test]
+    async fn revision_saturates_instead_of_wrapping() {
+        let state = NodeStateStore::new();
+        let updates = state.subscribe();
+
+        state
+            .update(|snapshot| snapshot.revision = u64::MAX - 1)
+            .await;
+        assert_eq!(updates.borrow().revision, u64::MAX);
+
+        state.update(|_| {}).await;
+        assert_eq!(updates.borrow().revision, u64::MAX);
     }
 
     #[test]

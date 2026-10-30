@@ -278,11 +278,11 @@ impl fmt::Debug for XWingSharedSecret {
     }
 }
 
-fn contributory_secret(secret: &X25519SharedSecret) -> Result<[u8; 32], XWingError> {
+fn contributory_secret(secret: &X25519SharedSecret) -> Result<Zeroizing<[u8; 32]>, XWingError> {
     if !secret.was_contributory() {
         return Err(XWingError::NonContributory);
     }
-    Ok(secret.to_bytes())
+    Ok(Zeroizing::new(secret.to_bytes()))
 }
 
 fn combine(

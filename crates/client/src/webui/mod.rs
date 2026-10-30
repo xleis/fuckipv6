@@ -1,13 +1,15 @@
 pub mod controller;
+pub mod security;
 
 use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Extension, Query, State,
     },
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Json},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -21,14 +23,25 @@ use fuckipv6_coordinator::webui::{
     BlacklistActionRequest, BlacklistActionResponse, LoginRequest, LoginResponse,
     NetworkConfigApiResponse, NetworkConfigDto, UpdateNetworkConfigRequest,
 };
+use security::{http_url, WebUiAuth, WebUiConfig};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-pub fn create_app_web_router(controller: Arc<AppController>) -> Router {
-    Router::new()
-        .route("/", get(handle_index))
-        .route("/assets/webui.css", get(handle_webui_css))
+pub use security::{
+    DEFAULT_WEBUI_BIND, DEFAULT_WEBUI_PORT, ENV_WEBUI_ALLOW_REMOTE, ENV_WEBUI_BIND,
+    ENV_WEBUI_JWT_SECRET, ENV_WEBUI_PASSWORD, ENV_WEBUI_USERNAME,
+};
+
+pub fn create_app_web_router(controller: Arc<AppController>) -> Result<Router> {
+    Ok(create_app_web_router_with_auth(
+        controller,
+        WebUiAuth::from_process_env()?,
+    ))
+}
+
+fn create_app_web_router_with_auth(controller: Arc<AppController>, auth: WebUiAuth) -> Router {
+    let auth = Arc::new(auth);
+    let protected = Router::new()
         .route("/api/status", get(handle_status))
         .route("/api/peers", get(handle_peers))
         .route("/api/peers/probe", post(handle_peer_probe))
@@ -39,7 +52,6 @@ pub fn create_app_web_router(controller: Arc<AppController>) -> Router {
         .route("/api/blacklist", get(handle_get_blacklist))
         .route("/api/blacklist/ban", post(handle_blacklist_ban))
         .route("/api/blacklist/unban", post(handle_blacklist_unban))
-        .route("/api/auth/login", post(handle_login))
         .route("/api/logs", get(handle_logs))
         .route("/ws", get(handle_ws))
         // 客户端网络与分流控制
@@ -51,20 +63,40 @@ pub fn create_app_web_router(controller: Arc<AppController>) -> Router {
         // 兼容接口
         .route("/api/coordinator/ban", post(handle_coordinator_ban))
         .route("/api/coordinator/unban", post(handle_coordinator_unban))
+        .route_layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_api_auth,
+        ));
+
+    Router::new()
+        .route("/", get(handle_index))
+        .route("/assets/webui.css", get(handle_webui_css))
+        .route("/api/auth/login", post(handle_login))
+        .merge(protected)
         .with_state(controller)
+        .layer(Extension(auth))
 }
 
 pub async fn start_app_webui(
     port: u16,
     controller: Arc<AppController>,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let app = create_app_web_router(controller.clone());
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let config = WebUiConfig::from_process_env(port)?;
+    config.validate_runtime_exposure()?;
+    let app = create_app_web_router_with_auth(controller.clone(), config.auth().clone());
+    let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .with_context(|| format!("WebUI 无法监听端口: {port}"))?;
+        .with_context(|| format!("WebUI 无法监听 {addr}"))?;
+    let local_addr = listener.local_addr().context("读取 WebUI 监听地址失败")?;
 
-    tracing::info!("fuckipv6 统一控制台已启动: http://0.0.0.0:{port}");
+    tracing::info!(
+        listen = %local_addr,
+        remote = config.is_remote(),
+        authentication = if config.auth().is_required() { "required" } else { "disabled" },
+        "fuckipv6 统一控制台已启动: {}",
+        http_url(local_addr)
+    );
 
     // 定期刷新在线 Peers 状态
     let ctrl = controller.clone();
@@ -82,6 +114,61 @@ pub async fn start_app_webui(
     });
 
     Ok(handle)
+}
+
+async fn require_api_auth(
+    State(auth): State<Arc<WebUiAuth>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !auth.is_required() {
+        return next.run(request).await;
+    }
+
+    // Browser WebSocket clients cannot set an Authorization header. Accept a
+    // query token only for the upgrade endpoint; regular HTTP APIs must use
+    // Bearer authentication so credentials do not end up in access/proxy logs.
+    let token = authorization_bearer_token(&request).or_else(|| {
+        (request.uri().path() == "/ws")
+            .then(|| request.uri().query())
+            .flatten()
+            .and_then(|query| {
+                query.split('&').find_map(|pair| {
+                    let (key, value) = pair.split_once('=')?;
+                    (key == "token" && !value.is_empty()).then_some(value)
+                })
+            })
+    });
+
+    match token {
+        Some(token) if auth.verify(token).is_ok() => next.run(request).await,
+        _ => unauthorized_response("控制面认证失败：请通过 /api/auth/login 获取 Bearer Token"),
+    }
+}
+
+fn authorization_bearer_token(request: &axum::extract::Request) -> Option<&str> {
+    let value = request
+        .headers()
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .trim();
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then_some(token.trim())
+        .filter(|token| !token.is_empty())
+}
+
+fn unauthorized_response(message: impl Into<String>) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer realm=\"fuckipv6-webui\"")],
+        Json(ApiError {
+            error: message.into(),
+        }),
+    )
+        .into_response()
 }
 
 async fn handle_index() -> impl IntoResponse {
@@ -139,7 +226,10 @@ async fn handle_peer_probe(
         })
 }
 
-async fn handle_status(State(ctrl): State<Arc<AppController>>) -> Json<serde_json::Value> {
+async fn handle_status(
+    State(ctrl): State<Arc<AppController>>,
+    Extension(auth): Extension<Arc<WebUiAuth>>,
+) -> Json<serde_json::Value> {
     let state = ctrl.get_state().await;
     let online_count = if state.runtime_available {
         state.peers.len()
@@ -156,7 +246,7 @@ async fn handle_status(State(ctrl): State<Arc<AppController>>) -> Json<serde_jso
         "runtime_available": state.runtime_available,
         "runtime_p2p_addr": state.runtime_p2p_addr,
         "runtime_traffic": state.runtime_traffic,
-        "auth_required": false,
+        "auth_required": auth.is_required(),
         "status": state.status,
         "virtual_ipv6": state.virtual_ipv6,
         "virtual_ipv4": state.virtual_ipv4,
@@ -323,14 +413,35 @@ async fn handle_blacklist_unban(
     ))
 }
 
-async fn handle_login(Json(_req): Json<LoginRequest>) -> Json<LoginResponse> {
-    Json(LoginResponse {
-        success: true,
-        token: Some("authorized".to_string()),
-        error: None,
-        expires_in: Some(86400),
-        auth_required: false,
-    })
+async fn handle_login(
+    Extension(auth): Extension<Arc<WebUiAuth>>,
+    Json(req): Json<LoginRequest>,
+) -> Response {
+    match auth.login(&req.username, &req.password) {
+        Ok(token) => (
+            StatusCode::OK,
+            Json(LoginResponse {
+                success: true,
+                token: Some(token),
+                error: None,
+                expires_in: Some(auth.expiration_secs()),
+                auth_required: auth.is_required(),
+            }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer realm=\"fuckipv6-webui\"")],
+            Json(LoginResponse {
+                success: false,
+                token: None,
+                error: Some("用户名或密码错误".to_string()),
+                expires_in: None,
+                auth_required: auth.is_required(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,16 +462,26 @@ async fn handle_logs(
 async fn handle_ws(
     ws: WebSocketUpgrade,
     State(ctrl): State<Arc<AppController>>,
+    Extension(auth): Extension<Arc<WebUiAuth>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_stream(socket, ctrl))
+    ws.on_upgrade(move |socket| ws_stream(socket, ctrl, auth))
 }
 
-async fn ws_stream(mut socket: WebSocket, ctrl: Arc<AppController>) {
+async fn ws_stream(mut socket: WebSocket, ctrl: Arc<AppController>, auth: Arc<WebUiAuth>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         ticker.tick().await;
-        let snap = ctrl.get_unified_snapshot().await;
-        let Ok(payload) = serde_json::to_string(&snap) else {
+        let snapshot = ctrl.get_unified_snapshot().await;
+        let Ok(mut payload) = serde_json::to_value(snapshot) else {
+            continue;
+        };
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "auth_required".to_string(),
+                serde_json::Value::Bool(auth.is_required()),
+            );
+        }
+        let Ok(payload) = serde_json::to_string(&payload) else {
             continue;
         };
         if socket.send(Message::Text(payload.into())).await.is_err() {
@@ -1175,6 +1296,61 @@ tun_name = "fuckipv6"</div>
     let currentTicket = '';
     let currentClientStatus = 'offline';
     let lastStatusData = null;
+    const AUTH_TOKEN_KEY = 'fuckipv6_control_token';
+    let authPromptPending = null;
+    let authPromptSuppressed = false;
+
+    function getAuthToken() {
+      return localStorage.getItem(AUTH_TOKEN_KEY) || '';
+    }
+
+    function withAuth(options = {}) {
+      const headers = new Headers(options.headers || {});
+      const token = getAuthToken();
+      if (token && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+      return { ...options, headers };
+    }
+
+    async function promptForAuthentication() {
+      if (authPromptSuppressed) return false;
+      if (authPromptPending) return authPromptPending;
+      authPromptPending = (async () => {
+        const username = window.prompt('控制面需要认证。用户名：', 'admin');
+        if (username === null) {
+          authPromptSuppressed = true;
+          return false;
+        }
+        const password = window.prompt('控制面需要认证。密码：');
+        if (password === null) {
+          authPromptSuppressed = true;
+          return false;
+        }
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || !payload.success || !payload.token) {
+          authPromptSuppressed = true;
+          showToast((payload && payload.error) || '控制面认证失败');
+          return false;
+        }
+        localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+        authPromptSuppressed = false;
+        showToast('控制面认证成功');
+        return true;
+      })().catch(error => {
+        authPromptSuppressed = true;
+        showToast(`控制面认证失败: ${error.message}`);
+        return false;
+      }).finally(() => {
+        authPromptPending = null;
+      });
+      return authPromptPending;
+    }
 
     function showToast(message) {
       const box = document.getElementById('toast-box');
@@ -1197,7 +1373,10 @@ tun_name = "fuckipv6"</div>
     }
 
     async function requestJson(url, options = {}) {
-      const response = await fetch(url, options);
+      let response = await fetch(url, withAuth(options));
+      if (response.status === 401 && await promptForAuthentication()) {
+        response = await fetch(url, withAuth(options));
+      }
       const contentType = response.headers.get('content-type') || '';
       let payload = null;
       if (contentType.includes('application/json')) {
@@ -2770,7 +2949,9 @@ tun_name = "fuckipv6"</div>
 
     function connectRealtime() {
       const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const socket = new WebSocket(`${scheme}://${window.location.host}/ws`);
+      const token = getAuthToken();
+      const query = token ? `?token=${encodeURIComponent(token)}` : '';
+      const socket = new WebSocket(`${scheme}://${window.location.host}/ws${query}`);
       let fallbackTimer = null;
       const liveDot = document.getElementById('live-dot');
 
@@ -3126,9 +3307,13 @@ tun_name = "fuckipv6"`;
       if (target && target.classList.contains('tab-content')) switchTab(tab);
     })();
 
-    refresh();
-    connectRealtime();
-    refreshLogs();
+    async function boot() {
+      await refresh();
+      connectRealtime();
+      refreshLogs();
+    }
+
+    boot();
   </script>
 </body>
 </html>"##;
@@ -3136,6 +3321,180 @@ tun_name = "fuckipv6"`;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use fuckipv6_common::CoordinatorAuthConfig;
+    use tower::ServiceExt;
+
+    fn test_auth() -> WebUiAuth {
+        WebUiAuth::new(CoordinatorAuthConfig {
+            enabled: true,
+            admin_username: "admin".to_string(),
+            admin_password: Some("secret".to_string()),
+            jwt_secret: Some("test-webui-integration-secret".to_string()),
+            jwt_expiration_secs: 3600,
+        })
+        .expect("test WebUI auth")
+    }
+
+    fn json_request(method: &str, uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("JSON request")
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("JSON response")
+    }
+
+    #[tokio::test]
+    async fn anonymous_loopback_router_keeps_control_api_accessible() {
+        let app =
+            create_app_web_router_with_auth(Arc::new(AppController::new()), WebUiAuth::disabled());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["auth_required"], false);
+    }
+
+    #[tokio::test]
+    async fn protected_http_api_rejects_missing_and_invalid_tokens() {
+        let auth = test_auth();
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), auth);
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            missing
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer realm=\"fuckipv6-webui\"")
+        );
+        let payload = response_json(missing).await;
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("认证失败")));
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header(header::AUTHORIZATION, "Bearer not-a-jwt")
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn protected_http_api_does_not_accept_tokens_in_query_strings() {
+        let auth = test_auth();
+        let token = auth.login("admin", "secret").expect("login token");
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), auth);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/status?token={token}"))
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn login_rejects_wrong_credentials_and_bearer_token_allows_api_access() {
+        let auth = test_auth();
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), auth);
+
+        let rejected = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/auth/login",
+                r#"{"username":"admin","password":"wrong"}"#,
+            ))
+            .await
+            .expect("login response");
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        let rejected_payload = response_json(rejected).await;
+        assert_eq!(rejected_payload["success"], false);
+        assert_eq!(rejected_payload["error"], "用户名或密码错误");
+
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/auth/login",
+                r#"{"username":"admin","password":"secret"}"#,
+            ))
+            .await
+            .expect("login response");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let accepted_payload = response_json(accepted).await;
+        assert_eq!(accepted_payload["success"], true);
+        assert_eq!(accepted_payload["auth_required"], true);
+        let token = accepted_payload["token"]
+            .as_str()
+            .expect("login response token")
+            .to_string();
+
+        let status = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_payload = response_json(status).await;
+        assert_eq!(status_payload["auth_required"], true);
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_anonymous_upgrade_when_auth_is_required() {
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), test_auth());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws")
+                    .body(Body::empty())
+                    .expect("websocket request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     #[test]
     fn test_unified_master_html_zero_emoji_and_svg_icons() {
@@ -3164,6 +3523,9 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("panel-head"));
         assert!(UNIFIED_MASTER_HTML.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(UNIFIED_MASTER_HTML.contains("/assets/webui.css"));
+        assert!(UNIFIED_MASTER_HTML.contains("fuckipv6_control_token"));
+        assert!(UNIFIED_MASTER_HTML.contains("/api/auth/login"));
+        assert!(UNIFIED_MASTER_HTML.contains("Bearer ${token}"));
         assert!(WEBUI_CSS.contains("--sidebar-w"));
         assert!(WEBUI_CSS.contains("--panel"));
         assert!(WEBUI_CSS.contains(".modal-wrap.active"));

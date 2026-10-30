@@ -48,7 +48,7 @@
 - 建议具有稳定的公网 IPv4/IPv6 地址或可转发端口；
 - 开放 TCP `6666`（WebSocket 信令）；
 - 开放 UDP `6667`（QUIC 中继）；
-- WebUI 默认使用 TCP `8080`，但生产环境应限制访问；
+- WebUI 默认只监听回环地址 `127.0.0.1:8080`，不应为远程管理直接开放到公网；
 - 如果网络服务位于 NAT 后，应配置 TCP/UDP 端口映射。
 
 IPv6 普及后，普通成员之间可以优先使用公网 IPv6 直连；但信令、NAT 穿透和中继仍可能需要可达端点。不要把“每个设备都有公网 IPv6”当作所有网络环境都已成立的假设。
@@ -205,18 +205,37 @@ fuckipv6 leave home
 
 ## 运行 WebUI
 
-headless 节点启动后访问：
+headless 节点默认只在本机回环地址提供 WebUI：
 
 ```text
-http://<节点地址>:8080
+http://127.0.0.1:8080
 ```
 
-建议：
+远程管理优先使用 SSH 隧道：
 
-- 本地调试仅监听 `127.0.0.1`，通过 SSH 隧道访问；
-- 远程管理时使用 VPN、受控管理网或带认证和 TLS 的反向代理；
-- 不要把当前无内置认证的本地 WebUI 直接暴露到公网；
-- WebSocket 路径为 `/ws`，REST API 包括 `/api/status`、`/api/peers` 和 `/api/logs`。
+```bash
+ssh -L 8080:127.0.0.1:8080 user@node
+```
+
+需要在受控网络中直接监听时，必须显式设置全部危险开关与认证变量：
+
+```bash
+export FUCKIPV6_WEBUI_BIND=0.0.0.0       # IPv6 可用 ::
+export FUCKIPV6_WEBUI_ALLOW_REMOTE=1
+export FUCKIPV6_WEBUI_USERNAME=admin
+export FUCKIPV6_WEBUI_PASSWORD='使用足够长的随机密码'
+export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
+```
+
+- 非回环监听缺少 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 或非空密码时，节点拒绝启动；
+- 设置 `FUCKIPV6_WEBUI_BIND=::1` 可显式使用 IPv6 回环；设为 `::` 属于非回环危险监听；
+- `/`、`/assets/webui.css` 和 `/api/auth/login` 可匿名访问，其余 REST API 与 `/ws` 需要有效 JWT；
+- REST API 使用 `Authorization: Bearer <token>`，浏览器 WebSocket 使用 `/ws?token=<token>`；认证失败返回 HTTP 401、`WWW-Authenticate: Bearer realm="fuckipv6-webui"` 和 JSON 错误；
+- WebUI/API 没有内置 TLS，远程使用时必须置于 TLS 反向代理或受控管理网之后；
+- `FUCKIPV6_WEBUI_JWT_SECRET` 未设置时会生成进程级随机密钥，重启后既有 Token 失效；生产环境建议显式配置并保护该密钥；
+- 回环模式默认免密，本机同权限进程仍可访问控制面；需要本机认证时也可仅设置 `FUCKIPV6_WEBUI_PASSWORD`。
+
+本地 IPC 默认监听 `127.0.0.1:6668`，可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。由于 IPC 尚无认证握手，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 只表示显式确认危险意图，非回环地址仍会拒绝启动；远程操作请使用 SSH 隧道。
 
 当前 WebUI 是实际可用的无头界面。GPUI 是待实现的原生桌面界面，两者最终必须共享同一命令和状态契约，并通过自动对等测试。
 
@@ -314,8 +333,9 @@ sudo find /var/backups/fuckipv6 -type f -mtime +30 -delete
 
 ### 网络暴露面
 
-- WebUI/API 当前不是为直接公网暴露设计的安全边界；
-- 生产环境使用防火墙、SSH 隧道、管理网或认证反向代理；
+- WebUI/API 默认只监听回环；远程监听必须显式开启危险开关并配置管理员密码，否则拒绝启动；
+- WebUI/API 没有内置 TLS，生产环境应使用 SSH 隧道、管理网或 TLS 终止反向代理，不应直接暴露到公网；
+- IPC 默认只监听回环且没有认证协议，远程 IPC 始终 fail-closed；
 - 网络服务需开放的端口应只对预期成员地址开放；
 - TLS client/server、握手 Initiator/Responder 是协议角色，不是节点权限等级；
 - Exit Node 会改变转发和 NAT 行为，应只对受信网络启用并审计策略。
@@ -494,7 +514,7 @@ python3 scripts/release-gate.py run --platform linux --toolchain stable
 - [ ] 仅安装了 `fuckipv6` 一个用户程序；
 - [ ] systemd/launchd 中只有 `fuckipv6.service` 或 `cc.xlei.fuckipv6`；
 - [ ] 网络通过 `fk://` 票据或统一节点配置加入；
-- [ ] WebUI 仅暴露在受信网络；
+- [ ] WebUI/IPC 默认仅监听回环；远程 WebUI 使用显式危险开关、认证和 TLS 边界；
 - [ ] 身份与配置已纳入加密备份；
 - [ ] 日志、Peer 路径、路由和 Exit Node 策略已检查；
 - [ ] 没有把 WebUI 浏览器窗口称为 GPUI；

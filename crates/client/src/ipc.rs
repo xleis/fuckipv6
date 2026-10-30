@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use fuckipv6_common::{recent_error_log_lines, PeerInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +13,10 @@ use tokio::time::Duration;
 use crate::node::{NodeCommandBus, NodeCommandRequest, NodeCommandResult};
 use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
+
+pub const DEFAULT_IPC_ADDR: &str = "127.0.0.1:6668";
+pub const ENV_IPC_ADDR: &str = "FUCKIPV6_IPC_ADDR";
+pub const ENV_IPC_ALLOW_REMOTE: &str = "FUCKIPV6_IPC_ALLOW_REMOTE";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcRequest {
@@ -249,7 +253,48 @@ impl MultiNetworkRegistry {
 }
 
 pub fn default_addr() -> String {
-    std::env::var("FUCKIPV6_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:6668".to_string())
+    std::env::var(ENV_IPC_ADDR).unwrap_or_else(|_| DEFAULT_IPC_ADDR.to_string())
+}
+
+pub fn validate_ipc_bind(addr: &str, allow_remote: bool) -> Result<SocketAddr> {
+    let socket_addr = addr
+        .parse::<SocketAddr>()
+        .with_context(|| format!("本地 IPC 监听地址无效: {addr}"))?;
+
+    if socket_addr.ip().is_loopback() {
+        return Ok(socket_addr);
+    }
+
+    if !allow_remote {
+        bail!(
+            "拒绝监听非回环 IPC 地址 {socket_addr}；如确需远程监听，必须显式设置 {ENV_IPC_ALLOW_REMOTE}=1"
+        );
+    }
+
+    // The IPC wire protocol currently has no authentication handshake. Keep the
+    // dangerous switch explicit, but fail closed until an authenticated remote
+    // transport is implemented.
+    bail!(
+        "拒绝监听远程 IPC 地址 {socket_addr}：当前 IPC 未配置认证，禁止非回环监听；请使用 SSH 隧道或本机回环访问"
+    );
+}
+
+pub fn process_ipc_bind() -> Result<SocketAddr> {
+    validate_ipc_bind(&default_addr(), ipc_allow_remote_from_env()?)
+}
+
+fn ipc_allow_remote_from_env() -> Result<bool> {
+    match std::env::var(ENV_IPC_ALLOW_REMOTE) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => bail!("{ENV_IPC_ALLOW_REMOTE} 必须是 1/true/yes/on 或 0/false/no/off"),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{ENV_IPC_ALLOW_REMOTE} 必须是有效的 UTF-8")
+        }
+    }
 }
 
 pub fn spawn_server(
@@ -387,11 +432,21 @@ async fn serve(
     registry: MultiNetworkRegistry,
     commands: Option<NodeCommandBus>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("无法监听本地控制接口 {}", addr))?;
+    let addr = validate_ipc_bind(addr, ipc_allow_remote_from_env()?)?;
+    if !addr.ip().is_loopback() {
+        bail!("远程 IPC 未配置认证，拒绝启动");
+    }
 
-    tracing::info!("本地控制接口监听: {}", addr);
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("无法监听本地控制接口 {addr}"))?;
+
+    tracing::info!(
+        listen = %addr,
+        remote = false,
+        authentication = "not-configured",
+        "本地 IPC 仅监听回环地址"
+    );
 
     loop {
         let (stream, _) = listener.accept().await.context("接受本地控制连接失败")?;
@@ -805,6 +860,38 @@ mod tests {
     use fuckipv6_common::{NatType, PeerInfo};
     use std::net::IpAddr;
     use tokio::time::{sleep, Duration};
+
+    #[test]
+    fn default_ipc_bind_is_loopback() {
+        let addr = validate_ipc_bind(DEFAULT_IPC_ADDR, false).expect("default IPC bind");
+        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 6668)));
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn ipv4_and_ipv6_loopback_are_accepted() {
+        for raw in ["127.0.0.1:6668", "[::1]:6668"] {
+            let addr = validate_ipc_bind(raw, false).expect("loopback IPC bind");
+            assert!(addr.ip().is_loopback());
+        }
+    }
+
+    #[test]
+    fn remote_ipc_bind_requires_danger_switch() {
+        for raw in ["0.0.0.0:6668", "[::]:6668"] {
+            let error = validate_ipc_bind(raw, false).expect_err("danger flag is required");
+            assert!(error.to_string().contains(ENV_IPC_ALLOW_REMOTE));
+        }
+    }
+
+    #[test]
+    fn remote_ipc_bind_is_rejected_without_authentication() {
+        for raw in ["0.0.0.0:6668", "[::]:6668"] {
+            let error = validate_ipc_bind(raw, true)
+                .expect_err("unauthenticated remote IPC must fail closed");
+            assert!(error.to_string().contains("未配置认证"));
+        }
+    }
 
     #[tokio::test]
     async fn control_sender_is_visible_immediately_after_registration() {

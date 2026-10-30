@@ -10,7 +10,7 @@
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
 - 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。QUIC 中继当前强制 Ed25519 客户端证书，并将证书 SPKI、Relay Register 应用身份、双 pin 与 TLS exporter 绑定，生产配置禁用 0-RTT；Coordinator 运行期黑名单已在 relay 注册和双向转发路径强制执行，但证书层 CA/allowlist/CRL/OCSP 与网络级授权仍未实现。该 profile 尚未完成独立密码学审计；可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT`，但尚未接入生产控制通道或数据面，且上游后量子 crate 未独立审计，不能据此宣称已具备后量子安全或超越 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
-- 🔒 **身份与鉴权**: Ed25519 签名验证；网络服务 Web/API 可配置 JWT，节点本地 WebUI/API 当前免密并只应绑定本机或受信网络
+- 🔒 **身份与鉴权**: Ed25519 签名验证；网络服务 Web/API 可配置 JWT；节点本地 WebUI/API 默认只监听回环，远程监听必须显式开启危险开关并配置认证，无认证的远程 IPC 始终拒绝启动
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
 - 📊 **可观测性**: 节点 WebUI、网络服务管理面板、实时拓扑、流量监控与本地 IPC 控制台；GPUI 桌面外壳尚未实现
 
@@ -44,7 +44,7 @@ sudo ./target/release/fuckipv6 host \
   --webui-port 8080
 ```
 
-节点启动后会输出 `fk://` 邀请票据。信令默认监听 TCP `6666`，QUIC 中继默认监听 UDP `6667`，WebUI 默认监听 TCP `8080`。托管网络是节点角色，不是另一个服务端程序。
+节点启动后会输出 `fk://` 邀请票据。信令默认监听 TCP `6666`，QUIC 中继默认监听 UDP `6667`，WebUI 默认仅监听 TCP `127.0.0.1:8080`；可用 `FUCKIPV6_WEBUI_BIND=::1` 显式选择 IPv6 回环。托管网络是节点角色，不是另一个服务端程序。
 
 ### 3. 在其他节点加入网络
 
@@ -179,7 +179,7 @@ fuckipv6/
 - `fuckipv6 route` / `fuckipv6 logs` 查看路由和服务日志
 - `fuckipv6 logs --service memory` 查看运行中节点聚合的最近 warn/error；网络服务 API 支持 `/api/logs?service=memory`
 - `fuckipv6 join/list/default/connect/leave` 管理并切换多个已保存网络配置
-- `http://<node>:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
+- `http://127.0.0.1:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
 
 ### ✅ Phase 2 - 传输与穿透（可直接使用）
 
@@ -288,6 +288,20 @@ python3 scripts/release-gate.py run --platform linux --toolchain stable \
 - **Linux需要 root 权限或 CAP_NET_ADMIN** 创建 TUN 设备；macOS 需要 sudo/root 创建 utun 并配置路由；Windows 需要管理员权限和 WinTun
 - **虚拟网络支持 IPv4/IPv6 双栈地址**，信令与 P2P endpoint 也可使用 IPv4 或 IPv6 传输
 - **NAT 类型检测依赖可访问的 STUN/RFC5780 服务器**；检测失败会标记为 `Unknown`，数据转发仍会在 P2P 失败时走 QUIC/信令中继
+
+### 本地控制面安全
+
+WebUI/API 与 IPC 默认都只监听回环地址，回环 WebUI 默认免密。远程 WebUI/API 必须同时显式设置危险开关和认证配置，否则节点拒绝启动：
+
+```bash
+export FUCKIPV6_WEBUI_BIND=0.0.0.0
+export FUCKIPV6_WEBUI_ALLOW_REMOTE=1
+export FUCKIPV6_WEBUI_USERNAME=admin
+export FUCKIPV6_WEBUI_PASSWORD='使用足够长的随机密码'
+export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
+```
+
+远程控制面没有内置 TLS，只能部署在受控管理网或 TLS 反向代理之后，不应直接暴露到公网。REST API 使用 `Authorization: Bearer <token>`，浏览器 WebSocket 使用 `/ws?token=<token>`；其他静态页面和 `/api/auth/login` 可匿名访问。IPC 尚无认证协议，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会放行非回环监听，请使用 SSH 隧道。
 
 ## FAQ
 

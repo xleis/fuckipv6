@@ -379,7 +379,7 @@ windows-sys = { version = "0.59", features = [
 **目标：** 可视化监控网络状态
 
 **待完成任务：**
-- [x] Axum Web 服务器（0.0.0.0:8080）
+- [x] Axum Web 服务器（默认 127.0.0.1:8080，远程监听需显式危险开关与认证）
   - [x] 前端页面（HTML）
   - [x] 客户端列表
   - [x] 连接拓扑图（内置 SVG，随 WebSocket 快照实时更新）
@@ -724,7 +724,7 @@ file = "/var/log/fuckipv6.log"
 
 ### 3. Agent 3: 单一二进制自适应双模 (浏览器应用窗口 + Axum WebUI) ✅ **可直接使用**
 - [x] 启动时环境智能检测（Wayland / X11 / Headless / Windows 服务）
-- [x] 内嵌现代可视化响应式控制台，无头环境自动挂载 WebUI (`0.0.0.0:8088`)
+- [x] 内嵌现代可视化响应式控制台，无头环境自动挂载 WebUI（默认 `127.0.0.1:8080`，端口可由 `--webui-port` 调整）
 - [x] 零停机热切换分流模式与出口节点的 REST API (`/api/status`, `/api/peers`, `/api/routing`)
 - [x] 桌面环境通过系统浏览器应用窗口或默认浏览器打开 WebUI；Tauri 原生桌面尚未接入
 

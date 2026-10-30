@@ -354,11 +354,21 @@ Snapshot shape:
 }
 ```
 
-## Client WebUI / Control API
+## Node WebUI / Control API
 
-The client starts an embedded Axum WebUI when `--gui` or headless mode is selected. The CLI default port is `8080`; override it with `--webui-port <PORT>`.
+The node starts an embedded Axum WebUI when WebUI or headless mode is selected. The default listener is `127.0.0.1:8080`; override the port with `--webui-port <PORT>`.
 
-> **Security boundary:** this server currently has no authentication (`auth_required` is always `false`) and binds to `0.0.0.0`. Do not expose it directly to an untrusted network. Restrict it with a firewall, bind it only in a trusted environment, or place an authenticated reverse proxy in front of it. This API is separate from the coordinator API, where JWT can be enabled.
+Configuration is process-environment based so the protected CLI startup paths do not need to change:
+
+| Variable | Purpose |
+|----------|---------|
+| `FUCKIPV6_WEBUI_BIND` | Listener IP; default `127.0.0.1`, IPv6 loopback is `::1` |
+| `FUCKIPV6_WEBUI_ALLOW_REMOTE` | Explicit danger switch required for any non-loopback IP |
+| `FUCKIPV6_WEBUI_USERNAME` | Administrator name; default `admin` |
+| `FUCKIPV6_WEBUI_PASSWORD` | Enables JWT authentication and is mandatory for non-loopback binding |
+| `FUCKIPV6_WEBUI_JWT_SECRET` | HS256 signing secret; random per process when omitted |
+
+> **Security boundary:** loopback mode may run without authentication. Any non-loopback bind requires both `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` and a non-empty password, otherwise the node refuses to start. This server has no built-in TLS; remote exposure must be behind a TLS reverse proxy or restricted management network. Static UI assets and `/api/auth/login` are public; all other REST APIs require `Authorization: Bearer <token>`, and browser WebSocket upgrades require `/ws?token=<token>`. Authentication failures return HTTP 401 with `WWW-Authenticate: Bearer realm="fuckipv6-webui"` and a JSON error. Do not send HTTP API tokens in query strings.
 
 ### Endpoint summary
 
@@ -374,7 +384,7 @@ The client starts an embedded Axum WebUI when `--gui` or headless mode is select
 | `GET` | `/api/blacklist` | Embedded-coordinator blacklist |
 | `POST` | `/api/blacklist/ban` | Ban a client and return the updated blacklist |
 | `POST` | `/api/blacklist/unban` | Unban a client and return the updated blacklist |
-| `POST` | `/api/auth/login` | Compatibility login endpoint; no authentication is required |
+| `POST` | `/api/auth/login` | Public login endpoint returning a JWT when authentication is configured |
 | `GET` | `/api/logs` | Read runtime or system logs |
 | `GET` | `/ws` | WebSocket snapshot stream |
 | `POST` | `/api/connect` | Connect the client to a network |
@@ -615,4 +625,4 @@ For `POST /api/routing`, `is_exit_node` defaults to `false` when omitted. Send i
 
 Default listener: `127.0.0.1:6668`.
 
-The IPC protocol is local JSON line request/response traffic used by CLI commands such as `status` and `peers`. It is intended for local operator tooling, not remote control.
+`FUCKIPV6_IPC_ADDR=[::1]:6668` explicitly selects IPv6 loopback. The IPC protocol is local JSON line request/response traffic used by CLI commands such as `status` and `peers`, and it has no authentication handshake. `FUCKIPV6_IPC_ALLOW_REMOTE=1` is the explicit danger switch, but non-loopback IPC binding is still rejected and fails closed. Use an SSH tunnel for remote operator access.

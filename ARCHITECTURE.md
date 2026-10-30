@@ -166,9 +166,11 @@ Coordinator-side observability:
 
 ## Security & Governance
 
-1. **Coordinator WebUI & API JWT Authentication** (not applied to the client-local WebUI/API):
+1. **Node control-plane JWT authentication**:
    - Lightweight RFC 2104 HMAC-SHA256 token manager with token expiration and claims.
-   - Protected endpoints require Bearer Token authorization or token query param.
+   - Coordinator and local-node protected REST endpoints require Bearer Token authorization; browser WebSocket upgrades may use a token query parameter.
+   - The local WebUI/API binds to `127.0.0.1` by default and supports explicit IPv6 loopback. Non-loopback binding requires a separate danger switch and configured administrator password, otherwise startup fails closed.
+   - The local IPC endpoint also binds to loopback by default. It has no authentication handshake, so non-loopback IPC binding remains rejected even when the danger switch is present.
    - Zero-dependency login flow supporting admin passwords and dynamic secret rotation.
 
 2. **Access Control Lists (ACL)**:
@@ -205,7 +207,7 @@ Coordinator-side observability:
 - RFC 6886 NAT-PMP and UPnP IGD automatic router port mapping.
 - Packet-level ACL filtering and coordinator admission blacklist.
 - Multi-relay selection at connection time using concurrent RTT/handshake probing.
-- Internal network-service WebUI/API with optional JWT, plus node CLI and local WebUI.
+- Internal network-service WebUI/API with optional JWT, plus node CLI and a local WebUI that defaults to loopback-only exposure.
 - The current desktop entry uses a browser `--app` window when available and falls back to the default browser. It is a temporary WebUI launcher, not GPUI, and must not be presented as native desktop parity.
 - Linux Exit Node forwarding through kernel IP forwarding, policy routing, and iptables/NAT rules.
 - Multi-network saved profiles and symmetric `host`/`join` networking with an embedded coordinator.

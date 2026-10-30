@@ -97,13 +97,21 @@ fuckipv6 leave home           # 删除网络配置和该网络使用的身份材
 
 ## 第三步：访问节点界面
 
-无桌面或远程部署时，访问：
+节点默认只在本机回环地址提供 WebUI，本机访问：
 
 ```text
-http://<节点地址>:8080
+http://127.0.0.1:8080
 ```
 
-本地调试可只监听回环地址，并通过 SSH 隧道访问，避免将尚未内置认证的本地 WebUI 暴露到公网。
+远程管理优先使用 SSH 隧道，不要直接把控制面暴露到公网：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@node
+```
+
+随后在操作机打开 `http://127.0.0.1:8080`。如确需让 WebUI/API 监听非回环地址，必须同时设置 `FUCKIPV6_WEBUI_BIND`、`FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 和非空 `FUCKIPV6_WEBUI_PASSWORD`，否则节点拒绝启动；远程部署还应通过 TLS 反向代理或受控管理网提供传输保护。完整变量见[部署指南](DEPLOYMENT.md#运行-webui)。
+
+IPC 默认监听 `127.0.0.1:6668`，也可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。IPC 当前没有认证协议，因此即使设置 `FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会允许非回环监听。
 
 桌面模式目前仍使用浏览器窗口。GPUI 原生桌面外壳、共享 UI 契约和 GPUI/WebUI 对等测试完成前，不应把浏览器窗口描述为 GPUI。
 

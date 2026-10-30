@@ -9,6 +9,7 @@ All notable changes are documented here. The project follows semantic versioning
 - **QUIC Relay 运行期身份撤销**: Coordinator 黑名单现在在 QUIC relay 注册前以及每个转发包的源、目的身份检查中强制执行；已撤销节点不能新建 relay 状态，也不能经现有连接发包，拒绝路径不增加 relay 转发计数。新增注册拒绝、撤销源、撤销目的和无状态/计数副作用回归测试。证书层 CA/allowlist/CRL/OCSP、网络级授权与独立安全审计仍未完成。
 - **NX-17 基准证据 fail-closed 门禁**: 基准工具现在从 canonical raw iperf3/perf/ping 证据重算吞吐、CPU、UDP 丢包和延迟，校验完整源码/二进制 provenance、证据 manifest、执行参数与正数约束；弱化 policy、篡改或逃逸证据、缺失/零/负指标、任一 UDP run 超丢包阈值都会失败。新增 25 个合成门禁测试；真实固定 CPU 对比尚待执行，不宣称性能超过 WireGuard。
 - **QUIC Relay 客户端证书 allowlist**: Relay 的 QUIC TLS 现在只接受当前已完成签名注册的节点 Ed25519 公钥；allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。TLS 授权查询使用同步快照，不在握手回调中等待异步会话锁。新增授权、未列入、空名单、未注册证书握手拒绝和注销后撤销回归测试。该控制是当前在线会话准入，不等同于 CA、CRL/OCSP、持久撤销列表或网络级最终授权，独立安全审计仍未完成。
+- **本地控制面暴露面收紧**: 节点 WebUI/API 默认只监听 `127.0.0.1`，并支持显式选择 `::1`；任何非回环监听都必须同时设置 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 和非空管理员密码，否则拒绝启动。受保护 REST API 使用 Bearer JWT，浏览器 WebSocket 可仅在 `/ws` 使用查询参数 Token；认证失败统一返回 401、`WWW-Authenticate` 和 JSON 错误。本地 IPC 默认监听 `127.0.0.1:6668`，支持 `[::1]:6668`，因尚无认证协议而始终拒绝远程监听。WebUI 仍无内置 TLS，远程使用必须置于 TLS 反向代理或受控管理网之后。
 
 ### Added
 - **UI manifest fail-closed 契约校验**: 共享 manifest 现在校验固定 11 页集合与顺序、9 类命令覆盖、页面/动作/字段唯一性、必填字段校验、命令权限与后端状态一致性，以及 Shutdown 的破坏性确认；HTTP 适配器在交付前拒绝任何违约 manifest，并以 `ContractViolation` 失败关闭。该门禁只是 UI 对等自动测试的基础，真实 WebUI/GPUI 渲染层尚未接入，不能据此宣称 UI 已对等。
@@ -84,7 +85,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 记录 v2 接入前的加密能力口径：当时 UDP 数据面使用静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，没有前向保密、重放窗口和密钥轮换；当前生产路径已切换为 v2 classic 临时会话，但独立审计、后量子组合和在线重协商仍未完成，完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。
 - 明确能力成熟度口径：区分“可直接使用”“基础设施已接入（待产品化）”与“尚未产品化”。
 - 修正桌面入口描述：当前使用系统浏览器应用窗口或默认浏览器打开 WebUI，尚未接入 Tauri 原生桌面。
-- 明确 JWT 仅用于 Coordinator Web/API；客户端本地 WebUI/API 当前免密，只适合本机或受信网络。
+- 对齐本地控制面文档：WebUI/API 默认回环并支持可选 JWT，远程监听必须显式危险开关和认证；IPC 默认回环且远程 fail-closed。
 - 明确 Exit Node 当前依赖 Linux 内核转发与 NAT 规则，不是用户态 NAT；其他平台尚未证明同等级可用。
 - 明确 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输是已接入且具备测试的基础设施，不是完整用户产品。
 

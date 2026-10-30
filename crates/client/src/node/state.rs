@@ -378,10 +378,24 @@ impl NodeStateStore {
     /// Attach the shared event bus so every state revision is also emitted as a
     /// `StateChanged` event for streaming adapters.
     pub fn with_events(events: NodeEventBus) -> Self {
-        let store = Self::new();
+        Self::with_events_and_identity(events, None)
+    }
+
+    /// Construct the canonical store with public node identity metadata already
+    /// present, so zero-network startup never exposes an anonymous control plane.
+    pub(crate) fn with_events_and_identity(
+        events: NodeEventBus,
+        identity: Option<NodeIdentitySnapshot>,
+    ) -> Self {
+        let snapshot = NodeSnapshot {
+            identity,
+            ..NodeSnapshot::default()
+        };
+        let (updates, _) = watch::channel(snapshot.clone());
         Self {
+            snapshot: Arc::new(RwLock::new(snapshot)),
+            updates,
             events: Some(events),
-            ..store
         }
     }
 

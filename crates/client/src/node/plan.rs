@@ -62,8 +62,10 @@ impl NodeRuntimePlan {
             let config_path = manager
                 .get_network_config(&name)
                 .with_context(|| format!("无法加载网络 [{name}] 的配置路径"))?;
-            let config = ClientConfig::from_file(&config_path)
+            let mut config = ClientConfig::from_file(&config_path)
                 .with_context(|| format!("加载网络 [{name}] 配置文件失败"))?;
+            // Identity belongs to the node, not to an individual network.
+            config.private_key_path = manager.node_identity_path();
             networks.push(NodeNetworkSpec {
                 name,
                 config_path,
@@ -131,6 +133,10 @@ mod tests {
         assert_eq!(
             plan.networks()[0].config.coordinator_url,
             "ws://home.example:6666"
+        );
+        assert_eq!(
+            plan.networks()[0].config.private_key_path,
+            manager.node_identity_path()
         );
 
         let _ = std::fs::remove_dir_all(dir);

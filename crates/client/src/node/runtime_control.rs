@@ -154,7 +154,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let assigned_ipv6 = runtime.assigned_ip;
             let assigned_ipv4 = runtime.assigned_ips.ipv4;
             let p2p_listen_addr = runtime.p2p.local_addr();
-            let identity = runtime_metadata::identity_snapshot(&runtime.identity);
+            let identity = runtime_metadata::identity_snapshot(&runtime.identity, None);
             let p2p = runtime.p2p.clone();
             let stats = runtime.stats.clone();
 

@@ -10,7 +10,7 @@
 - [x] **EX-02 内嵌服务状态快照**：把每个网络的内嵌信令/中继实例状态、监听地址和生命周期纳入 `NodeSnapshot` 与事件流。已完成 `Starting/Running/Stopping/Stopped/Failed` 状态、`EmbeddedServiceChanged` 事件及无票据/私钥/路径的共享 DTO；创建、启动失败、停止与全量关闭均有状态和事件测试。涉及 `crates/client/src/node/{state,event,mod,runtime_control}.rs`。
 - [x] **EX-03 节点状态不变量**：为网络名称唯一、配置/运行网络对应、停止后 Peer 清理、失败回滚和 revision 单调性增加集中式不变量测试。已完成 `NodeSnapshot::invariant_violations()`，可诊断网络/配置/内嵌服务重名、运行网络缺配置、未知/离线网络 Peer 及 `peer_count` 不一致；停止、自然退出和失败回滚会清理 Peer，revision 在 `u64::MAX` 饱和而不是回绕。涉及 `crates/client/src/node/{state,runtime_control}.rs`。
 - [x] **EX-04 命令错误契约**：补齐所有 `NodeCommand` 的验证、稳定错误码、可重试标记和序列化往返测试；路由/角色未实现必须持续返回 `Unavailable`。已完成 10 个命令的 JSON 往返与拒绝路径覆盖，`StopNetworks { all: true }` 与显式网络名冲突会被拒绝，网络名校验与 `ConfigManager` 的 ASCII 字符集对齐；`NodeProblem` 固定 `invalid_request/not_found/conflict/unavailable/permission_denied/cancelled/internal` 线值及 `retryable`，运行时错误映射和未实现命令均有 handler 测试，`UpdateRouting`/`SetNetworkRole` 仍明确返回可重试的 `Unavailable`。涉及 `crates/client/src/node/{command,runtime_handler,state}.rs`。
-- [ ] **EX-05 零网络节点身份**：零网络启动时也建立并发布节点公开身份、公钥指纹和配置中的显示名。验收：无网络快照仍含身份，私钥与种子不进入 DTO，身份跨重启稳定。
+- [x] **EX-05 零网络节点身份**：零网络启动时也建立并发布节点公开身份、公钥指纹和配置中的显示名。已完成配置根目录唯一的 `node_identity.pem` 与可选 `node_identity.json` 元数据；supervisor 构造即发布身份，所有网络启动计划复用同一节点密钥。测试覆盖空网络快照、跨重启稳定、显示名来源、私钥/种子/配置路径不进入 DTO。涉及 `crates/client/src/{config_manager,multi_network}.rs` 与 `crates/client/src/node/{plan,runtime_control,runtime_metadata,state}.rs`。
 
 ## P1：后端功能闭环
 

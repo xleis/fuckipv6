@@ -74,13 +74,24 @@ pub struct MultiNetworkSupervisor {
 
 impl MultiNetworkSupervisor {
     pub fn new(options: RuntimeOptions) -> Result<Self> {
+        Self::new_with_config_manager(options, ConfigManager::new()?)
+    }
+
+    pub(crate) fn new_with_config_manager(
+        options: RuntimeOptions,
+        configs: ConfigManager,
+    ) -> Result<Self> {
         let events = NodeEventBus::default();
         let registry = MultiNetworkRegistry::new();
-        let state = NodeStateStore::with_events(events.clone());
+        let identity = runtime_metadata::identity_snapshot(
+            &configs.load_node_identity()?,
+            configs.node_display_name()?,
+        );
+        let state = NodeStateStore::with_events_and_identity(events.clone(), Some(identity));
         let services = EmbeddedServiceManager::spawn(8);
         let lifecycle = NodeLifecycle::new();
         let runtimes = NetworkRuntimeManager::spawn(
-            ConfigManager::new()?,
+            configs,
             options.clone(),
             state.clone(),
             events.clone(),
@@ -479,6 +490,59 @@ fn node_peer_snapshot(peer: &ipc::PeerSnapshot) -> NodePeerSnapshot {
 mod tests {
     use super::*;
     use crate::node::NodeNetworkRole;
+
+    fn temp_config_dir(name: &str) -> std::path::PathBuf {
+        let unique = format!("fuckipv6-supervisor-{}-{}", name, std::process::id());
+        std::env::temp_dir().join(unique)
+    }
+
+    #[tokio::test]
+    async fn zero_network_supervisor_publishes_stable_identity() -> Result<()> {
+        let dir = temp_config_dir("identity");
+        let _ = std::fs::remove_dir_all(&dir);
+        let configs = ConfigManager::new_for_dir(dir.clone())?;
+        configs.set_node_display_name(Some("edge-gateway"))?;
+
+        let supervisor = MultiNetworkSupervisor::new_with_config_manager(
+            RuntimeOptions::default(),
+            configs.clone(),
+        )?;
+        let snapshot = supervisor.state().snapshot().await;
+        let identity = snapshot
+            .identity
+            .clone()
+            .expect("zero-network snapshot must include identity");
+
+        assert!(snapshot.networks.is_empty());
+        assert_eq!(identity.display_name.as_deref(), Some("edge-gateway"));
+        assert!(!identity.node_id.is_empty());
+        assert!(!identity.public_key_fingerprint.is_empty());
+
+        let encoded = serde_json::to_string(&snapshot)?;
+        assert!(!encoded.contains("private_key"));
+        assert!(!encoded.contains("seed"));
+        assert!(!encoded.contains(&dir.to_string_lossy().to_string()));
+
+        supervisor.runtimes.shutdown().await?;
+        let _ = supervisor.services.shutdown().await;
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        let restarted =
+            MultiNetworkSupervisor::new_with_config_manager(RuntimeOptions::default(), reopened)?;
+        let restarted_identity = restarted
+            .state()
+            .snapshot()
+            .await
+            .identity
+            .expect("restarted node must retain identity");
+
+        assert_eq!(restarted_identity, identity);
+        restarted.runtimes.shutdown().await?;
+        let _ = restarted.services.shutdown().await;
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
 
     #[test]
     fn test_derive_tun_name_custom_override() {

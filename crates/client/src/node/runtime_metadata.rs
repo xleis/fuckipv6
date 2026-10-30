@@ -12,10 +12,13 @@ pub(crate) const NODE_LOG_LIMIT: usize = 256;
 ///
 /// The source `Identity` owns signing material, but this DTO deliberately contains
 /// only the node id, an optional display name, and the public-key fingerprint.
-pub(crate) fn identity_snapshot(identity: &Identity) -> NodeIdentitySnapshot {
+pub(crate) fn identity_snapshot(
+    identity: &Identity,
+    display_name: Option<String>,
+) -> NodeIdentitySnapshot {
     NodeIdentitySnapshot {
         node_id: identity.client_id().to_string(),
-        display_name: None,
+        display_name,
         public_key_fingerprint: Identity::public_key_fingerprint(&identity.public_key_bytes()),
     }
 }
@@ -117,10 +120,10 @@ mod tests {
     #[test]
     fn identity_projection_exposes_only_public_metadata() -> anyhow::Result<()> {
         let identity = Identity::generate()?;
-        let snapshot = identity_snapshot(&identity);
+        let snapshot = identity_snapshot(&identity, Some("edge-gateway".into()));
 
         assert_eq!(snapshot.node_id, identity.client_id());
-        assert_eq!(snapshot.display_name, None);
+        assert_eq!(snapshot.display_name.as_deref(), Some("edge-gateway"));
         assert_eq!(
             snapshot.public_key_fingerprint,
             Identity::public_key_fingerprint(&identity.public_key_bytes())

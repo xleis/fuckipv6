@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::ClientConfig;
+use fuckipv6_common::{ClientConfig, Identity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+const NODE_IDENTITY_FILE: &str = "node_identity.pem";
+const NODE_METADATA_FILE: &str = "node_identity.json";
 
 /// 网络配置信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +21,14 @@ pub struct NetworkConfig {
 pub struct NetworkList {
     pub networks: HashMap<String, NetworkConfig>,
     pub default_network: Option<String>,
+}
+
+/// Node-wide metadata that is independent from any one joined network.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
 }
 
 /// 配置管理器
@@ -87,6 +98,43 @@ impl ConfigManager {
         self.config_dir.join("networks.json")
     }
 
+    /// Stable node identity shared by every network hosted by this node.
+    pub(crate) fn node_identity_path(&self) -> PathBuf {
+        self.config_dir.join(NODE_IDENTITY_FILE)
+    }
+
+    /// Load or create the node-wide signing identity.
+    pub(crate) fn load_node_identity(&self) -> Result<Identity> {
+        Identity::load_or_generate(self.node_identity_path()).context("无法加载节点身份")
+    }
+
+    /// Load the optional display name from node-wide metadata.
+    pub(crate) fn node_display_name(&self) -> Result<Option<String>> {
+        let metadata_path = self.config_dir.join(NODE_METADATA_FILE);
+        if !metadata_path.exists() {
+            return Ok(None);
+        }
+
+        let content = std::fs::read_to_string(&metadata_path)
+            .with_context(|| format!("无法读取节点元数据: {}", metadata_path.display()))?;
+        let metadata: NodeMetadata = serde_json::from_str(&content)
+            .with_context(|| format!("无法解析节点元数据: {}", metadata_path.display()))?;
+        normalize_display_name(metadata.display_name)
+    }
+
+    /// Persist a node-wide display name. Empty or whitespace-only values clear it.
+    #[cfg(test)]
+    pub(crate) fn set_node_display_name(&self, display_name: Option<&str>) -> Result<()> {
+        let metadata = NodeMetadata {
+            display_name: normalize_display_name(display_name.map(str::to_string))?,
+        };
+        let metadata_path = self.config_dir.join(NODE_METADATA_FILE);
+        let content = serde_json::to_string_pretty(&metadata).context("无法序列化节点元数据")?;
+        std::fs::write(&metadata_path, content)
+            .with_context(|| format!("无法写入节点元数据: {}", metadata_path.display()))?;
+        Ok(())
+    }
+
     /// 加载网络列表
     fn load_network_list(&self) -> Result<NetworkList> {
         let networks_file = self.get_networks_file();
@@ -133,7 +181,7 @@ impl ConfigManager {
         let config = ClientConfig {
             client_id: None,
             coordinator_url: coordinator_url.to_string(),
-            private_key_path: network_dir.join("identity.pem"),
+            private_key_path: self.node_identity_path(),
             network: Default::default(),
             tun: Default::default(),
             p2p: Default::default(),
@@ -285,6 +333,20 @@ impl ConfigManager {
     }
 }
 
+fn normalize_display_name(display_name: Option<String>) -> Result<Option<String>> {
+    let Some(display_name) = display_name else {
+        return Ok(None);
+    };
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Ok(None);
+    }
+    if display_name.chars().any(char::is_control) {
+        anyhow::bail!("节点显示名不能包含控制字符");
+    }
+    Ok(Some(display_name.to_string()))
+}
+
 fn url_to_network_slug(value: &str) -> String {
     let mut slug = String::new();
 
@@ -376,5 +438,55 @@ mod tests {
             ConfigManager::extract_network_name("ws://[2001:db8::1]:6666"),
             "2001-db8-1"
         );
+    }
+
+    #[test]
+    fn node_identity_and_display_name_are_stable_and_node_wide() -> anyhow::Result<()> {
+        let dir = temp_config_dir("identity");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+
+        let first = manager.load_node_identity()?;
+        let first_id = first.client_id().to_string();
+        let first_fingerprint = Identity::public_key_fingerprint(&first.public_key_bytes());
+        assert!(manager.node_identity_path().exists());
+        assert_eq!(manager.node_display_name()?, None);
+
+        manager.set_node_display_name(Some("  edge-gateway  "))?;
+        assert_eq!(manager.node_display_name()?, Some("edge-gateway".into()));
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        let second = reopened.load_node_identity()?;
+        assert_eq!(second.client_id(), first_id);
+        assert_eq!(
+            Identity::public_key_fingerprint(&second.public_key_bytes()),
+            first_fingerprint
+        );
+        assert_eq!(reopened.node_display_name()?, Some("edge-gateway".into()));
+
+        let config_path = reopened.create_network("home", "ws://home.example:6666", true)?;
+        let network_config = ClientConfig::from_file(config_path)?;
+        assert_eq!(
+            network_config.private_key_path,
+            reopened.node_identity_path()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn node_display_name_rejects_control_characters_and_can_be_cleared() -> anyhow::Result<()> {
+        let dir = temp_config_dir("display-name");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+
+        assert!(manager.set_node_display_name(Some("bad\nname")).is_err());
+        manager.set_node_display_name(Some("gateway"))?;
+        manager.set_node_display_name(Some("   "))?;
+        assert_eq!(manager.node_display_name()?, None);
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
     }
 }

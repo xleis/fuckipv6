@@ -51,6 +51,7 @@ impl Default for RelayState {
 #[derive(Debug, Clone)]
 struct RelayClient {
     client_id: ClientId,
+    public_key: Vec<u8>,
     connection: quinn::Connection,
     connection_id: usize,
 }
@@ -275,11 +276,20 @@ impl RelayServer {
         };
 
         let server = self.clone();
+        let src_client_id = registered.client_id.clone();
+        let src_public_key = registered.public_key.clone();
         let src_ip = registered.virtual_ip;
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(err) = server
-                .handle_packet_stream(src_ip, connection_id, send, recv)
+                .handle_packet_stream(
+                    &src_client_id,
+                    &src_public_key,
+                    src_ip,
+                    connection_id,
+                    send,
+                    recv,
+                )
                 .await
             {
                 tracing::warn!("QUIC 中继数据流处理失败: {err:#}");
@@ -330,6 +340,7 @@ impl RelayServer {
 
         let relay_client = RelayClient {
             client_id: client_id.clone(),
+            public_key: public_key.clone(),
             connection,
             connection_id,
         };
@@ -351,6 +362,7 @@ impl RelayServer {
         Ok(RegisteredRelayClient {
             client_id,
             virtual_ip,
+            public_key,
         })
     }
 
@@ -360,6 +372,14 @@ impl RelayServer {
         virtual_ip: Ipv6Addr,
         public_key: &[u8],
     ) -> Result<()> {
+        if self
+            .session_manager
+            .is_blacklisted(client_id, public_key)
+            .await
+        {
+            anyhow::bail!("客户端身份已撤销，拒绝 QUIC 中继注册: {client_id}");
+        }
+
         let peer = self
             .session_manager
             .get_peer_info(client_id)
@@ -383,6 +403,8 @@ impl RelayServer {
 
     async fn handle_packet_stream(
         &self,
+        src_client_id: &ClientId,
+        src_public_key: &[u8],
         registered_src_ip: Ipv6Addr,
         src_connection_id: usize,
         mut send: quinn::SendStream,
@@ -398,7 +420,13 @@ impl RelayServer {
         };
 
         let dst_client = match self
-            .validate_packet_request(&request, registered_src_ip, src_connection_id)
+            .validate_packet_request(
+                &request,
+                src_client_id,
+                src_public_key,
+                registered_src_ip,
+                src_connection_id,
+            )
             .await
         {
             Ok(dst_client) => dst_client,
@@ -466,9 +494,22 @@ impl RelayServer {
     async fn validate_packet_request(
         &self,
         request: &RelayPacketRequest,
+        src_client_id: &ClientId,
+        src_public_key: &[u8],
         registered_src_ip: Ipv6Addr,
         src_connection_id: usize,
     ) -> std::result::Result<RelayClient, Box<RelayMessage>> {
+        if self
+            .session_manager
+            .is_blacklisted(src_client_id, src_public_key)
+            .await
+        {
+            return Err(Box::new(RelayMessage::error(
+                ErrorCode::Forbidden,
+                "source client identity has been revoked",
+            )));
+        }
+
         if request.src_ip != registered_src_ip {
             return Err(Box::new(RelayMessage::error(
                 ErrorCode::Forbidden,
@@ -495,6 +536,17 @@ impl RelayServer {
                 ),
             )));
         };
+
+        if self
+            .session_manager
+            .is_blacklisted(&dst_client.client_id, &dst_client.public_key)
+            .await
+        {
+            return Err(Box::new(RelayMessage::error(
+                ErrorCode::Forbidden,
+                "destination client identity has been revoked",
+            )));
+        }
 
         if dst_client.connection_id == src_connection_id && request.src_ip == request.dst_ip {
             return Err(Box::new(RelayMessage::error(
@@ -613,6 +665,7 @@ impl RelayServer {
 struct RegisteredRelayClient {
     client_id: ClientId,
     virtual_ip: Ipv6Addr,
+    public_key: Vec<u8>,
 }
 
 fn verify_relay_registration(
@@ -881,6 +934,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quic_relay_rejects_blacklisted_registration_without_state_changes() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+        let revoked_fingerprint = Identity::public_key_fingerprint(&identity.public_key());
+        session_manager
+            .ban_client(revoked_fingerprint[..16].to_string())
+            .await;
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let response = send_raw_registration(
+            relay_addr,
+            server_pin,
+            &identity,
+            &identity,
+            virtual_ip,
+            RegisterBindingOverrides::default(),
+            |_| {},
+        )
+        .await?;
+        assert_registration_rejected(response, "已撤销");
+        assert_no_relay_state(&server, &session_manager).await;
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn quic_relay_forwards_packets_between_registered_clients() -> Result<()> {
         let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
         let identity_a = Identity::generate()?;
@@ -967,6 +1066,81 @@ mod tests {
             b"relay-through-quic".len() as u64
         );
         assert_eq!(traffic.relay_errors, 0);
+
+        client_a.close().await;
+        client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_blocks_revoked_clients_in_both_directions() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let ip_a = session_manager
+            .register_client(
+                identity_a.client_id().to_string(),
+                identity_a.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx_a,
+            )
+            .await?
+            .primary_ipv6();
+        let ip_b = session_manager
+            .register_client(
+                identity_b.client_id().to_string(),
+                identity_b.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000),
+                51821,
+                NatType::Open,
+                tx_b,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.run());
+        let client_a =
+            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
+                .await?;
+        let client_b =
+            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
+                .await?;
+
+        let revoked_fingerprint = Identity::public_key_fingerprint(&identity_b.public_key());
+        session_manager
+            .ban_client(revoked_fingerprint[..16].to_string())
+            .await;
+        let destination_error = client_a
+            .send_packet(1, ip_a, ip_b, b"revoked destination")
+            .await
+            .expect_err("revoked destination must not receive relay packets")
+            .to_string();
+        assert!(destination_error.contains("403"));
+
+        session_manager
+            .ban_client(identity_a.client_id().to_string())
+            .await;
+        let source_error = client_a
+            .send_packet(2, ip_a, ip_b, b"revoked source")
+            .await
+            .expect_err("revoked source must not send relay packets")
+            .to_string();
+        assert!(source_error.contains("403"));
+
+        let traffic = session_manager.snapshot().await.traffic;
+        assert_eq!(traffic.relay_packets, 0);
+        assert_eq!(traffic.relay_payload_bytes, 0);
 
         client_a.close().await;
         client_b.close().await;

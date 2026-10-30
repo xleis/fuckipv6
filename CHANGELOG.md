@@ -6,6 +6,7 @@ All notable changes are documented here. The project follows semantic versioning
 
 ### Security
 - **节点私钥文件权限**: Unix 上创建 `node_identity.pem` 时直接使用 `0600` 模式，不再依赖进程 umask；覆盖已有身份文件时会在写入私钥前收紧权限，并新增新文件与宽松旧权限两类回归测试。
+- **QUIC Relay 运行期身份撤销**: Coordinator 黑名单现在在 QUIC relay 注册前以及每个转发包的源、目的身份检查中强制执行；已撤销节点不能新建 relay 状态，也不能经现有连接发包，拒绝路径不增加 relay 转发计数。新增注册拒绝、撤销源、撤销目的和无状态/计数副作用回归测试。证书层 CA/allowlist/CRL/OCSP、网络级授权与独立安全审计仍未完成。
 
 ### Added
 - **零网络节点身份**: 节点控制面启动时即加载或生成配置根目录下唯一的 `node_identity.pem`，并从可选 `node_identity.json` 读取 `display_name`；即使没有启动任何网络，共享 `NodeSnapshot` 也会包含节点 ID、公钥指纹和显示名。网络启动计划统一复用节点级密钥，测试确认身份跨重启稳定，且私钥、种子和本机路径不会进入 DTO。README 已补充配置根目录、元数据格式和私钥文件权限注意事项。
@@ -13,7 +14,7 @@ All notable changes are documented here. The project follows semantic versioning
 - **节点快照一致性诊断**: `NodeSnapshot::invariant_violations()` 集中报告网络、配置和内嵌服务重名、运行网络缺少配置、Peer 引用未知/离线网络及 `peer_count` 不一致。运行网络停止、自然退出和创建失败回滚均清理对应 Peer；共享 revision 在 `u64::MAX` 饱和而不回绕。UI 只可展示诊断结果，不得在本地修复或维护平行状态机。
 - **内嵌服务状态快照**: `NodeSnapshot` 新增无敏感信息的 `embedded_services`，按网络发布内嵌信令/中继服务的 `Starting/Running/Stopping/Stopped/Failed` 状态及运行中监听地址；服务生命周期变化通过 `EmbeddedServiceChanged` 事件同步，测试覆盖创建、启动失败、按网络停止、全量关闭以及票据/私钥/配置路径不入快照。
 - **UI 契约命令通道**: 新增 `NodeCommand::GetUiManifest` 与 `NodeCommandOutcome::UiManifest`，让 CLI、IPC、WebUI 和后续 GPUI 通过同一个节点命令总线获取版本化 manifest；测试覆盖 JSON 往返、11 个页面和当前 schema 版本。该命令只传输 UI 契约，不代表 WebUI/GPUI 已完成适配。
-- 完成 QUIC 中继统一身份控制：生产服务端强制 Ed25519 客户端证书并验证私钥持有证明；Relay Register 签名绑定 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter；服务端在写入 relay 状态前逐字节核对证书 SPKI 与应用公钥。生产中继禁用 0-RTT，恢复会话回退到 1-RTT；负向测试覆盖缺失/错误证书、错误 pin、合法证书错绑应用身份、Register 篡改/缺失绑定及无 relay 状态副作用。客户端证书 CA/allowlist/撤销策略和独立安全审计仍未完成。
+- 完成 QUIC 中继统一身份控制：生产服务端强制 Ed25519 客户端证书并验证私钥持有证明；Relay Register 签名绑定 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter；服务端在写入 relay 状态前逐字节核对证书 SPKI 与应用公钥。生产中继禁用 0-RTT，恢复会话回退到 1-RTT；负向测试覆盖缺失/错误证书、错误 pin、合法证书错绑应用身份、Register 篡改/缺失绑定及无 relay 状态副作用。客户端证书层 CA/allowlist/CRL/OCSP、网络级授权和独立安全审计仍未完成。
 - 增加可选 `pq` feature 的 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT` profile：固定 X-Wing、复合身份、TH1、TH2 向量，规范 `HELLO` 6755 字节与 `ACCEPT` 6635 字节，并覆盖双签名、PSK 模式、有效签名降级、时间窗、重放、截断和非 contributory 输入失败关闭。该 profile 尚未接入生产控制通道、QUIC/relay 或数据面，尚无 Initiator hybrid `CONFIRM`、Cookie/限速和端到端容量测试；上游 ML-KEM/ML-DSA crate 未经独立审计，不得据此宣称已具备后量子安全或超越 WireGuard。
 - 将 Secure Session v2 classic 接入生产 `P2pEngine`：使用长期 Ed25519 公钥字典序选择 Initiator/Responder，在共享 UDP socket 上完成 `HELLO -> ACCEPT -> CONFIRM`，仅接受注册 endpoint 的握手与数据，并在 TUN/ACL 前执行 AEAD 认证和重放检查；QUIC Mesh、QUIC relay 与信令 relay 统一运输 v2 密文，未建链、legacy data 和静态 X25519 输入失败关闭。双引擎真实 UDP 测试覆盖双向收发、篡改、relay 重放与未建链拒绝。生产在线重协商、Cookie/限速、后量子组合和独立密码学审计仍未完成，也不构成 WireGuard 安全或性能超越结论。
 - 增加 Secure Session v2 独立 UDP 适配器及本地真实 socket 集成测试：完整执行 `HELLO -> ACCEPT -> CONFIRM`，固定对端地址与有序套件策略，设置握手/数据超时，复用 HELLO 重放缓存，并提供运行时会话与拒绝计数；测试覆盖双向数据、AEAD 篡改、重放、错误确认、不支持套件和旧版本拒绝。该适配器当前保留用于独立 socket 集成测试；生产 `P2pEngine` 已由后续条目接入共享 socket v2 数据面。该独立适配器本身不构成 WireGuard 安全或性能结论。

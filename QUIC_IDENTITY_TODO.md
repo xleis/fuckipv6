@@ -1,6 +1,6 @@
 # QUIC 统一身份执行清单（EQ-14）
 
-> 范围：中继 QUIC 的双向 TLS、应用身份绑定和 0-RTT 策略。
+> 范围：中继 QUIC 的双向 TLS、应用身份绑定、运行期身份撤销和 0-RTT 策略。
 > 威胁模型：[`QUIC_IDENTITY_THREAT_MODEL.md`](QUIC_IDENTITY_THREAT_MODEL.md)。
 > 边界：本清单只涉及 `crates/common`、`crates/coordinator`、非受保护的 P2P QUIC/连接代码与文档。不得修改用户正在处理的 `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs`。
 > 结论口径：代码和测试通过不等于独立安全审计；在该清单全部完成且独立复核前，不得宣称 QUIC 身份层或项目安全性超过 WireGuard。
@@ -21,6 +21,7 @@
 - [x] **QI-12 Relay 端到端集成**：正确绑定的客户端注册和转发成功，错误绑定的客户端不产生 relay 状态或流量计数副作用。
 - [x] **QI-13 文档与状态同步**：同步 `SECURITY_PERFORMANCE_TODO.md`、`SECURITY_TRACEABILITY.md`、`PROTOCOL_V2.md`、`CHANGELOG.md` 和 README 的准确限制；同时更新 QUIC 威胁模型的当前控制、0-RTT 行为和剩余授权边界。
 - [x] **QI-14 全量门禁与完成记录**：格式、文档检查、workspace check/clippy/test 和相关 QUIC 测试全部通过；完成状态与剩余风险记录如下。
+- [x] **QI-15 Relay 运行期身份撤销**：Relay 注册前拒绝 Coordinator 黑名单中的身份；每个转发包在增加计数前同时检查认证源和目标身份，覆盖撤销源、撤销目的、注册拒绝及无 relay 状态/计数副作用测试。
 
 ## 完成记录
 
@@ -29,9 +30,10 @@
 - `cargo fmt --all -- --check`、`git diff --check`、文档脚本 8 项单元测试与链接/声明检查通过。
 - `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 通过。
 - QUIC 定向回归通过：`fuckipv6-common quic::tests` 11 项、`fuckipv6-coordinator relay::server::tests` 7 项、`fuckipv6-client p2p::quic::tests` 6 项。
+- QI-15 增量回归：`cargo test -p fuckipv6-coordinator relay::server::tests` 9 项通过；`cargo clippy -p fuckipv6-coordinator --all-targets -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。
 - 以上结果证明当前工程控制与回归测试通过，不代表独立安全审计或生产认证授权体系完成。
 
-仍须明确的生产边界：QUIC 当前仍是经典 Ed25519 + TLS 1.3；`pq` feature 的 X-Wing/ML-DSA 尚未接入 QUIC/relay；客户端证书尚无 CA/allowlist/撤销策略；项目未经独立安全审计，也不能据此宣称安全性或性能超过 WireGuard。
+仍须明确的生产边界：QUIC 当前仍是经典 Ed25519 + TLS 1.3；`pq` feature 的 X-Wing/ML-DSA 尚未接入 QUIC/relay；运行期黑名单已覆盖 relay 注册和双向转发，但客户端证书尚无 CA/allowlist/CRL/OCSP 与网络级授权策略；项目未经独立安全审计，也不能据此宣称安全性或性能超过 WireGuard。
 
 ## 验收口径
 

@@ -8,7 +8,7 @@
 
 - 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
-- 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。QUIC 中继当前强制 Ed25519 客户端证书，并将证书 SPKI、Relay Register 应用身份、双 pin 与 TLS exporter 绑定，生产配置禁用 0-RTT；客户端证书的 CA/allowlist/撤销策略仍未实现。该 profile 尚未完成独立密码学审计；可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT`，但尚未接入生产控制通道或数据面，且上游后量子 crate 未独立审计，不能据此宣称已具备后量子安全或超越 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
+- 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。QUIC 中继当前强制 Ed25519 客户端证书，并将证书 SPKI、Relay Register 应用身份、双 pin 与 TLS exporter 绑定，生产配置禁用 0-RTT；Coordinator 运行期黑名单已在 relay 注册和双向转发路径强制执行，但证书层 CA/allowlist/CRL/OCSP 与网络级授权仍未实现。该 profile 尚未完成独立密码学审计；可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT`，但尚未接入生产控制通道或数据面，且上游后量子 crate 未独立审计，不能据此宣称已具备后量子安全或超越 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
 - 🔒 **身份与鉴权**: Ed25519 签名验证；网络服务 Web/API 可配置 JWT，节点本地 WebUI/API 当前免密并只应绑定本机或受信网络
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
@@ -214,7 +214,7 @@ fuckipv6/
 - [ ] 接入 v2 在线重协商控制通道、无状态 Cookie 与限速，并完成独立密码学审计；当前 epoch 达到时限/字节上限后失败关闭而不是在线换钥
 - [x] 实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性混合 `HELLO/ACCEPT`，固定 X-Wing/TH1/TH2 向量并覆盖降级、PSK、重放与非 contributory 输入失败关闭
 - [ ] 将混合 profile 接入生产控制通道、QUIC/relay 与 UDP/TUN 数据面并完成独立审计；当前生产路径仍不具备端到端后量子机密性或后量子身份认证
-- [x] QUIC 中继双向身份与通道绑定：强制客户端证书，Register 签名绑定证书/应用身份与 TLS exporter，错绑在 relay 状态写入前失败关闭，生产配置禁用 0-RTT（CA/allowlist/撤销与独立审计仍待完成）
+- [x] QUIC 中继双向身份与通道绑定：强制客户端证书，Register 签名绑定证书/应用身份与 TLS exporter，错绑在 relay 状态写入前失败关闭，生产配置禁用 0-RTT；运行期黑名单已在 relay 注册和双向转发路径强制执行（证书层 CA/allowlist/CRL/OCSP、网络级授权与独立审计仍待完成）
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
 - [x] IPv4/IPv6 双栈虚拟地址与网络服务 JWT 鉴权

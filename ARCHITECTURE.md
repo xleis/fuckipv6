@@ -2,7 +2,7 @@
 
 fuckipv6 is a dual-stack overlay network built around one product identity: the node. A node creates a local TUN interface and exchanges raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. Discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback are network-service capabilities that a node can provide for a network or consume from another node.
 
-Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products. The repository is currently in a documented migration state: it still has separate `fuckipv6` and `fuckipv6-coordinator` binaries and a browser-based desktop entry. Those are compatibility artifacts, not the target product model.
+Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products. The repository now publishes only the `fuckipv6` node executable; the former `fuckipv6-coordinator` user entry point has been removed and coordinator capabilities remain internal libraries. The repository is still in a documented migration state because the desktop entry uses a browser window instead of GPUI, and the two UI surfaces do not yet share a tested command and state contract.
 
 ## Unified Node Target Architecture (UN-01)
 
@@ -57,12 +57,12 @@ The GPUI and WebUI adapters are peers at the presentation boundary. Neither adap
 | Area | Decision |
 |------|----------|
 | `common` protocol, crypto, routing, and wire types | Retain. Technical `client`/`server` identifiers may remain where they describe protocol peers or preserve wire/config compatibility. |
-| `coordinator` library capabilities | Retain as internal network-service actors. Remove its standalone user entry point after preflight, config migration, service shutdown, and packaging are covered. |
+| `coordinator` library capabilities | Retain as internal network-service actors. Its standalone user entry point has been removed. |
 | `fuckipv6` binary and node runtime | Evolve into the sole executable. Existing commands may remain as command verbs during migration, but not as client/server program choices. |
 | Existing CLI/TUI/IPC | Route through the shared command bus and shared snapshots; keep as non-GUI adapters. |
 | Browser `--app` desktop entry | Remove from the desktop path. It may remain only as an explicitly selected WebUI fallback, never as GPUI parity. |
 | WebUI business logic and private state | Migrate to shared commands/snapshots, then delete duplicate mutation paths and DTO semantics. |
-| `fuckipv6-coordinator` binary, installers, services, and docs | Remove after the embedded network service has equivalent configuration, observability, authorization, and operations coverage. |
+| `fuckipv6-coordinator` binary, installers, and services | Retired. Single-binary packaging and workspace-target checks prevent its reintroduction. |
 | User-facing “client/server/coordinator” identity | Remove. Keep only node, network, member, service role, and the explicitly technical protocol session roles. |
 
 ### Non-negotiable acceptance rules
@@ -90,7 +90,7 @@ The GPUI and WebUI adapters are peers at the presentation boundary. Neither adap
 
 ### coordinator
 
-`crates/coordinator` is the public rendezvous server.
+`crates/coordinator` is the internal network-service library. It has no user-facing executable.
 
 - `signaling/server.rs` accepts WebSocket connections and handles registration, connect requests, heartbeats, and `RelayPacket` fallback.
 - `signaling/session.rs` owns online sessions, virtual IPv6 allocation, peer snapshots, heartbeat timestamps, and coordinator traffic counters.
@@ -99,7 +99,7 @@ The GPUI and WebUI adapters are peers at the presentation boundary. Neither adap
 
 ### client
 
-`crates/client` is the node process.
+`crates/client` builds the `fuckipv6` node process. Its crate name is retained for compatibility.
 
 - `tun/` creates and tears down OS TUN devices. Linux uses `ip tuntap`; macOS uses `utun`; Windows uses native embedded WinTun driver with pure Rust Windows IP Helper API for address/route configuration (zero external DLL and zero `netsh.exe` dependency).
 - `p2p/connection.rs` runs the encrypted UDP engine, endpoint probing, ping/pong, health checks, and fallback decisions.
@@ -200,13 +200,13 @@ Coordinator-side observability:
 
 - WebSocket signaling and cryptographic registration challenge authentication.
 - Linux, macOS (`utun`), and Windows (embedded WinTun) dual-stack TUN drivers, subject to target-platform runtime validation.
-- ChaCha20-Poly1305 payload encryption with static X25519-derived peer keys. Secure Session v2 primitives for ephemeral handshakes, counter nonces, a replay window, and key rotation exist in `fuckipv6-secure-session`, but the client data path does not depend on or invoke them yet. It must not be described as WireGuard-equivalent until those primitives are integrated and validated (see `SECURITY_PERFORMANCE_TODO.md`).
+- Secure Session v2 classic is wired into the production P2P data path with ephemeral X25519, Ed25519 authentication, bidirectional key confirmation, counter nonces, a replay window, and fail-closed handling. QUIC Mesh, QUIC relay, and signaling relay carry the same v2 ciphertext. Independent cryptographic audit, production online rekey validation, and the post-quantum profile remain incomplete; this must not be described as WireGuard-equivalent or superior until those gates and performance baselines pass (see `SECURITY_PERFORMANCE_TODO.md`).
 - Direct dual-mode P2P (QUIC Stream Mesh + encrypted raw UDP) and QUIC/signaling relay fallback.
 - RFC 6886 NAT-PMP and UPnP IGD automatic router port mapping.
 - Packet-level ACL filtering and coordinator admission blacklist.
 - Multi-relay selection at connection time using concurrent RTT/handshake probing.
-- Coordinator WebUI/API with optional JWT, plus client CLI and local WebUI.
-- The client web desktop entry uses a browser `--app` window when available and falls back to the default browser; it is not a Tauri application.
+- Internal network-service WebUI/API with optional JWT, plus node CLI and local WebUI.
+- The current desktop entry uses a browser `--app` window when available and falls back to the default browser. It is a temporary WebUI launcher, not GPUI, and must not be presented as native desktop parity.
 - Linux Exit Node forwarding through kernel IP forwarding, policy routing, and iptables/NAT rules.
 - Multi-network saved profiles and symmetric `host`/`join` networking with an embedded coordinator.
 - Smart routing (`MeshOnly`, `BypassMainland`, `GlobalProxy`) and full Chinese runtime logging.
@@ -220,7 +220,7 @@ Coordinator-side observability:
 
 ### Not productized
 
-- Tauri native desktop integration.
+- GPUI native desktop integration and a shared, tested GPUI/WebUI command and state contract.
 - User-space NAT; the current Exit Node path is Linux kernel-based.
 - Windows/macOS Exit Node parity with the Linux implementation.
 - Repeatable real cross-host NAT, production WAN scale, independent security audit, and target-platform runtime validation.

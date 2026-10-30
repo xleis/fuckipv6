@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
 use fuckipv6_common::{decrypt_config_file, is_encrypted_config_path, ClientConfig};
 
 use crate::logging;
+use crate::ui::{resolve_ui_mode, UiCapabilities, UiMode, UiModeError, UiModeRequest};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(author, version, about = "fuckipv6 - 全能对等网络与智能分流控制中心", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -41,20 +42,24 @@ pub struct Cli {
     #[arg(long, default_value_t = true)]
     pub auto_connect: bool,
 
-    /// 强制无头模式 (运行内置 WebUI 守护进程)
-    #[arg(long)]
+    /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+    #[arg(long, conflicts_with_all = ["webui", "gpui"])]
     pub headless: bool,
 
-    /// 强制桌面 GUI 模式
-    #[arg(long)]
-    pub gui: bool,
+    /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
+    #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+    pub webui: bool,
+
+    /// 使用原生 GPUI 桌面界面
+    #[arg(long, conflicts_with_all = ["headless", "webui"])]
+    pub gpui: bool,
 
     /// 统一控制中心 WebUI 监听端口 (默认 8080)
     #[arg(long, default_value = "8080")]
     pub webui_port: u16,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Commands {
     /// 作为网络创建者启动对等协调服务并生成邀请票据 (fk://...)
     Host {
@@ -90,13 +95,17 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式 (运行内置 Axum WebUI 守护进程)
-        #[arg(long)]
+        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 强制桌面 GUI 模式
-        #[arg(long)]
-        gui: bool,
+        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        webui: bool,
+
+        /// 使用原生 GPUI 桌面界面
+        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
         #[arg(long, default_value = "8080")]
@@ -128,13 +137,17 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式
-        #[arg(long)]
+        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 强制桌面 GUI 模式
-        #[arg(long)]
-        gui: bool,
+        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        webui: bool,
+
+        /// 使用原生 GPUI 桌面界面
+        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
         #[arg(long, default_value = "8080")]
@@ -167,13 +180,17 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式
-        #[arg(long)]
+        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 强制桌面 GUI 模式
-        #[arg(long)]
-        gui: bool,
+        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        webui: bool,
+
+        /// 使用原生 GPUI 桌面界面
+        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
         #[arg(long, default_value = "8080")]
@@ -202,13 +219,17 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式
-        #[arg(long)]
+        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 强制桌面 GUI 模式
-        #[arg(long)]
-        gui: bool,
+        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        webui: bool,
+
+        /// 使用原生 GPUI 桌面界面
+        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
         #[arg(long, default_value = "8080")]
@@ -259,13 +280,17 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式 (运行内置 Axum WebUI 守护进程)
-        #[arg(long)]
+        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 强制启动原生桌面 GUI (Tauri)
-        #[arg(long)]
-        gui: bool,
+        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        webui: bool,
+
+        /// 使用原生 GPUI 桌面界面
+        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
         #[arg(long, default_value = "8080")]
@@ -369,15 +394,63 @@ pub enum Commands {
     },
 }
 
+fn requested_ui_mode(
+    headless: bool,
+    webui: bool,
+    gpui: bool,
+) -> Result<UiModeRequest, UiModeError> {
+    match (headless, webui, gpui) {
+        (true, false, false) => Ok(UiModeRequest::Headless),
+        (false, true, false) => Ok(UiModeRequest::WebUi),
+        (false, false, true) => Ok(UiModeRequest::Gpui),
+        (false, false, false) => Ok(UiModeRequest::Auto),
+        _ => Err(UiModeError::ConflictingFlags),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_options(
+    routing_mode: Option<String>,
+    exit_node: Option<String>,
+    is_exit_node: Option<bool>,
+    headless: bool,
+    webui: bool,
+    gpui: bool,
+    webui_port: u16,
+) -> Result<commands::RuntimeOptions> {
+    let effective = resolve_ui_mode(
+        requested_ui_mode(headless, webui, gpui)?,
+        UiCapabilities::detect(),
+    )?
+    .effective;
+
+    let (headless, gui) = match effective {
+        UiMode::Headless => (true, false),
+        UiMode::WebUi => (false, true),
+        UiMode::Gpui => {
+            anyhow::bail!("原生 GPUI 运行时尚未接入；请使用 --webui 或 --headless")
+        }
+    };
+
+    Ok(commands::RuntimeOptions {
+        routing_mode,
+        exit_node,
+        is_exit_node,
+        headless,
+        gui,
+        webui_port,
+    })
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     if let Some(command) = cli.command {
         run_command(command).await
     } else {
+        let requested_ui = requested_ui_mode(cli.headless, cli.webui, cli.gpui)?;
         run_default_app(
             cli.webui_port,
-            cli.headless,
-            cli.gui,
+            requested_ui,
             cli.host,
             cli.host_name,
             cli.host_port,
@@ -393,8 +466,7 @@ pub async fn run() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_default_app(
     port: u16,
-    headless: bool,
-    gui: bool,
+    requested_ui: UiModeRequest,
     host: bool,
     host_name: String,
     host_port: u16,
@@ -404,7 +476,7 @@ pub async fn run_default_app(
     is_exit_node: Option<bool>,
 ) -> Result<()> {
     logging::init_default()?;
-    let ui_mode = crate::ui::detect_ui_mode(headless, gui);
+    let ui_mode = resolve_ui_mode(requested_ui, UiCapabilities::detect())?;
 
     let controller = std::sync::Arc::new(crate::webui::AppController::new());
     if let Some(enabled) = is_exit_node {
@@ -429,22 +501,26 @@ pub async fn run_default_app(
         }
     }
 
-    if ui_mode.is_gui() {
-        crate::ui::run_desktop_gui(port).await?;
-    } else {
-        println!("========================================================================");
-        println!("🚀 fuckipv6 统一控制中心已就绪 (无头/服务端模式)");
-        println!("------------------------------------------------------------------------");
-        println!("控制中心访问地址 (客户端 + 协调中枢 + 智能分流):");
-        println!("  👉 本地访问: http://127.0.0.1:{port}");
-        println!("  👉 局域网/公网访问: http://<你的服务器IP>:{port}");
-        println!();
-        println!("在浏览器中打开上述地址，即可在一个界面完成：");
-        println!("  - 加入对等网络 / 连接节点 (支持 fk:// 邀请票据)");
-        println!("  - 原生智能分流规则 (绕过大陆/全局代理) 与出境网关配置");
-        println!("  - 开启/管理网络协调中枢、QUIC中继与在线客户端管控");
-        println!("  - 查看实时网络拓扑、延时指标与控制台日志");
-        println!("========================================================================");
+    match ui_mode.effective {
+        UiMode::Gpui => {
+            anyhow::bail!("原生 GPUI 运行时尚未接入；请使用 --webui 或 --headless")
+        }
+        UiMode::WebUi => crate::ui::run_webui_window(port).await?,
+        UiMode::Headless => {
+            println!("========================================================================");
+            println!("🚀 fuckipv6 统一控制中心已就绪 (无头模式)");
+            println!("------------------------------------------------------------------------");
+            println!("控制中心访问地址 (客户端 + 协调中枢 + 智能分流):");
+            println!("  👉 本地访问: http://127.0.0.1:{port}");
+            println!("  👉 局域网/公网访问: http://<你的服务器IP>:{port}");
+            println!();
+            println!("在浏览器中打开上述地址，即可在一个界面完成：");
+            println!("  - 加入对等网络 / 连接节点 (支持 fk:// 邀请票据)");
+            println!("  - 原生智能分流规则 (绕过大陆/全局代理) 与出境网关配置");
+            println!("  - 开启/管理网络协调中枢、QUIC中继与在线客户端管控");
+            println!("  - 查看实时网络拓扑、延时指标与控制台日志");
+            println!("========================================================================");
+        }
     }
 
     println!("按 Ctrl+C 退出程序");
@@ -507,17 +583,19 @@ async fn run_network_command(command: Commands) -> Result<()> {
             exit_node,
             is_exit_node,
             headless,
-            gui,
+            webui,
+            gpui,
             webui_port,
         } => {
-            let options = commands::RuntimeOptions {
+            let options = runtime_options(
                 routing_mode,
                 exit_node,
                 is_exit_node,
                 headless,
-                gui,
+                webui,
+                gpui,
                 webui_port,
-            };
+            )?;
             network_commands::host(
                 &name,
                 port,
@@ -536,17 +614,19 @@ async fn run_network_command(command: Commands) -> Result<()> {
             exit_node,
             is_exit_node,
             headless,
-            gui,
+            webui,
+            gpui,
             webui_port,
         } => {
-            let options = commands::RuntimeOptions {
+            let options = runtime_options(
                 routing_mode,
                 exit_node,
                 is_exit_node,
                 headless,
-                gui,
+                webui,
+                gpui,
                 webui_port,
-            };
+            )?;
             network_commands::join(&server, name.as_deref(), start, options).await?
         }
         Commands::Connect {
@@ -557,17 +637,19 @@ async fn run_network_command(command: Commands) -> Result<()> {
             exit_node,
             is_exit_node,
             headless,
-            gui,
+            webui,
+            gpui,
             webui_port,
         } => {
-            let options = commands::RuntimeOptions {
+            let options = runtime_options(
                 routing_mode,
                 exit_node,
                 is_exit_node,
                 headless,
-                gui,
+                webui,
+                gpui,
                 webui_port,
-            };
+            )?;
             network_commands::connect(targets, all, temp, options).await?
         }
         Commands::Up {
@@ -577,17 +659,19 @@ async fn run_network_command(command: Commands) -> Result<()> {
             exit_node,
             is_exit_node,
             headless,
-            gui,
+            webui,
+            gpui,
             webui_port,
         } => {
-            let options = commands::RuntimeOptions {
+            let options = runtime_options(
                 routing_mode,
                 exit_node,
                 is_exit_node,
                 headless,
-                gui,
+                webui,
+                gpui,
                 webui_port,
-            };
+            )?;
             network_commands::up(networks, all, options).await?
         }
         Commands::Down { networks, all } => network_commands::down(networks, all).await?,
@@ -617,17 +701,19 @@ async fn run_runtime_command(command: Commands) -> Result<()> {
             exit_node,
             is_exit_node,
             headless,
-            gui,
+            webui,
+            gpui,
             webui_port,
         } => {
-            let options = commands::RuntimeOptions {
+            let options = runtime_options(
                 routing_mode,
                 exit_node,
                 is_exit_node,
                 headless,
-                gui,
+                webui,
+                gpui,
                 webui_port,
-            };
+            )?;
             start_from_config_path(&config, options).await?
         }
         Commands::Status => {
@@ -718,6 +804,7 @@ fn config_passphrase_from_env() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
 
     #[test]
     fn parses_exit_node_boolean_flag_forms() {
@@ -743,5 +830,66 @@ mod tests {
             }
             _ => panic!("expected host command"),
         }
+    }
+
+    #[test]
+    fn parses_explicit_webui_alias_and_gpui_modes() {
+        let webui = Cli::try_parse_from(["fuckipv6", "--webui"]).unwrap();
+        assert!(webui.webui);
+        assert!(!webui.headless);
+        assert!(!webui.gpui);
+
+        let legacy_alias = Cli::try_parse_from(["fuckipv6", "--gui"]).unwrap();
+        assert!(legacy_alias.webui);
+        assert!(!legacy_alias.gpui);
+
+        let gpui = Cli::try_parse_from(["fuckipv6", "--gpui"]).unwrap();
+        assert!(gpui.gpui);
+        assert!(!gpui.webui);
+    }
+
+    #[test]
+    fn rejects_conflicting_top_level_ui_modes() {
+        for args in [
+            ["fuckipv6", "--headless", "--webui"],
+            ["fuckipv6", "--headless", "--gpui"],
+            ["fuckipv6", "--webui", "--gpui"],
+            ["fuckipv6", "--gui", "--gpui"],
+        ] {
+            let error = Cli::try_parse_from(args).expect_err("conflicting modes must fail");
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_ui_modes_on_runtime_commands() {
+        let error = Cli::try_parse_from(["fuckipv6", "host", "--headless", "--webui"])
+            .expect_err("conflicting modes must fail");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+
+        let parsed = Cli::try_parse_from(["fuckipv6", "start", "--gpui"]).unwrap();
+        match parsed.command {
+            Some(Commands::Start { gpui, webui, .. }) => {
+                assert!(gpui);
+                assert!(!webui);
+            }
+            _ => panic!("expected start command"),
+        }
+    }
+
+    #[test]
+    fn gpui_mode_is_never_silently_downgraded() {
+        let error = runtime_options(None, None, None, false, false, true, 8080)
+            .expect_err("unavailable native GPUI must fail explicitly");
+        assert!(error.to_string().contains("GPUI"));
+    }
+
+    #[test]
+    fn legacy_gui_maps_to_webui_runtime_options() {
+        let options = runtime_options(None, None, None, false, true, false, 8080)
+            .expect("legacy GUI should map to WebUI");
+        assert!(!options.headless);
+        assert!(options.gui);
+        assert_eq!(options.webui_port, 8080);
     }
 }

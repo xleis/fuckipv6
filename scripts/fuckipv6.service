@@ -1,5 +1,5 @@
 [Unit]
-Description=fuckipv6 Client - IPv6 Virtual LAN P2P Mesh Network
+Description=fuckipv6 Node - IPv6 Virtual LAN P2P Mesh Network
 Documentation=https://github.com/yourusername/fuckipv6
 After=network-online.target
 Wants=network-online.target
@@ -13,7 +13,7 @@ Group=root
 WorkingDirectory=/opt/fuckipv6
 
 # 可执行文件路径（修改为实际路径）
-ExecStart=/opt/fuckipv6/fuckipv6 start --config /etc/fuckipv6/client.toml
+ExecStart=/opt/fuckipv6/fuckipv6 --headless --webui-port 8080
 
 # 环境变量
 Environment="RUST_LOG=info"

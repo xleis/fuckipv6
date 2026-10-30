@@ -57,10 +57,9 @@ jobs:
           package="fuckipv6-linux-x86_64-${version}"
           mkdir -p "dist/${package}/bin" "dist/${package}/examples" "dist/${package}/scripts"
           cp target/release/fuckipv6 "dist/${package}/bin/"
-          cp target/release/fuckipv6-coordinator "dist/${package}/bin/"
           cp README.md docs/QUICKSTART.md docs/DEPLOYMENT.md "dist/${package}/"
-          cp examples/client.toml.example examples/coordinator.toml.example "dist/${package}/examples/"
-          cp scripts/install-client.sh scripts/install-coordinator.sh scripts/fuckipv6-client.service scripts/fuckipv6-coordinator.service "dist/${package}/scripts/"
+          cp examples/node.toml.example "dist/${package}/examples/"
+          cp scripts/install-node.sh scripts/fuckipv6.service "dist/${package}/scripts/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
 
       - name: Generate SBOM, provenance, and checksums
@@ -126,9 +125,8 @@ jobs:
           package="fuckipv6-windows-x86_64-${version}"
           mkdir -p "dist/${package}"
           cp target/x86_64-pc-windows-gnu/release/fuckipv6.exe "dist/${package}/"
-          cp target/x86_64-pc-windows-gnu/release/fuckipv6-coordinator.exe "dist/${package}/"
           cp setup_windows.ps1 setup_windows.bat README_WINDOWS.md QUICKSTART_WINDOWS.md WINDOWS_TEST_CHECKLIST.md "dist/${package}/"
-          cp examples/client.toml.example examples/coordinator.toml.example "dist/${package}/"
+          cp examples/node.toml.example "dist/${package}/"
           (cd dist && zip -r "${package}.zip" "${package}")
 
       - name: Generate SBOM, provenance, and checksums
@@ -199,10 +197,9 @@ jobs:
           package="fuckipv6-macos-${{ matrix.arch }}-${version}"
           mkdir -p "dist/${package}/bin" "dist/${package}/examples"
           cp "target/${{ matrix.target }}/release/fuckipv6" "dist/${package}/bin/"
-          cp "target/${{ matrix.target }}/release/fuckipv6-coordinator" "dist/${package}/bin/"
           cp README.md docs/QUICKSTART.md docs/DEPLOYMENT.md "dist/${package}/"
-          cp examples/client.toml.example examples/coordinator.toml.example "dist/${package}/examples/"
-          cp scripts/install-macos-client.sh scripts/install-macos-coordinator.sh scripts/fuckipv6-client.plist scripts/fuckipv6-coordinator.plist "dist/${package}/"
+          cp examples/node.toml.example "dist/${package}/examples/"
+          cp scripts/install-macos-node.sh scripts/fuckipv6.plist "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
 
       - name: Generate SBOM, provenance, and checksums

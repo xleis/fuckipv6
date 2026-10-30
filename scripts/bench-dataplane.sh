@@ -4,7 +4,7 @@
 # kernel WireGuard, and wireguard-go. The script never changes global sysctls.
 #
 # Run as root after building release binaries:
-#   cargo build --release -p fuckipv6-client -p fuckipv6-coordinator
+#   cargo build --release -p fuckipv6-client
 #   sudo scripts/bench-dataplane.sh --impls "fuckipv6 wireguard-kernel"
 #
 # wireguard-go and iperf3 are required only when selected. Results include raw
@@ -14,7 +14,6 @@ set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FUCKIPV6_BIN="${FUCKIPV6_BIN:-$PROJECT_ROOT/target/release/fuckipv6}"
-COORDINATOR_BIN="${COORDINATOR_BIN:-$PROJECT_ROOT/target/release/fuckipv6-coordinator}"
 WG_GO_BIN="${WG_GO_BIN:-$(command -v wireguard-go || true)}"
 SUMMARIZER="$PROJECT_ROOT/scripts/bench-summarize.py"
 IMPLS="fuckipv6 wireguard-kernel"
@@ -44,14 +43,13 @@ Options:
   --udp-64-rate RATE   Controlled UDP 64-byte offered rate (default: 5M)
   --client-cpus LIST   Pin client-side processes with taskset (for example: 2 or 2-3)
   --server-cpus LIST   Pin server-side processes with taskset (for example: 3 or 3-4)
-  --control-cpus LIST  Pin the coordinator with taskset (for example: 0)
+  --control-cpus LIST  Pin the host node with taskset (for example: 0)
   --output DIR         Result directory (default: target/benchmarks/dataplane-TIMESTAMP)
   --no-perf            Skip system-wide CPU/perf counters
   -h, --help           Show this help
 
 Environment:
-  FUCKIPV6_BIN         Release client binary
-  COORDINATOR_BIN      Release coordinator binary
+  FUCKIPV6_BIN         Release node binary
   WG_GO_BIN            wireguard-go binary (required for wireguard-go)
 EOF
 }
@@ -166,8 +164,7 @@ fi
 [ -z "$CONTROL_CPUS" ] || taskset -c "$CONTROL_CPUS" true \
     || fail "Invalid --control-cpus value: $CONTROL_CPUS"
 [ -x "$SUMMARIZER" ] || fail "Summarizer is not executable: $SUMMARIZER"
-[ -x "$FUCKIPV6_BIN" ] || fail "Missing release client: $FUCKIPV6_BIN (build it first)"
-[ -x "$COORDINATOR_BIN" ] || fail "Missing release coordinator: $COORDINATOR_BIN (build it first)"
+[ -x "$FUCKIPV6_BIN" ] || fail "Missing release node: $FUCKIPV6_BIN (build it first)"
 if printf '%s\n' "${IMPL_LIST[@]}" | grep -qx 'wireguard-go'; then
     [ -n "$WG_GO_BIN" ] && [ -x "$WG_GO_BIN" ] \
         || fail "wireguard-go not found; set WG_GO_BIN or install wireguard-go"
@@ -218,7 +215,7 @@ CONTROL_AFFINITY=()
 [ -z "$SERVER_CPUS" ] || SERVER_AFFINITY=(taskset -c "$SERVER_CPUS")
 [ -z "$CONTROL_CPUS" ] || CONTROL_AFFINITY=(taskset -c "$CONTROL_CPUS")
 
-read -r SIGNALING_PORT RELAY_PORT WEBUI_PORT IPERF_PORT < <(
+read -r SIGNALING_PORT RELAY_PORT IPERF_PORT < <(
     python3 - <<'PY'
 import socket
 
@@ -244,9 +241,9 @@ cleanup() {
     for pid in "${OTHER_PIDS[@]:-}"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
     done
-    [ -n "${COORDINATOR_PID:-}" ] && kill "$COORDINATOR_PID" 2>/dev/null
+    [ -n "${HOST_PID:-}" ] && kill "$HOST_PID" 2>/dev/null
 
-    for pid in "${CLIENT_PIDS[@]:-}" "${OTHER_PIDS[@]:-}" "${COORDINATOR_PID:-}"; do
+    for pid in "${CLIENT_PIDS[@]:-}" "${OTHER_PIDS[@]:-}" "${HOST_PID:-}"; do
         [ -n "$pid" ] && wait "$pid" 2>/dev/null
     done
 
@@ -350,17 +347,15 @@ wait_for_ping() {
 }
 
 start_fuckipv6() {
-    local coordinator_log="$LOG_DIR/fuckipv6-coordinator.log"
-    "${CONTROL_AFFINITY[@]}" env RUST_LOG=info "$COORDINATOR_BIN" \
-        --bind "0.0.0.0:${SIGNALING_PORT}" \
-        --relay-bind "0.0.0.0:${RELAY_PORT}" \
-        --webui-bind "127.0.0.1:${WEBUI_PORT}" \
-        --ip-pool "fd00::1000/120" \
-        >"$coordinator_log" 2>&1 &
-    COORDINATOR_PID=$!
-    OTHER_PIDS+=("$COORDINATOR_PID")
+    local host_log="$LOG_DIR/fuckipv6-host.log"
+    "${CONTROL_AFFINITY[@]}" env RUST_LOG=info "$FUCKIPV6_BIN" host \
+        --port "$SIGNALING_PORT" \
+        --relay-port "$RELAY_PORT" \
+        >"$host_log" 2>&1 &
+    HOST_PID=$!
+    OTHER_PIDS+=("$HOST_PID")
     sleep 2
-    kill -0 "$COORDINATOR_PID" 2>/dev/null || fail "Coordinator failed to start"
+    kill -0 "$HOST_PID" 2>/dev/null || fail "Host node failed to start"
 
     write_client_config "$NS1" "$(( IPERF_PORT + 1 ))"
     write_client_config "$NS2" "$(( IPERF_PORT + 2 ))"
@@ -484,13 +479,13 @@ stop_implementation() {
     for pid in "${OTHER_PIDS[@]:-}"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
-    [ -n "${COORDINATOR_PID:-}" ] && kill "$COORDINATOR_PID" 2>/dev/null || true
-    for pid in "${CLIENT_PIDS[@]:-}" "${OTHER_PIDS[@]:-}" "${COORDINATOR_PID:-}"; do
+    [ -n "${HOST_PID:-}" ] && kill "$HOST_PID" 2>/dev/null || true
+    for pid in "${CLIENT_PIDS[@]:-}" "${OTHER_PIDS[@]:-}" "${HOST_PID:-}"; do
         [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
     CLIENT_PIDS=()
     OTHER_PIDS=()
-    COORDINATOR_PID=""
+    HOST_PID=""
     ip netns exec "$NS1" ip link delete "$WG_IF1" 2>/dev/null || true
     ip netns exec "$NS2" ip link delete "$WG_IF2" 2>/dev/null || true
     ip netns exec "$NS1" ip link delete "$CLIENT_IF" 2>/dev/null || true
@@ -553,7 +548,6 @@ metadata = {
     'perf_scope': 'system-wide task-clock/cycles/instructions' if int('$USE_PERF') else None,
     'implementations': '$IMPLS'.split(),
     'fuckipv6_binary_sha256': command('sha256sum', '$FUCKIPV6_BIN'),
-    'coordinator_binary_sha256': command('sha256sum', '$COORDINATOR_BIN'),
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
 PY

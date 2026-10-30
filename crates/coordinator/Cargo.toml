@@ -5,10 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "fuckipv6-coordinator"
-path = "src/main.rs"
-
 [dependencies]
 fuckipv6-common = { version = "0.3.0", path = "../common" }
 

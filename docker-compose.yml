@@ -1,34 +1,20 @@
 services:
-  coordinator:
+  node:
     build:
       context: .
-      dockerfile: Dockerfile.coordinator
-    image: fuckipv6/coordinator:local
-    container_name: fuckipv6-coordinator
+      dockerfile: Dockerfile
+    image: fuckipv6/node:local
+    container_name: fuckipv6
     restart: unless-stopped
-    ports:
-      - "6666:6666"
-      - "8080:8080"
-    volumes:
-      - ./examples/coordinator.toml.example:/etc/fuckipv6/coordinator.toml:ro
-
-  client:
-    build:
-      context: .
-      dockerfile: Dockerfile.client
-    image: fuckipv6/client:local
-    container_name: fuckipv6-client
-    restart: unless-stopped
-    profiles:
-      - client
     network_mode: host
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - ./client.toml:/etc/fuckipv6/client.toml:ro
-      - fuckipv6-client-state:/var/lib/fuckipv6
+      - fuckipv6-state:/var/lib/fuckipv6
+      - fuckipv6-config:/etc/fuckipv6
 
 volumes:
-  fuckipv6-client-state:
+  fuckipv6-state:
+  fuckipv6-config:

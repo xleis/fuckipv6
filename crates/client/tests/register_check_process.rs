@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fuckipv6_client::symmetric::EmbeddedCoordinator;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,32 +7,25 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 #[tokio::test]
-async fn register_check_command_registers_with_real_coordinator_process() -> Result<()> {
-    let coordinator_bin = workspace_bin("fuckipv6-coordinator")?;
-    let client_bin = workspace_bin("fuckipv6")?;
+async fn register_check_command_registers_with_embedded_host() -> Result<()> {
+    let node_bin = workspace_bin("fuckipv6")?;
     let signaling_addr = free_loopback_addr().await?;
-    let webui_addr = free_loopback_addr().await?;
-    let relay_addr = free_loopback_addr().await?;
+    let coordinator = EmbeddedCoordinator::start(
+        "register-check-test",
+        signaling_addr.port(),
+        0,
+        Some("127.0.0.1".to_string()),
+        None,
+    )
+    .await?;
+    let advertised_relay_addr = SocketAddr::new(signaling_addr.ip(), coordinator.relay_addr.port());
 
-    let mut coordinator = Command::new(coordinator_bin)
-        .arg("--bind")
-        .arg(signaling_addr.to_string())
-        .arg("--webui-bind")
-        .arg(webui_addr.to_string())
-        .arg("--relay-bind")
-        .arg(relay_addr.to_string())
-        .arg("--ip-pool")
-        .arg("fd00::1000/120")
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to spawn coordinator process")?;
-
-    wait_for_tcp(webui_addr).await?;
+    wait_for_tcp(signaling_addr).await?;
 
     let key_path = unique_temp_key_path();
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        Command::new(client_bin)
+        Command::new(&node_bin)
             .arg("register-check")
             .arg("--coordinator")
             .arg(format!("ws://{signaling_addr}"))
@@ -47,8 +41,7 @@ async fn register_check_command_registers_with_real_coordinator_process() -> Res
     .context("register-check process timed out")?
     .context("failed to run register-check process")?;
 
-    let _ = coordinator.start_kill();
-    let _ = coordinator.wait().await;
+    drop(coordinator);
     let _ = std::fs::remove_file(&key_path);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -59,7 +52,7 @@ async fn register_check_command_registers_with_real_coordinator_process() -> Res
     );
     assert!(stdout.contains("Register check OK"));
     assert!(stdout.contains("Virtual IP: fd00::1001"));
-    assert!(stdout.contains(&format!("QUIC relay: {relay_addr}")));
+    assert!(stdout.contains(&format!("QUIC relay: {advertised_relay_addr}")));
     assert!(stdout.contains("QUIC relay pin: "));
 
     Ok(())

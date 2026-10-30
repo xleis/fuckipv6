@@ -22,8 +22,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build coordinator image
-        run: docker build -f Dockerfile.coordinator -t fuckipv6-coordinator:ci .
-
-      - name: Build client image
-        run: docker build -f Dockerfile.client -t fuckipv6-client:ci .
+      - name: Build node image
+        run: docker build -f Dockerfile -t fuckipv6:ci .

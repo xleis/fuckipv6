@@ -99,22 +99,14 @@ echo
 # 显示编译结果
 echo "编译产物:"
 if [ -f "$BUILD_DIR/fuckipv6" ]; then
-    CLIENT_SIZE=$(du -h "$BUILD_DIR/fuckipv6" | cut -f1)
-    echo -e "  ${GREEN}✓${NC} 客户端:     $BUILD_DIR/fuckipv6 ($CLIENT_SIZE)"
+    NODE_SIZE=$(du -h "$BUILD_DIR/fuckipv6" | cut -f1)
+    echo -e "  ${GREEN}✓${NC} 节点程序: $BUILD_DIR/fuckipv6 ($NODE_SIZE)"
 else
-    echo -e "  ${RED}✗${NC} 客户端编译失败"
-fi
-
-if [ -f "$BUILD_DIR/fuckipv6-coordinator" ]; then
-    COORDINATOR_SIZE=$(du -h "$BUILD_DIR/fuckipv6-coordinator" | cut -f1)
-    echo -e "  ${GREEN}✓${NC} 协调服务器: $BUILD_DIR/fuckipv6-coordinator ($COORDINATOR_SIZE)"
-else
-    echo -e "  ${RED}✗${NC} 协调服务器编译失败"
+    echo -e "  ${RED}✗${NC} 节点程序编译失败"
 fi
 
 echo
 echo "下一步操作:"
 echo "  测试: sudo ./scripts/test-network.sh"
-echo "  安装客户端: sudo ./scripts/install-client.sh"
-echo "  安装服务器: sudo ./scripts/install-coordinator.sh"
+echo "  安装节点: sudo ./scripts/install-node.sh"
 echo

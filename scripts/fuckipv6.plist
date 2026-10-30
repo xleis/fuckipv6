@@ -4,17 +4,14 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>cc.xlei.fuckipv6.coordinator</string>
+  <string>cc.xlei.fuckipv6</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/fuckipv6/fuckipv6-coordinator</string>
-    <string>--bind</string>
-    <string>0.0.0.0:6666</string>
-    <string>--relay-bind</string>
-    <string>0.0.0.0:6667</string>
-    <string>--webui-bind</string>
-    <string>0.0.0.0:8080</string>
+    <string>/usr/local/fuckipv6/fuckipv6</string>
+    <string>--headless</string>
+    <string>--webui-port</string>
+    <string>8080</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -27,15 +24,18 @@
   </dict>
 
   <key>RunAtLoad</key>
-  <true/>
+  <false/>
 
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
 
   <key>StandardOutPath</key>
-  <string>/usr/local/var/log/fuckipv6/coordinator.log</string>
+  <string>/usr/local/var/log/fuckipv6/node.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/usr/local/var/log/fuckipv6/coordinator.err.log</string>
+  <string>/usr/local/var/log/fuckipv6/node.err.log</string>
 </dict>
 </plist>

@@ -3,7 +3,7 @@
 # fuckipv6 网络测试脚本
 # 用法: ./test-network.sh
 #
-# 此脚本会启动协调服务器和两个客户端，测试虚拟网络连接
+# 此脚本会启动一个托管节点和两个成员节点，测试虚拟网络连接
 #
 
 set -e
@@ -29,19 +29,19 @@ cleanup() {
     echo -e "\n${YELLOW}清理测试环境...${NC}"
 
     # 停止后台进程
-    if [ ! -z "$COORDINATOR_PID" ]; then
-        kill $COORDINATOR_PID 2>/dev/null || true
-        echo "✓ 已停止协调服务器 (PID: $COORDINATOR_PID)"
+    if [ -n "${HOST_PID:-}" ]; then
+        kill "$HOST_PID" 2>/dev/null || true
+        echo "✓ 已停止托管节点 (PID: $HOST_PID)"
     fi
 
-    if [ ! -z "$CLIENT1_PID" ]; then
-        kill $CLIENT1_PID 2>/dev/null || true
-        echo "✓ 已停止客户端1 (PID: $CLIENT1_PID)"
+    if [ -n "${NODE1_PID:-}" ]; then
+        kill "$NODE1_PID" 2>/dev/null || true
+        echo "✓ 已停止成员节点1 (PID: $NODE1_PID)"
     fi
 
-    if [ ! -z "$CLIENT2_PID" ]; then
-        kill $CLIENT2_PID 2>/dev/null || true
-        echo "✓ 已停止客户端2 (PID: $CLIENT2_PID)"
+    if [ -n "${NODE2_PID:-}" ]; then
+        kill "$NODE2_PID" 2>/dev/null || true
+        echo "✓ 已停止成员节点2 (PID: $NODE2_PID)"
     fi
 
     # 删除TUN设备
@@ -63,8 +63,8 @@ fi
 
 # 检查是否已编译
 echo -e "${BLUE}[1/6]${NC} 检查编译文件..."
-if [ ! -f "$BUILD_DIR/fuckipv6-coordinator" ] || [ ! -f "$BUILD_DIR/fuckipv6" ]; then
-    echo -e "${YELLOW}⚠ 未找到编译文件，开始编译...${NC}"
+if [ ! -x "$BUILD_DIR/fuckipv6" ]; then
+    echo -e "${YELLOW}⚠ 未找到节点程序，开始编译...${NC}"
     cd "$PROJECT_ROOT"
     cargo build --release
     echo -e "${GREEN}✓${NC} 编译完成"
@@ -75,18 +75,18 @@ fi
 # 创建测试目录
 echo -e "${BLUE}[2/6]${NC} 创建测试环境..."
 rm -rf "$TEST_DIR"
-mkdir -p "$TEST_DIR/coordinator"
-mkdir -p "$TEST_DIR/client1"
-mkdir -p "$TEST_DIR/client2"
+mkdir -p "$TEST_DIR/host"
+mkdir -p "$TEST_DIR/node1"
+mkdir -p "$TEST_DIR/node2"
 echo -e "${GREEN}✓${NC} 测试目录已创建: $TEST_DIR"
 
 # 生成配置文件
 echo -e "${BLUE}[3/6]${NC} 生成配置文件..."
 
-# 客户端1配置
-cat > "$TEST_DIR/client1/config.toml" <<EOF
+# 成员节点1配置
+cat > "$TEST_DIR/node1/config.toml" <<EOF
 coordinator_url = "ws://localhost:6666"
-private_key_path = "client1_key.pem"
+private_key_path = "node1_key.pem"
 
 [network]
 virtual_network = "fd00::/64"
@@ -103,10 +103,10 @@ heartbeat_interval = 30
 level = "info"
 EOF
 
-# 客户端2配置
-cat > "$TEST_DIR/client2/config.toml" <<EOF
+# 成员节点2配置
+cat > "$TEST_DIR/node2/config.toml" <<EOF
 coordinator_url = "ws://localhost:6666"
-private_key_path = "client2_key.pem"
+private_key_path = "node2_key.pem"
 
 [network]
 virtual_network = "fd00::/64"
@@ -125,55 +125,55 @@ EOF
 
 echo -e "${GREEN}✓${NC} 配置文件已生成"
 
-# 启动协调服务器
-echo -e "${BLUE}[4/6]${NC} 启动协调服务器..."
-cd "$TEST_DIR/coordinator"
-RUST_LOG=info "$BUILD_DIR/fuckipv6-coordinator" \
-    --bind "[::]:6666" \
-    --ip-pool "fd00::1000/120" \
-    > coordinator.log 2>&1 &
-COORDINATOR_PID=$!
+# 启动托管节点
+echo -e "${BLUE}[4/6]${NC} 启动托管节点..."
+cd "$TEST_DIR/host"
+RUST_LOG=info "$BUILD_DIR/fuckipv6" host \
+    --port 6666 \
+    --relay-port 6667 \
+    > host.log 2>&1 &
+HOST_PID=$!
 
 sleep 2
 
-if ps -p $COORDINATOR_PID > /dev/null; then
-    echo -e "${GREEN}✓${NC} 协调服务器已启动 (PID: $COORDINATOR_PID)"
-    echo "  监听地址: [::]:6666"
+if ps -p "$HOST_PID" > /dev/null; then
+    echo -e "${GREEN}✓${NC} 托管节点已启动 (PID: $HOST_PID)"
+    echo "  监听地址: 0.0.0.0:6666"
 else
-    echo -e "${RED}✗${NC} 协调服务器启动失败"
-    cat coordinator.log
+    echo -e "${RED}✗${NC} 托管节点启动失败"
+    cat host.log
     exit 1
 fi
 
-# 启动客户端1
-echo -e "${BLUE}[5/6]${NC} 启动客户端..."
+# 启动成员节点1
+echo -e "${BLUE}[5/6]${NC} 启动成员节点..."
 
-echo "启动客户端1..."
-cd "$TEST_DIR/client1"
-RUST_LOG=info "$BUILD_DIR/fuckipv6" start --config config.toml > client1.log 2>&1 &
-CLIENT1_PID=$!
+echo "启动成员节点1..."
+cd "$TEST_DIR/node1"
+RUST_LOG=info "$BUILD_DIR/fuckipv6" start --config config.toml > node1.log 2>&1 &
+NODE1_PID=$!
 sleep 3
 
-if ps -p $CLIENT1_PID > /dev/null; then
-    echo -e "${GREEN}✓${NC} 客户端1已启动 (PID: $CLIENT1_PID)"
+if ps -p "$NODE1_PID" > /dev/null; then
+    echo -e "${GREEN}✓${NC} 成员节点1已启动 (PID: $NODE1_PID)"
 else
-    echo -e "${RED}✗${NC} 客户端1启动失败"
-    cat client1.log
+    echo -e "${RED}✗${NC} 成员节点1启动失败"
+    cat node1.log
     exit 1
 fi
 
-# 启动客户端2
-echo "启动客户端2..."
-cd "$TEST_DIR/client2"
-RUST_LOG=info "$BUILD_DIR/fuckipv6" start --config config.toml > client2.log 2>&1 &
-CLIENT2_PID=$!
+# 启动成员节点2
+echo "启动成员节点2..."
+cd "$TEST_DIR/node2"
+RUST_LOG=info "$BUILD_DIR/fuckipv6" start --config config.toml > node2.log 2>&1 &
+NODE2_PID=$!
 sleep 3
 
-if ps -p $CLIENT2_PID > /dev/null; then
-    echo -e "${GREEN}✓${NC} 客户端2已启动 (PID: $CLIENT2_PID)"
+if ps -p "$NODE2_PID" > /dev/null; then
+    echo -e "${GREEN}✓${NC} 成员节点2已启动 (PID: $NODE2_PID)"
 else
-    echo -e "${RED}✗${NC} 客户端2启动失败"
-    cat client2.log
+    echo -e "${RED}✗${NC} 成员节点2启动失败"
+    cat node2.log
     exit 1
 fi
 
@@ -194,15 +194,15 @@ CLIENT2_IP=$(ip -6 addr show fuckipv6-test2 | grep -oP 'fd00::[0-9a-f:]+' | head
 
 if [ -z "$CLIENT1_IP" ]; then
     echo -e "${RED}✗${NC} 无法获取客户端1的IP地址"
-    echo "客户端1日志:"
-    tail -20 "$TEST_DIR/client1/client1.log"
+    echo "成员节点1日志:"
+    tail -20 "$TEST_DIR/node1/node1.log"
     exit 1
 fi
 
 if [ -z "$CLIENT2_IP" ]; then
     echo -e "${RED}✗${NC} 无法获取客户端2的IP地址"
-    echo "客户端2日志:"
-    tail -20 "$TEST_DIR/client2/client2.log"
+    echo "成员节点2日志:"
+    tail -20 "$TEST_DIR/node2/node2.log"
     exit 1
 fi
 
@@ -223,14 +223,14 @@ if ping6 -c 4 -W 2 $CLIENT2_IP > /dev/null 2>&1; then
 else
     echo -e "${RED}✗${NC} Ping失败"
     echo
-    echo "协调服务器日志 (最后20行):"
-    tail -20 "$TEST_DIR/coordinator/coordinator.log"
+    echo "托管节点日志 (最后20行):"
+    tail -20 "$TEST_DIR/host/host.log"
     echo
-    echo "客户端1日志 (最后20行):"
-    tail -20 "$TEST_DIR/client1/client1.log"
+    echo "成员节点1日志 (最后20行):"
+    tail -20 "$TEST_DIR/node1/node1.log"
     echo
-    echo "客户端2日志 (最后20行):"
-    tail -20 "$TEST_DIR/client2/client2.log"
+    echo "成员节点2日志 (最后20行):"
+    tail -20 "$TEST_DIR/node2/node2.log"
     exit 1
 fi
 
@@ -251,15 +251,15 @@ echo -e "${GREEN}✓ 所有测试通过！${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo
 echo "测试摘要:"
-echo "  协调服务器: 运行中 (PID: $COORDINATOR_PID)"
-echo "  客户端1:    运行中 (PID: $CLIENT1_PID) - $CLIENT1_IP"
-echo "  客户端2:    运行中 (PID: $CLIENT2_PID) - $CLIENT2_IP"
+echo "  托管节点:   运行中 (PID: $HOST_PID)"
+echo "  成员节点1:  运行中 (PID: $NODE1_PID) - $CLIENT1_IP"
+echo "  成员节点2:  运行中 (PID: $NODE2_PID) - $CLIENT2_IP"
 echo "  连接状态:   ✓ P2P连接成功"
 echo
 echo "日志文件:"
-echo "  协调服务器: $TEST_DIR/coordinator/coordinator.log"
-echo "  客户端1:    $TEST_DIR/client1/client1.log"
-echo "  客户端2:    $TEST_DIR/client2/client2.log"
+echo "  托管节点:   $TEST_DIR/host/host.log"
+echo "  成员节点1:  $TEST_DIR/node1/node1.log"
+echo "  成员节点2:  $TEST_DIR/node2/node2.log"
 echo
 echo "按Ctrl+C退出测试环境..."
 

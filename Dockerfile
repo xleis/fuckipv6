@@ -12,13 +12,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates iproute2 iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /etc/fuckipv6 /var/lib/fuckipv6
+RUN useradd -r -u 10001 -s /usr/sbin/nologin -d /var/lib/fuckipv6 fuckipv6 \
+    && mkdir -p /etc/fuckipv6 /var/lib/fuckipv6 \
+    && chown -R fuckipv6:fuckipv6 /var/lib/fuckipv6
 
 COPY --from=builder /src/target/release/fuckipv6 /usr/local/bin/fuckipv6
-COPY examples/client.toml.example /etc/fuckipv6/client.toml
+COPY examples/node.toml.example /etc/fuckipv6/node.toml
 
 VOLUME ["/etc/fuckipv6", "/var/lib/fuckipv6"]
 WORKDIR /var/lib/fuckipv6
+USER fuckipv6
 
 ENTRYPOINT ["/usr/local/bin/fuckipv6"]
-CMD ["start", "--config", "/etc/fuckipv6/client.toml"]
+EXPOSE 8080/tcp 6666/tcp 6667/udp
+CMD ["--headless", "--webui-port", "8080"]

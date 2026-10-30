@@ -18,6 +18,12 @@ jobs:
       - name: Test documentation checker
         run: python3 -m unittest scripts/test_check_docs.py -v
 
+      - name: Test single-binary boundary checker
+        run: python3 -m unittest scripts/test_check_single_binary.py -v
+
+      - name: Enforce single node binary
+        run: python3 scripts/check-single-binary.py
+
       - name: Check Markdown links, anchors, and status boundaries
         run: >-
           python3 scripts/check-docs.py

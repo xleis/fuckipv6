@@ -1,5 +1,5 @@
-# fuckipv6 客户端配置文件示例
-# 复制此文件到 /etc/fuckipv6/client.toml 并根据需要修改
+# fuckipv6 节点网络配置示例
+# 复制此文件到 /etc/fuckipv6/node.toml 并根据需要修改
 
 # 协调服务器WebSocket地址
 # 格式: ws://地址:端口 或 wss://地址:端口 (使用TLS)
@@ -8,13 +8,13 @@
 #   生产环境: wss://vpn.example.com:6666
 coordinator_url = "ws://localhost:6666"
 
-# 客户端私钥文件路径（可选）
+# 节点私钥文件路径（可选）
 # 如果文件不存在，将自动生成新的Ed25519密钥对
 # 相对路径: 相对于配置文件所在目录
-# 绝对路径: /var/lib/fuckipv6/client_key.pem
-private_key_path = "client_key.pem"
+# 绝对路径: /var/lib/fuckipv6/node_key.pem
+private_key_path = "node_key.pem"
 
-# 可选: 手动指定客户端ID（通常无需设置，会自动从公钥生成）
+# 可选: 手动指定节点成员ID（通常无需设置，会自动从公钥生成）
 # client_id = "my-custom-client-id"
 
 # ========================================

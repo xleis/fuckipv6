@@ -2,25 +2,23 @@
 #
 # End-to-end Linux network namespace test for fuckipv6.
 #
-# This starts one coordinator in the host namespace and three clients in
-# separate network namespaces. It verifies route setup, bidirectional ping,
-# near-MTU ping payloads, and 3-node reachability.
+# This starts one host node in the host namespace and member nodes in separate
+# network namespaces. It verifies route setup, bidirectional ping, near-MTU
+# ping payloads, and multi-node reachability.
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/target/release"
 TEST_DIR="$PROJECT_ROOT/test_workspace/netns"
-COORDINATOR_BIND_ADDR="${COORDINATOR_BIND_ADDR:-0.0.0.0}"
-WEBUI_BIND_ADDR="${WEBUI_BIND_ADDR:-127.0.0.1}"
 SIGNALING_PORT="16666"
-WEBUI_PORT="18080"
+RELAY_PORT="16667"
 CLIENT_COUNT="${CLIENT_COUNT:-3}"
 PING_PAYLOAD_SIZE="${PING_PAYLOAD_SIZE:-1200}"
-COORDINATOR_LOG="${COORDINATOR_LOG:-info}"
-CLIENT_LOG="${CLIENT_LOG:-info}"
+HOST_LOG="${HOST_LOG:-info}"
+NODE_LOG="${NODE_LOG:-info}"
 
-CLIENT_PIDS=()
+NODE_PIDS=()
 NAMESPACES=()
 VETH_HOSTS=()
 VETH_PEERS=()
@@ -41,9 +39,9 @@ dump_logs() {
         return
     fi
 
-    if [ -f "$TEST_DIR/coordinator/coordinator.log" ]; then
-        printf '\n[INFO] coordinator log tail\n' >&2
-        tail -80 "$TEST_DIR/coordinator/coordinator.log" >&2 || true
+    if [ -f "$TEST_DIR/host/host.log" ]; then
+        printf '\n[INFO] host node log tail\n' >&2
+        tail -80 "$TEST_DIR/host/host.log" >&2 || true
     fi
 
     for ns in "${NAMESPACES[@]:-}"; do
@@ -55,7 +53,7 @@ dump_logs() {
         ip netns exec "$ns" "$BUILD_DIR/fuckipv6" peers >&2 || true
     done
 
-    for log in "$TEST_DIR"/client*/client.log; do
+    for log in "$TEST_DIR"/node*/node.log; do
         [ -f "$log" ] || continue
         printf '\n[INFO] %s tail\n' "$log" >&2
         tail -80 "$log" >&2 || true
@@ -65,22 +63,22 @@ dump_logs() {
 cleanup() {
     set +e
 
-    for pid in "${CLIENT_PIDS[@]:-}"; do
+    for pid in "${NODE_PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
 
-    if [ -n "${COORDINATOR_PID:-}" ]; then
-        kill "$COORDINATOR_PID" 2>/dev/null || true
+    if [ -n "${HOST_PID:-}" ]; then
+        kill "$HOST_PID" 2>/dev/null || true
     fi
 
     sleep 1
 
-    for pid in "${CLIENT_PIDS[@]:-}"; do
+    for pid in "${NODE_PIDS[@]:-}"; do
         wait "$pid" 2>/dev/null || true
     done
 
-    if [ -n "${COORDINATOR_PID:-}" ]; then
-        wait "$COORDINATOR_PID" 2>/dev/null || true
+    if [ -n "${HOST_PID:-}" ]; then
+        wait "$HOST_PID" 2>/dev/null || true
     fi
 
     for ns in "${NAMESPACES[@]:-}"; do
@@ -116,9 +114,9 @@ require_tools() {
     fi
 }
 
-ensure_binaries() {
-    if [ ! -x "$BUILD_DIR/fuckipv6-coordinator" ] || [ ! -x "$BUILD_DIR/fuckipv6" ]; then
-        info "Release binaries not found; building them first"
+ensure_binary() {
+    if [ ! -x "$BUILD_DIR/fuckipv6" ]; then
+        info "Release node binary not found; building it first"
         (cd "$PROJECT_ROOT" && cargo build --release)
     fi
 }
@@ -147,9 +145,9 @@ create_namespace() {
     ip netns exec "$ns" ip route add default via "10.66.${index}.1"
 }
 
-write_client_config() {
+write_node_config() {
     local index="$1"
-    local dir="$TEST_DIR/client${index}"
+    local dir="$TEST_DIR/node${index}"
     local coordinator_addr="10.66.${index}.1"
     mkdir -p "$dir"
 
@@ -179,34 +177,33 @@ level = "info"
 EOF
 }
 
-start_coordinator() {
-    mkdir -p "$TEST_DIR/coordinator"
-    RUST_LOG="$COORDINATOR_LOG" "$BUILD_DIR/fuckipv6-coordinator" \
-        --bind "${COORDINATOR_BIND_ADDR}:${SIGNALING_PORT}" \
-        --webui-bind "${WEBUI_BIND_ADDR}:${WEBUI_PORT}" \
-        --ip-pool "fd00::1000/120" \
-        >"$TEST_DIR/coordinator/coordinator.log" 2>&1 &
-    COORDINATOR_PID="$!"
+start_host() {
+    mkdir -p "$TEST_DIR/host"
+    RUST_LOG="$HOST_LOG" "$BUILD_DIR/fuckipv6" host \
+        --port "$SIGNALING_PORT" \
+        --relay-port "$RELAY_PORT" \
+        >"$TEST_DIR/host/host.log" 2>&1 &
+    HOST_PID="$!"
 
     sleep 2
-    kill -0 "$COORDINATOR_PID" 2>/dev/null || {
-        cat "$TEST_DIR/coordinator/coordinator.log" >&2
-        fail "Coordinator failed to start"
+    kill -0 "$HOST_PID" 2>/dev/null || {
+        cat "$TEST_DIR/host/host.log" >&2
+        fail "Host node failed to start"
     }
 }
 
-start_client() {
+start_node() {
     local index="$1"
     local ns="fip6test${index}"
-    local dir="$TEST_DIR/client${index}"
+    local dir="$TEST_DIR/node${index}"
 
-    ip netns exec "$ns" env RUST_LOG="$CLIENT_LOG" "$BUILD_DIR/fuckipv6" \
+    ip netns exec "$ns" env RUST_LOG="$NODE_LOG" "$BUILD_DIR/fuckipv6" \
         start --config "$dir/config.toml" \
-        >"$dir/client.log" 2>&1 &
-    CLIENT_PIDS+=("$!")
+        >"$dir/node.log" 2>&1 &
+    NODE_PIDS+=("$!")
 }
 
-wait_for_client_ip() {
+wait_for_node_ip() {
     local index="$1"
     local ns="fip6test${index}"
     local ip_addr=""
@@ -225,7 +222,7 @@ wait_for_client_ip() {
         sleep 1
     done
 
-    tail -50 "$TEST_DIR/client${index}/client.log" >&2 || true
+    tail -50 "$TEST_DIR/node${index}/node.log" >&2 || true
     return 1
 }
 
@@ -266,42 +263,42 @@ assert_mtu_ping() {
 main() {
     require_root
     require_tools
-    ensure_binaries
+    ensure_binary
     cleanup
     mkdir -p "$TEST_DIR"
 
     info "Creating ${CLIENT_COUNT} network namespaces"
     for index in $(seq 1 "$CLIENT_COUNT"); do
         create_namespace "$index"
-        write_client_config "$index"
+        write_node_config "$index"
     done
 
-    info "Starting coordinator"
-    start_coordinator
+    info "Starting host node"
+    start_host
 
-    info "Starting clients"
+    info "Starting member nodes"
     for index in $(seq 1 "$CLIENT_COUNT"); do
-        start_client "$index"
+        start_node "$index"
     done
 
-    declare -a CLIENT_IPS
+    declare -a NODE_IPS
     for index in $(seq 1 "$CLIENT_COUNT"); do
-        CLIENT_IPS[$index]="$(wait_for_client_ip "$index")" \
-            || fail "Client ${index} did not receive a virtual IP"
-        info "Client ${index} virtual IP: ${CLIENT_IPS[$index]}"
+        NODE_IPS[$index]="$(wait_for_node_ip "$index")" \
+            || fail "Node ${index} did not receive a virtual IP"
+        info "Node ${index} virtual IP: ${NODE_IPS[$index]}"
         assert_route "$index"
     done
 
     sleep 5
 
-    assert_ping 1 "${CLIENT_IPS[2]}" "client1 to client2"
-    assert_ping 2 "${CLIENT_IPS[1]}" "client2 to client1"
-    assert_mtu_ping 1 "${CLIENT_IPS[2]}"
+    assert_ping 1 "${NODE_IPS[2]}" "node1 to node2"
+    assert_ping 2 "${NODE_IPS[1]}" "node2 to node1"
+    assert_mtu_ping 1 "${NODE_IPS[2]}"
 
     if [ "$CLIENT_COUNT" -ge 3 ]; then
-        assert_ping 1 "${CLIENT_IPS[3]}" "client1 to client3"
-        assert_ping 2 "${CLIENT_IPS[3]}" "client2 to client3"
-        assert_ping 3 "${CLIENT_IPS[1]}" "client3 to client1"
+        assert_ping 1 "${NODE_IPS[3]}" "node1 to node3"
+        assert_ping 2 "${NODE_IPS[3]}" "node2 to node3"
+        assert_ping 3 "${NODE_IPS[1]}" "node3 to node1"
     fi
 
     info "All namespace network tests passed"

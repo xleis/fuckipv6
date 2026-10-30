@@ -15,6 +15,8 @@ pub struct NodeSnapshot {
     pub configuration: NodeConfigurationSnapshot,
     #[serde(default)]
     pub permissions: NodePermissionSnapshot,
+    #[serde(default)]
+    pub embedded_services: Vec<NodeEmbeddedServiceSnapshot>,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     pub logs: Vec<NodeLogEntry>,
@@ -58,6 +60,27 @@ pub struct NodeNetworkConfigSnapshot {
     pub log_level: String,
     pub log_file_configured: bool,
     pub identity_configured: bool,
+}
+
+/// Non-secret runtime state for one network's embedded signaling and relay
+/// services. Invitation tickets, identity material, and host-local paths are
+/// deliberately excluded from this shared UI contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEmbeddedServiceSnapshot {
+    pub network_name: String,
+    pub status: NodeEmbeddedServiceStatus,
+    pub signaling_addr: Option<SocketAddr>,
+    pub relay_addr: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeEmbeddedServiceStatus {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
 }
 
 /// Control-plane authorization posture shared with UI adapters.

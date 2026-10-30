@@ -9,16 +9,20 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::{
-    NodeCreateNetworkCommand, NodeEventBus, NodeEventKind, NodeIdentitySnapshot,
-    NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase, NodeProblem,
-    NodeProblemCode, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
+    NodeCreateNetworkCommand, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus,
+    NodeEventKind, NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle,
+    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeRuntimePlan, NodeStateStore,
+    NodeTrafficSnapshot,
 };
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
 use crate::ipc::{MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::runtime_metadata;
-use crate::symmetric::{EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceStartRequest};
+use crate::symmetric::{
+    EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
+    EmbeddedServiceStartRequest,
+};
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -584,11 +588,17 @@ impl NetworkRuntimeActor {
             Some(host) => service_request.with_external_host(host),
             None => service_request.with_external_host("127.0.0.1"),
         };
-        let service = self
-            .services
-            .start(service_request)
-            .await
-            .map_err(map_service_error)?;
+        self.mark_embedded_service_status(&command.name, NodeEmbeddedServiceStatus::Starting)
+            .await;
+        let service = match self.services.start(service_request).await {
+            Ok(service) => service,
+            Err(error) => {
+                self.mark_embedded_service_status(&command.name, NodeEmbeddedServiceStatus::Failed)
+                    .await;
+                return Err(map_service_error(error));
+            }
+        };
+        self.record_running_embedded_service(&service).await;
         let coordinator_url = format!("ws://127.0.0.1:{}", service.signaling_addr.port());
 
         let config_file = match self
@@ -597,7 +607,8 @@ impl NetworkRuntimeActor {
         {
             Ok(path) => path,
             Err(error) => {
-                let _ = self.services.stop(&command.name).await;
+                self.stop_embedded_service(&command.name).await;
+                self.forget_network(&command.name).await;
                 return Err(RuntimeControlError::Persistence(format!(
                     "保存网络 [{}] 配置失败: {error:#}",
                     command.name
@@ -722,7 +733,7 @@ impl NetworkRuntimeActor {
             self.sessions
                 .keys()
                 .cloned()
-                .chain(services)
+                .chain(services.iter().cloned())
                 .collect::<BTreeSet<_>>()
         } else {
             let requested = networks.into_iter().collect::<BTreeSet<_>>();
@@ -742,6 +753,11 @@ impl NetworkRuntimeActor {
 
         let mut stopped = Vec::with_capacity(targets.len());
         for name in targets {
+            let has_embedded_service = services.contains(&name);
+            if has_embedded_service {
+                self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Stopping)
+                    .await;
+            }
             if let Some(mut session) = self.sessions.remove(&name) {
                 self.mark_network_status(Some(&name), NodeNetworkStatus::Stopping)
                     .await;
@@ -756,9 +772,21 @@ impl NetworkRuntimeActor {
                 self.mark_network_status(Some(&name), NodeNetworkStatus::Offline)
                     .await;
             }
-            match self.services.stop(&name).await {
-                Ok(_) | Err(EmbeddedServiceError::NotFound(_)) => {}
-                Err(error) => return Err(map_service_error(error)),
+            if has_embedded_service {
+                match self.services.stop(&name).await {
+                    Ok(_) | Err(EmbeddedServiceError::NotFound(_)) => {
+                        self.mark_embedded_service_status(
+                            &name,
+                            NodeEmbeddedServiceStatus::Stopped,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Failed)
+                            .await;
+                        return Err(map_service_error(error));
+                    }
+                }
             }
             stopped.push(name);
         }
@@ -782,8 +810,24 @@ impl NetworkRuntimeActor {
 
     async fn rollback_created_network(&mut self, network_name: &str) {
         let _ = self.configs.delete_network(network_name);
-        let _ = self.services.stop(network_name).await;
+        self.stop_embedded_service(network_name).await;
         self.forget_network(network_name).await;
+    }
+
+    async fn stop_embedded_service(&self, network_name: &str) {
+        self.mark_embedded_service_status(network_name, NodeEmbeddedServiceStatus::Stopping)
+            .await;
+        match self.services.stop(network_name).await {
+            Ok(_) | Err(EmbeddedServiceError::NotFound(_)) => {
+                self.mark_embedded_service_status(network_name, NodeEmbeddedServiceStatus::Stopped)
+                    .await;
+            }
+            Err(error) => {
+                self.mark_embedded_service_status(network_name, NodeEmbeddedServiceStatus::Failed)
+                    .await;
+                tracing::warn!("网络 [{network_name}] 内嵌服务停止失败: {error}");
+            }
+        }
     }
 
     async fn forget_network(&self, network_name: &str) {
@@ -796,6 +840,9 @@ impl NetworkRuntimeActor {
                     .configuration
                     .networks
                     .retain(|network| network.network_name != network_name);
+                snapshot
+                    .embedded_services
+                    .retain(|service| service.network_name != network_name);
                 if snapshot
                     .last_error
                     .as_ref()
@@ -838,6 +885,55 @@ impl NetworkRuntimeActor {
                 }
             })
             .await;
+    }
+
+    async fn record_running_embedded_service(&self, service: &EmbeddedServiceSnapshot) {
+        self.record_embedded_service(NodeEmbeddedServiceSnapshot {
+            network_name: service.network_name.clone(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some(service.signaling_addr),
+            relay_addr: Some(service.relay_addr),
+        })
+        .await;
+    }
+
+    async fn mark_embedded_service_status(
+        &self,
+        network_name: &str,
+        status: NodeEmbeddedServiceStatus,
+    ) {
+        self.record_embedded_service(NodeEmbeddedServiceSnapshot {
+            network_name: network_name.to_string(),
+            status,
+            signaling_addr: None,
+            relay_addr: None,
+        })
+        .await;
+    }
+
+    async fn record_embedded_service(&self, service: NodeEmbeddedServiceSnapshot) {
+        let network_name = service.network_name.clone();
+        let status = service.status;
+        self.state
+            .update(|snapshot| {
+                if let Some(existing) = snapshot
+                    .embedded_services
+                    .iter_mut()
+                    .find(|existing| existing.network_name == service.network_name)
+                {
+                    *existing = service;
+                } else {
+                    snapshot.embedded_services.push(service);
+                }
+                snapshot
+                    .embedded_services
+                    .sort_by(|left, right| left.network_name.cmp(&right.network_name));
+            })
+            .await;
+        self.events.publish(NodeEventKind::EmbeddedServiceChanged {
+            network_name,
+            status,
+        });
     }
 
     async fn record_network_config(&self, config: NodeNetworkConfigSnapshot) {
@@ -972,11 +1068,13 @@ fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::NodeEvent;
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use tokio::sync::broadcast;
 
     #[derive(Clone, Default)]
     struct FakeLauncher {
@@ -1060,6 +1158,7 @@ mod tests {
     struct TestHarness {
         configs: ConfigManager,
         state: NodeStateStore,
+        events: NodeEventBus,
         lifecycle: NodeLifecycle,
         services: EmbeddedServiceManager,
         runtime: NetworkRuntimeManager,
@@ -1089,7 +1188,7 @@ mod tests {
                 configs.clone(),
                 RuntimeOptions::default(),
                 state.clone(),
-                events,
+                events.clone(),
                 lifecycle.clone(),
                 services.clone(),
                 Arc::new(fake.clone()),
@@ -1098,6 +1197,7 @@ mod tests {
             Self {
                 configs,
                 state,
+                events,
                 lifecycle,
                 services,
                 runtime,
@@ -1120,6 +1220,25 @@ mod tests {
             external_host: None,
             auto_connect,
         }
+    }
+
+    fn embedded_service_events(
+        receiver: &mut broadcast::Receiver<NodeEvent>,
+        network_name: &str,
+    ) -> Vec<NodeEmbeddedServiceStatus> {
+        let mut statuses = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let NodeEventKind::EmbeddedServiceChanged {
+                network_name: event_network,
+                status,
+            } = event.kind
+            {
+                if event_network == network_name {
+                    statuses.push(status);
+                }
+            }
+        }
+        statuses
     }
 
     #[tokio::test]
@@ -1180,6 +1299,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_exposes_running_embedded_service_without_secrets_or_paths() {
+        let harness = TestHarness::new("service-running").await;
+        let mut events = harness.events.subscribe();
+
+        let created = harness
+            .runtime
+            .create(create_command("local", false))
+            .await
+            .expect("create detached network");
+        assert!(created.ticket.starts_with(NetworkTicket::URI_SCHEME));
+        assert_eq!(
+            embedded_service_events(&mut events, "local"),
+            vec![
+                NodeEmbeddedServiceStatus::Starting,
+                NodeEmbeddedServiceStatus::Running,
+            ]
+        );
+
+        let snapshot = harness.state.snapshot().await;
+        let service = snapshot
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == "local")
+            .expect("embedded service snapshot");
+        assert_eq!(service.status, NodeEmbeddedServiceStatus::Running);
+        assert!(service.signaling_addr.is_some());
+        assert!(service.relay_addr.is_some());
+
+        let encoded = serde_json::to_string(&snapshot).expect("serialize node snapshot");
+        assert!(!encoded.contains("ticket"));
+        assert!(!encoded.contains("private_key"));
+        assert!(!encoded.contains("secret_key"));
+        assert!(!encoded.contains("config_path"));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn embedded_service_start_failure_is_visible_in_snapshot_and_events() {
+        let harness = TestHarness::new("service-failure").await;
+        let mut events = harness.events.subscribe();
+        let mut command = create_command("broken", false);
+        command.signaling_port = 12345;
+        command.relay_port = 12345;
+
+        let error = harness
+            .runtime
+            .create(command)
+            .await
+            .expect_err("invalid embedded service request must fail");
+        assert!(matches!(error, RuntimeControlError::Invalid(_)));
+        assert_eq!(
+            embedded_service_events(&mut events, "broken"),
+            vec![
+                NodeEmbeddedServiceStatus::Starting,
+                NodeEmbeddedServiceStatus::Failed,
+            ]
+        );
+
+        let snapshot = harness.state.snapshot().await;
+        let service = snapshot
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == "broken")
+            .expect("failed embedded service snapshot");
+        assert_eq!(service.status, NodeEmbeddedServiceStatus::Failed);
+        assert!(service.signaling_addr.is_none());
+        assert!(service.relay_addr.is_none());
+        assert!(!harness.configs.network_exists("broken"));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn stop_network_releases_runtime_and_owned_service() {
         let harness = TestHarness::new("stop-owned").await;
         let created = harness
@@ -1193,6 +1386,7 @@ mod tests {
             harness.services.list().await.expect("list services").len(),
             1
         );
+        let mut events = harness.events.subscribe();
 
         let stopped = harness
             .runtime
@@ -1213,6 +1407,21 @@ mod tests {
         assert!(snapshot.networks.iter().any(|network| {
             network.name == "owned" && network.status == NodeNetworkStatus::Offline
         }));
+        let service = snapshot
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == "owned")
+            .expect("stopped embedded service snapshot");
+        assert_eq!(service.status, NodeEmbeddedServiceStatus::Stopped);
+        assert!(service.signaling_addr.is_none());
+        assert!(service.relay_addr.is_none());
+        assert_eq!(
+            embedded_service_events(&mut events, "owned"),
+            vec![
+                NodeEmbeddedServiceStatus::Stopping,
+                NodeEmbeddedServiceStatus::Stopped,
+            ]
+        );
         assert_eq!(snapshot.lifecycle.active_networks, 0);
         assert_eq!(snapshot.lifecycle.configured_networks, 1);
 
@@ -1253,6 +1462,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_stops_every_embedded_service_and_publishes_events() {
+        let harness = TestHarness::new("shutdown-services").await;
+        harness
+            .runtime
+            .create(create_command("alpha", false))
+            .await
+            .expect("create alpha");
+        harness
+            .runtime
+            .create(create_command("beta", false))
+            .await
+            .expect("create beta");
+        let mut alpha_events = harness.events.subscribe();
+        let mut beta_events = harness.events.subscribe();
+
+        let summary = harness.runtime.shutdown().await.expect("shutdown node");
+        assert_eq!(summary.stopped, vec!["alpha", "beta"]);
+
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(snapshot.embedded_services.len(), 2);
+        for service in &snapshot.embedded_services {
+            assert_eq!(service.status, NodeEmbeddedServiceStatus::Stopped);
+            assert!(service.signaling_addr.is_none());
+            assert!(service.relay_addr.is_none());
+        }
+        assert_eq!(
+            embedded_service_events(&mut alpha_events, "alpha"),
+            vec![
+                NodeEmbeddedServiceStatus::Stopping,
+                NodeEmbeddedServiceStatus::Stopped,
+            ]
+        );
+        assert_eq!(
+            embedded_service_events(&mut beta_events, "beta"),
+            vec![
+                NodeEmbeddedServiceStatus::Stopping,
+                NodeEmbeddedServiceStatus::Stopped,
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&harness.config_dir);
+    }
+
+    #[tokio::test]
     async fn create_failure_rolls_back_config_service_and_state() {
         let harness = TestHarness::new("create-rollback").await;
         harness.fake.fail("broken");
@@ -1281,6 +1534,10 @@ mod tests {
             .networks
             .iter()
             .any(|network| network.network_name == "broken"));
+        assert!(!snapshot
+            .embedded_services
+            .iter()
+            .any(|service| service.network_name == "broken"));
 
         harness.shutdown().await;
     }

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use super::{NodeLogLevel, NodeNetworkStatus};
+use super::{NodeEmbeddedServiceStatus, NodeLogLevel, NodeNetworkStatus};
 
 /// Ordered event delivered to every attached UI and control adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +21,10 @@ pub enum NodeEventKind {
     NetworkChanged {
         network_name: String,
         status: NodeNetworkStatus,
+    },
+    EmbeddedServiceChanged {
+        network_name: String,
+        status: NodeEmbeddedServiceStatus,
     },
     LogAppended {
         level: NodeLogLevel,

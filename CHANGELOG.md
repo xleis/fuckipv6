@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- **内嵌服务状态快照**: `NodeSnapshot` 新增无敏感信息的 `embedded_services`，按网络发布内嵌信令/中继服务的 `Starting/Running/Stopping/Stopped/Failed` 状态及运行中监听地址；服务生命周期变化通过 `EmbeddedServiceChanged` 事件同步，测试覆盖创建、启动失败、按网络停止、全量关闭以及票据/私钥/配置路径不入快照。
 - **UI 契约命令通道**: 新增 `NodeCommand::GetUiManifest` 与 `NodeCommandOutcome::UiManifest`，让 CLI、IPC、WebUI 和后续 GPUI 通过同一个节点命令总线获取版本化 manifest；测试覆盖 JSON 往返、11 个页面和当前 schema 版本。该命令只传输 UI 契约，不代表 WebUI/GPUI 已完成适配。
 - 完成 QUIC 中继统一身份控制：生产服务端强制 Ed25519 客户端证书并验证私钥持有证明；Relay Register 签名绑定 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter；服务端在写入 relay 状态前逐字节核对证书 SPKI 与应用公钥。生产中继禁用 0-RTT，恢复会话回退到 1-RTT；负向测试覆盖缺失/错误证书、错误 pin、合法证书错绑应用身份、Register 篡改/缺失绑定及无 relay 状态副作用。客户端证书 CA/allowlist/撤销策略和独立安全审计仍未完成。
 - 增加可选 `pq` feature 的 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT` profile：固定 X-Wing、复合身份、TH1、TH2 向量，规范 `HELLO` 6755 字节与 `ACCEPT` 6635 字节，并覆盖双签名、PSK 模式、有效签名降级、时间窗、重放、截断和非 contributory 输入失败关闭。该 profile 尚未接入生产控制通道、QUIC/relay 或数据面，尚无 Initiator hybrid `CONFIRM`、Cookie/限速和端到端容量测试；上游 ML-KEM/ML-DSA crate 未经独立审计，不得据此宣称已具备后量子安全或超越 WireGuard。
@@ -15,7 +16,7 @@ All notable changes are documented here. The project follows semantic versioning
 
 ### Changed
 - **动态网络运行时已接入统一节点命令层**: `NodeRuntimeHandler` 现在把动态启动、创建、票据/URL/主机加入、按网络停止与关闭转发给 `NetworkRuntimeManager` actor；初始计划支持部分失败后只重试未运行网络，创建失败会回滚配置、内嵌服务与节点状态，`auto_connect=false` 会保留服务直到显式停止。网络上下线、配置与失败状态会同步到共享快照和事件。路由热更新与网络角色变更仍返回稳定 `Unavailable`；CLI/WebUI 仍主要使用旧入口，GPUI 尚未实现，双 UI 对等测试未完成。权限仍是 `TrustedControlPlane` 且无逐主体鉴权，WebUI 仍监听全部网卡。
-- **内嵌网络服务生命周期 Actor**: 新增由节点侧统一持有的 `EmbeddedServiceManager`，在同一 actor 中管理多个网络的内嵌信令与 QUIC 中继实例，提供启动去重、排序列表、按网络停止和全量关闭；服务实例在停止或 actor 关闭时释放，关闭后的新请求返回稳定错误。该基座随后已接入共享命令处理器、节点状态/事件和动态网络运行时；服务级细粒度状态与 UI 展示仍未完成。
+- **内嵌网络服务生命周期 Actor**: 新增由节点侧统一持有的 `EmbeddedServiceManager`，在同一 actor 中管理多个网络的内嵌信令与 QUIC 中继实例，提供启动去重、排序列表、按网络停止和全量关闭；服务实例在停止或 actor 关闭时释放，关闭后的新请求返回稳定错误。该基座随后已接入共享命令处理器、节点状态/事件和动态网络运行时；服务级状态已进入共享快照，但 WebUI/GPUI 展示适配仍未完成。
 - **节点配置与权限快照**: 共享 `NodeSnapshot` 现在发布启动覆盖后的有效网络配置和统一权限类别；配置投影包含路由、Exit Node、TUN/P2P、ACL 摘要与日志级别，但刻意省略私钥和日志文件路径。多网络监督器同时补上 `is_exit_node` 启动覆盖。权限快照明确标记当前为 `TrustedControlPlane`（连接控制面的调用方可全权操作），不代表已实现逐用户或远程鉴权；WebUI 仍监听全部网卡，CLI/IPC/WebUI/GPUI 尚未完整渲染这些字段。
 - **共享 UI 能力清单基座**: 新增版本化、传输无关的节点 UI manifest，声明 11 个页面及动作、字段、校验、确认、权限、可用条件和后端成熟度；必填角色字段使用显式 `Role` 校验，测试校验页面/动作唯一性、破坏性确认，以及动作成熟度与当前真实命令处理器一致。动态启动、创建、加入和停止标记为 `Implemented`，路由与角色变更标记为 `Unavailable`；WebUI/GPUI 尚未消费该 manifest，双 UI 对等和端到端测试仍未完成。
 - **节点 IPC 接入统一命令总线**: 多网络运行时的本地 IPC 服务现在持有共享 `NodeCommandBus`，新增可提交 `NodeCommandRequest` 并返回类型化 `NodeCommandResult` 的传输请求，同时保留旧 IPC 请求以兼容现有 CLI/WebUI 调用。真实 TCP 测试覆盖 `GetSnapshot` 往返；CLI 和 WebUI 尚未迁移到该入口，动态启动、创建/加入后端已由后续动态运行时条目接通，路由和角色变更仍不可用。

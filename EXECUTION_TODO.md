@@ -7,7 +7,7 @@
 ## P0：共享契约与运行时底座
 
 - [x] **EX-01 UI manifest 命令通道**：让 UI 通过统一节点命令总线获取版本化 manifest，而不是在 WebUI/GPUI 各复制页面和动作定义。验收：新增 `GetUiManifest` 命令与类型化结果；JSON 往返可用；返回 11 个页面和当前 schema 版本。已通过 `GetUiManifest` 与类型化结果接通统一命令总线。涉及 `crates/client/src/node/{command,runtime_handler,ui_manifest}.rs`。
-- [>] **EX-02 内嵌服务状态快照**：把每个网络的内嵌信令/中继实例状态、监听地址和生命周期纳入 `NodeSnapshot` 与事件流。验收：创建、启动失败、停止、全量关闭均有状态与事件测试，快照不包含私钥或文件路径。
+- [x] **EX-02 内嵌服务状态快照**：把每个网络的内嵌信令/中继实例状态、监听地址和生命周期纳入 `NodeSnapshot` 与事件流。已完成 `Starting/Running/Stopping/Stopped/Failed` 状态、`EmbeddedServiceChanged` 事件及无票据/私钥/路径的共享 DTO；创建、启动失败、停止与全量关闭均有状态和事件测试。涉及 `crates/client/src/node/{state,event,mod,runtime_control}.rs`。
 - [ ] **EX-03 节点状态不变量**：为网络名称唯一、配置/运行网络对应、停止后 Peer 清理、失败回滚和 revision 单调性增加集中式不变量测试。验收：异常状态能被测试明确捕获，不允许 UI 自行修正。
 - [ ] **EX-04 命令错误契约**：补齐所有 `NodeCommand` 的验证、稳定错误码、可重试标记和序列化往返测试；路由/角色未实现必须持续返回 `Unavailable`。验收：每个命令至少覆盖成功或拒绝路径，错误不会伪装成功。
 - [ ] **EX-05 零网络节点身份**：零网络启动时也建立并发布节点公开身份、公钥指纹和配置中的显示名。验收：无网络快照仍含身份，私钥与种子不进入 DTO，身份跨重启稳定。

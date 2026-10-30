@@ -1,5 +1,4 @@
-use anyhow::{Context, Result};
-use fuckipv6_common::ClientConfig;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
@@ -7,6 +6,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
+use crate::node::{NodeLifecycle, NodeNetworkSelection, NodeRuntimePlan};
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
 /// Linux IFNAMSIZ 限制为 16 字节（包含空终止符 \0），最大有效长度为 15 字符。
@@ -59,6 +59,7 @@ pub fn sanitize_interface_name(name: &str) -> String {
 pub struct MultiNetworkSupervisor {
     registry: MultiNetworkRegistry,
     options: RuntimeOptions,
+    lifecycle: NodeLifecycle,
 }
 
 impl MultiNetworkSupervisor {
@@ -66,6 +67,7 @@ impl MultiNetworkSupervisor {
         Self {
             registry: MultiNetworkRegistry::new(),
             options,
+            lifecycle: NodeLifecycle::new(),
         }
     }
 
@@ -73,13 +75,36 @@ impl MultiNetworkSupervisor {
         &self.registry
     }
 
-    /// 并发启动并托管多个网络
-    pub async fn run_networks(&self, configs: Vec<(String, String, ClientConfig)>) -> Result<()> {
-        if configs.is_empty() {
-            anyhow::bail!("没有可启动的网络配置");
-        }
+    /// Shared node lifecycle consumed by every UI and control surface.
+    pub fn lifecycle(&self) -> &NodeLifecycle {
+        &self.lifecycle
+    }
 
-        tracing::info!("正在启动多网络并发管理器，共 {} 个网络...", configs.len());
+    /// Start the node control plane and its selected network sessions.
+    ///
+    /// An empty plan is valid: the node and its UI remain available so a
+    /// network can be created or joined from either interface.
+    pub async fn run_plan(&self, plan: NodeRuntimePlan) -> Result<()> {
+        let configured_networks = plan.len();
+        let configs: Vec<_> = plan
+            .into_networks()
+            .into_iter()
+            .map(|network| {
+                (
+                    network.name,
+                    network.config_path.to_string_lossy().into_owned(),
+                    network.config,
+                )
+            })
+            .collect();
+
+        self.lifecycle
+            .begin_start(configured_networks, Vec::new())
+            .await;
+        tracing::info!(
+            "正在启动节点运行时，已选择 {} 个网络...",
+            configured_networks
+        );
 
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<Option<String>>();
         self.registry.set_stop_sender(stop_tx);
@@ -103,9 +128,11 @@ impl MultiNetworkSupervisor {
             Arc::new(RwLock::new(HashMap::<String, watch::Sender<bool>>::new()));
 
         let mut handles = Vec::new();
+        let mut failed_networks = Vec::new();
+        let mut started_networks = 0usize;
 
         println!("══════════════════════════════════════════════════════════════════════════════");
-        println!("🚀 正在初始化多网络并发隧道 (共 {} 个网络)", configs.len());
+        println!("🚀 正在初始化节点网络管理器 (共 {configured_networks} 个网络)");
         println!("══════════════════════════════════════════════════════════════════════════════");
 
         for (net_name, config_path, mut client_config) in configs {
@@ -143,6 +170,7 @@ impl MultiNetworkSupervisor {
                 Err(e) => {
                     tracing::error!("网络 [{}] 初始化失败: {:#}", net_name, e);
                     println!("  ❌ 网络 [{}] 初始化失败: {:#}", net_name, e);
+                    failed_networks.push(net_name);
                     continue;
                 }
             };
@@ -195,13 +223,29 @@ impl MultiNetworkSupervisor {
             });
 
             handles.push(handle);
+            started_networks += 1;
         }
 
+        if configured_networks > 0 && started_networks == 0 {
+            self.lifecycle.failed().await;
+            anyhow::bail!("所有已选择网络均初始化失败，节点运行时未进入在线状态");
+        }
+
+        self.lifecycle
+            .running(started_networks, failed_networks)
+            .await;
+
         println!("══════════════════════════════════════════════════════════════════════════════");
-        println!("✨ 全部网络已成功上线运行！");
-        println!("  - 查看状态: fuckipv6 status");
-        println!("  - 查看节点: fuckipv6 peers");
-        println!("  - 停止网络: fuckipv6 down [名称] 或按 Ctrl+C");
+        if started_networks == 0 {
+            println!("✨ 节点控制面已上线，当前尚未加入网络");
+            println!("  - 可通过 WebUI 创建或加入网络");
+            println!("  - 停止节点: 按 Ctrl+C");
+        } else {
+            println!("✨ 节点控制面与 {started_networks} 个网络已上线运行！");
+            println!("  - 查看状态: fuckipv6 status");
+            println!("  - 查看节点: fuckipv6 peers");
+            println!("  - 停止网络: fuckipv6 down [名称] 或按 Ctrl+C");
+        }
         println!("══════════════════════════════════════════════════════════════════════════════");
 
         if ui_mode.is_gui() && webui_port > 0 {
@@ -215,7 +259,8 @@ impl MultiNetworkSupervisor {
         loop {
             tokio::select! {
                 _ = &mut shutdown_sig => {
-                    println!("\n🛑 收到中断信号，正在优雅关闭所有虚拟网...");
+                    println!("\n🛑 收到中断信号，正在优雅关闭节点网络...");
+                    self.lifecycle.begin_stop().await;
                     let _ = global_shutdown_tx.send(true);
                     let senders = network_shutdown_senders.read().await;
                     for tx in senders.values() {
@@ -238,6 +283,7 @@ impl MultiNetworkSupervisor {
                         }
                         None => {
                             println!("🛑 收到 IPC 指令: 停止所有网络");
+                            self.lifecycle.begin_stop().await;
                             let _ = global_shutdown_tx.send(true);
                             let senders = network_shutdown_senders.read().await;
                             for tx in senders.values() {
@@ -255,7 +301,8 @@ impl MultiNetworkSupervisor {
             let _ = h.await;
         }
 
-        println!("👋 所有网络已安全退出");
+        self.lifecycle.stopped().await;
+        println!("👋 节点网络运行时已安全退出");
         Ok(())
     }
 }
@@ -266,36 +313,32 @@ pub async fn start_multiple_networks(
     options: RuntimeOptions,
 ) -> Result<()> {
     let config_manager = ConfigManager::new()?;
-    let mut configs = Vec::new();
-
-    for name in network_names {
-        if !config_manager.network_exists(name) {
-            anyhow::bail!("网络配置不存在: {name} (可通过 'fuckipv6 list' 查看已保存的网络)");
-        }
-        let config_file = config_manager.get_network_config(name)?;
-        let config_path = config_file.to_string_lossy().to_string();
-        let client_config = ClientConfig::from_file(&config_path)
-            .with_context(|| format!("加载网络 [{name}] 配置文件失败"))?;
-        configs.push((name.clone(), config_path, client_config));
-    }
-
+    let plan = NodeRuntimePlan::load(
+        &config_manager,
+        NodeNetworkSelection::Named(network_names.to_vec()),
+    )?;
     let supervisor = MultiNetworkSupervisor::new(options);
-    supervisor.run_networks(configs).await
+    supervisor.run_plan(plan).await
 }
 
 /// 启动所有已保存的网络
 pub async fn start_all_networks(options: RuntimeOptions) -> Result<()> {
     let config_manager = ConfigManager::new()?;
-    let networks = config_manager.list_networks()?;
-    if networks.is_empty() {
+    let plan = NodeRuntimePlan::load(&config_manager, NodeNetworkSelection::All)?;
+    if plan.is_empty() {
         anyhow::bail!(
             "当前没有已保存的网络配置。请使用 'fuckipv6 join' 或 'fuckipv6 host' 添加网络。"
         );
     }
 
-    let names: Vec<String> = networks.into_iter().map(|n| n.name).collect();
+    let names: Vec<_> = plan
+        .networks()
+        .iter()
+        .map(|network| network.name.as_str())
+        .collect();
     println!("🚀 正在并发启动全部已保存的虚拟网络: {}", names.join(", "));
-    start_multiple_networks(&names, options).await
+    let supervisor = MultiNetworkSupervisor::new(options);
+    supervisor.run_plan(plan).await
 }
 
 /// 停止一个或全部运行中的网络

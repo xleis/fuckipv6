@@ -7,6 +7,7 @@ All notable changes are documented here. The project follows semantic versioning
 ### Security
 - **节点私钥文件权限**: Unix 上创建 `node_identity.pem` 时直接使用 `0600` 模式，不再依赖进程 umask；覆盖已有身份文件时会在写入私钥前收紧权限，并新增新文件与宽松旧权限两类回归测试。
 - **QUIC Relay 运行期身份撤销**: Coordinator 黑名单现在在 QUIC relay 注册前以及每个转发包的源、目的身份检查中强制执行；已撤销节点不能新建 relay 状态，也不能经现有连接发包，拒绝路径不增加 relay 转发计数。新增注册拒绝、撤销源、撤销目的和无状态/计数副作用回归测试。证书层 CA/allowlist/CRL/OCSP、网络级授权与独立安全审计仍未完成。
+- **NX-17 基准证据 fail-closed 门禁**: 基准工具现在从 canonical raw iperf3/perf/ping 证据重算吞吐、CPU、UDP 丢包和延迟，校验完整源码/二进制 provenance、证据 manifest、执行参数与正数约束；弱化 policy、篡改或逃逸证据、缺失/零/负指标、任一 UDP run 超丢包阈值都会失败。新增 25 个合成门禁测试；真实固定 CPU 对比尚待执行，不宣称性能超过 WireGuard。
 - **QUIC Relay 客户端证书 allowlist**: Relay 的 QUIC TLS 现在只接受当前已完成签名注册的节点 Ed25519 公钥；allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。TLS 授权查询使用同步快照，不在握手回调中等待异步会话锁。新增授权、未列入、空名单、未注册证书握手拒绝和注销后撤销回归测试。该控制是当前在线会话准入，不等同于 CA、CRL/OCSP、持久撤销列表或网络级最终授权，独立安全审计仍未完成。
 
 ### Added

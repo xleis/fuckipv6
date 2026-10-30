@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
+- **统一节点共享状态填充真实网络遥测**: 多网络监督器按秒聚合真实运行时中的 Peer 身份、虚拟地址、端点、P2P 质量、TUN/P2P 流量和错误计数到 `NodeStateStore`；停止期间的生命周期状态不会被竞态刷新覆盖，全部网络退出后会清理残留 Peer。身份、日志、配置、权限快照以及 CLI/IPC/WebUI/GPUI 的状态适配仍未完成。
 - **统一节点命令与状态契约基座**: 增加传输无关的 `NodeCommand`、请求/异步结果、稳定错误码、网络角色与节点快照 DTO，并实现并发命令总线和单调事件流；新增带修订号、watch 快照和事件通知的 `NodeStateStore`，多网络监督器现会发布生命周期及网络 Connecting/Online/Stopping/Offline/Failed 状态。真实命令处理器、身份/Peer/流量/日志生产填充以及 CLI/IPC/WebUI/GPUI 适配器迁移仍未完成。
 - **统一节点运行时基座**: 增加节点级 `Stopped/Starting/Running/Stopping/Failed` 生命周期、共享 watch 事件流和 `NodeRuntimePlan`；多网络监督器现在统一消费零网络、默认、全部或具名网络启动计划，空计划仍保留节点控制面和 WebUI，全部所选网络初始化失败时进入 `Failed`。身份、日志、本地控制面及 GPUI/WebUI 尚未全部订阅同一运行时和命令契约，因此不表示统一 UI 已完成。
 - **统一节点发布入口**: workspace 只发布 `fuckipv6` 一个用户程序，移除独立 `fuckipv6-coordinator` 二进制；Docker、Compose、systemd、launchd、安装脚本、CI/Release、测试和基准统一使用节点入口。`host`、`join`、中继和 Exit Node 均保留为同一节点的网络角色，不再代表两种产品身份。新增单二进制发布门禁。

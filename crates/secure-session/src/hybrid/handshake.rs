@@ -1129,6 +1129,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hybrid::xwing::XWING_SEED_LEN;
     use crate::transcript::{ENDPOINT_CONTEXT_HASH_LEN, SUITE_CHACHA20_POLY1305};
     use crate::Direction;
 
@@ -1190,6 +1191,80 @@ mod tests {
         let accept = accepted.accept().clone();
         let finished = initiator.finish(&accept, NOW, None).expect("finish");
         (accept, finished, accepted)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn canonical_hybrid_transcript_matches_fixed_vectors() {
+        let initiator_identity = initiator_identity();
+        let responder_identity = responder_identity();
+        let ephemeral_secret = XWingDecapsulationKey::from_seed(&[0x55; XWING_SEED_LEN]).unwrap();
+        let mut hello = HybridHello {
+            version: PROTOCOL_VERSION,
+            profile: HYBRID_PROFILE_ID,
+            suite_id: SUITE_CHACHA20_POLY1305,
+            initiator_identity: initiator_identity.identity_id(),
+            responder_identity: responder_identity.identity_id(),
+            initiator_public_key: initiator_identity.public_key(),
+            initiator_ephemeral_public: ephemeral_secret.encapsulation_key(),
+            initiator_nonce: [0x66; HYBRID_NONCE_LEN],
+            issued_at: NOW,
+            endpoint_context_hash: ENDPOINT,
+            psk_mode: 0,
+            cookie: [0x11; HYBRID_COOKIE_LEN],
+            signature: initiator_identity
+                .sign(HELLO_SIGNING_DOMAIN, &[0u8; TRANSCRIPT_HASH_LEN])
+                .unwrap(),
+        };
+        let th1 = hello.transcript_hash();
+        hello.signature = initiator_identity.sign(HELLO_SIGNING_DOMAIN, &th1).unwrap();
+
+        let (ciphertext, _shared_secret) = hello
+            .initiator_ephemeral_public
+            .encapsulate_derand(&[0x77; 64])
+            .unwrap();
+        let accept_transcript = HybridAcceptTranscript {
+            hello_hash: &th1,
+            hello_signature: &hello.signature,
+            session_id: &[0x88; SESSION_ID_LEN],
+            epoch: EPOCH,
+            initiator_identity: &hello.initiator_identity,
+            responder_identity: &hello.responder_identity,
+            responder_public_key: &responder_identity.public_key(),
+            ciphertext: &ciphertext,
+            responder_nonce: &[0x99; HYBRID_NONCE_LEN],
+            issued_at: NOW,
+        };
+        let th2_input = accept_transcript.hash();
+        let signature = responder_identity
+            .sign(ACCEPT_SIGNING_DOMAIN, &th2_input)
+            .unwrap();
+        let th2 = accept_transcript.final_hash(&signature);
+
+        assert_eq!(
+            hex(&th1),
+            concat!(
+                "b86ee3d485d9d8aa50a35b0ba07fbb848a56cfb89d6f8ac9b4f4bb9e86d9d71c",
+                "1d62f1ef9d076f6af6f727948fc7e1cb39dc5df024afd33b1fe95421c85e532a"
+            )
+        );
+        assert_eq!(
+            hex(&th2_input),
+            concat!(
+                "2a72f5e01209c4f01cf6b2bf21a8687b602a598a52991b0c3fb477b0d962b302",
+                "f430222697ddfd8f3e148589c187f5355816bdf876f66f6c000d4ef5f2472080"
+            )
+        );
+        assert_eq!(
+            hex(&th2),
+            concat!(
+                "6a04f77fc4534f63f91d3d6eb52fa6fcd9a24ddb4d70e40908d0dfbbf012f081",
+                "bfacea8e277db8977c4f5f1886ee5944dc9f01d877e611397851e792d4a9ee10"
+            )
+        );
     }
 
     #[test]

@@ -21,7 +21,27 @@ use crate::crypto::Identity;
 use crate::{ClientId, ErrorCode};
 
 pub const FUCKIPV6_QUIC_ALPN: &[u8] = b"fuckipv6-quic-v1";
+pub const QUIC_RELAY_CHANNEL_BINDING_LABEL: &[u8] = b"fuckipv6-quic-client-cert-binding-v1";
+pub const QUIC_RELAY_CHANNEL_BINDING_CONTEXT: &[u8] = b"relay-register";
 pub const MAX_QUIC_FRAME_SIZE: usize = 64 * 1024;
+
+/// 从当前 TLS 1.3 会话导出 relay 注册使用的 32 字节 channel binding。
+///
+/// 客户端与服务端必须调用同一 helper，并使用相同的版本化 label/context。
+/// exporter 结果随 TLS 会话变化，不能作为静态协议常量或跨连接复用。
+pub fn export_quic_relay_channel_binding(connection: &quinn::Connection) -> Result<[u8; 32]> {
+    let mut binding = [0_u8; 32];
+    connection
+        .export_keying_material(
+            &mut binding,
+            QUIC_RELAY_CHANNEL_BINDING_LABEL,
+            QUIC_RELAY_CHANNEL_BINDING_CONTEXT,
+        )
+        .map_err(|err| {
+            anyhow::anyhow!("无法从 QUIC TLS 会话导出 relay channel binding: {err:?}")
+        })?;
+    Ok(binding)
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct QuicCertificate {
@@ -855,6 +875,44 @@ mod tests {
         connection.close(0u32.into(), b"done");
         client.wait_idle().await;
         server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_endpoints_derive_same_relay_channel_binding() -> anyhow::Result<()> {
+        let server_certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+        let client_certificate = QuicCertificate::from_identity(&Identity::generate()?)?;
+        let server = quinn::Endpoint::server(
+            build_quic_server_config(&server_certificate)?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move {
+            let incoming = server
+                .accept()
+                .await
+                .context("server did not accept client")?;
+            let connection = incoming.await.context("server handshake failed")?;
+            export_quic_relay_channel_binding(&connection)
+        });
+
+        let mut client =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            server_certificate.public_key_pin,
+            &client_certificate,
+        )?);
+        let connection = client
+            .connect(server_addr, "fuckipv6.local")?
+            .await
+            .context("client handshake failed")?;
+        let client_binding = export_quic_relay_channel_binding(&connection)?;
+
+        connection.close(0u32.into(), b"done");
+        client.wait_idle().await;
+        let server_binding = server_task.await??;
+        assert_eq!(client_binding, server_binding);
         Ok(())
     }
 

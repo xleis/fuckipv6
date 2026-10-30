@@ -9,6 +9,15 @@ pub mod config_reload;
         target_os = "macos"
     )
 ))]
+pub mod gpui;
+#[cfg(all(
+    feature = "gpui-shell",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        windows,
+        target_os = "macos"
+    )
+))]
 pub mod gpui_shell;
 pub mod ipc;
 pub mod logging;

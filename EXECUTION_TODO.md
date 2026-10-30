@@ -23,7 +23,7 @@
 
 - [ ] **EX-10 WebUI manifest/快照适配**：WebUI 获取并校验 manifest，页面、动作、字段、可用条件和错误映射由共享契约驱动。验收：manifest 版本不匹配时明确失败，不静默降级。
 - [x] **EX-11 GPUI 应用外壳**：引入 GPUI，完成窗口、主题、导航、状态订阅、错误提示和退出清理；桌面模式不依赖浏览器。已完成真实 `gpui::Application::run`/`open_window` 外壳、manifest 导航、`NodeStateStore` 订阅、`NodeCommandBus` 命令、错误提示、无显示/未编译能力门禁和退出清理；Linux 桌面与 Xvfb 冒烟均可保持原生窗口进程运行。业务页面与自动对等测试归 EX-12/EX-14。
-- [ ] **EX-12 GPUI 功能页面**：按 manifest 实现网络、Peer、拓扑、流量、路由、Exit Node、中继、日志、身份和设置页面。验收：不实现第二套校验、权限或状态机。
+- [>] **EX-12 GPUI 功能页面**：按 manifest 实现网络、Peer、拓扑、流量、路由、Exit Node、中继、日志、身份和设置页面。验收：不实现第二套校验、权限或状态机。已交付 11 页真实 `NodeSnapshot` 投影、manifest 动作闭合映射、类型化命令构造、空态/错误态和纯 Rust 自动化测试；正式 IME/无障碍、端到端窗口交互与跨平台实机仍待完成。
 - [x] **EX-13 UI 模式选择与回退**：实现 `--gpui`、`--headless` 和自动检测；无显示环境使用 WebUI，GPUI 初始化失败给出显式策略。验收：三种模式及失败回退可自动化测试。完成：共享 `Gpui/WebUi/Headless` 模式契约、冲突/无显示/GPUI 不可用错误、CLI 参数接线、旧 `--gui` 到 WebUI 的兼容别名及 `NodeSnapshot.ui_mode` 均已落地；NX-08 已把顶层 `--gpui` 接到真实原生窗口，未编译或无显示时明确失败，不会伪装成 WebUI。
 - [>] **EX-14 UI 对等契约测试**：依据 manifest 自动比较 WebUI/GPUI 的页面、动作、字段、校验、错误映射和权限。验收：缺少任一动作或语义不一致时 CI 失败，覆盖无网络、单网络和双网络。
 
@@ -91,12 +91,13 @@
   - 工作：接入真正的 GPUI 原生窗口，完成主题、导航、`NodeStateStore` 订阅、命令提交、错误提示和退出清理；不得依赖浏览器、WebView 或 `--app` 窗口。
   - 依赖：NX-01、NX-03；命令总线与状态存储保持现有共享契约。
   - 验收：Linux 桌面可启动独立 GPUI 进程并连接真实节点；窗口关闭/崩溃路径不遗留运行时任务；无显示环境不会错误启动 GPUI；截图或自动窗口冒烟测试纳入 CI 可运行环境。
-  - 完成（2026-10-30）：新增 `gpui_shell`，顶层 `--gpui` 与桌面自动模式在 OS 主线程启动真实 `gpui::Application` 窗口；原生会话使用独立 Tokio runtime、真实 `MultiNetworkSupervisor`、共享 `NodeStateStore`/`NodeCommandBus`，11 页 manifest 全部有导航项，非 overview 页面显示 NX-09 占位且不伪造动作。无显示和未编译 shell 在创建窗口前失败；正常关闭、窗口创建失败和 panic unwind 均通过带超时的 `Shutdown`/runtime 回收清理。Linux Wayland 实机与 Xvfb 均验证窗口进程可启动；`scripts/gpui-smoke.sh` 同时验证 headless 能力门禁和强制 X11 原生窗口启动，并已加入 Verify CI。
+  - 完成（2026-10-30）：新增 `gpui_shell`，顶层 `--gpui` 与桌面自动模式在 OS 主线程启动真实 `gpui::Application` 窗口；原生会话使用独立 Tokio runtime、真实 `MultiNetworkSupervisor`、共享 `NodeStateStore`/`NodeCommandBus`，11 页 manifest 全部有导航项，非 overview 页面在 NX-08 交付时显示 NX-09 占位且不伪造动作；后续 NX-09 垂直切片已替换这些占位。无显示和未编译 shell 在创建窗口前失败；正常关闭、窗口创建失败和 panic unwind 均通过带超时的 `Shutdown`/runtime 回收清理。Linux Wayland 实机与 Xvfb 均验证窗口进程可启动；`scripts/gpui-smoke.sh` 同时验证 headless 能力门禁和强制 X11 原生窗口启动，并已加入 Verify CI。
 
-- [ ] **NX-09 GPUI 功能页面（细化 EX-12）**
+- [>] **NX-09 GPUI 功能页面（细化 EX-12）**
   - 工作：严格按 11 页 manifest 实现 `overview`、`networks`、`peers`、`topology`、`traffic`、`routing`、`exit_node`、`relay`、`logs`、`identity`、`settings`。
   - 依赖：NX-03、NX-08；后端未实现动作继续显示 manifest 的 `Unavailable`，不得前端伪造可用。
   - 验收：每页动作、字段、必填项、校验、确认、权限和不可用原因均来自共享契约；GPUI 不复制业务校验或状态机；覆盖空节点、单网络、双网络、离线、权限不足和命令失败状态。
+  - 进展（2026-10-30）：11 页均从真实 `NodeSnapshot` 构建 metrics/sections/空态；manifest 的 10 个动作使用闭合 action binding 和类型化 `NodeCommand`，未知页面/动作/命令不匹配失败关闭；权限与 availability 只读共享快照，确认与命令失败进入显式错误态。测试覆盖空节点、单/双网络、离线、权限不足、非法输入与未知动作。路由/角色动作仍由后端返回 `Unavailable`；文本输入仍是简化按键适配，正式 IME、无障碍、跨平台实机及 GPUI/WebUI 完整对等未完成，因此不宣称 NX-09 全量验收或 UI 对等完成。
 
 - [>] **NX-10 UI 对等自动门禁（细化 EX-14）**
   - 工作：建立 WebUI/GPUI 共用的页面与动作覆盖检查，自动比较页面集合、动作、字段、可用条件、权限、错误映射和命令 DTO。

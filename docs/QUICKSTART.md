@@ -13,7 +13,7 @@
 
 协议和 TLS 代码中的 client/server、Initiator/Responder 只是会话术语，不是产品身份。
 
-界面目标是：有桌面环境时使用 GPUI 原生界面，无桌面环境时使用 WebUI；两套 UI 必须共享命令层、状态模型、校验和错误语义。NX-08 已接通可启动的真实 GPUI 原生外壳，但 11 个业务页面仍以 NX-09 占位为主，双 UI 自动对等测试尚未完成。`--webui` 始终是浏览器托管路径，不能称为 GPUI。
+界面目标是：有桌面环境时使用 GPUI 原生界面，无桌面环境时使用 WebUI；两套 UI 必须共享命令层、状态模型、校验和错误语义。NX-08 已接通可启动的真实 GPUI 原生外壳；NX-09 垂直切片已让 11 个 manifest 页面显示真实快照并接通类型化动作，但正式 IME/无障碍、双 UI 自动对等测试与跨平台实机验证尚未完成。`--webui` 始终是浏览器托管路径，不能称为 GPUI。
 
 ## 前置要求
 
@@ -113,7 +113,7 @@ ssh -L 8080:127.0.0.1:8080 user@node
 
 IPC 默认监听 `127.0.0.1:6668`，也可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。IPC 当前没有认证协议，因此即使设置 `FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会允许非回环监听。
 
-有桌面显示时可运行 `fuckipv6 --gpui` 启动真实 GPUI 原生外壳；无显示环境使用 headless WebUI。当前 GPUI 已接通共享 manifest、状态和命令总线，但 NX-09 业务页面仍是占位，不能宣称 GPUI/WebUI 功能对等。
+有桌面显示时可运行 `fuckipv6 --gpui` 启动真实 GPUI 原生外壳；无显示环境使用 headless WebUI。当前 GPUI 已接通共享 manifest、状态和命令总线，11 个页面会展示真实快照并映射 manifest 动作；但完整交互、正式 IME/无障碍和 GPUI/WebUI 自动对等仍未完成，不能宣称功能对等。
 
 ## 使用传统配置文件启动
 
@@ -259,7 +259,7 @@ sudo ip link delete fuckipv6
 
 ### WebUI 是否等价于 GPUI？
 
-不是。WebUI 是当前功能较完整的界面表面；GPUI 已是真实原生桌面外壳，但多数业务页面仍待 NX-09。二者已消费同一 manifest、状态和命令契约，完成自动对等测试后才算达到统一 UI 目标。
+不是。WebUI 是当前功能较完整的界面表面；GPUI 已实现 11 页真实快照投影和 manifest 动作接线的垂直切片，但完整交互、IME/无障碍、跨平台实机与自动语义对等仍未完成。二者已消费同一 manifest、状态和命令契约，完成自动对等测试后才算达到统一 UI 目标。
 
 ## 架构边界
 

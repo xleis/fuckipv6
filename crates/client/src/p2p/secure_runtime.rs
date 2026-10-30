@@ -31,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
+use super::admission::{HandshakeAdmission, HandshakeAdmissionError, HandshakeAdmissionPermit};
 use super::secure_session::SessionPolicy;
 
 /// Network-separation domain bound into the v2 endpoint context.
@@ -58,6 +59,8 @@ pub(crate) enum SecureRuntimeError {
     ControlCodec(#[from] ControlCodecError),
     #[error("Secure Session v2 driver failed: {0}")]
     Driver(#[from] DriverError),
+    #[error("handshake admission rejected: {0}")]
+    Admission(#[from] HandshakeAdmissionError),
     #[error("Secure Session v2 is not established for this peer")]
     NotEstablished,
     #[error("Secure Session v2 has been revoked for this peer")]
@@ -92,6 +95,7 @@ struct PendingResponder {
     handshake: ResponderHandshake,
     hello: Hello,
     accept_frame: Vec<u8>,
+    admission: HandshakeAdmissionPermit,
 }
 
 #[derive(Default)]
@@ -111,6 +115,7 @@ pub(crate) struct SecurePeerState {
     endpoint_context: [u8; 32],
     policy: SessionPolicy,
     install_config: SessionInstallConfig,
+    handshake_admission: Arc<HandshakeAdmission>,
     initiator: bool,
     local_receiver_index: u32,
     lifecycle_gate: RwLock<()>,
@@ -124,6 +129,7 @@ impl SecurePeerState {
         local_identity: Ed25519Identity,
         local_virtual_ip: IpAddr,
         peer: &PeerInfo,
+        handshake_admission: Arc<HandshakeAdmission>,
     ) -> Result<Arc<Self>, SecureRuntimeError> {
         let peer_public: [u8; 32] = peer
             .public_key
@@ -211,6 +217,7 @@ impl SecurePeerState {
             endpoint_context,
             policy: SessionPolicy::default(),
             install_config,
+            handshake_admission,
             initiator,
             local_receiver_index: install_config.local_receiver_index,
             lifecycle_gate: RwLock::new(()),
@@ -415,6 +422,10 @@ impl SecurePeerState {
                 let Some(pending) = state.pending_responder.as_ref() else {
                     return Err(SecureRuntimeError::UnexpectedFrame { expected: "HELLO" });
                 };
+                if !pending.admission.is_active(Instant::now()) {
+                    state.pending_responder = None;
+                    return Err(HandshakeAdmissionError::Expired.into());
+                }
                 pending.handshake.validate_wire(&confirm)?;
                 let pending = state
                     .pending_responder
@@ -439,16 +450,33 @@ impl SecurePeerState {
                 expected: "CONFIRM",
             });
         }
-        if let Some(pending) = state.pending_responder.as_ref() {
-            if pending.hello == hello {
-                return Ok(vec![SecureControlAction {
-                    destination: source,
-                    frame: pending.accept_frame.clone(),
-                    kind: "ACCEPT",
-                }]);
-            }
+        let now = Instant::now();
+        if state
+            .pending_responder
+            .as_ref()
+            .is_some_and(|pending| pending.hello == hello && pending.admission.is_active(now))
+        {
+            let pending = state
+                .pending_responder
+                .as_ref()
+                .expect("active pending responder checked above");
+            return Ok(vec![SecureControlAction {
+                destination: source,
+                frame: pending.accept_frame.clone(),
+                kind: "ACCEPT",
+            }]);
+        }
+        if state
+            .pending_responder
+            .as_ref()
+            .is_some_and(|pending| !pending.admission.is_active(now))
+        {
+            state.pending_responder = None;
         }
 
+        let admission =
+            self.handshake_admission
+                .try_reserve(source.ip(), hello.initiator_identity, now)?;
         let responder = state
             .responder
             .as_mut()
@@ -472,6 +500,7 @@ impl SecurePeerState {
             handshake,
             hello,
             accept_frame: accept_frame.clone(),
+            admission,
         });
         Ok(vec![SecureControlAction {
             destination: source,
@@ -690,6 +719,7 @@ fn unix_timestamp() -> Result<u64, SecureRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::p2p::admission::HandshakeAdmissionConfig;
     use fuckipv6_common::{NatType, PeerInfo};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -711,7 +741,22 @@ mod tests {
         )
     }
 
+    fn admission() -> Arc<HandshakeAdmission> {
+        HandshakeAdmission::shared_default()
+    }
+
     fn pair() -> (
+        Arc<SecurePeerState>,
+        Arc<SecurePeerState>,
+        SocketAddr,
+        SocketAddr,
+    ) {
+        pair_with_admission(admission())
+    }
+
+    fn pair_with_admission(
+        admission: Arc<HandshakeAdmission>,
+    ) -> (
         Arc<SecurePeerState>,
         Arc<SecurePeerState>,
         SocketAddr,
@@ -732,6 +777,7 @@ mod tests {
                 "fd00::1",
                 responder_addr,
             ),
+            admission.clone(),
         )
         .expect("state A");
         let state_b = SecurePeerState::new(
@@ -743,6 +789,7 @@ mod tests {
                 "fd00::2",
                 initiator_addr,
             ),
+            admission,
         )
         .expect("state B");
         if state_a.is_initiator() {
@@ -791,6 +838,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handshake_admission_reservation_follows_pending_responder_lifecycle() {
+        let admission = admission();
+        let (initiator, responder, initiator_addr, responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let hello_message =
+            fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+
+        let accept = responder
+            .handle_control(initiator_addr, hello_message.clone())
+            .await
+            .expect("first hello");
+        responder
+            .handle_control(initiator_addr, hello_message)
+            .await
+            .expect("retransmitted hello");
+        let metrics = admission.metrics(Instant::now());
+        assert_eq!(metrics.admitted, 1);
+        assert_eq!(metrics.active_reservations, 1);
+
+        let confirm = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                    .expect("decode accept"),
+            )
+            .await
+            .expect("accept response");
+        responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+                    .expect("decode confirm"),
+            )
+            .await
+            .expect("complete responder");
+
+        assert!(responder.is_established().await);
+        assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_admission_is_fail_closed_and_valid_hello_recovers() {
+        let admission = HandshakeAdmission::new(HandshakeAdmissionConfig {
+            per_source: 1,
+            per_identity: 1,
+            global: 1,
+            max_entries: 1,
+            ttl: Duration::from_secs(30),
+        })
+        .expect("valid admission config");
+        let occupier = admission
+            .try_reserve(
+                "192.0.2.200".parse().expect("occupier source"),
+                [200; 32],
+                Instant::now(),
+            )
+            .expect("occupy global slot");
+        let (initiator, responder, initiator_addr, _responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let hello_message =
+            fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+
+        assert!(matches!(
+            responder
+                .handle_control(initiator_addr, hello_message.clone())
+                .await,
+            Err(SecureRuntimeError::Admission(
+                HandshakeAdmissionError::GlobalLimit
+            ))
+        ));
+        assert_eq!(admission.metrics(Instant::now()).rejected_global, 1);
+        assert!(!responder.is_established().await);
+
+        drop(occupier);
+        responder
+            .handle_control(initiator_addr, hello_message)
+            .await
+            .expect("valid hello progresses once pressure subsides");
+        assert_eq!(admission.metrics(Instant::now()).active_reservations, 1);
+    }
+
+    #[tokio::test]
     async fn dual_stack_peer_metadata_uses_the_same_single_address_context() {
         let initiator_identity = Ed25519Identity::from_seed(INITIATOR_SEED);
         let responder_identity = Ed25519Identity::from_seed(RESPONDER_SEED);
@@ -819,10 +958,17 @@ mod tests {
             vec![initiator_addr],
             NatType::Open,
         );
-        let state_a = SecurePeerState::new(initiator_identity, initiator_ip, &initiator_peer)
-            .expect("initiator state");
-        let state_b = SecurePeerState::new(responder_identity, responder_ip, &responder_peer)
-            .expect("responder state");
+        let admission = admission();
+        let state_a = SecurePeerState::new(
+            initiator_identity,
+            initiator_ip,
+            &initiator_peer,
+            admission.clone(),
+        )
+        .expect("initiator state");
+        let state_b =
+            SecurePeerState::new(responder_identity, responder_ip, &responder_peer, admission)
+                .expect("responder state");
         let (initiator, responder, initiator_addr, responder_addr) = if state_a.is_initiator() {
             (state_a, state_b, initiator_addr, responder_addr)
         } else {

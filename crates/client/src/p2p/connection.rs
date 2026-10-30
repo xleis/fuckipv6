@@ -13,6 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
+use super::admission::{HandshakeAdmission, HandshakeAdmissionMetrics};
 use super::health::{ConnectionHealthSnapshot, PeerHealth};
 use super::secure_runtime::SecurePeerState;
 
@@ -137,6 +138,7 @@ pub struct P2pEngine {
     local_ip: Arc<RwLock<Option<IpAddr>>>,
     local_identity: Arc<RwLock<Option<Identity>>>,
     authenticated_inbound: Arc<RwLock<AuthenticatedInboundCache>>,
+    handshake_admission: Arc<HandshakeAdmission>,
     fallback_threshold: Arc<RwLock<FallbackThreshold>>,
     quic_mesh: Arc<RwLock<Option<super::quic::QuicP2pMesh>>>,
     #[cfg(test)]
@@ -186,6 +188,7 @@ impl P2pEngine {
         let local_ip = Arc::new(RwLock::new(None));
         let local_identity = Arc::new(RwLock::new(None));
         let authenticated_inbound = Arc::new(RwLock::new(AuthenticatedInboundCache::default()));
+        let handshake_admission = HandshakeAdmission::shared_default();
         let overlay = Arc::new(super::overlay::P2pOverlay::new(
             fuckipv6_common::NodeId::default(),
         ));
@@ -210,6 +213,7 @@ impl P2pEngine {
             local_ip,
             local_identity,
             authenticated_inbound,
+            handshake_admission,
             fallback_threshold: Arc::new(RwLock::new(FallbackThreshold::default())),
             quic_mesh: Arc::new(RwLock::new(None)),
             #[cfg(test)]
@@ -251,12 +255,20 @@ impl P2pEngine {
         self.overlay.clone()
     }
 
+    /// Snapshot handshake admission pressure without exposing peer secrets.
+    pub fn handshake_admission_metrics(&self) -> HandshakeAdmissionMetrics {
+        self.handshake_admission.metrics(std::time::Instant::now())
+    }
+
     /// 启用端到端直连 QUIC P2P 网格能力
     pub async fn enable_quic_mesh(
         &self,
         bind_addr: SocketAddr,
     ) -> Result<fuckipv6_common::QuicCertificate> {
-        let mesh = super::quic::QuicP2pMesh::new(bind_addr)?;
+        let mesh = super::quic::QuicP2pMesh::new_with_admission(
+            bind_addr,
+            self.handshake_admission.clone(),
+        )?;
         let cert = mesh.certificate().clone();
         *self.quic_mesh.write().await = Some(mesh);
         Ok(cert)
@@ -306,6 +318,7 @@ impl P2pEngine {
             local_identity.secure_session_identity(),
             local_ip,
             &peer_info,
+            self.handshake_admission.clone(),
         )
         .with_context(|| format!("无法初始化与节点 {client_id} 的 Secure Session v2"))?;
 

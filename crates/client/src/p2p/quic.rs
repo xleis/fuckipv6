@@ -1,10 +1,15 @@
 use anyhow::{Context, Result};
+use ed25519_dalek::VerifyingKey;
 use fuckipv6_common::{
     build_pinned_quic_client_config, build_pinned_quic_client_config_with_auth,
     build_quic_server_config, generate_self_signed_quic_certificate, recv_quic_frame,
     send_quic_frame, Identity, QuicCertificate, QuicFrame, ZeroRttSelfTestReport,
 };
+use fuckipv6_secure_session::handshake::identity_id;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Instant;
+
+use super::admission::{AdmissionIdentity, HandshakeAdmission, HandshakeAdmissionMetrics};
 
 pub fn build_server_config(certificate: &QuicCertificate) -> Result<quinn::ServerConfig> {
     build_quic_server_config(certificate)
@@ -131,10 +136,19 @@ pub struct QuicP2pMesh {
     certificate: QuicCertificate,
     client_certificate: QuicCertificate,
     active_peers: Arc<RwLock<HashMap<Ipv6Addr, quinn::Connection>>>,
+    handshake_admission: Arc<HandshakeAdmission>,
 }
 
 impl QuicP2pMesh {
     pub fn new(bind_addr: SocketAddr) -> Result<Self> {
+        Self::new_with_admission(bind_addr, HandshakeAdmission::shared_default())
+    }
+
+    /// Build a QUIC mesh that shares handshake capacity with the UDP runtime.
+    pub(crate) fn new_with_admission(
+        bind_addr: SocketAddr,
+        handshake_admission: Arc<HandshakeAdmission>,
+    ) -> Result<Self> {
         let certificate = generate_node_certificate()?;
         let client_certificate = generate_client_certificate()?;
         let server_config = build_server_config(&certificate)?;
@@ -145,6 +159,7 @@ impl QuicP2pMesh {
             certificate,
             client_certificate,
             active_peers: Arc::new(RwLock::new(HashMap::new())),
+            handshake_admission,
         })
     }
 
@@ -154,6 +169,11 @@ impl QuicP2pMesh {
 
     pub fn certificate(&self) -> &QuicCertificate {
         &self.certificate
+    }
+
+    /// Snapshot admission pressure without exposing certificate or ticket data.
+    pub fn handshake_admission_metrics(&self) -> HandshakeAdmissionMetrics {
+        self.handshake_admission.metrics(Instant::now())
     }
 
     pub async fn connect_peer(
@@ -219,13 +239,54 @@ impl QuicP2pMesh {
         default_peer_ip: Option<Ipv6Addr>,
     ) -> tokio::task::JoinHandle<()> {
         let endpoint = self.endpoint.clone();
+        let admission = self.handshake_admission.clone();
         tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
+                let source = incoming.remote_address().ip();
+                let now = Instant::now();
+                let mut permit = match admission.try_reserve_source(source, now) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        let metrics = admission.metrics(now);
+                        tracing::warn!(
+                            %source,
+                            %error,
+                            active = metrics.active_reservations,
+                            rejected = metrics.rejected_total(),
+                            "QUIC 握手准入已拒绝"
+                        );
+                        incoming.refuse();
+                        continue;
+                    }
+                };
                 let tx = incoming_tx.clone();
+                let task_admission = admission.clone();
                 tokio::spawn(async move {
                     let Ok(connection) = incoming.await else {
                         return;
                     };
+                    let identity = match authenticated_peer_identity(&connection) {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            connection.close(0u32.into(), b"invalid peer identity");
+                            tracing::warn!(%source, %error, "QUIC 客户端身份提取失败");
+                            return;
+                        }
+                    };
+                    if let Err(error) = permit.bind_identity(identity, Instant::now()) {
+                        let metrics = task_admission.metrics(Instant::now());
+                        connection.close(0u32.into(), b"handshake admission rejected");
+                        tracing::warn!(
+                            %source,
+                            %error,
+                            active = metrics.active_reservations,
+                            rejected = metrics.rejected_total(),
+                            "QUIC 客户端身份准入已拒绝"
+                        );
+                        return;
+                    }
+                    drop(permit);
+
                     loop {
                         let Ok((mut send, mut recv)) = connection.accept_bi().await else {
                             break;
@@ -241,6 +302,26 @@ impl QuicP2pMesh {
             }
         })
     }
+}
+
+fn authenticated_peer_identity(connection: &quinn::Connection) -> Result<AdmissionIdentity> {
+    let peer_identity = connection
+        .peer_identity()
+        .context("QUIC 连接缺少客户端证书身份")?;
+    let certificates = peer_identity
+        .downcast::<Vec<quinn::rustls::pki_types::CertificateDer<'static>>>()
+        .map_err(|_| anyhow::anyhow!("QUIC 客户端证书身份类型无效"))?;
+    if certificates.len() != 1 {
+        anyhow::bail!(
+            "QUIC 客户端证书链必须恰好包含一个终端证书，实际为 {}",
+            certificates.len()
+        );
+    }
+    let public_key = fuckipv6_common::ed25519_public_key_from_certificate(&certificates[0])
+        .context("无法从 QUIC 客户端证书提取 Ed25519 公钥")?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key)
+        .context("QUIC 客户端证书公钥不是有效 Ed25519 身份")?;
+    Ok(identity_id(&verifying_key))
 }
 
 #[cfg(test)]
@@ -412,6 +493,19 @@ mod tests {
         // Node B 发起 P2P 直连握手连接到 Node A
         let _conn = node_b.connect_peer(ip_a, addr_a, pin_a).await?;
         assert!(node_b.has_peer(&ip_a).await);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let admission = node_a.handshake_admission_metrics();
+            if admission.admitted == 1 && admission.active_reservations == 0 {
+                assert_eq!(admission.rejected_total(), 0);
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "admission permit was not released"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         // Node B 发送数据
         node_b.send_packet(&ip_a, b"quic-p2p-mesh-packet").await?;

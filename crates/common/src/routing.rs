@@ -291,8 +291,8 @@ fn effective_linux_uid() -> Option<u32> {
 
 fn parse_effective_uid(status: &str) -> Option<u32> {
     status.lines().find_map(|line| {
-        let fields = line.strip_prefix("Uid:")?.split_whitespace();
-        fields.skip(1).next()?.parse().ok()
+        let mut fields = line.strip_prefix("Uid:")?.split_whitespace();
+        fields.nth(1)?.parse().ok()
     })
 }
 

@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
+- **节点 IPC 接入统一命令总线**: 多网络运行时的本地 IPC 服务现在持有共享 `NodeCommandBus`，新增可提交 `NodeCommandRequest` 并返回类型化 `NodeCommandResult` 的传输请求，同时保留旧 IPC 请求以兼容现有 CLI/WebUI 调用。真实 TCP 测试覆盖 `GetSnapshot` 往返；CLI 和 WebUI 尚未迁移到该入口，创建/加入、动态启停、路由和角色命令的运行时后端也仍未接通。
 - **统一节点发布真实身份与有界日志**: 多网络监督器从首个成功建立的真实网络运行时发布节点 ID 与公钥指纹，不把签名私钥或种子写入共享快照；检测到不同网络身份时保留首次身份并发出警告。监督器还会在启动就绪时及每秒刷新转换为类型化 DTO 的有界 WARN/ERROR 聚合日志，未知级别不会伪装成其他严重度。当前日志缓冲不是完整 INFO/DEBUG 流，零网络启动尚无节点身份，CLI/IPC/WebUI/GPUI 也尚未消费该共享快照。
 - **统一节点生产命令处理器基座**: 多网络监督器创建共享 `NodeCommandBus`，新增真实 `NodeRuntimeHandler`，已接通共享快照读取、按网络停止、P2P Peer 探测和全局关闭，并为探测返回传输无关的结构化结果。动态启动、创建/加入、路由热更新和网络角色变更尚未接入运行时 actor，当前明确返回稳定 `Unavailable` 错误；CLI/IPC/WebUI 仍未迁移到该命令入口，因此不代表统一 UI 已完成。
 - **统一节点共享状态填充真实网络遥测**: 多网络监督器按秒聚合真实运行时中的 Peer 身份、虚拟地址、端点、P2P 质量、TUN/P2P 流量和错误计数到 `NodeStateStore`；停止期间的生命周期状态不会被竞态刷新覆盖，全部网络退出后会清理残留 Peer。身份与日志随后由真实运行时生产填充；配置、权限快照以及 CLI/IPC/WebUI/GPUI 的状态适配仍未完成。

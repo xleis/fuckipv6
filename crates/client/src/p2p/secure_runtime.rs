@@ -29,7 +29,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use super::secure_session::SessionPolicy;
 
@@ -60,6 +60,8 @@ pub(crate) enum SecureRuntimeError {
     Driver(#[from] DriverError),
     #[error("Secure Session v2 is not established for this peer")]
     NotEstablished,
+    #[error("Secure Session v2 has been revoked for this peer")]
+    Revoked,
     #[error("Secure Session v2 handshake has no compatible initiator/responder role")]
     InvalidRole,
     #[error("peer has no registered UDP endpoint")]
@@ -94,6 +96,7 @@ struct PendingResponder {
 
 #[derive(Default)]
 struct SecureState {
+    revoked: bool,
     driver: Option<SessionDriver>,
     authenticated_peer: Option<SocketAddr>,
     responder: Option<ClassicResponder>,
@@ -110,6 +113,7 @@ pub(crate) struct SecurePeerState {
     install_config: SessionInstallConfig,
     initiator: bool,
     local_receiver_index: u32,
+    lifecycle_gate: RwLock<()>,
     state: Mutex<SecureState>,
 }
 
@@ -209,6 +213,7 @@ impl SecurePeerState {
             install_config,
             initiator,
             local_receiver_index: install_config.local_receiver_index,
+            lifecycle_gate: RwLock::new(()),
             state: Mutex::new(SecureState {
                 responder,
                 ..SecureState::default()
@@ -223,7 +228,48 @@ impl SecurePeerState {
 
     /// Whether an authenticated v2 driver is installed.
     pub(crate) async fn is_established(&self) -> bool {
-        self.state.lock().await.driver.is_some()
+        let state = self.state.lock().await;
+        !state.revoked && state.driver.is_some()
+    }
+
+    /// Prevent new session work and wait for already admitted session work.
+    ///
+    /// Callers performing transport I/O must hold this permission until the
+    /// sealed packet or handshake frame has been handed to the transport.
+    /// Callers consuming authenticated inbound plaintext must hold it until the
+    /// plaintext has been delivered or cached. This keeps revocation local to
+    /// one peer instead of holding the global connection index across slow I/O.
+    pub(crate) async fn acquire_session_permission(
+        &self,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, SecureRuntimeError> {
+        let permission = self.lifecycle_gate.read().await;
+        if self.state.lock().await.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
+        Ok(permission)
+    }
+
+    /// Permanently revoke this per-peer session instance.
+    ///
+    /// The terminal flag and all reusable handshake/session material are changed
+    /// under the same lock used by `seal`, `open` and `handle_control`. This waits
+    /// for admitted session work to finish, so after it returns no in-flight or
+    /// future operation on this instance can seal, open, resume a pending
+    /// handshake, or install a new driver. Ciphertext already returned to a caller
+    /// is outside this session object's control.
+    pub(crate) async fn revoke(&self) -> bool {
+        let _lifecycle = self.lifecycle_gate.write().await;
+        let mut state = self.state.lock().await;
+        if state.revoked {
+            return false;
+        }
+        state.revoked = true;
+        state.driver = None;
+        state.authenticated_peer = None;
+        state.responder = None;
+        state.pending_initiator = None;
+        state.pending_responder = None;
+        true
     }
 
     /// Endpoint authenticated by the completed handshake.
@@ -260,11 +306,13 @@ impl SecurePeerState {
     /// responder's replay cache can recognize retransmissions. An abandoned
     /// attempt is replaced after [`HELLO_REFRESH_AFTER`].
     pub(crate) async fn initiate_frame(&self) -> Result<Option<Vec<u8>>, SecureRuntimeError> {
+        let mut state = self.state.lock().await;
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
         if !self.initiator {
             return Ok(None);
         }
-
-        let mut state = self.state.lock().await;
         if state.driver.is_some() {
             return Ok(None);
         }
@@ -315,6 +363,9 @@ impl SecurePeerState {
             "收到 Secure Session v2 控制帧"
         );
         let mut state = self.state.lock().await;
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
         match message {
             ControlMessage::Hello(hello) => {
                 if !self.initiator {
@@ -436,6 +487,9 @@ impl SecurePeerState {
         plaintext: &[u8],
     ) -> Result<(SocketAddr, Vec<u8>), SecureRuntimeError> {
         let mut state = self.state.lock().await;
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
         let destination = state
             .authenticated_peer
             .ok_or(SecureRuntimeError::NotEstablished)?;
@@ -464,6 +518,9 @@ impl SecurePeerState {
         mut packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
         let mut state = self.state.lock().await;
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
         let expected = state
             .authenticated_peer
             .ok_or(SecureRuntimeError::NotEstablished)?;
@@ -511,6 +568,10 @@ impl SecurePeerState {
     /// or key confirmation has been checked. The subsequent `handle_control`
     /// call remains responsible for all authentication.
     pub(crate) async fn matches_control(&self, message: &ControlMessage) -> bool {
+        let state = self.state.lock().await;
+        if state.revoked {
+            return false;
+        }
         let local_identity = self.local_identity.identity_id();
         let peer_identity = fuckipv6_secure_session::handshake::identity_id(&self.expected_peer);
         match message {
@@ -528,7 +589,6 @@ impl SecurePeerState {
                 if self.initiator {
                     return false;
                 }
-                let state = self.state.lock().await;
                 state
                     .driver
                     .as_ref()
@@ -555,6 +615,9 @@ fn open_with_driver(
     state: &mut SecureState,
     mut packet: Vec<u8>,
 ) -> Result<Vec<u8>, SecureRuntimeError> {
+    if state.revoked {
+        return Err(SecureRuntimeError::Revoked);
+    }
     let driver = state
         .driver
         .as_mut()
@@ -983,6 +1046,183 @@ mod tests {
             .await
             .is_err());
         assert_eq!(responder.authenticated_peer().await, None);
+    }
+
+    #[tokio::test]
+    async fn revocation_invalidates_pending_handshakes_in_both_roles() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("accept hello");
+        let confirm = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                    .expect("decode accept"),
+            )
+            .await
+            .expect("accept response");
+
+        assert!(responder.revoke().await);
+        assert!(!responder.revoke().await);
+        let confirm_message = fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+            .expect("decode confirm");
+        assert!(!responder.matches_control(&confirm_message).await);
+        assert!(matches!(
+            responder
+                .handle_control(initiator_addr, confirm_message)
+                .await,
+            Err(SecureRuntimeError::Revoked)
+        ));
+        assert!(!responder.is_established().await);
+        assert_eq!(responder.authenticated_peer().await, None);
+
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("accept hello");
+
+        assert!(initiator.revoke().await);
+        assert!(matches!(
+            initiator.initiate_frame().await,
+            Err(SecureRuntimeError::Revoked)
+        ));
+        assert!(matches!(
+            initiator
+                .handle_control(
+                    responder_addr,
+                    fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                        .expect("decode accept"),
+                )
+                .await,
+            Err(SecureRuntimeError::Revoked)
+        ));
+        assert!(!initiator.is_established().await);
+        assert_eq!(initiator.authenticated_peer().await, None);
+    }
+
+    #[tokio::test]
+    async fn revocation_is_scoped_to_the_session_instance_so_offline_peer_can_rejoin() {
+        let (old_initiator, old_responder, initiator_addr, responder_addr) = pair();
+        establish(
+            &old_initiator,
+            &old_responder,
+            initiator_addr,
+            responder_addr,
+        )
+        .await;
+        assert!(old_initiator.revoke().await);
+        assert!(old_responder.revoke().await);
+
+        // PeerOffline revokes the current instance; a later PeerOnline registration
+        // creates fresh state with the same node identities and must be usable.
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+        let (_, packet) = initiator
+            .seal(b"rejoined")
+            .await
+            .expect("seal after rejoin");
+        assert_eq!(
+            responder
+                .open(initiator_addr, packet)
+                .await
+                .expect("open after rejoin"),
+            b"rejoined"
+        );
+        assert!(matches!(
+            old_initiator.seal(b"stale").await,
+            Err(SecureRuntimeError::Revoked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_permission_defers_revocation_until_transport_handoff() {
+        let (initiator, _, _, _) = pair();
+        let permission = initiator
+            .acquire_session_permission()
+            .await
+            .expect("outbound permission");
+        let revoker = initiator.clone();
+        let mut revoke_task = tokio::spawn(async move { revoker.revoke().await });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut revoke_task)
+                .await
+                .is_err(),
+            "revocation must wait for an admitted transport handoff"
+        );
+        drop(permission);
+        assert!(tokio::time::timeout(Duration::from_secs(1), revoke_task)
+            .await
+            .expect("revocation should complete after handoff")
+            .expect("revocation task"));
+        assert!(matches!(
+            initiator.acquire_session_permission().await,
+            Err(SecureRuntimeError::Revoked)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_revocation_stops_inflight_seal_and_receive() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+        let (_, old_packet) = initiator.seal(b"before revoke").await.expect("seal");
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let send_initiator = initiator.clone();
+        let send_task = tokio::spawn(async move {
+            let mut started_tx = Some(started_tx);
+            loop {
+                match send_initiator.seal(b"concurrent").await {
+                    Ok(_) => {
+                        if let Some(started_tx) = started_tx.take() {
+                            let _ = started_tx.send(());
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    Err(SecureRuntimeError::Revoked) => return,
+                    Err(error) => panic!("unexpected seal error during revocation: {error}"),
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("send task should start")
+            .expect("send task should report startup");
+
+        assert!(initiator.revoke().await);
+        assert!(responder.revoke().await);
+        tokio::time::timeout(Duration::from_secs(1), send_task)
+            .await
+            .expect("inflight send task should observe revocation")
+            .expect("send task should not panic");
+
+        assert!(matches!(
+            initiator.seal(b"after revoke").await,
+            Err(SecureRuntimeError::Revoked)
+        ));
+        assert!(matches!(
+            responder.open(initiator_addr, old_packet).await,
+            Err(SecureRuntimeError::Revoked)
+        ));
     }
 
     #[tokio::test]

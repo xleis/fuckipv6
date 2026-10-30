@@ -26,7 +26,13 @@ const AUTHENTICATED_INBOUND_CACHE_CAPACITY: usize = 4096;
 
 type IncomingPacket = (IpAddr, Vec<u8>);
 type IncomingReceiver = mpsc::UnboundedReceiver<IncomingPacket>;
-type AuthenticatedInboundKey = (IpAddr, blake3::Hash);
+type AuthenticatedInboundKey = (String, usize, IpAddr, blake3::Hash);
+
+#[cfg(test)]
+struct SendRaceGate {
+    sealed: tokio::sync::Barrier,
+    release: tokio::sync::Barrier,
+}
 
 /// Plaintexts authenticated by the UDP receiver while routing a v2 frame to
 /// its session. `decrypt_from_peer` consumes this cache so the shared event
@@ -39,11 +45,23 @@ struct AuthenticatedInboundCache {
 }
 
 impl AuthenticatedInboundCache {
-    fn insert(&mut self, source: IpAddr, ciphertext: &[u8], plaintext: Vec<u8>) {
+    fn insert(
+        &mut self,
+        client_id: &str,
+        secure_id: usize,
+        source: IpAddr,
+        ciphertext: &[u8],
+        plaintext: Vec<u8>,
+    ) {
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
-        let key = (source, blake3::hash(ciphertext));
-        self.payloads.insert(key, (generation, plaintext));
+        let key = (
+            client_id.to_string(),
+            secure_id,
+            source,
+            blake3::hash(ciphertext),
+        );
+        self.payloads.insert(key.clone(), (generation, plaintext));
         self.order.push_back((key, generation));
 
         while self.payloads.len() > AUTHENTICATED_INBOUND_CACHE_CAPACITY {
@@ -60,10 +78,31 @@ impl AuthenticatedInboundCache {
         }
     }
 
-    fn take(&mut self, source: IpAddr, ciphertext: &[u8]) -> Option<Vec<u8>> {
+    fn take(
+        &mut self,
+        client_id: &str,
+        secure_id: usize,
+        source: IpAddr,
+        ciphertext: &[u8],
+    ) -> Option<Vec<u8>> {
+        let key = (
+            client_id.to_string(),
+            secure_id,
+            source,
+            blake3::hash(ciphertext),
+        );
+        self.payloads.remove(&key).map(|(_, plaintext)| plaintext)
+    }
+
+    fn remove_peer(&mut self, client_id: &str) {
         self.payloads
-            .remove(&(source, blake3::hash(ciphertext)))
-            .map(|(_, plaintext)| plaintext)
+            .retain(|(cached_client_id, _, _, _), _| cached_client_id != client_id);
+        let payloads = &self.payloads;
+        self.order.retain(|(key, generation)| {
+            payloads
+                .get(key)
+                .is_some_and(|(current_generation, _)| current_generation == generation)
+        });
     }
 }
 
@@ -100,6 +139,8 @@ pub struct P2pEngine {
     authenticated_inbound: Arc<RwLock<AuthenticatedInboundCache>>,
     fallback_threshold: Arc<RwLock<FallbackThreshold>>,
     quic_mesh: Arc<RwLock<Option<super::quic::QuicP2pMesh>>>,
+    #[cfg(test)]
+    send_race_gate: Arc<RwLock<Option<Arc<SendRaceGate>>>>,
     pub overlay: Arc<super::overlay::P2pOverlay>,
 }
 
@@ -171,6 +212,8 @@ impl P2pEngine {
             authenticated_inbound,
             fallback_threshold: Arc::new(RwLock::new(FallbackThreshold::default())),
             quic_mesh: Arc::new(RwLock::new(None)),
+            #[cfg(test)]
+            send_race_gate: Arc::new(RwLock::new(None)),
             overlay,
         })
     }
@@ -274,9 +317,46 @@ impl P2pEngine {
             secure: secure.clone(),
         };
 
-        // 注册双栈 IP 路由映射
+        let previous = {
+            let connections = self.connections.read().await;
+            connections
+                .get(&client_id)
+                .map(|connection| (connection.secure.clone(), peer_ips(&connection.peer_info)))
+        };
+        if let Some((secure, _)) = previous.as_ref() {
+            // Retire the old session before publishing its replacement. The
+            // per-session gate waits for an admitted send, but this does not hold
+            // the global connection index or block unrelated peers.
+            secure.revoke().await;
+        }
+
+        let mut connections = self.connections.write().await;
+        if let Some(current) = connections.get(&client_id) {
+            let expected = previous
+                .as_ref()
+                .is_some_and(|(secure, _)| Arc::ptr_eq(secure, &current.secure));
+            if !expected {
+                // Another registration completed while the old session waited for
+                // in-flight outbound work. Do not clobber that newer instance.
+                return Ok(());
+            }
+            connections.remove(&client_id);
+        }
+        let previous_ips = previous
+            .as_ref()
+            .map(|(_, ips)| ips.clone())
+            .unwrap_or_default();
+        self.authenticated_inbound
+            .write()
+            .await
+            .remove_peer(&client_id);
         {
             let mut ip_idx = self.ip_index.write().await;
+            for ip in previous_ips {
+                if ip_idx.get(&ip).is_some_and(|mapped| mapped == &client_id) {
+                    ip_idx.remove(&ip);
+                }
+            }
             ip_idx.insert(IpAddr::V6(peer_info.virtual_ip), client_id.clone());
             if let Some(v6) = peer_info.virtual_ips.ipv6 {
                 ip_idx.insert(IpAddr::V6(v6), client_id.clone());
@@ -285,11 +365,8 @@ impl P2pEngine {
                 ip_idx.insert(IpAddr::V4(v4), client_id.clone());
             }
         }
-
-        self.connections
-            .write()
-            .await
-            .insert(client_id.clone(), connection);
+        connections.insert(client_id.clone(), connection);
+        drop(connections);
         let primary_ip = peer_info
             .virtual_ips
             .primary_ip()
@@ -335,6 +412,7 @@ impl P2pEngine {
             anyhow::bail!("No connection to peer {dst_ip}");
         };
 
+        let _session = secure.acquire_session_permission().await?;
         let (_, packet) = secure
             .seal(payload)
             .await
@@ -353,23 +431,6 @@ impl P2pEngine {
         payload: &[u8],
     ) -> Result<Vec<u8>> {
         let src_ip = src_ip.to_ip_addr();
-        if let Some(plaintext) = self
-            .authenticated_inbound
-            .write()
-            .await
-            .take(src_ip, payload)
-        {
-            let client_id = {
-                let idx = self.ip_index.read().await;
-                idx.get(&src_ip).cloned()
-            };
-            if let Some(client_id) = client_id {
-                record_peer_payload(&self.connections, &client_id, payload.len()).await;
-                return Ok(plaintext);
-            }
-            anyhow::bail!("No registered peer for source {src_ip}");
-        }
-
         let client_id = {
             let idx = self.ip_index.read().await;
             idx.get(&src_ip).cloned()
@@ -380,13 +441,32 @@ impl P2pEngine {
 
         let secure = {
             let connections = self.connections.read().await;
-            connections
-                .get(&client_id)
-                .map(|connection| connection.secure.clone())
+            let Some(connection) = connections.get(&client_id) else {
+                anyhow::bail!("No registered peer for source {src_ip}");
+            };
+            connection.secure.clone()
         };
-        let Some(secure) = secure else {
-            anyhow::bail!("No registered peer for source {src_ip}");
+        let _session = secure.acquire_session_permission().await?;
+
+        let cached_plaintext = {
+            let connections = self.connections.read().await;
+            let Some(connection) = connections.get(&client_id) else {
+                anyhow::bail!("No registered peer for source {src_ip}");
+            };
+            if !Arc::ptr_eq(&connection.secure, &secure) {
+                anyhow::bail!("Secure Session v2 changed while receiving from {src_ip}");
+            }
+            self.authenticated_inbound.write().await.take(
+                &client_id,
+                secure_cache_id(&secure),
+                src_ip,
+                payload,
+            )
         };
+        if let Some(plaintext) = cached_plaintext {
+            record_peer_payload(&self.connections, &client_id, payload.len()).await;
+            return Ok(plaintext);
+        }
 
         let plaintext = secure
             .open_from_session(payload.to_vec())
@@ -422,16 +502,29 @@ impl P2pEngine {
         }
         .ok_or_else(|| anyhow::anyhow!("No connection to peer {dst_ip}"))?;
 
+        // Admission and the actual transport handoff stay inside this per-session
+        // gate. Revocation takes the same gate for writing, so it cannot return
+        // while an admitted packet is still being sent, without blocking removal
+        // of unrelated peers on a slow socket.
+        let session = secure.acquire_session_permission().await?;
+
         let (destination, data) = secure
             .seal(payload)
             .await
             .context("对等节点尚无已确认的 Secure Session v2，拒绝发送数据")?;
+
+        #[cfg(test)]
+        if let Some(gate) = self.send_race_gate.read().await.clone() {
+            gate.sealed.wait().await;
+            gate.release.wait().await;
+        }
 
         // QUIC is only a transport here; the same v2 ciphertext is required on
         // every path so relay or direct transport cannot downgrade protection.
         if let IpAddr::V6(dst_v6) = dst_ip {
             if let Some(mesh) = self.quic_mesh.read().await.as_ref() {
                 if mesh.has_peer(&dst_v6).await && mesh.send_packet(&dst_v6, &data).await.is_ok() {
+                    drop(session);
                     record_peer_payload(&self.connections, &client_id, data.len()).await;
                     return Ok(());
                 }
@@ -442,6 +535,7 @@ impl P2pEngine {
             .send_to(&data, dual_stack_send_endpoint(destination))
             .await
             .with_context(|| format!("无法向对等节点 {dst_ip} 发送 Secure Session v2 数据包"))?;
+        drop(session);
         record_peer_payload(&self.connections, &client_id, data.len()).await;
         Ok(())
     }
@@ -453,23 +547,39 @@ impl P2pEngine {
 
     /// 移除对等节点（通过客户端ID）
     pub async fn remove_peer_by_id(&self, client_id: &str) -> Option<IpAddr> {
-        let mut connections = self.connections.write().await;
+        let secure = {
+            let connections = self.connections.read().await;
+            connections.get(client_id)?.secure.clone()
+        };
 
-        if let Some(conn) = connections.remove(client_id) {
-            let primary_ip = conn.peer_info.virtual_ips.primary_ip();
-            let mut ip_idx = self.ip_index.write().await;
-            ip_idx.remove(&IpAddr::V6(conn.peer_info.virtual_ip));
-            if let Some(v6) = conn.peer_info.virtual_ips.ipv6 {
-                ip_idx.remove(&IpAddr::V6(v6));
-            }
-            if let Some(v4) = conn.peer_info.virtual_ips.ipv4 {
-                ip_idx.remove(&IpAddr::V4(v4));
-            }
-            tracing::info!("已注销对等节点: {} ({:?})", client_id, primary_ip);
-            primary_ip.or(Some(IpAddr::V6(conn.peer_info.virtual_ip)))
-        } else {
-            None
+        // Revoke first. This waits only for this session's admitted transport
+        // handoff, not for sends or removals belonging to other peers.
+        secure.revoke().await;
+        let mut connections = self.connections.write().await;
+        let current = connections.get(client_id)?;
+        if !Arc::ptr_eq(&current.secure, &secure) {
+            // A newer registration replaced this instance while revocation waited;
+            // a stale offline event must not remove the replacement session.
+            return None;
         }
+        let conn = connections
+            .remove(client_id)
+            .expect("peer cannot disappear while holding write lock");
+        let primary_ip = conn.peer_info.virtual_ips.primary_ip();
+        {
+            let mut ip_idx = self.ip_index.write().await;
+            for ip in peer_ips(&conn.peer_info) {
+                if ip_idx.get(&ip).is_some_and(|mapped| mapped == client_id) {
+                    ip_idx.remove(&ip);
+                }
+            }
+        }
+        self.authenticated_inbound
+            .write()
+            .await
+            .remove_peer(client_id);
+        tracing::info!("已注销对等节点: {} ({:?})", client_id, primary_ip);
+        primary_ip.or(Some(IpAddr::V6(conn.peer_info.virtual_ip)))
     }
 
     /// 将任一虚拟 IP（IPv4 或 IPv6）映射到已认证的客户端 ID。
@@ -720,6 +830,15 @@ fn spawn_secure_initiator(
                 return;
             }
 
+            let outbound = match secure.acquire_session_permission().await {
+                Ok(permission) => permission,
+                Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
+                Err(error) => {
+                    tracing::warn!("无法为节点 {} 获取会话发送许可: {error}", client_id);
+                    sleep(SECURE_HANDSHAKE_RETRY_INTERVAL).await;
+                    continue;
+                }
+            };
             match secure.initiate_frame().await {
                 Ok(Some(frame)) => {
                     for endpoint in endpoints {
@@ -736,11 +855,16 @@ fn spawn_secure_initiator(
                         }
                     }
                 }
-                Ok(None) => return,
+                Ok(None) => {
+                    drop(outbound);
+                    return;
+                }
+                Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
                 Err(error) => {
                     tracing::warn!("无法为节点 {} 启动 Secure Session v2: {error}", client_id);
                 }
             }
+            drop(outbound);
 
             sleep(SECURE_HANDSHAKE_RETRY_INTERVAL).await;
         }
@@ -770,6 +894,27 @@ fn canonical_udp_endpoint(endpoint: SocketAddr) -> SocketAddr {
         },
         SocketAddr::V4(_) => endpoint,
     }
+}
+
+fn secure_cache_id(secure: &Arc<SecurePeerState>) -> usize {
+    Arc::as_ptr(secure) as usize
+}
+
+fn peer_ips(peer: &PeerInfo) -> Vec<IpAddr> {
+    let mut ips = vec![IpAddr::V6(peer.virtual_ip)];
+    if let Some(v6) = peer.virtual_ips.ipv6 {
+        let ip = IpAddr::V6(v6);
+        if !ips.contains(&ip) {
+            ips.push(ip);
+        }
+    }
+    if let Some(v4) = peer.virtual_ips.ipv4 {
+        let ip = IpAddr::V4(v4);
+        if !ips.contains(&ip) {
+            ips.push(ip);
+        }
+    }
+    ips
 }
 
 async fn peer_accepts_endpoint(
@@ -931,6 +1076,14 @@ async fn dispatch_secure_control(
         return;
     }
     let (client_id, secure) = matches.pop().expect("one matching peer");
+    let _session = match secure.acquire_session_permission().await {
+        Ok(permission) => permission,
+        Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
+        Err(error) => {
+            tracing::debug!("无法为节点 {client_id} 获取控制帧发送许可: {error}");
+            return;
+        }
+    };
 
     match secure.handle_control(addr, message).await {
         Ok(actions) => {
@@ -994,15 +1147,40 @@ async fn dispatch_secure_data(
     }
 
     for (client_id, secure, src_ip) in candidates {
+        let _session = match secure.acquire_session_permission().await {
+            Ok(permission) => permission,
+            Err(super::secure_runtime::SecureRuntimeError::Revoked) => continue,
+            Err(error) => {
+                tracing::debug!("无法为节点 {client_id} 获取入站数据处理许可: {error}");
+                continue;
+            }
+        };
         match secure.open_from_source(addr, bytes.to_vec()).await {
             Ok(plaintext) => {
                 // Authentication happens before endpoint migration. A spoofed,
                 // replayed, or tampered datagram must not steer future traffic.
-                update_peer_endpoint(connections, &client_id, addr).await;
-                authenticated_inbound
-                    .write()
-                    .await
-                    .insert(src_ip, bytes, plaintext);
+                // Revalidate while holding the connection write lock so removal
+                // cannot revoke and clear the cache between validation and insert.
+                let mut active_connections = connections.write().await;
+                let Some(connection) = active_connections.get_mut(&client_id) else {
+                    return;
+                };
+                if !Arc::ptr_eq(&connection.secure, &secure) {
+                    return;
+                }
+                let endpoint = canonical_udp_endpoint(addr);
+                if !connection.endpoints.contains(&endpoint) {
+                    connection.endpoints.push(endpoint);
+                }
+                connection.active_endpoint = Some(endpoint);
+                authenticated_inbound.write().await.insert(
+                    &client_id,
+                    secure_cache_id(&secure),
+                    src_ip,
+                    bytes,
+                    plaintext,
+                );
+                drop(active_connections);
                 let _ = incoming_tx.send((src_ip, bytes.to_vec()));
                 return;
             }
@@ -1674,6 +1852,263 @@ mod tests {
             .get("a")
             .and_then(|connection| connection.active_endpoint);
         assert_eq!(active_endpoint_after_replay, Some(rebound_endpoint));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn peer_removal_revokes_session_clears_cache_and_blocks_rebind_replay() -> Result<()> {
+        let engine_a = P2pEngine::new(0).await?;
+        let engine_b = P2pEngine::new(0).await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = Ipv6Addr::LOCALHOST;
+        let ip_b = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+
+        engine_a.set_identity(identity_a.clone()).await;
+        engine_b.set_identity(identity_b.clone()).await;
+        engine_a.set_local_ip(ip_a).await;
+        engine_b.set_local_ip(ip_b).await;
+
+        let endpoint_a = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_a.local_addr().port(),
+        );
+        let endpoint_b = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_b.local_addr().port(),
+        );
+        engine_a
+            .add_peer(PeerInfo::new(
+                "b".to_string(),
+                ip_b,
+                identity_b.public_key(),
+                vec![endpoint_b],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+        engine_b
+            .add_peer(PeerInfo::new(
+                "a".to_string(),
+                ip_a,
+                identity_a.public_key(),
+                vec![endpoint_a],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if engine_a
+                    .has_established_session_by_ip(IpAddr::V6(ip_b))
+                    .await
+                    && engine_b
+                        .has_established_session_by_ip(IpAddr::V6(ip_a))
+                        .await
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        let payload = b"authenticated before removal";
+        let packet = engine_a.encrypt_for_peer(ip_b, payload).await?;
+        let old_secure = engine_b
+            .connections
+            .read()
+            .await
+            .get("a")
+            .expect("peer A")
+            .secure
+            .clone();
+        engine_b.authenticated_inbound.write().await.insert(
+            "a",
+            secure_cache_id(&old_secure),
+            IpAddr::V6(ip_a),
+            &packet,
+            payload.to_vec(),
+        );
+
+        // Revocation must close the cache path immediately, even before the
+        // connection index is removed by the rest of PeerOffline handling.
+        assert!(old_secure.revoke().await);
+        assert!(
+            engine_b.decrypt_from_peer(ip_a, &packet).await.is_err(),
+            "a revoked session must not serve plaintext from its old cache"
+        );
+        assert!(
+            engine_b.send_to(ip_a, ip_b, b"after revoke").await.is_err(),
+            "a revoked session must reject sends while it is still indexed"
+        );
+
+        assert_eq!(
+            engine_b.remove_peer_by_id("a").await,
+            Some(IpAddr::V6(ip_a))
+        );
+        assert!(
+            engine_b
+                .authenticated_inbound
+                .read()
+                .await
+                .payloads
+                .is_empty(),
+            "removal must purge plaintext authenticated for the retired peer"
+        );
+        assert!(!old_secure.is_established().await);
+        assert_eq!(old_secure.authenticated_peer().await, None);
+        assert!(matches!(
+            old_secure.seal(payload).await,
+            Err(super::super::secure_runtime::SecureRuntimeError::Revoked)
+        ));
+        assert!(matches!(
+            old_secure
+                .open_from_source(endpoint_a, packet.clone())
+                .await,
+            Err(super::super::secure_runtime::SecureRuntimeError::Revoked)
+        ));
+
+        // A later registration can reuse the same client ID and virtual IP. It
+        // must receive a fresh session instance rather than inheriting a terminal
+        // tombstone or the previous session's authenticated plaintext cache.
+        engine_b
+            .add_peer(PeerInfo::new(
+                "a".to_string(),
+                ip_a,
+                identity_a.public_key(),
+                vec![endpoint_a],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+        let replacement_secure = engine_b
+            .connections
+            .read()
+            .await
+            .get("a")
+            .expect("replacement peer A")
+            .secure
+            .clone();
+        assert!(!Arc::ptr_eq(&old_secure, &replacement_secure));
+        assert!(engine_b.decrypt_from_peer(ip_a, &packet).await.is_err());
+        assert!(engine_b
+            .authenticated_inbound
+            .read()
+            .await
+            .payloads
+            .is_empty());
+
+        let (incoming_tx, _incoming_rx) = mpsc::unbounded_channel();
+        dispatch_secure_data(
+            &engine_b.connections,
+            &engine_b.authenticated_inbound,
+            &incoming_tx,
+            endpoint_a,
+            &packet,
+        )
+        .await;
+        assert!(
+            engine_b
+                .authenticated_inbound
+                .read()
+                .await
+                .payloads
+                .is_empty(),
+            "a delayed frame from the retired session must not repopulate the cache"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn peer_removal_waits_for_inflight_send_and_blocks_late_send() -> Result<()> {
+        let engine_a = P2pEngine::new(0).await?;
+        let engine_b = P2pEngine::new(0).await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = Ipv6Addr::LOCALHOST;
+        let ip_b = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
+
+        engine_a.set_identity(identity_a.clone()).await;
+        engine_b.set_identity(identity_b.clone()).await;
+        engine_a.set_local_ip(ip_a).await;
+        engine_b.set_local_ip(ip_b).await;
+
+        let endpoint_a = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_a.local_addr().port(),
+        );
+        let endpoint_b = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_b.local_addr().port(),
+        );
+        engine_a
+            .add_peer(PeerInfo::new(
+                "b".to_string(),
+                ip_b,
+                identity_b.public_key(),
+                vec![endpoint_b],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+        engine_b
+            .add_peer(PeerInfo::new(
+                "a".to_string(),
+                ip_a,
+                identity_a.public_key(),
+                vec![endpoint_a],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if engine_a
+                    .has_established_session_by_ip(IpAddr::V6(ip_b))
+                    .await
+                    && engine_b
+                        .has_established_session_by_ip(IpAddr::V6(ip_a))
+                        .await
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        let gate = Arc::new(SendRaceGate {
+            sealed: tokio::sync::Barrier::new(2),
+            release: tokio::sync::Barrier::new(2),
+        });
+        *engine_a.send_race_gate.write().await = Some(gate.clone());
+
+        let sender = engine_a.clone();
+        let send_task =
+            tokio::spawn(async move { sender.send_to(ip_b, ip_a, b"in-flight ciphertext").await });
+        tokio::time::timeout(Duration::from_secs(1), gate.sealed.wait()).await?;
+
+        let remover = engine_a.clone();
+        let mut remove_task = tokio::spawn(async move { remover.remove_peer_by_id("b").await });
+        let removal_completed_early =
+            tokio::time::timeout(Duration::from_millis(150), &mut remove_task)
+                .await
+                .is_ok();
+
+        gate.release.wait().await;
+        send_task.await??;
+        let removed = tokio::time::timeout(Duration::from_secs(1), remove_task).await??;
+
+        assert!(
+            !removal_completed_early,
+            "peer removal must not revoke the session while a sealed datagram is between seal and UDP send"
+        );
+        assert_eq!(removed, Some(IpAddr::V6(ip_b)));
+        assert!(
+            engine_a
+                .send_to(ip_b, ip_a, b"late plaintext")
+                .await
+                .is_err(),
+            "a send started after removal must fail instead of using the retired session mapping"
+        );
         Ok(())
     }
 

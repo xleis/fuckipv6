@@ -1,6 +1,79 @@
 # Architecture
 
-fuckipv6 is a dual-stack overlay network. Clients create a local TUN interface and exchange raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. A coordinator provides discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback. Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products.
+fuckipv6 is a dual-stack overlay network built around one product identity: the node. A node creates a local TUN interface and exchanges raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. Discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback are network-service capabilities that a node can provide for a network or consume from another node.
+
+Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products. The repository is currently in a documented migration state: it still has separate `fuckipv6` and `fuckipv6-coordinator` binaries and a browser-based desktop entry. Those are compatibility artifacts, not the target product model.
+
+## Unified Node Target Architecture (UN-01)
+
+Status: accepted architecture baseline; implementation tracked by `UNIFIED_NODE_TODO.md`.
+
+### Product model
+
+| Term | Meaning |
+|------|---------|
+| **Node** | The only product identity. One `fuckipv6` binary represents one local device and owns its identity, configuration, lifecycle, logs, UI surfaces, and local control plane. |
+| **Network** | An isolated overlay namespace with its own profile, TUN device, virtual addresses, routes, peers, and policies. One node may participate in several networks concurrently. |
+| **Member** | A node's participation in one network. Membership is per-network state, not a process-global client/server mode. |
+| **Network service** | A capability provided by a member for a network, such as discovery, address allocation, signaling, relay, policy, or Exit Node forwarding. These are roles, not separate products or privilege classes. |
+| **Peer** | Another node's member identity as observed inside a network. |
+| **Initiator / Responder** | Cryptographic handshake session roles, selected deterministically by session keys. They do not imply product identity, ownership, or a permanently privileged node. |
+
+User-visible language uses **node**, **network**, **member**, **service role**, and **peer**. Protocol and TLS implementation types may continue to use `client` and `server` for compatibility, but those names must not leak into startup choices or product identity.
+
+### Runtime layers
+
+```text
+                    one `fuckipv6` process (local node)
+┌─────────────────────────────────────────────────────────────────────┐
+│ UI adapters: GPUI (desktop) | WebUI HTTP/WS (headless) | CLI/IPC   │
+├─────────────────────────────────────────────────────────────────────┤
+│ Shared UI contract: capabilities, commands, snapshots, events,     │
+│ validation errors, confirmations, and authorization requirements   │
+├─────────────────────────────────────────────────────────────────────┤
+│ Node command bus and supervisor                                    │
+│ identity | config | lifecycle | logs | mode | multi-network state   │
+├─────────────────────────────────────────────────────────────────────┤
+│ Network manager                                                    │
+│ network A actor | network B actor | ...                            │
+│ members | addresses | peers | routes | policies | stats | roles    │
+├─────────────────────────────────────────────────────────────────────┤
+│ Per-network services and transports                                │
+│ discovery/signaling | allocator | QUIC relay | Exit Node | TUN     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+The GPUI and WebUI adapters are peers at the presentation boundary. Neither adapter may own a separate network state machine or invoke transport modules directly. Both send typed commands to the node command bus and render snapshots/events from the shared contract.
+
+### State ownership
+
+- **Node-global state**: device identity, installed configuration references, runtime mode, lifecycle, local control endpoint, logs, and update/version information.
+- **Per-network state**: membership, display name, TUN identity, virtual addresses, peers, topology, routes, relay selection, Exit Node role/selection, ACL/policy, reconnect state, and traffic counters.
+- **Ephemeral UI state**: selected tab, modal visibility, drafts, and scroll position only. Ephemeral UI state must not become a second source of truth for node or network behavior.
+- **Durable writes**: all persistent mutations go through one command implementation with one validator. UI adapters may pre-validate for responsiveness, but the command layer remains authoritative.
+
+### Compatibility and removal boundary
+
+| Area | Decision |
+|------|----------|
+| `common` protocol, crypto, routing, and wire types | Retain. Technical `client`/`server` identifiers may remain where they describe protocol peers or preserve wire/config compatibility. |
+| `coordinator` library capabilities | Retain as internal network-service actors. Remove its standalone user entry point after preflight, config migration, service shutdown, and packaging are covered. |
+| `fuckipv6` binary and node runtime | Evolve into the sole executable. Existing commands may remain as command verbs during migration, but not as client/server program choices. |
+| Existing CLI/TUI/IPC | Route through the shared command bus and shared snapshots; keep as non-GUI adapters. |
+| Browser `--app` desktop entry | Remove from the desktop path. It may remain only as an explicitly selected WebUI fallback, never as GPUI parity. |
+| WebUI business logic and private state | Migrate to shared commands/snapshots, then delete duplicate mutation paths and DTO semantics. |
+| `fuckipv6-coordinator` binary, installers, services, and docs | Remove after the embedded network service has equivalent configuration, observability, authorization, and operations coverage. |
+| User-facing “client/server/coordinator” identity | Remove. Keep only node, network, member, service role, and the explicitly technical protocol session roles. |
+
+### Non-negotiable acceptance rules
+
+1. A release exposes one user entry point, `fuckipv6`.
+2. Starting a node does not require choosing client or server mode.
+3. Creating a network and joining a network are node commands, not separate programs.
+4. GPUI starts without a browser in desktop mode; WebUI is the automatic headless surface.
+5. GPUI and WebUI declare capabilities from one manifest and are tested for page, command, field, validation, confirmation, permission, and error parity.
+6. Multi-network and multiple service roles are represented per network; a node is not globally promoted to a server role.
+7. Single-binary, parity, packaging, and cross-platform gates must pass before the migration is declared complete.
 
 ## Components
 

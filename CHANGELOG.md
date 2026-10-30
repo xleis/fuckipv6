@@ -53,6 +53,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
+- 固化统一节点目标架构：唯一产品身份为节点，协调/信令/中继/Exit Node 都是按网络承担的服务角色；明确 GPUI/WebUI 必须共享命令层、状态契约与能力清单，并列出独立协调二进制、浏览器伪桌面和重复 UI 业务逻辑的迁移/删除边界。
 - 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。
 - 记录 v2 接入前的加密能力口径：当时 UDP 数据面使用静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，没有前向保密、重放窗口和密钥轮换；当前生产路径已切换为 v2 classic 临时会话，但独立审计、后量子组合和在线重协商仍未完成，完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。
 - 明确能力成熟度口径：区分“可直接使用”“基础设施已接入（待产品化）”与“尚未产品化”。

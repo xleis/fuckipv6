@@ -1,5 +1,6 @@
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// 路由分流动作
@@ -61,6 +62,262 @@ pub struct ExitNodeConfig {
     /// 出口节点地理位置标识（如 "HK", "US", "JP" 等，可选）
     #[serde(default)]
     pub region: Option<String>,
+}
+
+/// Stable schema version for Exit Node capability data exposed to every UI/API
+/// adapter.
+pub const EXIT_NODE_CAPABILITY_SCHEMA_VERSION: u16 = 1;
+
+/// Host platforms with distinct Exit Node implementation requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitNodePlatform {
+    Linux,
+    Windows,
+    Macos,
+    Other,
+}
+
+impl ExitNodePlatform {
+    pub const fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::Macos
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            Self::Other
+        }
+    }
+
+    pub const fn supports_exit_node(self) -> bool {
+        matches!(self, Self::Linux)
+    }
+}
+
+impl Default for ExitNodePlatform {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
+/// Machine-readable reasons that make an Exit Node action unavailable.
+///
+/// Adapters must render these reasons instead of treating an enabled config
+/// flag as proof that kernel forwarding and NAT were installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitNodeUnsupportedReason {
+    PlatformNotLinux,
+    PrivilegesRequired,
+    RoutingToolUnavailable,
+    IptablesUnavailable,
+    Ipv4ForwardingUnavailable,
+}
+
+impl ExitNodeUnsupportedReason {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::PlatformNotLinux => "Exit Node is only supported on Linux",
+            Self::PrivilegesRequired => "root privileges are required",
+            Self::RoutingToolUnavailable => "the ip routing tool is unavailable",
+            Self::IptablesUnavailable => "the iptables tool is unavailable",
+            Self::Ipv4ForwardingUnavailable => "the IPv4 forwarding sysctl is unavailable",
+        }
+    }
+}
+
+impl fmt::Display for ExitNodeUnsupportedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+/// Current, non-secret Exit Node capability truth for one node process.
+///
+/// `supported` describes whether a basic IPv4 Exit Node can be installed now.
+/// `ipv6_forwarding` is independent because an IPv6-only limitation does not
+/// make the IPv4 Exit Node implementation unusable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitNodeCapabilities {
+    pub schema_version: u16,
+    pub platform: ExitNodePlatform,
+    pub supported: bool,
+    pub ipv4_forwarding: bool,
+    pub ipv6_forwarding: bool,
+    pub nat: bool,
+    pub cleanup: bool,
+    pub unsupported_reasons: Vec<ExitNodeUnsupportedReason>,
+}
+
+impl ExitNodeCapabilities {
+    /// Probe the current host. Non-Linux hosts return immediately and never
+    /// inspect Linux-only tools or kernel settings.
+    pub fn detect() -> Self {
+        Self::for_platform(ExitNodePlatform::current())
+    }
+
+    /// Probe capabilities for a platform. This is public so adapters and tests
+    /// can make fail-closed decisions from the same contract; only Linux probes
+    /// host prerequisites, while every non-Linux platform is deterministically
+    /// unsupported.
+    pub fn for_platform(platform: ExitNodePlatform) -> Self {
+        if !platform.supports_exit_node() {
+            return Self {
+                schema_version: EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                platform,
+                supported: false,
+                ipv4_forwarding: false,
+                ipv6_forwarding: false,
+                nat: false,
+                cleanup: false,
+                unsupported_reasons: vec![ExitNodeUnsupportedReason::PlatformNotLinux],
+            };
+        }
+
+        detect_linux_exit_node_capabilities()
+    }
+
+    /// Human-readable explanation suitable for a UI/API error message.
+    pub fn unsupported_explanation(&self) -> String {
+        if self.unsupported_reasons.is_empty() {
+            return "Exit Node is supported".to_string();
+        }
+        self.unsupported_reasons
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+impl Default for ExitNodeCapabilities {
+    fn default() -> Self {
+        Self::detect()
+    }
+}
+
+/// Typed error used when a configuration or command attempts to enable Exit
+/// Node on a platform where it cannot work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitNodeUnsupportedError {
+    pub platform: ExitNodePlatform,
+    pub reason: ExitNodeUnsupportedReason,
+}
+
+impl ExitNodeUnsupportedError {
+    const fn platform_not_linux(platform: ExitNodePlatform) -> Self {
+        Self {
+            platform,
+            reason: ExitNodeUnsupportedReason::PlatformNotLinux,
+        }
+    }
+}
+
+impl fmt::Display for ExitNodeUnsupportedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Exit Node is unsupported on {:?}: {}",
+            self.platform, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ExitNodeUnsupportedError {}
+
+/// Fail closed unless the target platform has an Exit Node data-plane design.
+pub fn ensure_exit_node_platform_supported(
+    platform: ExitNodePlatform,
+) -> Result<(), ExitNodeUnsupportedError> {
+    if platform.supports_exit_node() {
+        Ok(())
+    } else {
+        Err(ExitNodeUnsupportedError::platform_not_linux(platform))
+    }
+}
+
+fn detect_linux_exit_node_capabilities() -> ExitNodeCapabilities {
+    let privileged = effective_linux_uid() == Some(0);
+    let ip_available = executable_available("ip");
+    let iptables_available = executable_available("iptables");
+    let ip6tables_available = executable_available("ip6tables");
+    let ipv4_forwarding =
+        privileged && std::path::Path::new("/proc/sys/net/ipv4/ip_forward").is_file();
+    let ipv6_forwarding = privileged
+        && ip6tables_available
+        && std::path::Path::new("/proc/sys/net/ipv6/conf/all/forwarding").is_file();
+    let nat = privileged && iptables_available;
+    let cleanup = privileged && ip_available && iptables_available;
+
+    let mut unsupported_reasons = Vec::new();
+    if !privileged {
+        unsupported_reasons.push(ExitNodeUnsupportedReason::PrivilegesRequired);
+    }
+    if !ip_available {
+        unsupported_reasons.push(ExitNodeUnsupportedReason::RoutingToolUnavailable);
+    }
+    if !iptables_available {
+        unsupported_reasons.push(ExitNodeUnsupportedReason::IptablesUnavailable);
+    }
+    if !ipv4_forwarding {
+        unsupported_reasons.push(ExitNodeUnsupportedReason::Ipv4ForwardingUnavailable);
+    }
+
+    ExitNodeCapabilities {
+        schema_version: EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+        platform: ExitNodePlatform::Linux,
+        supported: unsupported_reasons.is_empty(),
+        ipv4_forwarding,
+        ipv6_forwarding,
+        nat,
+        cleanup,
+        unsupported_reasons,
+    }
+}
+
+fn effective_linux_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_effective_uid(&status)
+}
+
+fn parse_effective_uid(status: &str) -> Option<u32> {
+    status.lines().find_map(|line| {
+        let fields = line.strip_prefix("Uid:")?.split_whitespace();
+        fields.skip(1).next()?.parse().ok()
+    })
+}
+
+fn executable_available(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| {
+        let candidate = directory.join(name);
+        if !candidate.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            candidate
+                .metadata()
+                .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
 }
 
 /// 判断 IP 是否为私有、链路本地或回环地址
@@ -323,6 +580,58 @@ impl SmartRouteEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_linux_platforms_fail_closed_with_typed_reasons() {
+        for platform in [
+            ExitNodePlatform::Windows,
+            ExitNodePlatform::Macos,
+            ExitNodePlatform::Other,
+        ] {
+            let capabilities = ExitNodeCapabilities::for_platform(platform);
+            assert!(!capabilities.supported);
+            assert!(!capabilities.ipv4_forwarding);
+            assert!(!capabilities.ipv6_forwarding);
+            assert!(!capabilities.nat);
+            assert!(!capabilities.cleanup);
+            assert_eq!(
+                capabilities.unsupported_reasons,
+                [ExitNodeUnsupportedReason::PlatformNotLinux]
+            );
+
+            let error = ensure_exit_node_platform_supported(platform)
+                .expect_err("non-Linux platform must be rejected");
+            assert_eq!(error.platform, platform);
+            assert_eq!(error.reason, ExitNodeUnsupportedReason::PlatformNotLinux);
+        }
+    }
+
+    #[test]
+    fn capability_wire_contract_uses_stable_codes() {
+        let capabilities = ExitNodeCapabilities::for_platform(ExitNodePlatform::Windows);
+        let encoded = serde_json::to_value(&capabilities).expect("serialize capabilities");
+
+        assert_eq!(
+            encoded["schema_version"],
+            EXIT_NODE_CAPABILITY_SCHEMA_VERSION
+        );
+        assert_eq!(encoded["platform"], "windows");
+        assert_eq!(encoded["supported"], false);
+        assert_eq!(
+            encoded["unsupported_reasons"],
+            serde_json::json!(["platform_not_linux"])
+        );
+        assert_eq!(
+            capabilities.unsupported_explanation(),
+            "Exit Node is only supported on Linux"
+        );
+    }
+
+    #[test]
+    fn linux_effective_uid_parser_does_not_confuse_real_and_saved_ids() {
+        let status = "Name:\tfuckipv6\nUid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(parse_effective_uid(status), Some(1000));
+    }
 
     #[test]
     fn routing_mode_can_be_hot_updated() {

@@ -65,6 +65,13 @@ impl ClientConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_for_platform(crate::routing::ExitNodePlatform::current())
+    }
+
+    fn validate_for_platform(
+        &self,
+        platform: crate::routing::ExitNodePlatform,
+    ) -> anyhow::Result<()> {
         validate_ws_url(&self.coordinator_url, "coordinator_url")?;
         validate_network_config(&self.network)?;
         validate_tun_config(&self.tun)?;
@@ -75,6 +82,10 @@ impl ClientConfig {
             anyhow::bail!("private_key_path 不能为空");
         }
 
+        if self.exit_node.enabled {
+            crate::routing::ensure_exit_node_platform_supported(platform)?;
+        }
+
         Ok(())
     }
 
@@ -82,6 +93,7 @@ impl ClientConfig {
     ///
     /// 写入同目录临时文件并 `fsync` 后原子替换目标，避免进程或主机崩溃留下截断配置。
     pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.validate().context("客户端配置校验失败")?;
         let path = path.as_ref();
         let content = toml::to_string_pretty(self).context("序列化客户端配置失败")?;
         atomic_write(path, content.as_bytes())
@@ -874,6 +886,41 @@ mod tests {
 
         config.validate()?;
         Ok(())
+    }
+
+    #[test]
+    fn enabled_exit_node_is_rejected_with_a_typed_error_on_non_linux_platforms() {
+        let mut config = ClientConfig {
+            client_id: None,
+            coordinator_url: "ws://localhost:6666".to_string(),
+            private_key_path: PathBuf::from("key.pem"),
+            network: NetworkConfig::default(),
+            tun: TunConfig::default(),
+            p2p: P2pConfig::default(),
+            log: LogConfig::default(),
+            acl: Default::default(),
+            routing: Default::default(),
+            exit_node: Default::default(),
+        };
+        config.exit_node.enabled = true;
+
+        for platform in [
+            crate::routing::ExitNodePlatform::Windows,
+            crate::routing::ExitNodePlatform::Macos,
+            crate::routing::ExitNodePlatform::Other,
+        ] {
+            let error = config
+                .validate_for_platform(platform)
+                .expect_err("non-Linux Exit Node must fail closed");
+            let typed = error
+                .downcast_ref::<crate::routing::ExitNodeUnsupportedError>()
+                .expect("validation must preserve the typed unsupported error");
+            assert_eq!(typed.platform, platform);
+            assert_eq!(
+                typed.reason,
+                crate::routing::ExitNodeUnsupportedReason::PlatformNotLinux
+            );
+        }
     }
 
     #[test]

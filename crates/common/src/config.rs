@@ -298,6 +298,23 @@ pub struct CoordinatorConfig {
     pub relay_endpoints: Vec<crate::protocol::RelayEndpoint>,
 }
 
+impl Default for CoordinatorConfig {
+    fn default() -> Self {
+        Self {
+            signaling_bind: default_signaling_bind(),
+            relay_bind: default_relay_bind(),
+            webui_bind: default_webui_bind(),
+            heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
+            network: NetworkAllocation::default(),
+            tls: None,
+            log: LogConfig::default(),
+            auth: CoordinatorAuthConfig::default(),
+            blacklist: crate::acl::BlacklistConfig::default(),
+            relay_endpoints: Vec::new(),
+        }
+    }
+}
+
 impl CoordinatorConfig {
     /// 从TOML文件加载配置
     pub fn from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {

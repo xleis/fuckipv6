@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::{Identity, NetworkTicket, RelayEndpoint};
+use fuckipv6_common::{CoordinatorConfig, Identity, NetworkTicket, RelayEndpoint};
 use fuckipv6_coordinator::{
-    relay::server::RelayServer, signaling::server::SignalingServer,
-    signaling::session::SessionManager,
+    relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
+    signaling::server::SignalingServer, signaling::session::SessionManager,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+
+use crate::config_manager::ConfigManager;
 
 mod actor;
 
@@ -40,6 +42,23 @@ impl EmbeddedCoordinator {
         let pool = ip_pool.unwrap_or("fd00::1000/120");
         let session_manager =
             Arc::new(SessionManager::new(pool).context("无法初始化内嵌协调器地址池")?);
+
+        let config_manager = ConfigManager::new().context("无法确定节点配置目录")?;
+        let blacklist_path = config_manager
+            .coordinator_config_path(network_name)
+            .context("无法确定协调端黑名单持久化路径")?;
+        let mut default_coordinator_config = CoordinatorConfig::default();
+        default_coordinator_config.network.ipv6_pool = pool.to_string();
+        default_coordinator_config.network.ip_pool = Some(pool.to_string());
+        session_manager
+            .attach_blacklist_store(Arc::new(
+                CoordinatorConfigBlacklistStore::with_default_config(
+                    blacklist_path,
+                    default_coordinator_config,
+                ),
+            ))
+            .await
+            .context("无法加载节点持久黑名单")?;
 
         let signaling_bind = format!("0.0.0.0:{signaling_port}");
         let signaling_server =

@@ -15,11 +15,25 @@ pub trait BlacklistStore: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfigBlacklistStore {
     path: PathBuf,
+    default_config: CoordinatorConfig,
 }
 
 impl CoordinatorConfigBlacklistStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            default_config: CoordinatorConfig::default(),
+        }
+    }
+
+    pub fn with_default_config(
+        path: impl Into<PathBuf>,
+        default_config: CoordinatorConfig,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            default_config,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -29,27 +43,48 @@ impl CoordinatorConfigBlacklistStore {
 
 impl BlacklistStore for CoordinatorConfigBlacklistStore {
     fn load(&self) -> Result<BlacklistConfig> {
-        CoordinatorConfig::from_file(&self.path)
-            .map(|config| config.blacklist)
-            .with_context(|| format!("读取协调端持久黑名单失败: {}", self.path.to_string_lossy()))
+        match CoordinatorConfig::from_file(&self.path) {
+            Ok(config) => Ok(config.blacklist),
+            Err(error) if is_not_found(&error) => Ok(self.default_config.blacklist.clone()),
+            Err(error) => Err(error).with_context(|| {
+                format!("读取协调端持久黑名单失败: {}", self.path.to_string_lossy())
+            }),
+        }
     }
 
     fn save(&self, blacklist: &BlacklistConfig) -> Result<()> {
-        let mut config = CoordinatorConfig::from_file(&self.path).with_context(|| {
-            format!(
-                "更新持久黑名单前读取协调端配置失败: {}",
-                self.path.to_string_lossy()
-            )
-        })?;
+        let mut config = match CoordinatorConfig::from_file(&self.path) {
+            Ok(config) => config,
+            Err(error) if is_not_found(&error) => self.default_config.clone(),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "更新持久黑名单前读取协调端配置失败: {}",
+                        self.path.to_string_lossy()
+                    )
+                });
+            }
+        };
         if config.blacklist == *blacklist {
             return Ok(());
         }
         config.blacklist = blacklist.clone();
         config.validate().context("持久黑名单配置校验失败")?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建协调端配置目录失败: {}", parent.to_string_lossy()))?;
+        }
         config
             .save_to_file(&self.path)
             .with_context(|| format!("写入协调端持久黑名单失败: {}", self.path.to_string_lossy()))
     }
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// 为需要共享同一存储实例的调用方提供类型擦除。
@@ -110,6 +145,27 @@ mod tests {
         );
 
         std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_config_is_created_on_first_blacklist_save() -> Result<()> {
+        let path = test_config_path("blacklist-missing").join("coordinator.toml");
+        let mut default_config = coordinator_config();
+        default_config.network.ipv6_pool = "fd42::1000/120".to_string();
+        default_config.network.ip_pool = Some("fd42::1000/120".to_string());
+        let store = CoordinatorConfigBlacklistStore::with_default_config(&path, default_config);
+
+        assert!(store.load()?.banned_clients.is_empty());
+        store.save(&BlacklistConfig {
+            banned_clients: vec!["node-bad".to_string()],
+        })?;
+
+        let persisted = CoordinatorConfig::from_file(&path)?;
+        assert_eq!(persisted.network.effective_ipv6_pool(), "fd42::1000/120");
+        assert_eq!(persisted.blacklist.banned_clients, vec!["node-bad"]);
+
+        std::fs::remove_dir_all(path.parent().expect("test config parent"))?;
         Ok(())
     }
 

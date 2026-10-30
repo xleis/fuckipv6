@@ -103,6 +103,12 @@ impl ConfigManager {
         self.config_dir.join(NODE_IDENTITY_FILE)
     }
 
+    /// Per-network coordinator configuration, including the persistent blacklist.
+    pub(crate) fn coordinator_config_path(&self, network_name: &str) -> Result<PathBuf> {
+        Self::validate_network_name(network_name)?;
+        Ok(self.get_network_dir(network_name).join("coordinator.toml"))
+    }
+
     /// Load or create the node-wide signing identity.
     pub(crate) fn load_node_identity(&self) -> Result<Identity> {
         Identity::load_or_generate(self.node_identity_path()).context("无法加载节点身份")

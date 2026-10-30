@@ -88,6 +88,24 @@ impl NodeLifecycle {
         .await
     }
 
+    /// Update lifecycle counts while a live node accepts dynamic network
+    /// changes. The phase remains `Running`; only the configured/active/failed
+    /// projections change.
+    pub async fn running_with_configuration(
+        &self,
+        configured_networks: usize,
+        active_networks: usize,
+        failed_networks: Vec<String>,
+    ) -> NodeLifecycleSnapshot {
+        self.set(NodeLifecycleSnapshot {
+            phase: NodePhase::Running,
+            configured_networks,
+            active_networks,
+            failed_networks: normalize_failures(failed_networks),
+        })
+        .await
+    }
+
     pub async fn begin_stop(&self) -> NodeLifecycleSnapshot {
         let current = self.snapshot.read().await.clone();
         self.set(NodeLifecycleSnapshot {

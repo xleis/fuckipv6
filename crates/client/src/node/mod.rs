@@ -2,6 +2,7 @@ mod command;
 mod event;
 mod lifecycle;
 mod plan;
+mod runtime_control;
 mod runtime_handler;
 pub(crate) mod runtime_metadata;
 mod state;
@@ -16,6 +17,8 @@ pub use command::{
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
+pub(crate) use runtime_control::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
+pub(crate) use runtime_handler::spawn_command_bus_with_runtime;
 pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{
     NodeAccessModel, NodeConfigurationSnapshot, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,

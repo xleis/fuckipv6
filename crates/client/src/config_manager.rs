@@ -21,6 +21,7 @@ pub struct NetworkList {
 }
 
 /// 配置管理器
+#[derive(Clone)]
 pub struct ConfigManager {
     config_dir: PathBuf,
 }

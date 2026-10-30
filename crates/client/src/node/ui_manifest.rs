@@ -140,7 +140,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "create_network",
                         "action.create_network",
                         NodeUiCommandKind::CreateNetwork,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -186,7 +186,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "join_network",
                         "action.join_network",
                         NodeUiCommandKind::JoinNetwork,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -218,7 +218,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "start_networks",
                         "action.start_networks",
                         NodeUiCommandKind::StartNetworks,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![field(
@@ -600,6 +600,13 @@ mod tests {
             NodeUiCommandKind::StartNetworks,
             NodeUiCommandKind::CreateNetwork,
             NodeUiCommandKind::JoinNetwork,
+        ] {
+            assert_eq!(
+                status(command),
+                HashSet::from([NodeUiBackendStatus::Implemented])
+            );
+        }
+        for command in [
             NodeUiCommandKind::UpdateRouting,
             NodeUiCommandKind::SetNetworkRole,
         ] {

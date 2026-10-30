@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
     NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
     NodeCommandResult, NodePeerProbeSnapshot, NodeProblem, NodeProblemCode, NodeStateStore,
@@ -17,6 +18,7 @@ pub struct NodeRuntimeHandler {
     state: NodeStateStore,
     registry: MultiNetworkRegistry,
     services: EmbeddedServiceManager,
+    runtime: Option<NetworkRuntimeManager>,
 }
 
 impl NodeRuntimeHandler {
@@ -33,6 +35,21 @@ impl NodeRuntimeHandler {
             state,
             registry,
             services,
+            runtime: None,
+        }
+    }
+
+    fn with_runtime(
+        state: NodeStateStore,
+        registry: MultiNetworkRegistry,
+        services: EmbeddedServiceManager,
+        runtime: NetworkRuntimeManager,
+    ) -> Self {
+        Self {
+            state,
+            registry,
+            services,
+            runtime: Some(runtime),
         }
     }
 }
@@ -42,6 +59,7 @@ impl NodeCommandHandler for NodeRuntimeHandler {
         let state = self.state.clone();
         let registry = self.registry.clone();
         let services = self.services.clone();
+        let runtime = self.runtime.clone();
 
         Box::pin(async move {
             let request_id = request.request_id;
@@ -53,15 +71,25 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 super::NodeCommand::GetSnapshot => {
                     NodeCommandResult::snapshot(request_id, state.snapshot().await)
                 }
-                super::NodeCommand::StopNetworks { networks, all } => {
-                    stop_networks(&registry, request_id, &networks, all).await
-                }
+                super::NodeCommand::StopNetworks { networks, all } => match runtime {
+                    Some(runtime) => {
+                        stop_runtime_networks(&runtime, request_id, networks, all).await
+                    }
+                    None => stop_networks(&registry, request_id, &networks, all).await,
+                },
                 super::NodeCommand::ProbePeer(command) => {
                     probe_peer(&registry, request_id, command).await
                 }
                 super::NodeCommand::Shutdown => {
                     let result = stop_all(&registry, request_id).await;
                     if !result.is_success() {
+                        return result;
+                    }
+                    // The supervisor owns the runtime manager and will stop
+                    // all sessions and embedded services after receiving the
+                    // shutdown signal. Do not close the shared service actor
+                    // from this request first.
+                    if runtime.is_some() {
                         return result;
                     }
                     match services.shutdown().await {
@@ -72,16 +100,21 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                         ),
                     }
                 }
-                super::NodeCommand::StartNetworks { .. } => unavailable(
-                    request_id,
-                    "动态启动网络尚未接入监督器；请先完成运行时 actor 化",
-                ),
-                super::NodeCommand::CreateNetwork(_) => {
-                    unavailable(request_id, "创建网络尚未接入内嵌网络服务 actor")
-                }
-                super::NodeCommand::JoinNetwork(_) => {
-                    unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor")
-                }
+                super::NodeCommand::StartNetworks { selection } => match runtime {
+                    Some(runtime) => start_runtime_networks(&runtime, request_id, selection).await,
+                    None => unavailable(
+                        request_id,
+                        "动态启动网络尚未接入监督器；请先完成运行时 actor 化",
+                    ),
+                },
+                super::NodeCommand::CreateNetwork(command) => match runtime {
+                    Some(runtime) => create_runtime_network(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "创建网络尚未接入内嵌网络服务 actor"),
+                },
+                super::NodeCommand::JoinNetwork(command) => match runtime {
+                    Some(runtime) => join_runtime_network(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
+                },
                 super::NodeCommand::UpdateRouting(_) => {
                     unavailable(request_id, "路由热更新尚未接入多网络监督器控制通道")
                 }
@@ -91,6 +124,134 @@ impl NodeCommandHandler for NodeRuntimeHandler {
             }
         })
     }
+}
+
+async fn start_runtime_networks(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    selection: super::NodeNetworkSelection,
+) -> NodeCommandResult {
+    match runtime.start_selection(selection).await {
+        Ok(summary) if summary.requested == 0 => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: "没有需要启动的网络".into(),
+            },
+        ),
+        Ok(summary) if summary.started.is_empty() && !summary.failed.is_empty() => {
+            NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    summary.message("启动网络失败"),
+                )
+                .retryable(true),
+            )
+        }
+        Ok(summary) => completed_summary(request_id, summary, "启动网络"),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn create_runtime_network(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeCreateNetworkCommand,
+) -> NodeCommandResult {
+    match runtime.create(command).await {
+        Ok(result) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: format!(
+                    "网络 [{}] 已创建并保存；{}；邀请票据: {}",
+                    result.network_name,
+                    if result.started {
+                        "本地运行时已启动"
+                    } else {
+                        "本地运行时未自动启动"
+                    },
+                    result.ticket
+                ),
+            },
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn join_runtime_network(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeJoinNetworkCommand,
+) -> NodeCommandResult {
+    match runtime.join(command).await {
+        Ok(result) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: format!(
+                    "网络 [{}] 配置{}；{}；协调端点: {}",
+                    result.network_name,
+                    if result.config_saved {
+                        "已保存"
+                    } else {
+                        "已存在"
+                    },
+                    if result.started {
+                        "运行时已启动"
+                    } else {
+                        "按请求未自动启动"
+                    },
+                    result.coordinator_url
+                ),
+            },
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn stop_runtime_networks(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    networks: Vec<String>,
+    all: bool,
+) -> NodeCommandResult {
+    match runtime.stop(networks, all).await {
+        Ok(summary) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: if summary.stopped.is_empty() {
+                    "没有正在运行或托管服务的网络".into()
+                } else {
+                    format!("已停止网络: {}", summary.stopped.join(", "))
+                },
+            },
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+fn completed_summary(request_id: u64, summary: StartSummary, action: &str) -> NodeCommandResult {
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::Completed {
+            message: summary.message(action),
+        },
+    )
+}
+
+fn runtime_rejection(request_id: u64, error: RuntimeControlError) -> NodeCommandResult {
+    let code = match &error {
+        RuntimeControlError::Invalid(_) => NodeProblemCode::InvalidRequest,
+        RuntimeControlError::Conflict(_) => NodeProblemCode::Conflict,
+        RuntimeControlError::NotFound(_) => NodeProblemCode::NotFound,
+        RuntimeControlError::ActorClosed
+        | RuntimeControlError::Persistence(_)
+        | RuntimeControlError::Launch(_) => NodeProblemCode::Unavailable,
+    };
+    NodeCommandResult::rejected(
+        request_id,
+        NodeProblem::new(code, error.to_string())
+            .retryable(matches!(code, NodeProblemCode::Unavailable)),
+    )
 }
 
 async fn stop_networks(
@@ -224,6 +385,17 @@ pub fn spawn_command_bus_with_services(
     services: EmbeddedServiceManager,
 ) -> super::NodeCommandBus {
     let handler = NodeRuntimeHandler::with_services(state, registry, services);
+    super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
+}
+
+pub(crate) fn spawn_command_bus_with_runtime(
+    state: NodeStateStore,
+    registry: MultiNetworkRegistry,
+    events: super::NodeEventBus,
+    services: EmbeddedServiceManager,
+    runtime: NetworkRuntimeManager,
+) -> super::NodeCommandBus {
+    let handler = NodeRuntimeHandler::with_runtime(state, registry, services, runtime);
     super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
 }
 

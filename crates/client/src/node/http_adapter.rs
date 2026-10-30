@@ -13,7 +13,7 @@ use axum::{
     },
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use futures::SinkExt as _;
@@ -22,8 +22,8 @@ use tokio::sync::broadcast;
 
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeEvent, NodeEventBus, NodeEventKind, NodeProblem, NodeSnapshot,
-    NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeCommandResult, NodeEvent, NodeEventBus, NodeEventKind, NodeProblem, NodeProblemCode,
+    NodeSnapshot, NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };
 
 /// Version of the HTTP/WebSocket envelope contract used by desktop and
@@ -47,11 +47,30 @@ pub struct NodeManifestResponse {
     pub manifest: NodeUiManifest,
 }
 
+/// Versioned request DTO for `POST /api/node/commands`.
+///
+/// The embedded `NodeCommandRequest` is forwarded unchanged to
+/// `NodeCommandBus`; the adapter does not inspect or mutate node state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCommandHttpRequest {
+    pub schema_version: u16,
+    pub request: NodeCommandRequest,
+}
+
+/// Versioned response DTO containing the exact result returned by the command
+/// bus. Rejected results remain visible in the body alongside their HTTP status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeCommandHttpResponse {
+    pub schema_version: u16,
+    pub result: NodeCommandResult,
+}
+
 /// Stable error codes for HTTP version negotiation and backend failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
+    InvalidRequest,
     BackendRejected,
     BackendUnavailable,
     ContractViolation,
@@ -274,24 +293,40 @@ impl NodeHttpAdapter {
                 &format!("{NODE_HTTP_API_PREFIX}/events"),
                 get(handle_events),
             )
+            .route(
+                &format!("{NODE_HTTP_API_PREFIX}/commands"),
+                post(handle_command),
+            )
             .with_state(self)
     }
 
-    async fn execute(
+    /// Submit any node command unchanged to the shared command bus.
+    ///
+    /// HTTP action handlers use this method directly. No action path may call
+    /// `NodeStateStore::update` or maintain a second operation state machine.
+    pub async fn execute(
+        &self,
+        request: NodeCommandRequest,
+    ) -> Result<NodeCommandResult, NodeHttpAdapterError> {
+        self.commands
+            .execute(request)
+            .await
+            .map_err(NodeHttpAdapterError::from)
+    }
+
+    async fn execute_generated(
         &self,
         command: NodeCommand,
     ) -> Result<NodeCommandResult, NodeHttpAdapterError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        self.commands
-            .execute(NodeCommandRequest::new(request_id, command))
+        self.execute(NodeCommandRequest::new(request_id, command))
             .await
-            .map_err(NodeHttpAdapterError::from)
     }
 
     /// Fetch the latest snapshot through `NodeCommand::GetSnapshot`; the
     /// adapter never synthesizes a snapshot from private state.
     pub async fn snapshot(&self) -> Result<NodeSnapshot, NodeHttpAdapterError> {
-        let result = self.execute(NodeCommand::GetSnapshot).await?;
+        let result = self.execute_generated(NodeCommand::GetSnapshot).await?;
         match result.outcome {
             NodeCommandOutcome::Snapshot(snapshot) => Ok(*snapshot),
             NodeCommandOutcome::Rejected(problem) => Err(NodeHttpAdapterError::Rejected(problem)),
@@ -303,7 +338,7 @@ impl NodeHttpAdapter {
 
     /// Fetch the declarative UI contract through `NodeCommand::GetUiManifest`.
     pub async fn manifest(&self) -> Result<NodeUiManifest, NodeHttpAdapterError> {
-        let result = self.execute(NodeCommand::GetUiManifest).await?;
+        let result = self.execute_generated(NodeCommand::GetUiManifest).await?;
         match result.outcome {
             NodeCommandOutcome::UiManifest(manifest) => {
                 if manifest.schema_version != NODE_UI_MANIFEST_SCHEMA_VERSION {
@@ -328,7 +363,10 @@ struct NodeHttpQuery {
 }
 
 fn require_schema_version(query: &NodeHttpQuery) -> Result<u16, HttpAdapterError> {
-    let version = query.schema_version.unwrap_or(NODE_HTTP_SCHEMA_VERSION);
+    require_schema_version_value(query.schema_version.unwrap_or(NODE_HTTP_SCHEMA_VERSION))
+}
+
+fn require_schema_version_value(version: u16) -> Result<u16, HttpAdapterError> {
     if version != NODE_HTTP_SCHEMA_VERSION {
         return Err(HttpAdapterError::schema_version_mismatch(
             version,
@@ -336,6 +374,53 @@ fn require_schema_version(query: &NodeHttpQuery) -> Result<u16, HttpAdapterError
         ));
     }
     Ok(version)
+}
+
+/// Stable HTTP status mapping for command-bus results.
+fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
+    match &result.outcome {
+        NodeCommandOutcome::Rejected(problem) => status_for_problem(problem.code),
+        NodeCommandOutcome::Accepted { .. } => StatusCode::ACCEPTED,
+        NodeCommandOutcome::Snapshot(_)
+        | NodeCommandOutcome::UiManifest(_)
+        | NodeCommandOutcome::Probe(_)
+        | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
+    }
+}
+
+fn status_for_problem(code: NodeProblemCode) -> StatusCode {
+    match code {
+        NodeProblemCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        NodeProblemCode::NotFound => StatusCode::NOT_FOUND,
+        NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,
+        NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
+        NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn handle_command(
+    State(adapter): State<NodeHttpAdapter>,
+    Json(payload): Json<NodeCommandHttpRequest>,
+) -> Response {
+    if let Err(error) = require_schema_version_value(payload.schema_version) {
+        return error.into_response();
+    }
+
+    match adapter.execute(payload.request).await {
+        Ok(result) => {
+            let status = status_for_command_result(&result);
+            (
+                status,
+                Json(NodeCommandHttpResponse {
+                    schema_version: NODE_HTTP_SCHEMA_VERSION,
+                    result,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => HttpAdapterError::from(error).into_response(),
+    }
 }
 
 async fn handle_snapshot(
@@ -491,7 +576,7 @@ impl HttpAdapterError {
             ),
             NodeHttpAdapterError::Command(NodeCommandBusError::Invalid(problem)) => (
                 StatusCode::BAD_REQUEST,
-                NodeHttpErrorCode::BackendRejected,
+                NodeHttpErrorCode::InvalidRequest,
                 Some(problem.clone()),
             ),
             NodeHttpAdapterError::Command(_) => (
@@ -544,7 +629,7 @@ mod tests {
 
     use axum::{
         body::{to_bytes, Body},
-        http::{Request, StatusCode},
+        http::{header, Method, Request, StatusCode},
     };
     use futures::{SinkExt, StreamExt};
     use tokio::{net::TcpListener, sync::broadcast, time::timeout};
@@ -614,6 +699,22 @@ mod tests {
         serde_json::from_slice(&bytes).expect("decode response body")
     }
 
+    async fn post_command(adapter: NodeHttpAdapter, payload: &NodeCommandHttpRequest) -> Response {
+        let body = serde_json::to_vec(payload).expect("serialize command request");
+        adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/node/commands")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("command request"),
+            )
+            .await
+            .expect("command response")
+    }
+
     #[tokio::test]
     async fn snapshot_and_manifest_success_are_versioned_and_forwarded() {
         let (adapter, state, _events) = adapter_fixture(node_ui_manifest());
@@ -653,6 +754,89 @@ mod tests {
             NODE_UI_MANIFEST_SCHEMA_VERSION
         );
         assert_eq!(manifest.manifest.pages.len(), 11);
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_forwards_successful_read_command_to_bus() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(41, NodeCommand::GetSnapshot),
+        };
+
+        let response = post_command(adapter, &payload).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: NodeCommandHttpResponse = json_body(response).await;
+        assert_eq!(body.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        assert_eq!(body.result.request_id, 41);
+        assert!(matches!(
+            body.result.outcome,
+            NodeCommandOutcome::Snapshot(snapshot) if snapshot.revision == 0
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_maps_bus_validation_errors_to_bad_request() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(
+                42,
+                NodeCommand::StopNetworks {
+                    networks: Vec::new(),
+                    all: false,
+                },
+            ),
+        };
+
+        let response = post_command(adapter, &payload).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: NodeHttpErrorResponse = json_body(response).await;
+        assert_eq!(body.code, NodeHttpErrorCode::InvalidRequest);
+        let problem = body.problem.expect("validation problem in response");
+        assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_preserves_rejected_unavailable_result() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(43, NodeCommand::Shutdown),
+        };
+
+        let response = post_command(adapter, &payload).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: NodeCommandHttpResponse = json_body(response).await;
+        assert_eq!(body.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        assert_eq!(body.result.request_id, 43);
+        assert!(matches!(
+            body.result.outcome,
+            NodeCommandOutcome::Rejected(problem)
+                if problem.code == NodeProblemCode::Unavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_rejects_schema_mismatch_before_bus_submission() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION + 1,
+            request: NodeCommandRequest::new(44, NodeCommand::GetSnapshot),
+        };
+
+        let response = post_command(adapter, &payload).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: NodeHttpErrorResponse = json_body(response).await;
+        assert_eq!(body.code, NodeHttpErrorCode::SchemaVersionMismatch);
+        assert_eq!(
+            body.requested_schema_version,
+            Some(NODE_HTTP_SCHEMA_VERSION + 1)
+        );
+        assert_eq!(
+            body.supported_schema_version,
+            Some(NODE_HTTP_SCHEMA_VERSION)
+        );
     }
 
     #[tokio::test]

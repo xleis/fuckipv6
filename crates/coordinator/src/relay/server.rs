@@ -508,6 +508,34 @@ impl RelayServer {
         }))
     }
 
+    async fn ensure_packet_authorized(
+        &self,
+        client_id: &ClientId,
+        public_key: &[u8],
+        direction: &'static str,
+    ) -> std::result::Result<(), Box<RelayMessage>> {
+        match self
+            .session_manager
+            .is_registration_revoked(client_id, public_key)
+            .await
+        {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(Box::new(RelayMessage::error(
+                ErrorCode::Forbidden,
+                format!("{direction} client authorization has been revoked"),
+            ))),
+            Err(error) => {
+                tracing::error!(
+                    "QUIC 中继授权撤销目录查询失败，拒绝{direction}发包 {client_id}: {error:#}"
+                );
+                Err(Box::new(RelayMessage::error(
+                    ErrorCode::Internal,
+                    "authorization revocation check failed",
+                )))
+            }
+        }
+    }
+
     async fn validate_packet_request(
         &self,
         request: &RelayPacketRequest,
@@ -516,6 +544,8 @@ impl RelayServer {
         registered_src_ip: Ipv6Addr,
         src_connection_id: usize,
     ) -> std::result::Result<RelayClient, Box<RelayMessage>> {
+        self.ensure_packet_authorized(src_client_id, src_public_key, "source")
+            .await?;
         if self
             .session_manager
             .is_blacklisted(src_client_id, src_public_key)
@@ -523,7 +553,7 @@ impl RelayServer {
         {
             return Err(Box::new(RelayMessage::error(
                 ErrorCode::Forbidden,
-                "source client identity has been revoked",
+                "source client identity is blacklisted",
             )));
         }
 
@@ -554,6 +584,8 @@ impl RelayServer {
             )));
         };
 
+        self.ensure_packet_authorized(&dst_client.client_id, &dst_client.public_key, "destination")
+            .await?;
         if self
             .session_manager
             .is_blacklisted(&dst_client.client_id, &dst_client.public_key)
@@ -561,7 +593,7 @@ impl RelayServer {
         {
             return Err(Box::new(RelayMessage::error(
                 ErrorCode::Forbidden,
-                "destination client identity has been revoked",
+                "destination client identity is blacklisted",
             )));
         }
 
@@ -711,14 +743,89 @@ fn verify_relay_registration(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signaling::blacklist::BlacklistStore;
     use fuckipv6_common::relay_client::QuicRelayClient;
     use fuckipv6_common::{
         build_pinned_quic_client_config_with_auth, export_quic_relay_channel_binding,
         recv_relay_message, send_relay_message, BlacklistConfig, Identity, NatType,
-        NetworkAllocation, QuicCertificate, RelayMessage, RelayRegistrationBinding,
+        NetworkAllocation, NetworkAuthorizationRevocation, QuicCertificate, RelayMessage,
+        RelayRegistrationBinding,
     };
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
     use tokio::sync::mpsc;
+
+    #[derive(Default)]
+    struct MemoryAuthorizationStore {
+        revocations: Mutex<Vec<NetworkAuthorizationRevocation>>,
+        fail_revocation_reads: AtomicBool,
+    }
+
+    impl MemoryAuthorizationStore {
+        fn set_fail_revocation_reads(&self, fail: bool) {
+            self.fail_revocation_reads.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    impl BlacklistStore for MemoryAuthorizationStore {
+        fn load(&self) -> Result<BlacklistConfig> {
+            Ok(BlacklistConfig::default())
+        }
+
+        fn save(&self, _blacklist: &BlacklistConfig) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_authorization_revocations(&self) -> Result<Vec<NetworkAuthorizationRevocation>> {
+            if self.fail_revocation_reads.load(Ordering::SeqCst) {
+                anyhow::bail!("injected authorization directory read failure");
+            }
+            self.revocations
+                .lock()
+                .map(|revocations| revocations.clone())
+                .map_err(|_| anyhow::anyhow!("test authorization directory lock poisoned"))
+        }
+
+        fn revoke_authorization(&self, record: &NetworkAuthorizationRevocation) -> Result<bool> {
+            let mut revocations = self
+                .revocations
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test authorization directory lock poisoned"))?;
+            if revocations.iter().any(|existing| {
+                existing.network_id == record.network_id
+                    && (existing.client_id == record.client_id
+                        || existing.public_key_fingerprint == record.public_key_fingerprint)
+            }) {
+                return Ok(false);
+            }
+            revocations.push(record.clone());
+            Ok(true)
+        }
+
+        fn lift_authorization(
+            &self,
+            network_id: &str,
+            client_id: &str,
+            public_key_fingerprint: &str,
+        ) -> Result<bool> {
+            let mut revocations = self
+                .revocations
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test authorization directory lock poisoned"))?;
+            let original_len = revocations.len();
+            revocations.retain(|record| {
+                !(record.network_id == network_id
+                    && (record.client_id == client_id
+                        || record.public_key_fingerprint == public_key_fingerprint))
+            });
+            Ok(revocations.len() != original_len)
+        }
+
+        fn authorization_network_id(&self) -> String {
+            "test-network".to_string()
+        }
+    }
 
     #[derive(Debug, Default, Clone, Copy)]
     struct RegisterBindingOverrides {
@@ -1281,6 +1388,152 @@ mod tests {
         let traffic = session_manager.snapshot().await.traffic;
         assert_eq!(traffic.relay_packets, 0);
         assert_eq!(traffic.relay_payload_bytes, 0);
+
+        client_a.close().await;
+        client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_rechecks_persistent_revocation_on_established_connections() -> Result<()> {
+        let store = Arc::new(MemoryAuthorizationStore::default());
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        session_manager
+            .attach_blacklist_store(store.clone())
+            .await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let ip_a = session_manager
+            .register_client(
+                identity_a.client_id().to_string(),
+                identity_a.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx_a,
+            )
+            .await?
+            .primary_ipv6();
+        let ip_b = session_manager
+            .register_client(
+                identity_b.client_id().to_string(),
+                identity_b.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000),
+                51821,
+                NatType::Open,
+                tx_b,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.run());
+        let client_a =
+            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
+                .await?;
+        let client_b =
+            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
+                .await?;
+
+        session_manager
+            .try_revoke_node(identity_b.client_id(), &identity_b.public_key())
+            .await?;
+        let destination_error = client_a
+            .send_packet(1, ip_a, ip_b, b"persistently revoked destination")
+            .await
+            .expect_err("persistently revoked destination must not receive relay packets")
+            .to_string();
+        assert!(destination_error.contains("403"), "{destination_error}");
+
+        session_manager
+            .try_revoke_node(identity_a.client_id(), &identity_a.public_key())
+            .await?;
+        let source_error = client_a
+            .send_packet(2, ip_a, ip_b, b"persistently revoked source")
+            .await
+            .expect_err("persistently revoked source must not send relay packets")
+            .to_string();
+        assert!(source_error.contains("403"), "{source_error}");
+
+        let traffic = session_manager.snapshot().await.traffic;
+        assert_eq!(traffic.relay_packets, 0);
+        assert_eq!(traffic.relay_payload_bytes, 0);
+        assert_eq!(traffic.relay_errors, 2);
+
+        client_a.close().await;
+        client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_fails_closed_when_revocation_storage_is_unavailable() -> Result<()> {
+        let store = Arc::new(MemoryAuthorizationStore::default());
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        session_manager
+            .attach_blacklist_store(store.clone())
+            .await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let ip_a = session_manager
+            .register_client(
+                identity_a.client_id().to_string(),
+                identity_a.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx_a,
+            )
+            .await?
+            .primary_ipv6();
+        let ip_b = session_manager
+            .register_client(
+                identity_b.client_id().to_string(),
+                identity_b.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000),
+                51821,
+                NatType::Open,
+                tx_b,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.run());
+        let client_a =
+            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
+                .await?;
+        let client_b =
+            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
+                .await?;
+
+        store.set_fail_revocation_reads(true);
+        let error = client_a
+            .send_packet(1, ip_a, ip_b, b"storage unavailable")
+            .await
+            .expect_err("authorization storage errors must fail packet forwarding closed")
+            .to_string();
+        assert!(error.contains("500"), "{error}");
+
+        let traffic = session_manager.snapshot().await.traffic;
+        assert_eq!(traffic.relay_packets, 0);
+        assert_eq!(traffic.relay_payload_bytes, 0);
+        assert_eq!(traffic.relay_errors, 1);
 
         client_a.close().await;
         client_b.close().await;

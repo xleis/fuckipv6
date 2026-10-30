@@ -341,7 +341,11 @@ impl ClassicInitiator {
     /// Validate and finish the handshake using a responder `ACCEPT`.
     ///
     /// `now` is Unix time in seconds from the initiator's trusted clock.
-    pub fn finish(self, accept: &Accept, now: u64) -> Result<EstablishedHandshake, HandshakeError> {
+    pub fn finish(
+        &self,
+        accept: &Accept,
+        now: u64,
+    ) -> Result<EstablishedHandshake, HandshakeError> {
         validate_accept_matches_hello(&self.hello, accept)?;
         if accept.epoch != self.requested_epoch {
             return Err(HandshakeError::AcceptMismatch);

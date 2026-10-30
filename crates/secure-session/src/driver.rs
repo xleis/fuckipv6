@@ -11,7 +11,9 @@
 //! existing static-key implementation until it is migrated in a separate
 //! change.
 
-use crate::confirmation::{compute_confirmation, ConfirmationRole, ConfirmationTag};
+use crate::confirmation::{
+    compute_confirmation, verify_confirmation, ConfirmationRole, ConfirmationTag,
+};
 use crate::handshake::{Accept, ClassicInitiator, ClassicResponder, Ed25519Identity, Hello};
 use crate::handshake_epoch::HandshakeEpochError;
 use crate::key_schedule::{derive_session_keys, DerivedSession, KeyScheduleError};
@@ -388,6 +390,28 @@ impl InitiatorHandshake {
             .map(|(driver, confirm)| (driver, confirm.initiator_confirmation))
     }
 
+    /// Validate a decoded responder `ACCEPT` and its key confirmation without
+    /// consuming this pending handshake.
+    ///
+    /// Transports use this before taking pending state so an unauthenticated
+    /// frame cannot force a fresh handshake attempt.
+    pub fn validate_accept_wire(
+        &self,
+        accept: &AcceptFrame,
+        issued_at: u64,
+    ) -> Result<(), DriverError> {
+        let established = self.handshake.finish(&accept.accept, issued_at)?;
+        let derived = derive_session_keys(established, self.psk.as_deref())?;
+        verify_confirmation(
+            &derived.keys,
+            ConfirmationRole::Responder,
+            &derived.identity.transcript_hash,
+            accept.responder_confirmation.as_bytes(),
+        )
+        .map_err(HandshakeEpochError::Confirmation)?;
+        Ok(())
+    }
+
     /// Complete from a decoded `ACCEPT` wire frame and return the canonical
     /// `CONFIRM` frame required by the responder.
     ///
@@ -504,13 +528,30 @@ impl ResponderHandshake {
         confirm: &ConfirmFrame,
         now: Instant,
     ) -> Result<(SessionDriver, ConfirmationTag), DriverError> {
+        self.validate_wire(confirm)?;
+        self.complete(&confirm.initiator_confirmation, now)
+    }
+
+    /// Validate a decoded initiator `CONFIRM` without consuming this pending
+    /// handshake.
+    ///
+    /// Transports use this before taking pending state so a forged frame with
+    /// the expected public session identifier cannot force a fresh handshake.
+    pub fn validate_wire(&self, confirm: &ConfirmFrame) -> Result<(), DriverError> {
         if confirm.session_id != self.derived.identity.session_id {
             return Err(DriverError::ConfirmSessionMismatch);
         }
         if confirm.transcript_hash != self.derived.identity.transcript_hash {
             return Err(DriverError::ConfirmTranscriptMismatch);
         }
-        self.complete(&confirm.initiator_confirmation, now)
+        verify_confirmation(
+            &self.derived.keys,
+            ConfirmationRole::Initiator,
+            &self.derived.identity.transcript_hash,
+            confirm.initiator_confirmation.as_bytes(),
+        )
+        .map_err(HandshakeEpochError::Confirmation)?;
+        Ok(())
     }
 
     /// Verify the initiator confirmation and install a ready data-plane driver.

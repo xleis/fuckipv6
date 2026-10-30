@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use fuckipv6_common::{
     codec, BlacklistConfig, ClientId, NatType, NetworkAllocation, NetworkMode, PeerInfo,
     QuicClientCertificateAuthorizer, SignalingMessage, VirtualIps,
@@ -10,8 +10,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
+
+use super::blacklist::SharedBlacklistStore;
 
 /// 客户端会话
 pub struct ClientSession {
@@ -28,6 +30,8 @@ pub struct SessionManager {
     leases: Arc<RwLock<HashMap<ClientId, VirtualIps>>>,
     traffic: Arc<TrafficCounters>,
     blacklist: Arc<RwLock<BlacklistConfig>>,
+    blacklist_store: StdRwLock<Option<SharedBlacklistStore>>,
+    blacklist_write_lock: TokioMutex<()>,
     certificate_allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
 }
 
@@ -216,6 +220,8 @@ impl SessionManager {
             leases: Arc::new(RwLock::new(HashMap::new())),
             traffic: Arc::new(TrafficCounters::new()),
             blacklist: Arc::new(RwLock::new(BlacklistConfig::default())),
+            blacklist_store: StdRwLock::new(None),
+            blacklist_write_lock: TokioMutex::new(()),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
@@ -238,6 +244,8 @@ impl SessionManager {
             leases: Arc::new(RwLock::new(HashMap::new())),
             traffic: Arc::new(TrafficCounters::new()),
             blacklist: Arc::new(RwLock::new(blacklist)),
+            blacklist_store: StdRwLock::new(None),
+            blacklist_write_lock: TokioMutex::new(()),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
@@ -284,28 +292,132 @@ impl SessionManager {
             .is_banned(client_id, &fingerprint)
     }
 
-    /// 将客户端加入黑名单，并强制下线如果当前在线
-    pub async fn ban_client(&self, client_id: String) {
-        let mut bl = self.blacklist.write().await;
-        if !bl.banned_clients.contains(&client_id) {
-            bl.banned_clients.push(client_id.clone());
-        }
-        drop(bl);
+    /// 挂载持久化存储，并以磁盘配置作为启动时的权威黑名单状态。
+    ///
+    /// 加载失败时保持当前内存状态不变；加载成功后，已在线且匹配黑名单的会话
+    /// 会走正常注销路径释放租约、撤销证书授权并广播离线事件。
+    pub async fn attach_blacklist_store(&self, store: SharedBlacklistStore) -> Result<()> {
+        let load_store = store.clone();
+        let blacklist = tokio::task::spawn_blocking(move || load_store.load())
+            .await
+            .context("等待持久黑名单加载任务失败")??;
 
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.remove(&client_id) {
-            self.revoke_client_certificate_authorization(&client_id);
-            let _ = session.tx.send(Message::Close(None));
+        *self.blacklist.write().await = blacklist.clone();
+        {
+            let mut store_slot = self
+                .blacklist_store
+                .write()
+                .map_err(|_| anyhow!("持久黑名单存储锁已损坏"))?;
+            *store_slot = Some(store);
+        }
+
+        self.disconnect_blacklisted_sessions(&blacklist).await;
+        Ok(())
+    }
+
+    async fn persist_blacklist_state(&self, blacklist: &BlacklistConfig) -> Result<()> {
+        let store = self
+            .blacklist_store
+            .read()
+            .map_err(|_| anyhow!("持久黑名单存储锁已损坏"))?
+            .clone();
+        if let Some(store) = store {
+            let blacklist = blacklist.clone();
+            tokio::task::spawn_blocking(move || store.save(&blacklist))
+                .await
+                .context("等待持久黑名单写入任务失败")??;
+        }
+        Ok(())
+    }
+
+    async fn disconnect_blacklisted_sessions(&self, blacklist: &BlacklistConfig) {
+        let sessions_to_disconnect: Vec<(ClientId, mpsc::UnboundedSender<Message>)> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|session| {
+                    let fingerprint = fuckipv6_common::Identity::public_key_fingerprint(
+                        &session.peer_info.public_key,
+                    );
+                    blacklist.is_banned(&session.peer_info.client_id, &fingerprint)
+                })
+                .map(|session| (session.peer_info.client_id.clone(), session.tx.clone()))
+                .collect()
+        };
+
+        for (client_id, tx) in sessions_to_disconnect {
+            let _ = tx.send(Message::Close(None));
+            self.unregister_client(&client_id).await;
             tracing::warn!("黑名单客户端已强制断开并踢出: {}", client_id);
         }
     }
 
-    /// 从黑名单移除客户端
+    /// 将客户端加入黑名单，持久化成功后才更新运行期状态并强制下线。
+    ///
+    /// 返回 `true` 表示新增了黑名单项；返回 `false` 表示该项已存在。
+    /// 持久化失败时运行期黑名单和在线会话均保持不变。
+    pub async fn try_ban_client(&self, client_id: String) -> Result<bool> {
+        let target = client_id.trim();
+        if target.is_empty() {
+            bail!("客户端 ID 不能为空");
+        }
+
+        let _guard = self.blacklist_write_lock.lock().await;
+        let mut next = self.blacklist.read().await.clone();
+        let changed = !next
+            .banned_clients
+            .iter()
+            .any(|banned| banned.trim() == target);
+        if changed {
+            next.banned_clients.push(target.to_string());
+            self.persist_blacklist_state(&next).await?;
+        }
+
+        *self.blacklist.write().await = next.clone();
+        self.disconnect_blacklisted_sessions(&next).await;
+        Ok(changed)
+    }
+
+    /// 将客户端加入黑名单，并强制下线如果当前在线。
+    ///
+    /// 无持久化存储时保持原有内存语义；持久化失败会记录错误且不修改运行期状态。
+    pub async fn ban_client(&self, client_id: String) {
+        if let Err(error) = self.try_ban_client(client_id).await {
+            tracing::error!("封禁客户端失败，运行期状态未修改: {error:#}");
+        }
+    }
+
+    /// 从黑名单移除客户端，持久化成功后才更新运行期状态。
+    pub async fn try_unban_client(&self, client_id: &str) -> Result<bool> {
+        let target = client_id.trim();
+        if target.is_empty() {
+            return Ok(false);
+        }
+
+        let _guard = self.blacklist_write_lock.lock().await;
+        let mut next = self.blacklist.read().await.clone();
+        let original_len = next.banned_clients.len();
+        next.banned_clients.retain(|item| item.trim() != target);
+        if next.banned_clients.len() == original_len {
+            return Ok(false);
+        }
+
+        self.persist_blacklist_state(&next).await?;
+        *self.blacklist.write().await = next;
+        Ok(true)
+    }
+
+    /// 从黑名单移除客户端。
+    ///
+    /// 无持久化存储时保持原有内存语义；持久化失败会记录错误且不修改运行期状态。
     pub async fn unban_client(&self, client_id: &str) -> bool {
-        let mut bl = self.blacklist.write().await;
-        let original_len = bl.banned_clients.len();
-        bl.banned_clients.retain(|item| item != client_id);
-        bl.banned_clients.len() < original_len
+        match self.try_unban_client(client_id).await {
+            Ok(removed) => removed,
+            Err(error) => {
+                tracing::error!("解封客户端失败，运行期状态未修改: {error:#}");
+                false
+            }
+        }
     }
 
     /// 获取当前生效的黑名单列表
@@ -1077,6 +1189,42 @@ impl IpAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::RwLock as TestRwLock;
+
+    #[derive(Default)]
+    struct MemoryBlacklistStore {
+        state: TestRwLock<BlacklistConfig>,
+        fail_save: bool,
+    }
+
+    impl MemoryBlacklistStore {
+        fn with(initial: BlacklistConfig, fail_save: bool) -> Self {
+            Self {
+                state: TestRwLock::new(initial),
+                fail_save,
+            }
+        }
+    }
+
+    impl super::super::blacklist::BlacklistStore for MemoryBlacklistStore {
+        fn load(&self) -> Result<BlacklistConfig> {
+            self.state
+                .read()
+                .map(|state| state.clone())
+                .map_err(|_| anyhow!("test blacklist store lock poisoned"))
+        }
+
+        fn save(&self, blacklist: &BlacklistConfig) -> Result<()> {
+            if self.fail_save {
+                bail!("injected blacklist persistence failure");
+            }
+            *self
+                .state
+                .write()
+                .map_err(|_| anyhow!("test blacklist store lock poisoned"))? = blacklist.clone();
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_ip_allocator() -> Result<()> {
@@ -1540,6 +1688,129 @@ mod tests {
         // 通过指纹前缀封禁
         manager.ban_client(fingerprint[0..8].to_string()).await;
         assert!(manager.is_blacklisted("any-node-id", &pk).await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_blacklist_survives_manager_restart_and_unban() -> Result<()> {
+        let store = Arc::new(MemoryBlacklistStore::default());
+        let first = SessionManager::new("fd00::1000/120")?;
+        first.attach_blacklist_store(store.clone()).await?;
+        assert!(first.try_ban_client("node-bad".to_string()).await?);
+
+        let second = SessionManager::new("fd00::1000/120")?;
+        second.attach_blacklist_store(store.clone()).await?;
+        assert_eq!(second.get_blacklist().await, vec!["node-bad".to_string()]);
+        assert!(second.is_blacklisted("node-bad", &[9; 32]).await);
+        assert!(second.try_unban_client("node-bad").await?);
+
+        let third = SessionManager::new("fd00::1000/120")?;
+        third.attach_blacklist_store(store).await?;
+        assert!(third.get_blacklist().await.is_empty());
+        assert!(!third.is_blacklisted("node-bad", &[9; 32]).await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_keeps_runtime_blacklist_and_session_unchanged() -> Result<()> {
+        let store = Arc::new(MemoryBlacklistStore::with(BlacklistConfig::default(), true));
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager.attach_blacklist_store(store).await?;
+
+        let authorizer = manager.client_certificate_authorizer();
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let public_key: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                client_id.clone(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+
+        let error = manager
+            .try_ban_client(client_id.clone())
+            .await
+            .expect_err("persistence failure must reject ban");
+        assert!(error.to_string().contains("persistence failure"));
+        assert!(manager.get_blacklist().await.is_empty());
+        assert!(
+            manager
+                .is_blacklisted("any-node", &identity.public_key())
+                .await
+                == false
+        );
+        assert!(manager.get_peer_info(&client_id).await.is_some());
+        assert!(authorizer.is_authorized(&public_key));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unban_persistence_failure_keeps_runtime_blacklist_unchanged() -> Result<()> {
+        let persisted = BlacklistConfig {
+            banned_clients: vec!["node-bad".to_string()],
+        };
+        let store = Arc::new(MemoryBlacklistStore::with(persisted.clone(), true));
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager.attach_blacklist_store(store).await?;
+
+        let error = manager
+            .try_unban_client("node-bad")
+            .await
+            .expect_err("persistence failure must reject unban");
+        assert!(error.to_string().contains("persistence failure"));
+        assert_eq!(manager.get_blacklist().await, persisted.banned_clients);
+        assert!(manager.is_blacklisted("node-bad", &[9; 32]).await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_blacklist_disconnects_and_revokes_existing_match() -> Result<()> {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let authorizer = manager.client_certificate_authorizer();
+        let identity = fuckipv6_common::Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let public_key = identity.public_key();
+        let public_key: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("identity public key is not Ed25519"))?;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                client_id.clone(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+        assert!(authorizer.is_authorized(&public_key));
+
+        let store = Arc::new(MemoryBlacklistStore::with(
+            BlacklistConfig {
+                banned_clients: vec![identity.client_id().to_string()],
+            },
+            false,
+        ));
+        manager.attach_blacklist_store(store).await?;
+
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        assert!(!authorizer.is_authorized(&public_key));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Message::Close(_)) | Err(mpsc::error::TryRecvError::Empty)
+        ));
         Ok(())
     }
 }

@@ -700,8 +700,8 @@ mod tests {
     use fuckipv6_common::relay_client::QuicRelayClient;
     use fuckipv6_common::{
         build_pinned_quic_client_config_with_auth, export_quic_relay_channel_binding,
-        recv_relay_message, send_relay_message, Identity, NatType, QuicCertificate, RelayMessage,
-        RelayRegistrationBinding,
+        recv_relay_message, send_relay_message, BlacklistConfig, Identity, NatType,
+        NetworkAllocation, QuicCertificate, RelayMessage, RelayRegistrationBinding,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::sync::mpsc;
@@ -1059,8 +1059,14 @@ mod tests {
 
     #[tokio::test]
     async fn quic_relay_rejects_blacklisted_registration_without_state_changes() -> Result<()> {
-        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
         let identity = Identity::generate()?;
+        let revoked_fingerprint = Identity::public_key_fingerprint(&identity.public_key());
+        let session_manager = Arc::new(SessionManager::new_with_allocation_and_blacklist(
+            &NetworkAllocation::default(),
+            BlacklistConfig {
+                banned_clients: vec![revoked_fingerprint[..16].to_string()],
+            },
+        )?);
         let (tx, _rx) = mpsc::unbounded_channel();
         let virtual_ip = session_manager
             .register_client(
@@ -1073,10 +1079,6 @@ mod tests {
             )
             .await?
             .primary_ipv6();
-        let revoked_fingerprint = Identity::public_key_fingerprint(&identity.public_key());
-        session_manager
-            .ban_client(revoked_fingerprint[..16].to_string())
-            .await;
 
         let server = RelayServer::bind_with_generated_certificate(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

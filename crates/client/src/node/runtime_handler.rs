@@ -118,9 +118,10 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                     Some(runtime) => join_runtime_network(&runtime, request_id, command).await,
                     None => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
                 },
-                super::NodeCommand::UpdateRouting(_) => {
-                    unavailable(request_id, "路由热更新尚未接入多网络监督器控制通道")
-                }
+                super::NodeCommand::UpdateRouting(command) => match runtime {
+                    Some(runtime) => update_runtime_routing(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "路由热更新需要运行中的多网络监督器控制通道"),
+                },
                 super::NodeCommand::SetNetworkRole(_) => {
                     unavailable(request_id, "网络角色变更尚未接入持久化与运行时重配置")
                 }
@@ -226,6 +227,28 @@ async fn stop_runtime_networks(
                 } else {
                     format!("已停止网络: {}", summary.stopped.join(", "))
                 },
+            },
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn update_runtime_routing(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeUpdateRoutingCommand,
+) -> NodeCommandResult {
+    let network_name = command.network_name.clone();
+    match runtime.update_routing(command).await {
+        Ok(result) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: format!(
+                    "网络 [{network_name}] 路由已热更新: mode={}, exit_node={}, is_exit_node={}",
+                    result.mode,
+                    result.exit_node.as_deref().unwrap_or("none"),
+                    result.is_exit_node
+                ),
             },
         ),
         Err(error) => runtime_rejection(request_id, error),
@@ -591,7 +614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_routing_and_role_changes_are_explicitly_unavailable() {
+    async fn unsupported_role_changes_and_routing_without_runtime_are_unavailable() {
         let bus = spawn_command_bus(
             NodeStateStore::new(),
             MultiNetworkRegistry::new(),

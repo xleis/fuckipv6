@@ -7,17 +7,18 @@ use std::time::Duration;
 use fuckipv6_common::{ClientConfig, NetworkTicket};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use super::{
     NodeCreateNetworkCommand, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus,
     NodeEventKind, NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle,
     NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeRuntimePlan, NodeStateStore,
-    NodeTrafficSnapshot,
+    NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeRuntimePlan,
+    NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
-use crate::ipc::{MultiNetworkRegistry, NetworkSessionHandle};
+use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::runtime_metadata;
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -25,8 +26,17 @@ use crate::symmetric::{
 };
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
 
 type RuntimeFuture<T> = Pin<Box<dyn Future<Output = Result<T, RuntimeControlError>> + Send>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeRoutingRequestError {
+    ControlClosed,
+    TimedOut(Duration),
+    ResponseClosed,
+    Rejected(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum RuntimeControlError {
@@ -115,6 +125,7 @@ struct StartedNetworkRuntime {
     assigned_ipv4: Option<std::net::Ipv4Addr>,
     p2p_listen_addr: std::net::SocketAddr,
     identity: NodeIdentitySnapshot,
+    routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
     handle: JoinHandle<()>,
 }
@@ -157,6 +168,12 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let identity = runtime_metadata::identity_snapshot(&runtime.identity, None);
             let p2p = runtime.p2p.clone();
             let stats = runtime.stats.clone();
+
+            // Multi-network nodes disable each runtime's private IPC listener.
+            // Replace its unused control receiver with the actor-owned channel so
+            // routing changes are applied by the existing live event loop.
+            let (routing_control, routing_control_rx) = mpsc::unbounded_channel();
+            runtime.control_rx = routing_control_rx;
 
             registry
                 .register(NetworkSessionHandle {
@@ -211,6 +228,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 assigned_ipv4,
                 p2p_listen_addr,
                 identity,
+                routing_control,
                 shutdown,
                 handle,
             })
@@ -219,6 +237,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
 }
 
 struct NetworkRuntimeSession {
+    routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
     handle: JoinHandle<()>,
 }
@@ -239,6 +258,10 @@ enum RuntimeControlCommand {
     Join {
         command: NodeJoinNetworkCommand,
         reply: oneshot::Sender<Result<JoinResult, RuntimeControlError>>,
+    },
+    UpdateRouting {
+        command: NodeUpdateRoutingCommand,
+        reply: oneshot::Sender<Result<ipc::RoutingUpdateResult, RuntimeControlError>>,
     },
     Stop {
         networks: Vec<String>,
@@ -286,6 +309,29 @@ impl NetworkRuntimeManager {
         services: EmbeddedServiceManager,
         launcher: Arc<dyn NetworkRuntimeLauncher>,
     ) -> Self {
+        Self::spawn_with_launcher_and_timeout(
+            configs,
+            options,
+            state,
+            events,
+            lifecycle,
+            services,
+            launcher,
+            ROUTING_UPDATE_TIMEOUT,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_launcher_and_timeout(
+        configs: ConfigManager,
+        options: RuntimeOptions,
+        state: NodeStateStore,
+        events: NodeEventBus,
+        lifecycle: NodeLifecycle,
+        services: EmbeddedServiceManager,
+        launcher: Arc<dyn NetworkRuntimeLauncher>,
+        routing_update_timeout: Duration,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
         tokio::spawn(run_actor(
             receiver,
@@ -298,6 +344,7 @@ impl NetworkRuntimeManager {
                 services,
                 launcher,
                 sessions: HashMap::new(),
+                routing_update_timeout,
             },
         ));
         Self { sender }
@@ -345,6 +392,18 @@ impl NetworkRuntimeManager {
     ) -> Result<JoinResult, RuntimeControlError> {
         let (reply, response) = oneshot::channel();
         self.send(RuntimeControlCommand::Join { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    pub async fn update_routing(
+        &self,
+        command: NodeUpdateRoutingCommand,
+    ) -> Result<ipc::RoutingUpdateResult, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::UpdateRouting { command, reply })
             .await?;
         response
             .await
@@ -406,6 +465,10 @@ async fn run_actor(
                 let result = actor.join(command).await;
                 let _ = reply.send(result);
             }
+            RuntimeControlCommand::UpdateRouting { command, reply } => {
+                let result = actor.update_routing(command).await;
+                let _ = reply.send(result);
+            }
             RuntimeControlCommand::Stop {
                 networks,
                 all,
@@ -432,6 +495,7 @@ struct NetworkRuntimeActor {
     services: EmbeddedServiceManager,
     launcher: Arc<dyn NetworkRuntimeLauncher>,
     sessions: HashMap<String, NetworkRuntimeSession>,
+    routing_update_timeout: Duration,
 }
 
 impl NetworkRuntimeActor {
@@ -555,6 +619,7 @@ impl NetworkRuntimeActor {
         self.sessions.insert(
             network_name,
             NetworkRuntimeSession {
+                routing_control: started.routing_control,
                 shutdown: started.shutdown,
                 handle: started.handle,
             },
@@ -721,6 +786,98 @@ impl NetworkRuntimeActor {
             config_saved: true,
             started,
         })
+    }
+
+    async fn update_routing(
+        &mut self,
+        command: NodeUpdateRoutingCommand,
+    ) -> Result<ipc::RoutingUpdateResult, RuntimeControlError> {
+        self.prune_finished_sessions();
+
+        let network_name = command.network_name.clone();
+        let routing_control = self
+            .sessions
+            .get(&network_name)
+            .map(|session| session.routing_control.clone())
+            .ok_or_else(|| RuntimeControlError::NotFound(format!("网络未运行: {network_name}")))?;
+
+        let previous = self
+            .state
+            .snapshot()
+            .await
+            .configuration
+            .networks
+            .into_iter()
+            .find(|network| network.network_name == network_name)
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享配置快照缺失，未应用路由更新"
+                ))
+            })?;
+
+        let result = match request_runtime_routing_update(
+            &routing_control,
+            &command,
+            self.routing_update_timeout,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(RuntimeRoutingRequestError::ControlClosed) => {
+                return Err(RuntimeControlError::NotFound(format!(
+                    "网络 [{network_name}] 的运行时控制通道已关闭"
+                )));
+            }
+            Err(failure) => {
+                let failure_message = describe_routing_request_failure(&failure);
+                let rollback = rollback_runtime_routing(
+                    &routing_control,
+                    &previous,
+                    self.routing_update_timeout,
+                )
+                .await;
+                return Err(match rollback {
+                    Ok(()) => RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 路由热更新失败: {failure_message}；已通过运行时重新应用旧配置，文件和运行态已回滚"
+                    )),
+                    Err(rollback_error) => RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 路由热更新失败: {failure_message}；旧配置回滚未能确认: {rollback_error}"
+                    )),
+                });
+            }
+        };
+
+        let mut updated = previous.clone();
+        updated.routing_mode = command.mode;
+        updated.exit_node = command.exit_node.clone();
+        updated.exit_node_enabled = command.is_exit_node;
+
+        if !self.publish_existing_network_config(updated).await {
+            let rollback =
+                rollback_runtime_routing(&routing_control, &previous, self.routing_update_timeout)
+                    .await;
+            // The failed publish did not replace an existing entry. Restore the
+            // previous projection if a concurrent state transition removed it
+            // while the runtime update was in flight.
+            self.restore_network_config(previous).await;
+            return Err(match rollback {
+                Ok(()) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享快照发布失败，运行态、持久化配置和共享快照已回滚"
+                )),
+                Err(rollback_error) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享快照发布失败，且运行态回滚失败: {rollback_error}"
+                )),
+            });
+        }
+
+        self.events.publish(NodeEventKind::RoutingChanged {
+            network_name,
+            mode: command.mode,
+            exit_node: command.exit_node,
+            is_exit_node: command.is_exit_node,
+        });
+
+        Ok(result)
     }
 
     async fn stop(
@@ -964,6 +1121,41 @@ impl NetworkRuntimeActor {
             .await;
     }
 
+    async fn publish_existing_network_config(&self, config: NodeNetworkConfigSnapshot) -> bool {
+        let mut published = false;
+        self.state
+            .update(|snapshot| {
+                if let Some(existing) = snapshot
+                    .configuration
+                    .networks
+                    .iter_mut()
+                    .find(|existing| existing.network_name == config.network_name)
+                {
+                    *existing = config;
+                    published = true;
+                }
+            })
+            .await;
+        published
+    }
+
+    async fn restore_network_config(&self, config: NodeNetworkConfigSnapshot) {
+        self.state
+            .update(|snapshot| {
+                if let Some(existing) = snapshot
+                    .configuration
+                    .networks
+                    .iter_mut()
+                    .find(|existing| existing.network_name == config.network_name)
+                {
+                    *existing = config;
+                } else {
+                    snapshot.configuration.networks.push(config);
+                }
+            })
+            .await;
+    }
+
     async fn record_network(&self, network: NodeNetworkSnapshot) {
         let network_name = network.name.clone();
         let status = network.status;
@@ -1084,22 +1276,103 @@ fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
     }
 }
 
+async fn request_runtime_routing_update(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    command: &NodeUpdateRoutingCommand,
+    wait: Duration,
+) -> Result<ipc::RoutingUpdateResult, RuntimeRoutingRequestError> {
+    let (reply, response) = oneshot::channel();
+    routing_control
+        .send(ipc::RuntimeCommand::UpdateRouting {
+            mode: runtime_routing_mode_name(command.mode).into(),
+            exit_node: command.exit_node.clone(),
+            is_exit_node: command.is_exit_node,
+            reply,
+        })
+        .map_err(|_| RuntimeRoutingRequestError::ControlClosed)?;
+
+    match timeout(wait, response).await {
+        Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
+        Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
+        Ok(Ok(Ok(result))) => Ok(result),
+        Ok(Ok(Err(message))) => Err(RuntimeRoutingRequestError::Rejected(message)),
+    }
+}
+
+async fn rollback_runtime_routing(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    previous: &NodeNetworkConfigSnapshot,
+    wait: Duration,
+) -> Result<(), RuntimeControlError> {
+    let command = NodeUpdateRoutingCommand {
+        network_name: previous.network_name.clone(),
+        mode: previous.routing_mode,
+        exit_node: previous.exit_node.clone(),
+        is_exit_node: previous.exit_node_enabled,
+    };
+    request_runtime_routing_update(routing_control, &command, wait)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            RuntimeControlError::Persistence(format!(
+                "网络 [{}] 的旧路由回滚失败: {}",
+                previous.network_name,
+                describe_routing_request_failure(&error)
+            ))
+        })
+}
+
+fn describe_routing_request_failure(error: &RuntimeRoutingRequestError) -> String {
+    match error {
+        RuntimeRoutingRequestError::ControlClosed => "运行时控制通道已关闭".into(),
+        RuntimeRoutingRequestError::TimedOut(wait) => {
+            format!("等待运行时响应超时（{} 秒）", wait.as_secs_f64())
+        }
+        RuntimeRoutingRequestError::ResponseClosed => "运行时在完成前关闭了响应通道".into(),
+        RuntimeRoutingRequestError::Rejected(message) => format!("运行时拒绝更新: {message}"),
+    }
+}
+
+fn runtime_routing_mode_name(mode: NodeRoutingMode) -> &'static str {
+    match mode {
+        NodeRoutingMode::MeshOnly => "MeshOnly",
+        NodeRoutingMode::BypassMainland => "BypassMainland",
+        NodeRoutingMode::GlobalProxy => "GlobalProxy",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{NodeEvent, NodePeerSnapshot};
+    use crate::node::{
+        NodeCommand, NodeCommandOutcome, NodeCommandRequest, NodeEvent, NodePeerSnapshot,
+    };
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::time::Duration;
     use tokio::sync::broadcast;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RoutingCall {
+        network_name: String,
+        mode: NodeRoutingMode,
+        exit_node: Option<String>,
+        is_exit_node: bool,
+    }
 
     #[derive(Clone, Default)]
     struct FakeLauncher {
         launches: Arc<Mutex<Vec<String>>>,
         failures: Arc<Mutex<HashSet<String>>>,
         shutdowns: Arc<AtomicUsize>,
+        routing_calls: Arc<Mutex<Vec<RoutingCall>>>,
+        routing_failures: Arc<Mutex<HashSet<String>>>,
+        routing_delay_ms: Arc<AtomicU64>,
+        routing_in_flight: Arc<AtomicUsize>,
+        routing_max_in_flight: Arc<AtomicUsize>,
     }
 
     impl FakeLauncher {
@@ -1124,6 +1397,29 @@ mod tests {
         fn shutdown_count(&self) -> usize {
             self.shutdowns.load(Ordering::SeqCst)
         }
+
+        fn fail_routing(&self, network_name: &str) {
+            self.routing_failures
+                .lock()
+                .expect("routing failure lock poisoned")
+                .insert(network_name.to_string());
+        }
+
+        fn set_routing_delay(&self, delay: Duration) {
+            self.routing_delay_ms
+                .store(delay.as_millis() as u64, Ordering::SeqCst);
+        }
+
+        fn routing_calls(&self) -> Vec<RoutingCall> {
+            self.routing_calls
+                .lock()
+                .expect("routing call lock poisoned")
+                .clone()
+        }
+
+        fn max_routing_concurrency(&self) -> usize {
+            self.routing_max_in_flight.load(Ordering::SeqCst)
+        }
     }
 
     impl NetworkRuntimeLauncher for FakeLauncher {
@@ -1131,6 +1427,11 @@ mod tests {
             let launches = self.launches.clone();
             let failures = self.failures.clone();
             let shutdowns = self.shutdowns.clone();
+            let routing_calls = self.routing_calls.clone();
+            let routing_failures = self.routing_failures.clone();
+            let routing_delay_ms = self.routing_delay_ms.clone();
+            let routing_in_flight = self.routing_in_flight.clone();
+            let routing_max_in_flight = self.routing_max_in_flight.clone();
 
             Box::pin(async move {
                 if failures
@@ -1148,25 +1449,118 @@ mod tests {
                     .lock()
                     .expect("launch lock poisoned")
                     .push(request.network_name.clone());
+                let tun_name = crate::multi_network::derive_tun_name(
+                    Some(&request.network_name),
+                    &request.config.tun.name,
+                );
+                let network_name = request.network_name.clone();
+                let routing_network_name = network_name.clone();
+                let config_path = PathBuf::from(request.config_path);
+                let mut current_config = request.config;
+                let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
                 let (shutdown, mut shutdown_rx) = watch::channel(false);
                 let handle = tokio::spawn(async move {
-                    let _ = shutdown_rx.changed().await;
+                    loop {
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            command = routing_control_rx.recv() => {
+                                let Some(command) = command else {
+                                    break;
+                                };
+                                match command {
+                                    ipc::RuntimeCommand::UpdateRouting {
+                                        mode,
+                                        exit_node,
+                                        is_exit_node,
+                                        reply,
+                                    } => {
+                                        let node_mode = match mode.as_str() {
+                                            "MeshOnly" => NodeRoutingMode::MeshOnly,
+                                            "BypassMainland" => NodeRoutingMode::BypassMainland,
+                                            "GlobalProxy" => NodeRoutingMode::GlobalProxy,
+                                            _ => {
+                                                let _ = reply.send(Err(format!("未知路由模式: {mode}")));
+                                                continue;
+                                            }
+                                        };
+                                        let in_flight = routing_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                                        routing_max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+                                        routing_calls
+                                            .lock()
+                                            .expect("routing call lock poisoned")
+                                            .push(RoutingCall {
+                                                network_name: routing_network_name.clone(),
+                                                mode: node_mode,
+                                                exit_node: exit_node.clone(),
+                                                is_exit_node,
+                                            });
+
+                                        let delay_ms = routing_delay_ms.load(Ordering::SeqCst);
+                                        if delay_ms > 0 {
+                                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                                        }
+
+                                        let failed = routing_failures
+                                            .lock()
+                                            .expect("routing failure lock poisoned")
+                                            .contains(&routing_network_name);
+                                        let result = if failed {
+                                            Err("测试运行时拒绝路由热更新".to_string())
+                                        } else {
+                                            current_config.routing.mode = match node_mode {
+                                                NodeRoutingMode::MeshOnly => {
+                                                    fuckipv6_common::RoutingMode::MeshOnly
+                                                }
+                                                NodeRoutingMode::BypassMainland => {
+                                                    fuckipv6_common::RoutingMode::BypassMainland
+                                                }
+                                                NodeRoutingMode::GlobalProxy => {
+                                                    fuckipv6_common::RoutingMode::GlobalProxy
+                                                }
+                                            };
+                                            current_config.routing.exit_node = exit_node.clone();
+                                            current_config.exit_node.enabled = is_exit_node;
+                                            current_config
+                                                .save_to_file(&config_path)
+                                                .map(|_| ipc::RoutingUpdateResult {
+                                                    mode: format!("{node_mode:?}"),
+                                                    exit_node,
+                                                    is_exit_node,
+                                                })
+                                                .map_err(|error| format!("测试持久化失败: {error:#}"))
+                                        };
+                                        routing_in_flight.fetch_sub(1, Ordering::SeqCst);
+                                        let _ = reply.send(result);
+                                    }
+                                    ipc::RuntimeCommand::ProbePeer { reply, .. } => {
+                                        let _ = reply.send(Err("测试运行时不支持探测".into()));
+                                    }
+                                    ipc::RuntimeCommand::Disconnect { reply } => {
+                                        let _ = reply.send(Ok(()));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     shutdowns.fetch_add(1, Ordering::SeqCst);
                 });
 
                 Ok(StartedNetworkRuntime {
-                    tun_name: crate::multi_network::derive_tun_name(
-                        Some(&request.network_name),
-                        &request.config.tun.name,
-                    ),
+                    tun_name,
                     assigned_ipv6: Ipv6Addr::LOCALHOST,
                     assigned_ipv4: Some(Ipv4Addr::LOCALHOST),
                     p2p_listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
                     identity: NodeIdentitySnapshot {
-                        node_id: format!("node-{}", request.network_name),
+                        node_id: format!("node-{network_name}"),
                         display_name: None,
-                        public_key_fingerprint: format!("fingerprint-{}", request.network_name),
+                        public_key_fingerprint: format!("fingerprint-{network_name}"),
                     },
+                    routing_control,
                     shutdown,
                     handle,
                 })
@@ -1187,6 +1581,10 @@ mod tests {
 
     impl TestHarness {
         async fn new(label: &str) -> Self {
+            Self::new_with_routing_timeout(label, ROUTING_UPDATE_TIMEOUT).await
+        }
+
+        async fn new_with_routing_timeout(label: &str, routing_update_timeout: Duration) -> Self {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             let config_dir = std::env::temp_dir().join(format!(
@@ -1203,7 +1601,7 @@ mod tests {
             state.set_lifecycle(running).await;
             let services = EmbeddedServiceManager::spawn(4);
             let fake = FakeLauncher::default();
-            let runtime = NetworkRuntimeManager::spawn_with_launcher(
+            let runtime = NetworkRuntimeManager::spawn_with_launcher_and_timeout(
                 configs.clone(),
                 RuntimeOptions::default(),
                 state.clone(),
@@ -1211,6 +1609,7 @@ mod tests {
                 lifecycle.clone(),
                 services.clone(),
                 Arc::new(fake.clone()),
+                routing_update_timeout,
             );
 
             Self {
@@ -1257,6 +1656,69 @@ mod tests {
         }
     }
 
+    fn routing_command(
+        network_name: &str,
+        mode: NodeRoutingMode,
+        exit_node: Option<&str>,
+        is_exit_node: bool,
+    ) -> NodeUpdateRoutingCommand {
+        NodeUpdateRoutingCommand {
+            network_name: network_name.into(),
+            mode,
+            exit_node: exit_node.map(str::to_string),
+            is_exit_node,
+        }
+    }
+
+    async fn start_fake_network(harness: &TestHarness, network_name: &str) {
+        harness
+            .configs
+            .create_network(network_name, "ws://127.0.0.1:6666", true)
+            .expect("create test config");
+        let plan = NodeRuntimePlan::load(
+            &harness.configs,
+            NodeNetworkSelection::Named(vec![network_name.into()]),
+        )
+        .expect("load test plan");
+        let summary = harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start fake network");
+        assert_eq!(summary.started, vec![network_name]);
+    }
+
+    async fn wait_for_routing_calls(fake: &FakeLauncher, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if fake.routing_calls().len() >= expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("routing update did not reach the fake runtime");
+    }
+
+    fn routing_changed_events(
+        receiver: &mut broadcast::Receiver<NodeEvent>,
+    ) -> Vec<(String, NodeRoutingMode, Option<String>, bool)> {
+        let mut changes = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let NodeEventKind::RoutingChanged {
+                network_name,
+                mode,
+                exit_node,
+                is_exit_node,
+            } = event.kind
+            {
+                changes.push((network_name, mode, exit_node, is_exit_node));
+            }
+        }
+        changes
+    }
+
     fn embedded_service_events(
         receiver: &mut broadcast::Receiver<NodeEvent>,
         network_name: &str,
@@ -1274,6 +1736,447 @@ mod tests {
             }
         }
         statuses
+    }
+
+    #[tokio::test]
+    async fn command_bus_hot_updates_routing_without_restarting_or_dropping_peers() {
+        let harness = TestHarness::new("routing-success").await;
+        start_fake_network(&harness, "routing-success").await;
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "routing-success")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("routing-success"));
+            })
+            .await;
+        let mut events = harness.events.subscribe();
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            MultiNetworkRegistry::new(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+        );
+
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                600,
+                NodeCommand::UpdateRouting(routing_command(
+                    "routing-success",
+                    NodeRoutingMode::GlobalProxy,
+                    Some("office"),
+                    true,
+                )),
+            ))
+            .await
+            .expect("routing command result");
+        assert!(result.is_success());
+        match result.outcome {
+            NodeCommandOutcome::Completed { message } => {
+                assert!(message.contains("GlobalProxy"));
+                assert!(message.contains("office"));
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        assert_eq!(
+            harness.fake.routing_calls(),
+            vec![RoutingCall {
+                network_name: "routing-success".into(),
+                mode: NodeRoutingMode::GlobalProxy,
+                exit_node: Some("office".into()),
+                is_exit_node: true,
+            }]
+        );
+        let config_path = harness
+            .configs
+            .get_network_config("routing-success")
+            .expect("network config path");
+        let persisted = ClientConfig::from_file(config_path).expect("persisted routing config");
+        assert_eq!(
+            persisted.routing.mode,
+            fuckipv6_common::RoutingMode::GlobalProxy
+        );
+        assert_eq!(persisted.routing.exit_node.as_deref(), Some("office"));
+        assert!(persisted.exit_node.enabled);
+
+        let snapshot = harness.state.snapshot().await;
+        let configuration = snapshot
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "routing-success")
+            .expect("shared routing config");
+        assert_eq!(configuration.routing_mode, NodeRoutingMode::GlobalProxy);
+        assert_eq!(configuration.exit_node.as_deref(), Some("office"));
+        assert!(configuration.exit_node_enabled);
+        assert_eq!(
+            snapshot
+                .peers
+                .iter()
+                .filter(|peer| peer.network_name == "routing-success")
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == "routing-success")
+                .expect("running network")
+                .peer_count,
+            1
+        );
+        assert_eq!(
+            routing_changed_events(&mut events),
+            vec![(
+                "routing-success".into(),
+                NodeRoutingMode::GlobalProxy,
+                Some("office".into()),
+                true,
+            )]
+        );
+        assert_eq!(harness.fake.launches(), vec!["routing-success"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_routing_failure_leaves_file_snapshot_and_peers_unchanged() {
+        let harness = TestHarness::new("routing-failure").await;
+        start_fake_network(&harness, "routing-failure").await;
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "routing-failure")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("routing-failure"));
+            })
+            .await;
+        let before = harness.state.snapshot().await;
+        let before_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "routing-failure")
+            .expect("initial shared routing config")
+            .clone();
+        let config_path = harness
+            .configs
+            .get_network_config("routing-failure")
+            .expect("network config path");
+        let before_file = ClientConfig::from_file(&config_path).expect("initial config");
+        harness.fake.fail_routing("routing-failure");
+        let mut events = harness.events.subscribe();
+
+        let error = harness
+            .runtime
+            .update_routing(routing_command(
+                "routing-failure",
+                NodeRoutingMode::BypassMainland,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect_err("runtime rejection must propagate");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Persistence(ref message)
+                if message.contains("旧配置回滚未能确认")
+        ));
+
+        let after = harness.state.snapshot().await;
+        assert_eq!(
+            after
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "routing-failure")
+                .expect("unchanged shared routing config"),
+            &before_config
+        );
+        let after_file = ClientConfig::from_file(&config_path).expect("unchanged config");
+        assert_eq!(after_file.routing.mode, before_file.routing.mode);
+        assert_eq!(after_file.routing.exit_node, before_file.routing.exit_node);
+        assert_eq!(after_file.exit_node.enabled, before_file.exit_node.enabled);
+        assert!(routing_changed_events(&mut events).is_empty());
+        assert_eq!(after.peers, before.peers);
+        assert_eq!(harness.fake.routing_calls().len(), 2);
+        assert_eq!(harness.fake.launches(), vec!["routing-failure"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_routing_updates_are_serialized_and_last_write_wins() {
+        let harness = TestHarness::new("routing-concurrent").await;
+        start_fake_network(&harness, "routing-concurrent").await;
+        harness.fake.set_routing_delay(Duration::from_millis(80));
+
+        let first_runtime = harness.runtime.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .update_routing(routing_command(
+                    "routing-concurrent",
+                    NodeRoutingMode::BypassMainland,
+                    Some("first"),
+                    false,
+                ))
+                .await
+        });
+        wait_for_routing_calls(&harness.fake, 1).await;
+
+        let second = harness
+            .runtime
+            .update_routing(routing_command(
+                "routing-concurrent",
+                NodeRoutingMode::GlobalProxy,
+                Some("second"),
+                true,
+            ))
+            .await
+            .expect("second routing update");
+        assert_eq!(second.mode, "GlobalProxy");
+        first
+            .await
+            .expect("first routing task")
+            .expect("first routing update");
+
+        assert_eq!(harness.fake.max_routing_concurrency(), 1);
+        let calls = harness.fake.routing_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].mode, NodeRoutingMode::BypassMainland);
+        assert_eq!(calls[1].mode, NodeRoutingMode::GlobalProxy);
+        let snapshot = harness.state.snapshot().await;
+        let configuration = snapshot
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "routing-concurrent")
+            .expect("final shared routing config");
+        assert_eq!(configuration.routing_mode, NodeRoutingMode::GlobalProxy);
+        assert_eq!(configuration.exit_node.as_deref(), Some("second"));
+        assert!(configuration.exit_node_enabled);
+        assert_eq!(harness.fake.launches(), vec!["routing-concurrent"]);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_update_queues_old_config_rollback_after_late_application() {
+        let harness = TestHarness::new_with_routing_timeout(
+            "routing-timeout-rollback",
+            Duration::from_millis(80),
+        )
+        .await;
+        start_fake_network(&harness, "routing-timeout").await;
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "routing-timeout")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("routing-timeout"));
+            })
+            .await;
+        let before = harness.state.snapshot().await;
+        let before_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "routing-timeout")
+            .expect("initial shared routing config")
+            .clone();
+        let config_path = harness
+            .configs
+            .get_network_config("routing-timeout")
+            .expect("network config path");
+        harness.fake.set_routing_delay(Duration::from_millis(120));
+        let mut events = harness.events.subscribe();
+
+        let update_runtime = harness.runtime.clone();
+        let update = tokio::spawn(async move {
+            update_runtime
+                .update_routing(routing_command(
+                    "routing-timeout",
+                    NodeRoutingMode::GlobalProxy,
+                    Some("office"),
+                    true,
+                ))
+                .await
+        });
+        wait_for_routing_calls(&harness.fake, 1).await;
+        // Only the first application is slow. The queued compensation command
+        // must quickly restore the old config after that late application ends.
+        harness.fake.set_routing_delay(Duration::ZERO);
+        let error = update
+            .await
+            .expect("timed out routing task")
+            .expect_err("timed out update must not report success");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Persistence(ref message)
+                if message.contains("超时") && message.contains("已回滚")
+        ));
+
+        let calls = harness.fake.routing_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].mode, NodeRoutingMode::GlobalProxy);
+        assert_eq!(calls[1].mode, before_config.routing_mode);
+        assert_eq!(calls[1].exit_node, before_config.exit_node);
+        assert_eq!(calls[1].is_exit_node, before_config.exit_node_enabled);
+        assert_eq!(harness.fake.max_routing_concurrency(), 1);
+
+        let persisted = ClientConfig::from_file(config_path).expect("rolled back config");
+        assert_eq!(
+            persisted.routing.mode,
+            fuckipv6_common::RoutingMode::MeshOnly
+        );
+        assert_eq!(persisted.routing.exit_node, before_config.exit_node);
+        assert_eq!(persisted.exit_node.enabled, before_config.exit_node_enabled);
+        let after = harness.state.snapshot().await;
+        assert_eq!(
+            after
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "routing-timeout")
+                .expect("restored shared routing config"),
+            &before_config
+        );
+        assert_eq!(after.peers, before.peers);
+        assert!(routing_changed_events(&mut events).is_empty());
+        assert_eq!(harness.fake.launches(), vec!["routing-timeout"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_publish_failure_rolls_back_runtime_file_and_shared_state() {
+        let harness = TestHarness::new("routing-snapshot-rollback").await;
+        start_fake_network(&harness, "routing-snapshot").await;
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "routing-snapshot")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("routing-snapshot"));
+            })
+            .await;
+        let before = harness.state.snapshot().await;
+        let before_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "routing-snapshot")
+            .expect("initial shared routing config")
+            .clone();
+        harness.fake.set_routing_delay(Duration::from_millis(80));
+        let mut events = harness.events.subscribe();
+        let routing_runtime = harness.runtime.clone();
+        let update = tokio::spawn(async move {
+            routing_runtime
+                .update_routing(routing_command(
+                    "routing-snapshot",
+                    NodeRoutingMode::GlobalProxy,
+                    Some("office"),
+                    true,
+                ))
+                .await
+        });
+        wait_for_routing_calls(&harness.fake, 1).await;
+
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot
+                    .configuration
+                    .networks
+                    .retain(|network| network.network_name != "routing-snapshot");
+            })
+            .await;
+        let error = update
+            .await
+            .expect("routing task")
+            .expect_err("snapshot publish failure must reject the update");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Persistence(ref message)
+                if message.contains("共享快照发布失败")
+        ));
+
+        let calls = harness.fake.routing_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].mode, NodeRoutingMode::GlobalProxy);
+        assert_eq!(calls[1].mode, before_config.routing_mode);
+        assert_eq!(calls[1].exit_node, before_config.exit_node);
+        assert_eq!(calls[1].is_exit_node, before_config.exit_node_enabled);
+        let config_path = harness
+            .configs
+            .get_network_config("routing-snapshot")
+            .expect("network config path");
+        let persisted = ClientConfig::from_file(config_path).expect("rolled back config");
+        assert_eq!(
+            persisted.routing.mode,
+            fuckipv6_common::RoutingMode::MeshOnly
+        );
+        assert_eq!(persisted.routing.exit_node, before_config.exit_node);
+        assert_eq!(persisted.exit_node.enabled, before_config.exit_node_enabled);
+        let after = harness.state.snapshot().await;
+        assert_eq!(
+            after
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "routing-snapshot")
+                .expect("restored shared routing config"),
+            &before_config
+        );
+        assert_eq!(after.peers, before.peers);
+        assert!(routing_changed_events(&mut events).is_empty());
+        assert_eq!(harness.fake.launches(), vec!["routing-snapshot"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn routing_update_for_a_non_running_network_does_not_touch_the_runtime() {
+        let harness = TestHarness::new("routing-missing").await;
+
+        let error = harness
+            .runtime
+            .update_routing(routing_command(
+                "missing",
+                NodeRoutingMode::GlobalProxy,
+                None,
+                false,
+            ))
+            .await
+            .expect_err("non-running network must be rejected");
+        assert!(matches!(error, RuntimeControlError::NotFound(_)));
+        assert!(harness.fake.routing_calls().is_empty());
+
+        harness.shutdown().await;
     }
 
     #[tokio::test]

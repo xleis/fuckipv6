@@ -9,12 +9,12 @@
 - [x] **EX-01 UI manifest 命令通道**：让 UI 通过统一节点命令总线获取版本化 manifest，而不是在 WebUI/GPUI 各复制页面和动作定义。验收：新增 `GetUiManifest` 命令与类型化结果；JSON 往返可用；返回 11 个页面和当前 schema 版本。已通过 `GetUiManifest` 与类型化结果接通统一命令总线。涉及 `crates/client/src/node/{command,runtime_handler,ui_manifest}.rs`。
 - [x] **EX-02 内嵌服务状态快照**：把每个网络的内嵌信令/中继实例状态、监听地址和生命周期纳入 `NodeSnapshot` 与事件流。已完成 `Starting/Running/Stopping/Stopped/Failed` 状态、`EmbeddedServiceChanged` 事件及无票据/私钥/路径的共享 DTO；创建、启动失败、停止与全量关闭均有状态和事件测试。涉及 `crates/client/src/node/{state,event,mod,runtime_control}.rs`。
 - [x] **EX-03 节点状态不变量**：为网络名称唯一、配置/运行网络对应、停止后 Peer 清理、失败回滚和 revision 单调性增加集中式不变量测试。已完成 `NodeSnapshot::invariant_violations()`，可诊断网络/配置/内嵌服务重名、运行网络缺配置、未知/离线网络 Peer 及 `peer_count` 不一致；停止、自然退出和失败回滚会清理 Peer，revision 在 `u64::MAX` 饱和而不是回绕。涉及 `crates/client/src/node/{state,runtime_control}.rs`。
-- [x] **EX-04 命令错误契约**：补齐所有 `NodeCommand` 的验证、稳定错误码、可重试标记和序列化往返测试；路由/角色未实现必须持续返回 `Unavailable`。已完成 10 个命令的 JSON 往返与拒绝路径覆盖，`StopNetworks { all: true }` 与显式网络名冲突会被拒绝，网络名校验与 `ConfigManager` 的 ASCII 字符集对齐；`NodeProblem` 固定 `invalid_request/not_found/conflict/unavailable/permission_denied/cancelled/internal` 线值及 `retryable`，运行时错误映射和未实现命令均有 handler 测试，`UpdateRouting`/`SetNetworkRole` 仍明确返回可重试的 `Unavailable`。涉及 `crates/client/src/node/{command,runtime_handler,state}.rs`。
+- [x] **EX-04 命令错误契约**：补齐所有 `NodeCommand` 的验证、稳定错误码、可重试标记和序列化往返测试；路由/角色未实现时必须返回 `Unavailable`。已完成 10 个命令的 JSON 往返与拒绝路径覆盖，`StopNetworks { all: true }` 与显式网络名冲突会被拒绝，网络名校验与 `ConfigManager` 的 ASCII 字符集对齐；`NodeProblem` 固定 `invalid_request/not_found/conflict/unavailable/permission_denied/cancelled/internal` 线值及 `retryable`，运行时错误映射和未实现命令均有 handler 测试。`UpdateRouting` 已由 NX-04 接入运行中网络；`SetNetworkRole` 仍未实现并明确返回可重试的 `Unavailable`。涉及 `crates/client/src/node/{command,runtime_handler,state}.rs`。
 - [x] **EX-05 零网络节点身份**：零网络启动时也建立并发布节点公开身份、公钥指纹和配置中的显示名。已完成配置根目录唯一的 `node_identity.pem` 与可选 `node_identity.json` 元数据；supervisor 构造即发布身份，所有网络启动计划复用同一节点密钥。测试覆盖空网络快照、跨重启稳定、显示名来源、私钥/种子/配置路径不进入 DTO。涉及 `crates/client/src/{config_manager,multi_network}.rs` 与 `crates/client/src/node/{plan,runtime_control,runtime_metadata,state}.rs`。
 
 ## P1：后端功能闭环
 
-- [ ] **EX-06 路由热更新后端**：把 `UpdateRouting` 接入 `NetworkRuntimeManager`，同步 Smart Route、Exit Node 配置、持久化和共享快照。验收：成功与失败均回滚一致，网络运行中切换不重启节点；完成后解除 CLI/WebUI 迁移的 `Unavailable`。实现必须基于用户 Exit Node 持久化改动后的最新 HEAD，禁止覆盖这些改动，也禁止用重启网络或只写配置冒充热更新。
+- [x] **EX-06 路由热更新后端**：把 `UpdateRouting` 接入 `NetworkRuntimeManager`，同步 Smart Route、Exit Node 配置、持久化和共享快照。验收：成功与失败均回滚一致，网络运行中切换不重启节点；完成后解除 CLI/WebUI 迁移的 `Unavailable`。已由 NX-04 完成统一命令总线、运行态与控制通道接线；CLI/WebUI 自身迁移仍分别由 EX-08/EX-09 跟踪。
 - [ ] **EX-07 网络角色热更新后端**：把 `SetNetworkRole` 接到持久化与运行时重配置，覆盖成员、发现、中继和 Exit Node 角色。验收：非法组合明确拒绝，停止后可释放服务，角色变化发布状态与事件。
 - [ ] **EX-08 CLI 统一命令迁移**：CLI 的网络创建、加入、启停、探测和关闭只通过 `NodeCommandBus`。验收：不保留第二套业务规则，输出消费统一结果和错误码。
 - [ ] **EX-09 WebUI 统一命令迁移**：WebUI 的节点操作与状态读取只通过共享命令总线和 `NodeStateStore`。验收：移除 controller 内部独立网络/状态变更逻辑，HTTP 适配层只转换 DTO。
@@ -64,10 +64,11 @@
   - 验收：快照只来自 `NodeStateStore`，动作只发往命令总线；manifest schema 版本不匹配时明确失败而非降级；WS 断线、重复事件、revision 跳跃和非授权请求均有契约测试；不存在第二套页面/动作定义。
   - 进展（2026-10-30）：新增版本化 `/api/node/snapshot`、`/api/node/manifest`、WebSocket `/api/node/events` 和 `POST /api/node/commands`；读路径经命令总线取得共享状态，动作请求原样提交 `NodeCommandBus`。覆盖 schema 不匹配、非法请求、后端拒绝、`Unavailable`、重复/回退 revision、跳号与广播滞后重同步、断线。manifest 现在在 HTTP 适配器交付前检查 schema、固定页面集合与顺序、命令覆盖、动作/字段唯一性、必填字段校验、命令权限与后端状态一致性；格式错误返回 `ContractViolation` 而不是交给 UI 降级渲染。剩余：挂载到实际 WebUI/GPUI（NX-07/NX-08），并与 NX-02 的认证/暴露面策略接通后才算完整验收。
 
-- [ ] **NX-04 路由热更新后端（细化 EX-06）**
+- [x] **NX-04 路由热更新后端（细化 EX-06）**
   - 工作：让 `UpdateRouting` 原子更新运行中的 Smart Route、Exit Node 配置、持久化配置、共享快照和事件；任何阶段失败都恢复旧运行态。
   - 依赖：EX-03、EX-04；必须基于用户 Exit Node 持久化改动后的最新 HEAD 实现运行控制接线，不得覆盖工作区改动。
   - 验收：运行中切换不重启网络、不清空 Peer；持久化失败、运行时应用失败和快照发布失败均可回滚；并发更新串行化；成功/失败均有集成测试，`Unavailable` 仅在未实现时保留。
+  - 完成（2026-10-30）：`NodeCommandBus::UpdateRouting` 经 `NetworkRuntimeManager` actor 串行进入现有多网络运行循环，由 `apply_runtime_routing` 同时更新 Smart Route、Exit Node 运行配置和磁盘配置，再发布共享配置快照与 `RoutingChanged` 事件。actor 在运行时拒绝、响应超时、响应通道关闭和快照发布失败时重新应用旧配置；超时后的补偿命令排在同一控制通道中，晚到的新配置会被随后恢复。测试覆盖命令总线成功路径、Peer 保留、无重启、运行时失败、晚到超时回滚、并发串行后写胜出和快照失败回滚。manifest 已将 `update_routing` 标为 `Implemented`；`SetNetworkRole` 仍为 `Unavailable`。
 
 - [ ] **NX-05 网络角色热更新后端（细化 EX-07）**
   - 工作：把 `SetNetworkRole` 接到成员、发现、中继和 Exit Node 角色的运行时服务生命周期与持久化，保持“节点内角色”而非服务端/客户端进程划分。

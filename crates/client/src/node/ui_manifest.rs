@@ -471,7 +471,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "update_routing",
                     "action.update_routing",
                     NodeUiCommandKind::UpdateRouting,
-                    NodeUiBackendStatus::Unavailable,
+                    NodeUiBackendStatus::Implemented,
                     NodePermission::ChangeRouting,
                     NodeUiAvailability::NetworkSelected,
                     vec![
@@ -832,15 +832,14 @@ mod tests {
                 HashSet::from([NodeUiBackendStatus::Implemented])
             );
         }
-        for command in [
-            NodeUiCommandKind::UpdateRouting,
-            NodeUiCommandKind::SetNetworkRole,
-        ] {
-            assert_eq!(
-                status(command),
-                HashSet::from([NodeUiBackendStatus::Unavailable])
-            );
-        }
+        assert_eq!(
+            status(NodeUiCommandKind::UpdateRouting),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        assert_eq!(
+            status(NodeUiCommandKind::SetNetworkRole),
+            HashSet::from([NodeUiBackendStatus::Unavailable])
+        );
     }
 
     #[test]

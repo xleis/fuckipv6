@@ -56,7 +56,7 @@
   - 工作：WebUI/API 和本地 IPC 默认只绑定回环地址；远程监听必须显式开启、产生醒目警告并要求已配置认证，禁止匿名公网暴露。
   - 依赖：EX-03、EX-15；受保护 CLI 文件保持不修改，危险开关通过显式环境变量接入现有启动路径；合并时必须保留用户未提交改动。
   - 验收：默认 IPv4/IPv6 监听均为回环；`0.0.0.0`/`::` 仅能通过显式危险参数开启且缺少认证时启动失败；参数、日志、HTTP 响应和文档一致；覆盖拒绝启动、认证成功/失败和回环回归测试。
-  - 完成（2026-10-30）：WebUI/API 默认 `127.0.0.1:8080`，支持 `FUCKIPV6_WEBUI_BIND=::1`；非回环必须 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 且配置密码，否则拒绝启动。REST 使用 Bearer JWT，WebSocket 查询 Token 仅限 `/ws`；401/`WWW-Authenticate`/日志/文档一致。IPC 默认 `127.0.0.1:6668`，支持 `[::1]:6668`，危险开关存在但因无认证协议仍拒绝远程监听。
+  - 完成（2026-10-30）：WebUI/API 默认 `127.0.0.1:8080`，支持 `FUCKIPV6_WEBUI_BIND=::1`；非回环必须 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 且配置密码，否则拒绝启动。REST 使用 Bearer JWT，WebSocket 查询 Token 仅限 `/ws`；401/`WWW-Authenticate`/日志/文档一致。IPC 默认 `127.0.0.1:6668`，支持 `[::1]:6668`，危险开关存在但因无认证协议仍拒绝远程监听。后续加固已为登录增加按源 IP+用户名的原子失败计数、指数退避与 429/`Retry-After`，成功登录清除状态，状态表有容量和 TTL 上限；显式 JWT secret 校验最小长度与估计熵，并锁定认证 DTO/配置的 Debug 脱敏。
 
 - [>] **NX-03 共享节点 HTTP/WS 适配器（细化 EX-10）**
   - 工作：提供版本化的快照、manifest 和事件 WebSocket 适配层，把 HTTP/WS DTO 转换为 `NodeCommandBus` 与 `NodeStateStore` 调用；不拥有业务状态。

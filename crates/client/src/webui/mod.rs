@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Extension, Query, State,
+        ConnectInfo, Extension, Query, State,
     },
     http::{header, StatusCode},
     middleware::{self, Next},
@@ -20,11 +20,13 @@ pub use controller::{
 };
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
 use fuckipv6_coordinator::webui::{
-    BlacklistActionRequest, BlacklistActionResponse, LoginRequest, LoginResponse,
-    NetworkConfigApiResponse, NetworkConfigDto, UpdateNetworkConfigRequest,
+    BlacklistActionRequest, BlacklistActionResponse, NetworkConfigApiResponse, NetworkConfigDto,
+    UpdateNetworkConfigRequest,
 };
-use security::{http_url, WebUiAuth, WebUiConfig};
+use security::{http_url, WebUiAuth, WebUiConfig, WebUiLoginError};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub use security::{
@@ -108,7 +110,12 @@ pub async fn start_app_webui(
     });
 
     let handle = tokio::spawn(async move {
-        if let Err(err) = axum::serve(listener, app).await {
+        if let Err(err) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!("WebUI 服务发生错误: {err}");
         }
     });
@@ -413,13 +420,53 @@ async fn handle_blacklist_unban(
     ))
 }
 
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+impl fmt::Debug for LoginRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    success: bool,
+    token: Option<String>,
+    error: Option<String>,
+    expires_in: Option<u64>,
+    auth_required: bool,
+}
+
+impl fmt::Debug for LoginResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginResponse")
+            .field("success", &self.success)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("error", &self.error)
+            .field("expires_in", &self.expires_in)
+            .field("auth_required", &self.auth_required)
+            .finish()
+    }
+}
+
 async fn handle_login(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     Extension(auth): Extension<Arc<WebUiAuth>>,
     Json(req): Json<LoginRequest>,
 ) -> Response {
-    match auth.login(&req.username, &req.password) {
+    match auth.login_from(remote_addr.ip(), &req.username, &req.password) {
         Ok(token) => (
             StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store")],
             Json(LoginResponse {
                 success: true,
                 token: Some(token),
@@ -429,13 +476,42 @@ async fn handle_login(
             }),
         )
             .into_response(),
-        Err(_) => (
+        Err(WebUiLoginError::InvalidCredentials) => (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer realm=\"fuckipv6-webui\"")],
             Json(LoginResponse {
                 success: false,
                 token: None,
                 error: Some("用户名或密码错误".to_string()),
+                expires_in: None,
+                auth_required: auth.is_required(),
+            }),
+        )
+            .into_response(),
+        Err(WebUiLoginError::RateLimited { retry_after }) => {
+            let retry_after_secs = retry_after
+                .as_secs()
+                .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+                .max(1);
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after_secs.to_string())],
+                Json(LoginResponse {
+                    success: false,
+                    token: None,
+                    error: Some("登录尝试过于频繁，请稍后重试".to_string()),
+                    expires_in: None,
+                    auth_required: auth.is_required(),
+                }),
+            )
+                .into_response()
+        }
+        Err(WebUiLoginError::Internal) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(LoginResponse {
+                success: false,
+                token: None,
+                error: Some("认证服务内部错误".to_string()),
                 expires_in: None,
                 auth_required: auth.is_required(),
             }),
@@ -3322,12 +3398,14 @@ tun_name = "fuckipv6"`;
 mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
     use fuckipv6_common::CoordinatorAuthConfig;
+    use std::net::{IpAddr, Ipv4Addr};
     use tower::ServiceExt;
 
     fn test_auth() -> WebUiAuth {
-        WebUiAuth::new(CoordinatorAuthConfig {
+        WebUiAuth::new_for_test(CoordinatorAuthConfig {
             enabled: true,
             admin_username: "admin".to_string(),
             admin_password: Some("secret".to_string()),
@@ -3344,6 +3422,14 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .expect("JSON request")
+    }
+
+    fn login_request(body: &str, source_ip: IpAddr) -> Request<Body> {
+        let mut request = json_request("POST", "/api/auth/login", body);
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(source_ip, 49_152)));
+        request
     }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
@@ -3415,7 +3501,9 @@ mod tests {
     #[tokio::test]
     async fn protected_http_api_does_not_accept_tokens_in_query_strings() {
         let auth = test_auth();
-        let token = auth.login("admin", "secret").expect("login token");
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("login token");
         let app = create_app_web_router_with_auth(Arc::new(AppController::new()), auth);
         let response = app
             .oneshot(
@@ -3436,10 +3524,9 @@ mod tests {
 
         let rejected = app
             .clone()
-            .oneshot(json_request(
-                "POST",
-                "/api/auth/login",
+            .oneshot(login_request(
                 r#"{"username":"admin","password":"wrong"}"#,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
             ))
             .await
             .expect("login response");
@@ -3450,14 +3537,20 @@ mod tests {
 
         let accepted = app
             .clone()
-            .oneshot(json_request(
-                "POST",
-                "/api/auth/login",
+            .oneshot(login_request(
                 r#"{"username":"admin","password":"secret"}"#,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
             ))
             .await
             .expect("login response");
         assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(
+            accepted
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
         let accepted_payload = response_json(accepted).await;
         assert_eq!(accepted_payload["success"], true);
         assert_eq!(accepted_payload["auth_required"], true);
@@ -3479,6 +3572,122 @@ mod tests {
         assert_eq!(status.status(), StatusCode::OK);
         let status_payload = response_json(status).await;
         assert_eq!(status_payload["auth_required"], true);
+    }
+
+    #[test]
+    fn login_dto_debug_output_redacts_password_and_token() {
+        let request: LoginRequest =
+            serde_json::from_str(r#"{"username":"admin","password":"do-not-log-password"}"#)
+                .expect("login request");
+        let request_debug = format!("{request:?}");
+        assert!(request_debug.contains("admin"));
+        assert!(!request_debug.contains("do-not-log-password"));
+        assert!(request_debug.contains("[REDACTED]"));
+
+        let response = LoginResponse {
+            success: true,
+            token: Some("do-not-log-token".to_string()),
+            error: None,
+            expires_in: Some(3600),
+            auth_required: true,
+        };
+        let response_debug = format!("{response:?}");
+        assert!(!response_debug.contains("do-not-log-token"));
+        assert!(response_debug.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn login_endpoint_rate_limits_failed_attempts_per_source_ip() {
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), test_auth());
+        let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(login_request(
+                    r#"{"username":"admin","password":"wrong"}"#,
+                    source,
+                ))
+                .await
+                .expect("rejected login response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let throttled = app
+            .clone()
+            .oneshot(login_request(
+                r#"{"username":"admin","password":"secret"}"#,
+                source,
+            ))
+            .await
+            .expect("throttled login response");
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            throttled
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        let payload = response_json(throttled).await;
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["error"], "登录尝试过于频繁，请稍后重试");
+
+        let other_source = app
+            .oneshot(login_request(
+                r#"{"username":"admin","password":"secret"}"#,
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            ))
+            .await
+            .expect("login from other source");
+        assert_eq!(other_source.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn successful_login_clears_previous_failures() {
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), test_auth());
+        let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        for _ in 0..4 {
+            let response = app
+                .clone()
+                .oneshot(login_request(
+                    r#"{"username":"admin","password":"wrong"}"#,
+                    source,
+                ))
+                .await
+                .expect("rejected login response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let success = app
+            .clone()
+            .oneshot(login_request(
+                r#"{"username":"admin","password":"secret"}"#,
+                source,
+            ))
+            .await
+            .expect("successful login response");
+        assert_eq!(success.status(), StatusCode::OK);
+
+        for _ in 0..4 {
+            let response = app
+                .clone()
+                .oneshot(login_request(
+                    r#"{"username":"admin","password":"wrong"}"#,
+                    source,
+                ))
+                .await
+                .expect("rejected login after reset");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let success = app
+            .oneshot(login_request(
+                r#"{"username":"admin","password":"secret"}"#,
+                source,
+            ))
+            .await
+            .expect("successful login after accumulated failures were reset");
+        assert_eq!(success.status(), StatusCode::OK);
     }
 
     #[tokio::test]

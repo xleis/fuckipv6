@@ -231,8 +231,9 @@ export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
 - 设置 `FUCKIPV6_WEBUI_BIND=::1` 可显式使用 IPv6 回环；设为 `::` 属于非回环危险监听；
 - `/`、`/assets/webui.css` 和 `/api/auth/login` 可匿名访问，其余 REST API 与 `/ws` 需要有效 JWT；
 - REST API 使用 `Authorization: Bearer <token>`，浏览器 WebSocket 使用 `/ws?token=<token>`；认证失败返回 HTTP 401、`WWW-Authenticate: Bearer realm="fuckipv6-webui"` 和 JSON 错误；
+- `/api/auth/login` 按直连源 IP 和用户名独立计数；连续失败会触发指数退避并返回 HTTP 429 与 `Retry-After`，成功登录会清除该键的失败状态。进程内状态表最多保留 4096 项、15 分钟未活动后清理，不信任可伪造的 `X-Forwarded-For`；
+- 认证开启时，显式配置的 `FUCKIPV6_WEBUI_JWT_SECRET` 必须至少 32 字节且估计熵不低于 128 bit；应使用密码学随机源生成，不要使用可记忆短语。未显式配置时节点会生成进程级随机密钥，重启后既有 Token 失效；
 - WebUI/API 没有内置 TLS，远程使用时必须置于 TLS 反向代理或受控管理网之后；
-- `FUCKIPV6_WEBUI_JWT_SECRET` 未设置时会生成进程级随机密钥，重启后既有 Token 失效；生产环境建议显式配置并保护该密钥；
 - 回环模式默认免密，本机同权限进程仍可访问控制面；需要本机认证时也可仅设置 `FUCKIPV6_WEBUI_PASSWORD`。
 
 本地 IPC 默认监听 `127.0.0.1:6668`，可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。由于 IPC 尚无认证握手，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 只表示显式确认危险意图，非回环地址仍会拒绝启动；远程操作请使用 SSH 隧道。

@@ -37,7 +37,7 @@ impl ConfigManager {
     }
 
     #[cfg(test)]
-    fn new_for_dir(config_dir: PathBuf) -> Result<Self> {
+    pub(crate) fn new_for_dir(config_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&config_dir).context("无法创建配置目录")?;
         Ok(Self { config_dir })
     }

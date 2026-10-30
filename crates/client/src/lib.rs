@@ -4,6 +4,7 @@ pub mod config_reload;
 pub mod ipc;
 pub mod logging;
 pub mod multi_network;
+pub mod node;
 pub mod p2p;
 pub mod routing;
 pub mod signaling;

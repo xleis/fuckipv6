@@ -1001,6 +1001,7 @@ version = "0.3.0"
 dependencies = [
  "aes",
  "aes-gcm",
+ "blake3",
  "chacha20poly1305",
  "criterion",
  "ed25519-dalek",

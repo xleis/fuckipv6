@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
+- **统一节点运行时基座**: 增加节点级 `Stopped/Starting/Running/Stopping/Failed` 生命周期、共享 watch 事件流和 `NodeRuntimePlan`；多网络监督器现在统一消费零网络、默认、全部或具名网络启动计划，空计划仍保留节点控制面和 WebUI，全部所选网络初始化失败时进入 `Failed`。身份、日志、本地控制面及 GPUI/WebUI 尚未全部订阅同一运行时和命令契约，因此不表示统一 UI 已完成。
 - **统一节点发布入口**: workspace 只发布 `fuckipv6` 一个用户程序，移除独立 `fuckipv6-coordinator` 二进制；Docker、Compose、systemd、launchd、安装脚本、CI/Release、测试和基准统一使用节点入口。`host`、`join`、中继和 Exit Node 均保留为同一节点的网络角色，不再代表两种产品身份。新增单二进制发布门禁。
 - **WebUI 全面重构**:
   - 客户端控制台与协调信令中心统一采用侧边栏 + 顶栏 + 分层卡片设计系统，新增共享样式表 `crates/common/assets/webui.css`（通过 `/assets/webui.css` 分发）。

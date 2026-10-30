@@ -6,8 +6,9 @@ use tokio::sync::{mpsc, RwLock};
 use crate::crypto::Identity;
 use crate::protocol::RelayEndpoint;
 use crate::quic::{
-    build_pinned_quic_client_config_with_auth, recv_relay_message, send_relay_message,
-    QuicCertificate, RelayMessage,
+    build_pinned_quic_client_config_with_auth, export_quic_relay_channel_binding,
+    recv_relay_message, send_relay_message, QuicCertificate, RelayMessage,
+    RelayRegistrationBinding,
 };
 
 const RELAY_REGISTER_STREAM_ID: u64 = 0;
@@ -40,6 +41,7 @@ impl QuicRelayClient {
             SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
         };
         let client_certificate = QuicCertificate::from_identity(identity)?;
+        let client_certificate_public_key_pin = client_certificate.public_key_pin;
         let mut endpoint =
             quinn::Endpoint::client(bind_addr).context("无法创建 QUIC relay 客户端 endpoint")?;
         endpoint.set_default_client_config(build_pinned_quic_client_config_with_auth(
@@ -53,7 +55,14 @@ impl QuicRelayClient {
             .await
             .context("QUIC relay 握手失败")?;
 
-        register_relay_connection(&connection, identity, virtual_ip).await?;
+        register_relay_connection(
+            &connection,
+            identity,
+            virtual_ip,
+            expected_server_pin,
+            client_certificate_public_key_pin,
+        )
+        .await?;
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         spawn_incoming_task(connection.clone(), incoming_tx);
 
@@ -192,17 +201,29 @@ async fn register_relay_connection(
     connection: &quinn::Connection,
     identity: &Identity,
     virtual_ip: Ipv6Addr,
+    server_public_key_pin: [u8; 32],
+    client_certificate_public_key_pin: [u8; 32],
 ) -> Result<()> {
     let timestamp = now_secs();
     let public_key = identity.public_key();
-    let challenge =
-        RelayMessage::register_challenge(identity.client_id(), &virtual_ip, &public_key, timestamp);
-    let signature = identity.sign(&challenge).to_bytes().to_vec();
+    let registration = RelayRegistrationBinding {
+        client_id: identity.client_id(),
+        virtual_ip,
+        public_key: &public_key,
+        timestamp,
+        server_public_key_pin,
+        client_certificate_public_key_pin,
+        tls_channel_binding: export_quic_relay_channel_binding(connection)?,
+    };
+    let signature = identity.sign(&registration.challenge()).to_bytes().to_vec();
     let register = RelayMessage::Register {
         client_id: identity.client_id().to_string(),
         virtual_ip,
-        public_key,
+        public_key: public_key.clone(),
         timestamp,
+        server_public_key_pin,
+        client_certificate_public_key_pin,
+        tls_channel_binding: registration.tls_channel_binding,
         signature,
     };
 

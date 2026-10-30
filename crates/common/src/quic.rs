@@ -564,6 +564,41 @@ pub async fn recv_quic_frame(stream: &mut quinn::RecvStream) -> Result<QuicFrame
     Ok(QuicFrame { stream_id, payload })
 }
 
+/// relay 注册签名覆盖的完整身份与会话绑定字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayRegistrationBinding<'a> {
+    pub client_id: &'a str,
+    pub virtual_ip: Ipv6Addr,
+    pub public_key: &'a [u8],
+    pub timestamp: u64,
+    pub server_public_key_pin: [u8; 32],
+    pub client_certificate_public_key_pin: [u8; 32],
+    pub tls_channel_binding: [u8; 32],
+}
+
+impl RelayRegistrationBinding<'_> {
+    /// 生成版本化、无字段拼接歧义的注册签名载荷。
+    pub fn challenge(&self) -> Vec<u8> {
+        let mut challenge = Vec::with_capacity(
+            self.client_id.len() + self.public_key.len() + 1 + 8 + 8 + 16 + 8 + 32 * 3,
+        );
+        challenge.extend_from_slice(b"fuckipv6-relay-register-v2");
+        append_len_prefixed(&mut challenge, self.client_id.as_bytes());
+        challenge.extend_from_slice(&self.virtual_ip.octets());
+        append_len_prefixed(&mut challenge, self.public_key);
+        challenge.extend_from_slice(&self.timestamp.to_be_bytes());
+        challenge.extend_from_slice(&self.server_public_key_pin);
+        challenge.extend_from_slice(&self.client_certificate_public_key_pin);
+        challenge.extend_from_slice(&self.tls_channel_binding);
+        challenge
+    }
+}
+
+fn append_len_prefixed(buffer: &mut Vec<u8>, field: &[u8]) {
+    buffer.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(field);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayMessage {
     Register {
@@ -571,6 +606,9 @@ pub enum RelayMessage {
         virtual_ip: Ipv6Addr,
         public_key: Vec<u8>,
         timestamp: u64,
+        server_public_key_pin: [u8; 32],
+        client_certificate_public_key_pin: [u8; 32],
+        tls_channel_binding: [u8; 32],
         signature: Vec<u8>,
     },
     RegisterAck {
@@ -599,21 +637,6 @@ impl RelayMessage {
 
     pub fn default_error(code: ErrorCode) -> Self {
         Self::error(code, code.default_message())
-    }
-
-    pub fn register_challenge(
-        client_id: &str,
-        virtual_ip: &Ipv6Addr,
-        public_key: &[u8],
-        timestamp: u64,
-    ) -> Vec<u8> {
-        let mut challenge = Vec::with_capacity(client_id.len() + public_key.len() + 64);
-        challenge.extend_from_slice(b"fuckipv6-relay-register-v1");
-        challenge.extend_from_slice(client_id.as_bytes());
-        challenge.extend_from_slice(&virtual_ip.octets());
-        challenge.extend_from_slice(public_key);
-        challenge.extend_from_slice(&timestamp.to_be_bytes());
-        challenge
     }
 }
 
@@ -1041,23 +1064,62 @@ mod tests {
     }
 
     #[test]
-    fn relay_register_challenge_is_signed_and_verifiable() -> anyhow::Result<()> {
+    fn relay_register_challenge_covers_identity_and_tls_binding() -> anyhow::Result<()> {
         let identity = Identity::generate()?;
+        let public_key = identity.public_key();
         let virtual_ip = "fd00::1001".parse()?;
-        let timestamp = 123;
-        let challenge = RelayMessage::register_challenge(
-            identity.client_id(),
-            &virtual_ip,
-            &identity.public_key(),
-            timestamp,
-        );
+        let binding = RelayRegistrationBinding {
+            client_id: identity.client_id(),
+            virtual_ip,
+            public_key: &public_key,
+            timestamp: 123,
+            server_public_key_pin: [1; 32],
+            client_certificate_public_key_pin: [2; 32],
+            tls_channel_binding: [3; 32],
+        };
+        let challenge = binding.challenge();
         let signature = identity.sign(&challenge);
-
         assert!(Identity::verify(
-            &identity.public_key(),
+            &public_key,
             &challenge,
             &signature.to_bytes()
         ));
+
+        let other_public_key = Identity::generate()?.public_key();
+        let other_virtual_ip = "fd00::1002".parse()?;
+        let variants = [
+            RelayRegistrationBinding {
+                client_id: "different-client",
+                ..binding
+            },
+            RelayRegistrationBinding {
+                virtual_ip: other_virtual_ip,
+                ..binding
+            },
+            RelayRegistrationBinding {
+                public_key: &other_public_key,
+                ..binding
+            },
+            RelayRegistrationBinding {
+                timestamp: 124,
+                ..binding
+            },
+            RelayRegistrationBinding {
+                server_public_key_pin: [4; 32],
+                ..binding
+            },
+            RelayRegistrationBinding {
+                client_certificate_public_key_pin: [5; 32],
+                ..binding
+            },
+            RelayRegistrationBinding {
+                tls_channel_binding: [6; 32],
+                ..binding
+            },
+        ];
+        for variant in variants {
+            assert_ne!(variant.challenge(), challenge);
+        }
         Ok(())
     }
 

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{
-    build_quic_server_config, generate_self_signed_quic_certificate, recv_relay_message,
-    send_relay_message, ClientId, ErrorCode, Identity, QuicCertificate, RelayMessage,
+    build_quic_server_config, export_quic_relay_channel_binding,
+    generate_self_signed_quic_certificate, recv_relay_message, send_relay_message, ClientId,
+    ErrorCode, Identity, QuicCertificate, RelayMessage, RelayRegistrationBinding,
 };
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr};
@@ -288,13 +289,31 @@ impl RelayServer {
             virtual_ip,
             public_key,
             timestamp,
+            server_public_key_pin,
+            client_certificate_public_key_pin,
+            tls_channel_binding,
             signature,
         } = message
         else {
             anyhow::bail!("QUIC 中继首个消息必须是 Register");
         };
 
-        verify_relay_registration(&client_id, &virtual_ip, &public_key, timestamp, &signature)?;
+        let registration = RelayRegistrationBinding {
+            client_id: &client_id,
+            virtual_ip,
+            public_key: &public_key,
+            timestamp,
+            server_public_key_pin,
+            client_certificate_public_key_pin,
+            tls_channel_binding,
+        };
+        let actual_channel_binding = export_quic_relay_channel_binding(&connection)?;
+        verify_relay_registration(
+            &registration,
+            &signature,
+            self.certificate.public_key_pin,
+            &actual_channel_binding,
+        )?;
         self.verify_online_peer(&client_id, virtual_ip, &public_key)
             .await?;
 
@@ -373,7 +392,7 @@ impl RelayServer {
         {
             Ok(dst_client) => dst_client,
             Err(error) => {
-                self.send_relay_error_response(&mut send, request.stream_id, error)
+                self.send_relay_error_response(&mut send, request.stream_id, *error)
                     .await?;
                 return Ok(());
             }
@@ -438,39 +457,39 @@ impl RelayServer {
         request: &RelayPacketRequest,
         registered_src_ip: Ipv6Addr,
         src_connection_id: usize,
-    ) -> std::result::Result<RelayClient, RelayMessage> {
+    ) -> std::result::Result<RelayClient, Box<RelayMessage>> {
         if request.src_ip != registered_src_ip {
-            return Err(RelayMessage::error(
+            return Err(Box::new(RelayMessage::error(
                 ErrorCode::Forbidden,
                 "source IP does not match relay registration",
-            ));
+            )));
         }
 
         if !self
             .allow_relay(request.src_ip, request.payload.len())
             .await
         {
-            return Err(RelayMessage::error(
+            return Err(Box::new(RelayMessage::error(
                 ErrorCode::RateLimited,
                 "relay bandwidth limit exceeded",
-            ));
+            )));
         }
 
         let Some(dst_client) = self.lookup_client(request.dst_ip).await else {
-            return Err(RelayMessage::error(
+            return Err(Box::new(RelayMessage::error(
                 ErrorCode::NotFound,
                 format!(
                     "destination is not connected to QUIC relay: {}",
                     request.dst_ip
                 ),
-            ));
+            )));
         };
 
         if dst_client.connection_id == src_connection_id && request.src_ip == request.dst_ip {
-            return Err(RelayMessage::error(
+            return Err(Box::new(RelayMessage::error(
                 ErrorCode::BadRequest,
                 "refusing relay packet to self",
-            ));
+            )));
         }
 
         Ok(dst_client)
@@ -586,16 +605,21 @@ struct RegisteredRelayClient {
 }
 
 fn verify_relay_registration(
-    client_id: &str,
-    virtual_ip: &Ipv6Addr,
-    public_key: &[u8],
-    timestamp: u64,
+    registration: &RelayRegistrationBinding<'_>,
     signature: &[u8],
+    expected_server_public_key_pin: [u8; 32],
+    actual_channel_binding: &[u8; 32],
 ) -> Result<()> {
-    let challenge = RelayMessage::register_challenge(client_id, virtual_ip, public_key, timestamp);
+    if registration.server_public_key_pin != expected_server_public_key_pin {
+        anyhow::bail!("QUIC 中继注册绑定了错误的服务端公钥 pin");
+    }
+    if &registration.tls_channel_binding != actual_channel_binding {
+        anyhow::bail!("QUIC 中继注册绑定了其他 TLS 会话");
+    }
 
-    if Identity::verify_peer_fingerprint(public_key, client_id)
-        && Identity::verify(public_key, &challenge, signature)
+    let challenge = registration.challenge();
+    if Identity::verify_peer_fingerprint(registration.public_key, registration.client_id)
+        && Identity::verify(registration.public_key, &challenge, signature)
     {
         Ok(())
     } else {

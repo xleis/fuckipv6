@@ -12,7 +12,7 @@
 - [x] **QI-03 强制客户端证书校验**：服务端启用 mandatory client auth，只接受满足客户端用途且能完成 TLS proof-of-possession 的证书。
 - [x] **QI-04 客户端认证配置**：提供带客户端证书的 pinned 客户端配置，并保持现有无客户端证书配置仅供显式 legacy/自检路径使用。
 - [x] **QI-05 TLS channel binding**：定义稳定的 exporter label/context，客户端与服务端使用同一 helper 派生并比较绑定材料。
-- [ ] **QI-06 Relay 注册绑定**：Register 签名覆盖 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter。
+- [x] **QI-06 Relay 注册绑定**：Register 签名覆盖 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter。
 - [ ] **QI-07 证书与应用身份一致**：服务端将 TLS 对端证书 SPKI 与 Register 中的 Ed25519 公钥逐字节比较，错绑时在注册前失败关闭。
 - [x] **QI-08 缺失/错误客户端证书测试**：覆盖无客户端证书、错误客户端证书和错误服务端 pin 均无法完成连接。
 - [ ] **QI-09 应用身份错绑测试**：覆盖合法客户端证书搭配另一应用身份、篡改 Register 字段和缺失绑定信息的拒绝路径。

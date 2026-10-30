@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- **统一节点命令错误契约**: 10 个 `NodeCommand` 均覆盖 JSON 序列化往返与至少一条拒绝路径；重复/非法网络名和无效载荷统一返回 `InvalidRequest`，网络名规则与 `ConfigManager` 的 ASCII 白名单对齐。`NodeProblem` 的 7 个错误码、`network_name` 和 `retryable` 已锁定线协议并可往返；handler 测试覆盖无运行时创建/加入、未知网络探测及 `RuntimeControlError` 映射，`UpdateRouting`/`SetNetworkRole` 在 EX-06/EX-07 完成前继续返回可重试的 `Unavailable`，不会伪装成功。
 - **节点快照一致性诊断**: `NodeSnapshot::invariant_violations()` 集中报告网络、配置和内嵌服务重名、运行网络缺少配置、Peer 引用未知/离线网络及 `peer_count` 不一致。运行网络停止、自然退出和创建失败回滚均清理对应 Peer；共享 revision 在 `u64::MAX` 饱和而不回绕。UI 只可展示诊断结果，不得在本地修复或维护平行状态机。
 - **内嵌服务状态快照**: `NodeSnapshot` 新增无敏感信息的 `embedded_services`，按网络发布内嵌信令/中继服务的 `Starting/Running/Stopping/Stopped/Failed` 状态及运行中监听地址；服务生命周期变化通过 `EmbeddedServiceChanged` 事件同步，测试覆盖创建、启动失败、按网络停止、全量关闭以及票据/私钥/配置路径不入快照。
 - **UI 契约命令通道**: 新增 `NodeCommand::GetUiManifest` 与 `NodeCommandOutcome::UiManifest`，让 CLI、IPC、WebUI 和后续 GPUI 通过同一个节点命令总线获取版本化 manifest；测试覆盖 JSON 往返、11 个页面和当前 schema 版本。该命令只传输 UI 契约，不代表 WebUI/GPUI 已完成适配。

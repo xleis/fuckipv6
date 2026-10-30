@@ -600,6 +600,38 @@ mod tests {
     }
 
     #[test]
+    fn node_problem_round_trips_with_stable_codes_and_flags() {
+        let cases = [
+            (NodeProblemCode::InvalidRequest, "invalid_request"),
+            (NodeProblemCode::NotFound, "not_found"),
+            (NodeProblemCode::Conflict, "conflict"),
+            (NodeProblemCode::Unavailable, "unavailable"),
+            (NodeProblemCode::PermissionDenied, "permission_denied"),
+            (NodeProblemCode::Cancelled, "cancelled"),
+            (NodeProblemCode::Internal, "internal"),
+        ];
+
+        for (code, wire_name) in cases {
+            let problem = NodeProblem::new(code, "测试错误")
+                .for_network("home")
+                .retryable(true);
+            let encoded = serde_json::to_value(&problem).expect("serialize node problem");
+            assert_eq!(
+                encoded,
+                serde_json::json!({
+                    "code": wire_name,
+                    "message": "测试错误",
+                    "network_name": "home",
+                    "retryable": true,
+                })
+            );
+            let decoded: NodeProblem =
+                serde_json::from_value(encoded).expect("deserialize node problem");
+            assert_eq!(decoded, problem);
+        }
+    }
+
+    #[test]
     fn snapshot_round_trips_without_secret_identity_material() {
         let snapshot = NodeSnapshot {
             identity: Some(NodeIdentitySnapshot {

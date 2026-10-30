@@ -364,7 +364,7 @@ async fn probe_peer(
 fn unavailable(request_id: u64, message: impl Into<String>) -> NodeCommandResult {
     NodeCommandResult::rejected(
         request_id,
-        NodeProblem::new(NodeProblemCode::Unavailable, message),
+        NodeProblem::new(NodeProblemCode::Unavailable, message).retryable(true),
     )
 }
 
@@ -405,9 +405,36 @@ pub(crate) fn spawn_command_bus_with_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{NodeCommand, NodeCommandBus, NodeEventBus};
+    use crate::node::{
+        NodeCommand, NodeCommandBus, NodeCreateNetworkCommand, NodeEventBus,
+        NodeJoinNetworkCommand, NodeNetworkRole, NodeProbePeerCommand, NodeRoutingMode,
+        NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
+    };
     use crate::symmetric::EmbeddedServiceStartRequest;
     use tokio::sync::mpsc;
+
+    async fn execute_rejected(
+        bus: &NodeCommandBus,
+        request_id: u64,
+        command: NodeCommand,
+    ) -> NodeProblem {
+        let result = bus
+            .execute(NodeCommandRequest::new(request_id, command))
+            .await
+            .expect("command result");
+        assert_eq!(result.request_id, request_id);
+        assert!(!result.is_success());
+        match result.outcome {
+            NodeCommandOutcome::Rejected(problem) => problem,
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+    }
+
+    fn assert_problem(problem: &NodeProblem, code: NodeProblemCode, retryable: bool) {
+        assert_eq!(problem.code, code);
+        assert_eq!(problem.retryable, retryable);
+        assert!(!problem.message.is_empty());
+    }
 
     #[tokio::test]
     async fn get_snapshot_reads_the_shared_store() {
@@ -530,7 +557,7 @@ mod tests {
 
         match result.outcome {
             NodeCommandOutcome::Rejected(problem) => {
-                assert_eq!(problem.code, NodeProblemCode::NotFound);
+                assert_problem(&problem, NodeProblemCode::NotFound, false);
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
@@ -556,10 +583,135 @@ mod tests {
 
         match result.outcome {
             NodeCommandOutcome::Rejected(problem) => {
-                assert_eq!(problem.code, NodeProblemCode::Unavailable);
+                assert_problem(&problem, NodeProblemCode::Unavailable, true);
                 assert!(problem.message.contains("监督器"));
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_routing_and_role_changes_are_explicitly_unavailable() {
+        let bus = spawn_command_bus(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+        let commands = [
+            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name: "home".into(),
+                mode: NodeRoutingMode::GlobalProxy,
+                exit_node: Some("office".into()),
+                is_exit_node: false,
+            }),
+            NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                network_name: "home".into(),
+                role: NodeNetworkRole::ExitNode,
+                enabled: true,
+            }),
+        ];
+
+        for (offset, command) in commands.into_iter().enumerate() {
+            let problem = execute_rejected(&bus, 30 + offset as u64, command).await;
+            assert_problem(&problem, NodeProblemCode::Unavailable, true);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_and_join_fail_explicitly_without_a_runtime() {
+        let bus = spawn_command_bus(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+        let commands = [
+            NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+                name: "home".into(),
+                signaling_port: 6666,
+                relay_port: 6667,
+                external_host: None,
+                auto_connect: true,
+            }),
+            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                target: "fk://invite".into(),
+                network_name: Some("office".into()),
+                start: true,
+            }),
+        ];
+
+        for (offset, command) in commands.into_iter().enumerate() {
+            let problem = execute_rejected(&bus, 40 + offset as u64, command).await;
+            assert_problem(&problem, NodeProblemCode::Unavailable, true);
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_unknown_network_returns_network_scoped_not_found() {
+        let bus = spawn_command_bus(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+
+        let problem = execute_rejected(
+            &bus,
+            50,
+            NodeCommand::ProbePeer(NodeProbePeerCommand {
+                network_name: "home".into(),
+                target: "fd00::2".into(),
+                timeout_ms: 1_000,
+            }),
+        )
+        .await;
+
+        assert_problem(&problem, NodeProblemCode::NotFound, false);
+        assert_eq!(problem.network_name.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn runtime_errors_map_to_stable_problem_codes() {
+        let cases = [
+            (
+                RuntimeControlError::Invalid("invalid".into()),
+                NodeProblemCode::InvalidRequest,
+                false,
+            ),
+            (
+                RuntimeControlError::Conflict("conflict".into()),
+                NodeProblemCode::Conflict,
+                false,
+            ),
+            (
+                RuntimeControlError::NotFound("missing".into()),
+                NodeProblemCode::NotFound,
+                false,
+            ),
+            (
+                RuntimeControlError::ActorClosed,
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                RuntimeControlError::Persistence("persist".into()),
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                RuntimeControlError::Launch("launch".into()),
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+        ];
+
+        for (error, code, retryable) in cases {
+            let result = runtime_rejection(60, error);
+            assert!(!result.is_success());
+            match result.outcome {
+                NodeCommandOutcome::Rejected(problem) => {
+                    assert_problem(&problem, code, retryable);
+                }
+                outcome => panic!("unexpected outcome: {outcome:?}"),
+            }
         }
     }
 

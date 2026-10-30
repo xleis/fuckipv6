@@ -61,6 +61,11 @@ impl NodeCommand {
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
                 if *all {
+                    if !networks.is_empty() {
+                        return Err(invalid(
+                            "停止全部网络时不能同时指定网络名称，请只设置 all=true",
+                        ));
+                    }
                     return Ok(());
                 }
                 if networks.is_empty() {
@@ -219,13 +224,15 @@ pub fn validate_network_name(name: &str) -> Result<(), NodeProblem> {
     if trimmed != name {
         return Err(invalid("网络名称首尾不能包含空白字符"));
     }
-    if name.chars().any(char::is_control)
-        || name.contains('/')
-        || name.contains('\\')
-        || name == "."
-        || name == ".."
-    {
-        return Err(invalid("网络名称包含不允许的字符"));
+    if name == "." || name == ".." {
+        return Err(invalid("网络名称不能为 '.' 或 '..'"));
+    }
+    if name.chars().any(|character| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    }) {
+        return Err(invalid(
+            "网络名称只能包含 ASCII 字母、数字、'.'、'-' 和 '_'",
+        ));
     }
     Ok(())
 }
@@ -373,6 +380,56 @@ pub enum NodeCommandBusError {
 mod tests {
     use super::*;
 
+    fn valid_commands() -> Vec<NodeCommand> {
+        vec![
+            NodeCommand::GetSnapshot,
+            NodeCommand::GetUiManifest,
+            NodeCommand::StartNetworks {
+                selection: NodeNetworkSelection::Named(vec!["home".into()]),
+            },
+            NodeCommand::StopNetworks {
+                networks: Vec::new(),
+                all: true,
+            },
+            NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+                name: "home".into(),
+                signaling_port: 6666,
+                relay_port: 6667,
+                external_host: Some("vpn.example.com".into()),
+                auto_connect: true,
+            }),
+            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                target: "fk://invite".into(),
+                network_name: Some("office".into()),
+                start: true,
+            }),
+            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name: "home".into(),
+                mode: NodeRoutingMode::GlobalProxy,
+                exit_node: Some("office".into()),
+                is_exit_node: false,
+            }),
+            NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                network_name: "home".into(),
+                role: NodeNetworkRole::ExitNode,
+                enabled: true,
+            }),
+            NodeCommand::ProbePeer(NodeProbePeerCommand {
+                network_name: "home".into(),
+                target: "fd00::2".into(),
+                timeout_ms: 1_000,
+            }),
+            NodeCommand::Shutdown,
+        ]
+    }
+
+    fn assert_invalid(command: NodeCommand) {
+        let problem = command.validate().expect_err("command must be rejected");
+        assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+        assert!(!problem.retryable);
+        assert!(!problem.message.is_empty());
+    }
+
     struct EchoHandler;
 
     impl NodeCommandHandler for EchoHandler {
@@ -405,6 +462,100 @@ mod tests {
             all: false,
         };
         assert!(command.validate().is_err());
+
+        assert_invalid(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+            name: "局域网".into(),
+            signaling_port: 6666,
+            relay_port: 6667,
+            external_host: None,
+            auto_connect: true,
+        }));
+    }
+
+    #[test]
+    fn every_command_validates_and_round_trips_through_json() {
+        for command in valid_commands() {
+            command.validate().expect("valid command");
+            let encoded = serde_json::to_string(&command).expect("serialize command");
+            let decoded: NodeCommand = serde_json::from_str(&encoded).expect("deserialize command");
+            assert_eq!(decoded, command);
+        }
+    }
+
+    #[test]
+    fn every_payload_command_rejects_invalid_input() {
+        let commands = vec![
+            NodeCommand::StartNetworks {
+                selection: NodeNetworkSelection::Named(Vec::new()),
+            },
+            NodeCommand::StartNetworks {
+                selection: NodeNetworkSelection::Named(vec!["home".into(), "home".into()]),
+            },
+            NodeCommand::StopNetworks {
+                networks: Vec::new(),
+                all: false,
+            },
+            NodeCommand::StopNetworks {
+                networks: vec!["home".into()],
+                all: true,
+            },
+            NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+                name: "home".into(),
+                signaling_port: 0,
+                relay_port: 6667,
+                external_host: None,
+                auto_connect: true,
+            }),
+            NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+                name: "home".into(),
+                signaling_port: 6666,
+                relay_port: 6666,
+                external_host: None,
+                auto_connect: true,
+            }),
+            NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+                name: "home".into(),
+                signaling_port: 6666,
+                relay_port: 6667,
+                external_host: Some("  ".into()),
+                auto_connect: true,
+            }),
+            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                target: "  ".into(),
+                network_name: None,
+                start: false,
+            }),
+            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                target: "ws://127.0.0.1:6666".into(),
+                network_name: Some("../office".into()),
+                start: false,
+            }),
+            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name: "home".into(),
+                mode: NodeRoutingMode::MeshOnly,
+                exit_node: Some("  ".into()),
+                is_exit_node: false,
+            }),
+            NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                network_name: "home/office".into(),
+                role: NodeNetworkRole::Relay,
+                enabled: true,
+            }),
+            NodeCommand::ProbePeer(NodeProbePeerCommand {
+                network_name: "home".into(),
+                target: "  ".into(),
+                timeout_ms: 1_000,
+            }),
+            NodeCommand::ProbePeer(NodeProbePeerCommand {
+                network_name: "home".into(),
+                target: "fd00::2".into(),
+                timeout_ms: 0,
+            }),
+        ];
+
+        for command in commands {
+            assert_invalid(command);
+        }
     }
 
     #[test]

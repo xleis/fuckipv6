@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
-use super::NodeLifecycleSnapshot;
+use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot};
 
 /// Stable, transport-neutral state rendered by every node UI adapter.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -156,6 +156,7 @@ impl NodeProblem {
 pub struct NodeStateStore {
     snapshot: Arc<RwLock<NodeSnapshot>>,
     updates: watch::Sender<NodeSnapshot>,
+    events: Option<NodeEventBus>,
 }
 
 impl NodeStateStore {
@@ -165,6 +166,17 @@ impl NodeStateStore {
         Self {
             snapshot: Arc::new(RwLock::new(snapshot)),
             updates,
+            events: None,
+        }
+    }
+
+    /// Attach the shared event bus so every state revision is also emitted as a
+    /// `StateChanged` event for streaming adapters.
+    pub fn with_events(events: NodeEventBus) -> Self {
+        let store = Self::new();
+        Self {
+            events: Some(events),
+            ..store
         }
     }
 
@@ -186,6 +198,11 @@ impl NodeStateStore {
         snapshot.revision = snapshot.revision.wrapping_add(1);
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
         published
     }
 
@@ -231,6 +248,20 @@ mod tests {
         assert_eq!(
             updates.borrow().networks[0].roles,
             vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_event_bus_observes_every_state_revision() {
+        let events = NodeEventBus::new(8);
+        let mut receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+
+        state.update(|snapshot| snapshot.last_error = None).await;
+
+        assert_eq!(
+            receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
         );
     }
 

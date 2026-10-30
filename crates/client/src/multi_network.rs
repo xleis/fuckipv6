@@ -6,7 +6,11 @@ use tokio::sync::{mpsc, watch, RwLock};
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
-use crate::node::{NodeLifecycle, NodeNetworkSelection, NodeRuntimePlan};
+use crate::node::{
+    NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot, NodeNetworkRole,
+    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodeProblem, NodeProblemCode,
+    NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
+};
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
 /// Linux IFNAMSIZ 限制为 16 字节（包含空终止符 \0），最大有效长度为 15 字符。
@@ -60,14 +64,19 @@ pub struct MultiNetworkSupervisor {
     registry: MultiNetworkRegistry,
     options: RuntimeOptions,
     lifecycle: NodeLifecycle,
+    state: NodeStateStore,
+    events: NodeEventBus,
 }
 
 impl MultiNetworkSupervisor {
     pub fn new(options: RuntimeOptions) -> Self {
+        let events = NodeEventBus::default();
         Self {
             registry: MultiNetworkRegistry::new(),
             options,
             lifecycle: NodeLifecycle::new(),
+            state: NodeStateStore::with_events(events.clone()),
+            events,
         }
     }
 
@@ -78,6 +87,63 @@ impl MultiNetworkSupervisor {
     /// Shared node lifecycle consumed by every UI and control surface.
     pub fn lifecycle(&self) -> &NodeLifecycle {
         &self.lifecycle
+    }
+
+    /// Canonical state store shared by all node UI adapters.
+    pub fn state(&self) -> &NodeStateStore {
+        &self.state
+    }
+
+    /// Shared event bus for state, network and command lifecycle notifications.
+    pub fn event_bus(&self) -> NodeEventBus {
+        self.events.clone()
+    }
+
+    async fn sync_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) {
+        self.state.set_lifecycle(lifecycle).await;
+    }
+
+    async fn record_network(&self, network: NodeNetworkSnapshot) {
+        let network_name = network.name.clone();
+        let status = network.status;
+        self.state
+            .update(|snapshot| {
+                if let Some(existing) = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|existing| existing.name == network.name)
+                {
+                    *existing = network;
+                } else {
+                    snapshot.networks.push(network);
+                }
+            })
+            .await;
+        self.events.publish(NodeEventKind::NetworkChanged {
+            network_name,
+            status,
+        });
+    }
+
+    async fn mark_network_status(&self, network_name: Option<&str>, status: NodeNetworkStatus) {
+        let snapshot = self
+            .state
+            .update(|snapshot| {
+                for network in &mut snapshot.networks {
+                    if network_name.is_none_or(|name| network.name == name) {
+                        network.status = status;
+                    }
+                }
+            })
+            .await;
+        for network in snapshot.networks.iter().filter(|network| {
+            network_name.is_none_or(|name| network.name == name) && network.status == status
+        }) {
+            self.events.publish(NodeEventKind::NetworkChanged {
+                network_name: network.name.clone(),
+                status,
+            });
+        }
     }
 
     /// Start the node control plane and its selected network sessions.
@@ -98,9 +164,11 @@ impl MultiNetworkSupervisor {
             })
             .collect();
 
-        self.lifecycle
+        let lifecycle = self
+            .lifecycle
             .begin_start(configured_networks, Vec::new())
             .await;
+        self.sync_lifecycle(lifecycle).await;
         tracing::info!(
             "正在启动节点运行时，已选择 {} 个网络...",
             configured_networks
@@ -138,6 +206,20 @@ impl MultiNetworkSupervisor {
         for (net_name, config_path, mut client_config) in configs {
             println!("  正在建立网络连接: {} ...", net_name);
 
+            self.record_network(NodeNetworkSnapshot {
+                name: net_name.clone(),
+                tun_name: derive_tun_name(Some(&net_name), &client_config.tun.name),
+                status: NodeNetworkStatus::Connecting,
+                assigned_ipv6: None,
+                assigned_ipv4: None,
+                p2p_listen_addr: None,
+                uptime_secs: 0,
+                roles: vec![NodeNetworkRole::Member],
+                peer_count: 0,
+                traffic: NodeTrafficSnapshot::default(),
+            })
+            .await;
+
             // 应用命令行分流模式与出口节点参数覆盖
             if let Some(mode_str) = &self.options.routing_mode {
                 match mode_str.to_lowercase().as_str() {
@@ -170,6 +252,20 @@ impl MultiNetworkSupervisor {
                 Err(e) => {
                     tracing::error!("网络 [{}] 初始化失败: {:#}", net_name, e);
                     println!("  ❌ 网络 [{}] 初始化失败: {:#}", net_name, e);
+                    self.state
+                        .update(|snapshot| {
+                            snapshot.last_error = Some(
+                                NodeProblem::new(
+                                    NodeProblemCode::Unavailable,
+                                    format!("网络 [{net_name}] 初始化失败: {e:#}"),
+                                )
+                                .for_network(net_name.clone())
+                                .retryable(true),
+                            );
+                        })
+                        .await;
+                    self.mark_network_status(Some(&net_name), NodeNetworkStatus::Failed)
+                        .await;
                     failed_networks.push(net_name);
                     continue;
                 }
@@ -179,6 +275,7 @@ impl MultiNetworkSupervisor {
             let assigned_ip = runtime.assigned_ip;
             let assigned_ipv4 = runtime.assigned_ips.ipv4;
             let p2p = runtime.p2p.clone();
+            let p2p_listen_addr = p2p.local_addr();
             let stats = runtime.stats.clone();
 
             println!(
@@ -192,13 +289,27 @@ impl MultiNetworkSupervisor {
             // 注册到多网络状态管理器
             let session_handle = NetworkSessionHandle {
                 network_name: net_name.clone(),
-                tun_name: tun_device_name,
+                tun_name: tun_device_name.clone(),
                 assigned_ip,
                 assigned_ipv4,
                 p2p,
                 stats,
             };
             self.registry.register(session_handle).await;
+
+            self.record_network(NodeNetworkSnapshot {
+                name: net_name.clone(),
+                tun_name: tun_device_name.clone(),
+                status: NodeNetworkStatus::Online,
+                assigned_ipv6: Some(assigned_ip),
+                assigned_ipv4,
+                p2p_listen_addr: Some(p2p_listen_addr),
+                uptime_secs: 0,
+                roles: vec![NodeNetworkRole::Member],
+                peer_count: 0,
+                traffic: NodeTrafficSnapshot::default(),
+            })
+            .await;
 
             // 为该网络配置独立的关闭信号监听
             let (net_shutdown_tx, net_shutdown_rx) = watch::channel(false);
@@ -209,6 +320,8 @@ impl MultiNetworkSupervisor {
 
             let reg = self.registry.clone();
             let name_for_task = net_name.clone();
+            let state_for_task = self.state.clone();
+            let events_for_task = self.events.clone();
 
             let handle = tokio::spawn(async move {
                 tracing::info!("网络 [{name_for_task}] 正在启动事件循环");
@@ -219,6 +332,22 @@ impl MultiNetworkSupervisor {
                 tracing::info!("网络 [{name_for_task}] 正在清理资源");
                 runtime.shutdown().await;
                 reg.unregister(&name_for_task).await;
+                state_for_task
+                    .update(|snapshot| {
+                        if let Some(network) = snapshot
+                            .networks
+                            .iter_mut()
+                            .find(|network| network.name == name_for_task)
+                        {
+                            network.status = NodeNetworkStatus::Offline;
+                            network.peer_count = 0;
+                        }
+                    })
+                    .await;
+                events_for_task.publish(NodeEventKind::NetworkChanged {
+                    network_name: name_for_task.clone(),
+                    status: NodeNetworkStatus::Offline,
+                });
                 tracing::info!("网络 [{name_for_task}] 已安全下线");
             });
 
@@ -227,13 +356,16 @@ impl MultiNetworkSupervisor {
         }
 
         if configured_networks > 0 && started_networks == 0 {
-            self.lifecycle.failed().await;
+            let lifecycle = self.lifecycle.failed().await;
+            self.sync_lifecycle(lifecycle).await;
             anyhow::bail!("所有已选择网络均初始化失败，节点运行时未进入在线状态");
         }
 
-        self.lifecycle
+        let lifecycle = self
+            .lifecycle
             .running(started_networks, failed_networks)
             .await;
+        self.sync_lifecycle(lifecycle).await;
 
         println!("══════════════════════════════════════════════════════════════════════════════");
         if started_networks == 0 {
@@ -260,7 +392,10 @@ impl MultiNetworkSupervisor {
             tokio::select! {
                 _ = &mut shutdown_sig => {
                     println!("\n🛑 收到中断信号，正在优雅关闭节点网络...");
-                    self.lifecycle.begin_stop().await;
+                    self.mark_network_status(None, NodeNetworkStatus::Stopping)
+                        .await;
+                    let lifecycle = self.lifecycle.begin_stop().await;
+                    self.sync_lifecycle(lifecycle).await;
                     let _ = global_shutdown_tx.send(true);
                     let senders = network_shutdown_senders.read().await;
                     for tx in senders.values() {
@@ -272,18 +407,25 @@ impl MultiNetworkSupervisor {
                     match stop_target {
                         Some(ref name) => {
                             println!("🛑 收到 IPC 指令: 停止网络 [{name}]");
+                            self.mark_network_status(Some(name), NodeNetworkStatus::Stopping)
+                                .await;
                             let senders = network_shutdown_senders.read().await;
                             if let Some(tx) = senders.get(name) {
                                 let _ = tx.send(true);
                             }
                             if self.registry.is_empty().await {
                                 println!("所有网络均已停止，主进程退出");
+                                let lifecycle = self.lifecycle.begin_stop().await;
+                                self.sync_lifecycle(lifecycle).await;
                                 break;
                             }
                         }
                         None => {
                             println!("🛑 收到 IPC 指令: 停止所有网络");
-                            self.lifecycle.begin_stop().await;
+                            self.mark_network_status(None, NodeNetworkStatus::Stopping)
+                                .await;
+                            let lifecycle = self.lifecycle.begin_stop().await;
+                            self.sync_lifecycle(lifecycle).await;
                             let _ = global_shutdown_tx.send(true);
                             let senders = network_shutdown_senders.read().await;
                             for tx in senders.values() {
@@ -301,7 +443,8 @@ impl MultiNetworkSupervisor {
             let _ = h.await;
         }
 
-        self.lifecycle.stopped().await;
+        let lifecycle = self.lifecycle.stopped().await;
+        self.sync_lifecycle(lifecycle).await;
         println!("👋 节点网络运行时已安全退出");
         Ok(())
     }

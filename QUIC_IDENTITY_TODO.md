@@ -17,7 +17,7 @@
 - [x] **QI-08 缺失/错误客户端证书测试**：覆盖无客户端证书、错误客户端证书和错误服务端 pin 均无法完成连接。
 - [x] **QI-09 应用身份错绑测试**：覆盖合法客户端证书搭配另一应用身份、篡改 Register 字段和缺失绑定信息的拒绝路径。
 - [x] **QI-10 生产 0-RTT 关闭**：中继生产配置将 `max_early_data_size` 设为 0，客户端不默认启用 early data；不得让 Register/Packet 进入 0-RTT。
-- [ ] **QI-11 0-RTT 重放回归**：更新自检与集成测试，证明恢复会话不能提交早期 Register/Packet；保留“若未来启用，必须另有幂等/重放缓存”的发布条件。
+- [x] **QI-11 0-RTT 重放回归**：更新自检与集成测试，证明恢复会话不能提交早期 Register/Packet；若未来启用，必须另行具备幂等处理、有界重放缓存、时间窗和降级规则。
 - [ ] **QI-12 Relay 端到端集成**：正确绑定的客户端注册和转发成功，错误绑定的客户端不产生 relay 状态或流量计数副作用。
 - [ ] **QI-13 文档与状态同步**：同步 `SECURITY_PERFORMANCE_TODO.md`、`SECURITY_TRACEABILITY.md`、`PROTOCOL_V2.md`、`CHANGELOG.md` 和 README 的准确限制。
 - [ ] **QI-14 全量门禁与完成记录**：执行格式、文档检查、workspace check/clippy/test 和相关 QUIC 测试；每项独立提交后更新本节状态。

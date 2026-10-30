@@ -428,12 +428,21 @@ impl ClientCertVerifier for Ed25519ClientCertVerifier {
 }
 
 /// 构建强制客户端证书认证的 QUIC 服务端配置。
+///
+/// 生产配置不接受 TLS early data，避免 Register/Packet 进入可重放的 0-RTT。
 pub fn build_quic_server_config(certificate: &QuicCertificate) -> Result<quinn::ServerConfig> {
     build_quic_server_config_with_client_auth(certificate)
 }
 
 pub fn build_quic_server_config_with_client_auth(
     certificate: &QuicCertificate,
+) -> Result<quinn::ServerConfig> {
+    build_quic_server_config_with_client_auth_and_early_data(certificate, 0)
+}
+
+fn build_quic_server_config_with_client_auth_and_early_data(
+    certificate: &QuicCertificate,
+    max_early_data_size: u32,
 ) -> Result<quinn::ServerConfig> {
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
@@ -447,7 +456,7 @@ pub fn build_quic_server_config_with_client_auth(
     )
     .context("无法创建 QUIC 服务端证书配置")?;
     server_crypto.alpn_protocols = vec![FUCKIPV6_QUIC_ALPN.to_vec()];
-    server_crypto.max_early_data_size = 0;
+    server_crypto.max_early_data_size = max_early_data_size;
 
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
@@ -491,9 +500,23 @@ pub fn build_quic_server_config_without_client_auth(
 }
 
 /// 构建使用指定客户端证书并 pin 服务端公钥的 QUIC 客户端配置。
+///
+/// 生产配置不请求 TLS early data，重连始终完成 1-RTT 握手。
 pub fn build_pinned_quic_client_config_with_auth(
     expected_server_pin: [u8; 32],
     client_certificate: &QuicCertificate,
+) -> Result<quinn::ClientConfig> {
+    build_pinned_quic_client_config_with_auth_and_early_data(
+        expected_server_pin,
+        client_certificate,
+        false,
+    )
+}
+
+fn build_pinned_quic_client_config_with_auth_and_early_data(
+    expected_server_pin: [u8; 32],
+    client_certificate: &QuicCertificate,
+    enable_early_data: bool,
 ) -> Result<quinn::ClientConfig> {
     let mut client_crypto = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
@@ -508,7 +531,7 @@ pub fn build_pinned_quic_client_config_with_auth(
     )
     .context("无法配置 QUIC 客户端身份证书")?;
     client_crypto.alpn_protocols = vec![FUCKIPV6_QUIC_ALPN.to_vec()];
-    client_crypto.enable_early_data = false;
+    client_crypto.enable_early_data = enable_early_data;
     finish_pinned_client_config(client_crypto)
 }
 
@@ -1130,6 +1153,92 @@ mod tests {
         for variant in variants {
             assert_ne!(variant.challenge(), challenge);
         }
+        Ok(())
+    }
+
+    async fn session_offers_0rtt(
+        certificate: &QuicCertificate,
+        max_early_data_size: u32,
+    ) -> anyhow::Result<bool> {
+        let server_config = build_quic_server_config_with_client_auth_and_early_data(
+            certificate,
+            max_early_data_size,
+        )?;
+        let server = quinn::Endpoint::server(
+            server_config,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move {
+            let Some(incoming) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), server.accept())
+                    .await
+                    .ok()
+                    .flatten()
+            else {
+                return;
+            };
+            let Ok(connection) = incoming.await else {
+                return;
+            };
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(1), connection.closed()).await;
+        });
+
+        let client_identity = Identity::generate()?;
+        let client_certificate = QuicCertificate::from_identity(&client_identity)?;
+        let mut client =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(build_pinned_quic_client_config_with_auth_and_early_data(
+            certificate.public_key_pin,
+            &client_certificate,
+            true,
+        )?);
+
+        let warmup = client
+            .connect(server_addr, "fuckipv6.local")?
+            .await
+            .context("0-RTT regression warmup handshake failed")?;
+        // The session ticket arrives after the handshake. Keeping the warmup connection open
+        // briefly gives rustls a chance to persist it before reconnecting.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        warmup.close(0u32.into(), b"warmup-done");
+
+        let connecting = client.connect(server_addr, "fuckipv6.local")?;
+        let offered = match connecting.into_0rtt() {
+            Ok((connection, _accepted)) => {
+                connection.close(0u32.into(), b"0rtt-observed");
+                true
+            }
+            Err(connecting) => {
+                drop(connecting);
+                false
+            }
+        };
+        client.close(0u32.into(), b"test-done");
+        server_task.abort();
+        let _ = server_task.await;
+        Ok(offered)
+    }
+
+    #[tokio::test]
+    async fn resumed_session_cannot_send_early_register_or_packet() -> anyhow::Result<()> {
+        let certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+
+        // Positive control: the same client can offer 0-RTT when a test-only server explicitly
+        // advertises it. This proves the absent ticket, rather than a broken harness, is not why
+        // the production configuration is rejected.
+        assert!(
+            session_offers_0rtt(&certificate, u32::MAX).await?,
+            "0-RTT regression harness failed its positive control"
+        );
+        // Production configuration advertises zero early-data bytes. Therefore relay Register
+        // stream 0 and Packet streams cannot be opened or written before the handshake completes.
+        assert!(
+            !session_offers_0rtt(&certificate, 0).await?,
+            "production QUIC server unexpectedly offered 0-RTT"
+        );
         Ok(())
     }
 

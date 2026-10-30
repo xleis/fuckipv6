@@ -118,16 +118,61 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                     Some(runtime) => join_runtime_network(&runtime, request_id, command).await,
                     None => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
                 },
-                super::NodeCommand::UpdateRouting(command) => match runtime {
-                    Some(runtime) => update_runtime_routing(&runtime, request_id, command).await,
-                    None => unavailable(request_id, "路由热更新需要运行中的多网络监督器控制通道"),
-                },
+                super::NodeCommand::UpdateRouting(command) => {
+                    let capabilities = state.snapshot().await.exit_node_capabilities;
+                    if command.is_exit_node && !capabilities.supported {
+                        NodeCommandResult::rejected(
+                            request_id,
+                            NodeProblem::new(
+                                NodeProblemCode::Unsupported,
+                                capabilities.unsupported_explanation(),
+                            ),
+                        )
+                    } else {
+                        match runtime {
+                            Some(runtime) => {
+                                update_runtime_routing(&runtime, request_id, command).await
+                            }
+                            None => unavailable(
+                                request_id,
+                                "路由热更新需要运行中的多网络监督器控制通道",
+                            ),
+                        }
+                    }
+                }
+                super::NodeCommand::SetNetworkRole(command)
+                    if command.role == super::NodeNetworkRole::ExitNode && command.enabled =>
+                {
+                    reject_unsupported_exit_node_or(&state, request_id, || {
+                        "网络角色变更尚未接入持久化与运行时重配置".to_string()
+                    })
+                    .await
+                }
                 super::NodeCommand::SetNetworkRole(_) => {
                     unavailable(request_id, "网络角色变更尚未接入持久化与运行时重配置")
                 }
             }
         })
     }
+}
+
+async fn reject_unsupported_exit_node_or(
+    state: &NodeStateStore,
+    request_id: u64,
+    unavailable_message: impl FnOnce() -> String,
+) -> NodeCommandResult {
+    let capabilities = state.snapshot().await.exit_node_capabilities;
+    if capabilities.supported {
+        return unavailable(request_id, unavailable_message());
+    }
+
+    NodeCommandResult::rejected(
+        request_id,
+        NodeProblem::new(
+            NodeProblemCode::Unsupported,
+            capabilities.unsupported_explanation(),
+        ),
+    )
 }
 
 async fn start_runtime_networks(
@@ -434,6 +479,9 @@ mod tests {
         NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
     };
     use crate::symmetric::EmbeddedServiceStartRequest;
+    use fuckipv6_common::{
+        ExitNodeCapabilities, ExitNodePlatform, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+    };
     use tokio::sync::mpsc;
 
     async fn execute_rejected(
@@ -614,28 +662,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_role_changes_and_routing_without_runtime_are_unavailable() {
+    async fn non_exit_routing_update_reports_unavailable() {
         let bus = spawn_command_bus(
             NodeStateStore::new(),
             MultiNetworkRegistry::new(),
             NodeEventBus::default(),
         );
-        let commands = [
+        let problem = execute_rejected(
+            &bus,
+            30,
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),
                 mode: NodeRoutingMode::GlobalProxy,
                 exit_node: Some("office".into()),
                 is_exit_node: false,
             }),
+        )
+        .await;
+        assert_problem(&problem, NodeProblemCode::Unavailable, true);
+    }
+
+    #[tokio::test]
+    async fn exit_node_actions_use_unsupported_capabilities_from_the_snapshot() {
+        let state = NodeStateStore::new();
+        let capabilities = ExitNodeCapabilities::for_platform(ExitNodePlatform::Windows);
+        state
+            .update(|snapshot| snapshot.exit_node_capabilities = capabilities.clone())
+            .await;
+        let bus = spawn_command_bus(state, MultiNetworkRegistry::new(), NodeEventBus::default());
+        for (offset, command) in [
+            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name: "home".into(),
+                mode: NodeRoutingMode::GlobalProxy,
+                exit_node: Some("office".into()),
+                is_exit_node: true,
+            }),
             NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
                 network_name: "home".into(),
                 role: NodeNetworkRole::ExitNode,
                 enabled: true,
             }),
-        ];
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let problem = execute_rejected(&bus, 31 + offset as u64, command).await;
+            assert_problem(&problem, NodeProblemCode::Unsupported, false);
+            assert_eq!(problem.message, capabilities.unsupported_explanation());
+        }
+    }
 
-        for (offset, command) in commands.into_iter().enumerate() {
-            let problem = execute_rejected(&bus, 30 + offset as u64, command).await;
+    #[tokio::test]
+    async fn supported_exit_node_actions_stay_unavailable_until_backend_is_wired() {
+        let state = NodeStateStore::new();
+        state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = ExitNodeCapabilities {
+                    schema_version: EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                    platform: ExitNodePlatform::Linux,
+                    supported: true,
+                    ipv4_forwarding: true,
+                    ipv6_forwarding: true,
+                    nat: true,
+                    cleanup: true,
+                    unsupported_reasons: Vec::new(),
+                }
+            })
+            .await;
+        let bus = spawn_command_bus(state, MultiNetworkRegistry::new(), NodeEventBus::default());
+        for (offset, command) in [
+            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name: "home".into(),
+                mode: NodeRoutingMode::GlobalProxy,
+                exit_node: Some("office".into()),
+                is_exit_node: true,
+            }),
+            NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                network_name: "home".into(),
+                role: NodeNetworkRole::ExitNode,
+                enabled: true,
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let problem = execute_rejected(&bus, 41 + offset as u64, command).await;
             assert_problem(&problem, NodeProblemCode::Unavailable, true);
         }
     }

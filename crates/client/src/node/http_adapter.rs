@@ -398,6 +398,7 @@ fn status_for_problem(code: NodeProblemCode) -> StatusCode {
         NodeProblemCode::InvalidRequest => StatusCode::BAD_REQUEST,
         NodeProblemCode::NotFound => StatusCode::NOT_FOUND,
         NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,
+        NodeProblemCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
         NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
         NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -821,6 +822,14 @@ mod tests {
             NodeCommandOutcome::Rejected(problem)
                 if problem.code == NodeProblemCode::Unavailable
         ));
+    }
+
+    #[test]
+    fn unsupported_problem_uses_non_retryable_client_error_semantics() {
+        assert_eq!(
+            status_for_problem(NodeProblemCode::Unsupported),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[tokio::test]

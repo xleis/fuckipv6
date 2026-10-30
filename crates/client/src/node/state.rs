@@ -4,6 +4,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
+use fuckipv6_common::ExitNodeCapabilities;
+
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot};
 use crate::ui::UiModeResolution;
 
@@ -15,6 +17,11 @@ pub struct NodeSnapshot {
     pub identity: Option<NodeIdentitySnapshot>,
     #[serde(default)]
     pub configuration: NodeConfigurationSnapshot,
+    /// Runtime capability truth for this host. Adapters must disable Exit Node
+    /// actions when `supported` is false and render the typed reasons instead
+    /// of inferring success from configuration alone.
+    #[serde(default)]
+    pub exit_node_capabilities: ExitNodeCapabilities,
     #[serde(default)]
     pub permissions: NodePermissionSnapshot,
     #[serde(default)]
@@ -334,6 +341,8 @@ pub enum NodeProblemCode {
     Unavailable,
     PermissionDenied,
     Cancelled,
+    /// The operation is valid but unavailable on this platform or host.
+    Unsupported,
     Internal,
 }
 
@@ -650,6 +659,7 @@ mod tests {
             (NodeProblemCode::Unavailable, "unavailable"),
             (NodeProblemCode::PermissionDenied, "permission_denied"),
             (NodeProblemCode::Cancelled, "cancelled"),
+            (NodeProblemCode::Unsupported, "unsupported"),
             (NodeProblemCode::Internal, "internal"),
         ];
 
@@ -689,5 +699,43 @@ mod tests {
         assert_eq!(decoded, snapshot);
         assert!(!encoded.contains("private_key"));
         assert!(!encoded.contains("secret_key"));
+    }
+
+    #[tokio::test]
+    async fn state_store_exposes_exit_node_capability_truth() {
+        let snapshot = NodeStateStore::new().snapshot().await;
+
+        assert_eq!(
+            snapshot.exit_node_capabilities.schema_version,
+            fuckipv6_common::EXIT_NODE_CAPABILITY_SCHEMA_VERSION
+        );
+        assert_eq!(
+            snapshot.exit_node_capabilities.platform,
+            fuckipv6_common::ExitNodePlatform::current()
+        );
+        assert_eq!(
+            snapshot.exit_node_capabilities.supported,
+            snapshot
+                .exit_node_capabilities
+                .unsupported_reasons
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exit_node_capabilities_are_required_for_old_snapshots_to_fail_closed() {
+        let snapshot = NodeSnapshot::default();
+        let mut encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        encoded
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("exit_node_capabilities");
+
+        let decoded: NodeSnapshot =
+            serde_json::from_value(encoded).expect("deserialize legacy snapshot");
+        assert_eq!(
+            decoded.exit_node_capabilities,
+            ExitNodeCapabilities::detect()
+        );
     }
 }

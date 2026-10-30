@@ -177,8 +177,8 @@ def main() -> int:
             "probe_interval_ms": interval_ms,
             "probe_timeout_seconds": timeout_seconds,
             "expected_samples": expected_samples,
-            "ping_file": _relative_to_output(ping_file, output_dir.parent),
-            "ping_stderr_file": _relative_to_output(ping_stderr, output_dir.parent),
+            "ping_file": _relative_to_output(ping_file, output_dir),
+            "ping_stderr_file": _relative_to_output(ping_stderr, output_dir),
             "ping_returncode": ping_returncode,
             "iperf_returncode": iperf_result.returncode,
         }

@@ -21,19 +21,24 @@ non-zero unless the predeclared thresholds are met.
 
 `run.py` wraps the existing dataplane runner and adds:
 
-- exact kernel release and wireguard-go version/SHA-256 pinning;
+- exact kernel release, clean source commit/tree, tool hashes and wireguard-go
+  version/SHA-256 pinning;
 - a quiet-host preflight (`load1` and sampled CPU busy percentage);
 - required, disjoint CPU sets for client, server and control processes;
 - a complete traffic matrix and a pre-run `plan.json` whose hash must still match
   at evaluation time;
 - concurrent 100 Hz ICMPv6 probes through the tunnel during every iperf3 client
   run, with raw probe output preserved;
-- a final gate that fails on throughput, p99, CPU cost, packet loss, missing
-  samples or missing implementations;
+- an `evidence.sha256` manifest covering every retained raw and summary file;
+- a final gate that reloads raw iperf3 JSON, perf CSV and ping output, verifies
+  their manifest hashes, recomputes every reported metric, and fails on
+  throughput, p99, CPU cost, packet loss, missing samples or missing
+  implementations;
 - an explicit `INCOMPLETE` result when wireguard-go is intentionally absent.
 
-Every result is loaded from files created by the run. The harness never invents
-missing values or substitutes a zero.
+Every result is loaded from files created by the run. Summary values that do not
+match the raw evidence are rejected. The harness never invents missing values or
+substitutes a zero.
 
 ## Requirements
 
@@ -52,10 +57,10 @@ Build the project binaries first:
 cargo build --release -p fuckipv6-client -p fuckipv6-coordinator
 ```
 
-Disable unrelated workloads. Where CPU frequency scaling is available, prefer
-the `performance` governor and pass `--require-performance-governor`. The
-harness records governors either way. It also fails if one-second sampled CPU
-busy time exceeds 5% or `load1` exceeds 0.5 by default.
+Disable unrelated workloads. The harness records CPU frequency governors and
+fails if one-second sampled CPU busy time exceeds 5% or `load1` exceeds 0.5 by
+default. `--require-performance-governor` is available for stricter diagnostic
+runs, but changing it makes the policy non-canonical and therefore non-passing.
 
 ## Fixed CPU allocation
 
@@ -70,10 +75,10 @@ control 6     coordinator
 
 The traffic generator and the measured tunnel share a namespace by design; the
 current `bench-dataplane.sh` interface applies the same pinning to both. CPU cost
-is therefore host-wide busy CPU per UDP sent packet (or per byte for TCP, because
-iperf3 JSON does not report TCP packet counts). A quiet host and pinned CPU sets
-are mandatory, but this remains an end-to-end system metric, not a claim of exact
-per-process attribution.
+is recomputed from the retained system-wide `perf stat` task-clock counter per UDP
+sent packet (or per byte for TCP, because iperf3 JSON does not report TCP packet
+counts). A quiet host and pinned CPU sets are mandatory, but this remains an
+end-to-end system metric, not a claim of exact per-process attribution.
 
 ## Traffic models
 
@@ -114,10 +119,12 @@ Comparators are the pinned kernel WireGuard release and the pinned wireguard-go
 binary. Both checks use median aggregates and must pass independently. A single
 failed model/comparator check makes the complete gate fail.
 
-These values can be changed only through CLI arguments before collection; the
-chosen policy and its SHA-256 are frozen in the output directory. The defaults
-match the current 105% project target and are deliberately stricter than merely
-matching WireGuard.
+The defaults are the canonical `nx17-canonical-v1` policy. The policy object and
+its SHA-256 are frozen in `plan.json`; the gate requires the exact canonical hash.
+CLI arguments may still create diagnostic variants, but any changed threshold,
+run count, duration, traffic model or probe setting is marked `custom` and can
+never produce `passed`/exit `0`. The canonical defaults match the current 105%
+project target and are deliberately stricter than merely matching WireGuard.
 
 ## Run
 
@@ -130,7 +137,6 @@ sudo python3 scripts/benchmarks/run.py \
   --client-cpus 2-3 \
   --server-cpus 4-5 \
   --control-cpus 6 \
-  --require-performance-governor \
   --runs 5 \
   --duration 30 \
   --omit 2 \
@@ -138,7 +144,9 @@ sudo python3 scripts/benchmarks/run.py \
 ```
 
 Parameter validation and the exact plan can be inspected without root or network
-changes using `--dry-run`. A dry run is not performance evidence.
+changes using `--dry-run`. The gate also requires the plan's traffic, environment
+and latency settings to match the canonical policy exactly. A dry run is not
+performance evidence.
 
 Re-evaluate an existing evidence directory at any time:
 
@@ -175,7 +183,10 @@ sudo python3 scripts/benchmarks/run.py \
 
 The output directory contains:
 
-- `plan.json` and `plan.sha256`: pre-run policy, versions, CPU sets and command;
+- `plan.json` and `plan.sha256`: canonical policy/hash, clean source commit/tree,
+  binary and tool hashes, CPU sets and command;
+- `evidence.sha256`: hashes of every retained evidence file, excluding the
+  final gate report itself;
 - `environment.json`: kernel, CPU, load, governors, tools and kernel WG details;
 - `metadata.json`, `lscpu.txt`: metadata emitted by the existing runner;
 - `results.jsonl`, `summary.csv`: per-run iperf3 metrics and medians;
@@ -189,8 +200,8 @@ The output directory contains:
 
 The p99 metric is tunneled ICMPv6 echo tail latency under load. It is not
 application request latency, handshake latency, rekey latency or a substitute for
-a full protocol profile. CPU cost comes from host-wide `/proc/stat` busy time,
-with `perf stat -a` counters retained as supporting raw data. These limitations
+a full protocol profile. CPU cost comes from the retained system-wide `perf stat`
+task-clock counter and is not exact per-process attribution. These limitations
 must be stated with any result.
 
 The harness produces evidence, not a superiority claim. Only a complete passing

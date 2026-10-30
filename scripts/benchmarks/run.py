@@ -16,10 +16,14 @@ from typing import Any
 
 from gate import evaluate_output
 from harness import (
+    CANONICAL_POLICY_ID,
     COMPARATORS,
     DEFAULT_POLICY,
+    EVIDENCE_MANIFEST_SCHEMA,
     IMPLEMENTATIONS,
     PLAN_SCHEMA,
+    SOURCE_SCHEMA,
+    policy_metadata,
     sample_environment,
     sha256_file,
     utc_now,
@@ -164,6 +168,20 @@ def build_policy(args: argparse.Namespace) -> dict[str, Any]:
             "controlled_udp_max_loss_percent": args.controlled_udp_max_loss_percent,
         }
     )
+    policy["traffic"].update(
+        {
+            "duration_seconds": args.duration,
+            "omit_seconds": args.omit,
+            "mtu": args.mtu,
+        }
+    )
+    policy["environment"].update(
+        {
+            "load1_max": args.max_load1,
+            "cpu_busy_percent_max": args.max_cpu_busy_percent,
+            "require_performance_governor": args.require_performance_governor,
+        }
+    )
     policy["latency"].update(
         {
             "probe_interval_ms": args.latency_interval_ms,
@@ -284,6 +302,23 @@ def _write_plan(output: Path, plan: dict[str, Any]) -> None:
     (output / "plan.sha256").write_text(sha256_file(plan_path) + "\n", encoding="utf-8")
 
 
+def write_evidence_manifest(output: Path) -> None:
+    """Hash all retained evidence after collection without trusting result summaries."""
+    excluded = {"evidence.sha256", "gate-report.json"}
+    entries = []
+    for path in sorted(output.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(output).as_posix()
+        if relative in excluded:
+            continue
+        entries.append(f"{sha256_file(path)}  {relative}")
+    (output / "evidence.sha256").write_text(
+        f"{EVIDENCE_MANIFEST_SCHEMA}\n" + "\n".join(entries) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _runner_error(output: Path, message: str) -> None:
     (output / "runner-error.txt").write_text(message.rstrip() + "\n", encoding="utf-8")
 
@@ -310,11 +345,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
+        metadata = policy_metadata(policy)
         plan = {
             "schema": PLAN_SCHEMA,
             "created_utc": utc_now(),
             "evidence": False,
             "policy": policy,
+            "policy_id": metadata["id"],
+            "policy_sha256": metadata["sha256"],
+            "policy_canonical": metadata["canonical"],
             "requested_implementations": _csv_or_space(args.impls),
             "implementations": _csv_or_space(args.impls),
             "skipped": [],
@@ -324,6 +363,20 @@ def main(argv: list[str] | None = None) -> int:
                 "load1_max": args.max_load1,
                 "cpu_busy_percent_max": args.max_cpu_busy_percent,
                 "require_performance_governor": args.require_performance_governor,
+            },
+            "traffic": {
+                "runs": args.runs,
+                "duration_seconds": args.duration,
+                "omit_seconds": args.omit,
+                "mtu": args.mtu,
+                "udp_1420_controlled_rate": args.udp_1420_rate,
+                "udp_64_controlled_rate": args.udp_64_rate,
+            },
+            "latency_probe": {
+                "implementation": "concurrent ICMPv6 echo through the tunnel",
+                "interval_ms": args.latency_interval_ms,
+                "timeout_seconds": args.latency_timeout_seconds,
+                "aggregation": "nearest-rank p99 per run, median across runs",
             },
         }
         print(json.dumps(plan, indent=2, sort_keys=True))
@@ -363,14 +416,23 @@ def main(argv: list[str] | None = None) -> int:
         ):
             skipped.append({"implementation": comparator, "reason": "not selected"})
 
+    metadata = policy_metadata(policy)
+    git_status = _git_value("status", "--porcelain")
     plan = {
         "schema": PLAN_SCHEMA,
         "created_utc": utc_now(),
         "evidence": True,
         "policy": policy,
+        "policy_id": metadata["id"],
+        "policy_sha256": metadata["sha256"],
+        "policy_canonical": metadata["canonical"],
+        "canonical_policy_id": CANONICAL_POLICY_ID,
         "source": {
+            "schema": SOURCE_SCHEMA,
             "git_commit": _git_value("rev-parse", "HEAD"),
-            "git_status": _git_value("status", "--porcelain"),
+            "git_tree": _git_value("rev-parse", "HEAD^{tree}"),
+            "git_status": git_status,
+            "dirty": bool(git_status),
         },
         "requested_implementations": requested,
         "implementations": implementations,
@@ -380,6 +442,15 @@ def main(argv: list[str] | None = None) -> int:
         "binaries": {
             "fuckipv6": {"path": str(fuckipv6_bin), "sha256": sha256_file(fuckipv6_bin)},
             "coordinator": {"path": str(coordinator_bin), "sha256": sha256_file(coordinator_bin)},
+            "wireguard-go": (
+                {"path": wireguard_go["path"], "sha256": wireguard_go["sha256"]}
+                if wireguard_go is not None
+                else None
+            ),
+            "tools": {
+                name: {"path": str(path), "sha256": sha256_file(path)}
+                for name, path in extra_tools.items()
+            },
         },
         "cpu_affinity": {name: sorted(cpus) for name, cpus in cpu_sets.items()},
         "environment_limits": {
@@ -436,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
     if preflight_failures:
         _runner_error(output, "; ".join(preflight_failures))
+        write_evidence_manifest(output)
         report, exit_code = evaluate_output(output)
         _gate_summary(report, output, exit_code)
         return exit_code
@@ -451,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
     env["FIP6_BENCH_REAL_IPERF3"] = str(extra_tools["iperf3"])
     env["FIP6_BENCH_LATENCY_LOG"] = str(output / "latency-invocations.jsonl")
-    env["FIP6_BENCH_LATENCY_DIR"] = str(output / "latency")
+    env["FIP6_BENCH_LATENCY_DIR"] = str(output)
     env["FIP6_BENCH_PROBE_INTERVAL_MS"] = str(args.latency_interval_ms)
     env["FIP6_BENCH_PROBE_TIMEOUT_S"] = str(args.latency_timeout_seconds)
     env["FUCKIPV6_BIN"] = str(fuckipv6_bin)
@@ -492,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     if process.returncode != 0:
         _runner_error(output, f"bench-dataplane.sh exited with status {process.returncode}")
 
+    write_evidence_manifest(output)
     report, exit_code = evaluate_output(output)
     _gate_summary(report, output, exit_code)
     return exit_code

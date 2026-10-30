@@ -19,6 +19,9 @@ PLAN_SCHEMA = "fuckipv6.dataplane-plan/v1"
 ENVIRONMENT_SCHEMA = "fuckipv6.dataplane-environment/v1"
 REPORT_SCHEMA = "fuckipv6.dataplane-gate-report/v1"
 LATENCY_SCHEMA = "fuckipv6.dataplane-latency-invocation/v1"
+SOURCE_SCHEMA = "fuckipv6.dataplane-source/v1"
+EVIDENCE_MANIFEST_SCHEMA = "fuckipv6.dataplane-evidence-sha256/v1"
+CANONICAL_POLICY_ID = "nx17-canonical-v1"
 
 IMPLEMENTATIONS = ("fuckipv6", "wireguard-kernel", "wireguard-go")
 COMPARATORS = ("wireguard-kernel", "wireguard-go")
@@ -70,6 +73,7 @@ TRAFFIC_MODELS = (
         "streams": 1,
         "payload_bytes": 1420,
         "load": "controlled",
+        "controlled_rate": "50M",
         "latency_gate": True,
     },
     {
@@ -78,6 +82,7 @@ TRAFFIC_MODELS = (
         "streams": 1,
         "payload_bytes": 64,
         "load": "controlled",
+        "controlled_rate": "5M",
         "latency_gate": True,
     },
 )
@@ -89,6 +94,16 @@ DEFAULT_POLICY: dict[str, Any] = {
     "p99_max_ratio": 1.0,
     "cpu_cost_max_ratio": 1.0,
     "controlled_udp_max_loss_percent": 1.0,
+    "traffic": {
+        "duration_seconds": 30,
+        "omit_seconds": 2,
+        "mtu": 1420,
+    },
+    "environment": {
+        "load1_max": 0.5,
+        "cpu_busy_percent_max": 5.0,
+        "require_performance_governor": False,
+    },
     "latency": {
         "probe_interval_ms": 10.0,
         "probe_timeout_seconds": 1.0,
@@ -100,6 +115,30 @@ DEFAULT_POLICY: dict[str, Any] = {
     },
     "traffic_models": list(TRAFFIC_MODELS),
 }
+
+
+def canonical_json(value: Any) -> bytes:
+    """Serialize a policy deterministically for hashing and equality checks."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def policy_sha256(policy: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(policy)).hexdigest()
+
+
+CANONICAL_POLICY_SHA256 = policy_sha256(DEFAULT_POLICY)
+
+
+def policy_metadata(policy: dict[str, Any]) -> dict[str, Any]:
+    digest = policy_sha256(policy)
+    canonical = digest == CANONICAL_POLICY_SHA256
+    return {
+        "id": CANONICAL_POLICY_ID if canonical else "custom",
+        "sha256": digest,
+        "canonical": canonical,
+        "canonical_id": CANONICAL_POLICY_ID,
+        "canonical_sha256": CANONICAL_POLICY_SHA256,
+    }
 
 
 def utc_now() -> str:

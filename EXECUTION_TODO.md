@@ -2,7 +2,7 @@
 
 > 本清单把路线图拆成可独立提交、可验证的短任务。状态约定：`[ ]` 未开始，`[>]` 进行中，`[x]` 已完成，`[!]` 被外部修改阻塞。
 >
-> 执行规则：一次只推进一个 `[>]`；每项先完成代码与测试，再同步本清单和 `CHANGELOG.md`；验证通过后单独提交。不得修改或暂存用户声明保护的 `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs`。
+> 执行规则：每项先完成代码与测试，再同步本清单和 `CHANGELOG.md`；验证通过后单独提交。禁止使用 `git commit -a`；只能暂存本任务文件，不得覆盖工作区中用户尚未提交的改动。并行任务按文件范围隔离，合并时如遇冲突必须人工核对。
 
 ## P0：共享契约与运行时底座
 
@@ -14,10 +14,10 @@
 
 ## P1：后端功能闭环
 
-- [!] **EX-06 路由热更新后端**：把 `UpdateRouting` 接入 `NetworkRuntimeManager`，同步 Smart Route、Exit Node 配置、持久化和共享快照。验收：成功与失败均回滚一致，网络运行中切换不重启节点；完成后解除 CLI/WebUI 迁移的 `Unavailable`。当前被用户保护的 `crates/client/src/cli/commands.rs` 阻塞：现有 `apply_runtime_routing` 与事件循环控制接收端位于该文件，且运行网络的控制 sender 尚未暴露给 actor；解除保护并通知用户后才可继续，禁止用重启网络或只写配置冒充热更新。
+- [ ] **EX-06 路由热更新后端**：把 `UpdateRouting` 接入 `NetworkRuntimeManager`，同步 Smart Route、Exit Node 配置、持久化和共享快照。验收：成功与失败均回滚一致，网络运行中切换不重启节点；完成后解除 CLI/WebUI 迁移的 `Unavailable`。实现必须基于用户 Exit Node 持久化改动后的最新 HEAD，禁止覆盖这些改动，也禁止用重启网络或只写配置冒充热更新。
 - [ ] **EX-07 网络角色热更新后端**：把 `SetNetworkRole` 接到持久化与运行时重配置，覆盖成员、发现、中继和 Exit Node 角色。验收：非法组合明确拒绝，停止后可释放服务，角色变化发布状态与事件。
-- [ ] **EX-08 CLI 统一命令迁移**：CLI 的网络创建、加入、启停、探测和关闭只通过 `NodeCommandBus`。验收：不保留第二套业务规则，输出消费统一结果和错误码。受保护文件解除前为 `[!]`。
-- [ ] **EX-09 WebUI 统一命令迁移**：WebUI 的节点操作与状态读取只通过共享命令总线和 `NodeStateStore`。验收：移除 controller 内部独立网络/状态变更逻辑，HTTP 适配层只转换 DTO。受保护文件解除前为 `[!]`。
+- [ ] **EX-08 CLI 统一命令迁移**：CLI 的网络创建、加入、启停、探测和关闭只通过 `NodeCommandBus`。验收：不保留第二套业务规则，输出消费统一结果和错误码。
+- [ ] **EX-09 WebUI 统一命令迁移**：WebUI 的节点操作与状态读取只通过共享命令总线和 `NodeStateStore`。验收：移除 controller 内部独立网络/状态变更逻辑，HTTP 适配层只转换 DTO。
 
 ## P1：双 UI 与模式选择
 
@@ -42,7 +42,7 @@
 >
 > 产品模型固定为“只有节点”，不区分服务端与客户端。桌面环境使用原生 GPUI；无桌面环境使用 WebUI。两套 UI 必须共享 manifest、命令、快照、事件、权限、校验与错误语义，只允许渲染层不同。
 >
-> 当前阻断：完整验收需要修改 `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs` 或 `crates/client/src/webui/controller.rs` 的任务，必须在用户解除保护并明确授权后执行。禁止通过复制业务逻辑、重启网络、伪造成功或浏览器 `--app` 窗口绕过验收。
+> 工作区隔离：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 当前可能包含用户未提交的 Exit Node 持久化改动。实施相关任务时必须 rebase 到用户改动落地后的 HEAD；不得覆盖、回退或混入用户改动。禁止通过复制业务逻辑、重启网络、伪造成功或浏览器 `--app` 窗口绕过验收。
 
 ### P0-A：统一控制面与节点语义
 
@@ -54,7 +54,7 @@
 
 - [ ] **NX-02 本地控制面暴露面收紧（细化 EX-15）**
   - 工作：WebUI/API 和本地 IPC 默认只绑定回环地址；远程监听必须显式开启、产生醒目警告并要求已配置认证，禁止匿名公网暴露。
-  - 依赖：EX-03、EX-15；涉及受保护的 CLI/WebUI 启动文件，解除保护前不实施。
+  - 依赖：EX-03、EX-15；涉及 CLI/WebUI 启动文件，合并时必须保留用户未提交改动。
   - 验收：默认 IPv4/IPv6 监听均为回环；`0.0.0.0`/`::` 仅能通过显式危险参数开启且缺少认证时启动失败；参数、日志、HTTP 响应和文档一致；覆盖拒绝启动、认证成功/失败和回环回归测试。
 
 - [ ] **NX-03 共享节点 HTTP/WS 适配器（细化 EX-10）**
@@ -62,9 +62,9 @@
   - 依赖：EX-01、EX-02、EX-04、NX-01。
   - 验收：快照只来自 `NodeStateStore`，动作只发往命令总线；manifest schema 版本不匹配时明确失败而非降级；WS 断线、重复事件、revision 跳跃和非授权请求均有契约测试；不存在第二套页面/动作定义。
 
-- [!] **NX-04 路由热更新后端（细化 EX-06）**
+- [ ] **NX-04 路由热更新后端（细化 EX-06）**
   - 工作：让 `UpdateRouting` 原子更新运行中的 Smart Route、Exit Node 配置、持久化配置、共享快照和事件；任何阶段失败都恢复旧运行态。
-  - 依赖：EX-03、EX-04；当前被受保护的 `crates/client/src/cli/commands.rs` 中运行控制接收端阻塞，解除保护前不得开工。
+  - 依赖：EX-03、EX-04；必须基于用户 Exit Node 持久化改动后的最新 HEAD 实现运行控制接线，不得覆盖工作区改动。
   - 验收：运行中切换不重启网络、不清空 Peer；持久化失败、运行时应用失败和快照发布失败均可回滚；并发更新串行化；成功/失败均有集成测试，`Unavailable` 仅在未实现时保留。
 
 - [ ] **NX-05 网络角色热更新后端（细化 EX-07）**
@@ -72,14 +72,14 @@
   - 依赖：EX-02、EX-04、NX-04；复用统一事务与回滚边界。
   - 验收：非法角色组合返回稳定错误码；角色启用只启动所需内嵌服务，禁用后释放端口/任务；失败回滚持久化与运行态；角色变化产生快照和事件；覆盖零网络、停止网络和多网络隔离。
 
-- [!] **NX-06 CLI 统一命令迁移（细化 EX-08）**
+- [ ] **NX-06 CLI 统一命令迁移（细化 EX-08）**
   - 工作：CLI 的建网、加入、启停、探测、状态、路由、Exit Node 和关闭全部通过 `NodeCommandBus`，CLI 只负责参数解析、确认和结果渲染。
-  - 依赖：NX-01、NX-03、NX-04、NX-05；必须修改受保护的 `crates/client/src/cli/commands.rs` 与 `crates/client/src/cli/mod.rs`。
+  - 依赖：NX-01、NX-03、NX-04、NX-05；涉及 `crates/client/src/cli/commands.rs` 与 `crates/client/src/cli/mod.rs`，合并时必须保留用户未提交改动。
   - 验收：删除或封存 CLI 内独立运行时状态机和直接配置写入；帮助文本、退出码和错误输出消费统一 `NodeProblem`；无网络、运行网络、失败回滚和多网络场景有端到端测试；不改变节点唯一产品模型。
 
-- [!] **NX-07 WebUI 统一命令迁移（细化 EX-09）**
+- [ ] **NX-07 WebUI 统一命令迁移（细化 EX-09）**
   - 工作：WebUI 节点操作和状态读取只通过共享命令总线、状态存储和事件流；controller 只保留连接/展示适配，不直接改业务状态。
-  - 依赖：NX-03、NX-04、NX-05；必须修改受保护的 `crates/client/src/webui/controller.rs`。
+  - 依赖：NX-03、NX-04、NX-05；涉及 `crates/client/src/webui/controller.rs`，合并时必须保留用户未提交改动。
   - 验收：移除 controller 内重复的网络/路由/Exit Node 状态机及直接运行时写入；HTTP 层只做 DTO 和鉴权转换；所有失败透传错误码与可重试标记；无网络、双网络、断线重连和权限拒绝均有集成测试。
 
 ### P0-B：GPUI 与 UI 对等
@@ -145,7 +145,7 @@
 
 ### 推荐执行顺序
 
-1. **先解除受保护文件并稳定当前 P2P/路由/安全改动**：完成 NX-04、NX-05，再处理 NX-06、NX-07；不得与用户正在进行的 Exit Node 持久化混在同一提交。
+1. **先稳定当前 P2P/路由/安全改动**：基于用户 Exit Node 持久化改动后的 HEAD 完成 NX-04、NX-05，再处理 NX-06、NX-07；不得把用户改动混入本任务提交。
 2. **控制面与 UI 地基**：NX-01 → NX-03 → NX-02 → NX-08 → NX-09 → NX-10，CLI/WebUI/GPUI 始终消费同一 manifest、命令和快照。
 3. **安全生产化**：NX-11 → NX-12 → NX-14 → NX-13 → NX-15/NX-16，先保证会话切换和失败关闭，再扩大能力面。
 4. **证据驱动的性能与发布**：NX-17 达标后才执行 NX-18；每个任务独立提交，并在提交前运行格式、Clippy、测试和文档一致性检查。

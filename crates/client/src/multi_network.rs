@@ -9,9 +9,9 @@ use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::runtime_metadata;
 use crate::node::{
     NodeCommandBus, NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot,
-    NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus,
-    NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeRuntimePlan, NodeStateStore,
-    NodeTrafficSnapshot,
+    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeRuntimePlan,
+    NodeStateStore, NodeTrafficSnapshot,
 };
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
@@ -138,6 +138,23 @@ impl MultiNetworkSupervisor {
         });
     }
 
+    async fn record_network_config(&self, config: NodeNetworkConfigSnapshot) {
+        self.state
+            .update(|snapshot| {
+                if let Some(existing) = snapshot
+                    .configuration
+                    .networks
+                    .iter_mut()
+                    .find(|existing| existing.network_name == config.network_name)
+                {
+                    *existing = config;
+                } else {
+                    snapshot.configuration.networks.push(config);
+                }
+            })
+            .await;
+    }
+
     async fn mark_network_status(&self, network_name: Option<&str>, status: NodeNetworkStatus) {
         let snapshot = self
             .state
@@ -220,6 +237,13 @@ impl MultiNetworkSupervisor {
             })
             .collect();
 
+        self.state
+            .update(|snapshot| {
+                snapshot.permissions = runtime_metadata::trusted_control_plane_permissions();
+                snapshot.configuration.networks.clear();
+            })
+            .await;
+
         let lifecycle = self
             .lifecycle
             .begin_start(configured_networks, Vec::new())
@@ -295,6 +319,15 @@ impl MultiNetworkSupervisor {
             if let Some(exit) = &self.options.exit_node {
                 client_config.routing.exit_node = Some(exit.clone());
             }
+            if let Some(enabled) = self.options.is_exit_node {
+                client_config.exit_node.enabled = enabled;
+            }
+
+            self.record_network_config(runtime_metadata::network_config_snapshot(
+                &net_name,
+                &client_config,
+            ))
+            .await;
 
             // 派生独立 TUN 设备名称并准备运行时
             let mut runtime = match commands::prepare_client_runtime_ext(

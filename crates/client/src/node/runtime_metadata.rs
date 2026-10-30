@@ -1,6 +1,9 @@
-use fuckipv6_common::{AggregatedLogEntry, Identity};
+use fuckipv6_common::{AggregatedLogEntry, ClientConfig, Identity, RoutingMode};
 
-use super::{NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel};
+use super::{
+    NodeAccessModel, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel, NodeNetworkConfigSnapshot,
+    NodePermission, NodePermissionSnapshot, NodeRoutingMode,
+};
 
 /// Keep the shared snapshot bounded when logs are refreshed from the runtime.
 pub(crate) const NODE_LOG_LIMIT: usize = 256;
@@ -20,6 +23,53 @@ pub(crate) fn identity_snapshot(identity: &Identity) -> NodeIdentitySnapshot {
 /// Read the current bounded WARN/ERROR aggregation and convert it for state consumers.
 pub(crate) fn recent_log_entries() -> Vec<NodeLogEntry> {
     log_entries(fuckipv6_common::recent_error_logs(NODE_LOG_LIMIT))
+}
+
+/// Project effective network configuration without exposing host-local paths.
+pub(crate) fn network_config_snapshot(
+    network_name: &str,
+    config: &ClientConfig,
+) -> NodeNetworkConfigSnapshot {
+    NodeNetworkConfigSnapshot {
+        network_name: network_name.to_string(),
+        coordinator_url: config.coordinator_url.clone(),
+        virtual_mode: config.network.mode,
+        preferred_ipv4: config.network.preferred_ipv4,
+        preferred_ipv6: config.network.preferred_ipv6,
+        virtual_network: config.network.virtual_network.clone(),
+        tun_name: config.tun.name.clone(),
+        mtu: config.tun.mtu,
+        p2p_listen_port: config.p2p.listen_port,
+        p2p_connect_timeout_secs: config.p2p.connect_timeout,
+        p2p_heartbeat_interval_secs: config.p2p.heartbeat_interval,
+        routing_mode: match config.routing.mode {
+            RoutingMode::MeshOnly => NodeRoutingMode::MeshOnly,
+            RoutingMode::BypassMainland => NodeRoutingMode::BypassMainland,
+            RoutingMode::GlobalProxy => NodeRoutingMode::GlobalProxy,
+        },
+        exit_node: config.routing.exit_node.clone(),
+        direct_cidrs: config.routing.direct_cidrs.clone(),
+        proxy_cidrs: config.routing.proxy_cidrs.clone(),
+        exit_node_enabled: config.exit_node.enabled,
+        exit_node_allowed_clients: config.exit_node.allowed_clients.clone(),
+        exit_node_allow_lan_access: config.exit_node.allow_lan_access,
+        exit_node_region: config.exit_node.region.clone(),
+        acl_enabled: config.acl.enabled,
+        acl_default_action: config.acl.default_action,
+        acl_rule_count: config.acl.rules.len(),
+        log_level: config.log.level.clone(),
+        log_file_configured: config.log.file.is_some(),
+        identity_configured: !config.private_key_path.as_os_str().is_empty(),
+    }
+}
+
+/// The current control plane has no per-principal authorization. Publish that
+/// limitation explicitly instead of implying that remote authentication exists.
+pub(crate) fn trusted_control_plane_permissions() -> NodePermissionSnapshot {
+    NodePermissionSnapshot {
+        access_model: NodeAccessModel::TrustedControlPlane,
+        permissions: NodePermission::ALL.to_vec(),
+    }
 }
 
 fn log_entries(entries: impl IntoIterator<Item = AggregatedLogEntry>) -> Vec<NodeLogEntry> {
@@ -52,6 +102,8 @@ fn parse_log_level(level: &str) -> Option<NodeLogLevel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::{LogConfig, RoutingConfig};
+    use std::path::PathBuf;
 
     fn log(timestamp_ms: u128, level: &str, message: &str) -> AggregatedLogEntry {
         AggregatedLogEntry {
@@ -104,5 +156,56 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].unix_ms, u64::MAX);
+    }
+
+    #[test]
+    fn config_projection_maps_effective_values_without_host_paths() {
+        let config = ClientConfig {
+            client_id: None,
+            coordinator_url: "wss://network.example/ws".into(),
+            private_key_path: PathBuf::from("/secret/identity.pem"),
+            network: Default::default(),
+            tun: Default::default(),
+            p2p: Default::default(),
+            log: LogConfig {
+                level: "debug".into(),
+                file: Some(PathBuf::from("/secret/client.log")),
+            },
+            acl: Default::default(),
+            routing: RoutingConfig {
+                mode: RoutingMode::GlobalProxy,
+                exit_node: Some("fd00::2".into()),
+                direct_cidrs: vec!["10.0.0.0/8".into()],
+                proxy_cidrs: vec!["0.0.0.0/0".into()],
+            },
+            exit_node: Default::default(),
+        };
+
+        let snapshot = network_config_snapshot("home", &config);
+        let encoded = serde_json::to_string(&snapshot).expect("serialize config snapshot");
+
+        assert_eq!(snapshot.network_name, "home");
+        assert_eq!(snapshot.routing_mode, NodeRoutingMode::GlobalProxy);
+        assert_eq!(snapshot.exit_node.as_deref(), Some("fd00::2"));
+        assert_eq!(snapshot.direct_cidrs, ["10.0.0.0/8"]);
+        assert_eq!(snapshot.proxy_cidrs, ["0.0.0.0/0"]);
+        assert!(snapshot.identity_configured);
+        assert!(snapshot.log_file_configured);
+        assert!(!encoded.contains("/secret"));
+        assert!(!encoded.contains("private_key_path"));
+    }
+
+    #[test]
+    fn permission_projection_matches_the_manifest_capability_set() {
+        let snapshot = trusted_control_plane_permissions();
+        let permissions = snapshot
+            .permissions
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(snapshot.access_model, NodeAccessModel::TrustedControlPlane);
+        assert_eq!(permissions.len(), NodePermission::ALL.len());
+        assert_eq!(permissions, NodePermission::ALL.into_iter().collect());
     }
 }

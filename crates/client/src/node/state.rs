@@ -11,10 +11,95 @@ pub struct NodeSnapshot {
     pub revision: u64,
     pub lifecycle: NodeLifecycleSnapshot,
     pub identity: Option<NodeIdentitySnapshot>,
+    #[serde(default)]
+    pub configuration: NodeConfigurationSnapshot,
+    #[serde(default)]
+    pub permissions: NodePermissionSnapshot,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     pub logs: Vec<NodeLogEntry>,
     pub last_error: Option<NodeProblem>,
+}
+
+/// Effective, non-secret network configuration exposed to every UI adapter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeConfigurationSnapshot {
+    pub networks: Vec<NodeNetworkConfigSnapshot>,
+}
+
+/// One network's effective configuration after loading startup overrides.
+///
+/// Filesystem paths and other host-local details are deliberately omitted. The
+/// boolean fields only state whether optional host-local settings are present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeNetworkConfigSnapshot {
+    pub network_name: String,
+    pub coordinator_url: String,
+    pub virtual_mode: Option<fuckipv6_common::NetworkMode>,
+    pub preferred_ipv4: Option<Ipv4Addr>,
+    pub preferred_ipv6: Option<Ipv6Addr>,
+    pub virtual_network: Option<String>,
+    pub tun_name: String,
+    pub mtu: u16,
+    pub p2p_listen_port: u16,
+    pub p2p_connect_timeout_secs: u64,
+    pub p2p_heartbeat_interval_secs: u64,
+    pub routing_mode: NodeRoutingMode,
+    pub exit_node: Option<String>,
+    pub direct_cidrs: Vec<String>,
+    pub proxy_cidrs: Vec<String>,
+    pub exit_node_enabled: bool,
+    pub exit_node_allowed_clients: Vec<String>,
+    pub exit_node_allow_lan_access: bool,
+    pub exit_node_region: Option<String>,
+    pub acl_enabled: bool,
+    pub acl_default_action: fuckipv6_common::AclAction,
+    pub acl_rule_count: usize,
+    pub log_level: String,
+    pub log_file_configured: bool,
+    pub identity_configured: bool,
+}
+
+/// Control-plane authorization posture shared with UI adapters.
+///
+/// `TrustedControlPlane` means the runtime accepts every connected adapter as
+/// fully privileged. It does not mean per-user or remote authentication exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePermissionSnapshot {
+    pub access_model: NodeAccessModel,
+    pub permissions: Vec<NodePermission>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeAccessModel {
+    #[default]
+    TrustedControlPlane,
+}
+
+/// Stable capability classes used by both the permission snapshot and UI actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodePermission {
+    ViewState,
+    ManageNetworks,
+    ChangeRouting,
+    ManageRoles,
+    ProbePeers,
+    StopNode,
+    ViewLogs,
+}
+
+impl NodePermission {
+    pub const ALL: [Self; 7] = [
+        Self::ViewState,
+        Self::ManageNetworks,
+        Self::ChangeRouting,
+        Self::ManageRoles,
+        Self::ProbePeers,
+        Self::StopNode,
+        Self::ViewLogs,
+    ];
 }
 
 /// Public node identity metadata. Secret key material must never enter this DTO.
@@ -48,6 +133,14 @@ pub enum NodeNetworkRole {
     Discovery,
     Relay,
     ExitNode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRoutingMode {
+    MeshOnly,
+    BypassMainland,
+    GlobalProxy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::state::NodePermission;
+
 pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
 
 /// Declarative contract shared by WebUI and the future native GPUI surface.
@@ -27,7 +29,7 @@ pub struct NodeUiAction {
     pub label_key: String,
     pub command: NodeUiCommandKind,
     pub backend_status: NodeUiBackendStatus,
-    pub permission: NodeUiPermission,
+    pub permission: NodePermission,
     pub availability: NodeUiAvailability,
     pub fields: Vec<NodeUiField>,
     pub confirmation: Option<NodeUiConfirmation>,
@@ -70,18 +72,6 @@ pub enum NodeUiBackendStatus {
     Implemented,
     /// The shared command exists, but the runtime backend rejects it as unavailable.
     Unavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeUiPermission {
-    ViewState,
-    ManageNetworks,
-    ChangeRouting,
-    ManageRoles,
-    ProbePeers,
-    StopNode,
-    ViewLogs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +125,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "action.refresh_snapshot",
                     NodeUiCommandKind::GetSnapshot,
                     NodeUiBackendStatus::Implemented,
-                    NodeUiPermission::ViewState,
+                    NodePermission::ViewState,
                     NodeUiAvailability::Always,
                     vec![],
                     None,
@@ -151,7 +141,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "action.create_network",
                         NodeUiCommandKind::CreateNetwork,
                         NodeUiBackendStatus::Unavailable,
-                        NodeUiPermission::ManageNetworks,
+                        NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
                             field(
@@ -197,7 +187,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "action.join_network",
                         NodeUiCommandKind::JoinNetwork,
                         NodeUiBackendStatus::Unavailable,
-                        NodeUiPermission::ManageNetworks,
+                        NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
                             field(
@@ -229,7 +219,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "action.start_networks",
                         NodeUiCommandKind::StartNetworks,
                         NodeUiBackendStatus::Unavailable,
-                        NodeUiPermission::ManageNetworks,
+                        NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![field(
                             "selection",
@@ -245,7 +235,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "action.stop_networks",
                         NodeUiCommandKind::StopNetworks,
                         NodeUiBackendStatus::Implemented,
-                        NodeUiPermission::ManageNetworks,
+                        NodePermission::ManageNetworks,
                         NodeUiAvailability::NetworkOnline,
                         vec![
                             field(
@@ -280,7 +270,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "action.probe_peer",
                     NodeUiCommandKind::ProbePeer,
                     NodeUiBackendStatus::Implemented,
-                    NodeUiPermission::ProbePeers,
+                    NodePermission::ProbePeers,
                     NodeUiAvailability::NetworkOnline,
                     vec![
                         field(
@@ -319,7 +309,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "action.update_routing",
                     NodeUiCommandKind::UpdateRouting,
                     NodeUiBackendStatus::Unavailable,
-                    NodeUiPermission::ChangeRouting,
+                    NodePermission::ChangeRouting,
                     NodeUiAvailability::NetworkSelected,
                     vec![
                         field(
@@ -367,7 +357,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "action.set_exit_node_role",
                     NodeUiCommandKind::SetNetworkRole,
                     NodeUiBackendStatus::Unavailable,
-                    NodeUiPermission::ManageRoles,
+                    NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
                     vec![
                         field(
@@ -408,7 +398,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "action.set_relay_role",
                     NodeUiCommandKind::SetNetworkRole,
                     NodeUiBackendStatus::Unavailable,
-                    NodeUiPermission::ManageRoles,
+                    NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
                     vec![
                         field(
@@ -451,7 +441,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "action.shutdown_node",
                     NodeUiCommandKind::Shutdown,
                     NodeUiBackendStatus::Implemented,
-                    NodeUiPermission::StopNode,
+                    NodePermission::StopNode,
                     NodeUiAvailability::NodeRunning,
                     vec![],
                     Some(confirmation(
@@ -480,7 +470,7 @@ fn action(
     label_key: &str,
     command: NodeUiCommandKind,
     backend_status: NodeUiBackendStatus,
-    permission: NodeUiPermission,
+    permission: NodePermission,
     availability: NodeUiAvailability,
     fields: Vec<NodeUiField>,
     confirmation: Option<NodeUiConfirmation>,
@@ -644,5 +634,22 @@ mod tests {
         assert!(!encoded.contains("server_mode"));
         assert!(encoded.contains("set_exit_node_role"));
         assert!(encoded.contains("set_relay_role"));
+    }
+
+    #[test]
+    fn action_permissions_are_part_of_the_shared_permission_snapshot() {
+        let manifest = node_ui_manifest();
+        let granted = crate::node::runtime_metadata::trusted_control_plane_permissions()
+            .permissions
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        for action in manifest.pages.iter().flat_map(|page| &page.actions) {
+            assert!(
+                granted.contains(&action.permission),
+                "action {} uses an ungranted permission",
+                action.id
+            );
+        }
     }
 }

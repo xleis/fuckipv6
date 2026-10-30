@@ -11,19 +11,21 @@ pub use command::{
     validate_network_name, NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandFuture,
     NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeCreateNetworkCommand, NodeJoinNetworkCommand, NodePeerProbeSnapshot, NodeProbePeerCommand,
-    NodeRoutingMode, NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
+    NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
 };
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
 pub use runtime_handler::{spawn_command_bus, NodeRuntimeHandler};
 pub use state::{
-    NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel, NodeNetworkRole, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeSnapshot,
-    NodeStateStore, NodeTrafficSnapshot,
+    NodeAccessModel, NodeConfigurationSnapshot, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
+    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
+    NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission, NodePermissionSnapshot,
+    NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore,
+    NodeTrafficSnapshot,
 };
 pub use ui_manifest::{
     node_ui_manifest, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiCommandKind,
-    NodeUiConfirmation, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiPermission,
-    NodeUiValidation, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeUiConfirmation, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiValidation,
+    NODE_UI_MANIFEST_SCHEMA_VERSION,
 };

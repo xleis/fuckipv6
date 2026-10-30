@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     NodeEventBus, NodeEventKind, NodeNetworkRole, NodeNetworkSelection, NodeProblem,
-    NodeProblemCode, NodeSnapshot,
+    NodeProblemCode, NodeRoutingMode, NodeSnapshot,
 };
 
 /// One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.
@@ -144,14 +144,6 @@ impl NodeUpdateRoutingCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeRoutingMode {
-    MeshOnly,
-    BypassMainland,
-    GlobalProxy,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSetNetworkRoleCommand {
     pub network_name: String,
@@ -249,7 +241,7 @@ impl NodeCommandResult {
     }
 
     pub fn snapshot(request_id: u64, snapshot: NodeSnapshot) -> Self {
-        Self::completed(request_id, NodeCommandOutcome::Snapshot(snapshot))
+        Self::completed(request_id, NodeCommandOutcome::Snapshot(Box::new(snapshot)))
     }
 
     pub fn rejected(request_id: u64, problem: NodeProblem) -> Self {
@@ -274,7 +266,7 @@ pub struct NodePeerProbeSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
-    Snapshot(NodeSnapshot),
+    Snapshot(Box<NodeSnapshot>),
     Probe(NodePeerProbeSnapshot),
     Accepted { operation_id: String },
     Completed { message: String },

@@ -928,6 +928,26 @@ mod tests {
             QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
                 .await?;
 
+        {
+            let clients = server.state.clients.read().await;
+            assert_eq!(clients.len(), 2);
+            assert_eq!(
+                clients
+                    .get(&ip_a)
+                    .context("missing first relay client")?
+                    .client_id,
+                identity_a.client_id()
+            );
+            assert_eq!(
+                clients
+                    .get(&ip_b)
+                    .context("missing second relay client")?
+                    .client_id,
+                identity_b.client_id()
+            );
+        }
+        assert_eq!(server.state.limits.read().await.len(), 2);
+
         let payload = b"relay-through-quic".to_vec();
         let (sent, delivered) = tokio::join!(
             client_a.send_packet(7, ip_a, ip_b, &payload),

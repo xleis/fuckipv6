@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## Unreleased
 
+### Security
+- **节点私钥文件权限**: Unix 上创建 `node_identity.pem` 时直接使用 `0600` 模式，不再依赖进程 umask；覆盖已有身份文件时会在写入私钥前收紧权限，并新增新文件与宽松旧权限两类回归测试。
+
 ### Added
 - **零网络节点身份**: 节点控制面启动时即加载或生成配置根目录下唯一的 `node_identity.pem`，并从可选 `node_identity.json` 读取 `display_name`；即使没有启动任何网络，共享 `NodeSnapshot` 也会包含节点 ID、公钥指纹和显示名。网络启动计划统一复用节点级密钥，测试确认身份跨重启稳定，且私钥、种子和本机路径不会进入 DTO。README 已补充配置根目录、元数据格式和私钥文件权限注意事项。
 - **统一节点命令错误契约**: 10 个 `NodeCommand` 均覆盖 JSON 序列化往返与至少一条拒绝路径；重复/非法网络名和无效载荷统一返回 `InvalidRequest`，网络名规则与 `ConfigManager` 的 ASCII 白名单对齐。`NodeProblem` 的 7 个错误码、`network_name` 和 `retryable` 已锁定线协议并可往返；handler 测试覆盖无运行时创建/加入、未知网络探测及 `RuntimeControlError` 映射，`UpdateRouting`/`SetNetworkRole` 在 EX-06/EX-07 完成前继续返回可重试的 `Unavailable`，不会伪装成功。

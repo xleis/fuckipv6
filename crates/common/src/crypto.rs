@@ -5,6 +5,7 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha512};
+use std::io::Write;
 use std::path::Path;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -67,7 +68,32 @@ impl Identity {
         bytes.extend_from_slice(&self.signing_key.to_bytes());
         bytes.extend_from_slice(self.verifying_key.as_bytes());
 
-        std::fs::write(path.as_ref(), bytes)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options
+            .open(path.as_ref())
+            .with_context(|| format!("Failed to write key file: {:?}", path.as_ref()))?;
+
+        // `mode` only applies when the file is created. Tighten an existing
+        // identity before replacing its contents so it is never rewritten
+        // while remaining readable by other local users.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .with_context(|| {
+                    format!("Failed to secure key file permissions: {:?}", path.as_ref())
+                })?;
+        }
+
+        file.write_all(&bytes)
             .with_context(|| format!("Failed to write key file: {:?}", path.as_ref()))?;
 
         Ok(())
@@ -287,6 +313,34 @@ mod tests {
 
         let identity2 = Identity::load_from_file(&temp_file)?;
         assert_eq!(identity1.client_id(), identity2.client_id());
+
+        std::fs::remove_file(temp_file).ok();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_file_is_owner_only_and_existing_permissions_are_tightened() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temp_file = std::env::temp_dir().join(format!(
+            "fuckipv6_identity_permissions_{}_{}.pem",
+            std::process::id(),
+            unique
+        ));
+        let identity = Identity::generate()?;
+
+        identity.save_to_file(&temp_file)?;
+        let created_mode = std::fs::metadata(&temp_file)?.permissions().mode() & 0o777;
+        assert_eq!(created_mode, 0o600);
+
+        std::fs::set_permissions(&temp_file, std::fs::Permissions::from_mode(0o644))?;
+        identity.save_to_file(&temp_file)?;
+        let rewritten_mode = std::fs::metadata(&temp_file)?.permissions().mode() & 0o777;
+        assert_eq!(rewritten_mode, 0o600);
 
         std::fs::remove_file(temp_file).ok();
         Ok(())

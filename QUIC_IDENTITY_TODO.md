@@ -20,7 +20,18 @@
 - [x] **QI-11 0-RTT 重放回归**：更新自检与集成测试，证明恢复会话不能提交早期 Register/Packet；若未来启用，必须另行具备幂等处理、有界重放缓存、时间窗和降级规则。
 - [x] **QI-12 Relay 端到端集成**：正确绑定的客户端注册和转发成功，错误绑定的客户端不产生 relay 状态或流量计数副作用。
 - [x] **QI-13 文档与状态同步**：同步 `SECURITY_PERFORMANCE_TODO.md`、`SECURITY_TRACEABILITY.md`、`PROTOCOL_V2.md`、`CHANGELOG.md` 和 README 的准确限制；同时更新 QUIC 威胁模型的当前控制、0-RTT 行为和剩余授权边界。
-- [ ] **QI-14 全量门禁与完成记录**：执行格式、文档检查、workspace check/clippy/test 和相关 QUIC 测试；每项独立提交后更新本节状态。
+- [x] **QI-14 全量门禁与完成记录**：格式、文档检查、workspace check/clippy/test 和相关 QUIC 测试全部通过；完成状态与剩余风险记录如下。
+
+## 完成记录
+
+- 完成日期：2026-10-30。
+- QI-13 文档同步提交：`0dadd1d`。
+- `cargo fmt --all -- --check`、`git diff --check`、文档脚本 8 项单元测试与链接/声明检查通过。
+- `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 通过。
+- QUIC 定向回归通过：`fuckipv6-common quic::tests` 11 项、`fuckipv6-coordinator relay::server::tests` 7 项、`fuckipv6-client p2p::quic::tests` 6 项。
+- 以上结果证明当前工程控制与回归测试通过，不代表独立安全审计或生产认证授权体系完成。
+
+仍须明确的生产边界：QUIC 当前仍是经典 Ed25519 + TLS 1.3；`pq` feature 的 X-Wing/ML-DSA 尚未接入 QUIC/relay；客户端证书尚无 CA/allowlist/撤销策略；项目未经独立安全审计，也不能据此宣称安全性或性能超过 WireGuard。
 
 ## 验收口径
 

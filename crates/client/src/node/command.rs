@@ -261,10 +261,21 @@ impl NodeCommandResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePeerProbeSnapshot {
+    pub peer_id: String,
+    pub virtual_ipv6: std::net::Ipv6Addr,
+    pub endpoint: Option<std::net::SocketAddr>,
+    pub rtt_us: Option<u64>,
+    pub p2p_active: bool,
+    pub timed_out: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
     Snapshot(NodeSnapshot),
+    Probe(NodePeerProbeSnapshot),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),

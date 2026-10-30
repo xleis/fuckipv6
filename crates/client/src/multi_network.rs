@@ -7,9 +7,10 @@ use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::{
-    NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodeProblem,
-    NodeProblemCode, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
+    NodeCommandBus, NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot,
+    NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus,
+    NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeRuntimePlan, NodeStateStore,
+    NodeTrafficSnapshot,
 };
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
@@ -66,17 +67,23 @@ pub struct MultiNetworkSupervisor {
     lifecycle: NodeLifecycle,
     state: NodeStateStore,
     events: NodeEventBus,
+    commands: NodeCommandBus,
 }
 
 impl MultiNetworkSupervisor {
     pub fn new(options: RuntimeOptions) -> Self {
         let events = NodeEventBus::default();
+        let registry = MultiNetworkRegistry::new();
+        let state = NodeStateStore::with_events(events.clone());
+        let commands =
+            crate::node::spawn_command_bus(state.clone(), registry.clone(), events.clone());
         Self {
-            registry: MultiNetworkRegistry::new(),
+            registry,
             options,
             lifecycle: NodeLifecycle::new(),
-            state: NodeStateStore::with_events(events.clone()),
+            state,
             events,
+            commands,
         }
     }
 
@@ -97,6 +104,11 @@ impl MultiNetworkSupervisor {
     /// Shared event bus for state, network and command lifecycle notifications.
     pub fn event_bus(&self) -> NodeEventBus {
         self.events.clone()
+    }
+
+    /// Shared command entrypoint for CLI, IPC, WebUI and future GPUI adapters.
+    pub fn commands(&self) -> NodeCommandBus {
+        self.commands.clone()
     }
 
     async fn sync_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) {

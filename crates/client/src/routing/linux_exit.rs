@@ -1378,12 +1378,14 @@ mod tests {
     }
 
     fn ping_upstream() -> std::process::Output {
+        let client_netns = std::env::var("FUCKIPV6_EXIT_NETNS_CLIENT")
+            .expect("the privileged netns runner must provide the client namespace name");
         command_output(
             "ip",
             &[
                 "netns",
                 "exec",
-                "fip6-client",
+                &client_netns,
                 "ping",
                 "-c",
                 "1",

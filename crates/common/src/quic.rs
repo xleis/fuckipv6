@@ -306,17 +306,28 @@ impl ServerCertVerifier for PinnedServerVerifier {
     }
 }
 
+/// 同步查询 QUIC 客户端证书是否属于当前准入集合。
+///
+/// 实现必须在 TLS 回调内快速返回，不得执行异步等待或获取异步锁。返回
+/// `false` 会失败关闭握手。自签名证书仅证明持有 Ed25519 私钥；该授权器负责
+/// 判断公钥是否已通过上层节点准入。
+pub trait QuicClientCertificateAuthorizer: std::fmt::Debug + Send + Sync {
+    fn is_authorized(&self, public_key: &[u8; 32]) -> bool;
+}
+
 #[derive(Debug)]
 struct Ed25519ClientCertVerifier {
     root_hint_subjects: Vec<RustlsDistinguishedName>,
     crypto_provider: Arc<rustls::crypto::CryptoProvider>,
+    authorizer: Option<Arc<dyn QuicClientCertificateAuthorizer>>,
 }
 
 impl Ed25519ClientCertVerifier {
-    fn new() -> Arc<Self> {
+    fn new(authorizer: Option<Arc<dyn QuicClientCertificateAuthorizer>>) -> Arc<Self> {
         Arc::new(Self {
             root_hint_subjects: Vec::new(),
             crypto_provider: Arc::new(rustls::crypto::ring::default_provider()),
+            authorizer,
         })
     }
 
@@ -361,6 +372,24 @@ impl Ed25519ClientCertVerifier {
             return Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::ApplicationVerificationFailure,
             ));
+        }
+        if let Some(authorizer) = &self.authorizer {
+            let public_key: [u8; 32] = certificate
+                .public_key()
+                .subject_public_key
+                .data
+                .as_ref()
+                .try_into()
+                .map_err(|_| {
+                    rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::ApplicationVerificationFailure,
+                    )
+                })?;
+            if !authorizer.is_authorized(&public_key) {
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ));
+            }
         }
         Ok(())
     }
@@ -437,19 +466,31 @@ pub fn build_quic_server_config(certificate: &QuicCertificate) -> Result<quinn::
 pub fn build_quic_server_config_with_client_auth(
     certificate: &QuicCertificate,
 ) -> Result<quinn::ServerConfig> {
-    build_quic_server_config_with_client_auth_and_early_data(certificate, 0)
+    build_quic_server_config_with_client_auth_and_early_data(certificate, 0, None)
+}
+
+/// 构建强制客户端证书认证并执行动态公钥 allowlist 的 QUIC 服务端配置。
+///
+/// 空 allowlist 默认拒绝所有客户端。授权器在每次 TLS 握手时同步查询，
+/// 因此可在不重启 relay 的情况下随节点会话准入和注销更新。
+pub fn build_quic_server_config_with_client_certificate_authorizer(
+    certificate: &QuicCertificate,
+    authorizer: Arc<dyn QuicClientCertificateAuthorizer>,
+) -> Result<quinn::ServerConfig> {
+    build_quic_server_config_with_client_auth_and_early_data(certificate, 0, Some(authorizer))
 }
 
 fn build_quic_server_config_with_client_auth_and_early_data(
     certificate: &QuicCertificate,
     max_early_data_size: u32,
+    authorizer: Option<Arc<dyn QuicClientCertificateAuthorizer>>,
 ) -> Result<quinn::ServerConfig> {
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
     )
     .with_safe_default_protocol_versions()
     .context("无法创建 QUIC 服务端 TLS 协议版本配置")?
-    .with_client_cert_verifier(Ed25519ClientCertVerifier::new())
+    .with_client_cert_verifier(Ed25519ClientCertVerifier::new(authorizer))
     .with_single_cert(
         vec![certificate.certificate_der()],
         certificate.private_key_der(),
@@ -845,6 +886,18 @@ async fn run_zero_rtt_test_server(server: quinn::Endpoint) -> Result<()> {
 mod tests {
     use super::*;
     use crate::Identity;
+    use std::collections::HashSet;
+
+    #[derive(Debug)]
+    struct StaticClientCertificateAuthorizer {
+        public_keys: HashSet<[u8; 32]>,
+    }
+
+    impl QuicClientCertificateAuthorizer for StaticClientCertificateAuthorizer {
+        fn is_authorized(&self, public_key: &[u8; 32]) -> bool {
+            self.public_keys.contains(public_key)
+        }
+    }
 
     #[test]
     fn generates_self_signed_certificate_and_stable_public_key_pin() -> anyhow::Result<()> {
@@ -931,6 +984,149 @@ mod tests {
         connection.close(0u32.into(), b"done");
         client.wait_idle().await;
         server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_certificate_allowlist_accepts_authorized_identity() -> anyhow::Result<()> {
+        let server_certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+        let identity = Identity::generate()?;
+        let client_certificate = QuicCertificate::from_identity(&identity)?;
+        let public_key = identity.public_key();
+        let public_key: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("identity public key is not Ed25519"))?;
+        let authorizer = Arc::new(StaticClientCertificateAuthorizer {
+            public_keys: HashSet::from([public_key]),
+        });
+        let server = quinn::Endpoint::server(
+            build_quic_server_config_with_client_certificate_authorizer(
+                &server_certificate,
+                authorizer,
+            )?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move {
+            server
+                .accept()
+                .await
+                .context("server did not accept client")?
+                .await
+                .context("authorized client handshake failed")
+        });
+
+        let mut client =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            server_certificate.public_key_pin,
+            &client_certificate,
+        )?);
+        let connection = client
+            .connect(server_addr, "fuckipv6.local")?
+            .await
+            .context("authorized client connect failed")?;
+        connection.close(0u32.into(), b"done");
+        client.wait_idle().await;
+        server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_certificate_allowlist_rejects_unlisted_identity() -> anyhow::Result<()> {
+        let server_certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+        let authorized_identity = Identity::generate()?;
+        let unlisted_identity = Identity::generate()?;
+        let unlisted_certificate = QuicCertificate::from_identity(&unlisted_identity)?;
+        let authorized_public_key = authorized_identity.public_key();
+        let authorized_public_key: [u8; 32] = authorized_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("identity public key is not Ed25519"))?;
+        let authorizer = Arc::new(StaticClientCertificateAuthorizer {
+            public_keys: HashSet::from([authorized_public_key]),
+        });
+        let server = quinn::Endpoint::server(
+            build_quic_server_config_with_client_certificate_authorizer(
+                &server_certificate,
+                authorizer,
+            )?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move {
+            let incoming = server
+                .accept()
+                .await
+                .context("server did not accept client")?;
+            Ok::<(), anyhow::Error>(incoming.await.map(|_| ())?)
+        });
+
+        let mut client =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            server_certificate.public_key_pin,
+            &unlisted_certificate,
+        )?);
+        let connecting = client.connect(server_addr, "fuckipv6.local")?;
+        let client_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await?;
+        if let Ok(connection) = client_result {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), connection.closed()).await;
+        }
+        let server_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), server_task).await??;
+        assert!(server_result.is_err(), "unlisted certificate must fail TLS");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_client_certificate_allowlist_rejects_all_identities() -> anyhow::Result<()> {
+        let server_certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+        let client_certificate = QuicCertificate::from_identity(&Identity::generate()?)?;
+        let authorizer = Arc::new(StaticClientCertificateAuthorizer {
+            public_keys: HashSet::new(),
+        });
+        let server = quinn::Endpoint::server(
+            build_quic_server_config_with_client_certificate_authorizer(
+                &server_certificate,
+                authorizer,
+            )?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move {
+            let incoming = server
+                .accept()
+                .await
+                .context("server did not accept client")?;
+            Ok::<(), anyhow::Error>(incoming.await.map(|_| ())?)
+        });
+
+        let mut client =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            server_certificate.public_key_pin,
+            &client_certificate,
+        )?);
+        let connecting = client.connect(server_addr, "fuckipv6.local")?;
+        let client_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await?;
+        if let Ok(connection) = client_result {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), connection.closed()).await;
+        }
+        let server_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), server_task).await??;
+        assert!(
+            server_result.is_err(),
+            "empty allowlist must fail every TLS handshake"
+        );
         Ok(())
     }
 
@@ -1163,6 +1359,7 @@ mod tests {
         let server_config = build_quic_server_config_with_client_auth_and_early_data(
             certificate,
             max_early_data_size,
+            None,
         )?;
         let server = quinn::Endpoint::server(
             server_config,

@@ -22,6 +22,7 @@
 - [x] **QI-13 文档与状态同步**：同步 `SECURITY_PERFORMANCE_TODO.md`、`SECURITY_TRACEABILITY.md`、`PROTOCOL_V2.md`、`CHANGELOG.md` 和 README 的准确限制；同时更新 QUIC 威胁模型的当前控制、0-RTT 行为和剩余授权边界。
 - [x] **QI-14 全量门禁与完成记录**：格式、文档检查、workspace check/clippy/test 和相关 QUIC 测试全部通过；完成状态与剩余风险记录如下。
 - [x] **QI-15 Relay 运行期身份撤销**：Relay 注册前拒绝 Coordinator 黑名单中的身份；每个转发包在增加计数前同时检查认证源和目标身份，覆盖撤销源、撤销目的、注册拒绝及无 relay 状态/计数副作用测试。
+- [x] **QI-16 Relay 客户端证书 allowlist**：TLS 1.3 握手阶段只接受当前已完成签名注册的节点 Ed25519 公钥；allowlist 随注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。授权查询使用同步快照且不在 TLS 回调中等待异步锁；覆盖授权、未列入、空名单、未注册证书、合法 TLS 证书身份错绑以及注销/封禁后撤销测试。该能力不等于 CA、CRL/OCSP、持久撤销列表或网络级最终授权。
 
 ## 完成记录
 
@@ -31,9 +32,10 @@
 - `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 通过。
 - QUIC 定向回归通过：`fuckipv6-common quic::tests` 11 项、`fuckipv6-coordinator relay::server::tests` 7 项、`fuckipv6-client p2p::quic::tests` 6 项。
 - QI-15 增量回归：`cargo test -p fuckipv6-coordinator relay::server::tests` 9 项通过；`cargo clippy -p fuckipv6-coordinator --all-targets -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- QI-16 增量回归：common 证书 allowlist 3 项、Coordinator 证书授权生命周期 1 项及 relay QUIC 11 项通过；common 全量 67 项、Coordinator 全量 36 项 + 2 项集成通过。
 - 以上结果证明当前工程控制与回归测试通过，不代表独立安全审计或生产认证授权体系完成。
 
-仍须明确的生产边界：QUIC 当前仍是经典 Ed25519 + TLS 1.3；`pq` feature 的 X-Wing/ML-DSA 尚未接入 QUIC/relay；运行期黑名单已覆盖 relay 注册和双向转发，但客户端证书尚无 CA/allowlist/CRL/OCSP 与网络级授权策略；项目未经独立安全审计，也不能据此宣称安全性或性能超过 WireGuard。
+仍须明确的生产边界：QUIC 当前仍是经典 Ed25519 + TLS 1.3；`pq` feature 的 X-Wing/ML-DSA 尚未接入 QUIC/relay；Relay TLS 已有随在线会话更新的客户端证书 allowlist，运行期黑名单覆盖注册和双向转发，但仍无 CA、CRL/OCSP、持久撤销列表与网络级最终授权策略；P2P QUIC Mesh 尚未接入同等身份目录；项目未经独立安全审计，也不能据此宣称安全性或性能超过 WireGuard。
 
 ## 验收口径
 

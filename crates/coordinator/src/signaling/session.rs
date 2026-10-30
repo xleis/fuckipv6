@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{
     codec, BlacklistConfig, ClientId, NatType, NetworkAllocation, NetworkMode, PeerInfo,
-    SignalingMessage, VirtualIps,
+    QuicClientCertificateAuthorizer, SignalingMessage, VirtualIps,
 };
 use serde::Serialize;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message;
@@ -28,6 +28,25 @@ pub struct SessionManager {
     leases: Arc<RwLock<HashMap<ClientId, VirtualIps>>>,
     traffic: Arc<TrafficCounters>,
     blacklist: Arc<RwLock<BlacklistConfig>>,
+    certificate_allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionClientCertificateAuthorizer {
+    allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
+}
+
+impl QuicClientCertificateAuthorizer for SessionClientCertificateAuthorizer {
+    fn is_authorized(&self, public_key: &[u8; 32]) -> bool {
+        self.allowlist
+            .read()
+            .map(|allowlist| {
+                allowlist
+                    .values()
+                    .any(|authorized| authorized == public_key)
+            })
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,6 +216,7 @@ impl SessionManager {
             leases: Arc::new(RwLock::new(HashMap::new())),
             traffic: Arc::new(TrafficCounters::new()),
             blacklist: Arc::new(RwLock::new(BlacklistConfig::default())),
+            certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
 
@@ -218,7 +238,41 @@ impl SessionManager {
             leases: Arc::new(RwLock::new(HashMap::new())),
             traffic: Arc::new(TrafficCounters::new()),
             blacklist: Arc::new(RwLock::new(blacklist)),
+            certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
         })
+    }
+
+    /// 返回可在同步 TLS 回调中查询的客户端证书公钥授权器。
+    ///
+    /// allowlist 只包含当前完成签名注册的在线节点；空集合默认拒绝。授权器
+    /// 持有独立的同步锁视图，不在 TLS 回调中等待 Tokio 异步会话锁。
+    pub fn client_certificate_authorizer(&self) -> Arc<dyn QuicClientCertificateAuthorizer> {
+        Arc::new(SessionClientCertificateAuthorizer {
+            allowlist: self.certificate_allowlist.clone(),
+        })
+    }
+
+    fn set_client_certificate_authorization(&self, client_id: &ClientId, public_key: &[u8]) {
+        let public_key = <[u8; 32]>::try_from(public_key).ok();
+        match self.certificate_allowlist.write() {
+            Ok(mut allowlist) => match public_key {
+                Some(public_key) => {
+                    allowlist.insert(client_id.clone(), public_key);
+                }
+                None => {
+                    allowlist.remove(client_id);
+                }
+            },
+            Err(_) => tracing::error!(
+                "客户端证书 allowlist 锁已损坏，后续 QUIC 握手将失败关闭: {client_id}"
+            ),
+        }
+    }
+
+    fn revoke_client_certificate_authorization(&self, client_id: &ClientId) {
+        if let Ok(mut allowlist) = self.certificate_allowlist.write() {
+            allowlist.remove(client_id);
+        }
     }
 
     /// 检查客户端 ID 或公钥是否在黑名单中
@@ -240,6 +294,7 @@ impl SessionManager {
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.remove(&client_id) {
+            self.revoke_client_certificate_authorization(&client_id);
             let _ = session.tx.send(Message::Close(None));
             tracing::warn!("黑名单客户端已强制断开并踢出: {}", client_id);
         }
@@ -325,6 +380,10 @@ impl SessionManager {
             now: Instant::now(),
         };
         let result = self.register_or_refresh_session(input).await?;
+        self.set_client_certificate_authorization(
+            &result.peer_info.client_id,
+            &result.peer_info.public_key,
+        );
 
         if result.is_reconnect {
             tracing::info!(
@@ -419,6 +478,7 @@ impl SessionManager {
         tracing::debug!("sessions write 锁已释放");
 
         if let Some(session) = session_opt {
+            self.revoke_client_certificate_authorization(client_id);
             // 释放IP
             tracing::debug!("获取 ip_allocator write 锁...");
             self.ip_allocator
@@ -1380,6 +1440,85 @@ mod tests {
 
         assert_eq!(stale, vec![client_id.clone()]);
         assert!(manager.get_peer_info(&client_id).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_certificate_authorizer_tracks_registration_rekey_unregistration_and_ban(
+    ) -> Result<()> {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let authorizer = manager.client_certificate_authorizer();
+        let first_identity = fuckipv6_common::Identity::generate()?;
+        let second_identity = fuckipv6_common::Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let observed = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000);
+
+        let first_key = first_identity.public_key();
+        let first_key: [u8; 32] = first_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("first identity public key is not Ed25519"))?;
+        assert!(!authorizer.is_authorized(&first_key));
+
+        manager
+            .register_client(
+                first_identity.client_id().to_string(),
+                first_identity.public_key(),
+                observed,
+                51820,
+                NatType::Open,
+                tx.clone(),
+            )
+            .await?;
+        assert!(authorizer.is_authorized(&first_key));
+
+        let second_key = second_identity.public_key();
+        let second_key: [u8; 32] = second_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("second identity public key is not Ed25519"))?;
+        manager
+            .register_client(
+                first_identity.client_id().to_string(),
+                second_identity.public_key(),
+                observed,
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+        assert!(!authorizer.is_authorized(&first_key));
+        assert!(authorizer.is_authorized(&second_key));
+
+        manager
+            .unregister_client(&first_identity.client_id().to_string())
+            .await;
+        assert!(!authorizer.is_authorized(&second_key));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                first_identity.client_id().to_string(),
+                second_identity.public_key(),
+                observed,
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+        assert!(authorizer.is_authorized(&second_key));
+
+        manager
+            .ban_client(first_identity.client_id().to_string())
+            .await;
+        assert!(
+            manager
+                .get_peer_info(&first_identity.client_id().to_string())
+                .await
+                .is_none(),
+            "ban must remove the active session"
+        );
+        assert!(!authorizer.is_authorized(&second_key));
         Ok(())
     }
 

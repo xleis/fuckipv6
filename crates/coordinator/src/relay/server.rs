@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{
-    build_quic_server_config, export_quic_relay_channel_binding,
+    build_quic_server_config_with_client_certificate_authorizer, export_quic_relay_channel_binding,
     generate_self_signed_quic_certificate, recv_relay_message, send_relay_message,
     verify_quic_client_identity_binding, ClientId, ErrorCode, Identity, QuicCertificate,
     RelayMessage, RelayRegistrationBinding,
@@ -110,7 +110,10 @@ impl RelayServer {
         session_manager: Arc<SessionManager>,
         certificate: QuicCertificate,
     ) -> Result<Self> {
-        let server_config = build_quic_server_config(&certificate)?;
+        let server_config = build_quic_server_config_with_client_certificate_authorizer(
+            &certificate,
+            session_manager.client_certificate_authorizer(),
+        )?;
         let endpoint = quinn::Endpoint::server(server_config, bind_addr)
             .with_context(|| format!("无法启动 QUIC 中继服务: {bind_addr}"))?;
         let bind_addr = endpoint
@@ -797,12 +800,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quic_relay_rejects_unregistered_tls_certificate_before_registration() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let application_identity = Identity::generate()?;
+        let tls_identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                application_identity.client_id().to_string(),
+                application_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let connect_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            QuicRelayClient::connect(
+                relay_addr,
+                server_pin,
+                "fuckipv6.local",
+                &tls_identity,
+                virtual_ip,
+            ),
+        )
+        .await
+        .context("unregistered TLS certificate handshake timed out")?;
+        assert!(
+            connect_result.is_err(),
+            "certificate not present in the active-session allowlist must fail TLS"
+        );
+        assert_no_relay_state(&server, &session_manager).await;
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_revokes_certificate_allowlist_after_session_unregister() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let first_client = QuicRelayClient::connect(
+            relay_addr,
+            server_pin,
+            "fuckipv6.local",
+            &identity,
+            virtual_ip,
+        )
+        .await
+        .context("registered identity should pass the certificate allowlist")?;
+        first_client.close().await;
+
+        session_manager
+            .unregister_client(&identity.client_id().to_string())
+            .await;
+        let reconnect = tokio::time::timeout(
+            Duration::from_secs(5),
+            QuicRelayClient::connect(
+                relay_addr,
+                server_pin,
+                "fuckipv6.local",
+                &identity,
+                virtual_ip,
+            ),
+        )
+        .await
+        .context("revoked certificate handshake timed out")?;
+        assert!(
+            reconnect.is_err(),
+            "unregistered session public key must no longer pass TLS"
+        );
+        let traffic = session_manager.snapshot().await.traffic;
+        assert_eq!(traffic.relay_packets, 0);
+        assert_eq!(traffic.relay_payload_bytes, 0);
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn quic_relay_rejects_valid_tls_certificate_with_another_application_identity(
     ) -> Result<()> {
         let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
         let application_identity = Identity::generate()?;
         let tls_identity = Identity::generate()?;
         let (tx, _rx) = mpsc::unbounded_channel();
+        session_manager
+            .register_client(
+                tls_identity.client_id().to_string(),
+                tls_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000),
+                51820,
+                NatType::Open,
+                tx.clone(),
+            )
+            .await?;
         let virtual_ip = session_manager
             .register_client(
                 application_identity.client_id().to_string(),

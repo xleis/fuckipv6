@@ -214,7 +214,7 @@ fuckipv6/
 - [ ] 接入 v2 在线重协商控制通道、无状态 Cookie 与限速，并完成独立密码学审计；当前 epoch 达到时限/字节上限后失败关闭而不是在线换钥
 - [x] 实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性混合 `HELLO/ACCEPT`，固定 X-Wing/TH1/TH2 向量并覆盖降级、PSK、重放与非 contributory 输入失败关闭
 - [ ] 将混合 profile 接入生产控制通道、QUIC/relay 与 UDP/TUN 数据面并完成独立审计；当前生产路径仍不具备端到端后量子机密性或后量子身份认证
-- [x] QUIC 中继双向身份与通道绑定：强制客户端证书，Register 签名绑定证书/应用身份与 TLS exporter，错绑在 relay 状态写入前失败关闭，生产配置禁用 0-RTT；运行期黑名单已在 relay 注册和双向转发路径强制执行（证书层 CA/allowlist/CRL/OCSP、网络级授权与独立审计仍待完成）
+- [x] QUIC 中继双向身份与通道绑定：强制客户端证书，TLS 层只接受当前已完成签名注册的节点公钥 allowlist，Register 签名绑定证书/应用身份与 TLS exporter，错绑在 relay 状态写入前失败关闭，生产配置禁用 0-RTT；运行期黑名单已在 relay 注册和双向转发路径强制执行（CA、CRL/OCSP、持久撤销列表、网络级最终授权与独立审计仍待完成）
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
 - [x] IPv4/IPv6 双栈虚拟地址与网络服务 JWT 鉴权

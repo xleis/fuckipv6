@@ -7,6 +7,7 @@ All notable changes are documented here. The project follows semantic versioning
 ### Security
 - **节点私钥文件权限**: Unix 上创建 `node_identity.pem` 时直接使用 `0600` 模式，不再依赖进程 umask；覆盖已有身份文件时会在写入私钥前收紧权限，并新增新文件与宽松旧权限两类回归测试。
 - **QUIC Relay 运行期身份撤销**: Coordinator 黑名单现在在 QUIC relay 注册前以及每个转发包的源、目的身份检查中强制执行；已撤销节点不能新建 relay 状态，也不能经现有连接发包，拒绝路径不增加 relay 转发计数。新增注册拒绝、撤销源、撤销目的和无状态/计数副作用回归测试。证书层 CA/allowlist/CRL/OCSP、网络级授权与独立安全审计仍未完成。
+- **QUIC Relay 客户端证书 allowlist**: Relay 的 QUIC TLS 现在只接受当前已完成签名注册的节点 Ed25519 公钥；allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。TLS 授权查询使用同步快照，不在握手回调中等待异步会话锁。新增授权、未列入、空名单、未注册证书握手拒绝和注销后撤销回归测试。该控制是当前在线会话准入，不等同于 CA、CRL/OCSP、持久撤销列表或网络级最终授权，独立安全审计仍未完成。
 
 ### Added
 - **零网络节点身份**: 节点控制面启动时即加载或生成配置根目录下唯一的 `node_identity.pem`，并从可选 `node_identity.json` 读取 `display_name`；即使没有启动任何网络，共享 `NodeSnapshot` 也会包含节点 ID、公钥指纹和显示名。网络启动计划统一复用节点级密钥，测试确认身份跨重启稳定，且私钥、种子和本机路径不会进入 DTO。README 已补充配置根目录、元数据格式和私钥文件权限注意事项。

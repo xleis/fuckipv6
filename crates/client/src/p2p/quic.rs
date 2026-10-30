@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{
-    build_pinned_quic_client_config, build_quic_server_config,
-    generate_self_signed_quic_certificate, recv_quic_frame, send_quic_frame, QuicCertificate,
-    QuicFrame, ZeroRttSelfTestReport,
+    build_pinned_quic_client_config, build_pinned_quic_client_config_with_auth,
+    build_quic_server_config, generate_self_signed_quic_certificate, recv_quic_frame,
+    send_quic_frame, Identity, QuicCertificate, QuicFrame, ZeroRttSelfTestReport,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -16,6 +16,17 @@ pub fn build_client_config(expected_server_pin: [u8; 32]) -> Result<quinn::Clien
 
 pub fn generate_node_certificate() -> Result<QuicCertificate> {
     generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])
+}
+
+fn build_authenticated_client_config(
+    expected_server_pin: [u8; 32],
+    certificate: &QuicCertificate,
+) -> Result<quinn::ClientConfig> {
+    build_pinned_quic_client_config_with_auth(expected_server_pin, certificate)
+}
+
+fn generate_client_certificate() -> Result<QuicCertificate> {
+    QuicCertificate::from_identity(&Identity::generate()?)
 }
 
 pub async fn send_frame(stream: &mut quinn::SendStream, frame: &QuicFrame) -> Result<()> {
@@ -44,6 +55,7 @@ pub async fn run_loopback_self_test(certificate: &QuicCertificate) -> Result<Qui
         .context("无法读取 QUIC loopback 服务端地址")?;
 
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let client_certificate = generate_client_certificate()?;
 
     let server_future = async move {
         let incoming = server
@@ -65,7 +77,10 @@ pub async fn run_loopback_self_test(certificate: &QuicCertificate) -> Result<Qui
         let mut client =
             quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
                 .context("无法启动 QUIC loopback 客户端")?;
-        client.set_default_client_config(build_client_config(certificate.public_key_pin)?);
+        client.set_default_client_config(build_authenticated_client_config(
+            certificate.public_key_pin,
+            &client_certificate,
+        )?);
         let connection = client
             .connect(server_addr, "fuckipv6.local")
             .context("无法发起 QUIC loopback 连接")?
@@ -114,18 +129,21 @@ use tokio::sync::{mpsc, RwLock};
 pub struct QuicP2pMesh {
     endpoint: quinn::Endpoint,
     certificate: QuicCertificate,
+    client_certificate: QuicCertificate,
     active_peers: Arc<RwLock<HashMap<Ipv6Addr, quinn::Connection>>>,
 }
 
 impl QuicP2pMesh {
     pub fn new(bind_addr: SocketAddr) -> Result<Self> {
         let certificate = generate_node_certificate()?;
+        let client_certificate = generate_client_certificate()?;
         let server_config = build_server_config(&certificate)?;
         let endpoint = quinn::Endpoint::server(server_config, bind_addr)
             .context("无法创建 QUIC P2P 直连端点")?;
         Ok(Self {
             endpoint,
             certificate,
+            client_certificate,
             active_peers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -144,7 +162,8 @@ impl QuicP2pMesh {
         remote_addr: SocketAddr,
         expected_pin: [u8; 32],
     ) -> Result<quinn::Connection> {
-        let client_config = build_client_config(expected_pin)?;
+        let client_config =
+            build_authenticated_client_config(expected_pin, &self.client_certificate)?;
         let mut client_endpoint = self.endpoint.clone();
         client_endpoint.set_default_client_config(client_config);
 
@@ -228,6 +247,11 @@ impl QuicP2pMesh {
 mod tests {
     use super::*;
 
+    fn authenticated_client_config(server_pin: [u8; 32]) -> Result<quinn::ClientConfig> {
+        let client_certificate = generate_client_certificate()?;
+        build_authenticated_client_config(server_pin, &client_certificate)
+    }
+
     #[tokio::test]
     async fn pinned_quic_connection_accepts_matching_certificate() -> Result<()> {
         let cert = generate_node_certificate()?;
@@ -245,7 +269,7 @@ mod tests {
 
         let mut client =
             quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
-        client.set_default_client_config(build_client_config(cert.public_key_pin)?);
+        client.set_default_client_config(authenticated_client_config(cert.public_key_pin)?);
 
         let connection = client
             .connect(server_addr, "fuckipv6.local")
@@ -277,7 +301,7 @@ mod tests {
 
         let mut client =
             quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
-        client.set_default_client_config(build_client_config(other_cert.public_key_pin)?);
+        client.set_default_client_config(authenticated_client_config(other_cert.public_key_pin)?);
 
         let result = client
             .connect(server_addr, "fuckipv6.local")
@@ -320,7 +344,7 @@ mod tests {
 
         let mut client =
             quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
-        client.set_default_client_config(build_client_config(cert.public_key_pin)?);
+        client.set_default_client_config(authenticated_client_config(cert.public_key_pin)?);
         let connection = client
             .connect(server_addr, "fuckipv6.local")
             .context("failed to start QUIC connect")?

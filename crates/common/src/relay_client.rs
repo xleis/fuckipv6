@@ -6,7 +6,8 @@ use tokio::sync::{mpsc, RwLock};
 use crate::crypto::Identity;
 use crate::protocol::RelayEndpoint;
 use crate::quic::{
-    build_pinned_quic_client_config, recv_relay_message, send_relay_message, RelayMessage,
+    build_pinned_quic_client_config_with_auth, recv_relay_message, send_relay_message,
+    QuicCertificate, RelayMessage,
 };
 
 const RELAY_REGISTER_STREAM_ID: u64 = 0;
@@ -38,9 +39,13 @@ impl QuicRelayClient {
         } else {
             SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
         };
+        let client_certificate = QuicCertificate::from_identity(identity)?;
         let mut endpoint =
             quinn::Endpoint::client(bind_addr).context("无法创建 QUIC relay 客户端 endpoint")?;
-        endpoint.set_default_client_config(build_pinned_quic_client_config(expected_server_pin)?);
+        endpoint.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            expected_server_pin,
+            &client_certificate,
+        )?);
 
         let connection = endpoint
             .connect(relay_addr, server_name)

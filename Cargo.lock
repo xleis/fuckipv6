@@ -975,6 +975,7 @@ dependencies = [
  "urlencoding",
  "x25519-dalek",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

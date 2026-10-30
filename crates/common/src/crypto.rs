@@ -101,6 +101,13 @@ impl Identity {
         self.verifying_key.as_bytes().to_vec()
     }
 
+    /// 返回长期 Ed25519 签名种子的受控副本，仅供同 crate 的可信适配层使用。
+    ///
+    /// 调用方必须在使用后立即清零返回的缓冲区，不得持久化或记录该值。
+    pub(crate) fn signing_key_seed(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
     /// 构造与当前长期身份等价的 Secure Session Ed25519 身份。
     ///
     /// 该方法只返回由 Secure Session 类型封装的身份句柄，不暴露种子或

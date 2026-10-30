@@ -71,6 +71,9 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 super::NodeCommand::GetSnapshot => {
                     NodeCommandResult::snapshot(request_id, state.snapshot().await)
                 }
+                super::NodeCommand::GetUiManifest => {
+                    NodeCommandResult::ui_manifest(request_id, super::node_ui_manifest())
+                }
                 super::NodeCommand::StopNetworks { networks, all } => match runtime {
                     Some(runtime) => {
                         stop_runtime_networks(&runtime, request_id, networks, all).await
@@ -431,6 +434,33 @@ mod tests {
             NodeCommandOutcome::Snapshot(snapshot) => {
                 assert_eq!(snapshot.revision, 1);
                 assert_eq!(snapshot.logs[0].message, "shared");
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_ui_manifest_round_trips_and_matches_the_shared_contract() {
+        let bus = spawn_command_bus(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+        let request = NodeCommandRequest::new(21, NodeCommand::GetUiManifest);
+        let encoded = serde_json::to_string(&request).expect("serialize manifest request");
+        let decoded: NodeCommandRequest =
+            serde_json::from_str(&encoded).expect("deserialize manifest request");
+        assert_eq!(decoded, request);
+
+        let result = bus.execute(decoded).await.expect("manifest result");
+        match result.outcome {
+            NodeCommandOutcome::UiManifest(manifest) => {
+                assert_eq!(
+                    manifest.schema_version,
+                    crate::node::NODE_UI_MANIFEST_SCHEMA_VERSION
+                );
+                assert_eq!(manifest.pages.len(), 11);
+                assert_eq!(*manifest, crate::node::node_ui_manifest());
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }

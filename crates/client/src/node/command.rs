@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     NodeEventBus, NodeEventKind, NodeNetworkRole, NodeNetworkSelection, NodeProblem,
-    NodeProblemCode, NodeRoutingMode, NodeSnapshot,
+    NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeUiManifest,
 };
 
 /// One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.
@@ -36,8 +36,16 @@ impl NodeCommandRequest {
 #[serde(tag = "command", content = "payload", rename_all = "snake_case")]
 pub enum NodeCommand {
     GetSnapshot,
-    StartNetworks { selection: NodeNetworkSelection },
-    StopNetworks { networks: Vec<String>, all: bool },
+    /// Bootstrap query for the declarative UI contract. This is not rendered as
+    /// a page action and should be called before an adapter builds its UI.
+    GetUiManifest,
+    StartNetworks {
+        selection: NodeNetworkSelection,
+    },
+    StopNetworks {
+        networks: Vec<String>,
+        all: bool,
+    },
     CreateNetwork(NodeCreateNetworkCommand),
     JoinNetwork(NodeJoinNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
@@ -49,7 +57,7 @@ pub enum NodeCommand {
 impl NodeCommand {
     pub fn validate(&self) -> Result<(), NodeProblem> {
         match self {
-            Self::GetSnapshot | Self::Shutdown => Ok(()),
+            Self::GetSnapshot | Self::GetUiManifest | Self::Shutdown => Ok(()),
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
                 if *all {
@@ -244,6 +252,13 @@ impl NodeCommandResult {
         Self::completed(request_id, NodeCommandOutcome::Snapshot(Box::new(snapshot)))
     }
 
+    pub fn ui_manifest(request_id: u64, manifest: NodeUiManifest) -> Self {
+        Self::completed(
+            request_id,
+            NodeCommandOutcome::UiManifest(Box::new(manifest)),
+        )
+    }
+
     pub fn rejected(request_id: u64, problem: NodeProblem) -> Self {
         Self::completed(request_id, NodeCommandOutcome::Rejected(problem))
     }
@@ -267,6 +282,7 @@ pub struct NodePeerProbeSnapshot {
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
     Snapshot(Box<NodeSnapshot>),
+    UiManifest(Box<NodeUiManifest>),
     Probe(NodePeerProbeSnapshot),
     Accepted { operation_id: String },
     Completed { message: String },

@@ -1,5 +1,6 @@
 mod command;
 mod event;
+mod http_adapter;
 mod lifecycle;
 mod plan;
 mod runtime_control;
@@ -15,6 +16,11 @@ pub use command::{
     NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
 };
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
+pub use http_adapter::{
+    NodeHttpAdapter, NodeHttpAdapterError, NodeHttpErrorCode, NodeHttpErrorResponse,
+    NodeManifestResponse, NodeSnapshotResponse, NodeWsMessage, NodeWsResyncReason, NodeWsSession,
+    NodeWsSessionError, NODE_HTTP_API_PREFIX, NODE_HTTP_SCHEMA_VERSION,
+};
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
 pub(crate) use runtime_control::{NetworkRuntimeManager, RuntimeControlError, StartSummary};

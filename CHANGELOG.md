@@ -15,6 +15,7 @@ All notable changes are documented here. The project follows semantic versioning
 ### Added
 - **UI manifest fail-closed 契约校验**: 共享 manifest 现在校验固定 11 页集合与顺序、9 类命令覆盖、页面/动作/字段唯一性、必填字段校验、命令权限与后端状态一致性，以及 Shutdown 的破坏性确认；HTTP 适配器在交付前拒绝任何违约 manifest，并以 `ContractViolation` 失败关闭。该门禁只是 UI 对等自动测试的基础，真实 WebUI/GPUI 渲染层尚未接入，不能据此宣称 UI 已对等。
 - **共享节点 HTTP/WS 适配器**: 新增版本化快照、manifest、事件 WebSocket 和命令提交端点。快照/事件合并使用共享 `NodeStateStore`，动作及读取命令只提交 `NodeCommandBus`，schema 不匹配、非法请求、后端拒绝和 `Unavailable` 均有稳定 HTTP 映射；重复/过期 revision 被抑制，跳号与广播滞后会下发权威快照重同步。该适配器尚未挂载到现有 WebUI/GPUI。
+- **GPUI 原生应用外壳（NX-08）**: 顶层 `--gpui` 与桌面自动模式现在在 OS 主线程创建真实 `gpui::Application` 原生窗口，不再使用浏览器、WebView 或 `--app` 窗口。外壳提供深色主题、manifest 驱动导航、`NodeStateStore` 实时订阅、`NodeCommandBus` 命令提交、错误/通知提示和带超时的退出清理；所有 11 个 manifest 页面均有导航项，非 overview 页面明确标记为 NX-09 占位，不伪造表单或成功状态。无桌面显示、未编译 feature 或不支持的目标会在窗口创建前拒绝 GPUI 能力；顶层 `--gpui` 不会被静默降级到 WebUI。`scripts/gpui-smoke.sh` 在 CI 的 Xvfb 环境验证 headless 门禁与真实 X11 窗口初始化。
 - **UI 运行模式 CLI 真值接线**: 顶层及 `host`/`join`/`connect`/`up`/`start` 支持互斥的 `--headless`、`--webui`、`--gpui`；`--gui` 保留为 WebUI 兼容别名。无显示环境、冲突参数和当前不可用的原生 GPUI 均明确失败，不再静默降级或把浏览器窗口标记为 GPUI。
 - **零网络节点身份**: 节点控制面启动时即加载或生成配置根目录下唯一的 `node_identity.pem`，并从可选 `node_identity.json` 读取 `display_name`；即使没有启动任何网络，共享 `NodeSnapshot` 也会包含节点 ID、公钥指纹和显示名。网络启动计划统一复用节点级密钥，测试确认身份跨重启稳定，且私钥、种子和本机路径不会进入 DTO。README 已补充配置根目录、元数据格式和私钥文件权限注意事项。
 - **统一节点命令错误契约**: 10 个 `NodeCommand` 均覆盖 JSON 序列化往返与至少一条拒绝路径；重复/非法网络名和无效载荷统一返回 `InvalidRequest`，网络名规则与 `ConfigManager` 的 ASCII 白名单对齐。`NodeProblem` 的 7 个错误码、`network_name` 和 `retryable` 已锁定线协议并可往返；handler 测试覆盖无运行时创建/加入、未知网络探测及 `RuntimeControlError` 映射，`UpdateRouting`/`SetNetworkRole` 在 EX-06/EX-07 完成前继续返回可重试的 `Unavailable`，不会伪装成功。
@@ -29,7 +30,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
-- **动态网络运行时已接入统一节点命令层**: `NodeRuntimeHandler` 现在把动态启动、创建、票据/URL/主机加入、按网络停止与关闭转发给 `NetworkRuntimeManager` actor；初始计划支持部分失败后只重试未运行网络，创建失败会回滚配置、内嵌服务与节点状态，`auto_connect=false` 会保留服务直到显式停止。网络上下线、配置与失败状态会同步到共享快照和事件。路由热更新与网络角色变更仍返回稳定 `Unavailable`；CLI/WebUI 仍主要使用旧入口，GPUI 尚未实现，双 UI 对等测试未完成。权限仍是 `TrustedControlPlane` 且无逐主体鉴权，WebUI 仍监听全部网卡。
+- **动态网络运行时已接入统一节点命令层**: `NodeRuntimeHandler` 现在把动态启动、创建、票据/URL/主机加入、按网络停止与关闭转发给 `NetworkRuntimeManager` actor；初始计划支持部分失败后只重试未运行网络，创建失败会回滚配置、内嵌服务与节点状态，`auto_connect=false` 会保留服务直到显式停止。网络上下线、配置与失败状态会同步到共享快照和事件。路由热更新与网络角色变更仍返回稳定 `Unavailable`；CLI/WebUI 仍主要使用旧入口。NX-08 已接通 GPUI 原生外壳，但业务页面和双 UI 对等测试仍未完成。权限仍是 `TrustedControlPlane` 且无逐主体鉴权，WebUI 仍监听全部网卡。
 - **内嵌网络服务生命周期 Actor**: 新增由节点侧统一持有的 `EmbeddedServiceManager`，在同一 actor 中管理多个网络的内嵌信令与 QUIC 中继实例，提供启动去重、排序列表、按网络停止和全量关闭；服务实例在停止或 actor 关闭时释放，关闭后的新请求返回稳定错误。该基座随后已接入共享命令处理器、节点状态/事件和动态网络运行时；服务级状态已进入共享快照，但 WebUI/GPUI 展示适配仍未完成。
 - **节点配置与权限快照**: 共享 `NodeSnapshot` 现在发布启动覆盖后的有效网络配置和统一权限类别；配置投影包含路由、Exit Node、TUN/P2P、ACL 摘要与日志级别，但刻意省略私钥和日志文件路径。多网络监督器同时补上 `is_exit_node` 启动覆盖。权限快照明确标记当前为 `TrustedControlPlane`（连接控制面的调用方可全权操作），不代表已实现逐用户或远程鉴权；WebUI 仍监听全部网卡，CLI/IPC/WebUI/GPUI 尚未完整渲染这些字段。
 - **共享 UI 能力清单基座**: 新增版本化、传输无关的节点 UI manifest，声明 11 个页面及动作、字段、校验、确认、权限、可用条件和后端成熟度；必填角色字段使用显式 `Role` 校验，测试校验页面/动作唯一性、破坏性确认，以及动作成熟度与当前真实命令处理器一致。动态启动、创建、加入和停止标记为 `Implemented`，路由与角色变更标记为 `Unavailable`；WebUI/GPUI 尚未消费该 manifest，双 UI 对等和端到端测试仍未完成。
@@ -80,7 +81,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
-- 对齐 README、快速开始、部署、迁移清单与变更记录中的统一节点模型：产品层只有节点，`host`/`join` 是同一程序创建或加入网络的操作；明确当前桌面路径仍为浏览器 WebUI，GPUI 原生界面与两套 UI 的共享契约尚未完成，不能把目标状态描述为已交付。
+- 对齐 README、快速开始、部署、迁移清单与变更记录中的统一节点模型：产品层只有节点，`host`/`join` 是同一程序创建或加入网络的操作；明确 NX-08 已交付真实 GPUI 原生外壳，但 11 个业务页面、GPUI/WebUI 语义对等测试和跨平台实机验证仍未完成，不能把目标状态描述为已交付。
 - 固化统一节点目标架构：唯一产品身份为节点，协调/信令/中继/Exit Node 都是按网络承担的服务角色；明确 GPUI/WebUI 必须共享命令层、状态契约与能力清单，并列出独立协调二进制、浏览器伪桌面和重复 UI 业务逻辑的迁移/删除边界。
 - 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。
 - 记录 v2 接入前的加密能力口径：当时 UDP 数据面使用静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，没有前向保密、重放窗口和密钥轮换；当前生产路径已切换为 v2 classic 临时会话，但独立审计、后量子组合和在线重协商仍未完成，完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。

@@ -58,6 +58,12 @@ zeroize = "1"
 ml-kem = { version = "=0.3.3", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 
+# 原生桌面界面
+gpui = "0.2.2"
+
+# gpui 的 xattr 0.2.3 仍引用 Linux libc::ENOATTR；0.2.191 已移除该常量。
+libc = "=0.2.186"
+
 # 命令行
 clap = { version = "4", features = ["derive"] }
 

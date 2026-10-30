@@ -14,7 +14,7 @@
 
 角色属于“节点在某个网络中的成员状态”，不属于二进制类型、系统用户或权限等级。
 
-界面目标是桌面环境使用 GPUI，无桌面环境使用 WebUI。当前 GPUI 尚未实现；`--headless` 启动 WebUI，现有桌面路径仍会打开浏览器，不能视为 GPUI 已完成。
+桌面环境可运行顶层 `fuckipv6 --gpui` 启动真实 GPUI 原生外壳，无桌面环境使用 `--headless` WebUI。GPUI 已接通共享 manifest、状态和命令总线，但 11 个业务页面与对等测试仍待完成；`--webui` 仍是浏览器托管路径，不能与 GPUI 混称。
 
 ## 目录
 
@@ -113,7 +113,7 @@ launchd 标签为 `cc.xlei.fuckipv6`，二进制、配置、日志和 WebUI 端�
 
 ### Windows
 
-使用 release 包中的 `setup_windows.ps1`，或在管理员终端直接运行 `fuckipv6.exe`。GPUI 完成前，Windows 桌面入口仍属于浏览器 WebUI 路径。
+使用 release 包中的 `setup_windows.ps1`，或在管理员终端直接运行 `fuckipv6.exe`。Windows 上的 GPUI 原生外壳尚待目标平台构建和实机验证；未验证的桌面路径应显式使用 WebUI。
 
 ---
 
@@ -140,6 +140,7 @@ sudo fuckipv6 host \
 | `--relay-port 6667` | QUIC 中继 UDP 端口 |
 | `--external-host` | 写入邀请票据、其他节点可达的域名或地址 |
 | `--headless` | 使用 WebUI，不尝试桌面界面 |
+| `--gpui` | 在支持的桌面显示环境中启动真实 GPUI 原生外壳 |
 | `--webui-port 8080` | 本地 WebUI 监听端口 |
 
 当前 `host` 默认让本节点自动加入所创建网络。CLI 尚不能通过 `--auto-connect=false` 关闭这一行为；需要纯网络服务角色时，应等待运行时监督器完成该配置语义，不要把当前限制描述成最终设计。
@@ -238,7 +239,7 @@ export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
 
 本地 IPC 默认监听 `127.0.0.1:6668`，可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。由于 IPC 尚无认证握手，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 只表示显式确认危险意图，非回环地址仍会拒绝启动；远程操作请使用 SSH 隧道。
 
-当前 WebUI 是实际可用的无头界面。GPUI 是待实现的原生桌面界面，两者最终必须共享同一命令和状态契约，并通过自动对等测试。
+当前 WebUI 是功能较完整的无头界面。GPUI 已实现真实原生外壳并消费同一命令和状态契约，但业务页面与自动对等测试仍未完成。
 
 ---
 

@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["gpui-shell"]
+gpui-shell = ["dep:gpui"]
+
 [[bin]]
 name = "fuckipv6"
 path = "src/main.rs"
@@ -41,8 +45,13 @@ getrandom = { workspace = true }
 
 anyhow = { workspace = true }
 
+# GPUI is a native desktop dependency. Unsupported targets keep the capability
+# disabled instead of reporting a browser-hosted surface as GPUI.
+[target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), windows, target_os = "macos"))'.dependencies]
+gpui = { workspace = true, optional = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 # Windows TUN support
 [target.'cfg(windows)'.dependencies]
@@ -58,4 +67,4 @@ windows-sys = { version = "0.59", features = [
 
 # macOS utun support
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
+libc = { workspace = true }

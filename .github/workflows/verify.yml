@@ -64,6 +64,33 @@ jobs:
           path: target/supply-chain
           if-no-files-found: warn
 
+  gpui-smoke:
+    name: Native GPUI smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install virtual display and Vulkan
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y
+          xvfb libvulkan1 mesa-vulkan-drivers
+          libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
+
+      - name: Build native node binary
+        run: cargo build -p fuckipv6-client
+
+      - name: Verify capability gate and native X11 window
+        run: ./scripts/gpui-smoke.sh
+
   linux:
     name: Linux gate
     runs-on: ubuntu-latest
@@ -169,7 +196,7 @@ jobs:
   aggregate:
     name: Aggregate release decision
     if: always()
-    needs: [linux, windows, macos]
+    needs: [docs, supply-chain, gpui-smoke, linux, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

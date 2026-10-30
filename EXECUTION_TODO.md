@@ -22,9 +22,9 @@
 ## P1：双 UI 与模式选择
 
 - [ ] **EX-10 WebUI manifest/快照适配**：WebUI 获取并校验 manifest，页面、动作、字段、可用条件和错误映射由共享契约驱动。验收：manifest 版本不匹配时明确失败，不静默降级。
-- [ ] **EX-11 GPUI 应用外壳**：引入 GPUI，完成窗口、主题、导航、状态订阅、错误提示和退出清理；桌面模式不依赖浏览器。验收：可在 Linux 桌面启动并连接真实节点命令总线。
+- [x] **EX-11 GPUI 应用外壳**：引入 GPUI，完成窗口、主题、导航、状态订阅、错误提示和退出清理；桌面模式不依赖浏览器。已完成真实 `gpui::Application::run`/`open_window` 外壳、manifest 导航、`NodeStateStore` 订阅、`NodeCommandBus` 命令、错误提示、无显示/未编译能力门禁和退出清理；Linux 桌面与 Xvfb 冒烟均可保持原生窗口进程运行。业务页面与自动对等测试归 EX-12/EX-14。
 - [ ] **EX-12 GPUI 功能页面**：按 manifest 实现网络、Peer、拓扑、流量、路由、Exit Node、中继、日志、身份和设置页面。验收：不实现第二套校验、权限或状态机。
-- [x] **EX-13 UI 模式选择与回退**：实现 `--gpui`、`--headless` 和自动检测；无显示环境使用 WebUI，GPUI 初始化失败给出显式策略。验收：三种模式及失败回退可自动化测试。完成：共享 `Gpui/WebUi/Headless` 模式契约、冲突/无显示/GPUI 不可用错误、CLI 参数接线、旧 `--gui` 到 WebUI 的兼容别名及 `NodeSnapshot.ui_mode` 均已落地；原生 GPUI 未接入时明确失败，不会伪装成 WebUI。
+- [x] **EX-13 UI 模式选择与回退**：实现 `--gpui`、`--headless` 和自动检测；无显示环境使用 WebUI，GPUI 初始化失败给出显式策略。验收：三种模式及失败回退可自动化测试。完成：共享 `Gpui/WebUi/Headless` 模式契约、冲突/无显示/GPUI 不可用错误、CLI 参数接线、旧 `--gui` 到 WebUI 的兼容别名及 `NodeSnapshot.ui_mode` 均已落地；NX-08 已把顶层 `--gpui` 接到真实原生窗口，未编译或无显示时明确失败，不会伪装成 WebUI。
 - [>] **EX-14 UI 对等契约测试**：依据 manifest 自动比较 WebUI/GPUI 的页面、动作、字段、校验、错误映射和权限。验收：缺少任一动作或语义不一致时 CI 失败，覆盖无网络、单网络和双网络。
 
 ## P1：安全、性能与发布门禁
@@ -86,10 +86,11 @@
 
 ### P0-B：GPUI 与 UI 对等
 
-- [ ] **NX-08 GPUI 应用外壳（细化 EX-11）**
+- [x] **NX-08 GPUI 应用外壳（细化 EX-11）**
   - 工作：接入真正的 GPUI 原生窗口，完成主题、导航、`NodeStateStore` 订阅、命令提交、错误提示和退出清理；不得依赖浏览器、WebView 或 `--app` 窗口。
   - 依赖：NX-01、NX-03；命令总线与状态存储保持现有共享契约。
   - 验收：Linux 桌面可启动独立 GPUI 进程并连接真实节点；窗口关闭/崩溃路径不遗留运行时任务；无显示环境不会错误启动 GPUI；截图或自动窗口冒烟测试纳入 CI 可运行环境。
+  - 完成（2026-10-30）：新增 `gpui_shell`，顶层 `--gpui` 与桌面自动模式在 OS 主线程启动真实 `gpui::Application` 窗口；原生会话使用独立 Tokio runtime、真实 `MultiNetworkSupervisor`、共享 `NodeStateStore`/`NodeCommandBus`，11 页 manifest 全部有导航项，非 overview 页面显示 NX-09 占位且不伪造动作。无显示和未编译 shell 在创建窗口前失败；正常关闭、窗口创建失败和 panic unwind 均通过带超时的 `Shutdown`/runtime 回收清理。Linux Wayland 实机与 Xvfb 均验证窗口进程可启动；`scripts/gpui-smoke.sh` 同时验证 headless 能力门禁和强制 X11 原生窗口启动，并已加入 Verify CI。
 
 - [ ] **NX-09 GPUI 功能页面（细化 EX-12）**
   - 工作：严格按 11 页 manifest 实现 `overview`、`networks`、`peers`、`topology`、`traffic`、`routing`、`exit_node`、`relay`、`logs`、`identity`、`settings`。

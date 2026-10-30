@@ -1,7 +1,7 @@
 pub mod commands;
 pub mod network_commands;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fuckipv6_common::{decrypt_config_file, is_encrypted_config_path, ClientConfig};
 
@@ -418,17 +418,18 @@ fn runtime_options(
     gpui: bool,
     webui_port: u16,
 ) -> Result<commands::RuntimeOptions> {
-    let effective = resolve_ui_mode(
-        requested_ui_mode(headless, webui, gpui)?,
-        UiCapabilities::detect(),
-    )?
-    .effective;
+    let requested = requested_ui_mode(headless, webui, gpui)?;
+    let effective = resolve_ui_mode(requested, UiCapabilities::detect())?.effective;
 
     let (headless, gui) = match effective {
         UiMode::Headless => (true, false),
         UiMode::WebUi => (false, true),
+        // Runtime subcommands historically use the legacy desktop adapter when
+        // no explicit mode is supplied. Explicit --gpui must never be silently
+        // downgraded to that browser-hosted path.
+        UiMode::Gpui if requested == UiModeRequest::Auto => (false, true),
         UiMode::Gpui => {
-            anyhow::bail!("原生 GPUI 运行时尚未接入；请使用 --webui 或 --headless")
+            anyhow::bail!("GPUI 原生入口目前只支持顶层 `fuckipv6 --gpui`；命令子入口尚未接线")
         }
     };
 
@@ -442,8 +443,60 @@ fn runtime_options(
     })
 }
 
-pub async fn run() -> Result<()> {
+fn command_requests_gpui(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Host { gpui: true, .. }
+            | Commands::Join { gpui: true, .. }
+            | Commands::Connect { gpui: true, .. }
+            | Commands::Up { gpui: true, .. }
+            | Commands::Start { gpui: true, .. }
+    )
+}
+
+fn reject_unwired_subcommand_gpui(command: &Commands) -> Result<()> {
+    if command_requests_gpui(command) {
+        resolve_ui_mode(UiModeRequest::Gpui, UiCapabilities::detect())?;
+        anyhow::bail!(
+            "GPUI 原生入口目前只支持顶层 `fuckipv6 --gpui`；请先进入原生应用，再通过共享命令创建或加入网络"
+        );
+    }
+    Ok(())
+}
+
+fn async_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("无法创建异步运行时")
+}
+
+/// Synchronous process entrypoint. GPUI must be constructed on the OS main
+/// thread, so native desktop mode is selected before any Tokio runtime exists.
+pub fn run_entrypoint() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(command) = cli.command.as_ref() {
+        reject_unwired_subcommand_gpui(command)?;
+    } else {
+        let requested_ui = requested_ui_mode(cli.headless, cli.webui, cli.gpui)?;
+        let effective = resolve_ui_mode(requested_ui, UiCapabilities::detect())?.effective;
+        if effective.is_gpui() {
+            return run_native_default_app(cli);
+        }
+    }
+
+    async_runtime()?.block_on(run_parsed(cli))
+}
+
+/// Async compatibility entrypoint for callers that already own a runtime.
+/// The process `main` must use `run_entrypoint` so native GPUI never starts on
+/// a Tokio worker thread.
+pub async fn run() -> Result<()> {
+    run_parsed(Cli::parse()).await
+}
+
+async fn run_parsed(cli: Cli) -> Result<()> {
     if let Some(command) = cli.command {
         run_command(command).await
     } else {
@@ -463,6 +516,46 @@ pub async fn run() -> Result<()> {
     }
 }
 
+#[cfg(all(
+    feature = "gpui-shell",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        windows,
+        target_os = "macos"
+    )
+))]
+fn run_native_default_app(cli: Cli) -> Result<()> {
+    if cli.host {
+        anyhow::bail!(
+            "NX-08 尚未把顶层 --host 接入原生外壳；请使用 --webui，或去掉 --host 后在应用内创建网络"
+        );
+    }
+
+    logging::init_default()?;
+    crate::gpui_shell::run(commands::RuntimeOptions {
+        routing_mode: None,
+        exit_node: None,
+        is_exit_node: cli.is_exit_node,
+        headless: false,
+        // GPUI is not the browser-hosted `gui` adapter. Port 0 prevents a
+        // future shared runtime plan from implicitly opening WebUI.
+        gui: false,
+        webui_port: 0,
+    })
+}
+
+#[cfg(not(all(
+    feature = "gpui-shell",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        windows,
+        target_os = "macos"
+    )
+)))]
+fn run_native_default_app(_cli: Cli) -> Result<()> {
+    anyhow::bail!("当前构建未包含可用的原生 GPUI 外壳")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_default_app(
     port: u16,
@@ -477,6 +570,10 @@ pub async fn run_default_app(
 ) -> Result<()> {
     logging::init_default()?;
     let ui_mode = resolve_ui_mode(requested_ui, UiCapabilities::detect())?;
+
+    if ui_mode.effective.is_gpui() {
+        anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过 `fuckipv6 --gpui` 运行");
+    }
 
     let controller = std::sync::Arc::new(crate::webui::AppController::new());
     if let Some(enabled) = is_exit_node {
@@ -502,9 +599,7 @@ pub async fn run_default_app(
     }
 
     match ui_mode.effective {
-        UiMode::Gpui => {
-            anyhow::bail!("原生 GPUI 运行时尚未接入；请使用 --webui 或 --headless")
-        }
+        UiMode::Gpui => unreachable!("GPUI is rejected before the WebUI server starts"),
         UiMode::WebUi => crate::ui::run_webui_window(port).await?,
         UiMode::Headless => {
             println!("========================================================================");

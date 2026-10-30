@@ -2,7 +2,7 @@
 
 基于 IPv4/IPv6 双栈虚拟地址的组网软件，当前可直接用于受控环境组网。洋葱路由、Kademlia DHT 与分块传输已作为 P2P 基础设施接入，但尚未形成完整的用户产品流程。
 
-产品层只有一种身份：**节点**。只发布一个 `fuckipv6` 程序；创建、加入、托管网络、中继和 Exit Node 都是节点在某网络中的能力，不是“客户端/服务端”两种程序。目标形态是桌面环境使用 GPUI 原生界面，无桌面环境使用 WebUI，两者共享同一命令层、状态模型、校验和错误语义。当前已完成单二进制入口收敛，并由 `NodeRuntimeHandler` 接通动态启动、创建、加入、按网络停止与关闭；但这些能力目前主要到后端命令层，CLI/WebUI 仍主要使用旧入口，GPUI 尚未实现，双 UI 对等性仍未完成。
+产品层只有一种身份：**节点**。只发布一个 `fuckipv6` 程序；创建、加入、托管网络、中继和 Exit Node 都是节点在某网络中的能力，不是“客户端/服务端”两种程序。目标形态是桌面环境使用 GPUI 原生界面，无桌面环境使用 WebUI，两者共享同一命令层、状态模型、校验和错误语义。当前已完成单二进制入口收敛，并由 `NodeRuntimeHandler` 接通动态启动、创建、加入、按网络停止与关闭。顶层桌面入口已接入真实 GPUI 原生外壳，可启动窗口、读取共享 manifest、订阅 `NodeStateStore` 并通过 `NodeCommandBus` 提交命令；NX-09 的 11 个业务页面仍以明确占位为主，CLI/WebUI 也仍主要使用旧入口，双 UI 对等性尚未完成。
 
 ## ✨ 核心能力
 
@@ -12,15 +12,15 @@
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
 - 🔒 **身份与鉴权**: Ed25519 签名验证；网络服务 Web/API 可配置 JWT；节点本地 WebUI/API 默认只监听回环，远程监听必须显式开启危险开关并配置认证，无认证的远程 IPC 始终拒绝启动
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
-- 📊 **可观测性**: 节点 WebUI、网络服务管理面板、实时拓扑、流量监控与本地 IPC 控制台；GPUI 桌面外壳尚未实现
+- 📊 **可观测性**: 节点 WebUI、网络服务管理面板、实时拓扑、流量监控、本地 IPC 控制台，以及可启动的 GPUI 原生应用外壳（业务页面待 NX-09 完成）
 
 ## 📌 能力状态
 
 | 状态 | 当前范围 |
 |------|----------|
-| **可直接使用** | 单一 `fuckipv6` 节点程序、节点级稳定身份、双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、节点 CLI/WebUI、`host`/`join` 与多网络配置 |
-| **基础设施已接入（待产品化）** | 统一节点动态运行时命令（启动、创建、加入、按网络停止）已接通后端处理器，但 CLI/WebUI/GPUI 尚未全部迁移；多中继连接时择优、3-Hop 洋葱电路、Kademlia DHT、Blake3 分块传输已有引擎接入与单元测试，但缺少完整 UI 用户流程 |
-| **尚未产品化** | GPUI 原生桌面应用、GPUI/WebUI 共享契约与对等测试、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
+| **可直接使用** | 单一 `fuckipv6` 节点程序、节点级稳定身份、双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、节点 CLI/WebUI、`host`/`join` 与多网络配置；Linux 桌面可启动 GPUI 原生外壳 |
+| **基础设施已接入（待产品化）** | GPUI 外壳已接通共享 manifest、状态和命令总线，但 11 个业务页面、表单动作与 UI 对等测试仍待 NX-09/NX-10；统一节点动态运行时命令（启动、创建、加入、按网络停止）已接通后端处理器，但 CLI/WebUI 尚未全部迁移；多中继连接时择优、3-Hop 洋葱电路、Kademlia DHT、Blake3 分块传输已有引擎接入与单元测试，但缺少完整 UI 用户流程 |
+| **尚未产品化** | GPUI 业务页面与 GPUI/WebUI 语义对等测试、跨平台 GPUI 实机验证、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
 
 ## 📖 快速开始
 
@@ -225,8 +225,9 @@ fuckipv6/
 - [x] 智能分流（MeshOnly / BypassMainland / GlobalProxy）与 Linux Exit Node 内核转发/NAT
 - [x] `fuckipv6 host` 一键建网与 `fk://` 邀请票据
 - [x] 多网络并发、独立 TUN 与路由隔离
-- [x] 自适应 WebUI；当前桌面路径仍是浏览器窗口，不是 GPUI 原生桌面
-- [ ] GPUI 桌面外壳与 GPUI/WebUI 共享契约、功能对等测试
+- [x] 自适应 WebUI；`--webui` 仍显式启动浏览器托管界面
+- [x] 真实 GPUI 原生外壳：窗口、基础主题/导航、共享 manifest、`NodeStateStore` 订阅、`NodeCommandBus` 命令、错误提示和退出清理
+- [ ] GPUI 的 11 个业务页面、表单动作、GPUI/WebUI 功能对等测试与跨平台实机验证
 - [x] 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输基础设施（引擎与测试已接入，尚无完整用户操作流程）
 
 生产发布前仍建议完成真实跨公网/跨 NAT、Windows/macOS 实机、更大规模 WAN 压测和外部安全审计。
@@ -241,6 +242,7 @@ fuckipv6/
   - TUN/TAP (虚拟网卡)
 - **序列化**: postcard
 - **加密**: Secure Session v2 classic（临时 X25519、Ed25519、HKDF-SHA-512、HMAC-SHA-256、ChaCha20-Poly1305 / AES-256-GCM）；后量子迁移与审计边界见 `SECURITY_PERFORMANCE_TODO.md`
+- **GUI**: GPUI 0.2（Linux 原生窗口已实机/Xvfb 冒烟；Windows/macOS 仍待目标平台验证）
 - **CLI**: clap
 
 ## 📊 性能目标

@@ -2,7 +2,7 @@
 
 fuckipv6 is a dual-stack overlay network built around one product identity: the node. A node creates a local TUN interface and exchanges raw IPv4/IPv6 packets over a dual-mode QUIC/UDP P2P data plane. Discovery, virtual address allocation, health cleanup, WebSocket signaling, QUIC relay discovery, and signaling-channel fallback are network-service capabilities that a node can provide for a network or consume from another node.
 
-Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products. The repository now publishes only the `fuckipv6` node executable; the former `fuckipv6-coordinator` user entry point has been removed and coordinator capabilities remain internal libraries. The repository is still in a documented migration state because the desktop entry uses a browser window instead of GPUI, and the two UI surfaces do not yet share a tested command and state contract.
+Onion circuits, Kademlia DHT, and chunk transfer are integrated P2P infrastructure, but they are not yet complete user-facing products. The repository now publishes only the `fuckipv6` node executable; the former `fuckipv6-coordinator` user entry point has been removed and coordinator capabilities remain internal libraries. The top-level desktop entry now opens a real GPUI native shell backed by the shared node command bus and state store; it is not a browser, WebView, or `--app` window. The repository remains in a documented migration state because the GPUI business pages and automated GPUI/WebUI semantic parity tests are not complete.
 
 ## Unified Node Target Architecture (UN-01)
 
@@ -208,7 +208,7 @@ Coordinator-side observability:
 - Packet-level ACL filtering and coordinator admission blacklist.
 - Multi-relay selection at connection time using concurrent RTT/handshake probing.
 - Internal network-service WebUI/API with optional JWT, plus node CLI and a local WebUI that defaults to loopback-only exposure.
-- The current desktop entry uses a browser `--app` window when available and falls back to the default browser. It is a temporary WebUI launcher, not GPUI, and must not be presented as native desktop parity.
+- The top-level desktop entry runs a real GPUI native shell with a dark theme, manifest-driven navigation, shared snapshot subscription, command submission, error banners, and timeout-bounded shutdown cleanup. The `--webui` path remains a browser-hosted surface; runtime subcommands that historically selected the desktop adapter still use the legacy WebUI adapter.
 - Linux Exit Node forwarding through kernel IP forwarding, policy routing, and iptables/NAT rules.
 - Multi-network saved profiles and symmetric `host`/`join` networking with an embedded coordinator.
 - Smart routing (`MeshOnly`, `BypassMainland`, `GlobalProxy`) and full Chinese runtime logging.
@@ -222,7 +222,7 @@ Coordinator-side observability:
 
 ### Not productized
 
-- GPUI native desktop integration and a shared, tested GPUI/WebUI command and state contract.
+- GPUI business pages/action forms for the 11-page manifest, automated GPUI/WebUI semantic parity tests, and cross-platform GPUI runtime validation.
 - User-space NAT; the current Exit Node path is Linux kernel-based.
 - Windows/macOS Exit Node parity with the Linux implementation.
 - Repeatable real cross-host NAT, production WAN scale, independent security audit, and target-platform runtime validation.

@@ -137,8 +137,36 @@ impl UiCapabilities {
     pub fn detect() -> Self {
         Self {
             display: DisplayEnvironment::detect(),
-            gpui_available: false,
+            gpui_available: gpui_shell_available(),
         }
+    }
+}
+
+/// A capability is true only when the native GPUI module was compiled for a
+/// supported desktop target. Display availability is checked separately by
+/// `resolve_ui_mode` before any platform window is created.
+pub const fn gpui_shell_available() -> bool {
+    #[cfg(all(
+        feature = "gpui-shell",
+        any(
+            all(target_os = "linux", not(target_env = "musl")),
+            windows,
+            target_os = "macos"
+        )
+    ))]
+    {
+        true
+    }
+    #[cfg(not(all(
+        feature = "gpui-shell",
+        any(
+            all(target_os = "linux", not(target_env = "musl")),
+            windows,
+            target_os = "macos"
+        )
+    )))]
+    {
+        false
     }
 }
 
@@ -305,6 +333,19 @@ mod tests {
         )
         .expect("available GPUI should resolve");
         assert_eq!(resolution.effective, UiMode::Gpui);
+    }
+
+    #[test]
+    fn gpui_capability_matches_the_compiled_supported_feature() {
+        let expected = cfg!(all(
+            feature = "gpui-shell",
+            any(
+                all(target_os = "linux", not(target_env = "musl")),
+                windows,
+                target_os = "macos"
+            )
+        ));
+        assert_eq!(gpui_shell_available(), expected);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > 目标：`fuckipv6` 只发布一个节点程序。节点不再在产品层区分“客户端”和“服务端”；有桌面环境时使用 GPUI 原生 GUI，无桌面环境时使用 WebUI，两套 UI 必须具有完全一致的功能、状态、校验和错误语义。
 >
-> 当前状态：单二进制发布入口已完成，workspace 只产生用户程序 `fuckipv6`；节点生命周期、启动计划、多网络监督器、共享命令总线、真实运行时处理器与状态存储基座已落地。`NodeRuntimeHandler` 已接通 `GetSnapshot`、`StartNetworks`、`CreateNetwork`、`JoinNetwork`、按网络 `StopNetworks`、`ProbePeer` 与 `Shutdown`；`NetworkRuntimeManager` actor 负责初始计划、动态启动、创建、票据/URL 加入、按网络停止和全量关闭，创建失败会回滚配置、服务与状态，`auto_connect=false` 会保留内嵌服务直到显式停止，并同步网络状态、配置快照与事件。监督器从真实运行时填充公开身份、Peer、流量和有界 WARN/ERROR 日志。路由热更新和网络角色变更仍明确返回 `Unavailable`；CLI/WebUI 命令入口仍主要走旧路径，GPUI 尚未实现，声明式 UI manifest 已固定 11 个页面但 WebUI/GPUI 尚未消费，双 UI 对等测试未完成。当前权限模型仍是 `TrustedControlPlane`、无逐主体鉴权，WebUI 仍监听全部网卡。
+> 当前状态：单二进制发布入口已完成，workspace 只产生用户程序 `fuckipv6`；节点生命周期、启动计划、多网络监督器、共享命令总线、真实运行时处理器与状态存储基座已落地。`NodeRuntimeHandler` 已接通 `GetSnapshot`、`StartNetworks`、`CreateNetwork`、`JoinNetwork`、按网络 `StopNetworks`、`ProbePeer` 与 `Shutdown`；`NetworkRuntimeManager` actor 负责初始计划、动态启动、创建、票据/URL 加入、按网络停止和全量关闭，创建失败会回滚配置、服务与状态，`auto_connect=false` 会保留内嵌服务直到显式停止，并同步网络状态、配置快照与事件。监督器从真实运行时填充公开身份、Peer、流量和有界 WARN/ERROR 日志。路由热更新和网络角色变更仍明确返回 `Unavailable`；CLI/WebUI 命令入口仍主要走旧路径；GPUI 真实原生外壳已实现并消费共享 manifest、状态与命令，但 11 个业务页面仍待 NX-09，WebUI 适配和双 UI 对等测试未完成。当前权限模型仍是 `TrustedControlPlane`、无逐主体鉴权，WebUI 仍监听全部网卡。
 >
 > 保护约束：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 当前属于用户正在处理的 Exit Node 持久化范围，未获确认前不得修改、暂存或提交。
 
@@ -42,7 +42,7 @@
     - [x] **UN-06b-3 配置与权限快照**：共享快照发布启动覆盖后的有效网络配置，包括路由模式、出口目标、TUN/P2P 参数、ACL 摘要和 Exit Node 设置，并省略私钥路径与日志文件路径；动态运行时在创建、启动和停止时同步配置快照，创建失败会移除回滚状态。权限快照复用 UI manifest 的能力类别并明确标记 `TrustedControlPlane`，不伪装成已实现逐用户或远程鉴权。WebUI 仍监听全部网卡，CLI/IPC/WebUI/GPUI 尚未完整渲染和消费这些字段。
 - [ ] **UN-07 UI 能力与导航清单**：用声明式 manifest 固定页面、操作、表单字段、校验、确认项和可用条件，作为双 UI 对等性的唯一事实来源。
   - [x] **UN-07a 声明式 manifest 基座**：定义版本化、传输无关的页面、动作、字段、校验、确认、权限、可用条件和后端成熟度模型；覆盖 overview、networks、peers、topology、traffic、routing、exit_node、relay、logs、identity、settings 共 11 个页面，并用测试验证页面/动作 ID 唯一、必填字段校验、破坏性确认、后端状态与处理器一致，以及不引入产品级 client/server 身份。动态启动、创建、加入和停止当前标记为 `Implemented`，路由与角色变更标记为 `Unavailable`；WebUI/GPUI 适配器和双 UI 对等测试尚未完成，因此不勾选 UN-07。
-- [ ] **UN-08 GPUI 应用外壳**：引入 GPUI，实现窗口生命周期、主题、导航、状态订阅、错误提示和退出清理；桌面模式不得依赖浏览器。
+- [x] **UN-08 GPUI 应用外壳**：引入 GPUI，实现窗口生命周期、主题、导航、状态订阅、错误提示和退出清理；桌面模式不得依赖浏览器。已完成真实原生窗口、共享契约接线、无显示/未编译门禁和退出清理；业务页面归 UN-09。
 - [ ] **UN-09 GPUI 功能页面**：实现网络创建/加入/切换、Peer、拓扑、流量、配置、路由、Exit Node、中继、日志和身份管理页面，全部消费共享契约。
 - [ ] **UN-10 WebUI 适配共享契约**：让 WebUI 仅作为共享命令和快照的 HTTP/WebSocket 适配器，不再拥有独立业务规则或另一套状态语义。
 - [ ] **UN-11 模式选择与回退**：可靠检测桌面会话，支持 `--gpui`、`--headless` 和自动模式；无显示环境启动 WebUI，GPUI 初始化失败时给出显式策略而不是静默打开浏览器。

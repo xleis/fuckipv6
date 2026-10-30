@@ -7,9 +7,12 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{ExitNodeConfig, VirtualIps};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::future::Future;
 use std::net::IpAddr;
 use std::path::Path;
-use tokio::process::Command;
+use std::pin::Pin;
+use std::sync::Arc;
 
 const ROUTE_PROTOCOL: &str = "99";
 const IPTABLES_WAIT_SECONDS: &str = "5";
@@ -23,6 +26,68 @@ struct IptablesRule {
     args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CommandInvocation {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandResult {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+type CommandFuture<'a> = Pin<Box<dyn Future<Output = Result<CommandResult>> + Send + 'a>>;
+
+trait ExitCommandRunner: Send + Sync {
+    fn run(&self, invocation: CommandInvocation) -> CommandFuture<'_>;
+    fn run_sync(&self, invocation: CommandInvocation) -> Result<CommandResult>;
+    fn read_file(&self, path: &str) -> Result<String>;
+    fn write_file(&self, path: &str, contents: &[u8]) -> Result<()>;
+}
+
+#[derive(Debug)]
+struct SystemCommandRunner;
+
+impl ExitCommandRunner for SystemCommandRunner {
+    fn run(&self, invocation: CommandInvocation) -> CommandFuture<'_> {
+        Box::pin(async move {
+            let output = tokio::process::Command::new(&invocation.program)
+                .args(&invocation.args)
+                .output()
+                .await
+                .with_context(|| format!("无法执行 {}", invocation.program))?;
+            Ok(CommandResult {
+                success: output.status.success(),
+                stdout: output.stdout,
+                stderr: output.stderr,
+            })
+        })
+    }
+
+    fn run_sync(&self, invocation: CommandInvocation) -> Result<CommandResult> {
+        let output = std::process::Command::new(&invocation.program)
+            .args(&invocation.args)
+            .output()
+            .with_context(|| format!("无法执行 {}", invocation.program))?;
+        Ok(CommandResult {
+            success: output.status.success(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    fn read_file(&self, path: &str) -> Result<String> {
+        Ok(std::fs::read_to_string(path)?)
+    }
+
+    fn write_file(&self, path: &str, contents: &[u8]) -> Result<()> {
+        Ok(std::fs::write(Path::new(path), contents)?)
+    }
+}
+
 #[derive(Debug)]
 struct ClientForwardState {
     addresses: HashSet<IpAddr>,
@@ -31,7 +96,6 @@ struct ClientForwardState {
 }
 
 /// Owns forwarding, NAT and return-route resources for one Exit Node process.
-#[derive(Debug)]
 pub struct LinuxExitForwarder {
     tun_name: String,
     external_v4_interface: String,
@@ -42,6 +106,22 @@ pub struct LinuxExitForwarder {
     ipv4_forward_changed: bool,
     ipv6_forward_changed: bool,
     cleaned: bool,
+    runner: Arc<dyn ExitCommandRunner>,
+}
+
+impl fmt::Debug for LinuxExitForwarder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LinuxExitForwarder")
+            .field("tun_name", &self.tun_name)
+            .field("external_v4_interface", &self.external_v4_interface)
+            .field("external_v6_interface", &self.external_v6_interface)
+            .field("forward_chain", &self.forward_chain)
+            .field("nat_chain", &self.nat_chain)
+            .field("clients", &self.clients)
+            .field("cleaned", &self.cleaned)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LinuxExitForwarder {
@@ -51,10 +131,11 @@ impl LinuxExitForwarder {
             return Ok(None);
         }
 
-        let external_v4_interface = default_route_interface(false)
+        let runner: Arc<dyn ExitCommandRunner> = Arc::new(SystemCommandRunner);
+        let external_v4_interface = default_route_interface(runner.as_ref(), false)
             .await
             .context("无法检测 Exit Node 的 IPv4 默认出口网卡")?;
-        let external_v6_interface = default_route_interface(true).await.ok();
+        let external_v6_interface = default_route_interface(runner.as_ref(), true).await.ok();
         // Chain ownership is keyed by TUN name rather than PID so a crash and
         // restart can discover and purge resources left by the previous process.
         let forward_chain = chain_name("F", tun_name);
@@ -70,12 +151,13 @@ impl LinuxExitForwarder {
             ipv4_forward_changed: false,
             ipv6_forward_changed: false,
             cleaned: false,
+            runner,
         };
 
-        if let Err(error) = manager.install_forwarding().await {
-            manager.rollback();
-            return Err(error).context("安装 Exit Node 转发与 NAT 失败，已回滚");
-        }
+        manager
+            .install_resources()
+            .await
+            .context("安装 Exit Node 转发与 NAT 失败，已回滚")?;
 
         tracing::info!(
             "Exit Node 内核转发已就绪: tun={}, ipv4_out={}, ipv6_out={:?}, chains={}/{}",
@@ -86,6 +168,14 @@ impl LinuxExitForwarder {
             manager.nat_chain
         );
         Ok(Some(manager))
+    }
+
+    async fn install_resources(&mut self) -> Result<()> {
+        if let Err(error) = self.install_forwarding().await {
+            self.rollback();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Whether the host has a usable outbound path for this family.
@@ -125,7 +215,7 @@ impl LinuxExitForwarder {
             ordered_addresses.sort_unstable();
 
             for address in ordered_addresses {
-                if ensure_return_route(&self.tun_name, address).await? {
+                if ensure_return_route(self.runner.as_ref(), &self.tun_name, address).await? {
                     state.owned_routes.push(address);
                 }
             }
@@ -154,7 +244,7 @@ impl LinuxExitForwarder {
         .await;
 
         if let Err(error) = result {
-            rollback_client_state_for_tun(&self.tun_name, &mut state).await;
+            rollback_client_state_for_tun(self.runner.as_ref(), &self.tun_name, &mut state).await;
             return Err(error)
                 .with_context(|| format!("无法为客户端 {client_id} 安装 Exit Node 转发资源"));
         }
@@ -176,34 +266,43 @@ impl LinuxExitForwarder {
         let Some(mut state) = self.clients.remove(client_id) else {
             return Ok(());
         };
-        rollback_client_state_for_tun(&self.tun_name, &mut state).await;
+        rollback_client_state_for_tun(self.runner.as_ref(), &self.tun_name, &mut state).await;
         tracing::info!("Exit Node 已撤销客户端 {} 的转发资源", client_id);
         Ok(())
     }
 
+    async fn run_iptables(&self, program: &str, table: Option<&str>, args: &[&str]) -> Result<()> {
+        run_iptables(self.runner.as_ref(), program, table, args).await
+    }
+
     async fn install_forwarding(&mut self) -> Result<()> {
-        self.ipv4_forward_changed = ensure_sysctl("/proc/sys/net/ipv4/ip_forward")?;
+        self.ipv4_forward_changed =
+            ensure_sysctl(self.runner.as_ref(), "/proc/sys/net/ipv4/ip_forward")?;
         if self.external_v6_interface.is_some() {
-            self.ipv6_forward_changed = ensure_sysctl("/proc/sys/net/ipv6/conf/all/forwarding")?;
+            self.ipv6_forward_changed = ensure_sysctl(
+                self.runner.as_ref(),
+                "/proc/sys/net/ipv6/conf/all/forwarding",
+            )?;
         }
 
         self.purge_stale_chains().await?;
         self.purge_stale_return_routes().await?;
-        run_iptables(
+        self.run_iptables(
             "iptables",
             Some("filter"),
             &["-N", self.forward_chain.as_str()],
         )
         .await?;
-        run_iptables("iptables", Some("nat"), &["-N", self.nat_chain.as_str()]).await?;
+        self.run_iptables("iptables", Some("nat"), &["-N", self.nat_chain.as_str()])
+            .await?;
         self.install_terminal_drops("iptables").await?;
-        run_iptables(
+        self.run_iptables(
             "iptables",
             Some("filter"),
             &["-I", "FORWARD", "1", "-j", self.forward_chain.as_str()],
         )
         .await?;
-        run_iptables(
+        self.run_iptables(
             "iptables",
             Some("nat"),
             &["-I", "POSTROUTING", "1", "-j", self.nat_chain.as_str()],
@@ -211,21 +310,22 @@ impl LinuxExitForwarder {
         .await?;
 
         if let Some(interface) = self.external_v6_interface.as_deref() {
-            run_iptables(
+            self.run_iptables(
                 "ip6tables",
                 Some("filter"),
                 &["-N", self.forward_chain.as_str()],
             )
             .await?;
-            run_iptables("ip6tables", Some("nat"), &["-N", self.nat_chain.as_str()]).await?;
+            self.run_iptables("ip6tables", Some("nat"), &["-N", self.nat_chain.as_str()])
+                .await?;
             self.install_terminal_drops("ip6tables").await?;
-            run_iptables(
+            self.run_iptables(
                 "ip6tables",
                 Some("filter"),
                 &["-I", "FORWARD", "1", "-j", self.forward_chain.as_str()],
             )
             .await?;
-            run_iptables(
+            self.run_iptables(
                 "ip6tables",
                 Some("nat"),
                 &["-I", "POSTROUTING", "1", "-j", self.nat_chain.as_str()],
@@ -242,7 +342,7 @@ impl LinuxExitForwarder {
     async fn install_terminal_drops(&self, program: &'static str) -> Result<()> {
         for args in terminal_forward_drop_rules(&self.forward_chain, &self.tun_name) {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            run_iptables(program, Some("filter"), &refs).await?;
+            self.run_iptables(program, Some("filter"), &refs).await?;
         }
         Ok(())
     }
@@ -268,10 +368,11 @@ impl LinuxExitForwarder {
         // authenticated client exception above them so rules added while the
         // Exit Node is live remain reachable.
         for args in client_forward_rules(&self.forward_chain, &self.tun_name, source) {
-            install_iptables_rule(program, Some("filter"), args, rules).await?;
+            install_iptables_rule(self.runner.as_ref(), program, Some("filter"), args, rules)
+                .await?;
         }
         let nat_rule = nat_masquerade_rule(&self.nat_chain, source, external_interface);
-        install_iptables_rule(program, Some("nat"), nat_rule, rules).await?;
+        install_iptables_rule(self.runner.as_ref(), program, Some("nat"), nat_rule, rules).await?;
         Ok(())
     }
 
@@ -281,13 +382,12 @@ impl LinuxExitForwarder {
             families.push(true);
         }
         for ipv6 in families {
-            let mut command = Command::new("ip");
+            let mut args = vec!["route".to_string()];
             if ipv6 {
-                command.arg("-6");
+                args.insert(0, "-6".to_string());
             }
-            let output = command
-                .args([
-                    "route",
+            args.extend(
+                [
                     "flush",
                     "table",
                     "main",
@@ -295,11 +395,19 @@ impl LinuxExitForwarder {
                     ROUTE_PROTOCOL,
                     "dev",
                     &self.tun_name,
-                ])
-                .output()
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
+            let output = self
+                .runner
+                .run(CommandInvocation {
+                    program: "ip".to_string(),
+                    args,
+                })
                 .await
                 .context("清理 Exit Node 残留回程路由时无法执行 ip 命令")?;
-            if !output.status.success() {
+            if !output.success {
                 anyhow::bail!(
                     "清理 Exit Node 残留回程路由失败: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
@@ -314,7 +422,7 @@ impl LinuxExitForwarder {
             ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
             ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
         ] {
-            purge_iptables_chain(program, table, builtin, chain).await?;
+            purge_iptables_chain(self.runner.as_ref(), program, table, builtin, chain).await?;
         }
         if self.external_v6_interface.is_some() {
             for (program, table, builtin, chain) in [
@@ -326,7 +434,7 @@ impl LinuxExitForwarder {
                 ),
                 ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
             ] {
-                purge_iptables_chain(program, table, builtin, chain).await?;
+                purge_iptables_chain(self.runner.as_ref(), program, table, builtin, chain).await?;
             }
         }
         Ok(())
@@ -341,10 +449,10 @@ impl LinuxExitForwarder {
 
         for state in self.clients.values_mut() {
             for rule in state.rules.iter().rev() {
-                let _ = run_iptables_sync_delete(rule);
+                let _ = run_iptables_sync_delete(self.runner.as_ref(), rule);
             }
             for address in state.owned_routes.iter().rev() {
-                let _ = remove_return_route_sync(&self.tun_name, *address);
+                let _ = remove_return_route_sync(self.runner.as_ref(), &self.tun_name, *address);
             }
         }
         self.clients.clear();
@@ -353,7 +461,7 @@ impl LinuxExitForwarder {
             ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
             ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
         ] {
-            cleanup_iptables_chain_sync(program, table, builtin, chain);
+            cleanup_iptables_chain_sync(self.runner.as_ref(), program, table, builtin, chain);
         }
         if self.external_v6_interface.is_some() {
             for (program, table, builtin, chain) in [
@@ -365,15 +473,18 @@ impl LinuxExitForwarder {
                 ),
                 ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
             ] {
-                cleanup_iptables_chain_sync(program, table, builtin, chain);
+                cleanup_iptables_chain_sync(self.runner.as_ref(), program, table, builtin, chain);
             }
         }
 
         if self.ipv4_forward_changed {
-            let _ = restore_sysctl("/proc/sys/net/ipv4/ip_forward");
+            let _ = restore_sysctl(self.runner.as_ref(), "/proc/sys/net/ipv4/ip_forward");
         }
         if self.ipv6_forward_changed {
-            let _ = restore_sysctl("/proc/sys/net/ipv6/conf/all/forwarding");
+            let _ = restore_sysctl(
+                self.runner.as_ref(),
+                "/proc/sys/net/ipv6/conf/all/forwarding",
+            );
         }
     }
 }
@@ -385,13 +496,14 @@ impl Drop for LinuxExitForwarder {
 }
 
 async fn install_iptables_rule(
+    runner: &dyn ExitCommandRunner,
     program: &'static str,
     table: Option<&'static str>,
     args: Vec<String>,
     rules: &mut Vec<IptablesRule>,
 ) -> Result<()> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_iptables(program, table, &refs).await?;
+    run_iptables(runner, program, table, &refs).await?;
     rules.push(IptablesRule {
         program,
         table,
@@ -400,33 +512,40 @@ async fn install_iptables_rule(
     Ok(())
 }
 
-async fn rollback_client_state_for_tun(tun_name: &str, state: &mut ClientForwardState) {
+async fn rollback_client_state_for_tun(
+    runner: &dyn ExitCommandRunner,
+    tun_name: &str,
+    state: &mut ClientForwardState,
+) {
     for rule in state.rules.iter().rev() {
-        if let Err(error) = run_iptables_delete(rule).await {
+        if let Err(error) = run_iptables_delete(runner, rule).await {
             tracing::warn!("删除 Exit Node iptables 规则失败: {error:#}");
         }
     }
     state.rules.clear();
 
     for address in state.owned_routes.iter().rev() {
-        if let Err(error) = remove_return_route(tun_name, *address).await {
+        if let Err(error) = remove_return_route(runner, tun_name, *address).await {
             tracing::warn!("删除 Exit Node 回程路由失败: {error:#}");
         }
     }
     state.owned_routes.clear();
 }
 
-async fn default_route_interface(ipv6: bool) -> Result<String> {
-    let mut command = Command::new("ip");
+async fn default_route_interface(runner: &dyn ExitCommandRunner, ipv6: bool) -> Result<String> {
+    let mut args = vec!["route".to_string()];
     if ipv6 {
-        command.arg("-6");
+        args.insert(0, "-6".to_string());
     }
-    let output = command
-        .args(["route", "show", "default"])
-        .output()
+    args.extend(["show", "default"].into_iter().map(str::to_string));
+    let output = runner
+        .run(CommandInvocation {
+            program: "ip".to_string(),
+            args,
+        })
         .await
         .context("无法执行 ip route show default")?;
-    if !output.status.success() {
+    if !output.success {
         anyhow::bail!(
             "读取默认路由失败: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -537,18 +656,32 @@ fn host_prefix(address: IpAddr) -> Result<String> {
     }
 }
 
-async fn ensure_return_route(tun_name: &str, address: IpAddr) -> Result<bool> {
-    let prefix = host_prefix(address)?;
-    let mut show = Command::new("ip");
-    if address.is_ipv6() {
-        show.arg("-6");
+fn ip_invocation(ipv6: bool, args: &[&str]) -> CommandInvocation {
+    let mut command_args = Vec::with_capacity(args.len() + usize::from(ipv6));
+    if ipv6 {
+        command_args.push("-6".to_string());
     }
-    let output = show
-        .args(["route", "show", "exact", &prefix])
-        .output()
+    command_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    CommandInvocation {
+        program: "ip".to_string(),
+        args: command_args,
+    }
+}
+
+async fn ensure_return_route(
+    runner: &dyn ExitCommandRunner,
+    tun_name: &str,
+    address: IpAddr,
+) -> Result<bool> {
+    let prefix = host_prefix(address)?;
+    let output = runner
+        .run(ip_invocation(
+            address.is_ipv6(),
+            &["route", "show", "exact", &prefix],
+        ))
         .await
         .with_context(|| format!("检查 Exit Node 回程路由失败: {prefix}"))?;
-    if !output.status.success() {
+    if !output.success {
         anyhow::bail!(
             "检查 Exit Node 回程路由失败: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -563,24 +696,22 @@ async fn ensure_return_route(tun_name: &str, address: IpAddr) -> Result<bool> {
         anyhow::bail!("回程地址 {prefix} 已被其他网卡占用: {}", existing.trim());
     }
 
-    let mut add = Command::new("ip");
-    if address.is_ipv6() {
-        add.arg("-6");
-    }
-    let output = add
-        .args([
-            "route",
-            "add",
-            &prefix,
-            "dev",
-            tun_name,
-            "proto",
-            ROUTE_PROTOCOL,
-        ])
-        .output()
+    let output = runner
+        .run(ip_invocation(
+            address.is_ipv6(),
+            &[
+                "route",
+                "add",
+                &prefix,
+                "dev",
+                tun_name,
+                "proto",
+                ROUTE_PROTOCOL,
+            ],
+        ))
         .await
         .with_context(|| format!("添加 Exit Node 回程路由失败: {prefix}"))?;
-    if !output.status.success() {
+    if !output.success {
         anyhow::bail!(
             "添加 Exit Node 回程路由失败 ({}): {}",
             prefix,
@@ -590,26 +721,28 @@ async fn ensure_return_route(tun_name: &str, address: IpAddr) -> Result<bool> {
     Ok(true)
 }
 
-async fn remove_return_route(tun_name: &str, address: IpAddr) -> Result<()> {
+async fn remove_return_route(
+    runner: &dyn ExitCommandRunner,
+    tun_name: &str,
+    address: IpAddr,
+) -> Result<()> {
     let prefix = host_prefix(address)?;
-    let mut command = Command::new("ip");
-    if address.is_ipv6() {
-        command.arg("-6");
-    }
-    let output = command
-        .args([
-            "route",
-            "del",
-            &prefix,
-            "dev",
-            tun_name,
-            "proto",
-            ROUTE_PROTOCOL,
-        ])
-        .output()
+    let output = runner
+        .run(ip_invocation(
+            address.is_ipv6(),
+            &[
+                "route",
+                "del",
+                &prefix,
+                "dev",
+                tun_name,
+                "proto",
+                ROUTE_PROTOCOL,
+            ],
+        ))
         .await
         .with_context(|| format!("删除 Exit Node 回程路由失败: {prefix}"))?;
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("No such process")
             || stderr.contains("Cannot find device")
@@ -626,25 +759,27 @@ async fn remove_return_route(tun_name: &str, address: IpAddr) -> Result<()> {
     Ok(())
 }
 
-fn remove_return_route_sync(tun_name: &str, address: IpAddr) -> Result<()> {
+fn remove_return_route_sync(
+    runner: &dyn ExitCommandRunner,
+    tun_name: &str,
+    address: IpAddr,
+) -> Result<()> {
     let prefix = host_prefix(address)?;
-    let mut command = std::process::Command::new("ip");
-    if address.is_ipv6() {
-        command.arg("-6");
-    }
-    let output = command
-        .args([
-            "route",
-            "del",
-            &prefix,
-            "dev",
-            tun_name,
-            "proto",
-            ROUTE_PROTOCOL,
-        ])
-        .output()
+    let output = runner
+        .run_sync(ip_invocation(
+            address.is_ipv6(),
+            &[
+                "route",
+                "del",
+                &prefix,
+                "dev",
+                tun_name,
+                "proto",
+                ROUTE_PROTOCOL,
+            ],
+        ))
         .with_context(|| format!("删除 Exit Node 回程路由失败: {prefix}"))?;
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("No such process")
             || stderr.contains("Cannot find device")
@@ -662,46 +797,50 @@ fn remove_return_route_sync(tun_name: &str, address: IpAddr) -> Result<()> {
 }
 
 async fn purge_iptables_chain(
+    runner: &dyn ExitCommandRunner,
     program: &str,
     table: &str,
     builtin: &str,
     chain: &str,
 ) -> Result<()> {
     for _ in 0..MAX_STALE_JUMP_RULES {
-        if run_iptables(program, Some(table), &["-D", builtin, "-j", chain])
+        if run_iptables(runner, program, Some(table), &["-D", builtin, "-j", chain])
             .await
             .is_err()
         {
             break;
         }
     }
-    let _ = run_iptables(program, Some(table), &["-F", chain]).await;
-    let _ = run_iptables(program, Some(table), &["-X", chain]).await;
+    let _ = run_iptables(runner, program, Some(table), &["-F", chain]).await;
+    let _ = run_iptables(runner, program, Some(table), &["-X", chain]).await;
     Ok(())
 }
 
-fn cleanup_iptables_chain_sync(program: &str, table: &str, builtin: &str, chain: &str) {
+fn cleanup_iptables_chain_sync(
+    runner: &dyn ExitCommandRunner,
+    program: &str,
+    table: &str,
+    builtin: &str,
+    chain: &str,
+) {
     for _ in 0..MAX_STALE_JUMP_RULES {
-        if run_iptables_sync(program, Some(table), &["-D", builtin, "-j", chain]).is_err() {
+        if run_iptables_sync(runner, program, Some(table), &["-D", builtin, "-j", chain]).is_err() {
             break;
         }
     }
-    let _ = run_iptables_sync(program, Some(table), &["-F", chain]);
-    let _ = run_iptables_sync(program, Some(table), &["-X", chain]);
+    let _ = run_iptables_sync(runner, program, Some(table), &["-F", chain]);
+    let _ = run_iptables_sync(runner, program, Some(table), &["-X", chain]);
 }
 
-async fn run_iptables(program: &str, table: Option<&str>, args: &[&str]) -> Result<()> {
-    let mut command = Command::new(program);
-    command.args(["-w", IPTABLES_WAIT_SECONDS]);
-    if let Some(table) = table {
-        command.args(["-t", table]);
-    }
-    command.args(args);
-    let output = command
-        .output()
-        .await
-        .with_context(|| format!("无法执行 {program}"))?;
-    if output.status.success() {
+async fn run_iptables(
+    runner: &dyn ExitCommandRunner,
+    program: &str,
+    table: Option<&str>,
+    args: &[&str],
+) -> Result<()> {
+    let invocation = iptables_invocation(program, table, args);
+    let output = runner.run(invocation).await?;
+    if output.success {
         return Ok(());
     }
     anyhow::bail!(
@@ -709,6 +848,19 @@ async fn run_iptables(program: &str, table: Option<&str>, args: &[&str]) -> Resu
         args.join(" "),
         String::from_utf8_lossy(&output.stderr).trim()
     )
+}
+
+fn iptables_invocation(program: &str, table: Option<&str>, args: &[&str]) -> CommandInvocation {
+    let mut command_args = vec!["-w".to_string(), IPTABLES_WAIT_SECONDS.to_string()];
+    if let Some(table) = table {
+        command_args.push("-t".to_string());
+        command_args.push(table.to_string());
+    }
+    command_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    CommandInvocation {
+        program: program.to_string(),
+        args: command_args,
+    }
 }
 
 fn iptables_delete_args(rule: &IptablesRule) -> Vec<String> {
@@ -725,23 +877,20 @@ fn iptables_delete_args(rule: &IptablesRule) -> Vec<String> {
     args
 }
 
-async fn run_iptables_delete(rule: &IptablesRule) -> Result<()> {
+async fn run_iptables_delete(runner: &dyn ExitCommandRunner, rule: &IptablesRule) -> Result<()> {
     let args = iptables_delete_args(rule);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_iptables(rule.program, rule.table, &refs).await
+    run_iptables(runner, rule.program, rule.table, &refs).await
 }
 
-fn run_iptables_sync(program: &str, table: Option<&str>, args: &[&str]) -> Result<()> {
-    let mut command = std::process::Command::new(program);
-    command.args(["-w", IPTABLES_WAIT_SECONDS]);
-    if let Some(table) = table {
-        command.args(["-t", table]);
-    }
-    command.args(args);
-    let output = command
-        .output()
-        .with_context(|| format!("无法执行 {program}"))?;
-    if output.status.success() {
+fn run_iptables_sync(
+    runner: &dyn ExitCommandRunner,
+    program: &str,
+    table: Option<&str>,
+    args: &[&str],
+) -> Result<()> {
+    let output = runner.run_sync(iptables_invocation(program, table, args))?;
+    if output.success {
         return Ok(());
     }
     anyhow::bail!(
@@ -751,31 +900,168 @@ fn run_iptables_sync(program: &str, table: Option<&str>, args: &[&str]) -> Resul
     )
 }
 
-fn run_iptables_sync_delete(rule: &IptablesRule) -> Result<()> {
+fn run_iptables_sync_delete(runner: &dyn ExitCommandRunner, rule: &IptablesRule) -> Result<()> {
     let args = iptables_delete_args(rule);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_iptables_sync(rule.program, rule.table, &refs)
+    run_iptables_sync(runner, rule.program, rule.table, &refs)
 }
 
-fn ensure_sysctl(path: &str) -> Result<bool> {
-    let previous = std::fs::read_to_string(path)
+fn ensure_sysctl(runner: &dyn ExitCommandRunner, path: &str) -> Result<bool> {
+    let previous = runner
+        .read_file(path)
         .with_context(|| format!("读取内核参数失败: {path}"))?
         .trim()
         .to_string();
     if previous == "1" {
         return Ok(false);
     }
-    std::fs::write(Path::new(path), b"1\n").with_context(|| format!("开启内核转发失败: {path}"))?;
+    runner
+        .write_file(path, b"1\n")
+        .with_context(|| format!("开启内核转发失败: {path}"))?;
     Ok(true)
 }
 
-fn restore_sysctl(path: &str) -> Result<()> {
-    std::fs::write(Path::new(path), b"0\n").with_context(|| format!("恢复内核转发参数失败: {path}"))
+fn restore_sysctl(runner: &dyn ExitCommandRunner, path: &str) -> Result<()> {
+    runner
+        .write_file(path, b"0\n")
+        .with_context(|| format!("恢复内核转发参数失败: {path}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeCommandRunner {
+        async_runs: Mutex<Vec<CommandInvocation>>,
+        sync_runs: Mutex<Vec<CommandInvocation>>,
+        files: Mutex<HashMap<String, String>>,
+        async_failures: Mutex<HashSet<CommandInvocation>>,
+        sync_failures: Mutex<HashSet<CommandInvocation>>,
+    }
+
+    impl FakeCommandRunner {
+        fn with_sysctl(value: &str) -> Self {
+            let runner = Self::default();
+            for path in [
+                "/proc/sys/net/ipv4/ip_forward",
+                "/proc/sys/net/ipv6/conf/all/forwarding",
+            ] {
+                runner
+                    .files
+                    .lock()
+                    .expect("fake filesystem lock")
+                    .insert(path.to_string(), value.to_string());
+            }
+            runner
+        }
+
+        fn fail_async(&self, invocation: CommandInvocation) {
+            self.async_failures
+                .lock()
+                .expect("async failures lock")
+                .insert(invocation);
+        }
+
+        fn async_runs(&self) -> Vec<CommandInvocation> {
+            self.async_runs.lock().expect("async runs lock").clone()
+        }
+
+        fn sync_runs(&self) -> Vec<CommandInvocation> {
+            self.sync_runs.lock().expect("sync runs lock").clone()
+        }
+
+        fn file(&self, path: &str) -> Option<String> {
+            self.files
+                .lock()
+                .expect("fake filesystem lock")
+                .get(path)
+                .cloned()
+        }
+    }
+
+    impl ExitCommandRunner for FakeCommandRunner {
+        fn run(&self, invocation: CommandInvocation) -> CommandFuture<'_> {
+            Box::pin(async move {
+                self.async_runs
+                    .lock()
+                    .expect("async runs lock")
+                    .push(invocation.clone());
+                let failed = self
+                    .async_failures
+                    .lock()
+                    .expect("async failures lock")
+                    .remove(&invocation);
+                Ok(CommandResult {
+                    success: !failed,
+                    stdout: Vec::new(),
+                    stderr: if failed {
+                        b"injected command failure".to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                })
+            })
+        }
+
+        fn run_sync(&self, invocation: CommandInvocation) -> Result<CommandResult> {
+            self.sync_runs
+                .lock()
+                .expect("sync runs lock")
+                .push(invocation.clone());
+            let failed = self
+                .sync_failures
+                .lock()
+                .expect("sync failures lock")
+                .remove(&invocation);
+            Ok(CommandResult {
+                success: !failed,
+                stdout: Vec::new(),
+                stderr: if failed {
+                    b"injected command failure".to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+
+        fn read_file(&self, path: &str) -> Result<String> {
+            self.files
+                .lock()
+                .expect("fake filesystem lock")
+                .get(path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing fake file: {path}"))
+        }
+
+        fn write_file(&self, path: &str, contents: &[u8]) -> Result<()> {
+            self.files.lock().expect("fake filesystem lock").insert(
+                path.to_string(),
+                String::from_utf8(contents.to_vec()).context("fake UTF-8 file contents")?,
+            );
+            Ok(())
+        }
+    }
+
+    fn fake_forwarder(
+        runner: Arc<FakeCommandRunner>,
+        external_v6_interface: Option<&str>,
+    ) -> LinuxExitForwarder {
+        let tun_name = "fkexit".to_string();
+        LinuxExitForwarder {
+            forward_chain: chain_name("F", &tun_name),
+            nat_chain: chain_name("N", &tun_name),
+            tun_name,
+            external_v4_interface: "eth0".to_string(),
+            external_v6_interface: external_v6_interface.map(str::to_string),
+            clients: HashMap::new(),
+            ipv4_forward_changed: false,
+            ipv6_forward_changed: false,
+            cleaned: false,
+            runner,
+        }
+    }
 
     #[test]
     fn default_route_parser_finds_interface() {
@@ -835,5 +1121,215 @@ mod tests {
             host_prefix("fd00::1002".parse().unwrap()).unwrap(),
             "fd00::1002/128"
         );
+    }
+
+    #[tokio::test]
+    async fn forwarding_nat_and_cleanup_install_the_owned_resources() {
+        let runner = Arc::new(FakeCommandRunner::with_sysctl("0\n"));
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+
+        forwarder
+            .install_resources()
+            .await
+            .expect("fake host must accept forwarding installation");
+        assert_eq!(
+            runner.file("/proc/sys/net/ipv4/ip_forward").as_deref(),
+            Some("1\n")
+        );
+
+        let virtual_ips = VirtualIps::from_ipv4("10.8.0.2".parse().expect("valid IPv4"));
+        forwarder
+            .allow_client("peer-1", &virtual_ips)
+            .await
+            .expect("fake host must accept client authorization");
+
+        let async_runs = runner.async_runs();
+        for expected in [
+            iptables_invocation(
+                "iptables",
+                Some("filter"),
+                &["-N", &forwarder.forward_chain],
+            ),
+            iptables_invocation("iptables", Some("nat"), &["-N", &forwarder.nat_chain]),
+            iptables_invocation(
+                "iptables",
+                Some("filter"),
+                &["-I", "FORWARD", "1", "-j", &forwarder.forward_chain],
+            ),
+            iptables_invocation(
+                "iptables",
+                Some("nat"),
+                &["-I", "POSTROUTING", "1", "-j", &forwarder.nat_chain],
+            ),
+            iptables_invocation(
+                "iptables",
+                Some("nat"),
+                &[
+                    "-A",
+                    &forwarder.nat_chain,
+                    "-s",
+                    "10.8.0.2/32",
+                    "-o",
+                    "eth0",
+                    "-j",
+                    "MASQUERADE",
+                ],
+            ),
+        ] {
+            assert!(
+                async_runs.contains(&expected),
+                "missing installed command: {expected:?}"
+            );
+        }
+
+        forwarder.rollback();
+        assert_eq!(
+            runner.file("/proc/sys/net/ipv4/ip_forward").as_deref(),
+            Some("0\n")
+        );
+        let sync_runs = runner.sync_runs();
+        let first_client_rule = IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: client_forward_rules(
+                &forwarder.forward_chain,
+                &forwarder.tun_name,
+                "10.8.0.2/32",
+            )[0]
+            .clone(),
+        };
+        let delete_args = iptables_delete_args(&first_client_rule);
+        let delete_refs = delete_args.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(sync_runs.contains(&iptables_invocation(
+            "iptables",
+            Some("filter"),
+            &delete_refs,
+        )));
+        assert!(sync_runs.contains(&ip_invocation(
+            false,
+            &[
+                "route",
+                "del",
+                "10.8.0.2/32",
+                "dev",
+                "fkexit",
+                "proto",
+                "99",
+            ],
+        )));
+        assert!(sync_runs.contains(&iptables_invocation(
+            "iptables",
+            Some("filter"),
+            &["-X", &forwarder.forward_chain],
+        )));
+        assert!(sync_runs.contains(&iptables_invocation(
+            "iptables",
+            Some("nat"),
+            &["-X", &forwarder.nat_chain],
+        )));
+    }
+
+    #[tokio::test]
+    async fn forwarding_install_failure_rolls_back_chains_and_sysctl_once() {
+        let runner = Arc::new(FakeCommandRunner::with_sysctl("0\n"));
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        runner.fail_async(iptables_invocation(
+            "iptables",
+            Some("nat"),
+            &["-N", &forwarder.nat_chain],
+        ));
+
+        let error = forwarder
+            .install_resources()
+            .await
+            .expect_err("injected NAT chain creation failure must abort installation");
+        assert!(format!("{error:#}").contains("injected command failure"));
+
+        let sync_runs = runner.sync_runs();
+        for expected in [
+            iptables_invocation(
+                "iptables",
+                Some("filter"),
+                &["-D", "FORWARD", "-j", &forwarder.forward_chain],
+            ),
+            iptables_invocation(
+                "iptables",
+                Some("filter"),
+                &["-F", &forwarder.forward_chain],
+            ),
+            iptables_invocation(
+                "iptables",
+                Some("filter"),
+                &["-X", &forwarder.forward_chain],
+            ),
+            iptables_invocation(
+                "iptables",
+                Some("nat"),
+                &["-D", "POSTROUTING", "-j", &forwarder.nat_chain],
+            ),
+            iptables_invocation("iptables", Some("nat"), &["-F", &forwarder.nat_chain]),
+            iptables_invocation("iptables", Some("nat"), &["-X", &forwarder.nat_chain]),
+        ] {
+            assert!(
+                sync_runs.contains(&expected),
+                "missing rollback command: {expected:?}"
+            );
+        }
+        assert_eq!(
+            runner.file("/proc/sys/net/ipv4/ip_forward").as_deref(),
+            Some("0\n")
+        );
+
+        let cleanup_count = sync_runs.len();
+        forwarder.rollback();
+        assert_eq!(runner.sync_runs().len(), cleanup_count);
+    }
+
+    #[tokio::test]
+    async fn client_rule_failure_rolls_back_prior_rules_and_return_route() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        let rules =
+            client_forward_rules(&forwarder.forward_chain, &forwarder.tun_name, "10.8.0.2/32");
+        let second_rule_args = rules[1].iter().map(String::as_str).collect::<Vec<_>>();
+        runner.fail_async(iptables_invocation(
+            "iptables",
+            Some("filter"),
+            &second_rule_args,
+        ));
+        let virtual_ips = VirtualIps::from_ipv4("10.8.0.2".parse().expect("valid IPv4"));
+
+        forwarder
+            .allow_client("peer-1", &virtual_ips)
+            .await
+            .expect_err("injected second client rule failure must abort authorization");
+
+        let first_rule = IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: rules[0].clone(),
+        };
+        let delete_args = iptables_delete_args(&first_rule);
+        let delete_refs = delete_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let expected_delete = iptables_invocation("iptables", Some("filter"), &delete_refs);
+        let expected_route_delete = ip_invocation(
+            false,
+            &[
+                "route",
+                "del",
+                "10.8.0.2/32",
+                "dev",
+                "fkexit",
+                "proto",
+                "99",
+            ],
+        );
+        let async_runs = runner.async_runs();
+        assert_eq!(
+            async_runs.get(async_runs.len().saturating_sub(2)),
+            Some(&expected_delete)
+        );
+        assert_eq!(async_runs.last(), Some(&expected_route_delete));
+        assert!(forwarder.clients.is_empty());
     }
 }

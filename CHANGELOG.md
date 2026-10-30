@@ -72,6 +72,7 @@ All notable changes are documented here. The project follows semantic versioning
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 
 ### Fixed
+- 修复新建内嵌协调端网络缺少持久配置、导致授权撤销目录失败关闭并阻断启动的问题；首次启动现在会创建网络配置，随后稳定网络标识由持久化存储初始化。
 - 修复供应链审计发现的 RustSec 安全公告：升级 `anyhow`、`crossbeam-epoch`、`quinn`/`quinn-proto`、`rustls`/`rustls-webpki`、`tokio` 等锁定版本，并统一主 workspace 的 `socket2`、`tower` 版本以消除可避免的重复依赖。
 - 修复 `VirtualIps` 单栈地址因 Postcard 条件字段省略而无法自解码的问题；所有 Option 字段现在始终编码，并增加单栈/双栈往返回归测试。
 - 修复客户端重连后 TUN/路由仍使用旧虚拟地址、但协调端分配新地址造成流量黑洞的问题；现在地址变化会记录错误并失败关闭。

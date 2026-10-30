@@ -50,13 +50,25 @@ impl EmbeddedCoordinator {
         let mut default_coordinator_config = CoordinatorConfig::default();
         default_coordinator_config.network.ipv6_pool = pool.to_string();
         default_coordinator_config.network.ip_pool = Some(pool.to_string());
+        let blacklist_store = CoordinatorConfigBlacklistStore::with_default_config(
+            blacklist_path.clone(),
+            default_coordinator_config.clone(),
+        );
+        // Authorization lookups deliberately fail closed when the persistent
+        // coordinator config is absent. A newly created embedded network has
+        // no config yet, so bootstrap it here before attaching the store. The
+        // store will then assign a stable network id under its file lock.
+        if !blacklist_path.exists() {
+            if let Some(parent) = blacklist_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("无法创建内嵌协调端配置目录: {}", parent.display()))?;
+            }
+            default_coordinator_config
+                .save_to_file(&blacklist_path)
+                .context("无法初始化内嵌协调端持久配置")?;
+        }
         session_manager
-            .attach_blacklist_store(Arc::new(
-                CoordinatorConfigBlacklistStore::with_default_config(
-                    blacklist_path,
-                    default_coordinator_config,
-                ),
-            ))
+            .attach_blacklist_store(Arc::new(blacklist_store))
             .await
             .context("无法加载节点持久黑名单")?;
 

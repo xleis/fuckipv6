@@ -6,7 +6,8 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fuckipv6_common::{
-    recent_error_log_lines, CoordinatorAuthConfig, NetworkAllocation, NetworkMode,
+    recent_error_log_lines, CoordinatorAuthConfig, NetworkAllocation,
+    NetworkAuthorizationRevocation, NetworkMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -159,6 +160,18 @@ fn build_router(state: AppState) -> Router {
         .route("/api/blacklist", get(get_blacklist))
         .route("/api/blacklist/ban", post(ban_client))
         .route("/api/blacklist/unban", post(unban_client))
+        .route(
+            "/api/authorization-revocations",
+            get(list_authorization_revocations),
+        )
+        .route(
+            "/api/authorization-revocations/revoke",
+            post(revoke_authorization),
+        )
+        .route(
+            "/api/authorization-revocations/lift",
+            post(lift_authorization),
+        )
         .route("/ws", get(ws))
         .with_state(state)
 }
@@ -559,6 +572,166 @@ async fn unban_client(
                 }),
             ))
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorizationRevocationRequest {
+    pub client_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthorizationRevocationListResponse {
+    pub success: bool,
+    pub message: String,
+    pub revocations: Vec<NetworkAuthorizationRevocation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthorizationRevocationActionResponse {
+    pub success: bool,
+    pub changed: bool,
+    pub message: String,
+}
+
+type AuthorizationRevocationListHttpResult =
+    (StatusCode, Json<AuthorizationRevocationListResponse>);
+type AuthorizationRevocationActionHttpResult =
+    (StatusCode, Json<AuthorizationRevocationActionResponse>);
+
+fn authorization_api_error(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<AuthorizationRevocationActionResponse>) {
+    (
+        status,
+        Json(AuthorizationRevocationActionResponse {
+            success: false,
+            changed: false,
+            message: message.into(),
+        }),
+    )
+}
+
+async fn list_authorization_revocations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> AuthorizationRevocationListHttpResult {
+    if let Err(status) = check_auth(&state, &headers, params.get("token").map(String::as_str)) {
+        return (
+            status,
+            Json(AuthorizationRevocationListResponse {
+                success: false,
+                message: "未授权或认证失效，请先登录".to_string(),
+                revocations: Vec::new(),
+            }),
+        );
+    }
+
+    match state.session_manager.list_authorization_revocations().await {
+        Ok(revocations) => (
+            StatusCode::OK,
+            Json(AuthorizationRevocationListResponse {
+                success: true,
+                message: "授权撤销目录读取成功".to_string(),
+                revocations,
+            }),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthorizationRevocationListResponse {
+                success: false,
+                message: format!("读取授权撤销目录失败: {error:#}"),
+                revocations: Vec::new(),
+            }),
+        ),
+    }
+}
+
+async fn revoke_authorization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(payload): Json<AuthorizationRevocationRequest>,
+) -> AuthorizationRevocationActionHttpResult {
+    if let Err(status) = check_auth(&state, &headers, params.get("token").map(String::as_str)) {
+        return authorization_api_error(status, "未授权或认证失效，请先登录");
+    }
+
+    let client_id = payload.client_id.trim();
+    if client_id.is_empty() {
+        return authorization_api_error(StatusCode::BAD_REQUEST, "节点 ID 不能为空");
+    }
+
+    match state
+        .session_manager
+        .try_revoke_node_by_client_id(client_id)
+        .await
+    {
+        Ok(Some(changed)) => (
+            StatusCode::OK,
+            Json(AuthorizationRevocationActionResponse {
+                success: true,
+                changed,
+                message: if changed {
+                    format!("节点 {client_id} 的授权已持久撤销，在线会话已断开")
+                } else {
+                    format!("节点 {client_id} 已处于授权撤销状态")
+                },
+            }),
+        ),
+        Ok(None) => authorization_api_error(
+            StatusCode::NOT_FOUND,
+            format!("未找到在线节点 {client_id}，无法按当前公钥撤销授权"),
+        ),
+        Err(error) => authorization_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("授权撤销存储失败，运行期状态未修改: {error:#}"),
+        ),
+    }
+}
+
+async fn lift_authorization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(payload): Json<AuthorizationRevocationRequest>,
+) -> AuthorizationRevocationActionHttpResult {
+    if let Err(status) = check_auth(&state, &headers, params.get("token").map(String::as_str)) {
+        return authorization_api_error(status, "未授权或认证失效，请先登录");
+    }
+
+    let client_id = payload.client_id.trim();
+    if client_id.is_empty() {
+        return authorization_api_error(StatusCode::BAD_REQUEST, "节点 ID 不能为空");
+    }
+
+    match state
+        .session_manager
+        .try_lift_revocation_by_client_id(client_id)
+        .await
+    {
+        Ok(Some(changed)) => (
+            StatusCode::OK,
+            Json(AuthorizationRevocationActionResponse {
+                success: true,
+                changed,
+                message: if changed {
+                    format!("节点 {client_id} 的授权撤销已解除")
+                } else {
+                    format!("节点 {client_id} 没有可解除的授权撤销记录")
+                },
+            }),
+        ),
+        Ok(None) => authorization_api_error(
+            StatusCode::NOT_FOUND,
+            format!("未找到节点 {client_id} 的授权撤销记录"),
+        ),
+        Err(error) => authorization_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("解除授权撤销存储失败，运行期状态未修改: {error:#}"),
+        ),
     }
 }
 
@@ -2694,7 +2867,9 @@ tun_name = "fuckipv6"`;
 mod tests {
     use super::*;
     use crate::signaling::blacklist::BlacklistStore;
-    use fuckipv6_common::BlacklistConfig;
+    use fuckipv6_common::{BlacklistConfig, Identity, NatType, NetworkAuthorizationRevocation};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex as StdMutex;
 
     struct FailingBlacklistStore {
         loaded: BlacklistConfig,
@@ -2708,6 +2883,311 @@ mod tests {
         fn save(&self, _blacklist: &BlacklistConfig) -> Result<()> {
             anyhow::bail!("injected blacklist persistence failure")
         }
+    }
+
+    #[derive(Default)]
+    struct AuthorizationTestStore {
+        revocations: StdMutex<Vec<NetworkAuthorizationRevocation>>,
+        fail_list: AtomicBool,
+        fail_revoke: AtomicBool,
+        fail_lift: AtomicBool,
+    }
+
+    impl AuthorizationTestStore {
+        fn records(&self) -> Result<Vec<NetworkAuthorizationRevocation>> {
+            self.revocations
+                .lock()
+                .map(|records| records.clone())
+                .map_err(|_| anyhow::anyhow!("test authorization store lock poisoned"))
+        }
+    }
+
+    impl BlacklistStore for AuthorizationTestStore {
+        fn supports_authorization_revocations(&self) -> bool {
+            true
+        }
+
+        fn load(&self) -> Result<BlacklistConfig> {
+            Ok(BlacklistConfig::default())
+        }
+
+        fn save(&self, _blacklist: &BlacklistConfig) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_authorization_revocations(&self) -> Result<Vec<NetworkAuthorizationRevocation>> {
+            if self.fail_list.load(Ordering::SeqCst) {
+                anyhow::bail!("injected authorization directory read failure");
+            }
+            self.records()
+        }
+
+        fn revoke_authorization(&self, record: &NetworkAuthorizationRevocation) -> Result<bool> {
+            if self.fail_revoke.load(Ordering::SeqCst) {
+                anyhow::bail!("injected authorization directory write failure");
+            }
+            let mut records = self
+                .revocations
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test authorization store lock poisoned"))?;
+            if records.iter().any(|existing| {
+                existing.network_id == record.network_id
+                    && (existing.client_id == record.client_id
+                        || existing.public_key_fingerprint == record.public_key_fingerprint)
+            }) {
+                return Ok(false);
+            }
+            records.push(record.clone());
+            Ok(true)
+        }
+
+        fn lift_authorization(
+            &self,
+            network_id: &str,
+            client_id: &str,
+            public_key_fingerprint: &str,
+        ) -> Result<bool> {
+            if self.fail_lift.load(Ordering::SeqCst) {
+                anyhow::bail!("injected authorization directory lift failure");
+            }
+            let mut records = self
+                .revocations
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test authorization store lock poisoned"))?;
+            let original_len = records.len();
+            records.retain(|record| {
+                !(record.network_id == network_id
+                    && (record.client_id == client_id
+                        || record.public_key_fingerprint == public_key_fingerprint))
+            });
+            Ok(records.len() != original_len)
+        }
+
+        fn authorization_network_id(&self) -> Result<String> {
+            Ok("test-network".to_string())
+        }
+    }
+
+    async fn manager_with_authorization_store(
+        store: Arc<AuthorizationTestStore>,
+    ) -> Result<Arc<SessionManager>> {
+        let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        manager.attach_blacklist_store(store).await?;
+        Ok(manager)
+    }
+
+    async fn register_online_identity(
+        manager: &SessionManager,
+        identity: &Identity,
+        port: u16,
+    ) -> Result<()> {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                format!("127.0.0.1:{port}").parse()?,
+                port,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authorization_revocation_api_lists_revokes_and_lifts_offline_nodes() -> Result<()> {
+        let store = Arc::new(AuthorizationTestStore::default());
+        let manager = manager_with_authorization_store(store).await?;
+        let identity = Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        let fingerprint = Identity::public_key_fingerprint(&identity.public_key());
+        register_online_identity(&manager, &identity, 41000).await?;
+        let state = AppState::new(manager.clone(), CoordinatorAuthConfig::default());
+
+        let (status_code, Json(revoked)) = revoke_authorization(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(AuthorizationRevocationRequest {
+                client_id: client_id.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert!(revoked.success);
+        assert!(revoked.changed);
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+
+        let (status_code, Json(listed)) = list_authorization_revocations(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert!(listed.success);
+        assert_eq!(listed.revocations.len(), 1);
+        assert_eq!(listed.revocations[0].client_id, client_id);
+        assert_eq!(listed.revocations[0].public_key_fingerprint, fingerprint);
+
+        let (status_code, Json(lifted)) = lift_authorization(
+            State(state),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(AuthorizationRevocationRequest {
+                client_id: client_id.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert!(lifted.success);
+        assert!(lifted.changed);
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        assert!(manager.list_authorization_revocations().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authorization_revocation_api_requires_authentication() -> Result<()> {
+        let state = AppState::new(
+            Arc::new(SessionManager::new("fd00::1000/120")?),
+            CoordinatorAuthConfig {
+                enabled: true,
+                admin_username: "admin".to_string(),
+                admin_password: Some("secret123".to_string()),
+                jwt_secret: Some("test-jwt-secret-for-authorization-api".to_string()),
+                jwt_expiration_secs: 3600,
+            },
+        );
+
+        let (status_code, Json(denied)) = list_authorization_revocations(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::UNAUTHORIZED);
+        assert!(!denied.success);
+        assert!(denied.revocations.is_empty());
+
+        let token = state.jwt_manager.sign("admin", "admin")?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let (status_code, Json(allowed)) =
+            list_authorization_revocations(State(state), headers, Query(HashMap::new())).await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert!(allowed.success);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authorization_revocation_api_rejects_unknown_nodes() -> Result<()> {
+        let store = Arc::new(AuthorizationTestStore::default());
+        let manager = manager_with_authorization_store(store).await?;
+        let state = AppState::new(manager, CoordinatorAuthConfig::default());
+        assert!(
+            state
+                .session_manager
+                .try_ban_client("missing-node".to_string())
+                .await?
+        );
+        let request = || AuthorizationRevocationRequest {
+            client_id: "missing-node".to_string(),
+        };
+
+        let (status_code, Json(revoke_response)) = revoke_authorization(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(request()),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::NOT_FOUND);
+        assert!(!revoke_response.success);
+
+        let (status_code, Json(lift_response)) = lift_authorization(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(request()),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::NOT_FOUND);
+        assert!(!lift_response.success);
+        assert!(state
+            .session_manager
+            .list_authorization_revocations()
+            .await?
+            .is_empty());
+        assert_eq!(
+            state.session_manager.get_blacklist().await,
+            vec!["missing-node".to_string()],
+            "旧黑名单记录不得被当作授权撤销记录"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authorization_revocation_storage_failures_are_explicit_and_do_not_mutate_state(
+    ) -> Result<()> {
+        let store = Arc::new(AuthorizationTestStore::default());
+        let manager = manager_with_authorization_store(store.clone()).await?;
+        let identity = Identity::generate()?;
+        let client_id = identity.client_id().to_string();
+        register_online_identity(&manager, &identity, 41001).await?;
+        let state = AppState::new(manager.clone(), CoordinatorAuthConfig::default());
+
+        store.fail_revoke.store(true, Ordering::SeqCst);
+        let (status_code, Json(revoke_response)) = revoke_authorization(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(AuthorizationRevocationRequest {
+                client_id: client_id.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!revoke_response.success);
+        assert!(revoke_response.message.contains("运行期状态未修改"));
+        assert!(manager.get_peer_info(&client_id).await.is_some());
+        assert!(store.records()?.is_empty());
+
+        store.fail_revoke.store(false, Ordering::SeqCst);
+        assert!(
+            manager
+                .try_revoke_node(&client_id, &identity.public_key())
+                .await?
+        );
+        store.fail_lift.store(true, Ordering::SeqCst);
+        let (status_code, Json(lift_response)) = lift_authorization(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(AuthorizationRevocationRequest {
+                client_id: client_id.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!lift_response.success);
+        assert!(lift_response.message.contains("运行期状态未修改"));
+        assert_eq!(store.records()?.len(), 1);
+
+        store.fail_lift.store(false, Ordering::SeqCst);
+        store.fail_list.store(true, Ordering::SeqCst);
+        let (status_code, Json(list_response)) =
+            list_authorization_revocations(State(state), HeaderMap::new(), Query(HashMap::new()))
+                .await;
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!list_response.success);
+        assert!(list_response.revocations.is_empty());
+        assert_eq!(store.records()?.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]

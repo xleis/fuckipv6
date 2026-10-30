@@ -460,6 +460,78 @@ impl SessionManager {
         }
     }
 
+    /// 按节点 ID 查询当前在线会话使用的公钥。
+    ///
+    /// 公钥仅用于协调端内部的授权操作，不会通过 WebUI API 返回。
+    pub(crate) async fn online_client_public_key(&self, client_id: &str) -> Option<Vec<u8>> {
+        let client_id = client_id.trim();
+        if client_id.is_empty() {
+            return None;
+        }
+        self.sessions
+            .read()
+            .await
+            .get(client_id)
+            .map(|session| session.peer_info.public_key.clone())
+    }
+
+    /// 列出当前网络作用域内的持久授权撤销记录。
+    pub(crate) async fn list_authorization_revocations(
+        &self,
+    ) -> Result<Vec<fuckipv6_common::NetworkAuthorizationRevocation>> {
+        let directory = self
+            .authorization_directory
+            .read()
+            .map_err(|_| anyhow!("授权撤销目录锁已损坏"))?
+            .clone()
+            .ok_or_else(|| anyhow!("授权撤销目录尚未配置"))?;
+        directory.list().await
+    }
+
+    /// 仅当节点在线时，按其 ID 解析当前公钥并持久撤销。
+    ///
+    /// 返回 `None` 表示该节点当前不在线；不会使用黑名单或仅凭节点 ID 伪造公钥。
+    pub(crate) async fn try_revoke_node_by_client_id(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<bool>> {
+        let Some(public_key) = self.online_client_public_key(client_id).await else {
+            return Ok(None);
+        };
+        self.try_revoke_node(client_id.trim(), &public_key)
+            .await
+            .map(Some)
+    }
+
+    /// 按节点 ID 解除持久授权撤销，在线和离线节点均受支持。
+    ///
+    /// 离线节点先从当前网络的既有撤销记录中确认节点 ID 存在。底层存储的
+    /// `lift_authorization` 以节点 ID 或公钥指纹匹配，因此这里生成一个不会与
+    /// 其他记录指纹冲突的内部探针，继续复用 `try_lift_revocation` 的授权门和
+    /// 存储错误语义。返回 `None` 表示当前网络没有该节点的撤销记录。
+    pub(crate) async fn try_lift_revocation_by_client_id(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<bool>> {
+        let client_id = client_id.trim();
+        if client_id.is_empty() {
+            return Ok(None);
+        }
+
+        let records = self.list_authorization_revocations().await?;
+        if !records.iter().any(|record| record.client_id == client_id) {
+            return Ok(None);
+        }
+
+        let public_key = match self.online_client_public_key(client_id).await {
+            Some(public_key) => public_key,
+            None => non_colliding_lift_probe(&records).to_vec(),
+        };
+        self.try_lift_revocation(client_id, &public_key)
+            .await
+            .map(Some)
+    }
+
     async fn ensure_registration_authorized(
         &self,
         client_id: &str,
@@ -1410,6 +1482,28 @@ impl IpAllocator {
     pub fn allocation(&self) -> &NetworkAllocation {
         &self.allocation
     }
+}
+
+/// 生成仅供离线解撤销内部使用的 32 字节探针。
+///
+/// 底层解撤销接口会同时匹配节点 ID 和公钥指纹。由于撤销记录只保存指纹，
+/// 离线节点无法恢复原始公钥；该探针必须避开目录内所有已有指纹，确保本次操作
+/// 只能通过精确的节点 ID 删除目标记录。
+fn non_colliding_lift_probe(
+    records: &[fuckipv6_common::NetworkAuthorizationRevocation],
+) -> [u8; 32] {
+    let mut probe = [0_u8; 32];
+    for counter in 0_u64..=u64::MAX {
+        probe[..8].copy_from_slice(&counter.to_be_bytes());
+        let fingerprint = fuckipv6_common::Identity::public_key_fingerprint(&probe);
+        if records
+            .iter()
+            .all(|record| record.public_key_fingerprint != fingerprint)
+        {
+            return probe;
+        }
+    }
+    unreachable!("64-bit probe space cannot be exhausted by the revocation directory")
 }
 
 #[cfg(test)]

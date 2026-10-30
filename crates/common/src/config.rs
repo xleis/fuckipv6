@@ -1,7 +1,9 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::NetworkMode;
 
@@ -77,12 +79,13 @@ impl ClientConfig {
     }
 
     /// 保存配置到TOML文件
-    pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+    ///
+    /// 写入同目录临时文件并 `fsync` 后原子替换目标，避免进程或主机崩溃留下截断配置。
+    pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref();
         let content = toml::to_string_pretty(self).context("序列化客户端配置失败")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("写入客户端配置失败: {}", path.display()))?;
-        Ok(())
+        atomic_write(path, content.as_bytes())
+            .with_context(|| format!("写入客户端配置失败: {}", path.display()))
     }
 }
 
@@ -336,12 +339,13 @@ impl CoordinatorConfig {
     }
 
     /// 保存配置到TOML文件
-    pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+    ///
+    /// 写入同目录临时文件并 `fsync` 后原子替换目标，避免进程或主机崩溃留下截断配置。
+    pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref();
         let content = toml::to_string_pretty(self).context("序列化协调端配置失败")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("写入协调端配置失败: {}", path.display()))?;
-        Ok(())
+        atomic_write(path, content.as_bytes())
+            .with_context(|| format!("写入协调端配置失败: {}", path.display()))
     }
 }
 
@@ -666,9 +670,96 @@ pub fn validate_ipv6_cidr(value: &str, field: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+static CONFIG_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("配置路径缺少文件名: {}", path.display()))?;
+    let existing_permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let sequence = CONFIG_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
+    let temporary_path = parent.join(temporary_name);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let write_result = (|| -> Result<()> {
+        let mut file = options
+            .open(&temporary_path)
+            .with_context(|| format!("创建临时配置文件失败: {}", temporary_path.display()))?;
+        if let Some(permissions) = existing_permissions {
+            std::fs::set_permissions(&temporary_path, permissions)
+                .with_context(|| format!("继承配置文件权限失败: {}", temporary_path.display()))?;
+        }
+        file.write_all(content)
+            .with_context(|| format!("写入临时配置文件失败: {}", temporary_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("同步临时配置文件失败: {}", temporary_path.display()))?;
+        std::fs::rename(&temporary_path, path)
+            .with_context(|| format!("原子替换配置文件失败: {}", path.display()))?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("同步配置目录失败: {}", parent.display()))?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    write_result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_complete_file_and_preserves_permissions() -> Result<()> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fuckipv6-atomic-config-{}-{unique}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"old")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))?;
+        }
+
+        atomic_write(&path, b"new complete config")?;
+        assert_eq!(std::fs::read(&path)?, b"new complete config");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
 
     #[test]
     fn test_client_config_serialization() -> anyhow::Result<()> {

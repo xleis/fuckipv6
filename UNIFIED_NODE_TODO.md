@@ -2,7 +2,7 @@
 
 > 目标：`fuckipv6` 只发布一个节点程序。节点不再在产品层区分“客户端”和“服务端”；有桌面环境时使用 GPUI 原生 GUI，无桌面环境时使用 WebUI，两套 UI 必须具有完全一致的功能、状态、校验和错误语义。
 >
-> 当前状态：单二进制发布入口已完成，workspace 只产生用户程序 `fuckipv6`；节点生命周期、启动计划、多网络监督器、共享命令总线、真实运行时处理器与状态存储基座已落地，可在零网络、单网络和多网络计划下运行。监督器已发布生命周期、网络状态、有效非敏感配置和控制面权限快照，并从真实运行时填充公开身份、Peer、网络流量与有界 WARN/ERROR 日志；共享处理器已接通快照、按网络停止、Peer 探测和关闭，本地 IPC 已提供统一命令传输桥。内嵌信令与 QUIC 中继现在由单节点 actor 统一持有其启动、查询、停止和关闭，监督器与统一命令总线共享同一管理器并在完整关闭时释放；创建/加入尚未通过命令接口公开，动态启停、路由与角色变更仍需继续运行时化。当前权限模型仍是“受信控制面、无逐主体鉴权”，CLI/WebUI 命令入口迁移也尚未完成。声明式 UI manifest 已固定 11 个页面及操作、字段、校验、确认、权限和可用条件，但 WebUI 与 GPUI 尚未消费该清单。桌面入口仍只是用 Chromium `--app` 或系统浏览器打开 WebUI；仓库没有 GPUI 依赖；内嵌网络服务目前只覆盖显式 `host` 流程。两类 UI 的适配、对等测试和统一运行时仍待完成。
+> 当前状态：单二进制发布入口已完成，workspace 只产生用户程序 `fuckipv6`；节点生命周期、启动计划、多网络监督器、共享命令总线、真实运行时处理器与状态存储基座已落地。`NodeRuntimeHandler` 已接通 `GetSnapshot`、`StartNetworks`、`CreateNetwork`、`JoinNetwork`、按网络 `StopNetworks`、`ProbePeer` 与 `Shutdown`；`NetworkRuntimeManager` actor 负责初始计划、动态启动、创建、票据/URL 加入、按网络停止和全量关闭，创建失败会回滚配置、服务与状态，`auto_connect=false` 会保留内嵌服务直到显式停止，并同步网络状态、配置快照与事件。监督器从真实运行时填充公开身份、Peer、流量和有界 WARN/ERROR 日志。路由热更新和网络角色变更仍明确返回 `Unavailable`；CLI/WebUI 命令入口仍主要走旧路径，GPUI 尚未实现，声明式 UI manifest 已固定 11 个页面但 WebUI/GPUI 尚未消费，双 UI 对等测试未完成。当前权限模型仍是 `TrustedControlPlane`、无逐主体鉴权，WebUI 仍监听全部网卡。
 >
 > 保护约束：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 当前属于用户正在处理的 Exit Node 持久化范围，未获确认前不得修改、暂存或提交。
 
@@ -24,24 +24,24 @@
 - [ ] **UN-03 节点运行时监督器**：建立统一 lifecycle，启动身份、配置、日志、本地控制面和网络管理器，并支持无网络、单网络和多网络状态。
   - [x] **UN-03a 生命周期状态模型**：提供 `Stopped/Starting/Running/Stopping/Failed`、不可变快照和单一 watch 事件流，供 CLI、IPC、WebUI 及后续 GPUI 共同订阅。
   - [x] **UN-03b 统一启动计划**：用 `NodeRuntimePlan` 统一加载无网络、默认、全部和具名网络选择，并拒绝重复或缺失的网络配置。
-  - [x] **UN-03c 网络监督器接线**：多网络监督器消费启动计划，维护统一生命周期；空计划仍启动节点控制面和 WebUI，全部网络初始化失败时进入 `Failed`。
+  - [x] **UN-03c 网络监督器接线**：多网络监督器先启动 IPC/WebUI 控制面，再通过 runtime actor 消费启动计划；空计划仍启动节点控制面，全部网络初始化失败时进入 `Failed`，部分失败时保持 `Running` 并记录失败网络，后续启动选择只重试尚未运行的网络。
   - [ ] **UN-03d 完整运行时收口**：将身份、日志和本地控制面接入同一节点上下文，并让 WebUI、CLI 与 IPC 订阅同一 lifecycle；完成这些接线前不勾选 UN-03。
 - [ ] **UN-04 内嵌网络服务 actor 化**：节点可按需创建或承接网络发现、虚拟地址分配、QUIC relay 和策略控制；不再要求单独启动协调程序。
-  - [x] **UN-04a 内嵌服务生命周期 actor**：新增单节点共享 actor，统一持有多个网络的内嵌信令与 QUIC 中继实例，支持启动、去重、列表、停止和关闭；服务 actor 关闭后稳定拒绝新请求，停止或关闭网络会释放对应实例。当前仅有基础 actor 与单元测试，尚未接入 `NodeCommandHandler`、节点状态/事件快照或 CLI/WebUI/GPUI。
-  - [x] **UN-04b 监督器所有权接线**：多网络监督器创建并持有内嵌服务 actor，统一命令总线通过共享句柄参与完整节点关闭；`Shutdown` 会在停止网络指令下发后释放全部内嵌信令/中继实例，监督器退出路径也会兜底关闭。当前仅完成所有权与关闭路径，创建/加入命令、服务状态/事件快照以及 UI 展示仍未接通。
+  - [x] **UN-04a 内嵌服务生命周期 actor**：新增单节点共享 actor，统一持有多个网络的内嵌信令与 QUIC 中继实例，支持启动、去重、列表、停止和关闭；服务 actor 关闭后稳定拒绝新请求，停止或关闭网络会释放对应实例。该 actor 已接入 `NodeRuntimeHandler`、`NetworkRuntimeManager`、节点状态/事件和按网络停止路径；服务级细粒度状态与 UI 展示仍未完成。
+  - [x] **UN-04b 监督器所有权与动态编排接线**：多网络监督器与统一命令总线共享同一个内嵌服务 actor，`CreateNetwork`、`JoinNetwork`、`StartNetworks` 和按网络 `StopNetworks` 已接入 `NetworkRuntimeManager`；完整 `Shutdown` 会先停止网络，再释放全部内嵌信令/中继实例。创建失败会回滚配置、服务与状态，`auto_connect=false` 会保留服务直到显式停止。剩余工作主要是服务级细粒度状态、策略控制和 UI 展示。
 - [ ] **UN-05 节点命令总线**：定义统一 `NodeCommand`、异步结果和事件流；GPUI、WebUI、CLI 及 IPC 都通过同一入口执行操作。
   - [x] **UN-05a 命令协议基座**：定义节点命令、请求 ID、异步结果、稳定错误码、单调事件流和并发命令总线；命令校验只暴露节点/网络/角色语义，并有异步总线与拒绝路径测试。
   - [ ] **UN-05b 生产处理器接线**：实现真实 `NodeCommandHandler`，把创建、加入、启停、路由、角色、探测和关闭接到现有运行时，并迁移 CLI、IPC、WebUI 及后续 GPUI 只通过该入口操作。
-    - [x] **UN-05b-1 基础运行时命令**：监督器创建共享命令总线，生产处理器已接通 `GetSnapshot`、按网络 `StopNetworks`、`ProbePeer` 与 `Shutdown`，并使用类型化探测结果；未接通的动态启动、创建/加入、路由和角色命令返回稳定 `Unavailable`，不伪造成功。CLI/IPC/WebUI 迁移仍未完成。
+    - [x] **UN-05b-1 运行时命令接线**：多网络监督器创建共享命令总线，生产处理器已接通 `GetSnapshot`、`StartNetworks`、`CreateNetwork`、`JoinNetwork`、按网络 `StopNetworks`、`ProbePeer` 与 `Shutdown`，并使用类型化结果；路由热更新和网络角色变更仍返回稳定 `Unavailable`。CLI/IPC/WebUI 迁移仍未完成，因此不勾选 UN-05b。
     - [x] **UN-05b-2 IPC 命令传输桥**：多网络运行时的本地 IPC 服务接入共享 `NodeCommandBus`，新增 `IpcRequest::NodeCommand` 与类型化 `IpcResponse::NodeCommand`，保留旧请求以兼容现有调用方，并用真实 TCP 请求验证 `GetSnapshot` 往返。当前只完成服务端桥接，CLI 与 WebUI 仍走旧入口。
 - [ ] **UN-06 共享 UI 状态契约**：定义唯一的节点快照、网络列表、Peer、流量、日志、配置、错误和权限 DTO；删除两套 UI 各自演化状态的路径。
   - [x] **UN-06a 状态契约基座**：定义节点身份、网络角色、网络状态、Peer、流量、日志和错误的传输无关 DTO，以及带修订号、watch 快照和事件通知的单一 `NodeStateStore`；监督器已发布生命周期与网络上下线状态。
   - [ ] **UN-06b 状态生产者与适配器迁移**：从真实运行时填充身份、Peer、流量和日志，补齐配置与权限快照，并让 CLI、IPC、WebUI 及 GPUI 只消费共享状态快照。
     - [x] **UN-06b-1 网络遥测生产填充**：监督器每秒从所有真实网络会话聚合 Peer、连接质量、TUN/P2P 流量和错误计数；停止中的网络不再被刷新逻辑覆盖回 Online，空运行时会清理残留 Peer；身份与日志由后续 UN-06b-2 补齐，配置、权限和 UI 适配仍未完成。
     - [x] **UN-06b-2 身份与日志生产填充**：从首个成功建立的网络运行时写入仅含节点 ID、公钥指纹和可选显示名的公开身份快照；每秒把运行时 WARN/ERROR 聚合缓冲转换为有界类型化日志。当前日志并非完整 INFO/DEBUG 流，零网络启动尚未建立节点身份，且 CLI/IPC/WebUI/GPUI 仍未消费该快照。
-    - [x] **UN-06b-3 配置与权限快照**：共享快照发布启动覆盖后的有效网络配置，包括路由模式、出口目标、TUN/P2P 参数、ACL 摘要和 Exit Node 设置，并省略私钥路径与日志文件路径；监督器现在也真正应用 `is_exit_node` 启动覆盖。权限快照复用 UI manifest 的能力类别并明确标记 `TrustedControlPlane`，不伪装成已实现逐用户或远程鉴权。WebUI 仍监听全部网卡，CLI/IPC/WebUI/GPUI 尚未完整渲染和消费这些字段。
+    - [x] **UN-06b-3 配置与权限快照**：共享快照发布启动覆盖后的有效网络配置，包括路由模式、出口目标、TUN/P2P 参数、ACL 摘要和 Exit Node 设置，并省略私钥路径与日志文件路径；动态运行时在创建、启动和停止时同步配置快照，创建失败会移除回滚状态。权限快照复用 UI manifest 的能力类别并明确标记 `TrustedControlPlane`，不伪装成已实现逐用户或远程鉴权。WebUI 仍监听全部网卡，CLI/IPC/WebUI/GPUI 尚未完整渲染和消费这些字段。
 - [ ] **UN-07 UI 能力与导航清单**：用声明式 manifest 固定页面、操作、表单字段、校验、确认项和可用条件，作为双 UI 对等性的唯一事实来源。
-  - [x] **UN-07a 声明式 manifest 基座**：定义版本化、传输无关的页面、动作、字段、校验、确认、权限、可用条件和后端成熟度模型；覆盖 overview、networks、peers、topology、traffic、routing、exit_node、relay、logs、identity、settings 共 11 个页面，并用测试验证页面/动作 ID 唯一、必填字段校验、破坏性确认、后端状态与处理器一致，以及不引入产品级 client/server 身份。WebUI/GPUI 适配器和双 UI 对等测试尚未完成，因此不勾选 UN-07。
+  - [x] **UN-07a 声明式 manifest 基座**：定义版本化、传输无关的页面、动作、字段、校验、确认、权限、可用条件和后端成熟度模型；覆盖 overview、networks、peers、topology、traffic、routing、exit_node、relay、logs、identity、settings 共 11 个页面，并用测试验证页面/动作 ID 唯一、必填字段校验、破坏性确认、后端状态与处理器一致，以及不引入产品级 client/server 身份。动态启动、创建、加入和停止当前标记为 `Implemented`，路由与角色变更标记为 `Unavailable`；WebUI/GPUI 适配器和双 UI 对等测试尚未完成，因此不勾选 UN-07。
 - [ ] **UN-08 GPUI 应用外壳**：引入 GPUI，实现窗口生命周期、主题、导航、状态订阅、错误提示和退出清理；桌面模式不得依赖浏览器。
 - [ ] **UN-09 GPUI 功能页面**：实现网络创建/加入/切换、Peer、拓扑、流量、配置、路由、Exit Node、中继、日志和身份管理页面，全部消费共享契约。
 - [ ] **UN-10 WebUI 适配共享契约**：让 WebUI 仅作为共享命令和快照的 HTTP/WebSocket 适配器，不再拥有独立业务规则或另一套状态语义。

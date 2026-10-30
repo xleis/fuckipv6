@@ -447,7 +447,7 @@ pub fn build_quic_server_config_with_client_auth(
     )
     .context("无法创建 QUIC 服务端证书配置")?;
     server_crypto.alpn_protocols = vec![FUCKIPV6_QUIC_ALPN.to_vec()];
-    server_crypto.max_early_data_size = u32::MAX;
+    server_crypto.max_early_data_size = 0;
 
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
@@ -508,7 +508,7 @@ pub fn build_pinned_quic_client_config_with_auth(
     )
     .context("无法配置 QUIC 客户端身份证书")?;
     client_crypto.alpn_protocols = vec![FUCKIPV6_QUIC_ALPN.to_vec()];
-    client_crypto.enable_early_data = true;
+    client_crypto.enable_early_data = false;
     finish_pinned_client_config(client_crypto)
 }
 
@@ -526,7 +526,7 @@ pub fn build_pinned_quic_client_config(
     .with_custom_certificate_verifier(PinnedServerVerifier::new(expected_server_pin))
     .with_no_client_auth();
     client_crypto.alpn_protocols = vec![FUCKIPV6_QUIC_ALPN.to_vec()];
-    client_crypto.enable_early_data = true;
+    client_crypto.enable_early_data = false;
     finish_pinned_client_config(client_crypto)
 }
 
@@ -718,130 +718,104 @@ pub async fn run_quic_zero_rtt_reconnect_self_test(
         server_config,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
     )
-    .context("无法启动 QUIC 0-RTT loopback 服务端")?;
+    .context("无法启动 QUIC 1-RTT fallback loopback 服务端")?;
     let server_addr = server
         .local_addr()
-        .context("无法读取 QUIC 0-RTT loopback 服务端地址")?;
-    let (server_payload_tx, mut server_payload_rx) = tokio::sync::mpsc::unbounded_channel();
-    let server_task = tokio::spawn(run_zero_rtt_test_server(server, server_payload_tx));
+        .context("无法读取 QUIC 1-RTT fallback loopback 服务端地址")?;
+    let server_task = tokio::spawn(run_zero_rtt_test_server(server));
 
     let client_identity = Identity::generate()?;
     let client_certificate = QuicCertificate::from_identity(&client_identity)?;
     let mut client = quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .context("无法启动 QUIC 0-RTT loopback 客户端")?;
+        .context("无法启动 QUIC 1-RTT fallback loopback 客户端")?;
     client.set_default_client_config(build_pinned_quic_client_config_with_auth(
         certificate.public_key_pin,
         &client_certificate,
     )?);
 
-    let first_connection = client
+    let warmup = client
         .connect(server_addr, "fuckipv6.local")
-        .context("无法发起 QUIC 0-RTT 首次连接")?
-        .into_0rtt()
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("QUIC 0-RTT unexpectedly available before warmup"))?
+        .context("无法发起 QUIC 会话票据预热连接")?
         .await
-        .context("QUIC 0-RTT 首次握手失败")?;
-    let mut half_rtt_marker = first_connection
-        .accept_uni()
+        .context("QUIC 会话票据预热握手失败")?;
+    let (mut send, mut recv) = warmup
+        .open_bi()
         .await
-        .context("QUIC 0-RTT 首次连接未收到 0.5-RTT 标记")?;
-    let marker = half_rtt_marker
-        .read_to_end(usize::MAX)
+        .context("QUIC 会话票据预热连接无法打开双向流")?;
+    let warmup_frame = QuicFrame {
+        stream_id: 1,
+        payload: b"warmup".to_vec(),
+    };
+    send_quic_frame(&mut send, &warmup_frame).await?;
+    let echoed_warmup = recv_quic_frame(&mut recv)
         .await
-        .context("QUIC 0-RTT 首次连接读取 0.5-RTT 标记失败")?;
-    if marker != b"half-rtt" {
-        anyhow::bail!("QUIC 0-RTT half-rtt marker mismatch");
+        .context("QUIC 会话票据预热回显失败")?;
+    if echoed_warmup != warmup_frame {
+        anyhow::bail!("QUIC 会话票据预热回显不一致");
     }
-    let mut established_marker = first_connection
-        .accept_uni()
-        .await
-        .context("QUIC 0-RTT 首次连接未收到握手完成标记")?;
-    let marker = established_marker
-        .read_to_end(usize::MAX)
-        .await
-        .context("QUIC 0-RTT 首次连接读取握手完成标记失败")?;
-    if marker != b"established" {
-        anyhow::bail!("QUIC 0-RTT handshake marker mismatch");
-    }
-    first_connection.close(0u32.into(), b"warmup-done");
+    warmup.close(0u32.into(), b"warmup-done");
     client.wait_idle().await;
 
     let connecting = client
         .connect(server_addr, "fuckipv6.local")
-        .context("无法发起 QUIC 0-RTT 重连")?;
-    let (connection, zero_rtt) = connecting
-        .into_0rtt()
-        .map_err(|_| anyhow::anyhow!("QUIC 0-RTT session ticket unavailable"))?;
-    let (mut send, _recv) = connection
+        .context("无法发起 QUIC 重连")?;
+    let fallback = match connecting.into_0rtt() {
+        Ok((_connection, _accepted)) => {
+            anyhow::bail!("QUIC 在关闭 early data 后仍尝试 0-RTT")
+        }
+        Err(connecting) => connecting.await.context("QUIC 1-RTT fallback 握手失败")?,
+    };
+    let (mut send, mut recv) = fallback
         .open_bi()
         .await
-        .context("QUIC 0-RTT 重连无法打开双向流")?;
-    let frame = QuicFrame {
+        .context("QUIC 1-RTT fallback 连接无法打开双向流")?;
+    let fallback_frame = QuicFrame {
         stream_id: 2,
-        payload: b"zero-rtt".to_vec(),
+        payload: b"one-rtt-fallback".to_vec(),
     };
-    send_quic_frame(&mut send, &frame).await?;
-    let accepted = zero_rtt.await;
-    let echoed_payload =
-        tokio::time::timeout(std::time::Duration::from_secs(2), server_payload_rx.recv())
-            .await
-            .context("等待 QUIC 0-RTT 服务端接收 payload 超时")?
-            .ok_or_else(|| anyhow::anyhow!("QUIC 0-RTT 服务端接收通道已关闭"))?;
-
-    connection.close(0u32.into(), b"done");
+    send_quic_frame(&mut send, &fallback_frame).await?;
+    let echoed_payload = recv_quic_frame(&mut recv)
+        .await
+        .context("QUIC 1-RTT fallback 回显失败")?
+        .payload;
+    fallback.close(0u32.into(), b"done");
     client.wait_idle().await;
-    server_task.abort();
+    server_task.await??;
 
     Ok(ZeroRttSelfTestReport {
         server_addr,
-        accepted,
+        accepted: false,
         echoed_payload,
     })
 }
 
-async fn run_zero_rtt_test_server(
-    server: quinn::Endpoint,
-    server_payload_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-) {
-    while let Some(incoming) = server.accept().await {
-        let server_payload_tx = server_payload_tx.clone();
-        tokio::spawn(async move {
-            let Ok(connecting) = incoming.accept() else {
-                return;
-            };
-            let Ok((connection, established)) = connecting.into_0rtt() else {
-                return;
-            };
-            let reader_connection = connection.clone();
-            let reader_task = tokio::spawn(async move {
-                if let Ok((_send, mut recv)) = reader_connection.accept_bi().await {
-                    if let Ok(frame) = recv_quic_frame(&mut recv).await {
-                        let _ = server_payload_tx.send(frame.payload);
-                    }
-                }
-            });
-
-            if let Ok(mut stream) = connection.open_uni().await {
-                let _ = stream.write_all(b"half-rtt").await;
-                let _ = stream.finish();
-            }
-            let _ = established.await;
-            if let Ok(mut stream) = connection.open_uni().await {
-                let _ = stream.write_all(b"established").await;
-                let _ = stream.finish();
-            }
-
-            if let Ok(Ok(())) =
-                tokio::time::timeout(std::time::Duration::from_millis(500), reader_task).await
-            {
-                if let Ok(mut stream) = connection.open_uni().await {
-                    let _ = stream.write_all(b"received").await;
-                    let _ = stream.finish();
-                }
-            }
-        });
+async fn run_zero_rtt_test_server(server: quinn::Endpoint) -> Result<()> {
+    for expected_stream_id in [1_u64, 2_u64] {
+        let incoming = tokio::time::timeout(std::time::Duration::from_secs(3), server.accept())
+            .await
+            .context("等待 QUIC 自检连接超时")?
+            .context("QUIC 自检服务端已关闭")?;
+        let connection = incoming.await.context("QUIC 自检服务端握手失败")?;
+        let (mut send, mut recv) = connection
+            .accept_bi()
+            .await
+            .context("QUIC 自检服务端无法接受双向流")?;
+        let frame = recv_quic_frame(&mut recv)
+            .await
+            .context("QUIC 自检服务端无法读取帧")?;
+        if frame.stream_id != expected_stream_id {
+            anyhow::bail!(
+                "QUIC 自检 stream_id 不匹配: {} != {}",
+                frame.stream_id,
+                expected_stream_id
+            );
+        }
+        send_quic_frame(&mut send, &frame)
+            .await
+            .context("QUIC 自检服务端无法回显帧")?;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), connection.closed()).await;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1160,11 +1134,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_rtt_reconnect_self_test_uses_resumed_session() -> anyhow::Result<()> {
+    async fn zero_rtt_reconnect_self_test_reports_fallback() -> anyhow::Result<()> {
         let cert = generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
         let report = run_quic_zero_rtt_reconnect_self_test(&cert).await?;
-        assert!(report.accepted);
-        assert_eq!(report.echoed_payload, b"zero-rtt");
+        assert!(!report.accepted);
+        assert_eq!(report.echoed_payload, b"one-rtt-fallback");
         Ok(())
     }
 

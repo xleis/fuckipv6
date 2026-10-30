@@ -387,11 +387,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_rtt_reconnect_self_test_accepts_early_data() -> Result<()> {
+    async fn zero_rtt_reconnect_self_test_falls_back_to_one_rtt() -> Result<()> {
         let cert = generate_node_certificate()?;
         let report = run_zero_rtt_reconnect_self_test(&cert).await?;
-        assert!(report.accepted);
-        assert_eq!(report.echoed_payload, b"zero-rtt");
+        assert!(!report.accepted);
+        assert_eq!(report.echoed_payload, b"one-rtt-fallback");
         Ok(())
     }
 

@@ -8,6 +8,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+mod actor;
+
+pub use actor::{
+    EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
+    EmbeddedServiceStartRequest,
+};
+
 /// 内嵌协调端 Actor
 ///
 /// 赋予普通客户端节点完整的中心协调与中继服务能力，

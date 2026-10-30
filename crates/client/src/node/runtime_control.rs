@@ -1745,6 +1745,16 @@ mod tests {
         harness
             .state
             .update(|snapshot| {
+                snapshot.exit_node_capabilities = fuckipv6_common::ExitNodeCapabilities {
+                    schema_version: fuckipv6_common::EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                    platform: fuckipv6_common::ExitNodePlatform::Linux,
+                    supported: true,
+                    ipv4_forwarding: true,
+                    ipv6_forwarding: true,
+                    nat: true,
+                    cleanup: true,
+                    unsupported_reasons: Vec::new(),
+                };
                 let network = snapshot
                     .networks
                     .iter_mut()

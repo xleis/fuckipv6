@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
+- **内嵌网络服务生命周期 Actor**: 新增由节点侧统一持有的 `EmbeddedServiceManager`，在同一 actor 中管理多个网络的内嵌信令与 QUIC 中继实例，提供启动去重、排序列表、按网络停止和全量关闭；服务实例在停止或 actor 关闭时释放，关闭后的新请求返回稳定错误。当前尚未接入共享命令处理器、节点状态/事件或任何 UI。
 - **节点配置与权限快照**: 共享 `NodeSnapshot` 现在发布启动覆盖后的有效网络配置和统一权限类别；配置投影包含路由、Exit Node、TUN/P2P、ACL 摘要与日志级别，但刻意省略私钥和日志文件路径。多网络监督器同时补上 `is_exit_node` 启动覆盖。权限快照明确标记当前为 `TrustedControlPlane`（连接控制面的调用方可全权操作），不代表已实现逐用户或远程鉴权；WebUI 仍监听全部网卡，CLI/IPC/WebUI/GPUI 尚未完整渲染这些字段。
 - **共享 UI 能力清单基座**: 新增版本化、传输无关的节点 UI manifest，声明 11 个页面及动作、字段、校验、确认、权限、可用条件和后端成熟度；必填角色字段使用显式 `Role` 校验，测试校验页面/动作唯一性、破坏性确认，以及动作成熟度与当前真实命令处理器一致。当前只完成共享契约，WebUI/GPUI 尚未消费该 manifest，双 UI 对等和端到端测试仍未完成。
 - **节点 IPC 接入统一命令总线**: 多网络运行时的本地 IPC 服务现在持有共享 `NodeCommandBus`，新增可提交 `NodeCommandRequest` 并返回类型化 `NodeCommandResult` 的传输请求，同时保留旧 IPC 请求以兼容现有 CLI/WebUI 调用。真实 TCP 测试覆盖 `GetSnapshot` 往返；CLI 和 WebUI 尚未迁移到该入口，创建/加入、动态启停、路由和角色命令的运行时后端也仍未接通。

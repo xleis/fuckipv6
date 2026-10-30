@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::ClientConfig;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::config_manager::ConfigManager;
 
 /// How a node should choose the networks it loads at startup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NodeNetworkSelection {
     /// Keep the node and its control surfaces running without joining a network.
     None,

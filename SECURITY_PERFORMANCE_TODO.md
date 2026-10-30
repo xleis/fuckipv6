@@ -7,7 +7,7 @@
 
 威胁、代码控制、测试证据和生产缺口的逐项映射见 [`SECURITY_TRACEABILITY.md`](SECURITY_TRACEABILITY.md)。
 
-## 当前基线（2026-10-30，基于 `64556d2`）
+## 当前基线（2026-10-30，基于 `823c7be` 及后续文档对齐）
 
 ### 已有能力
 
@@ -24,13 +24,17 @@
 - [x] **重放保护**：生产 v2 数据帧使用方向分离的计数 Nonce 和 4096 包重放窗口，未认证或重复数据在进入 TUN/ACL 前失败关闭；真实 UDP 双引擎测试覆盖重放与篡改。
 - [ ] **密钥生命周期**：初始 epoch 已有 120 秒/2^60 字节硬上限、回滚拒绝和过期擦除，达到上限后失败关闭；在线 `REKEY_INIT/ACCEPT/CONFIRM` 尚未接入生产控制通道，因此持续流量达到时限后不能无缝换钥。
 - [x] **握手认证**：生产 UDP 路径已使用绑定双方身份、临时公钥、算法套件、SID、epoch 和 endpoint context 的签名 transcript 与双向 key confirmation；不安全或未完成的会话无法发送数据。
-- [ ] **抗量子握手与身份**：生产数据面仍只使用 X25519 和 Ed25519；可选 `pq` feature 已适配 ML-KEM-768/ML-DSA-65 并通过 ACVP KAT，但尚未接入 X-Wing、复合签名或握手，因此尚不具备端到端后量子机密性或后量子身份认证。
+- [ ] **端到端抗量子握手与身份**：生产数据面仍只使用 X25519 和 Ed25519，因此尚不具备生产后量子机密性或后量子身份认证。可选 `pq` feature 的本地进展分项记录如下：
+  - [x] X-Wing draft-11 固定向量、封装/解封装、严格长度和非 contributory 失败关闭。
+  - [x] Ed25519 + ML-DSA-65 复合身份、双签名强制验证、IdentityId 与签名域绑定。
+  - [x] 实验性固定长度 `HELLO/ACCEPT`、TH1/TH2 固定向量、suite/profile/PSK 降级失败关闭、时间窗和有界重放缓存；6755 + 6635 字节 body 均在 16 KiB 单帧预算内。
+  - [ ] 接入生产控制通道、Initiator `CONFIRM`、Cookie/限速、能力协商，以及 QUIC/relay/UDP/TUN 数据面；完成端到端容量、性能和独立安全审计。
 - [ ] **QUIC 双向身份**：当前 QUIC 服务端未启用客户端证书认证，应用层身份与服务端证书未统一绑定。
 - [ ] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie，但尚未接入握手控制通道；生产路径仍缺少握手速率控制和无效包成本上限。
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 
-已接入生产 `P2pEngine` 的 Secure Session v2 能力包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口，以及共享 UDP socket 上的握手/控制/数据多路复用。`send_to`、QUIC Mesh、QUIC relay 与信令 relay 调用同一 v2 seal/open 路径；未握手、未认证、legacy data 和静态 X25519 输入均失败关闭。双引擎真实 UDP 测试覆盖建链、双向数据、篡改、重放和未建链拒绝。批量快路径、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码与原子 epoch 轮换仍主要是 crate 内原语，尚未全部接入生产控制通道。可选 `pq` feature 提供 ML-KEM-768/ML-DSA-65 适配与 NIST ACVP KAT，但上游实现未经独立安全审计，且尚未参与任何握手或密钥组合。
+已接入生产 `P2pEngine` 的 Secure Session v2 能力包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口，以及共享 UDP socket 上的握手/控制/数据多路复用。`send_to`、QUIC Mesh、QUIC relay 与信令 relay 调用同一 v2 seal/open 路径；未握手、未认证、legacy data 和静态 X25519 输入均失败关闭。双引擎真实 UDP 测试覆盖建链、双向数据、篡改、重放和未建链拒绝。批量快路径、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码与原子 epoch 轮换仍主要是 crate 内原语，尚未全部接入生产控制通道。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 适配、X-Wing draft-11、复合身份和实验性混合 `HELLO/ACCEPT`；固定向量和失败关闭测试已通过，但该 profile 尚未参与生产控制通道或数据面，上游实现也未经独立安全审计。
 
 ### 快速数据面基线（非发布结论）
 
@@ -140,7 +144,8 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
   - [ ] 将状态机接入握手产生的键、控制通道线格式与真实数据面轮换；当前状态机不执行密码学验证。
 - [ ] **SP-05 混合后量子握手**：X25519 + ML-KEM-768，Ed25519 + ML-DSA-65。
   - [x] 锁定可选 ML-KEM-768/ML-DSA-65 原语适配，并通过 NIST ACVP KAT、固定长度负向测试和清零检查。
-  - [ ] 接入 X-Wing 组合、复合签名、握手 transcript、能力协商及端到端容量测试；上游未审计前不得用于生产。
+  - [x] 实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份及实验性 `HELLO/ACCEPT` transcript，固定 X-Wing、身份、TH1、TH2 向量，并覆盖降级、PSK 模式、时间窗、重放和非 contributory 输入失败关闭。
+  - [ ] 将混合 profile 接入生产控制通道和数据面，补齐 Initiator `CONFIRM`、Cookie/限速、能力协商、端到端容量测试及独立审计；上游未审计前不得用于生产。
 - [ ] **SP-06 数据面快路径**：固定帧格式、预计算 Peer 状态、缓冲池、批处理和零拷贝。
   - [x] 实现 v2 固定帧、预分配批量 seal/open 和禁止逐包分配的本地快路径基准。
   - [ ] v2 固定帧已进入真实 UDP/TUN 路径；仍需完成 Peer 热状态、缓冲池、批量 I/O 和端到端 profiling。

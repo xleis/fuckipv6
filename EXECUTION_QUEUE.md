@@ -23,7 +23,7 @@
 - [x] **EQ-10 文档链接与状态一致性检查**：自动检查仓库内 Markdown 链接、锚点、执行队列依赖和关键安全声明；独立 `docs` CI job 运行单测并上传机器可读报告。
 - [x] **EQ-11 会话驱动适配层**：为 secure-session 提供可嵌入客户端的数据面驱动接口，覆盖建链、收发、重协商、旧 epoch 宽限和失败关闭，并有集成测试；客户端真实数据面接入仍由 EQ-12 跟踪。
 - [x] **EQ-12 真实客户端数据面接入**：生产 `P2pEngine` 已完成 `HELLO -> ACCEPT -> CONFIRM`、基于长期 Ed25519 公钥字典序的无冲突角色选择、认证 endpoint 路由、v2 数据帧 AEAD/重放检查、QUIC/relay 同密文传输和静态密钥/legacy data 失败关闭；真实 UDP 双引擎测试覆盖双向收发、篡改、重放与未建链拒绝。在线重协商、Cookie/限速、独立审计与后量子能力继续由后续项跟踪。
-- [ ] **EQ-13 混合后量子握手**：实现并规范 X25519 + ML-KEM-768 密钥组合与 Ed25519 + ML-DSA-65 复合身份验证，补齐固定向量、降级策略和容量测试。
+- [x] **EQ-13 混合后量子握手**：`pq` feature 已实现并规范 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性混合 `HELLO/ACCEPT` 原语；固定 X-Wing/身份/TH1/TH2 向量、双签名、PSK 模式、有效签名降级、重放和时间窗负向测试通过。规范 `HELLO` 6755 字节、`ACCEPT` 6635 字节，均小于 16 KiB 控制帧预算。该 profile 尚未接入生产控制通道、QUIC/relay 或 `P2pEngine` 数据面，上游 ML-KEM/ML-DSA 实现也未独立审计。
 - [ ] **EQ-14 QUIC 统一身份**：启用客户端证书认证，将应用层身份与服务端证书绑定，限制 0-RTT 重放并覆盖错误证书与身份错绑测试。
 - [ ] **EQ-15 跨平台与跨主机验证**：建立 Linux network namespace 自动化和 Windows/macOS 实机/CI 测试路径，覆盖 TUN、P2P、中继、Exit Node 与失败回滚。
 - [ ] **EQ-16 数据面性能优化闭环**：复现空闲机基线、CPU/内存 profiling、批处理与缓冲池优化，按真实端到端结果对照内核 WireGuard 和 wireguard-go。

@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- 增加可选 `pq` feature 的 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT` profile：固定 X-Wing、复合身份、TH1、TH2 向量，规范 `HELLO` 6755 字节与 `ACCEPT` 6635 字节，并覆盖双签名、PSK 模式、有效签名降级、时间窗、重放、截断和非 contributory 输入失败关闭。该 profile 尚未接入生产控制通道、QUIC/relay 或数据面，尚无 Initiator hybrid `CONFIRM`、Cookie/限速和端到端容量测试；上游 ML-KEM/ML-DSA crate 未经独立审计，不得据此宣称已具备后量子安全或超越 WireGuard。
 - 将 Secure Session v2 classic 接入生产 `P2pEngine`：使用长期 Ed25519 公钥字典序选择 Initiator/Responder，在共享 UDP socket 上完成 `HELLO -> ACCEPT -> CONFIRM`，仅接受注册 endpoint 的握手与数据，并在 TUN/ACL 前执行 AEAD 认证和重放检查；QUIC Mesh、QUIC relay 与信令 relay 统一运输 v2 密文，未建链、legacy data 和静态 X25519 输入失败关闭。双引擎真实 UDP 测试覆盖双向收发、篡改、relay 重放与未建链拒绝。生产在线重协商、Cookie/限速、后量子组合和独立密码学审计仍未完成，也不构成 WireGuard 安全或性能超越结论。
 - 增加 Secure Session v2 独立 UDP 适配器及本地真实 socket 集成测试：完整执行 `HELLO -> ACCEPT -> CONFIRM`，固定对端地址与有序套件策略，设置握手/数据超时，复用 HELLO 重放缓存，并提供运行时会话与拒绝计数；测试覆盖双向数据、AEAD 篡改、重放、错误确认、不支持套件和旧版本拒绝。该适配器当前保留用于独立 socket 集成测试；生产 `P2pEngine` 已由后续条目接入共享 socket v2 数据面。该独立适配器本身不构成 WireGuard 安全或性能结论。
 - 增加 `common::Identity` 到 Secure Session Ed25519 身份的受控适配：复用同一长期 Ed25519 种子，但不向调用方暴露种子或私钥字节，并用签名互验测试确认注册公钥与 v2 握手身份一致。该适配为客户端 v2 数据面接线提供身份基础；生产数据面接入已由后续条目完成。
@@ -37,7 +38,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 canonical handshake transcript 构造器：使用独立协议域、两字节长度前缀和固定角色顺序绑定套件、双方身份/临时公钥、SID、epoch 及 endpoint context；未知套件、空字段、重复身份和超限输入在 SHA-512 前拒绝。
 - 增加 Secure Session v2 `REKEY_INIT/ACCEPT/CONFIRM` 有界、版本化控制帧编解码与固定字节向量；解析失败关闭截断、超长、尾随字节、非法长度、未知版本/类型和非零保留字段。帧本身仍需由已认证控制通道保护。
 - 增加 Secure Session v2 数据面 Criterion 基准，覆盖 64/512/1280/1420 字节的 seal/open、重放拒绝及 `EpochSession` 包装开销；发布 2026-10-30 开发基线并明确其结果不构成发布性能门禁。
-- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭；初始 v2 握手与数据面此后已接入生产路径，但在线重协商仍等待接入真实控制通道。完整 X-Wing 握手和 PQC 身份仍未实现。
+- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭；初始 v2 握手与数据面此后已接入生产路径，但在线重协商仍等待接入真实控制通道。X-Wing、复合身份和实验性 HELLO/ACCEPT 此后已实现，但仍未接入生产控制通道或数据面。
 - 客户端重连时通过 v2 签名请求恢复原虚拟 IPv4/IPv6 租约；协调端内存分配器重启后，只要地址仍空闲即可恢复。
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 

@@ -1,11 +1,12 @@
 //! Transport-independent primitives for the fuckipv6 secure session protocol v2.
 //!
-//! This crate intentionally does not implement the post-quantum handshake yet.
 //! It contains the byte-exact data frame, nonce construction, replay window,
 //! bounded epoch lifecycle, allocation-free AEAD packet operations, and the
 //! online `REKEY_INIT`/`REKEY_ACCEPT`/`REKEY_CONFIRM` state machine. With the
-//! optional `pq` feature, it also provides the X-Wing draft-11 KEM primitive;
-//! the corresponding hybrid wire handshake is not yet connected.
+//! optional `pq` feature, it also provides X-Wing draft-11, composite
+//! Ed25519 + ML-DSA-65 identities, and an experimental hybrid `HELLO/ACCEPT`
+//! handshake primitive. That hybrid profile is not connected to the production
+//! control channel or `P2pEngine`, and its upstream PQ crates are not audited.
 
 pub mod confirmation;
 pub mod cookie;

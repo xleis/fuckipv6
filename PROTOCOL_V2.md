@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。在线重协商控制通道、Cookie/限速和完整后量子套件仍未接入。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 独立原语适配和 NIST ACVP KAT，但完整 X-Wing 握手、复合签名、PQC 握手 profile 和控制通道线格式尚未实现，且尚未经过独立密码学评审。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性两消息混合 `HELLO/ACCEPT` profile，并用固定向量覆盖 transcript、降级、PSK 模式和重放失败关闭。该混合 profile 尚未接入生产控制通道、QUIC/relay 或 `P2pEngine`，尚无混合 Initiator `CONFIRM` 线格式、Cookie 校验和生产限速；在线重协商控制通道、Capacity/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -35,18 +35,18 @@ Secure Session Protocol v2 为 Peer 之间的 IP 载荷建立经过双向认证�
 5. 自动选择只用于 AES-GCM/ChaCha20 的性能路由，两者安全等级相同，且都绑定在同一 transcript。
 6. `0x0201` 仅在 CPU 提供 AES 硬件加速时优先；其他平台使用 `0x0202`。
 
-### 2.2 X-Wing 依赖门槛
+### 2.2 X-Wing 实现状态与依赖门槛
 
-目标构造是 `draft-connolly-cfrg-xwing-kem-11`（X25519 + ML-KEM-768 + SHA3-256）。在实现前必须满足：
+目标构造是 `draft-connolly-cfrg-xwing-kem-11`（X25519 + ML-KEM-768 + SHA3-256）。`pq` feature 已按该 revision 实现固定长度组合 KEM、封装/解封装、shared-secret 组合和 draft-11 固定向量；X-Wing 公钥与密文长度分别为 1216 和 1120 字节。实现继续遵守：
 
-- 所选 Rust crate 与草案 revision 完全一致，并有公开测试向量。
-- 不混用早期 Kyber round-3 格式与 FIPS 203 ML-KEM 格式。
-- crate 的维护状态、许可证、审计和 `zeroize` 行为通过依赖审查。
-- 若草案在发布前变化，必须发布新的 suite ID，不能静默改变线格式。
+- RustCrypto 的 `ml-kem 0.3.3` 与 `ml-dsa 0.1.1` 版本和许可证已锁定，且不得混用早期 Kyber round-3 格式与 FIPS 203 ML-KEM 格式。
+- X-Wing 与复合身份只存在于 `pq` feature；关闭该 feature 时不得静默构造后量子能力。
+- 若草案或依赖线格式变化，必须发布新的 suite/profile ID 并更新固定向量，不能静默改变已有线格式。
+- 两个上游 crate 尚未经过独立安全审计；固定向量通过只证明实现一致，不证明协议安全。
 
-当前 crates.io 的 `x-wing 0.1.x` 只标称早期草案。实现不得直接沿用，除非升级核验到相同 revision 或由审计过的薄封装提供固定测试向量。
+生产接入前仍需完成外部密码学评审、依赖审计、控制通道集成、容量/端到端性能和跨平台验证。
 
-### 2.3 后 Quantum 身份
+### 2.3 后量子身份
 
 长期身份是一个复合公钥：
 
@@ -70,12 +70,17 @@ IdentityId = BLAKE3("fuckipv6-v2 identity" || len(EdPk) || EdPk || len(PqPk) || 
 
 适配层只暴露 FIPS 203/204 固定尺寸编解码、密钥生成、封装/解封装、签名和验证，并提供 NIST ACVP known-answer 测试。ML-KEM 公钥、密文和 shared secret 分别为 1184、1088、32 字节；ML-DSA-65 公钥和签名分别为 1952、3309 字节。私钥 seed、临时随机数和 shared secret 使用清零容器，私钥 Debug 输出脱敏。
 
-该适配层**不是**下面任一能力：
+当前实现已包括：
 
-- X-Wing 组合 KEM 或其线格式。
-- Ed25519 + ML-DSA-65 复合身份/双签名。
-- `HELLO/ACCEPT` 后量子握手 profile。
-- 真实 UDP/TUN 数据面或生产密码套件接入。
+- X-Wing draft-11 组合 KEM、固定长度编解码和 draft-11 向量。
+- Ed25519 + ML-DSA-65 复合身份、IdentityId 绑定和双签名强制验证。
+- 实验性固定长度混合 `HELLO`/`ACCEPT` profile、TH1/TH2 固定向量、降级与 PSK 模式失败关闭。
+
+仍未包括：
+
+- 生产控制通道、QUIC/relay 或 UDP/TUN 数据面接入。
+- 混合 Initiator `CONFIRM` 线格式、生产 Cookie 校验和限速。
+- 完整能力协商、端到端容量测试、跨平台运行证据和独立密码学审计。
 
 两个上游 crate 均明确声明尚未经过独立安全审计。SS-13 的测试通过只证明适配和标准向量一致，不构成安全认证；在完成组合协议评审、依赖审计、跨平台验证和端到端基准前，不得宣称后量子安全或性能超越 WireGuard。
 
@@ -126,7 +131,7 @@ P             Suite ID
 字段：
 
 ```text
-version, suite_id, CI, CR, HE_I, HP_I,
+version, profile, suite_id, CI, CR, HE_I, HP_I,
 EPK_I, NI, T,
 endpoint_context_hash,
 psk_mode,
@@ -143,7 +148,7 @@ signature_ed_i, signature_pq_i
 ```text
 TH1 = SHA-512(
   "fuckipv6-v2 hello" ||
-  L(version) || L(suite_id) || L(CI) || L(CR) ||
+  L(version) || L(profile) || L(suite_id) || L(CI) || L(CR) ||
   L(HE_I) || L(HP_I) || L(EPK_I) || L(NI) || L(T) ||
   L(endpoint_context_hash) || L(psk_mode) || L(cookie_or_zero)
 )
@@ -159,7 +164,7 @@ TH1 = SHA-512(
 字段：
 
 ```text
-version, suite_id, SID,
+version, profile, suite_id, SID, epoch,
 CR, CI, HE_R, HP_R,
 CT_R, NR, T,
 signature_ed_r, signature_pq_r,
@@ -177,8 +182,8 @@ responder_confirm
 TH2_input = SHA-512(
   "fuckipv6-v2 accept" ||
   TH1 || L(signature_ed_i) || L(signature_pq_i) ||
-  L(SID) || L(CR) || L(CI) || L(HE_R) || L(HP_R) ||
-  L(CT_R) || L(NR) || L(T)
+  L(SID) || L(epoch) || L(CR) || L(CI) ||
+  L(HE_R) || L(HP_R) || L(CT_R) || L(NR) || L(T)
 )
 ```
 
@@ -208,6 +213,17 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
 - 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation，以及 SS-08 的认证数据 epoch 桥接。canonical `ACCEPT` 携带 Responder confirmation，`CONFIRM` 携带 Initiator confirmation；只有验证对端方向 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index。SS-10 使桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。生产 `P2pEngine` 已使用共享 UDP socket 完成该握手、按认证 endpoint 路由数据并在 TUN/ACL 前认证解密；SS-09 的在线重协商、无状态 Cookie 与限速仍未接入生产控制通道。
+
+#### 4.3.2 实验性 hybrid profile
+
+`crates/secure-session/src/hybrid/handshake.rs` 实现 `HYBRID_PROFILE_ID = 2`，覆盖 suite `0x0201`/`0x0202`。它是 crate 内的两消息 `HELLO -> ACCEPT` 原语，不是已接入生产控制通道的协议实现：
+
+- canonical `HELLO` body 为 6755 字节，canonical `ACCEPT` body 为 6635 字节；两者合计 13390 字节，低于 16 KiB 控制帧 payload 上限。由于单个消息远大于安全 UDP MTU，生产接入必须先提供可靠、有序、限长的已认证控制通道。
+- `HELLO` 固定绑定 `version`、`profile`、`suite_id`、双方 `IdentityId`、Initiator 复合公钥的 Ed25519/ML-DSA-65 分量、X-Wing 临时公钥、32 字节 nonce、时间、endpoint context hash、`psk_mode` 和 41 字节 cookie。`TH1` 使用域分离的 SHA-512 覆盖这些未签名字段，复合身份必须同时提供有效 Ed25519 和 ML-DSA-65 签名。
+- `TH2_input` 使用域分离的 SHA-512 覆盖 `TH1`、`HELLO` 双签名的两个分量、`SID`、`epoch`、Responder/Initiator `IdentityId`、Responder 复合公钥的两个分量、X-Wing 密文、Responder nonce 和时间。最终 `TH2` 再绑定 Responder 的两个签名分量。`suite`、`profile`、endpoint context 和 `psk_mode` 通过 `TH1` 间接绑定；双方还必须显式核对 `ACCEPT.profile`/`suite_id` 与 `HELLO` 一致。
+- `ACCEPT` 当前不含未经认证的额外字段：`responder_confirmation` 是由 `TH2` 和派生密钥计算的 HMAC-SHA-256 确认值。`PSK mode 0/1` 必须与双方本地配置一致，经典-only 身份、缺失任一后量子签名、有效签名下的 suite/profile 降级、非 contributory X-Wing 结果和篡改均失败关闭。
+- Responder 在完成身份、时间窗、endpoint、签名、KEM 和确认验证后才把 `TH1` 插入最多 4096 项的有界 replay cache；重复 `HELLO`、缓存耗尽或过期项重新出现均失败关闭。当前缓存只在进程内，尚未实现持久化重放状态。
+- 固定向量覆盖 X-Wing draft-11、复合身份、TH1、TH2_input、TH2 和消息容量。生产缺口仍包括 Initiator hybrid `CONFIRM`、cookie 校验/生产限速、能力协商、控制通道与 relay/UDP/TUN 接入，以及端到端容量和独立安全审计。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 

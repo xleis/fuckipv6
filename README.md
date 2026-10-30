@@ -6,7 +6,7 @@
 
 - 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
-- 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。该 profile 尚未完成独立密码学审计，后量子身份与密钥组合尚未接入，不能据此宣称安全等级或性能超过 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
+- 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。该 profile 尚未完成独立密码学审计；可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT`，但尚未接入生产控制通道或数据面，且上游后量子 crate 未独立审计，不能据此宣称已具备后量子安全或超越 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
 - 🔒 **身份与鉴权**: Ed25519 签名验证；Coordinator Web/API 可配置 JWT，客户端本地 WebUI/API 当前免密并只应绑定本机或受信网络
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
@@ -187,7 +187,8 @@ fuckipv6/
 
 - [x] Secure Session v2 classic（临时 X25519 + Ed25519、确认帧、计数 Nonce、重放窗口）已接入生产 `P2pEngine` 的 UDP/TUN 数据面；旧版静态密钥数据包失败关闭，QUIC 与 relay 只承载同一 v2 密文
 - [ ] 接入 v2 在线重协商控制通道、无状态 Cookie 与限速，并完成独立密码学审计；当前 epoch 达到时限/字节上限后失败关闭而不是在线换钥
-- [ ] 接入 X25519 + ML-KEM-768 与 Ed25519 + ML-DSA-65 混合握手；当前生产路径不具备端到端后量子机密性或后量子身份认证
+- [x] 实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性混合 `HELLO/ACCEPT`，固定 X-Wing/TH1/TH2 向量并覆盖降级、PSK、重放与非 contributory 输入失败关闭
+- [ ] 将混合 profile 接入生产控制通道、QUIC/relay 与 UDP/TUN 数据面并完成独立审计；当前生产路径仍不具备端到端后量子机密性或后量子身份认证
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
 - [x] IPv4/IPv6 双栈虚拟地址与 Coordinator JWT 鉴权

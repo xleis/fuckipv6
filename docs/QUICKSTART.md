@@ -1,373 +1,278 @@
 # 快速开始指南
 
+## 先理解产品模型
+
+`fuckipv6` 只有一种产品身份：**节点**。只发布一个 `fuckipv6` 程序；没有需要分别安装或启动的“客户端程序”和“服务端程序”。
+
+同一个节点可以：
+
+- 创建网络，并承担信令、地址分配和 QUIC 中继等网络服务角色；
+- 通过 `fk://` 邀请票据加入网络，成为普通成员；
+- 同时在多个网络中承担不同职责；
+- 作为 Exit Node 为指定网络提供出口转发。
+
+协议和 TLS 代码中的 client/server、Initiator/Responder 只是会话术语，不是产品身份。
+
+界面目标是：有桌面环境时使用 GPUI 原生界面，无桌面环境时使用 WebUI；两套 UI 必须共享命令层、状态模型、校验和错误语义。**当前 GPUI 尚未实现，桌面模式仍会打开浏览器 WebUI，不能将这一临时行为称为 GPUI。**
+
 ## 前置要求
 
-- Linux、macOS 或 Windows
-- Linux 需要 root 权限或 `CAP_NET_ADMIN` 创建 TUN 设备；macOS 需要 sudo/root 创建 utun 并配置路由；Windows 需要管理员权限和 WinTun
-- Rust 1.75+
-- IPv6网络环境
+- Linux、macOS 或 Windows；
+- Linux 需要 root 或 `CAP_NET_ADMIN` 创建 TUN、配置地址和路由；macOS 需要 sudo/root；Windows 需要管理员权限和 WinTun；
+- Rust 1.75+（从源码构建时）；
+- 节点之间至少有一条可达的 IPv4 或 IPv6 传输路径。
+
+托管网络服务时通常需要允许：
+
+- TCP `6666`：WebSocket 信令；
+- UDP `6667`：QUIC 中继；
+- TCP `8080`：WebUI；生产环境应仅绑定可信网络或放在认证反向代理后。
 
 ## 编译
 
 ```bash
-cd /home/xlei/project/fuckipv6
+git clone https://github.com/yourusername/fuckipv6.git
+cd fuckipv6
 cargo build --release
 ```
 
-编译完成后，二进制文件位于：
-- 客户端：`./target/release/fuckipv6`
-- 协调服务器：`./target/release/fuckipv6-coordinator`
+构建产物只有：
 
-## 第一步：启动协调服务器
+```text
+./target/release/fuckipv6
+```
 
-在你的公网服务器上运行：
+## 第一步：在一个可达节点上创建网络
+
+在具有可达地址的节点上运行：
 
 ```bash
-# 使用默认端口：信令 0.0.0.0:6666，WebUI 0.0.0.0:8080
-sudo ./target/release/fuckipv6-coordinator
-
-# 或指定自定义端口
-sudo ./target/release/fuckipv6-coordinator --bind "0.0.0.0:7777" --webui-bind "0.0.0.0:8080"
-
-# 查看帮助
-./target/release/fuckipv6-coordinator --help
+sudo ./target/release/fuckipv6 host \
+  --name home \
+  --port 6666 \
+  --relay-port 6667 \
+  --external-host 2001:db8::10 \
+  --headless \
+  --webui-port 8080
 ```
 
-**注意事项**：
-- 确保防火墙开放了6666端口（TCP，用于WebSocket信令）
-- 如需查看Web管理界面，开放8080端口或通过SSH隧道访问
-- 服务器需要客户端可达；虚拟网络承载IPv6，传输endpoint可为IPv4或IPv6
+说明：
 
-## 第二步：配置客户端
+- `host` 是节点的网络服务角色，不是独立服务端程序；
+- 该节点默认作为成员自动加入自己创建的网络；
+- `--external-host` 应填写其他节点可达的域名、IPv4 或 IPv6 地址，用于生成邀请票据；
+- 程序会输出 `fk://...` 邀请票据，后续节点使用同一票据加入；
+- `--headless` 仅选择 WebUI 表面，不改变节点身份或权限。
 
-在每台需要组网的机器上：
+如果只在受控本地环境验证，可以省略 `--external-host`，并使用本机默认地址生成票据。
+
+## 第二步：其他节点加入网络
+
+在另一台节点上执行：
 
 ```bash
-# 生成配置文件
-./target/release/fuckipv6 init-config
-
-# 编辑配置文件
-nano client.toml
+sudo ./target/release/fuckipv6 join "fk://..." \
+  --name home \
+  --start \
+  --headless \
+  --webui-port 8080
 ```
 
-修改`coordinator_url`为你的服务器地址：
+也可以把“保存配置”和“启动”拆开：
 
-```toml
-coordinator_url = "ws://[your-server-ipv6]:6666"
+```bash
+./target/release/fuckipv6 join "fk://..." --name home
+sudo ./target/release/fuckipv6 connect home --headless --webui-port 8080
 ```
 
-**配置说明**：
+常用网络操作：
+
+```bash
+fuckipv6 list                 # 查看已保存网络
+fuckipv6 default home         # 设置默认网络
+fuckipv6 connect home         # 连接指定网络
+fuckipv6 connect --all        # 连接所有已保存网络
+fuckipv6 leave home           # 删除网络配置和该网络使用的身份材料
+```
+
+## 第三步：访问节点界面
+
+无桌面或远程部署时，访问：
+
+```text
+http://<节点地址>:8080
+```
+
+本地调试可只监听回环地址，并通过 SSH 隧道访问，避免将尚未内置认证的本地 WebUI 暴露到公网。
+
+桌面模式目前仍使用浏览器窗口。GPUI 原生桌面外壳、共享 UI 契约和 GPUI/WebUI 对等测试完成前，不应把浏览器窗口描述为 GPUI。
+
+## 使用传统配置文件启动
+
+从一个节点生成配置：
+
+```bash
+./target/release/fuckipv6 init-config node.toml
+```
+
+编辑网络服务端点。当前配置字段为了兼容仍名为 `coordinator_url`：
 
 ```toml
-# 协调服务器地址
-coordinator_url = "ws://[2001:db8::1]:6666"
-
-# 私钥文件（自动生成）
-private_key_path = "client_key.pem"
+coordinator_url = "wss://network.example.com:6666"
+private_key_path = "node_key.pem"
 
 [network]
-# 虚拟网络（由服务器分配）
 virtual_network = "fd00::/64"
 
 [tun]
-# TUN设备名称
 name = "fuckipv6"
-# MTU大小
-mtu = 1280
+mtu = 1400
 
 [p2p]
-# P2P监听端口（0=随机）
 listen_port = 0
-# 连接超时（秒）
-connect_timeout = 10
-# 心跳间隔（秒）
 heartbeat_interval = 30
-
-[p2p.fallback_threshold]
-# 最大RTT（毫秒）
-max_rtt_ms = 200
-# 最大丢包率
-max_loss_rate = 0.05
-# 连接超时（秒）
-timeout_secs = 30
+connect_timeout = 10
 
 [log]
-# 日志级别: trace, debug, info, warn, error
-# 客户端和协调端都会读取该配置；RUST_LOG 环境变量会覆盖它
 level = "info"
 ```
 
-配置文件加载时会校验 WebSocket URL、IPv6 CIDR、监听地址、MTU、超时、丢包率阈值和日志级别；非法配置会在启动时直接报错。
-
-客户端运行时会轮询配置文件变更并热重载 `[p2p.fallback_threshold]`，用于调整自动 fallback 的 RTT、丢包率和超时阈值。`log.level` 变更会被检测并写入日志，但当前日志订阅器需要重启客户端后生效。
-
-如需加密保存配置文件，可使用 `FUCKIPV6_CONFIG_PASSPHRASE` 提供口令：
+启动同一个节点程序：
 
 ```bash
-FUCKIPV6_CONFIG_PASSPHRASE='change-me' fuckipv6 encrypt-config client.toml client.toml.enc
-FUCKIPV6_CONFIG_PASSPHRASE='change-me' sudo -E fuckipv6 start --config client.toml.enc
+sudo ./target/release/fuckipv6 start --config node.toml --headless
+```
+
+`coordinator_url` 是内部兼容名称，不代表用户需要选择或运行一个独立协调程序。
+
+配置文件加载时会校验 WebSocket URL、IPv6 CIDR、监听地址、MTU、超时、丢包率阈值和日志级别；非法配置会直接报错。
+
+如需加密配置文件，可使用 `FUCKIPV6_CONFIG_PASSPHRASE`：
+
+```bash
+FUCKIPV6_CONFIG_PASSPHRASE='change-me' \
+  fuckipv6 encrypt-config node.toml node.toml.enc
+
+FUCKIPV6_CONFIG_PASSPHRASE='change-me' \
+  sudo -E fuckipv6 start --config node.toml.enc --headless
 ```
 
 解密导出：
 
 ```bash
-FUCKIPV6_CONFIG_PASSPHRASE='change-me' fuckipv6 decrypt-config client.toml.enc --output client.toml
+FUCKIPV6_CONFIG_PASSPHRASE='change-me' \
+  fuckipv6 decrypt-config node.toml.enc --output node.toml
 ```
 
-## 第三步：启动客户端
+## 验证连通性
 
-**重要**：Linux/macOS 需要 sudo/root 权限创建虚拟网卡并配置路由；Windows 需要管理员权限。
+查看 TUN、IPv6 地址和路由：
 
 ```bash
-# 启动客户端
-sudo ./target/release/fuckipv6 start --config client.toml
-
-# 或使用环境变量调整日志级别
-sudo RUST_LOG=debug ./target/release/fuckipv6 start
-```
-
-成功启动后，你会看到类似输出：
-
-```
-INFO  Starting client with config: client.toml
-INFO  Client ID: rBz8Xk3l...
-INFO  Connecting to coordinator: ws://[2001:db8::1]:6666
-INFO  WebSocket connected
-INFO  Assigned virtual IP: fd00::1001
-INFO  P2P engine listening on: [::]:54321
-INFO  TUN device created: fuckipv6
-INFO  Client started successfully, entering main loop
-```
-
-macOS 上配置中的 `tun.name = "fuckipv6"` 会自动分配实际 `utunN` 接口；如果要固定接口，可以改成 `utun0`、`utun1` 等系统允许的名称。
-
-## 第四步：测试连通性
-
-在客户端A上：
-
-```bash
-# 查看TUN设备（Linux）
 ip addr show fuckipv6
-
-# 查看路由（Linux）
 ip -6 route | grep fuckipv6
-
-# macOS 可查看实际 utun 接口和 IPv6 路由
-ifconfig | grep -A4 utun
-netstat -rn -f inet6 | grep utun
-
-# 使用内置命令查看虚拟网络路由
-sudo ./target/release/fuckipv6 route
-
-# 查看客户端运行状态
-sudo ./target/release/fuckipv6 status
-
-# 查看已发现节点
-sudo ./target/release/fuckipv6 peers
-
-# 查看 systemd 日志
-sudo ./target/release/fuckipv6 logs --service client --lines 100
 ```
 
-假设客户端A分配到 `fd00::1001`，客户端B分配到 `fd00::1002`
+查看节点运行状态和 Peer：
 
-在客户端A上ping客户端B：
+```bash
+sudo ./target/release/fuckipv6 status
+sudo ./target/release/fuckipv6 peers
+sudo ./target/release/fuckipv6 route
+```
+
+假设另一个成员节点的虚拟 IPv6 是 `fd00::1002`：
 
 ```bash
 ping6 fd00::1002
 ```
 
-成功输出：
-
-```
-PING fd00::1002(fd00::1002) 56 data bytes
-64 bytes from fd00::1002: icmp_seq=1 ttl=64 time=12.3 ms
-64 bytes from fd00::1002: icmp_seq=2 ttl=64 time=11.8 ms
-```
+`peers` 输出中的 Path、RTT、Loss、Probe 成功率和带宽估计可用于判断当前是直连还是中继。Path 显示 Relay 时，说明 P2P 尚未验证或质量低于阈值，但 fallback 可用。
 
 ## 本机端到端验证
 
-在 Linux 开发机上，可以用 network namespace 脚本启动 1 个协调服务器和 3 个隔离客户端，验证路由、双向 ping、接近 MTU 的大包 ping 和三节点连通性：
+Linux 开发机可使用 network namespace 脚本启动 1 个托管节点和 3 个隔离成员节点：
 
 ```bash
 sudo ./scripts/test-netns.sh
 ```
 
-脚本需要 root、`ip`、`ping6` 或 `ping -6`、TUN 内核模块和 network namespace 支持。它会自动构建 release 二进制并在退出时清理测试 namespace。
+脚本覆盖双向 ping、路由和接近 MTU 的大包 ping。它需要 root、`ip`、`ping`、TUN 内核模块和 network namespace 支持。
+
+## 安装为系统服务
+
+Linux release 包和源码仓库提供统一的节点安装脚本：
+
+```bash
+sudo ./scripts/install-node.sh
+sudo systemctl start fuckipv6
+sudo systemctl status fuckipv6
+sudo journalctl -u fuckipv6 -f
+```
+
+服务名只有 `fuckipv6.service`。网络创建、加入或默认连接配置好以后，同一个服务会以 headless 模式提供 WebUI 和节点运行时。
+
+macOS 使用：
+
+```bash
+sudo ./scripts/install-macos-node.sh
+sudo launchctl kickstart -k system/cc.xlei.fuckipv6
+```
+
+Windows 请使用 release 包中的 `setup_windows.ps1`，或在管理员终端运行同一个 `fuckipv6.exe`。
 
 ## 常见问题
 
-### 1. 权限错误
-
-```
-Error: 创建 TUN 设备失败：权限不足，请使用 root 运行或授予 CAP_NET_ADMIN
-```
-
-**解决**：必须使用足够权限运行客户端
-```bash
-sudo ./target/release/fuckipv6 start
-```
-
-如果提示设备已存在，说明上次异常退出留下了残留设备：
-
-```bash
-sudo ip link delete fuckipv6
-```
-
-macOS 残留路由或地址可通过 `netstat -rn -f inet6` 和 `ifconfig utunN` 定位，必要时手动删除对应 IPv6 路由或地址。
-
-### 2. 连接失败
-
-```
-Error: Failed to connect to coordinator
-```
-
-**检查**：
-- 协调服务器是否运行
-- 服务器地址和端口是否正确
-- 防火墙是否开放
-- IPv6网络是否可达
-
-### 3. 查看协调端状态
-
-浏览器访问：
+### 权限错误
 
 ```text
-http://your-server:8080
+Error: 创建 TUN 设备失败：权限不足
 ```
 
-或直接调用API：
+使用 root、`CAP_NET_ADMIN` 或平台等价权限。如果上次异常退出留下设备，可清理：
 
 ```bash
-curl http://your-server:8080/api/status
-curl http://your-server:8080/api/peers
-```
-
-Web 管理页面会通过 `/ws` WebSocket 自动刷新；如果浏览器无法建立 WebSocket，会退回到定时 REST 轮询。页面的 System Logs 面板会调用 `/api/logs` 读取 systemd journal 最近日志。
-
-### 4. 无法ping通
-
-**检查**：
-- 两个客户端是否都成功连接到服务器
-- 查看日志中是否有"Peer online"消息
-- 确认虚拟IP地址正确
-- 运行 `fuckipv6 peers` 查看 Path、RTT、Loss、Probe 成功率和 BW 带宽估计；如果 Path 显示 Relay，说明P2P尚未验证或健康阈值不达标，但fallback可用
-
-### 5. TUN设备已存在
-
-如果上次异常退出，TUN设备可能没有清理：
-
-```bash
-# 删除旧设备
 sudo ip link delete fuckipv6
 ```
 
-## 高级用法
+### 无法加入网络
 
-### 查看详细日志
+检查：
 
-```bash
-sudo RUST_LOG=trace ./target/release/fuckipv6 start
+- 邀请票据是否完整；
+- `--external-host` 是否填写为其他节点可达地址；
+- TCP `6666` 是否可达；
+- 网络服务节点的防火墙和 NAT 端口映射是否正确；
+- 使用 `sudo journalctl -u fuckipv6 -n 100` 查看错误。
+
+### 能完成信令但无法 P2P
+
+这是正常降级路径。节点会优先尝试 QUIC 中继，必要时再走 WebSocket 信令中继。检查 UDP `6667`、NAT 映射和中继健康状态。
+
+### WebUI 是否等价于 GPUI？
+
+不是。WebUI 是当前可用的统一界面表面；GPUI 是待实现的桌面原生表面。二者必须消费同一命令与状态契约，完成自动对等测试后才算达到统一 UI 目标。
+
+## 架构边界
+
+```text
+                 一个 fuckipv6 进程（本地节点）
+┌─────────────────────────────────────────────────────┐
+│ UI：GPUI（目标） | WebUI（headless） | CLI/IPC       │
+├─────────────────────────────────────────────────────┤
+│ 共享命令、状态、校验、确认和错误契约                │
+├─────────────────────────────────────────────────────┤
+│ 节点监督器：身份、配置、日志、生命周期、多网络管理  │
+├─────────────────────────────────────────────────────┤
+│ 网络 A：成员、地址、Peer、路由、策略、服务角色      │
+│ 网络 B：成员、地址、Peer、路由、策略、服务角色      │
+└─────────────────────────────────────────────────────┘
 ```
 
-### 后台运行
+- **节点**是唯一产品身份；
+- **网络**是隔离的虚拟覆盖网；
+- **成员**是某节点在一个网络中的参与状态；
+- **网络服务角色**包括信令、地址分配、中继和 Exit Node；
+- **GPUI/WebUI** 都只能做展示与输入适配，不得各自复制业务状态机。
 
-```bash
-# 使用systemd
-sudo nano /etc/systemd/system/fuckipv6.service
-```
-
-```ini
-[Unit]
-Description=fuckipv6 Client
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/home/user/fuckipv6
-ExecStart=/home/user/fuckipv6/target/release/fuckipv6 start --config /etc/fuckipv6/client.toml
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable fuckipv6
-sudo systemctl start fuckipv6
-sudo systemctl status fuckipv6
-```
-
-### SSH通过虚拟网络
-
-假设客户端B的虚拟IP是 `fd00::1002`：
-
-```bash
-ssh user@fd00::1002
-```
-
-### 文件传输
-
-```bash
-scp file.txt user@[fd00::1002]:/tmp/
-```
-
-## 架构说明
-
-```
-┌─────────────────┐
-│  Coordinator    │  WebSocket信令 + IPv6地址分配
-│  (公网服务器)    │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    │         │
-┌───▼──┐  ┌──▼───┐
-│Client│◄─┤Client│  UDP P2P直连
-│  A   │  │  B   │
-└──────┘  └──────┘
-fd00::1001  fd00::1002
-```
-
-- **协调服务器**：负责客户端注册、地址分配、对等节点发现
-- **P2P连接**：客户端之间通过UDP直接通信，数据不经过服务器
-- **TUN设备**：虚拟网卡，提供IPv6虚拟局域网接口
-
-## 下一步
-
-当前实现了Phase 1 MVP，后续可以扩展：
-
-- **Phase 2**: NAT穿透、QUIC协议、中继服务
-- **Phase 3**: Web管理界面、性能优化
-- **Phase 4**: Windows支持、移动端
-
-## 故障排查
-
-启用调试日志：
-
-```bash
-sudo RUST_LOG=fuckipv6=debug,fuckipv6_client=debug ./target/release/fuckipv6 start
-```
-
-查看网络连接：
-
-```bash
-# 查看UDP监听端口
-sudo ss -ulnp | grep fuckipv6
-
-# 查看TUN设备状态
-ip link show fuckipv6
-ip -6 addr show fuckipv6
-```
-
-抓包分析：
-
-```bash
-# 抓取TUN设备流量
-sudo tcpdump -i fuckipv6 -n
-
-# 抓取UDP流量
-sudo tcpdump -i any 'udp and port 54321' -n
-```
+详细迁移项见 [`UNIFIED_NODE_TODO.md`](../UNIFIED_NODE_TODO.md)。

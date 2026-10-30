@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 classic 握手 UDP 控制帧编解码：`HELLO`、`ACCEPT + responder confirmation` 和 `CONFIRM` 使用独立 `FKV2` magic、协议版本、类型和精确 body 长度，拒绝截断、超长、尾随字节、错误 magic/版本/类型及非零 flags/reserved；同时提供双方公钥顺序无关的 endpoint context 派生和随机输入不 panic 测试。该层只完成线格式；生产数据面接入已由后续条目完成。
 
 ### Changed
+- **统一节点发布入口**: workspace 只发布 `fuckipv6` 一个用户程序，移除独立 `fuckipv6-coordinator` 二进制；Docker、Compose、systemd、launchd、安装脚本、CI/Release、测试和基准统一使用节点入口。`host`、`join`、中继和 Exit Node 均保留为同一节点的网络角色，不再代表两种产品身份。新增单二进制发布门禁。
 - **WebUI 全面重构**:
   - 客户端控制台与协调信令中心统一采用侧边栏 + 顶栏 + 分层卡片设计系统，新增共享样式表 `crates/common/assets/webui.css`（通过 `/assets/webui.css` 分发）。
   - 重做指标卡、拓扑舞台、数据表格、日志控制台、表单、弹窗、右键菜单与空状态，统一深色极光 / 明亮双主题与响应式断点。
@@ -53,6 +54,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
+- 对齐 README、快速开始、部署、迁移清单与变更记录中的统一节点模型：产品层只有节点，`host`/`join` 是同一程序创建或加入网络的操作；明确当前桌面路径仍为浏览器 WebUI，GPUI 原生界面与两套 UI 的共享契约尚未完成，不能把目标状态描述为已交付。
 - 固化统一节点目标架构：唯一产品身份为节点，协调/信令/中继/Exit Node 都是按网络承担的服务角色；明确 GPUI/WebUI 必须共享命令层、状态契约与能力清单，并列出独立协调二进制、浏览器伪桌面和重复 UI 业务逻辑的迁移/删除边界。
 - 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。
 - 记录 v2 接入前的加密能力口径：当时 UDP 数据面使用静态 X25519 会话密钥 + 随机 Nonce 的 ChaCha20-Poly1305，没有前向保密、重放窗口和密钥轮换；当前生产路径已切换为 v2 classic 临时会话，但独立审计、后量子组合和在线重协商仍未完成，完整差距与验收门槛见 `SECURITY_PERFORMANCE_TODO.md`。

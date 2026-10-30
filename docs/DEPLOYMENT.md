@@ -1,750 +1,501 @@
 # fuckipv6 部署指南
 
-本文档提供详细的生产环境部署指南。
+本文档说明如何以**节点**为单位部署 `fuckipv6`。产品层不再区分客户端和服务端，也不存在第二个用户需要安装或启动的协调程序。
+
+## 部署模型
+
+```text
+一个 fuckipv6 二进制
+├── 普通成员节点：加入一个或多个网络
+├── 托管节点：为网络提供信令、地址分配、QUIC 中继
+├── Exit Node：为指定网络提供出口转发
+└── 同一节点可同时承担以上多个角色
+```
+
+角色属于“节点在某个网络中的成员状态”，不属于二进制类型、系统用户或权限等级。
+
+界面目标是桌面环境使用 GPUI，无桌面环境使用 WebUI。当前 GPUI 尚未实现；`--headless` 启动 WebUI，现有桌面路径仍会打开浏览器，不能视为 GPUI 已完成。
 
 ## 目录
 
 - [系统要求](#系统要求)
-- [服务器部署](#服务器部署)
-- [客户端部署](#客户端部署)
-- [安全加固](#安全加固)
-- [监控和维护](#监控和维护)
+- [构建与安装](#构建与安装)
+- [创建网络](#创建网络)
+- [加入网络](#加入网络)
+- [运行 WebUI](#运行-webui)
+- [systemd 持久运行](#systemd-持久运行)
+- [Docker 部署](#docker-部署)
+- [安全边界](#安全边界)
+- [监控与维护](#监控与维护)
 - [故障排除](#故障排除)
+- [发布与升级](#发布与升级)
 
 ---
 
 ## 系统要求
 
-### 协调服务器
+### 通用节点
 
-**硬件要求**:
-- CPU: 1核心 (推荐2核心)
-- 内存: 512MB (推荐1GB)
-- 网络: 公网IPv6地址
-- 磁盘: 1GB
+- CPU：1 核及以上；
+- 内存：128 MB 及以上；托管大型网络时建议 512 MB 及以上；
+- 操作系统：Linux、macOS 或 Windows；
+- IPv4 或 IPv6 传输路径至少一条可达；
+- Linux 需要 root 或 `CAP_NET_ADMIN`；macOS 需要 sudo/root；Windows 需要管理员权限和 WinTun；
+- 构建源码需要 Rust 1.75+。
 
-**软件要求**:
-- 操作系统: Linux (Ubuntu 20.04+, Debian 11+, CentOS 8+)
-- 开放端口: TCP 6666 (WebSocket信令)
-- IPv6: 必须启用
+### 托管网络服务的节点
 
-### 客户端
+- 建议具有稳定的公网 IPv4/IPv6 地址或可转发端口；
+- 开放 TCP `6666`（WebSocket 信令）；
+- 开放 UDP `6667`（QUIC 中继）；
+- WebUI 默认使用 TCP `8080`，但生产环境应限制访问；
+- 如果网络服务位于 NAT 后，应配置 TCP/UDP 端口映射。
 
-**硬件要求**:
-- CPU: 1核心
-- 内存: 128MB
-- 网络: IPv6网络连接
-- 磁盘: 100MB
-
-**软件要求**:
-- 操作系统: Linux、macOS 或 Windows
-- 权限: Linux 需要 root 或 `CAP_NET_ADMIN`；macOS 需要 sudo/root；Windows 需要管理员权限和 WinTun
-- IPv6: 必须启用
+IPv6 普及后，普通成员之间可以优先使用公网 IPv6 直连；但信令、NAT 穿透和中继仍可能需要可达端点。不要把“每个设备都有公网 IPv6”当作所有网络环境都已成立的假设。
 
 ---
 
-## 服务器部署
+## 构建与安装
 
-### 1. 准备服务器
-
-```bash
-# 更新系统
-sudo apt update && sudo apt upgrade -y
-
-# 安装必要工具
-sudo apt install -y git curl build-essential pkg-config
-
-# 验证IPv6可用
-ip -6 addr show
-ping6 google.com
-```
-
-### 2. 安装Rust工具链
+### 从源码构建
 
 ```bash
-# 安装rustup
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# 重新加载环境
-source $HOME/.cargo/env
-
-# 验证安装
-rustc --version
-cargo --version
-```
-
-### 3. 编译项目
-
-```bash
-# 克隆仓库
 git clone https://github.com/yourusername/fuckipv6.git
 cd fuckipv6
-
-# 编译（Release模式）
-./scripts/build.sh release
-
-# 或手动编译
 cargo build --release
 ```
 
-### 4. 安装协调服务器
+唯一用户程序为：
 
-```bash
-# 运行安装脚本
-sudo ./scripts/install-coordinator.sh
+```text
+target/release/fuckipv6
 ```
 
-该脚本会自动执行以下操作:
-1. 创建系统用户 `fuckipv6`
-2. 复制二进制文件到 `/opt/fuckipv6/`
-3. 安装systemd服务
-4. 配置防火墙（如果使用firewalld）
+### Linux 安装脚本
 
-### 5. 配置防火墙
-
-**使用firewalld**:
-```bash
-sudo firewall-cmd --permanent --add-port=6666/tcp
-sudo firewall-cmd --reload
-```
-
-**使用iptables**:
-```bash
-sudo ip6tables -A INPUT -p tcp --dport 6666 -j ACCEPT
-sudo ip6tables-save > /etc/iptables/rules.v6
-```
-
-**使用ufw**:
-```bash
-sudo ufw allow 6666/tcp
-sudo ufw reload
-```
-
-### 6. 启动服务
+在包含 `fuckipv6` 二进制和安装脚本的源码或 release 包目录运行：
 
 ```bash
-# 启动服务
-sudo systemctl start fuckipv6-coordinator
-
-# 查看状态
-sudo systemctl status fuckipv6-coordinator
-
-# 查看日志
-sudo journalctl -u fuckipv6-coordinator -f
-
-# 设置开机自启
-sudo systemctl enable fuckipv6-coordinator
+sudo ./scripts/install-node.sh
 ```
 
-### 7. 验证服务运行
+安装内容包括：
+
+- 唯一二进制 `/opt/fuckipv6/fuckipv6`；
+- 命令入口 `/usr/local/bin/fuckipv6`；
+- 系统服务 `fuckipv6.service`。
+
+安装后检查：
 
 ```bash
-# 检查端口监听
-ss -tlnp | grep 6666
-
-# 应该看到类似输出:
-# LISTEN 0  128  [::]:6666  [::]:*  users:(("fuckipv6-coordinator",pid=1234,fd=5))
-
-# 测试WebSocket连接（使用wscat）
-npm install -g wscat
-wscat -c "ws://[::1]:6666"
+fuckipv6 --version
+systemctl cat fuckipv6
 ```
+
+### 手动安装
+
+```bash
+sudo install -d /opt/fuckipv6 /etc/fuckipv6 /var/lib/fuckipv6 /var/log/fuckipv6
+sudo install -m 0755 target/release/fuckipv6 /opt/fuckipv6/fuckipv6
+sudo ln -sf /opt/fuckipv6/fuckipv6 /usr/local/bin/fuckipv6
+```
+
+身份私钥和运行状态应保存在 `/var/lib/fuckipv6`，配置应保存在 `/etc/fuckipv6`。不要将私钥、节点配置或构建产物提交到 Git。
+
+### macOS 安装脚本
+
+```bash
+sudo ./scripts/install-macos-node.sh
+sudo launchctl kickstart -k system/cc.xlei.fuckipv6
+```
+
+launchd 标签为 `cc.xlei.fuckipv6`，二进制、配置、日志和 WebUI 端口均使用同一节点安装布局。
+
+### Windows
+
+使用 release 包中的 `setup_windows.ps1`，或在管理员终端直接运行 `fuckipv6.exe`。GPUI 完成前，Windows 桌面入口仍属于浏览器 WebUI 路径。
 
 ---
 
-## 客户端部署
+## 创建网络
 
-### 方法1: Linux 使用安装脚本（推荐）
-
-```bash
-# 1. 编译项目
-./scripts/build.sh release
-
-# 2. 运行安装脚本
-sudo ./scripts/install-client.sh
-
-# 3. 编辑配置文件
-sudo nano /etc/fuckipv6/client.toml
-
-# 修改 coordinator_url 为你的服务器地址:
-# coordinator_url = "ws://[2001:db8::1]:6666"
-
-# 4. 启动服务
-sudo systemctl start fuckipv6-client
-
-# 5. 查看状态
-sudo systemctl status fuckipv6-client
-```
-
-### 方法2: 手动安装（Linux/macOS 通用）
+先在可达节点上启动网络服务角色。以下命令直接创建网络、输出 `fk://` 票据，并让本节点加入该网络：
 
 ```bash
-# 1. 创建目录
-sudo mkdir -p /opt/fuckipv6
-sudo mkdir -p /etc/fuckipv6
-sudo mkdir -p /var/log/fuckipv6
-
-# 2. 复制二进制文件
-sudo cp target/release/fuckipv6 /opt/fuckipv6/
-sudo chmod +x /opt/fuckipv6/fuckipv6
-
-# 3. 生成配置文件
-/opt/fuckipv6/fuckipv6 init-config --output /etc/fuckipv6/client.toml
-
-# 4. 编辑配置
-sudo nano /etc/fuckipv6/client.toml
-
-# 5. 手动启动测试
-sudo /opt/fuckipv6/fuckipv6 start --config /etc/fuckipv6/client.toml
+sudo fuckipv6 host \
+  --name home \
+  --port 6666 \
+  --relay-port 6667 \
+  --external-host 2001:db8::10 \
+  --headless \
+  --webui-port 8080
 ```
 
-macOS 可直接使用 release 包或本机编译出的二进制，手动生成配置后通过 `sudo fuckipv6 start --config client.toml` 启动；Windows 请使用 Windows release 包中的 `setup_windows.ps1` 或管理员终端手动运行。
+参数说明：
 
-macOS release 包还包含 launchd 安装脚本：
+| 参数 | 作用 |
+|------|------|
+| `--name home` | 网络名称；不是进程级“服务端身份” |
+| `--port 6666` | WebSocket 信令监听端口 |
+| `--relay-port 6667` | QUIC 中继 UDP 端口 |
+| `--external-host` | 写入邀请票据、其他节点可达的域名或地址 |
+| `--headless` | 使用 WebUI，不尝试桌面界面 |
+| `--webui-port 8080` | 本地 WebUI 监听端口 |
+
+当前 `host` 默认让本节点自动加入所创建网络。CLI 尚不能通过 `--auto-connect=false` 关闭这一行为；需要纯网络服务角色时，应等待运行时监督器完成该配置语义，不要把当前限制描述成最终设计。
+
+保存输出的 `fk://...` 票据。它是加入网络所需凭证，不应发布到公共日志或工单系统。
+
+### 使用全局 host 参数
+
+也可以不进入子命令，直接启动默认应用并内嵌网络服务：
 
 ```bash
-sudo ./install-macos-client.sh
-# 编辑 /usr/local/etc/fuckipv6/client.toml 后启动/重启
-sudo launchctl kickstart -k system/cc.xlei.fuckipv6.client
+sudo fuckipv6 \
+  --headless \
+  --webui-port 8080 \
+  --host \
+  --host-name home \
+  --host-port 6666 \
+  --host-relay-port 6667 \
+  --external-host 2001:db8::10
 ```
 
-macOS 协调服务器可使用：
+这条路径适合 systemd 持久运行，但同样受当前自动加入语义影响。
+
+---
+
+## 加入网络
+
+在其他节点上执行：
 
 ```bash
-sudo ./install-macos-coordinator.sh
-sudo launchctl kickstart -k system/cc.xlei.fuckipv6.coordinator
+sudo fuckipv6 join "fk://..." \
+  --name home \
+  --start \
+  --headless \
+  --webui-port 8080
 ```
 
-### 配置说明
+或分开保存与启动：
 
-编辑 `/etc/fuckipv6/client.toml`:
-
-```toml
-# 必须修改: 协调服务器地址
-coordinator_url = "ws://your-server.example.com:6666"
-
-# 可选: 指定客户端ID（通常无需设置）
-# client_id = "my-laptop"
-
-[network]
-virtual_network = "fd00::/64"
-
-[tun]
-name = "fuckipv6"
-mtu = 1400
-
-[p2p]
-listen_port = 0  # 0 = 随机端口
-heartbeat_interval = 30
-
-[log]
-level = "info"
+```bash
+fuckipv6 join "fk://..." --name home
+sudo fuckipv6 connect home --headless --webui-port 8080
 ```
 
-启动时会校验配置值，包括 WebSocket URL、IPv6 CIDR、监听地址、MTU、超时、丢包率阈值和日志级别；部署前可先用目标配置启动一次确认没有校验错误。
+连接多个网络：
+
+```bash
+sudo fuckipv6 connect home office --headless
+sudo fuckipv6 connect --all --headless
+```
+
+查看和修改已保存网络：
+
+```bash
+fuckipv6 list
+fuckipv6 default home
+fuckipv6 leave home
+```
+
+网络配置的兼容字段仍为 `coordinator_url`，但该字段只表示网络服务端点，不表示独立产品程序。
+
+---
+
+## 运行 WebUI
+
+headless 节点启动后访问：
+
+```text
+http://<节点地址>:8080
+```
+
+建议：
+
+- 本地调试仅监听 `127.0.0.1`，通过 SSH 隧道访问；
+- 远程管理时使用 VPN、受控管理网或带认证和 TLS 的反向代理；
+- 不要把当前无内置认证的本地 WebUI 直接暴露到公网；
+- WebSocket 路径为 `/ws`，REST API 包括 `/api/status`、`/api/peers` 和 `/api/logs`。
+
+当前 WebUI 是实际可用的无头界面。GPUI 是待实现的原生桌面界面，两者最终必须共享同一命令和状态契约，并通过自动对等测试。
+
+---
+
+## systemd 持久运行
+
+安装脚本提供基础服务文件：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now fuckipv6
+sudo systemctl status fuckipv6
+sudo journalctl -u fuckipv6 -f
+```
+
+默认服务以 headless 模式启动 WebUI。要让同一服务持久承担网络服务角色，可使用 drop-in 替换 `ExecStart`：
+
+```ini
+# sudo systemctl edit fuckipv6
+[Service]
+ExecStart=
+ExecStart=/opt/fuckipv6/fuckipv6 --headless --webui-port 8080 --host --host-name home --host-port 6666 --host-relay-port 6667 --external-host 2001:db8::10
+```
+
+成员节点可替换为：
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/opt/fuckipv6/fuckipv6 connect home --headless --webui-port 8080
+```
+
+应用修改：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart fuckipv6
+sudo journalctl -u fuckipv6 -n 100 --no-pager
+```
+
+服务名只有 `fuckipv6.service`。旧 `fuckipv6-client.service` 和 `fuckipv6-coordinator.service` 已不再随发布物提供。
 
 ---
 
 ## Docker 部署
 
-### 协调服务器
+仓库只提供一个节点镜像：
 
 ```bash
-# 构建镜像
-docker build -f Dockerfile.coordinator -t fuckipv6-coordinator:local .
+docker build -f Dockerfile -t fuckipv6:local .
+```
 
-# 启动协调服务器
+由于 TUN、路由和主机网络能力依赖宿主机，Docker 运行需要 `network_mode: host`、`NET_ADMIN` 和 `/dev/net/tun`：
+
+```bash
 docker run -d \
-  --name fuckipv6-coordinator \
+  --name fuckipv6 \
   --restart unless-stopped \
-  -p 6666:6666 \
-  -p 8080:8080 \
-  -v "$PWD/examples/coordinator.toml.example:/etc/fuckipv6/coordinator.toml:ro" \
-  fuckipv6-coordinator:local
+  --network host \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -v fuckipv6-state:/var/lib/fuckipv6 \
+  -v fuckipv6-config:/etc/fuckipv6 \
+  fuckipv6:local
 ```
 
-### docker compose
+Compose 入口只有一个服务：
 
 ```bash
-# 启动协调服务器
-docker compose up -d coordinator
-
-# 如需容器化客户端，先编辑 ./client.toml，然后启动 client profile
-docker compose --profile client up -d client
+docker compose up -d node
+docker compose logs -f node
 ```
 
-容器化客户端当前面向 Linux，需要 `network_mode: host`、`NET_ADMIN` capability 和 `/dev/net/tun` 设备映射。生产环境更推荐客户端直接用系统服务部署，便于管理 TUN/utun/WinTun 设备和主机路由。
+容器默认启动 headless WebUI。托管网络服务或加入成员网络时，通过 WebUI、compose `command` 或挂载一致的节点配置选择角色。容器化部署不应复制出第二个协调镜像。
 
 ---
 
-## 发布流程
+## 安全边界
 
-GitHub Actions 提供两个工作流：
+### 身份与配置
 
-- `.github/workflows/ci.yml`：每次 push/PR 调用 `verify.yml`，在 Linux、Windows、macOS 执行发布门禁并聚合报告。
-- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时先复用 `verify.yml`；三平台门禁通过后才打包 Linux x86_64、macOS x86_64、macOS arm64 和 Windows x86_64 产物，生成 SHA256 并上传到 GitHub Release。
+- 节点身份由 Ed25519 私钥表示；私钥属于节点，不属于“客户端/服务端身份”；
+- 配置文件可能包含网络端点、路径、策略和身份引用，应限制为 root 或专用服务用户可读；
+- 使用 `FUCKIPV6_CONFIG_PASSPHRASE` 可加密兼容配置文件；
+- 定期备份身份与配置，但不要把私钥放入镜像、制品或公开备份。
 
-发布门禁也可以在本机执行。正式检查默认要求干净工作区；禁止用 `--allow-dirty` 的产物作为发布依据。
-
-```bash
-python3 scripts/release-gate.py run --platform linux --print-plan
-python3 scripts/release-gate.py run --platform linux --toolchain stable
-```
-
-Linux 门禁默认额外检查 musl 和 Windows GNU target，需提前安装对应 Rust target 及 MinGW。报告位于 `target/release-gate/linux.json`，完整日志和 Criterion 原始估计值位于 `target/release-gate/linux-artifacts/`。门禁报告只覆盖工程构建、测试、lint 和基准可执行性，不代表独立安全审计通过，也不构成超越 WireGuard 的性能证明。
-
-创建发布：
+示例备份：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+sudo install -d -m 0700 /var/backups/fuckipv6
+sudo tar -C / -czf "/var/backups/fuckipv6/node-$(date +%F).tar.gz" etc/fuckipv6 var/lib/fuckipv6
+sudo find /var/backups/fuckipv6 -type f -mtime +30 -delete
 ```
 
-发布产物包括：
+### 网络暴露面
 
-- `fuckipv6-linux-x86_64-<version>.tar.gz`
-- `fuckipv6-macos-x86_64-<version>.tar.gz`
-- `fuckipv6-macos-arm64-<version>.tar.gz`
-- `fuckipv6-windows-x86_64-<version>.zip`
-- 对应的 `.sha256` 校验文件
+- WebUI/API 当前不是为直接公网暴露设计的安全边界；
+- 生产环境使用防火墙、SSH 隧道、管理网或认证反向代理；
+- 网络服务需开放的端口应只对预期成员地址开放；
+- TLS client/server、握手 Initiator/Responder 是协议角色，不是节点权限等级；
+- Exit Node 会改变转发和 NAT 行为，应只对受信网络启用并审计策略。
+
+### 密码学状态
+
+Secure Session v2 classic 已接入 UDP/TUN 生产数据面，但尚未完成独立密码学审计；后量子混合 profile 尚未接入生产控制通道和数据面，不能宣称已具备后量子安全。当前性能基线也未证明超越 WireGuard。具体边界见 `SECURITY_PERFORMANCE_TODO.md` 和 `SECURITY_TRACEABILITY.md`。
 
 ---
 
-## 安全加固
+## 监控与维护
 
-### 1. 使用TLS/SSL (推荐生产环境)
-
-**获取Let's Encrypt证书**:
+### 日志
 
 ```bash
-# 安装certbot
-sudo apt install -y certbot
-
-# 获取证书
-sudo certbot certonly --standalone -d vpn.example.com
-
-# 证书位置:
-# /etc/letsencrypt/live/vpn.example.com/fullchain.pem
-# /etc/letsencrypt/live/vpn.example.com/privkey.pem
+sudo journalctl -u fuckipv6 -f
+sudo journalctl -u fuckipv6 -n 200 --no-pager
+sudo journalctl -u fuckipv6 --since "1 hour ago"
 ```
 
-**修改systemd服务**:
+调整日志级别：
 
-编辑 `/etc/systemd/system/fuckipv6-coordinator.service`:
+```bash
+sudo systemctl edit fuckipv6
+```
 
 ```ini
-ExecStart=/opt/fuckipv6/fuckipv6-coordinator \
-    --bind "[::]:6666" \
-    --ip-pool "fd00::1000/120" \
-    --tls-cert /etc/letsencrypt/live/vpn.example.com/fullchain.pem \
-    --tls-key /etc/letsencrypt/live/vpn.example.com/privkey.pem
-```
-
-**客户端使用wss://**:
-
-```toml
-coordinator_url = "wss://vpn.example.com:6666"
-```
-
-### 2. 防火墙规则
-
-**仅允许特定IP访问**:
-
-```bash
-# 仅允许特定客户端IP段
-sudo ip6tables -A INPUT -p tcp --dport 6666 -s 2001:db8::/32 -j ACCEPT
-sudo ip6tables -A INPUT -p tcp --dport 6666 -j DROP
-```
-
-### 3. 系统用户权限
-
-协调服务器使用专用用户运行:
-
-```bash
-# 验证用户已创建
-id fuckipv6
-
-# 验证文件权限
-ls -la /opt/fuckipv6
-# 应该显示: drwxr-xr-x fuckipv6 fuckipv6
-```
-
-### 4. 日志审计
-
-客户端和协调端都会读取配置文件中的 `[log].level`，可选值为 `trace`、`debug`、`info`、`warn`、`error`。如果设置了 `RUST_LOG`，环境变量优先。
-两端使用同一套 tracing 初始化，日志格式包含统一的时间、级别、target 和消息字段，便于 systemd/journal 或外部采集器统一解析。
-
-通过 systemd 启用详细日志:
-
-```bash
-# 编辑服务文件
-sudo systemctl edit fuckipv6-coordinator
-
-# 添加:
 [Service]
-Environment="RUST_LOG=info,fuckipv6=debug"
-
-# 重新加载
-sudo systemctl daemon-reload
-sudo systemctl restart fuckipv6-coordinator
+Environment="RUST_LOG=debug"
 ```
 
----
+修改后重启 `fuckipv6`。
 
-## 监控和维护
+### 运行状态
 
-### 1. 日志管理
-
-**查看实时日志**:
 ```bash
-# 协调服务器
-sudo journalctl -u fuckipv6-coordinator -f
-
-# 客户端
-sudo journalctl -u fuckipv6-client -f
+fuckipv6 status
+fuckipv6 peers
+fuckipv6 stats
+fuckipv6 route
 ```
 
-**查看历史日志**:
+WebUI 提供在线成员、连接拓扑、流量、系统日志和网络操作。远程自动化应优先调用稳定的本地控制接口；不要在脚本中抓取 HTML。
+
+### 资源检查
+
 ```bash
-# 最近100行
-sudo journalctl -u fuckipv6-coordinator -n 100
-
-# 今天的日志
-sudo journalctl -u fuckipv6-coordinator --since today
-
-# 特定时间段
-sudo journalctl -u fuckipv6-coordinator --since "2024-01-01" --until "2024-01-02"
-```
-
-**日志轮转**:
-```bash
-# journald自动管理日志轮转
-# 配置位置: /etc/systemd/journald.conf
-
-# 限制日志大小
-sudo systemctl edit systemd-journald
-
-[Journal]
-SystemMaxUse=1G
-```
-
-### 2. 性能监控
-
-**检查连接状态**:
-```bash
-# 服务器端
-ss -tlnp | grep fuckipv6
-
-# 客户端
+systemctl status fuckipv6
+ps -o pid,%cpu,%mem,rss,cmd -C fuckipv6
+ss -tlnp | grep -E ':(6666|8080)'
+ss -ulnp | grep 6667
 ip -6 addr show fuckipv6
-ping6 fd00::1001  # ping其他客户端
-```
-
-**系统资源使用**:
-```bash
-# CPU和内存
-top -p $(pidof fuckipv6-coordinator)
-
-# 网络流量
-iftop -i fuckipv6  # 需要安装iftop
-```
-
-### 3. 自动更新
-
-**创建更新脚本** (`/opt/fuckipv6/update.sh`):
-
-```bash
-#!/bin/bash
-set -e
-
-cd /path/to/fuckipv6
-git pull
-cargo build --release
-
-sudo systemctl stop fuckipv6-coordinator
-sudo cp target/release/fuckipv6-coordinator /opt/fuckipv6/
-sudo systemctl start fuckipv6-coordinator
-```
-
-**设置定期检查**:
-```bash
-# 添加到crontab
-crontab -e
-
-# 每天凌晨2点检查更新
-0 2 * * * /opt/fuckipv6/update.sh >> /var/log/fuckipv6/update.log 2>&1
-```
-
-### 4. 备份
-
-**备份关键文件**:
-```bash
-#!/bin/bash
-# backup.sh
-
-BACKUP_DIR="/var/backups/fuckipv6"
-DATE=$(date +%Y%m%d)
-
-mkdir -p "$BACKUP_DIR"
-
-# 备份配置
-tar czf "$BACKUP_DIR/config-$DATE.tar.gz" /etc/fuckipv6/
-
-# 备份密钥
-tar czf "$BACKUP_DIR/keys-$DATE.tar.gz" /var/lib/fuckipv6/*.pem
-
-# 保留最近30天的备份
-find "$BACKUP_DIR" -name "*.tar.gz" -mtime +30 -delete
+ip -6 route show
 ```
 
 ---
 
 ## 故障排除
 
-### 问题1: 客户端无法连接到服务器
+### 服务未启动
 
-**症状**: 客户端日志显示 "Failed to connect to coordinator"
-
-**解决方案**:
 ```bash
-# 1. 检查服务器是否运行
-sudo systemctl status fuckipv6-coordinator
+sudo systemctl status fuckipv6 --no-pager
+sudo journalctl -u fuckipv6 -n 200 --no-pager
+```
 
-# 2. 检查端口是否监听
+检查配置路径、私钥权限、端口占用和 TUN 权限。
+
+### 无法加入网络
+
+检查：
+
+```bash
+ping -6 <托管节点地址>
 ss -tlnp | grep 6666
-
-# 3. 检查防火墙
-sudo firewall-cmd --list-all
-sudo ip6tables -L -n
-
-# 4. 测试网络连接
-ping6 your-server.example.com
-telnet your-server.example.com 6666
-
-# 5. 检查服务器日志
-sudo journalctl -u fuckipv6-coordinator -n 100
+sudo systemctl status fuckipv6
 ```
 
-### 问题2: TUN设备创建失败
+确认邀请票据完整、`--external-host` 可从成员节点解析或访问、TCP `6666` 未被防火墙阻断。
 
-**症状**: "创建 TUN 设备失败"、"权限不足"、"设备已存在" 或 "无法执行 ip 命令"
+### 无法创建 TUN
 
-**解决方案**:
 ```bash
-# 1. 检查TUN模块是否加载
 lsmod | grep tun
-
-# 如果没有，手动加载
-sudo modprobe tun
-
-# 2. 检查设备权限
 ls -l /dev/net/tun
-
-# 应该显示: crw-rw-rw- 1 root root
-
-# 3. 确保以root运行
-whoami  # 应该显示 root
-
-# 4. 检查现有TUN设备
 ip link show type tun
-
-# 如果 fuckipv6 设备已存在，清理残留设备
-sudo ip link delete fuckipv6
-
-# 5. 检查 iproute2 是否安装
-ip -V
+ip link delete fuckipv6 2>/dev/null || true
 ```
 
-### 问题3: 节点间无法通信
+确认进程具备 root 或 `CAP_NET_ADMIN`。服务文件中应保留 `CAP_NET_ADMIN` 和 `CAP_NET_RAW`。
 
-**症状**: ping6 其他节点超时
+### 能信令但无法 P2P
 
-**解决方案**:
 ```bash
-# 1. 检查虚拟IP是否分配
-ip -6 addr show fuckipv6
-
-# 2. 检查路由表
-ip -6 route show
-
-# 3. 检查P2P连接状态
-# 查看客户端日志中的 "add_peer" 信息
-sudo journalctl -u fuckipv6-client | grep "add_peer"
-
-# 4. 测试P2P端口
-# 在客户端1:
-sudo lsof -i UDP
-
-# 5. 抓包分析
-sudo tcpdump -i fuckipv6 -n icmp6
+fuckipv6 peers
+sudo ss -ulnp | grep 6667
 ```
 
-### 问题4: 性能差/延迟高
+检查 UDP 中继端口、NAT 映射、IPv6 防火墙和 Peer 的 Path/RTT/Loss。Relay 路径可用不代表直连失败。
 
-**症状**: ping延迟 >100ms
+### WebUI 无法访问
 
-**解决方案**:
 ```bash
-# 1. 检查MTU设置
-ip link show fuckipv6
-# 应该显示 mtu 1400
-
-# 2. 调整MTU
-sudo ip link set fuckipv6 mtu 1280
-
-# 3. 检查系统网络性能
-ping6 -c 10 -s 1200 目标IP
-# 观察丢包率
-
-# 4. 检查CPU使用
-top -p $(pidof fuckipv6)
-
-# 5. 启用debug日志分析
-sudo systemctl edit fuckipv6-client
-# Environment="RUST_LOG=debug"
+ss -tlnp | grep 8080
+curl -v http://127.0.0.1:8080/api/status
 ```
 
-### 问题5: 服务意外停止
+确认节点以 `--headless` 启动、端口未被占用，并检查监听地址和反向代理设置。
 
-**症状**: systemctl显示服务inactive
+### 旧安装残留
 
-**解决方案**:
+旧版本可能遗留独立服务或配置：
+
 ```bash
-# 1. 查看崩溃原因
-sudo journalctl -u fuckipv6-coordinator --since "1 hour ago"
-
-# 2. 检查系统资源
-free -h
-df -h
-
-# 3. 检查OOM killer日志
-dmesg | grep -i "killed process"
-
-# 4. 增加内存限制（systemd）
-sudo systemctl edit fuckipv6-coordinator
-[Service]
-MemoryMax=1G
-
-# 5. 启用核心转储
-sudo systemctl edit fuckipv6-coordinator
-[Service]
-LimitCORE=infinity
+sudo systemctl disable --now fuckipv6-client.service fuckipv6-coordinator.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/fuckipv6-client.service /etc/systemd/system/fuckipv6-coordinator.service
+sudo systemctl daemon-reload
 ```
+
+迁移时保留节点身份和网络凭证，合并为 `fuckipv6.service` 与统一节点配置。
 
 ---
 
-## 常见部署场景
+## 发布与升级
 
-### 场景1: 家庭组网
+发布物只包含 `fuckipv6` 节点程序及对应示例、安装脚本和服务文件，不再提供独立协调二进制。
 
-**网络拓扑**:
-```
-Internet
-   |
-[家用路由器] (有公网IPv6)
-   |
-[协调服务器] (树莓派/NAS)
-   |
-   +--- [客户端1] (笔记本)
-   +--- [客户端2] (台式机)
-   +--- [客户端3] (手机)
-```
+升级前：
 
-**部署步骤**:
-1. 在路由器或NAS上部署协调服务器
-2. 使用内网地址: `ws://[fd00::1]:6666`
-3. 所有客户端连接到该地址
+1. 备份 `/etc/fuckipv6` 与 `/var/lib/fuckipv6`；
+2. 阅读 `CHANGELOG.md` 的兼容性说明；
+3. 在非生产网络验证票据、配置和身份保持可用；
+4. 替换唯一二进制并重启 `fuckipv6.service`。
 
-### 场景2: 云服务器中转
-
-**网络拓扑**:
-```
-[云服务器] (公网IPv6)
-   |
-   +--- [家庭网络客户端]
-   +--- [公司网络客户端]
-   +--- [移动设备客户端]
-```
-
-**部署步骤**:
-1. 在云服务器部署协调服务器
-2. 配置TLS证书
-3. 使用公网地址: `wss://vpn.example.com:6666`
-4. 配置域名DNS AAAA记录
-
-### 场景3: 企业内网
-
-**网络拓扑**:
-```
-[办公室服务器] (内网)
-   |
-   +--- [开发机1]
-   +--- [开发机2]
-   +--- [测试服务器]
-```
-
-**部署步骤**:
-1. 在内网服务器部署协调服务器
-2. 使用内网IPv6地址
-3. 配置防火墙仅允许内网访问
-4. 集成到企业认证系统（Phase 2功能）
-
----
-
-## 性能调优
-
-### 1. 内核参数优化
-
-编辑 `/etc/sysctl.conf`:
-
-```ini
-# 增加UDP缓冲区
-net.core.rmem_max = 26214400
-net.core.wmem_max = 26214400
-
-# 启用IPv6转发（如果需要）
-net.ipv6.conf.all.forwarding = 1
-
-# 增加文件描述符限制
-fs.file-max = 65536
-```
-
-应用配置:
 ```bash
-sudo sysctl -p
+sudo install -m 0755 target/release/fuckipv6 /opt/fuckipv6/fuckipv6
+sudo systemctl restart fuckipv6
+sudo systemctl status fuckipv6
 ```
 
-### 2. systemd服务限制
+发布门禁：
 
-编辑服务文件:
-```ini
-[Service]
-LimitNOFILE=65536
-LimitNPROC=4096
+```bash
+python3 scripts/release-gate.py run --platform linux --print-plan
+python3 scripts/release-gate.py run --platform linux --toolchain stable
 ```
 
-### 3. 编译优化
-
-使用更激进的优化:
-
-编辑 `Cargo.toml`:
-```toml
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-```
+门禁通过不替代独立密码学审计、真实跨公网/跨 NAT 验证、目标平台实机验证或 WireGuard 性能对等证明。
 
 ---
 
-## 总结
+## 典型场景
 
-本部署指南涵盖了从基础安装到生产环境优化的完整流程。主要要点:
+### 家庭网络
 
-✅ **服务器端**: 使用systemd管理服务，配置防火墙和TLS
-✅ **客户端**: 确保root权限，正确配置TUN设备
-✅ **安全**: 使用TLS加密，限制访问IP，定期更新
-✅ **监控**: 配置日志记录，监控资源使用
-✅ **维护**: 定期备份配置和密钥，建立更新流程
+- NAS、软路由或树莓派充当托管节点；
+- 其他设备使用同一个 `fk://` 票据加入；
+- 优先使用公网 IPv6 直连，NAT 环境使用 QUIC/信令中继 fallback；
+- 所有设备运行同一个 `fuckipv6` 二进制。
 
-如有问题，请参考故障排除章节或提交Issue到GitHub仓库。
+### 云上可达节点
+
+- 云主机承担信令和 QUIC 中继服务角色；
+- 家庭和办公节点作为普通成员加入；
+- 通过防火墙限制信令和 WebUI 访问范围；
+- TLS 终止、反向代理和访问控制独立部署并审计。
+
+### 多网络节点
+
+同一个节点可并发加入家庭、办公室和测试网络；每个网络拥有独立 TUN、虚拟地址、Peer、路由和策略。网络服务角色和 Exit Node 角色按网络分别授予，不是进程级“客户端/服务端模式”。
+
+---
+
+## 最终检查清单
+
+- [ ] 仅安装了 `fuckipv6` 一个用户程序；
+- [ ] systemd/launchd 中只有 `fuckipv6.service` 或 `cc.xlei.fuckipv6`；
+- [ ] 网络通过 `fk://` 票据或统一节点配置加入；
+- [ ] WebUI 仅暴露在受信网络；
+- [ ] 身份与配置已纳入加密备份；
+- [ ] 日志、Peer 路径、路由和 Exit Node 策略已检查；
+- [ ] 没有把 WebUI 浏览器窗口称为 GPUI；
+- [ ] 没有宣称未经审计或基准证明的“超越 WireGuard”结论。

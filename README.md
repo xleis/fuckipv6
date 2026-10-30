@@ -2,23 +2,25 @@
 
 基于 IPv4/IPv6 双栈虚拟地址的组网软件，当前可直接用于受控环境组网。洋葱路由、Kademlia DHT 与分块传输已作为 P2P 基础设施接入，但尚未形成完整的用户产品流程。
 
+产品层只有一种身份：**节点**。只发布一个 `fuckipv6` 程序；创建、加入、托管网络、中继和 Exit Node 都是节点在某网络中的能力，不是“客户端/服务端”两种程序。目标形态是桌面环境使用 GPUI 原生界面，无桌面环境使用 WebUI，两者共享同一命令层、状态模型、校验和错误语义。当前只完成单二进制入口收敛，GPUI 与 UI 对等性仍在迁移中。
+
 ## ✨ 核心能力
 
 - 🚀 **P2P 直连与 QUIC Mesh**: UDP/QUIC 双模自适应直连，端到端 TLS 1.3 Peer Pinning 与数据流多路复用，低延迟
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
 - 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。QUIC 中继当前强制 Ed25519 客户端证书，并将证书 SPKI、Relay Register 应用身份、双 pin 与 TLS exporter 绑定，生产配置禁用 0-RTT；客户端证书的 CA/allowlist/撤销策略仍未实现。该 profile 尚未完成独立密码学审计；可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT`，但尚未接入生产控制通道或数据面，且上游后量子 crate 未独立审计，不能据此宣称已具备后量子安全或超越 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
-- 🔒 **身份与鉴权**: Ed25519 签名验证；Coordinator Web/API 可配置 JWT，客户端本地 WebUI/API 当前免密并只应绑定本机或受信网络
+- 🔒 **身份与鉴权**: Ed25519 签名验证；网络服务 Web/API 可配置 JWT，节点本地 WebUI/API 当前免密并只应绑定本机或受信网络
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
-- 📊 **可观测性**: Coordinator Web 管理面板、客户端 WebUI/浏览器应用窗口、实时拓扑、流量监控与本地IPC控制台
+- 📊 **可观测性**: 节点 WebUI、网络服务管理面板、实时拓扑、流量监控与本地 IPC 控制台；GPUI 桌面外壳尚未实现
 
 ## 📌 能力状态
 
 | 状态 | 当前范围 |
 |------|----------|
-| **可直接使用** | 双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、Coordinator WebUI、客户端 CLI/本地 WebUI、`host`/`join` 与多网络配置 |
+| **可直接使用** | 单一 `fuckipv6` 节点程序、双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、节点 CLI/WebUI、`host`/`join` 与多网络配置 |
 | **基础设施已接入（待产品化）** | 多中继连接时择优、3-Hop 洋葱电路、Kademlia DHT、Blake3 分块传输；已有引擎接入与单元测试，但缺少完整 CLI/WebUI 用户流程 |
-| **尚未产品化** | Tauri 原生桌面应用、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
+| **尚未产品化** | GPUI 原生桌面应用、GPUI/WebUI 共享契约与对等测试、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
 
 ## 📖 快速开始
 
@@ -30,36 +32,41 @@ cd fuckipv6
 cargo build --release
 ```
 
-### 2. 启动协调服务器
+### 2. 在可达节点上创建网络
 
 ```bash
-# 在公网服务器上运行
-./target/release/fuckipv6-coordinator
+# 该节点同时提供信令与 QUIC 中继，并默认作为成员加入网络
+sudo ./target/release/fuckipv6 host \
+  --name home \
+  --port 6666 \
+  --relay-port 6667 \
+  --headless \
+  --webui-port 8080
 ```
 
-默认信令监听 `0.0.0.0:6666`，QUIC 中继监听 `0.0.0.0:6667`，Web管理界面监听 `0.0.0.0:8080`。
+节点启动后会输出 `fk://` 邀请票据。信令默认监听 TCP `6666`，QUIC 中继默认监听 UDP `6667`，WebUI 默认监听 TCP `8080`。托管网络是节点角色，不是另一个服务端程序。
 
-### 3. 配置并启动客户端
+### 3. 在其他节点加入网络
 
 ```bash
-# 生成配置文件
-./target/release/fuckipv6 init-config
-
-# 编辑配置文件，修改coordinator_url
-nano client.toml
-
-# 启动客户端（需要root权限）
-sudo ./target/release/fuckipv6 start
+# 保存邀请票据并直接启动；该节点也会运行 WebUI
+sudo ./target/release/fuckipv6 join "fk://..." \
+  --name home \
+  --start \
+  --headless \
+  --webui-port 8080
 ```
+
+也可以先用 `fuckipv6 join "fk://..." --name home` 保存配置，再运行 `sudo fuckipv6 connect home --headless`。所有加入者使用同一个 `fuckipv6` 程序。
 
 ### 4. 测试连通性
 
 ```bash
-# 在客户端A上ping客户端B的虚拟IP
+# 在节点 A 上 ping 节点 B 的虚拟 IP
 ping6 fd00::1002
 ```
 
-本机 Linux 端到端验证可使用 network namespace 脚本启动 1 个 coordinator 和 3 个隔离客户端，覆盖互 ping、路由和接近 MTU 的大包 ping：
+本机 Linux 端到端验证可使用 network namespace 脚本启动 1 个托管节点和 3 个隔离成员节点，覆盖互 ping、路由和接近 MTU 的大包 ping：
 
 ```bash
 sudo ./scripts/test-netns.sh
@@ -76,30 +83,29 @@ sudo ./scripts/test-netns.sh
 ## 🏗️ 架构
 
 ```
-┌──────────────────────┐
-│  Coordinator Server  │  ← 公网服务器
-│  - WebSocket信令     │     监听: [::]:6666
-│  - QUIC中继          │     监听: [::]:6667
-│  - IP地址分配        │
-└──────────┬───────────┘
-           │ WebSocket
-    ┌──────┴──────┐
-    │             │
-┌───▼────┐   ┌───▼────┐
-│Client A│◄──┤Client B│  ← UDP/QUIC P2P
-│        │   │        │
-│TUN设备 │   │TUN设备 │
-│fd00::1 │   │fd00::2 │
-└────────┘   └────────┘
+┌──────────────────────────┐
+│ Node A（同一 fuckipv6）  │  ← 承担网络服务角色
+│ - WebSocket 信令         │     监听: [::]:6666
+│ - QUIC 中继              │     监听: [::]:6667
+│ - IP 地址分配            │
+│ - 普通成员               │
+└────────────┬─────────────┘
+             │ 信令 / relay
+      ┌──────┴──────┐
+      │             │
+┌─────▼─────┐ ┌─────▼─────┐
+│  Node B   │◄┤  Node C   │  ← UDP/QUIC P2P
+│ TUN fd00  │ │ TUN fd00  │
+└───────────┘ └───────────┘
 ```
 
 **工作流程**：
 
-1. 客户端连接协调服务器，获取虚拟IP（如`fd00::1001`）
-2. 协调服务器通知所有客户端新节点上线
-3. 客户端之间通过 UDP 探测和多中继测速验证可达端点
+1. 成员节点连接网络服务，获取虚拟 IP（如 `fd00::1001`）
+2. 网络服务通知同一网络中的成员节点有新节点上线
+3. 节点之间通过 UDP 探测和多中继测速验证可达端点
 4. 应用流量先封装为 v2 密文，再按路径选择 QUIC Stream Mesh 或 UDP 直连；两种传输均不会接受静态密钥或明文降级
-5. 如果 P2P 不可用，客户端优先通过 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令中继
+5. 如果 P2P 不可用，节点优先通过 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令中继
 
 ## 📦 项目结构
 
@@ -112,13 +118,13 @@ fuckipv6/
 │   │   ├── config.rs    # 配置管理
 │   │   └── crypto.rs    # Ed25519加密
 │   │
-│   ├── client/          # 客户端
+│   ├── client/          # 节点进程、CLI 与界面适配器（历史 crate 名）
 │   │   ├── tun/         # TUN设备管理
 │   │   ├── p2p/         # P2P连接引擎
-│   │   ├── signaling/   # 信令客户端
+│   │   ├── signaling/   # 节点侧信令会话
 │   │   └── cli/         # 命令行界面
 │   │
-│   └── coordinator/     # 协调服务器
+│   └── coordinator/     # 内嵌网络服务库（无独立用户程序）
 │       ├── signaling/   # WebSocket信令服务
 │       ├── relay/       # QUIC中继服务
 │       └── webui/       # Web管理界面和API
@@ -131,30 +137,30 @@ fuckipv6/
 
 ### ✅ Phase 1 - 核心组网（可直接使用）
 
-- [x] 信令服务器 (WebSocket)
+- [x] 网络服务信令 (WebSocket，内嵌节点)
 - [x] IPv6地址分配器
 - [x] TUN虚拟网卡 (Linux/macOS/Windows)
 - [x] UDP P2P连接
-- [x] 客户端注册和发现
+- [x] 成员节点注册和发现
 - [x] 基本数据转发
 - [x] CLI工具
 - [x] Ed25519注册签名验证
 - [x] UDP端点探测/基础打洞
 - [x] 信令通道中继fallback
 - [x] 本地IPC status/peers
-- [x] 协调端Web UI/API
+- [x] 网络服务 Web UI/API
 
 **当前可用功能**：
-- 客户端注册到协调服务器
+- 成员节点注册到网络服务
 - 自动分配虚拟 IPv4/IPv6 双栈地址
-- 客户端间 UDP/QUIC P2P 直连，失败时 QUIC/信令中继
+- 节点间 UDP/QUIC P2P 直连，失败时 QUIC/信令中继
 - 通过虚拟IP进行通信（ping、SSH、文件传输）
 - WebSocket 信令断线自动重连并重新注册
 - `fuckipv6 status` / `fuckipv6 peers` 查看运行时状态、RTT、丢包率、带宽估计和 P2P 健康状态
 - `fuckipv6 route` / `fuckipv6 logs` 查看路由和服务日志
-- `fuckipv6 logs --service memory` 查看运行中客户端聚合的最近 warn/error；协调端支持 `/api/logs?service=memory`
+- `fuckipv6 logs --service memory` 查看运行中节点聚合的最近 warn/error；网络服务 API 支持 `/api/logs?service=memory`
 - `fuckipv6 join/list/default/connect/leave` 管理并切换多个已保存网络配置
-- `http://<coordinator>:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
+- `http://<node>:8080` 通过 Web UI/API/WebSocket 查看在线节点、连接拓扑、实时流量和系统日志
 
 ### ✅ Phase 2 - 传输与穿透（可直接使用）
 
@@ -192,7 +198,7 @@ fuckipv6/
 - [x] QUIC 中继双向身份与通道绑定：强制客户端证书，Register 签名绑定证书/应用身份与 TLS exporter，错绑在 relay 状态写入前失败关闭，生产配置禁用 0-RTT（CA/allowlist/撤销与独立审计仍待完成）
 - [x] ICE 候选收集、STUN、UPnP IGD、RFC 6886 NAT-PMP
 - [x] Windows 内嵌 WinTun 与纯 Rust IP Helper
-- [x] IPv4/IPv6 双栈虚拟地址与 Coordinator JWT 鉴权
+- [x] IPv4/IPv6 双栈虚拟地址与网络服务 JWT 鉴权
 - [x] 声明式 ACL、准入黑名单与多中继智能选路
 
 ### 🚧 Phase 6 - 下一代能力（基础设施已接入，待产品化）
@@ -200,7 +206,8 @@ fuckipv6/
 - [x] 智能分流（MeshOnly / BypassMainland / GlobalProxy）与 Linux Exit Node 内核转发/NAT
 - [x] `fuckipv6 host` 一键建网与 `fk://` 邀请票据
 - [x] 多网络并发、独立 TUN 与路由隔离
-- [x] 自适应 WebUI 与浏览器应用窗口（不是 Tauri 原生桌面）
+- [x] 自适应 WebUI；当前桌面路径仍是浏览器窗口，不是 GPUI 原生桌面
+- [ ] GPUI 桌面外壳与 GPUI/WebUI 共享契约、功能对等测试
 - [x] 3-Hop 洋葱路由、Kademlia DHT 与 Blake3 分块传输基础设施（引擎与测试已接入，尚无完整用户操作流程）
 
 生产发布前仍建议完成真实跨公网/跨 NAT、Windows/macOS 实机、更大规模 WAN 压测和外部安全审计。
@@ -271,11 +278,11 @@ python3 scripts/release-gate.py run --platform linux --toolchain stable \
 
 **必须有公网 IPv6 吗？**
 
-不必须。虚拟网络承载 IPv6 包，但协调服务器和 P2P endpoint 可以使用 IPv4 或 IPv6 传输。协调服务器需要被客户端访问到。
+不必须。虚拟网络承载 IPv6 包，但网络服务与 P2P endpoint 可以使用 IPv4 或 IPv6 传输。至少有一个成员节点或独立可达端点需要能被其他成员访问，用于信令和 fallback 中继。
 
 **P2P 失败会怎样？**
 
-客户端会在端点未验证、发送失败或健康阈值不达标时优先切换到 QUIC 中继；QUIC 中继不可用时再通过协调服务器 WebSocket 信令通道发送 `RelayPacket`。
+节点会在端点未验证、发送失败或健康阈值不达标时优先切换到 QUIC 中继；QUIC 中继不可用时再通过网络服务的 WebSocket 信令通道发送 `RelayPacket`。
 
 **为什么默认 MTU 是 1280？**
 

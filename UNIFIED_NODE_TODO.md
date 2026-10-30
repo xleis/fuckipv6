@@ -2,7 +2,7 @@
 
 > 目标：`fuckipv6` 只发布一个节点程序。节点不再在产品层区分“客户端”和“服务端”；有桌面环境时使用 GPUI 原生 GUI，无桌面环境时使用 WebUI，两套 UI 必须具有完全一致的功能、状态、校验和错误语义。
 >
-> 当前状态：目标已确认，现有实现尚未达标。仓库仍发布 `fuckipv6` 与 `fuckipv6-coordinator` 两个二进制；桌面入口只是用 Chromium `--app` 或系统浏览器打开 WebUI；仓库没有 GPUI 依赖；内嵌协调服务目前只覆盖显式 `host` 流程。
+> 当前状态：单二进制发布入口已完成，workspace 只产生用户程序 `fuckipv6`；桌面入口仍只是用 Chromium `--app` 或系统浏览器打开 WebUI；仓库没有 GPUI 依赖；内嵌网络服务目前只覆盖显式 `host` 流程。GPUI/WebUI 共享契约、对等测试和统一运行时仍待实现。
 >
 > 保护约束：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 当前属于用户正在处理的 Exit Node 持久化范围，未获确认前不得修改、暂存或提交。
 
@@ -20,7 +20,7 @@
 ## 执行清单
 
 - [x] **UN-01 架构基线与迁移边界**：固化单二进制、节点监督器、内嵌网络服务、共享命令层和双 UI 适配器的组件边界；列出兼容与删除项。
-- [ ] **UN-02 单一发布入口**：移除独立 `fuckipv6-coordinator` 二进制及其用户入口，确保 workspace 只产生节点发布程序；协调、信令、WebUI 和中继保留为内部库能力。
+- [x] **UN-02 单一发布入口**：移除独立 `fuckipv6-coordinator` 二进制及其用户入口，确保 workspace 只产生节点发布程序；协调、信令、WebUI 和中继保留为内部库能力。
 - [ ] **UN-03 节点运行时监督器**：建立统一 lifecycle，启动身份、配置、日志、本地控制面和网络管理器，并支持无网络、单网络和多网络状态。
 - [ ] **UN-04 内嵌网络服务 actor 化**：节点可按需创建或承接网络发现、虚拟地址分配、QUIC relay 和策略控制；不再要求单独启动协调程序。
 - [ ] **UN-05 节点命令总线**：定义统一 `NodeCommand`、异步结果和事件流；GPUI、WebUI、CLI 及 IPC 都通过同一入口执行操作。

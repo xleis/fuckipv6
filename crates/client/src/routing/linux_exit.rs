@@ -1332,4 +1332,162 @@ mod tests {
         assert_eq!(async_runs.last(), Some(&expected_route_delete));
         assert!(forwarder.clients.is_empty());
     }
+
+    fn require_privileged_netns_topology() {
+        assert_eq!(
+            std::env::var("FUCKIPV6_EXIT_NETNS_TOPOLOGY").as_deref(),
+            Ok("1"),
+            "run this ignored test through scripts/test-exit-node-netns.sh"
+        );
+    }
+
+    fn command_output(program: &str, args: &[&str]) -> std::process::Output {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to execute {program}: {error}"))
+    }
+
+    fn command_stdout(program: &str, args: &[&str]) -> String {
+        let output = command_output(program, args);
+        assert!(
+            output.status.success(),
+            "{program} {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn iptables_stdout(table: &str, args: &[&str]) -> String {
+        let mut command_args = vec!["-w", "5", "-t", table];
+        command_args.extend_from_slice(args);
+        command_stdout("iptables", &command_args)
+    }
+
+    fn iptables_succeeds(table: &str, args: &[&str]) -> bool {
+        let mut command_args = vec!["-w", "5", "-t", table];
+        command_args.extend_from_slice(args);
+        command_output("iptables", &command_args).status.success()
+    }
+
+    fn ipv4_forwarding() -> String {
+        std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+            .expect("read IPv4 forwarding sysctl")
+            .trim()
+            .to_string()
+    }
+
+    fn ping_upstream() -> std::process::Output {
+        command_output(
+            "ip",
+            &[
+                "netns",
+                "exec",
+                "fip6-client",
+                "ping",
+                "-c",
+                "1",
+                "-W",
+                "2",
+                "198.51.100.10",
+            ],
+        )
+    }
+
+    fn assert_exit_resources_absent(tun_name: &str) {
+        let forward_chain = chain_name("F", tun_name);
+        let nat_chain = chain_name("N", tun_name);
+
+        assert!(!iptables_succeeds("filter", &["-S", &forward_chain]));
+        assert!(!iptables_succeeds("nat", &["-S", &nat_chain]));
+        assert!(!iptables_stdout("filter", &["-S", "FORWARD"]).contains(&forward_chain));
+        assert!(!iptables_stdout("nat", &["-S", "POSTROUTING"]).contains(&nat_chain));
+
+        let route = command_stdout("ip", &["route", "show", "exact", "10.0.0.2/32"]);
+        assert!(!route.contains(&format!("dev {tun_name}")));
+        assert_eq!(ipv4_forwarding(), "0");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the isolated privileged topology from scripts/test-exit-node-netns.sh"]
+    async fn linux_netns_forwarding_nat_revocation_and_cleanup_are_effective() {
+        require_privileged_netns_topology();
+        assert_eq!(ipv4_forwarding(), "0");
+
+        let config = ExitNodeConfig {
+            enabled: true,
+            ..ExitNodeConfig::default()
+        };
+        let mut forwarder = LinuxExitForwarder::install(&config, "fip6tun")
+            .await
+            .expect("install Exit Node forwarding in the isolated namespace")
+            .expect("enabled Exit Node configuration must produce a forwarder");
+        assert_eq!(ipv4_forwarding(), "1");
+        assert_eq!(forwarder.external_v4_interface, "fip6out");
+        assert!(forwarder.supports("198.51.100.10".parse().unwrap()));
+
+        let client = VirtualIps::from_ipv4("10.0.0.2".parse().expect("valid client IPv4"));
+        forwarder
+            .allow_client("netns-client", &client)
+            .await
+            .expect("authorize the netns client");
+
+        let filter_rules = iptables_stdout("filter", &["-S", &forwarder.forward_chain]);
+        assert_eq!(filter_rules.matches("-j ACCEPT").count(), 2);
+        assert!(filter_rules.contains("-i fip6tun"));
+        assert!(filter_rules.contains("-o fip6tun"));
+        assert!(filter_rules.contains("-s 10.0.0.2/32"));
+        assert!(filter_rules.contains("-d 10.0.0.2/32"));
+
+        let nat_rules = iptables_stdout("nat", &["-S", &forwarder.nat_chain]);
+        assert!(nat_rules.contains("-s 10.0.0.2/32 -o fip6out -j MASQUERADE"));
+        assert!(iptables_stdout("filter", &["-S", "FORWARD"]).contains(&forwarder.forward_chain));
+        assert!(iptables_stdout("nat", &["-S", "POSTROUTING"]).contains(&forwarder.nat_chain));
+        assert_eq!(
+            command_stdout("ip", &["route", "show", "exact", "10.0.0.2/32"]).trim(),
+            "10.0.0.2 dev fip6tun proto 99 scope link"
+        );
+
+        let forwarded = ping_upstream();
+        assert!(
+            forwarded.status.success(),
+            "client traffic did not traverse forwarding and NAT: {}{}",
+            String::from_utf8_lossy(&forwarded.stdout),
+            String::from_utf8_lossy(&forwarded.stderr)
+        );
+
+        forwarder
+            .remove_client("netns-client")
+            .await
+            .expect("revoke the netns client");
+        assert!(
+            !ping_upstream().status.success(),
+            "revoked client traffic still traversed the Exit Node"
+        );
+
+        forwarder.rollback();
+        forwarder.rollback();
+        assert_exit_resources_absent("fip6tun");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the isolated privileged topology from scripts/test-exit-node-netns.sh"]
+    async fn linux_netns_install_failure_rolls_back_kernel_state() {
+        require_privileged_netns_topology();
+        assert_eq!(ipv4_forwarding(), "0");
+
+        let config = ExitNodeConfig {
+            enabled: true,
+            ..ExitNodeConfig::default()
+        };
+        let error = LinuxExitForwarder::install(&config, "fip6tun")
+            .await
+            .expect_err("the PATH wrapper must fail the POSTROUTING jump installation");
+        assert!(
+            format!("{error:#}").contains("injected POSTROUTING failure"),
+            "unexpected installation error: {error:#}"
+        );
+
+        assert_exit_resources_absent("fip6tun");
+    }
 }

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{
     build_quic_server_config, export_quic_relay_channel_binding,
-    generate_self_signed_quic_certificate, recv_relay_message, send_relay_message, ClientId,
-    ErrorCode, Identity, QuicCertificate, RelayMessage, RelayRegistrationBinding,
+    generate_self_signed_quic_certificate, recv_relay_message, send_relay_message,
+    verify_quic_client_identity_binding, ClientId, ErrorCode, Identity, QuicCertificate,
+    RelayMessage, RelayRegistrationBinding,
 };
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr};
@@ -308,6 +309,7 @@ impl RelayServer {
             tls_channel_binding,
         };
         let actual_channel_binding = export_quic_relay_channel_binding(&connection)?;
+        verify_quic_client_identity_binding(&connection, &registration)?;
         verify_relay_registration(
             &registration,
             &signature,

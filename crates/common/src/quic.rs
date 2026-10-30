@@ -43,6 +43,42 @@ pub fn export_quic_relay_channel_binding(connection: &quinn::Connection) -> Resu
     Ok(binding)
 }
 
+/// 校验当前 QUIC TLS 终端证书与 Relay Register 声明的身份完全相同。
+///
+/// 调用方必须在写入任何 relay 状态之前执行。TLS 层已通过 mandatory client
+/// auth 验证证书用途和私钥持有证明；本函数把证书 SPKI、Register 公钥和
+/// Register 中签名的证书 pin 绑定在一起。
+pub fn verify_quic_client_identity_binding(
+    connection: &quinn::Connection,
+    registration: &RelayRegistrationBinding<'_>,
+) -> Result<()> {
+    let peer_identity = connection
+        .peer_identity()
+        .context("QUIC 中继连接缺少客户端证书身份")?;
+    let certificates = peer_identity
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| anyhow::anyhow!("QUIC 客户端证书身份类型无效"))?;
+    if certificates.len() != 1 {
+        anyhow::bail!(
+            "QUIC 客户端证书链必须恰好包含一个终端证书，实际为 {}",
+            certificates.len()
+        );
+    }
+
+    let certificate = &certificates[0];
+    let tls_public_key = ed25519_public_key_from_certificate(certificate)?;
+    if tls_public_key.as_slice() != registration.public_key {
+        anyhow::bail!("QUIC 客户端证书公钥与 Relay Register 应用身份不一致");
+    }
+
+    let tls_public_key_pin = public_key_pin_from_certificate(certificate)?;
+    if tls_public_key_pin != registration.client_certificate_public_key_pin {
+        anyhow::bail!("QUIC 客户端证书 SPKI pin 与 Relay Register 声明不一致");
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct QuicCertificate {
     pub cert_der: Vec<u8>,

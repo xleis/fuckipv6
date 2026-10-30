@@ -1444,7 +1444,14 @@ mod tests {
         assert!(iptables_stdout("filter", &["-S", "FORWARD"]).contains(&forwarder.forward_chain));
         assert!(iptables_stdout("nat", &["-S", "POSTROUTING"]).contains(&forwarder.nat_chain));
         let return_route = command_stdout("ip", &["route", "show", "exact", "10.0.0.2/32"]);
-        assert!(return_route.contains("10.0.0.2 dev fip6tun proto 99"));
+        let has_owned_route_protocol =
+            return_route.contains("proto 99") || return_route.contains("proto openr");
+        assert!(
+            return_route.contains("10.0.0.2")
+                && return_route.contains("dev fip6tun")
+                && has_owned_route_protocol,
+            "unexpected return route: {return_route:?}"
+        );
 
         let forwarded = ping_upstream();
         assert!(

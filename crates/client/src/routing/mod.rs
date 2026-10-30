@@ -1,4 +1,6 @@
 #[cfg(target_os = "linux")]
+pub mod doh_dns;
+#[cfg(target_os = "linux")]
 pub mod linux_exit;
 #[cfg(target_os = "linux")]
 pub mod linux_route;

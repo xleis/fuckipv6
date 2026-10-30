@@ -22,6 +22,7 @@ tun = { workspace = true }
 socket2 = { workspace = true }
 quinn = { workspace = true }
 ipnet = { workspace = true }
+reqwest = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

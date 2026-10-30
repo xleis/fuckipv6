@@ -11,6 +11,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use tokio::process::Command;
 
+use super::doh_dns::DohDnsGuard;
+
 const ROUTE_PROTOCOL: &str = "99";
 const STATIC_PREFERENCE_START: u32 = 1_000;
 const DYNAMIC_PREFERENCE_START: u32 = 20_000;
@@ -71,6 +73,7 @@ pub struct LinuxRouteManager {
     peer_bypasses: HashMap<String, Vec<IpAddr>>,
     next_v4_preference: u32,
     next_v6_preference: u32,
+    dns_guard: Option<DohDnsGuard>,
     plan: Option<RoutePlan>,
 }
 
@@ -109,6 +112,7 @@ impl LinuxRouteManager {
             peer_bypasses: HashMap::new(),
             next_v4_preference: DYNAMIC_PREFERENCE_START,
             next_v6_preference: DYNAMIC_PREFERENCE_START,
+            dns_guard: None,
             plan: Some(plan),
         };
 
@@ -185,6 +189,17 @@ impl LinuxRouteManager {
         if let Err(error) = setup_result {
             manager.rollback().await;
             return Err(error).context("安装代理策略路由失败，已回滚");
+        }
+
+        // Install DNS interception only after the catch-all route is active.
+        // If this fails, rollback removes the policy route before returning so
+        // the host never resolves through a bridge that is not running.
+        match DohDnsGuard::install().await {
+            Ok(guard) => manager.dns_guard = guard,
+            Err(error) => {
+                manager.rollback().await;
+                return Err(error).context("安装 DoH DNS 代理失败，已回滚代理策略路由");
+            }
         }
 
         tracing::info!(
@@ -457,6 +472,9 @@ impl LinuxRouteManager {
         match first_error {
             Some(error) => Err(error).context("部分策略路由未能回滚，将在对象销毁时重试"),
             None => {
+                if let Some(mut guard) = self.dns_guard.take() {
+                    guard.shutdown();
+                }
                 self.plan = None;
                 Ok(())
             }
@@ -917,6 +935,7 @@ mod tests {
             peer_bypasses: HashMap::new(),
             next_v4_preference: DYNAMIC_PREFERENCE_START,
             next_v6_preference: DYNAMIC_PREFERENCE_START,
+            dns_guard: None,
             plan: None,
         };
         let addresses = manager.dynamic_addresses(&[
@@ -948,6 +967,7 @@ mod tests {
             peer_bypasses: HashMap::new(),
             next_v4_preference: DYNAMIC_PREFERENCE_START,
             next_v6_preference: DYNAMIC_PREFERENCE_START,
+            dns_guard: None,
             plan: None,
         };
         assert_eq!(manager.proxy_lookup_table(), 12345);

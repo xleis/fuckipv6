@@ -307,8 +307,10 @@ impl RekeySession {
         Ok(completion)
     }
 
-    /// Expire a half-open transaction and discard any staged epoch keys.
+    /// Expire a half-open transaction, discard staged keys, and prune retired
+    /// receive ciphers whose grace deadline has passed.
     pub fn expire(&mut self, now: Instant) -> bool {
+        self.session.prune_retired_receive(now);
         let expired = self.rekey.expire(now);
         if expired {
             self.prepared = None;

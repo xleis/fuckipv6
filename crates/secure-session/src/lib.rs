@@ -610,8 +610,10 @@ struct RetiredReceiveCipher {
 /// `EpochSession` enforces the protocol's time and byte limits, requires a
 /// monotonically increasing epoch on rotation, and retains a bounded number of
 /// previous receive ciphers so in-flight packets can complete after rekeying.
-/// Retired keys are dropped, and therefore zeroized by the AEAD implementation,
-/// as soon as their grace period expires or the retention bound is exceeded.
+/// Retired cipher state is dropped at the exact grace deadline, when the
+/// retention bound is exceeded, or when the session is closed. The AEAD
+/// constructors zeroize their input key material and their destructors clear
+/// their private cipher state as provided by the underlying cipher crates.
 pub struct EpochSession {
     active_send: SendCipher,
     active_receive: ReceiveCipher,
@@ -659,6 +661,7 @@ impl EpochSession {
         packet: &mut [u8],
         now: Instant,
     ) -> Result<usize, SessionError> {
+        self.prune_retired_receive(now);
         self.ensure_active_epoch_usable(plaintext.len(), now)?;
         let packet_len = self.active_send.seal(plaintext, packet)?;
         self.sent_bytes = self
@@ -680,6 +683,7 @@ impl EpochSession {
         stride: usize,
         now: Instant,
     ) -> Result<usize, SessionError> {
+        self.prune_retired_receive(now);
         let plaintext_bytes = plaintexts.iter().try_fold(0u64, |total, plaintext| {
             total.checked_add(plaintext.len() as u64)
         });
@@ -707,7 +711,7 @@ impl EpochSession {
         now: Instant,
     ) -> Result<usize, SessionError> {
         validate_batch_layout(packets.len(), packet_lengths, stride)?;
-        self.prune_retired(now);
+        self.prune_retired_receive(now);
         let mut plaintext_bytes = 0usize;
         for (index, packet_len) in packet_lengths.iter().copied().enumerate() {
             let offset = index
@@ -727,7 +731,7 @@ impl EpochSession {
         packet: &'a mut [u8],
         now: Instant,
     ) -> Result<&'a mut [u8], SessionError> {
-        self.prune_retired(now);
+        self.prune_retired_receive(now);
         if packet.len() < MIN_DATA_PACKET_LEN {
             return Err(SessionError::PacketTooShort);
         }
@@ -795,6 +799,7 @@ impl EpochSession {
         now: Instant,
     ) -> Result<(), SessionError> {
         self.validate_rotation(&send, &receive)?;
+        self.prune_retired_receive(now);
 
         let old_send = std::mem::replace(&mut self.active_send, send);
         drop(old_send);
@@ -849,15 +854,31 @@ impl EpochSession {
         Ok(())
     }
 
-    fn prune_retired(&mut self, now: Instant) {
+    /// Drop receive epochs whose exact grace deadline has been reached.
+    ///
+    /// Returns the number of retained epochs removed. The receive cipher and
+    /// its AEAD state are dropped before this method returns. This can be
+    /// called from a maintenance tick even when no packets are arriving.
+    pub fn prune_retired_receive(&mut self, now: Instant) -> usize {
+        let mut removed = 0;
         for entry in &mut self.retired_receive {
             if entry
                 .as_ref()
                 .is_some_and(|retired| now >= retired.discard_at)
             {
                 *entry = None;
+                removed += 1;
             }
         }
+        removed
+    }
+
+    /// Number of receive epochs currently retained for in-flight packets.
+    pub fn retired_receive_epoch_count(&self) -> usize {
+        self.retired_receive
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count()
     }
 }
 
@@ -1842,6 +1863,7 @@ mod tests {
         responder
             .rotate(new_send, new_receive, rotate_at)
             .expect("rotate responder");
+        assert_eq!(responder.retired_receive_epoch_count(), 1);
         assert_eq!(
             responder
                 .open_in_place(&mut old_first[..first_len], rotate_at)
@@ -1855,6 +1877,7 @@ mod tests {
             ),
             Err(SessionError::UnknownEpoch)
         );
+        assert_eq!(responder.retired_receive_epoch_count(), 0);
 
         let (new_send, new_receive) = initiator_ciphers(2, 1);
         initiator
@@ -1869,6 +1892,46 @@ mod tests {
                 .open_in_place(&mut new_packet[..new_len], rotate_at)
                 .expect("open new epoch"),
             b"new epoch"
+        );
+    }
+
+    #[test]
+    fn retired_receive_is_pruned_at_the_exact_grace_deadline_without_traffic() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(1, 0, now);
+        let mut responder = responder_epoch(1, 0, now);
+        let mut old_first = [0u8; 128];
+        let mut old_second = [0u8; 128];
+        let first_len = initiator
+            .seal(b"old first", &mut old_first, now)
+            .expect("seal first old packet");
+        let second_len = initiator
+            .seal(b"old second", &mut old_second, now)
+            .expect("seal second old packet");
+
+        let rotate_at = now + Duration::from_secs(1);
+        let (send, receive) = responder_ciphers(2, 1);
+        responder
+            .rotate(send, receive, rotate_at)
+            .expect("rotate responder");
+        assert_eq!(responder.retired_receive_epoch_count(), 1);
+
+        let before_deadline = rotate_at + RETIRED_EPOCH_GRACE - Duration::from_nanos(1);
+        assert_eq!(responder.prune_retired_receive(before_deadline), 0);
+        assert_eq!(responder.retired_receive_epoch_count(), 1);
+        assert_eq!(
+            responder
+                .open_in_place(&mut old_first[..first_len], before_deadline)
+                .expect("old epoch remains valid before deadline"),
+            b"old first"
+        );
+
+        let deadline = rotate_at + RETIRED_EPOCH_GRACE;
+        assert_eq!(responder.prune_retired_receive(deadline), 1);
+        assert_eq!(responder.retired_receive_epoch_count(), 0);
+        assert_eq!(
+            responder.open_in_place(&mut old_second[..second_len], deadline),
+            Err(SessionError::UnknownEpoch)
         );
     }
 
@@ -1912,6 +1975,11 @@ mod tests {
                 .rotate(send, receive, now + Duration::from_secs(epoch as u64))
                 .expect("rotate through retention bound");
         }
+
+        assert_eq!(
+            responder.retired_receive_epoch_count(),
+            MAX_RETIRED_RECEIVE_EPOCHS
+        );
 
         assert_eq!(
             responder.open_in_place(&mut old_packet[..old_len], now + Duration::from_secs(4)),

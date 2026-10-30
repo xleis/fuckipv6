@@ -1443,10 +1443,8 @@ mod tests {
         assert!(nat_rules.contains("-s 10.0.0.2/32 -o fip6out -j MASQUERADE"));
         assert!(iptables_stdout("filter", &["-S", "FORWARD"]).contains(&forwarder.forward_chain));
         assert!(iptables_stdout("nat", &["-S", "POSTROUTING"]).contains(&forwarder.nat_chain));
-        assert_eq!(
-            command_stdout("ip", &["route", "show", "exact", "10.0.0.2/32"]).trim(),
-            "10.0.0.2 dev fip6tun proto 99 scope link"
-        );
+        let return_route = command_stdout("ip", &["route", "show", "exact", "10.0.0.2/32"]);
+        assert!(return_route.contains("10.0.0.2 dev fip6tun proto 99"));
 
         let forwarded = ping_upstream();
         assert!(

@@ -6,9 +6,15 @@
 //! not been independently audited, so this module must not be presented as a
 //! production post-quantum security claim.
 
+pub mod handshake;
 pub mod identity;
 pub mod xwing;
 
+pub use handshake::{
+    HybridAccept, HybridAcceptTranscript, HybridAccepted, HybridFinished, HybridHandshakeError,
+    HybridHello, HybridInitiator, HybridResponder, HYBRID_ACCEPT_LEN, HYBRID_COOKIE_LEN,
+    HYBRID_HELLO_LEN, HYBRID_NONCE_LEN, HYBRID_PROFILE_ID, MAX_CONTROL_FRAME_LEN,
+};
 pub use identity::{
     CompositeIdentity, CompositePublicKey, CompositeSignature, IdentityError, IdentityId,
     COMPOSITE_IDENTITY_PUBLIC_KEY_LEN, COMPOSITE_SIGNATURE_LEN, IDENTITY_ID_LEN,

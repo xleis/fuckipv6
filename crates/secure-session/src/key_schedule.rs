@@ -88,7 +88,7 @@ pub fn derive_session_keys(
     Ok(DerivedSession { identity, keys })
 }
 
-fn derive_from_parts(
+pub(crate) fn derive_from_parts(
     shared_secret: Zeroizing<[u8; 32]>,
     transcript_hash: TranscriptHash,
     identity: HandshakeIdentity,

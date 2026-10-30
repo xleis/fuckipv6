@@ -822,6 +822,9 @@ impl EpochSession {
         receive: &ReceiveCipher,
     ) -> Result<(), SessionError> {
         validate_epoch_pair(send, receive)?;
+        if send.suite() != self.suite() || receive.suite() != self.suite() {
+            return Err(SessionError::InvalidEpochState);
+        }
         if receive.epoch <= self.active_receive.epoch {
             return Err(SessionError::EpochRollback);
         }
@@ -1957,6 +1960,56 @@ mod tests {
             EpochSession::new(send, wrong_direction_receive, now).err(),
             Some(SessionError::InvalidEpochState)
         );
+    }
+
+    #[test]
+    fn epoch_session_rejects_a_matched_cipher_suite_change() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(1, 0, now);
+        let mut responder = responder_epoch(1, 0, now);
+        let mut old_packet = [0u8; 128];
+        let old_len = initiator
+            .seal(b"active suite", &mut old_packet, now)
+            .expect("seal active-suite packet");
+
+        let suite = DataCipherSuite::Aes256Gcm;
+        let send = SendCipher::new_with_suite(
+            suite,
+            [0x21; 32],
+            TEST_SESSION_ID,
+            Direction::ResponderToInitiator,
+            2,
+            0xb1b2_b3b4,
+        );
+        let receive = ReceiveCipher::new_with_suite(
+            suite,
+            [0x11; 32],
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            2,
+            0xa1a2_a3a4,
+        );
+        assert_eq!(send.suite(), receive.suite());
+
+        assert_eq!(
+            responder.rotate(send, receive, now + Duration::from_secs(1)),
+            Err(SessionError::InvalidEpochState)
+        );
+        assert_eq!(responder.suite(), DataCipherSuite::ChaCha20Poly1305);
+        assert_eq!(responder.epoch(), 1);
+        assert_eq!(responder.retired_receive_epoch_count(), 0);
+        assert_eq!(
+            responder
+                .open_in_place(&mut old_packet[..old_len], now + Duration::from_secs(1))
+                .expect("active receive remains usable after suite downgrade attempt"),
+            b"active suite"
+        );
+
+        let (send, receive) = responder_ciphers(2, 1);
+        responder
+            .rotate(send, receive, now + Duration::from_secs(2))
+            .expect("matching negotiated suite rotates");
+        assert_eq!(responder.suite(), DataCipherSuite::ChaCha20Poly1305);
     }
 
     #[test]

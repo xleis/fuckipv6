@@ -2,8 +2,8 @@
 //!
 //! [`RekeySession`] owns both the active [`EpochSession`] and its
 //! [`RekeyStateMachine`], so callers cannot advance one without the other. New
-//! ciphers are validated against the negotiated SID, epoch, direction pair and
-//! active epoch before they can be installed. The responder stages keys during
+//! ciphers are validated against the negotiated SID, suite, epoch and direction
+//! pair before they can be installed. The responder stages keys during
 //! `REKEY_ACCEPT` and installs them only after a valid `REKEY_CONFIRM`; the
 //! initiator installs them only after validating the responder's ACCEPT
 //! confirmation. Installation uses [`EpochSession::rotate`], retaining the old
@@ -62,7 +62,8 @@ pub enum RekeySessionError {
     /// The authenticated rekey state machine rejected the transition.
     #[error("rekey state machine rejected the transition: {0}")]
     State(#[from] RekeyError),
-    /// The proposed data ciphers are internally inconsistent or roll back the epoch.
+    /// The proposed data ciphers are inconsistent, change the active suite, or
+    /// roll back the epoch.
     #[error("rekey data epoch is invalid: {0}")]
     Session(#[from] SessionError),
     /// Ciphers do not match the SID or epoch bound by the rekey message.
@@ -684,6 +685,84 @@ mod tests {
         ));
         assert_eq!(responder.epoch(), 2);
         assert_eq!(confirm, bad_confirm);
+    }
+
+    #[test]
+    fn suite_downgrade_is_rejected_before_rekey_material_is_staged() {
+        let now = Instant::now();
+        let (mut initiator, mut responder) = sessions(now);
+        let mut old_packet = [0u8; 128];
+        let old_len = initiator
+            .seal(b"old active receive", &mut old_packet, now)
+            .expect("seal old active packet");
+        let init = initiator
+            .initiate(2, NEW_SID, nonce(0x31), now)
+            .expect("initiate rekey");
+
+        let suite = DataCipherSuite::Aes256Gcm;
+        let downgraded_send = SendCipher::new_with_suite(
+            suite,
+            [0x41; 32],
+            NEW_SID,
+            Direction::ResponderToInitiator,
+            2,
+            INITIATOR_INDEX,
+        );
+        let downgraded_receive = ReceiveCipher::new_with_suite(
+            suite,
+            [0x40; 32],
+            NEW_SID,
+            Direction::InitiatorToResponder,
+            2,
+            RESPONDER_INDEX,
+        );
+        assert_eq!(downgraded_send.suite(), downgraded_receive.suite());
+
+        assert_eq!(
+            responder.accept_peer_init(
+                RekeyAcceptOffer {
+                    init,
+                    responder_nonce: nonce(0x32),
+                    transcript_hash: digest(0x33),
+                    responder_confirmation: digest(0x34),
+                    expected_initiator_confirmation: digest(0x35),
+                    new_send: downgraded_send,
+                    new_receive: downgraded_receive,
+                },
+                now,
+            ),
+            Err(RekeySessionError::Session(SessionError::InvalidEpochState))
+        );
+        assert_eq!(responder.epoch(), 1);
+        assert_eq!(responder.suite(), DataCipherSuite::ChaCha20Poly1305);
+        assert_eq!(responder.phase(), RekeyPhase::Idle);
+        assert!(responder.prepared.is_none());
+        assert_eq!(
+            responder
+                .open_in_place(&mut old_packet[..old_len], now + Duration::from_secs(1))
+                .expect("active receive survives rejected downgrade"),
+            b"old active receive"
+        );
+
+        let (send, receive) = responder_ciphers(2, NEW_SID, 0x40);
+        responder
+            .accept_peer_init(
+                RekeyAcceptOffer {
+                    init,
+                    responder_nonce: nonce(0x32),
+                    transcript_hash: digest(0x33),
+                    responder_confirmation: digest(0x34),
+                    expected_initiator_confirmation: digest(0x35),
+                    new_send: send,
+                    new_receive: receive,
+                },
+                now + Duration::from_secs(1),
+            )
+            .expect("valid material can be staged after rejection");
+        assert_eq!(responder.phase(), RekeyPhase::AwaitingConfirm);
+        let prepared = responder.prepared.as_ref().expect("valid keys staged");
+        assert_eq!(prepared.send.suite(), DataCipherSuite::ChaCha20Poly1305);
+        assert_eq!(prepared.receive.suite(), DataCipherSuite::ChaCha20Poly1305);
     }
 
     #[test]

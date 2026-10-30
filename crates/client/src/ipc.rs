@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
+use crate::node::{NodeCommandBus, NodeCommandRequest, NodeCommandResult};
 use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
 
@@ -33,6 +34,7 @@ pub enum IpcRequest {
         is_exit_node: bool,
     },
     Disconnect,
+    NodeCommand(NodeCommandRequest),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +47,7 @@ pub enum IpcResponse {
     MultiStatus(Vec<NetworkSessionSnapshot>),
     PeerProbe(PeerProbeOutcome),
     RoutingUpdated(RoutingUpdateResult),
+    NodeCommand(NodeCommandResult),
     Success { message: String },
     Error { message: String },
 }
@@ -306,9 +309,32 @@ pub fn spawn_multi_server(registry: MultiNetworkRegistry) -> JoinHandle<()> {
     spawn_multi_server_at(default_addr(), registry)
 }
 
+pub fn spawn_multi_server_with_commands(
+    registry: MultiNetworkRegistry,
+    commands: NodeCommandBus,
+) -> JoinHandle<()> {
+    spawn_multi_server_with_commands_at(default_addr(), registry, commands)
+}
+
 pub fn spawn_multi_server_at(addr: String, registry: MultiNetworkRegistry) -> JoinHandle<()> {
+    spawn_multi_server_inner(addr, registry, None)
+}
+
+fn spawn_multi_server_with_commands_at(
+    addr: String,
+    registry: MultiNetworkRegistry,
+    commands: NodeCommandBus,
+) -> JoinHandle<()> {
+    spawn_multi_server_inner(addr, registry, Some(commands))
+}
+
+fn spawn_multi_server_inner(
+    addr: String,
+    registry: MultiNetworkRegistry,
+    commands: Option<NodeCommandBus>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = serve(&addr, registry).await {
+        if let Err(e) = serve(&addr, registry, commands).await {
             tracing::warn!("本地 IPC 服务已停止: {:?}", e);
         }
     })
@@ -321,7 +347,7 @@ fn spawn_multi_server_with_control_at(
 ) -> JoinHandle<()> {
     registry.set_control_sender(control_tx);
     tokio::spawn(async move {
-        if let Err(e) = serve(&addr, registry).await {
+        if let Err(e) = serve(&addr, registry, None).await {
             tracing::warn!("本地 IPC 服务已停止: {:?}", e);
         }
     })
@@ -356,7 +382,11 @@ async fn request_at(addr: &str, req: IpcRequest) -> Result<IpcResponse> {
     Ok(response)
 }
 
-async fn serve(addr: &str, registry: MultiNetworkRegistry) -> Result<()> {
+async fn serve(
+    addr: &str,
+    registry: MultiNetworkRegistry,
+    commands: Option<NodeCommandBus>,
+) -> Result<()> {
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("无法监听本地控制接口 {}", addr))?;
@@ -366,16 +396,21 @@ async fn serve(addr: &str, registry: MultiNetworkRegistry) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await.context("接受本地控制连接失败")?;
         let reg = registry.clone();
+        let commands = commands.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, reg).await {
+            if let Err(e) = handle_client(stream, reg, commands).await {
                 tracing::debug!("本地 IPC 请求处理失败: {:?}", e);
             }
         });
     }
 }
 
-async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) -> Result<()> {
+async fn handle_client(
+    mut stream: TcpStream,
+    registry: MultiNetworkRegistry,
+    commands: Option<NodeCommandBus>,
+) -> Result<()> {
     let mut request = Vec::new();
     stream
         .read_to_end(&mut request)
@@ -395,6 +430,17 @@ async fn handle_client(mut stream: TcpStream, registry: MultiNetworkRegistry) ->
             is_exit_node,
         }) => update_runtime_routing(&registry, mode, exit_node, is_exit_node).await,
         Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
+        Ok(IpcRequest::NodeCommand(request)) => match commands {
+            Some(commands) => match commands.execute(request).await {
+                Ok(result) => IpcResponse::NodeCommand(result),
+                Err(error) => IpcResponse::Error {
+                    message: format!("节点命令执行失败: {error}"),
+                },
+            },
+            None => IpcResponse::Error {
+                message: "当前运行时未提供统一节点命令总线".to_string(),
+            },
+        },
         Ok(IpcRequest::StopNetwork { name }) => {
             let signaled = registry.send_stop(name.clone());
             if signaled {
@@ -832,6 +878,46 @@ mod tests {
                 assert!(lines.len() <= 10);
             }
             other => panic!("unexpected response: {:?}", other),
+        }
+
+        task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ipc_executes_shared_node_commands_and_returns_typed_results() -> anyhow::Result<()> {
+        let addr = "127.0.0.1:0";
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?.to_string();
+        drop(listener);
+
+        let registry = MultiNetworkRegistry::new();
+        let commands = crate::node::spawn_command_bus(
+            crate::node::NodeStateStore::new(),
+            registry.clone(),
+            crate::node::NodeEventBus::default(),
+        );
+        let task = spawn_multi_server_with_commands_at(local_addr.clone(), registry, commands);
+        sleep(Duration::from_millis(50)).await;
+
+        let response = request_at(
+            &local_addr,
+            IpcRequest::NodeCommand(NodeCommandRequest::new(
+                77,
+                crate::node::NodeCommand::GetSnapshot,
+            )),
+        )
+        .await?;
+
+        match response {
+            IpcResponse::NodeCommand(result) => {
+                assert_eq!(result.request_id, 77);
+                assert!(matches!(
+                    result.outcome,
+                    crate::node::NodeCommandOutcome::Snapshot(_)
+                ));
+            }
+            other => panic!("unexpected response: {other:?}"),
         }
 
         task.abort();

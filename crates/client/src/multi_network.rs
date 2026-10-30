@@ -234,7 +234,8 @@ impl MultiNetworkSupervisor {
         self.registry.set_stop_sender(stop_tx);
 
         // 启动全局聚合 IPC 控制接口
-        let _ipc_task = ipc::spawn_multi_server(self.registry.clone());
+        let _ipc_task =
+            ipc::spawn_multi_server_with_commands(self.registry.clone(), self.commands.clone());
 
         // 启动 WebUI (如果指定端口且大于0)
         let webui_port = self.options.webui_port;

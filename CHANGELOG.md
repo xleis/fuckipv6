@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Security
+- **NX-16 用户态 NAT 隔离原型**: 新增默认关闭的 `userspace-nat-prototype` feature，未接入任何生产路径。原型包含严格 IPv4/TCP/UDP 解析与校验和、TCP/UDP 有界连接跟踪、确定性超时与端口复用、每源/全局容量限制、无在线流驱逐的失败关闭策略，以及 12 个确定性测试。文档给出逻辑内存预算和待测性能门禁；尚无包重写、真实转发吞吐/延迟/RSS 或安全审计证据，因此结论为 **NO-GO，禁止产品接入**。
 - **Coordinator 持久授权撤销**: 新增与配置目录绑定的稳定网络标识和持久授权撤销目录，旧路径哈希记录可安全迁移，歧义记录拒绝自动改写；撤销/注册通过授权门串行，使用进程内互斥、跨进程文件锁与原子替换避免并发丢更新。目录缺失、读取失败、存储不支持撤销和跨网络撤销写入均失败关闭；重启后撤销继续生效，在线会话被断开且证书 allowlist 被移除，QUIC relay 对已建立连接逐包重查撤销。新增重启恢复、独立子进程并发、跨网络和存储故障负向测试。产品撤销入口、多 Coordinator 即时同步、P2P UDP/QUIC 完整链路及授权 epoch/租约绑定仍未完成，NX-14 保持进行中。
 - **节点私钥文件权限**: Unix 上创建 `node_identity.pem` 时直接使用 `0600` 模式，不再依赖进程 umask；覆盖已有身份文件时会在写入私钥前收紧权限，并新增新文件与宽松旧权限两类回归测试。
 - **QUIC Relay 运行期身份撤销**: Coordinator 黑名单现在在 QUIC relay 注册前以及每个转发包的源、目的身份检查中强制执行；已撤销节点不能新建 relay 状态，也不能经现有连接发包，拒绝路径不增加 relay 转发计数。新增注册拒绝、撤销源、撤销目的和无状态/计数副作用回归测试。证书层 CA/allowlist/CRL/OCSP、网络级授权与独立安全审计仍未完成。

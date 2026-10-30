@@ -21,4 +21,6 @@ pub mod stats;
 pub mod symmetric;
 pub mod tun;
 pub mod ui;
+#[cfg(feature = "userspace-nat-prototype")]
+pub mod userspace_nat_prototype;
 pub mod webui;

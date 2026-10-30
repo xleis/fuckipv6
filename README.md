@@ -18,7 +18,7 @@
 
 | 状态 | 当前范围 |
 |------|----------|
-| **可直接使用** | 单一 `fuckipv6` 节点程序、双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、节点 CLI/WebUI、`host`/`join` 与多网络配置 |
+| **可直接使用** | 单一 `fuckipv6` 节点程序、节点级稳定身份、双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、节点 CLI/WebUI、`host`/`join` 与多网络配置 |
 | **基础设施已接入（待产品化）** | 统一节点动态运行时命令（启动、创建、加入、按网络停止）已接通后端处理器，但 CLI/WebUI/GPUI 尚未全部迁移；多中继连接时择优、3-Hop 洋葱电路、Kademlia DHT、Blake3 分块传输已有引擎接入与单元测试，但缺少完整 UI 用户流程 |
 | **尚未产品化** | GPUI 原生桌面应用、GPUI/WebUI 共享契约与对等测试、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
 
@@ -106,6 +106,25 @@ sudo ./scripts/test-netns.sh
 3. 节点之间通过 UDP 探测和多中继测速验证可达端点
 4. 应用流量先封装为 v2 密文，再按路径选择 QUIC Stream Mesh 或 UDP 直连；两种传输均不会接受静态密钥或明文降级
 5. 如果 P2P 不可用，节点优先通过 QUIC 中继转发；QUIC 中继不可用时降级到 WebSocket 信令中继
+
+### 节点身份
+
+节点身份独立于网络配置。首次启动节点控制面时，程序会在配置根目录创建 `node_identity.pem`，并在零网络状态下直接发布节点 ID 与公钥指纹；后续创建或加入的网络都复用这一身份，不会为每个网络生成不同的节点密钥。
+
+配置根目录按以下顺序确定：
+
+1. `$XDG_CONFIG_HOME/fuckipv6`
+2. `$HOME/.config/fuckipv6`
+
+可选文件 `node_identity.json` 用于设置节点显示名：
+
+```json
+{
+  "display_name": "edge-gateway"
+}
+```
+
+显示名首尾空白会被去除，空值表示不设置显示名，控制字符会被拒绝。`node_identity.pem` 包含节点私有密钥材料，必须限制文件权限并且不得提交到仓库、放入邀请票据或发送给其他节点。当前写文件代码依赖操作系统的 umask；部署时应显式执行 `chmod 600 <配置目录>/node_identity.pem`。
 
 ## 📦 项目结构
 

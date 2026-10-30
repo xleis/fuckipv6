@@ -8,8 +8,8 @@ use crate::config_manager::ConfigManager;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::{
     NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodeProblem, NodeProblemCode,
-    NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
+    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodeProblem,
+    NodeProblemCode, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
 };
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
@@ -144,6 +144,27 @@ impl MultiNetworkSupervisor {
                 status,
             });
         }
+    }
+
+    async fn refresh_runtime_state(&self) {
+        let runtime = ipc::multi_status_snapshot(&self.registry).await;
+        self.state
+            .update(|snapshot| {
+                for network in &runtime.networks {
+                    if let Some(existing) = snapshot
+                        .networks
+                        .iter_mut()
+                        .find(|existing| existing.name == network.network_name)
+                    {
+                        update_network_from_runtime(existing, network);
+                    }
+                }
+
+                // An empty runtime means all peers are gone. Replacing the
+                // collection also removes peers from networks stopped earlier.
+                snapshot.peers = runtime.peers.iter().map(node_peer_snapshot).collect();
+            })
+            .await;
     }
 
     /// Start the node control plane and its selected network sessions.
@@ -387,9 +408,15 @@ impl MultiNetworkSupervisor {
         // 监听外部信号 (Ctrl+C, SIGTERM, 或通过 IPC 下发的 StopNetwork)
         let shutdown_sig = commands::shutdown_signal();
         tokio::pin!(shutdown_sig);
+        let mut state_refresh = tokio::time::interval(std::time::Duration::from_secs(1));
+        state_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        state_refresh.tick().await;
 
         loop {
             tokio::select! {
+                _ = state_refresh.tick() => {
+                    self.refresh_runtime_state().await;
+                }
                 _ = &mut shutdown_sig => {
                     println!("\n🛑 收到中断信号，正在优雅关闭节点网络...");
                     self.mark_network_status(None, NodeNetworkStatus::Stopping)
@@ -525,6 +552,64 @@ pub async fn stop_networks(network_names: &[String], all: bool) -> Result<()> {
     Ok(())
 }
 
+/// Refresh telemetry from a live session without owning lifecycle transitions.
+/// Status changes are published by the supervisor/network task so a runtime
+/// snapshot racing with shutdown cannot resurrect `Stopping` as `Online`.
+fn update_network_from_runtime(
+    existing: &mut NodeNetworkSnapshot,
+    network: &ipc::NetworkSessionSnapshot,
+) {
+    existing.tun_name = network.tun_name.clone();
+    existing.assigned_ipv6 = Some(network.assigned_ip);
+    existing.assigned_ipv4 = network.assigned_ipv4;
+    existing.p2p_listen_addr = Some(network.p2p_listen_addr);
+    existing.uptime_secs = network.uptime_secs;
+    existing.peer_count = network.peers.len();
+    existing.traffic = node_traffic_snapshot(&network.global);
+}
+
+fn node_traffic_snapshot(global: &ipc::GlobalStatsSnapshot) -> NodeTrafficSnapshot {
+    NodeTrafficSnapshot {
+        tun_rx_packets: global.tun_rx_packets,
+        tun_rx_bytes: global.tun_rx_bytes,
+        tun_tx_packets: global.tun_tx_packets,
+        tun_tx_bytes: global.tun_tx_bytes,
+        p2p_rx_packets: global.p2p_rx_packets,
+        p2p_rx_bytes: global.p2p_rx_bytes,
+        p2p_tx_packets: global.p2p_tx_packets,
+        p2p_tx_bytes: global.p2p_tx_bytes,
+        error_count: global.tun_read_errors
+            + global.tun_write_errors
+            + global.p2p_send_errors
+            + global.p2p_recv_errors,
+    }
+}
+
+fn node_peer_snapshot(peer: &ipc::PeerSnapshot) -> NodePeerSnapshot {
+    NodePeerSnapshot {
+        peer_id: peer.client_id.clone(),
+        network_name: peer
+            .network_name
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        virtual_ipv6: peer.virtual_ip,
+        virtual_ipv4: peer.virtual_ipv4,
+        endpoints: peer.endpoints.clone(),
+        online: true,
+        p2p_active: peer.p2p_active,
+        p2p_healthy: peer.p2p_healthy,
+        rtt_us: peer.rtt_us,
+        loss_rate: peer.loss_rate,
+        traffic: NodeTrafficSnapshot {
+            p2p_rx_packets: peer.rx_packets,
+            p2p_rx_bytes: peer.rx_bytes,
+            p2p_tx_packets: peer.tx_packets,
+            p2p_tx_bytes: peer.tx_bytes,
+            ..NodeTrafficSnapshot::default()
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +650,123 @@ mod tests {
         assert_eq!(sanitize_interface_name("eth0_test"), "eth0_test");
         assert_eq!(sanitize_interface_name("fk-home.1"), "fk-home1");
         assert_eq!(sanitize_interface_name(""), "fuckipv6");
+    }
+
+    fn sample_global_stats() -> ipc::GlobalStatsSnapshot {
+        ipc::GlobalStatsSnapshot {
+            tun_rx_packets: 1,
+            tun_rx_bytes: 2,
+            tun_tx_packets: 3,
+            tun_tx_bytes: 4,
+            p2p_rx_packets: 5,
+            p2p_rx_bytes: 6,
+            p2p_tx_packets: 7,
+            p2p_tx_bytes: 8,
+            tun_read_errors: 9,
+            tun_write_errors: 10,
+            p2p_send_errors: 11,
+            p2p_recv_errors: 12,
+            signaling_messages_sent: 13,
+            signaling_messages_received: 14,
+            signaling_reconnects: 15,
+        }
+    }
+
+    #[test]
+    fn node_traffic_snapshot_maps_global_counters_and_aggregate_errors() {
+        let traffic = node_traffic_snapshot(&sample_global_stats());
+
+        assert_eq!(traffic.tun_rx_packets, 1);
+        assert_eq!(traffic.tun_rx_bytes, 2);
+        assert_eq!(traffic.tun_tx_packets, 3);
+        assert_eq!(traffic.tun_tx_bytes, 4);
+        assert_eq!(traffic.p2p_rx_packets, 5);
+        assert_eq!(traffic.p2p_rx_bytes, 6);
+        assert_eq!(traffic.p2p_tx_packets, 7);
+        assert_eq!(traffic.p2p_tx_bytes, 8);
+        assert_eq!(traffic.error_count, 42);
+    }
+
+    #[test]
+    fn node_peer_snapshot_maps_identity_network_quality_and_traffic() {
+        let peer = ipc::PeerSnapshot {
+            client_id: "peer-1".into(),
+            virtual_ip: "fd00::2".parse().expect("valid IPv6"),
+            virtual_ipv4: Some("10.0.0.2".parse().expect("valid IPv4")),
+            endpoints: vec!["[2001:db8::2]:9000".parse().expect("valid endpoint")],
+            nat_type: "port_restricted".into(),
+            p2p_active: true,
+            p2p_healthy: true,
+            tx_packets: 10,
+            tx_bytes: 1000,
+            rx_packets: 20,
+            rx_bytes: 2000,
+            rtt_us: Some(12_000),
+            loss_rate: 0.25,
+            bandwidth_bps: 1_000_000,
+            health_probes_sent: 10,
+            health_probes_acked: 9,
+            health_window_probes: 10,
+            health_window_lost: 1,
+            probe_success_rate: 0.9,
+            idle_secs: Some(0),
+            last_p2p_success_secs: Some(1),
+            remote_rtt_us: Some(15_000),
+            remote_loss_rate: Some(0.5),
+            remote_bandwidth_bps: Some(900_000),
+            remote_quality_age_secs: Some(2),
+            network_name: Some("home".into()),
+        };
+
+        let snapshot = node_peer_snapshot(&peer);
+
+        assert_eq!(snapshot.peer_id, "peer-1");
+        assert_eq!(snapshot.network_name, "home");
+        assert_eq!(snapshot.virtual_ipv6, peer.virtual_ip);
+        assert_eq!(snapshot.virtual_ipv4, peer.virtual_ipv4);
+        assert_eq!(snapshot.endpoints, peer.endpoints);
+        assert!(snapshot.online);
+        assert!(snapshot.p2p_active);
+        assert!(snapshot.p2p_healthy);
+        assert_eq!(snapshot.rtt_us, Some(12_000));
+        assert_eq!(snapshot.loss_rate, 0.25);
+        assert_eq!(snapshot.traffic.p2p_rx_packets, 20);
+        assert_eq!(snapshot.traffic.p2p_rx_bytes, 2000);
+        assert_eq!(snapshot.traffic.p2p_tx_packets, 10);
+        assert_eq!(snapshot.traffic.p2p_tx_bytes, 1000);
+    }
+
+    #[test]
+    fn runtime_refresh_does_not_overwrite_stopping_status() {
+        let mut existing = NodeNetworkSnapshot {
+            name: "home".into(),
+            tun_name: "fk-home".into(),
+            status: NodeNetworkStatus::Stopping,
+            assigned_ipv6: None,
+            assigned_ipv4: None,
+            p2p_listen_addr: None,
+            uptime_secs: 0,
+            roles: vec![NodeNetworkRole::Member],
+            peer_count: 0,
+            traffic: NodeTrafficSnapshot::default(),
+        };
+        let runtime = ipc::NetworkSessionSnapshot {
+            network_name: "home".into(),
+            tun_name: "fk-home-live".into(),
+            assigned_ip: "fd00::2".parse().expect("valid IPv6"),
+            assigned_ipv4: Some("10.0.0.2".parse().expect("valid IPv4")),
+            p2p_listen_addr: "[::]:9000".parse().expect("valid socket"),
+            uptime_secs: 30,
+            peers: Vec::new(),
+            global: sample_global_stats(),
+        };
+
+        update_network_from_runtime(&mut existing, &runtime);
+
+        assert_eq!(existing.status, NodeNetworkStatus::Stopping);
+        assert_eq!(existing.tun_name, "fk-home-live");
+        assert_eq!(existing.assigned_ipv6, Some(runtime.assigned_ip));
+        assert_eq!(existing.p2p_listen_addr, Some(runtime.p2p_listen_addr));
+        assert_eq!(existing.uptime_secs, 30);
     }
 }

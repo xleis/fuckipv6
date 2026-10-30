@@ -499,7 +499,7 @@ async fn disconnect_runtime(registry: &MultiNetworkRegistry) -> IpcResponse {
     }
 }
 
-async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> StatusSnapshot {
+pub(crate) async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> StatusSnapshot {
     let sessions = registry.get_all().await;
     if sessions.is_empty() {
         return StatusSnapshot {

@@ -10,6 +10,7 @@ All notable changes are documented here. The project follows semantic versioning
 - **QUIC Relay 客户端证书 allowlist**: Relay 的 QUIC TLS 现在只接受当前已完成签名注册的节点 Ed25519 公钥；allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。TLS 授权查询使用同步快照，不在握手回调中等待异步会话锁。新增授权、未列入、空名单、未注册证书握手拒绝和注销后撤销回归测试。该控制是当前在线会话准入，不等同于 CA、CRL/OCSP、持久撤销列表或网络级最终授权，独立安全审计仍未完成。
 
 ### Added
+- **UI manifest fail-closed 契约校验**: 共享 manifest 现在校验固定 11 页集合与顺序、9 类命令覆盖、页面/动作/字段唯一性、必填字段校验、命令权限与后端状态一致性，以及 Shutdown 的破坏性确认；HTTP 适配器在交付前拒绝任何违约 manifest，并以 `ContractViolation` 失败关闭。该门禁只是 UI 对等自动测试的基础，真实 WebUI/GPUI 渲染层尚未接入，不能据此宣称 UI 已对等。
 - **共享节点 HTTP/WS 适配器**: 新增版本化快照、manifest、事件 WebSocket 和命令提交端点。快照/事件合并使用共享 `NodeStateStore`，动作及读取命令只提交 `NodeCommandBus`，schema 不匹配、非法请求、后端拒绝和 `Unavailable` 均有稳定 HTTP 映射；重复/过期 revision 被抑制，跳号与广播滞后会下发权威快照重同步。该适配器尚未挂载到现有 WebUI/GPUI。
 - **UI 运行模式 CLI 真值接线**: 顶层及 `host`/`join`/`connect`/`up`/`start` 支持互斥的 `--headless`、`--webui`、`--gpui`；`--gui` 保留为 WebUI 兼容别名。无显示环境、冲突参数和当前不可用的原生 GPUI 均明确失败，不再静默降级或把浏览器窗口标记为 GPUI。
 - **零网络节点身份**: 节点控制面启动时即加载或生成配置根目录下唯一的 `node_identity.pem`，并从可选 `node_identity.json` 读取 `display_name`；即使没有启动任何网络，共享 `NodeSnapshot` 也会包含节点 ID、公钥指纹和显示名。网络启动计划统一复用节点级密钥，测试确认身份跨重启稳定，且私钥、种子和本机路径不会进入 DTO。README 已补充配置根目录、元数据格式和私钥文件权限注意事项。

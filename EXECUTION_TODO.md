@@ -25,7 +25,7 @@
 - [ ] **EX-11 GPUI 应用外壳**：引入 GPUI，完成窗口、主题、导航、状态订阅、错误提示和退出清理；桌面模式不依赖浏览器。验收：可在 Linux 桌面启动并连接真实节点命令总线。
 - [ ] **EX-12 GPUI 功能页面**：按 manifest 实现网络、Peer、拓扑、流量、路由、Exit Node、中继、日志、身份和设置页面。验收：不实现第二套校验、权限或状态机。
 - [x] **EX-13 UI 模式选择与回退**：实现 `--gpui`、`--headless` 和自动检测；无显示环境使用 WebUI，GPUI 初始化失败给出显式策略。验收：三种模式及失败回退可自动化测试。完成：共享 `Gpui/WebUi/Headless` 模式契约、冲突/无显示/GPUI 不可用错误、CLI 参数接线、旧 `--gui` 到 WebUI 的兼容别名及 `NodeSnapshot.ui_mode` 均已落地；原生 GPUI 未接入时明确失败，不会伪装成 WebUI。
-- [ ] **EX-14 UI 对等契约测试**：依据 manifest 自动比较 WebUI/GPUI 的页面、动作、字段、校验、错误映射和权限。验收：缺少任一动作或语义不一致时 CI 失败，覆盖无网络、单网络和双网络。
+- [>] **EX-14 UI 对等契约测试**：依据 manifest 自动比较 WebUI/GPUI 的页面、动作、字段、校验、错误映射和权限。验收：缺少任一动作或语义不一致时 CI 失败，覆盖无网络、单网络和双网络。
 
 ## P1：安全、性能与发布门禁
 
@@ -61,7 +61,7 @@
   - 工作：提供版本化的快照、manifest 和事件 WebSocket 适配层，把 HTTP/WS DTO 转换为 `NodeCommandBus` 与 `NodeStateStore` 调用；不拥有业务状态。
   - 依赖：EX-01、EX-02、EX-04、NX-01。
   - 验收：快照只来自 `NodeStateStore`，动作只发往命令总线；manifest schema 版本不匹配时明确失败而非降级；WS 断线、重复事件、revision 跳跃和非授权请求均有契约测试；不存在第二套页面/动作定义。
-  - 进展（2026-10-30）：新增版本化 `/api/node/snapshot`、`/api/node/manifest`、WebSocket `/api/node/events` 和 `POST /api/node/commands`；读路径经命令总线取得共享状态，动作请求原样提交 `NodeCommandBus`。覆盖 schema 不匹配、非法请求、后端拒绝、`Unavailable`、重复/回退 revision、跳号与广播滞后重同步、断线。剩余：挂载到实际 WebUI/GPUI（NX-07/NX-08），并与 NX-02 的认证/暴露面策略接通后才算完整验收。
+  - 进展（2026-10-30）：新增版本化 `/api/node/snapshot`、`/api/node/manifest`、WebSocket `/api/node/events` 和 `POST /api/node/commands`；读路径经命令总线取得共享状态，动作请求原样提交 `NodeCommandBus`。覆盖 schema 不匹配、非法请求、后端拒绝、`Unavailable`、重复/回退 revision、跳号与广播滞后重同步、断线。manifest 现在在 HTTP 适配器交付前检查 schema、固定页面集合与顺序、命令覆盖、动作/字段唯一性、必填字段校验、命令权限与后端状态一致性；格式错误返回 `ContractViolation` 而不是交给 UI 降级渲染。剩余：挂载到实际 WebUI/GPUI（NX-07/NX-08），并与 NX-02 的认证/暴露面策略接通后才算完整验收。
 
 - [ ] **NX-04 路由热更新后端（细化 EX-06）**
   - 工作：让 `UpdateRouting` 原子更新运行中的 Smart Route、Exit Node 配置、持久化配置、共享快照和事件；任何阶段失败都恢复旧运行态。
@@ -95,10 +95,11 @@
   - 依赖：NX-03、NX-08；后端未实现动作继续显示 manifest 的 `Unavailable`，不得前端伪造可用。
   - 验收：每页动作、字段、必填项、校验、确认、权限和不可用原因均来自共享契约；GPUI 不复制业务校验或状态机；覆盖空节点、单网络、双网络、离线、权限不足和命令失败状态。
 
-- [ ] **NX-10 UI 对等自动门禁（细化 EX-14）**
+- [>] **NX-10 UI 对等自动门禁（细化 EX-14）**
   - 工作：建立 WebUI/GPUI 共用的页面与动作覆盖检查，自动比较页面集合、动作、字段、可用条件、权限、错误映射和命令 DTO。
   - 依赖：NX-03、NX-07、NX-09。
   - 验收：任一 UI 缺少页面、动作或字段时 CI 失败；manifest 版本漂移导致失败；至少覆盖无网络、单网络和双网络；允许渲染差异但不允许语义差异。
+  - 进展（2026-10-30）：manifest 自带 fail-closed 契约校验，HTTP 适配器在交付前拒绝页面顺序/集合、action/field 重复、必填字段无校验、命令权限/后端状态不一致及 Shutdown 确认缺失。该基础门禁不能替代真实 WebUI/GPUI 渲染层对等测试，NX-10 仍未完成。
 
 ### P1-C：安全能力生产化
 

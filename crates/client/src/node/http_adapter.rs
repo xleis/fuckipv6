@@ -252,6 +252,8 @@ pub enum NodeHttpAdapterError {
     UnexpectedOutcome(String),
     #[error("节点 UI manifest schema 不兼容: current={current}, supported={supported}")]
     ManifestSchemaMismatch { current: u16, supported: u16 },
+    #[error("节点 UI manifest 违反共享契约: {violations:?}")]
+    InvalidManifest { violations: Vec<String> },
 }
 
 /// HTTP/WebSocket projection over the shared node bus and state store.
@@ -346,6 +348,9 @@ impl NodeHttpAdapter {
                         current: manifest.schema_version,
                         supported: NODE_UI_MANIFEST_SCHEMA_VERSION,
                     });
+                }
+                if let Err(violations) = manifest.validate() {
+                    return Err(NodeHttpAdapterError::InvalidManifest { violations });
                 }
                 Ok(*manifest)
             }
@@ -590,7 +595,8 @@ impl HttpAdapterError {
                 Some(problem.clone()),
             ),
             NodeHttpAdapterError::UnexpectedOutcome(_)
-            | NodeHttpAdapterError::ManifestSchemaMismatch { .. } => (
+            | NodeHttpAdapterError::ManifestSchemaMismatch { .. }
+            | NodeHttpAdapterError::InvalidManifest { .. } => (
                 StatusCode::BAD_GATEWAY,
                 NodeHttpErrorCode::ContractViolation,
                 None,
@@ -883,6 +889,23 @@ mod tests {
         assert!(matches!(
             error,
             NodeHttpAdapterError::ManifestSchemaMismatch { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_manifest_is_rejected_before_rendering() {
+        let mut manifest = node_ui_manifest();
+        manifest.pages.swap(0, 1);
+        let (adapter, _state, _events) = adapter_fixture(manifest);
+
+        let error = adapter
+            .manifest()
+            .await
+            .expect_err("malformed manifest must be rejected");
+        assert!(matches!(
+            error,
+            NodeHttpAdapterError::InvalidManifest { violations }
+                if violations.iter().any(|violation| violation.starts_with("page_set_or_order_mismatch:"))
         ));
     }
 

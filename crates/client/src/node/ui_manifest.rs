@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use super::state::NodePermission;
@@ -13,6 +15,139 @@ pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
 pub struct NodeUiManifest {
     pub schema_version: u16,
     pub pages: Vec<NodeUiPage>,
+}
+
+impl NodeUiManifest {
+    /// Validate the cross-surface contract before either WebUI or GPUI uses it.
+    ///
+    /// The manifest is a compatibility boundary, not trusted configuration.
+    /// A malformed manifest must fail closed instead of allowing each renderer
+    /// to invent a different page set, field rule, permission, or backend state.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        const REQUIRED_PAGES: [&str; 11] = [
+            "overview",
+            "networks",
+            "peers",
+            "topology",
+            "traffic",
+            "routing",
+            "exit_node",
+            "relay",
+            "logs",
+            "identity",
+            "settings",
+        ];
+
+        let mut violations = Vec::new();
+        if self.schema_version != NODE_UI_MANIFEST_SCHEMA_VERSION {
+            violations.push(format!(
+                "schema_version_mismatch:expected={NODE_UI_MANIFEST_SCHEMA_VERSION}:actual={}",
+                self.schema_version
+            ));
+        }
+
+        let actual_pages = self
+            .pages
+            .iter()
+            .map(|page| page.id.as_str())
+            .collect::<Vec<_>>();
+        if actual_pages != REQUIRED_PAGES {
+            violations.push(format!(
+                "page_set_or_order_mismatch:expected={REQUIRED_PAGES:?}:actual={actual_pages:?}"
+            ));
+        }
+
+        let mut page_ids = HashSet::new();
+        let mut action_ids = HashSet::new();
+        let mut command_modes = HashMap::new();
+
+        for page in &self.pages {
+            if page.id.is_empty() || page.nav_label_key.is_empty() || page.title_key.is_empty() {
+                violations.push(format!("page_has_empty_contract_key:{}", page.id));
+            }
+            if !page_ids.insert(page.id.as_str()) {
+                violations.push(format!("duplicate_page_id:{}", page.id));
+            }
+
+            for action in &page.actions {
+                let context = format!("{}.{}", page.id, action.id);
+                if action.id.is_empty() || action.label_key.is_empty() {
+                    violations.push(format!("action_has_empty_contract_key:{context}"));
+                }
+                if !action_ids.insert(action.id.as_str()) {
+                    violations.push(format!("duplicate_action_id:{}", action.id));
+                }
+
+                if let Some((backend_status, permission)) =
+                    command_modes.insert(action.command, (action.backend_status, action.permission))
+                {
+                    if backend_status != action.backend_status {
+                        violations.push(format!(
+                            "inconsistent_backend_status:{}:{context}",
+                            command_wire_name(action.command)
+                        ));
+                    }
+                    if permission != action.permission {
+                        violations.push(format!(
+                            "inconsistent_permission:{}:{context}",
+                            command_wire_name(action.command)
+                        ));
+                    }
+                }
+
+                if let Some(confirmation) = &action.confirmation {
+                    if confirmation.title_key.is_empty() || confirmation.consequence_key.is_empty()
+                    {
+                        violations.push(format!("confirmation_has_empty_key:{context}"));
+                    }
+                }
+                if action.command == NodeUiCommandKind::Shutdown
+                    && !action
+                        .confirmation
+                        .as_ref()
+                        .is_some_and(|confirmation| confirmation.destructive)
+                {
+                    violations.push(format!(
+                        "shutdown_requires_destructive_confirmation:{context}"
+                    ));
+                }
+
+                let mut field_ids = HashSet::new();
+                for field in &action.fields {
+                    if field.id.is_empty() || field.label_key.is_empty() {
+                        violations.push(format!("field_has_empty_contract_key:{context}"));
+                    }
+                    if !field_ids.insert(field.id.as_str()) {
+                        violations.push(format!("duplicate_field_id:{context}.{}", field.id));
+                    }
+                    if field.required
+                        && field.input != NodeUiInputKind::Boolean
+                        && field.validation == NodeUiValidation::None
+                    {
+                        violations.push(format!(
+                            "required_field_has_no_validation:{context}.{}",
+                            field.id
+                        ));
+                    }
+                }
+            }
+        }
+
+        for command in NodeUiCommandKind::ALL {
+            if !command_modes.contains_key(&command) {
+                violations.push(format!(
+                    "missing_command_action:{}",
+                    command_wire_name(command)
+                ));
+            }
+        }
+
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +200,20 @@ pub enum NodeUiCommandKind {
     Shutdown,
 }
 
+impl NodeUiCommandKind {
+    pub const ALL: [Self; 9] = [
+        Self::GetSnapshot,
+        Self::StartNetworks,
+        Self::StopNetworks,
+        Self::CreateNetwork,
+        Self::JoinNetwork,
+        Self::UpdateRouting,
+        Self::SetNetworkRole,
+        Self::ProbePeer,
+        Self::Shutdown,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeUiBackendStatus {
@@ -110,6 +259,20 @@ pub enum NodeUiValidation {
     Role,
     RoutingMode,
     PositiveTimeout,
+}
+
+fn command_wire_name(command: NodeUiCommandKind) -> &'static str {
+    match command {
+        NodeUiCommandKind::GetSnapshot => "get_snapshot",
+        NodeUiCommandKind::StartNetworks => "start_networks",
+        NodeUiCommandKind::StopNetworks => "stop_networks",
+        NodeUiCommandKind::CreateNetwork => "create_network",
+        NodeUiCommandKind::JoinNetwork => "join_network",
+        NodeUiCommandKind::UpdateRouting => "update_routing",
+        NodeUiCommandKind::SetNetworkRole => "set_network_role",
+        NodeUiCommandKind::ProbePeer => "probe_peer",
+        NodeUiCommandKind::Shutdown => "shutdown",
+    }
 }
 
 pub fn node_ui_manifest() -> NodeUiManifest {
@@ -515,6 +678,69 @@ fn confirmation(title_key: &str, consequence_key: &str, destructive: bool) -> No
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn canonical_manifest_passes_contract_validation() {
+        node_ui_manifest()
+            .validate()
+            .expect("canonical manifest must be valid");
+    }
+
+    #[test]
+    fn validation_rejects_page_reordering_and_removal() {
+        let mut manifest = node_ui_manifest();
+        manifest.pages.swap(0, 1);
+        let violations = manifest.validate().expect_err("reordered pages must fail");
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("page_set_or_order_mismatch:")));
+
+        let mut manifest = node_ui_manifest();
+        manifest.pages.pop();
+        let violations = manifest.validate().expect_err("missing page must fail");
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("page_set_or_order_mismatch:")));
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_fields_and_unvalidated_required_inputs() {
+        let mut manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter_mut()
+            .flat_map(|page| &mut page.actions)
+            .find(|action| action.command == NodeUiCommandKind::CreateNetwork)
+            .expect("create action");
+        action.fields[1].id = action.fields[0].id.clone();
+        action.fields[0].validation = NodeUiValidation::None;
+
+        let violations = manifest.validate().expect_err("malformed fields must fail");
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("duplicate_field_id:")));
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("required_field_has_no_validation:")));
+    }
+
+    #[test]
+    fn validation_rejects_inconsistent_command_semantics() {
+        let mut manifest = node_ui_manifest();
+        let relay = manifest
+            .pages
+            .iter_mut()
+            .find(|page| page.id == "relay")
+            .expect("relay page");
+        relay.actions[0].permission = NodePermission::ViewState;
+
+        let violations = manifest
+            .validate()
+            .expect_err("command permissions must agree across surfaces");
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("inconsistent_permission:set_network_role:")));
+    }
 
     #[test]
     fn manifest_declares_the_complete_required_page_set_once() {

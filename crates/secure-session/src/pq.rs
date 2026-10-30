@@ -2,9 +2,10 @@
 //!
 //! This module is compiled only with the `pq` feature. It provides strict,
 //! fixed-size byte interfaces around the RustCrypto implementations and keeps
-//! private material in zeroizing containers. It does **not** implement X-Wing,
-//! a composite Ed25519 + ML-DSA identity, a post-quantum handshake profile, or
-//! any wire messages.
+//! private material in zeroizing containers. The separate [`crate::hybrid`]
+//! module builds X-Wing from these adapters. This module does not implement a
+//! composite Ed25519 + ML-DSA identity, a post-quantum wire handshake, or any
+//! control-channel messages.
 //!
 //! The upstream `ml-kem` and `ml-dsa` crates state that their implementations
 //! have never been independently audited. These adapters therefore inherit that
@@ -114,7 +115,7 @@ impl MlKem768PublicKey {
         Ok(self.encapsulate_with_message(&message))
     }
 
-    fn encapsulate_with_message(
+    pub(crate) fn encapsulate_with_message(
         &self,
         message: &[u8; 32],
     ) -> (MlKem768Ciphertext, MlKem768SharedSecret) {
@@ -170,6 +171,13 @@ impl MlKem768SecretKey {
             key: secret_key.key.encapsulation_key().clone(),
         };
         Ok((secret_key, public_key))
+    }
+
+    /// Return the corresponding ML-KEM-768 encapsulation key.
+    pub(crate) fn encapsulation_key(&self) -> MlKem768PublicKey {
+        MlKem768PublicKey {
+            key: self.key.encapsulation_key().clone(),
+        }
     }
 
     /// Export a zeroizing copy of the 64-byte decapsulation seed.

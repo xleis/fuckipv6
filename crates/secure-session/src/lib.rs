@@ -3,9 +3,9 @@
 //! This crate intentionally does not implement the post-quantum handshake yet.
 //! It contains the byte-exact data frame, nonce construction, replay window,
 //! bounded epoch lifecycle, allocation-free AEAD packet operations, and the
-//! online `REKEY_INIT`/`REKEY_ACCEPT`/`REKEY_CONFIRM` state machine that can be
-//! tested independently from the eventually selected X-Wing and ML-DSA
-//! implementations.
+//! online `REKEY_INIT`/`REKEY_ACCEPT`/`REKEY_CONFIRM` state machine. With the
+//! optional `pq` feature, it also provides the X-Wing draft-11 KEM primitive;
+//! the corresponding hybrid wire handshake is not yet connected.
 
 pub mod confirmation;
 pub mod cookie;
@@ -13,6 +13,8 @@ pub mod data_cipher;
 pub mod driver;
 pub mod handshake;
 pub mod handshake_epoch;
+#[cfg(feature = "pq")]
+pub mod hybrid;
 pub mod key_schedule;
 #[cfg(feature = "pq")]
 pub mod pq;

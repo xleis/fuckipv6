@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
 use crate::auth::jwt::{Claims, JwtManager};
+use crate::signaling::blacklist::{CoordinatorConfigBlacklistStore, SharedBlacklistStore};
 use crate::signaling::session::{
     CoordinatorSnapshot, PeerSnapshot, SessionManager, TrafficSnapshot,
 };
@@ -122,6 +123,14 @@ pub async fn run_with_options(
     auth_config: CoordinatorAuthConfig,
     config_path: Option<String>,
 ) -> Result<()> {
+    if let Some(path) = &config_path {
+        let store: SharedBlacklistStore = Arc::new(CoordinatorConfigBlacklistStore::new(path));
+        session_manager
+            .attach_blacklist_store(store)
+            .await
+            .context("加载协调端持久黑名单失败")?;
+    }
+
     let state = AppState::new_with_config_path(session_manager, auth_config, config_path);
     let app = build_router(state);
 
@@ -464,28 +473,55 @@ async fn get_blacklist(
     Ok(Json(state.session_manager.get_blacklist().await))
 }
 
+type BlacklistActionHttpResult = Result<(StatusCode, Json<BlacklistActionResponse>), StatusCode>;
+
 async fn ban_client(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     Json(payload): Json<BlacklistActionRequest>,
-) -> Result<Json<BlacklistActionResponse>, StatusCode> {
+) -> BlacklistActionHttpResult {
     check_auth(&state, &headers, params.get("token").map(String::as_str))?;
     let target = payload.client_id.trim();
     if target.is_empty() {
-        return Ok(Json(BlacklistActionResponse {
-            success: false,
-            message: "Client ID cannot be empty".to_string(),
-            blacklist: state.session_manager.get_blacklist().await,
-        }));
+        return Ok((
+            StatusCode::OK,
+            Json(BlacklistActionResponse {
+                success: false,
+                message: "Client ID cannot be empty".to_string(),
+                blacklist: state.session_manager.get_blacklist().await,
+            }),
+        ));
     }
-    state.session_manager.ban_client(target.to_string()).await;
-    let current = state.session_manager.get_blacklist().await;
-    Ok(Json(BlacklistActionResponse {
-        success: true,
-        message: format!("客户端 {target} 已被封禁并移入黑名单"),
-        blacklist: current,
-    }))
+
+    match state
+        .session_manager
+        .try_ban_client(target.to_string())
+        .await
+    {
+        Ok(_) => {
+            let current = state.session_manager.get_blacklist().await;
+            Ok((
+                StatusCode::OK,
+                Json(BlacklistActionResponse {
+                    success: true,
+                    message: format!("客户端 {target} 已被封禁并移入黑名单"),
+                    blacklist: current,
+                }),
+            ))
+        }
+        Err(error) => {
+            let current = state.session_manager.get_blacklist().await;
+            Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(BlacklistActionResponse {
+                    success: false,
+                    message: format!("封禁持久化失败，运行期状态未修改: {error:#}"),
+                    blacklist: current,
+                }),
+            ))
+        }
+    }
 }
 
 async fn unban_client(
@@ -493,20 +529,37 @@ async fn unban_client(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     Json(payload): Json<BlacklistActionRequest>,
-) -> Result<Json<BlacklistActionResponse>, StatusCode> {
+) -> BlacklistActionHttpResult {
     check_auth(&state, &headers, params.get("token").map(String::as_str))?;
     let target = payload.client_id.trim();
-    let removed = state.session_manager.unban_client(target).await;
-    let current = state.session_manager.get_blacklist().await;
-    Ok(Json(BlacklistActionResponse {
-        success: removed,
-        message: if removed {
-            format!("客户端 {target} 已成功解封移出黑名单")
-        } else {
-            format!("客户端 {target} 不在黑名单中")
-        },
-        blacklist: current,
-    }))
+    match state.session_manager.try_unban_client(target).await {
+        Ok(removed) => {
+            let current = state.session_manager.get_blacklist().await;
+            Ok((
+                StatusCode::OK,
+                Json(BlacklistActionResponse {
+                    success: removed,
+                    message: if removed {
+                        format!("客户端 {target} 已成功解封移出黑名单")
+                    } else {
+                        format!("客户端 {target} 不在黑名单中")
+                    },
+                    blacklist: current,
+                }),
+            ))
+        }
+        Err(error) => {
+            let current = state.session_manager.get_blacklist().await;
+            Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(BlacklistActionResponse {
+                    success: false,
+                    message: format!("解封持久化失败，运行期状态未修改: {error:#}"),
+                    blacklist: current,
+                }),
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1582,7 +1635,7 @@ tun_name = "fuckipv6"</div>
           showToast(`客户端 ${shortId(clientId)} 已被拉黑并强制下线`);
           refresh(true);
         } else {
-          showToast(`拉黑失败: ${res.error || '未知错误'}`);
+          showToast(`拉黑失败: ${res.error || res.message || '未知错误'}`);
         }
       } catch (err) {
         showToast(`操作异常: ${err.message}`);
@@ -2640,6 +2693,22 @@ tun_name = "fuckipv6"`;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signaling::blacklist::BlacklistStore;
+    use fuckipv6_common::BlacklistConfig;
+
+    struct FailingBlacklistStore {
+        loaded: BlacklistConfig,
+    }
+
+    impl BlacklistStore for FailingBlacklistStore {
+        fn load(&self) -> Result<BlacklistConfig> {
+            Ok(self.loaded.clone())
+        }
+
+        fn save(&self, _blacklist: &BlacklistConfig) -> Result<()> {
+            anyhow::bail!("injected blacklist persistence failure")
+        }
+    }
 
     #[tokio::test]
     async fn test_status_api() -> Result<()> {
@@ -2671,6 +2740,70 @@ mod tests {
 
         let logs_res = logs(State(state), HeaderMap::new(), Query(HashMap::new())).await;
         assert!(logs_res.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blacklist_api_reports_persistence_failure_without_mutating_state() -> Result<()> {
+        let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        manager
+            .attach_blacklist_store(Arc::new(FailingBlacklistStore {
+                loaded: BlacklistConfig::default(),
+            }))
+            .await?;
+        let state = AppState::new(manager, CoordinatorAuthConfig::default());
+
+        let (status_code, Json(response)) = ban_client(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(BlacklistActionRequest {
+                client_id: "node-bad".to_string(),
+            }),
+        )
+        .await
+        .expect("persistence failure should be returned as a JSON API response");
+
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.success);
+        assert!(response.message.contains("运行期状态未修改"));
+        assert!(response.blacklist.is_empty());
+        assert!(state.session_manager.get_blacklist().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blacklist_unban_api_reports_persistence_failure_without_mutating_state() -> Result<()>
+    {
+        let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        manager
+            .attach_blacklist_store(Arc::new(FailingBlacklistStore {
+                loaded: BlacklistConfig {
+                    banned_clients: vec!["node-bad".to_string()],
+                },
+            }))
+            .await?;
+        let state = AppState::new(manager, CoordinatorAuthConfig::default());
+
+        let (status_code, Json(response)) = unban_client(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(BlacklistActionRequest {
+                client_id: "node-bad".to_string(),
+            }),
+        )
+        .await
+        .expect("persistence failure should be returned as a JSON API response");
+
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.success);
+        assert!(response.message.contains("运行期状态未修改"));
+        assert_eq!(response.blacklist, vec!["node-bad".to_string()]);
+        assert_eq!(
+            state.session_manager.get_blacklist().await,
+            vec!["node-bad".to_string()]
+        );
         Ok(())
     }
 

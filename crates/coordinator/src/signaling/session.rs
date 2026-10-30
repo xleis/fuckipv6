@@ -1744,10 +1744,9 @@ mod tests {
         assert!(error.to_string().contains("persistence failure"));
         assert!(manager.get_blacklist().await.is_empty());
         assert!(
-            manager
+            !manager
                 .is_blacklisted("any-node", &identity.public_key())
                 .await
-                == false
         );
         assert!(manager.get_peer_info(&client_id).await.is_some());
         assert!(authorizer.is_authorized(&public_key));

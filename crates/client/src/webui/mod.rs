@@ -215,45 +215,112 @@ async fn handle_get_blacklist(State(ctrl): State<Arc<AppController>>) -> Json<Ve
     Json(ctrl.get_blacklist().await)
 }
 
+type BlacklistActionHttpResult =
+    Result<Json<BlacklistActionResponse>, (StatusCode, Json<BlacklistActionResponse>)>;
+
+fn blacklist_response(
+    success: bool,
+    message: impl Into<String>,
+    blacklist: Vec<String>,
+) -> Json<BlacklistActionResponse> {
+    Json(BlacklistActionResponse {
+        success,
+        message: message.into(),
+        blacklist,
+    })
+}
+
+fn blacklist_contains(blacklist: &[String], client_id: &str) -> bool {
+    blacklist
+        .iter()
+        .any(|entry| entry.trim() == client_id.trim())
+}
+
 async fn handle_blacklist_ban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BlacklistActionRequest>,
-) -> Json<BlacklistActionResponse> {
+) -> BlacklistActionHttpResult {
     let client_id = payload.client_id.trim().to_string();
     if client_id.is_empty() {
-        return Json(BlacklistActionResponse {
-            success: false,
-            message: "客户端标识不能为空".to_string(),
-            blacklist: ctrl.get_blacklist().await,
-        });
+        return Err((
+            StatusCode::BAD_REQUEST,
+            blacklist_response(false, "客户端标识不能为空", ctrl.get_blacklist().await),
+        ));
     }
-    let res = ctrl.ban_client(client_id.clone()).await;
-    Json(BlacklistActionResponse {
-        success: res.is_ok(),
-        message: if res.is_ok() {
-            format!("客户端 {client_id} 已封禁加入黑名单")
-        } else {
-            format!("封禁失败: {:?}", res.err())
-        },
-        blacklist: ctrl.get_blacklist().await,
-    })
+
+    if let Err(error) = ctrl.ban_client(client_id.clone()).await {
+        let message = format!("封禁失败，运行期状态未确认修改: {error:#}");
+        ctrl.log(message.clone()).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            blacklist_response(false, message, ctrl.get_blacklist().await),
+        ));
+    }
+
+    let blacklist = ctrl.get_blacklist().await;
+    // AppController currently logs persistence errors internally. Confirm the
+    // requested state changed before reporting success to the WebUI/API.
+    if !blacklist_contains(&blacklist, &client_id) {
+        let message = "封禁失败，协调服务未确认客户端进入黑名单，运行期状态未修改".to_string();
+        ctrl.log(message.clone()).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            blacklist_response(false, message, blacklist),
+        ));
+    }
+
+    Ok(blacklist_response(
+        true,
+        format!("客户端 {client_id} 已封禁加入黑名单"),
+        blacklist,
+    ))
 }
 
 async fn handle_blacklist_unban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BlacklistActionRequest>,
-) -> Json<BlacklistActionResponse> {
+) -> BlacklistActionHttpResult {
     let client_id = payload.client_id.trim().to_string();
-    let res = ctrl.unban_client(&client_id).await.unwrap_or(false);
-    Json(BlacklistActionResponse {
-        success: res,
-        message: if res {
-            format!("客户端 {client_id} 已解除封禁移出黑名单")
-        } else {
-            format!("客户端 {client_id} 不在黑名单中")
-        },
-        blacklist: ctrl.get_blacklist().await,
-    })
+    if client_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            blacklist_response(false, "客户端标识不能为空", ctrl.get_blacklist().await),
+        ));
+    }
+
+    let before = ctrl.get_blacklist().await;
+    if let Err(error) = ctrl.unban_client(&client_id).await {
+        let message = format!("解封失败，运行期状态未确认修改: {error:#}");
+        ctrl.log(message.clone()).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            blacklist_response(false, message, ctrl.get_blacklist().await),
+        ));
+    }
+
+    let blacklist = ctrl.get_blacklist().await;
+    if !blacklist_contains(&blacklist, &client_id) {
+        return Ok(blacklist_response(
+            true,
+            format!("客户端 {client_id} 已解除封禁移出黑名单"),
+            blacklist,
+        ));
+    }
+
+    if blacklist_contains(&before, &client_id) {
+        let message = "解封失败，协调服务未确认客户端移出黑名单，运行期状态未修改".to_string();
+        ctrl.log(message.clone()).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            blacklist_response(false, message, blacklist),
+        ));
+    }
+
+    Ok(blacklist_response(
+        false,
+        format!("客户端 {client_id} 不在黑名单中"),
+        blacklist,
+    ))
 }
 
 async fn handle_login(Json(_req): Json<LoginRequest>) -> Json<LoginResponse> {
@@ -368,28 +435,42 @@ async fn handle_coordinator_ban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BanRequest>,
 ) -> ApiResult<AppUiState> {
-    match ctrl.ban_client(payload.client_id).await {
-        Ok(_) => Ok(Json(ctrl.get_state().await)),
-        Err(e) => {
-            let message = format!("封禁客户端失败: {e:#}");
-            ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::BAD_REQUEST, message))
-        }
+    let client_id = payload.client_id.trim().to_string();
+    if let Err(error) = ctrl.ban_client(client_id.clone()).await {
+        let message = format!("封禁客户端失败: {error:#}");
+        ctrl.log(message.clone()).await;
+        return Err(api_error(StatusCode::BAD_REQUEST, message));
     }
+
+    if !blacklist_contains(&ctrl.get_blacklist().await, &client_id) {
+        let message = "封禁客户端失败，协调服务未确认运行期状态修改".to_string();
+        ctrl.log(message.clone()).await;
+        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message));
+    }
+
+    Ok(Json(ctrl.get_state().await))
 }
 
 async fn handle_coordinator_unban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BanRequest>,
 ) -> ApiResult<AppUiState> {
-    match ctrl.unban_client(&payload.client_id).await {
-        Ok(_) => Ok(Json(ctrl.get_state().await)),
-        Err(e) => {
-            let message = format!("解封客户端失败: {e:#}");
-            ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::BAD_REQUEST, message))
-        }
+    let client_id = payload.client_id.trim().to_string();
+    let before = ctrl.get_blacklist().await;
+    if let Err(error) = ctrl.unban_client(&client_id).await {
+        let message = format!("解封客户端失败: {error:#}");
+        ctrl.log(message.clone()).await;
+        return Err(api_error(StatusCode::BAD_REQUEST, message));
     }
+
+    let after = ctrl.get_blacklist().await;
+    if blacklist_contains(&before, &client_id) && blacklist_contains(&after, &client_id) {
+        let message = "解封客户端失败，协调服务未确认运行期状态修改".to_string();
+        ctrl.log(message.clone()).await;
+        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message));
+    }
+
+    Ok(Json(ctrl.get_state().await))
 }
 
 async fn handle_routing(
@@ -3169,5 +3250,46 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("status.coordinator_signaling_addr || '--'"));
         assert!(!UNIFIED_MASTER_HTML.contains("核心协调网络运行中"));
         assert!(!UNIFIED_MASTER_HTML.contains("UDP:6667 (QUIC)"));
+    }
+
+    #[test]
+    fn blacklist_contains_matches_trimmed_client_ids() {
+        let blacklist = vec![" node-bad ".to_string(), "node-other".to_string()];
+        assert!(blacklist_contains(&blacklist, "node-bad"));
+        assert!(blacklist_contains(&blacklist, " node-bad "));
+        assert!(!blacklist_contains(&blacklist, "node-missing"));
+    }
+
+    #[tokio::test]
+    async fn blacklist_mutations_fail_closed_without_coordinator() {
+        let ctrl = Arc::new(AppController::new());
+
+        let ban_error = handle_blacklist_ban(
+            State(ctrl.clone()),
+            Json(BlacklistActionRequest {
+                client_id: "node-bad".to_string(),
+            }),
+        )
+        .await
+        .expect_err("ban without an active coordinator must not report success");
+        let (ban_status, Json(ban_body)) = ban_error;
+        assert_eq!(ban_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!ban_body.success);
+        assert!(ban_body.message.contains("本地协调服务未运行"));
+        assert!(ban_body.blacklist.is_empty());
+
+        let unban_error = handle_blacklist_unban(
+            State(ctrl),
+            Json(BlacklistActionRequest {
+                client_id: "node-bad".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unban without an active coordinator must not report success");
+        let (unban_status, Json(unban_body)) = unban_error;
+        assert_eq!(unban_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!unban_body.success);
+        assert!(unban_body.message.contains("本地协调服务未运行"));
+        assert!(unban_body.blacklist.is_empty());
     }
 }

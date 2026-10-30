@@ -1,7 +1,7 @@
 # 安全威胁—控制—测试追踪矩阵
 
 > 状态：工程追踪文档，不是独立安全审计结论。  
-> 基线：`823c7be` 之后的生产 Secure Session v2 classic 数据面与实验性 hybrid 原语。
+> 基线：`55b53c5` 之后的生产 Secure Session v2 classic 数据面、QUIC 统一身份控制与实验性 hybrid 原语。
 > 判定口径：源码存在不等于生产路径已接入；单元测试通过不等于协议已获独立评审。
 
 ## 1. 结论先行
@@ -12,8 +12,8 @@
 | 拥有可测试的临时握手、重放窗口、重协商和运输无关会话驱动 v2 原语 | 是 | `crates/secure-session`；`driver.rs` 与集成测试 |
 | 客户端生产路径已使用 v2 临时握手和计数 Nonce | 是 | `P2pEngine` 使用共享 UDP socket 完成 HELLO/ACCEPT/CONFIRM 并将 v2 密文交给 TUN/ACL 路径 |
 | 已具备端到端后量子机密性和身份认证 | 否 | X-Wing、复合身份和实验性 `HELLO/ACCEPT` 已实现并有固定向量，但尚未接入生产控制通道或数据面 |
-| QUIC 双向身份已统一 | 否 | 服务端尚未要求客户端证书，应用层身份未与证书绑定 |
-| 已达到 WireGuard 安全等级 | 否 | 生产数据面、独立审计和 QUIC 身份等缺口仍在 |
+| QUIC 中继双向身份与通道绑定已实现 | 是，工程控制与回归测试已落地 | mandatory client auth、TLS exporter、双 pin 和 Register 应用身份绑定；尚无证书 CA/allowlist/撤销策略或独立安全审计 |
+| 已达到 WireGuard 安全等级 | 否 | 生产数据面、证书授权策略、跨平台验证和独立审计等缺口仍在 |
 | 安全等级和性能超过 WireGuard | 否 | 完整安全与性能门槛均未满足 |
 
 ## 2. 追踪矩阵
@@ -30,7 +30,7 @@
 | T-08 | 密钥、Nonce、PSK 或签名秘密进入内存转储、日志、panic 或 Debug | 秘密及时清零；认证比较恒定时间；日志和 Debug 只暴露公开标识；错误不包含秘密 | `zeroize` 包装和显式擦除；`pq.rs` 脱敏 Debug；各校验路径在状态变更前完成认证 | `explicit_erase_zeroizes_all_output_keys`、`secret_debug_output_is_redacted`、`fixed_tag`/KAT 测试、各 `fail_closed` 负向测试 | 本地原语有清理和脱敏测试；生产运行时日志、panic hook、core dump 和长期身份生命周期未系统验证 |
 | T-09 | 截断、尾随字节、保留字段非零、超长帧或随机输入触发 panic/越界/歧义 | 所有解码器做精确长度和值域检查；失败不改变状态；随机输入不 panic | `handshake.rs`、`transcript.rs`、`rekey_codec.rs`、`cookie.rs`、`lib.rs`、`pq.rs` 的严格解码 | `all_frame_types_reject_truncated_and_trailing_bytes`、`decoder_rejects_versions_reserved_bytes_and_body_length_changes`、`cookie_parser_rejects_version_truncation_trailing_bytes_and_tampering`、`fixed_size_decoders_reject_truncation_and_trailing_bytes`、`data_header_rejects_invalid_fields` | 定向负向测试和短时 `cargo fuzz` CI 已存在；长期 fuzz、panic=abort 和真实生产数据面 fuzz 尚未完成 |
 | T-10 | 量子攻击者先存储后解密，或后量子身份迁移被静默降级 | X25519 与 ML-KEM 结果必须组合；Ed25519 与 ML-DSA 必须共同验证；降级必须显式策略；混合组件不能单独授权 | `pq.rs` 锁定 ML-KEM-768/ML-DSA-65 严格编解码、KAT、清零与脱敏 Debug；`hybrid/xwing.rs` 实现 draft-11 组合 KEM；`hybrid/identity.rs` 强制双签名；`hybrid/handshake.rs` 固定 TH1/TH2、PSK 模式、时间窗与有界 replay cache；`PROTOCOL_V2.md` 描述 hybrid 边界 | `ml_kem_768_keygen_matches_nist_acvp_vector`、`ml_dsa_65_siggen_matches_nist_acvp_vector`、`matches_all_draft11_fixed_vectors`、`composite_identity_round_trips_and_verifies_both_signatures`、`canonical_hybrid_transcript_matches_fixed_vectors`、`psk_mode_is_required_to_match_on_both_sides`、`replayed_hello_is_rejected_without_poisoning_the_cache` | 原语、复合身份和两消息实验 profile 已本地验证；生产接入、Initiator CONFIRM、Cookie/限速、容量性能测试和独立审计仍未完成 |
-| T-11 | Relay/Coordinator 看到或篡改跨端身份，QUIC 连接与应用身份错绑 | QUIC 双向认证；证书/公钥绑定应用层身份；0-RTT 重放受限；错误证书和身份错绑失败关闭 | `common/src/quic.rs` 有服务端证书 pin 和客户端校验逻辑 | 现有测试主要覆盖证书 pin/编码；缺少客户端证书和身份绑定负向测试 | 生产缺口：服务端未启用客户端证书认证，应用层身份与证书未统一绑定 |
+| T-11 | Relay/Coordinator 看到或篡改跨端身份，QUIC 连接与应用身份错绑 | QUIC 双向认证；证书/公钥绑定应用层身份；0-RTT 重放受限；错误证书和身份错绑失败关闭 | `common/src/quic.rs` 强制客户端证书并验证 TLS exporter；`relay/server.rs` 在写状态前校验 Register 的全字段签名、双 pin、证书 SPKI 和应用公钥 | `mandatory_client_auth_rejects_missing_client_certificate`、`mandatory_client_auth_rejects_non_client_auth_certificate`、`authenticated_endpoints_derive_same_relay_channel_binding`、`authenticated_client_rejects_wrong_server_pin`、`resumed_session_cannot_send_early_register_or_packet`、`quic_relay_rejects_valid_tls_certificate_with_another_application_identity`、`quic_relay_rejects_tampered_registration_fields_without_state_changes`、`quic_relay_rejects_missing_registration_binding_without_state_changes` | 工程控制已实现且负向测试断言无 relay 状态/计数副作用；仍缺 CA/allowlist/撤销、运行时长周期验证和独立安全审计 |
 | T-12 | 性能优化引入降级、错误日志泄露或未经测量的“超越 WireGuard”声明 | 安全路径不得以关闭认证/重放检查换性能；发布材料只能引用可复现同条件数据 | `benches/dataplane.rs`、端到端基准、发布门禁和 `SECURITY_PERFORMANCE_TODO.md` | Criterion seal/open、批量路径、epoch 开销和端到端基线 | 当前 TCP 与小包性能显著落后 WireGuard；无回归阈值、空闲机复测和独立审计 |
 
 ## 3. 生产接入门槛
@@ -44,6 +44,7 @@
 5. 生产路径具备运行时计数：握手成功/失败、降级拒绝、重放拒绝、cookie 拒绝、重协商延迟和密钥销毁。
 6. cargo-fuzz/AFL、依赖审计、SBOM、许可证扫描和性能回归阈值进入 CI。
 7. Linux、Windows、macOS 实机或 CI 运行验证通过，并由独立厂商完成协议与密码学审计。
+8. [ ] 为 QUIC 客户端证书增加 CA/allowlist/撤销与网络级授权策略，并对证书生命周期、时钟和错误/panic 日志做生产验证。
 
 ## 4. 文档与测试维护规则
 

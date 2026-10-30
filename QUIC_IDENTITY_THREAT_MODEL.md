@@ -1,6 +1,6 @@
 # QUIC 身份威胁模型与版本边界
 
-> 状态：EQ-14/QI-01 设计边界，对应 2026-10-30 的 QUIC 实现快照。
+> 状态：EQ-14/QI-13 状态对齐，对应 2026-10-30 的 QUIC 身份实现快照。
 > 结论口径：本文定义必须满足的安全性质与当前缺口。存在实现和测试不代表已完成独立审计，也不构成“安全性或性能超过 WireGuard”的结论。
 
 ## 1. 范围
@@ -52,51 +52,44 @@
 
 ## 4. 应用层身份绑定
 
-当前 `Register` 的应用层签名只覆盖 client id、虚拟 IP、应用公钥和时间戳。TLS 客户端证书虽然由同一长期 Ed25519 身份派生，但服务端尚未验证下面两项：
-
-- Register 中的 `public_key` 是否等于 TLS 终端证书的 Ed25519 公钥。
-- Register 签名是否绑定服务端 pin 和当前 TLS 会话的 exporter 材料。
-
-因此，在 QI-05～QI-07、QI-09 完成前，不能宣称：
-
-- 合法 TLS 客户端不能冒用另一应用身份注册。
-- Relay 注册来源已经与 QUIC 通道和虚拟 IP 强绑定。
-- 客户端证书认证已经构成完整的中继授权机制。
-
-完成后的最低不变量：
+QI-05～QI-07、QI-09 已完成，当前实现满足以下不变量：
 
 1. TLS 对端证书的 Ed25519 公钥与 Register `public_key` 逐字节相等。
 2. Register 签名覆盖 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter。
-3. exporter label/context 版本化并在两端使用同一 helper；不得把静态常量当作会话绑定。
+3. exporter 使用版本化 label `fuckipv6-quic-client-cert-binding-v1` 和 context `relay-register`，并在两端调用同一 helper；静态常量不能替代会话绑定。
 4. 任一字段缺失、重复出现、编码非法或校验失败时，在写入 `RelayState` 和流量计数之前关闭连接。
 5. 来自一个 TLS 会话的签名不能重放到另一个服务端、客户端、连接或虚拟 IP。
 
+剩余授权边界：客户端证书尚未接入 CA 根目录、每客户端 allowlist 或撤销策略。TLS 层会验证证书格式、用途和私钥持有证明，应用层会验证证书与 Register 身份及当前通道一致，但“某个合法自签身份是否获准加入指定网络”仍由现有网络准入配置和后续授权策略决定。该实现未经独立安全审计。
+
 ## 5. 0-RTT 与重放边界
 
-QUIC 0-RTT 数据不由当前连接重新证明客户端私钥持有，可能被攻击者重放。因此：
+QUIC 0-RTT 数据不由当前连接重新证明客户端私钥持有，可能被攻击者重放。当前生产策略是直接禁用：
 
-- 生产中继不得在 0-RTT 中接受会创建/修改 relay 状态或转发用户流量的 Register/Packet。
-- 当前默认服务端允许 TLS early data，且自检仍验证恢复会话；这是已知待收敛缺口，不能作为生产安全性质。
-- QI-10 必须把生产服务端 `max_early_data_size` 设为 0，并使生产客户端不启用 early data。
-- QI-11 必须用回归测试证明恢复会话不能提交早期 Register/Packet。若未来重新启用 0-RTT，必须另行发布策略，并具备幂等处理、有界重放缓存、时间窗和明确降级规则。
+- 生产中继服务端将 `max_early_data_size` 设为 0。
+- 生产认证客户端和 legacy 自检客户端均设置 `enable_early_data = false`。
+- 恢复会话不能升级为 0-RTT，只能回退到 1-RTT；因此 Register 和 Packet 流不会进入 early data。
+- 自检保留测试专用正向对照以证明恢复会话原本可提供 0-RTT，并验证生产配置下 `into_0rtt()` 失败且不会提交早期 Register/Packet。
+
+若未来重新启用 0-RTT，必须另行发布策略，并具备幂等处理、有界重放缓存、时间窗和明确降级规则；当前版本不提供这些生产保证。
 
 ## 6. 威胁与预期行为
 
-| 威胁 | 当前行为 | 完成 QI-05～QI-11 后的要求 |
+| 威胁 | 当前行为 | 剩余边界 |
 |---|---|---|
-| 无客户端证书连接 | TLS 握手失败或连接随即关闭 | 保持失败关闭 |
+| 无客户端证书连接 | mandatory client auth 使 TLS 握手失败或连接随即关闭 | 保持失败关闭 |
 | 非 Ed25519 或缺少 clientAuth 的证书 | TLS verifier 拒绝 | 保持失败关闭 |
 | 客户端使用错误服务端 pin | 客户端拒绝 | 保持失败关闭 |
-| 合法证书搭配另一应用身份 | **尚未阻止** | Register 在写状态前拒绝 |
-| 篡改 Register 虚拟 IP、公钥、时间或签名 | 现有签名覆盖静态字段，但尚未绑定 TLS | 全字段绑定并在状态修改前拒绝 |
-| 重放其它连接的 Register | **尚未完整阻止** | TLS exporter 与双 pin 使跨连接重放失败 |
-| 重放 0-RTT Register/Packet | **当前策略未提供生产保证** | 生产禁用 early data；回归测试证明不可提交 |
+| 合法证书搭配另一应用身份 | Register 在写入 relay 状态前被拒绝 | 证书授权/撤销策略仍需补齐 |
+| 篡改 Register 虚拟 IP、公钥、时间、pin 或签名 | 全字段签名与 TLS 证书/通道绑定校验失败，且无 relay 状态副作用 | 继续保持副作用前置拒绝 |
+| 重放其它连接或其它 relay 的 Register | 服务端 pin、客户端证书 pin 与 TLS exporter 使跨连接重放失败 | exporter 或签名域变更必须升级版本并更新向量 |
+| 重放 0-RTT Register/Packet | 生产配置不接受 early data，恢复连接回退到 1-RTT | 未来启用前必须完成独立重放设计 |
 | 错误/恶意 relay 返回自签证书 | SPKI pin 不匹配则拒绝 | 保持失败关闭 |
-| 证书或私钥进入日志 | 当前证书 Debug 已脱敏私钥 | 所有新增错误路径和指标继续脱敏 |
+| 证书或私钥进入日志 | 证书 Debug 已脱敏私钥，错误路径只记录原因分类 | 仍需系统验证 panic/core dump 等运行时边界 |
 
 ## 7. 版本与兼容边界
 
-- 当前 QUIC 线格式版本标识为 ALPN `fuckipv6-quic-v1`；channel-binding exporter label/context 需要独立版本，不复用 ALPN 字符串。
+- 当前 QUIC 线格式版本标识为 ALPN `fuckipv6-quic-v1`；channel-binding exporter 使用独立版本化 label/context，不复用 ALPN 字符串。
 - 生产路径不提供“自动退回无客户端证书”兼容开关。旧节点需要显式迁移或独立版本，不得静默降级。
 - 证书只从长期 Ed25519 身份确定性派生；不得把 QUIC 私钥持久化成新的长期身份。
 - 修改 exporter、证书身份绑定或 Register 签名域时必须提升相应版本/用途标签，并更新固定测试和文档。

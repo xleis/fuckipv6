@@ -7,7 +7,7 @@
 
 威胁、代码控制、测试证据和生产缺口的逐项映射见 [`SECURITY_TRACEABILITY.md`](SECURITY_TRACEABILITY.md)。
 
-## 当前基线（2026-10-30，基于 `823c7be` 及后续文档对齐）
+## 当前基线（2026-10-30，基于 `55b53c5` 及后续文档对齐）
 
 ### 已有能力
 
@@ -15,7 +15,7 @@
 - Secure Session v2 classic 已接入生产 `P2pEngine`：临时 X25519 + Ed25519 握手、双向 key confirmation、按长期公钥确定性选角色、认证 endpoint 绑定、计数 Nonce、4096 包重放窗口及 AEAD 失败关闭；该接入尚未完成独立密码学审计。
 - QUIC Mesh、QUIC relay 与信令 relay 只运输同一 v2 密文；静态 X25519 与 legacy data 帧不会进入生产接收队列。
 - HKDF-SHA-512 会话密钥派生、HMAC-SHA-256 confirmation，以及 ChaCha20-Poly1305 / AES-256-GCM 数据套件。
-- QUIC/TLS 1.3 通道、证书公钥 pin 和 0-RTT 自检。
+- QUIC/TLS 1.3 通道、服务端 SPKI pin、强制 Ed25519 客户端证书、证书/应用身份/TLS exporter 绑定；生产中继禁用 0-RTT，并已验证恢复会话回退到 1-RTT。
 - ACL、准入黑名单、配置加密和 Exit Node 源地址校验。
 
 ### 必须补齐的差距
@@ -29,7 +29,7 @@
   - [x] Ed25519 + ML-DSA-65 复合身份、双签名强制验证、IdentityId 与签名域绑定。
   - [x] 实验性固定长度 `HELLO/ACCEPT`、TH1/TH2 固定向量、suite/profile/PSK 降级失败关闭、时间窗和有界重放缓存；6755 + 6635 字节 body 均在 16 KiB 单帧预算内。
   - [ ] 接入生产控制通道、Initiator `CONFIRM`、Cookie/限速、能力协商，以及 QUIC/relay/UDP/TUN 数据面；完成端到端容量、性能和独立安全审计。
-- [ ] **QUIC 双向身份**：当前 QUIC 服务端未启用客户端证书认证，应用层身份与服务端证书未统一绑定。
+- [x] **QUIC 双向身份**：中继服务端已启用强制客户端证书认证；Register 签名绑定双 pin 与 TLS exporter，证书 SPKI 和 Register 应用公钥逐字节核对，错绑、篡改和缺失绑定均在 relay 状态变更前失败关闭。CA/allowlist/撤销策略与独立安全审计仍未完成。
 - [ ] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie，但尚未接入握手控制通道；生产路径仍缺少握手速率控制和无效包成本上限。
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
@@ -149,7 +149,11 @@ cargo bench -p fuckipv6-common --bench protocol -- --quick --noplot
 - [ ] **SP-06 数据面快路径**：固定帧格式、预计算 Peer 状态、缓冲池、批处理和零拷贝。
   - [x] 实现 v2 固定帧、预分配批量 seal/open 和禁止逐包分配的本地快路径基准。
   - [ ] v2 固定帧已进入真实 UDP/TUN 路径；仍需完成 Peer 热状态、缓冲池、批量 I/O 和端到端 profiling。
-- [ ] **SP-07 QUIC 统一身份**：双向认证、证书/公钥绑定、0-RTT 重放限制。
+- [x] **SP-07 QUIC 统一身份**：双向认证、证书/公钥绑定、0-RTT 重放限制。
+  - [x] 服务端 mandatory client auth，要求证书具备 clientAuth 用途并完成 TLS 私钥持有证明。
+  - [x] Register 签名覆盖服务端 pin、客户端证书 pin 和 TLS exporter，并在写 relay 状态前核对证书与应用公钥。
+  - [x] 生产配置 `max_early_data_size = 0`、客户端不启用 early data，恢复会话回归测试证明 Register/Packet 不能进入 0-RTT。
+  - [ ] 增加客户端证书 CA/allowlist/撤销与网络级授权策略，并完成独立安全审计；当前任何满足格式与用途要求的自签 Ed25519 身份仍可能在 TLS 层完成握手，最终依赖应用层绑定和现有准入策略。
 - [ ] **SP-08 审计与发布门禁**：模糊测试、外部审计、跨平台验证和性能回归门禁。
   - [x] 增加默认拒绝脏工作区的发布门禁、Linux musl/Windows GNU 编译检查和 Linux/Windows/macOS CI 报告聚合。
   - [x] 增加 Criterion 基线快照与回归比较器；样本不足、基线缺失或基准消失默认失败，并接入可选发布门禁参数。

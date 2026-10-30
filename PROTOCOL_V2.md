@@ -92,6 +92,13 @@ IdentityId = BLAKE3("fuckipv6-v2 identity" || len(EdPk) || EdPk || len(PqPk) || 
 - 经认证的 Coordinator/Relay 控制帧。
 - 未来的独立可靠握手通道。
 
+当前 QUIC 中继控制通道的边界：
+
+- TLS 1.3 服务端通过预配置 SPKI pin 认证；生产服务端要求客户端提供 Ed25519 终端证书并完成 CertificateVerify，缺失证书或错误用途失败关闭。
+- Relay `Register` 签名覆盖 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter；服务端在写 relay 状态前核对证书 SPKI 与 Register 应用公钥。
+- 生产中继 `max_early_data_size = 0`，客户端不启用 early data；恢复会话只能回退到 1-RTT，Register/Packet 不能提交到 0-RTT。
+- 这些控制通道认证不替代 v2 Peer 身份认证，也不构成客户端证书的 CA/allowlist/撤销策略。
+
 控制通道只负责传输和粗粒度限速，**不构成** Peer 身份认证。每个握手 frame 为：
 
 ```text

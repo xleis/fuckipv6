@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Added
+- 完成 QUIC 中继统一身份控制：生产服务端强制 Ed25519 客户端证书并验证私钥持有证明；Relay Register 签名绑定 client id、虚拟 IP、应用公钥、时间戳、服务端 pin、客户端证书 pin 和 TLS exporter；服务端在写入 relay 状态前逐字节核对证书 SPKI 与应用公钥。生产中继禁用 0-RTT，恢复会话回退到 1-RTT；负向测试覆盖缺失/错误证书、错误 pin、合法证书错绑应用身份、Register 篡改/缺失绑定及无 relay 状态副作用。客户端证书 CA/allowlist/撤销策略和独立安全审计仍未完成。
 - 增加可选 `pq` feature 的 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT` profile：固定 X-Wing、复合身份、TH1、TH2 向量，规范 `HELLO` 6755 字节与 `ACCEPT` 6635 字节，并覆盖双签名、PSK 模式、有效签名降级、时间窗、重放、截断和非 contributory 输入失败关闭。该 profile 尚未接入生产控制通道、QUIC/relay 或数据面，尚无 Initiator hybrid `CONFIRM`、Cookie/限速和端到端容量测试；上游 ML-KEM/ML-DSA crate 未经独立审计，不得据此宣称已具备后量子安全或超越 WireGuard。
 - 将 Secure Session v2 classic 接入生产 `P2pEngine`：使用长期 Ed25519 公钥字典序选择 Initiator/Responder，在共享 UDP socket 上完成 `HELLO -> ACCEPT -> CONFIRM`，仅接受注册 endpoint 的握手与数据，并在 TUN/ACL 前执行 AEAD 认证和重放检查；QUIC Mesh、QUIC relay 与信令 relay 统一运输 v2 密文，未建链、legacy data 和静态 X25519 输入失败关闭。双引擎真实 UDP 测试覆盖双向收发、篡改、relay 重放与未建链拒绝。生产在线重协商、Cookie/限速、后量子组合和独立密码学审计仍未完成，也不构成 WireGuard 安全或性能超越结论。
 - 增加 Secure Session v2 独立 UDP 适配器及本地真实 socket 集成测试：完整执行 `HELLO -> ACCEPT -> CONFIRM`，固定对端地址与有序套件策略，设置握手/数据超时，复用 HELLO 重放缓存，并提供运行时会话与拒绝计数；测试覆盖双向数据、AEAD 篡改、重放、错误确认、不支持套件和旧版本拒绝。该适配器当前保留用于独立 socket 集成测试；生产 `P2pEngine` 已由后续条目接入共享 socket v2 数据面。该独立适配器本身不构成 WireGuard 安全或性能结论。

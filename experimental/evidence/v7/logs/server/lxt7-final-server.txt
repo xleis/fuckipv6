@@ -1,0 +1,36 @@
+== final server ==
+2026-10-30T10:32:00Z
+== iptables ==
+-P INPUT ACCEPT
+-P FORWARD ACCEPT
+-P OUTPUT ACCEPT
+-N FKV6F-99E15423
+-A FORWARD -j FKV6F-99E15423
+-A FORWARD -i fuckipv6 -j ACCEPT
+-A FORWARD -o fuckipv6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A FKV6F-99E15423 -i fuckipv6 -j DROP
+-A FKV6F-99E15423 -o fuckipv6 -j DROP
+== ip route ==
+default via 185.217.110.1 dev eth0 proto static metric 100 initcwnd 10000 initrwnd 10000 
+10.8.0.0/24 dev fuckipv6 proto kernel scope link src 10.8.0.1 
+185.217.110.0/24 dev eth0 proto kernel scope link src 185.217.110.15 metric 100 
+== listeners ==
+udp   UNCONN 0      0                   *:443              *:*    users:(("sing-box",pid=625074,fd=9))                     
+tcp   LISTEN 0      2000   185.217.110.15:443        0.0.0.0:*    users:(("haproxy",pid=854,fd=5))                         
+tcp   LISTEN 0      4096        127.0.0.1:443        0.0.0.0:*    users:(("xray-linux-amd6",pid=625090,fd=5))              
+tcp   LISTEN 0      128           0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=844,fd=3))                            
+tcp   LISTEN 0      4096                *:80               *:*    users:(("xray-linux-amd6",pid=625090,fd=9))              
+tcp   LISTEN 0      128              [::]:22            [::]:*    users:(("sshd",pid=844,fd=4))                            
+== ss 39090 ==
+no_39090_conn
+== lxt procs ==
+== nstat ==
+TcpRetransSegs                  5227459            0.0
+TcpExtTCPLostRetransmit         678458             0.0
+TcpExtTCPTimeouts               373899             0.0
+== selinux ==
+Disabled
+== sshd ==
+active
+== firewalld ==
+inactive

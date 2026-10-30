@@ -1,0 +1,6 @@
+table inet lxt_v7_a {
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+    iifname "eth0" oifname "lxtv7h" ip saddr 185.217.110.15 ip daddr 10.200.7.2 tcp sport 39090 tcp flags & (syn|ack) == (syn|ack) counter drop
+  }
+}

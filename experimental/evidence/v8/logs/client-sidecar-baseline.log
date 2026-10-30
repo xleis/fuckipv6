@@ -1,0 +1,3 @@
+[client-sidecar] iface=v8c0 TUN=lxtrescue0 server=10.80.3.2 UDP=41138 -> 39091
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified

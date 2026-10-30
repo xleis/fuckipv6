@@ -1,0 +1,21 @@
+tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length 160 bytes
+17:46:57.526584 IP (tos 0x0, ttl 64, id 38914, offset 0, flags [DF], proto TCP (6), length 60)
+    172.31.0.173.44326 > 185.217.110.15.39090: Flags [S], cksum 0xd4e3 (incorrect -> 0x10d8), seq 2966802027, win 64240, options [mss 1460,sackOK,TS val 1106731120 ecr 0,nop,wscale 7], length 0
+17:46:57.779654 IP (tos 0x0, ttl 47, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.44326: Flags [S.], cksum 0x886b (correct), seq 279100540, ack 2966802028, win 65160, options [mss 1332,sackOK,TS val 2236494546 ecr 1106731120,nop,wscale 11], length 0
+17:46:58.528637 IP (tos 0x0, ttl 64, id 38915, offset 0, flags [DF], proto TCP (6), length 60)
+    172.31.0.173.44326 > 185.217.110.15.39090: Flags [S], cksum 0xd4e3 (incorrect -> 0x0ced), seq 2966802027, win 64240, options [mss 1460,sackOK,TS val 1106732123 ecr 0,nop,wscale 7], length 0
+17:46:58.781669 IP (tos 0x0, ttl 47, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.44326: Flags [S.], cksum 0x8481 (correct), seq 279100540, ack 2966802028, win 65160, options [mss 1332,sackOK,TS val 2236495548 ecr 1106731120,nop,wscale 11], length 0
+17:46:59.797324 IP (tos 0x0, ttl 47, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.44326: Flags [S.], cksum 0x8089 (correct), seq 279100540, ack 2966802028, win 65160, options [mss 1332,sackOK,TS val 2236496564 ecr 1106731120,nop,wscale 11], length 0
+17:47:00.544640 IP (tos 0x0, ttl 64, id 38916, offset 0, flags [DF], proto TCP (6), length 60)
+    172.31.0.173.44326 > 185.217.110.15.39090: Flags [S], cksum 0xd4e3 (incorrect -> 0x050d), seq 2966802027, win 64240, options [mss 1460,sackOK,TS val 1106734139 ecr 0,nop,wscale 7], length 0
+17:47:00.797675 IP (tos 0x0, ttl 47, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.44326: Flags [S.], cksum 0x7ca1 (correct), seq 279100540, ack 2966802028, win 65160, options [mss 1332,sackOK,TS val 2236497564 ecr 1106731120,nop,wscale 11], length 0
+17:47:02.805270 IP (tos 0x0, ttl 47, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.44326: Flags [S.], cksum 0x74c9 (correct), seq 279100540, ack 2966802028, win 65160, options [mss 1332,sackOK,TS val 2236499572 ecr 1106731120,nop,wscale 11], length 0
+
+8 packets captured
+8 packets received by filter
+0 packets dropped by kernel

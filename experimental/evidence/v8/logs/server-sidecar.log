@@ -1,0 +1,174 @@
+[server-sidecar] iface=v8s0 UDP=0.0.0.0:39091 TCP sport=39090; waiting for authenticated HELLO
+[server-sidecar] HELLO verified from 10.80.1.2:41138
+[server-sidecar] HELLO verified from 10.80.1.2:41138
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:40862 tcpseq=3512795169 via UDP -> 10.80.1.2:41138
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:40870 tcpseq=3379028879 via UDP -> 10.80.1.2:41138
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:44422 tcpseq=3011005782 via UDP -> 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:44438 tcpseq=1485280730 via UDP -> 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:41122 tcpseq=1374216414 via UDP -> 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:41134 tcpseq=3115215269 via UDP -> 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:46752 tcpseq=2894191444 via UDP -> 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:45882 tcpseq=4241211765 via UDP -> 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:45882 tcpseq=4241211765 via UDP -> 10.80.1.2:36571
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:45882 tcpseq=4241211765 via UDP -> 10.80.1.2:36571
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:52430 tcpseq=326269250 via UDP -> 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:52444 tcpseq=3687893169 via UDP -> 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:52450 tcpseq=1922326657 via UDP -> 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:53862 tcpseq=773426353 via UDP -> 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:50162 tcpseq=2541448950 via UDP -> 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:50162 tcpseq=2541448950 via UDP -> 10.80.1.2:42894
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:50162 tcpseq=2541448950 via UDP -> 10.80.1.2:42894
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:49612 tcpseq=2695888196 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:49612 tcpseq=2695888196 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:49612 tcpseq=2695888196 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:49612 tcpseq=2695888196 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:35086 tcpseq=2248368516 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:49612 tcpseq=2695888196 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] relayed SYN-ACK 10.80.3.2:39090 -> 10.80.1.2:49612 tcpseq=2695888196 via UDP -> 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299
+[server-sidecar] HELLO verified from 10.80.1.2:38299

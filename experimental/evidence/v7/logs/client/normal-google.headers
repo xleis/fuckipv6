@@ -1,0 +1,20 @@
+HTTP/1.1 200 Connection Established
+Proxy-Agent: lxt-v6
+
+HTTP/2 200 
+content-type: text/html; charset=ISO-8859-1
+date: Fri, 30 Oct 2026 10:20:41 GMT
+expires: -1
+cache-control: private, max-age=0
+content-security-policy-report-only: object-src 'none';base-uri 'self';script-src 'nonce-vZSV2ZGJtBv2uI_mSZJB8w' 'strict-dynamic' 'report-sample' 'unsafe-eval' 'unsafe-inline' https: http:;report-uri https://csp.withgoogle.com/csp/gws/other-hp
+accept-ch: Sec-CH-Prefers-Color-Scheme
+p3p: CP="This is not a P3P policy! See g.co/p3phelp for more info."
+server: gws
+x-xss-protection: 0
+x-frame-options: SAMEORIGIN
+set-cookie: AEC=Aaa9EJpJa3a8HUKW5bm_dF1VP67BeHt1cCJn0G0X5fXJHo33Wkr4x3mPQYk; expires=Wed, 28-Apr-2027 10:20:41 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax
+set-cookie: __Secure-ENID=Cu8BCAISoQEBY3DFer6vI6641iEG73qg1S3Y52pNqKBQTObT00Dg9Rd9LuxstlFIUDB4cGguKTX_BUJDceHw64JYA8lsXnLt9VTqyTolWcnJpMijE_TYQjtPikPUGdjemBqOqnmBIi2Xv-MmolnjE4SHJaoZ5ab-75OQp2rF3Bziz_c6lGcz8vAofhYEWIF0yjFEvkpd70b-AuqZm0wGtqvhqjUNgR1nESgCMkUB-wj8asz2dyuOFAJP4-3AYxOMWqtE8TEaPsqvzFmOiNa6gG125S4hCvgnjUg0DcwIqKd1lRsl-EO3j8ggXfcnhmpDIwc; expires=Tue, 30-Nov-2027 02:38:59 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax
+alt-svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+accept-ranges: none
+vary: Accept-Encoding
+

@@ -1,0 +1,13 @@
+[client] conn=1/3 established in 159.9 ms
+[PASS] conn=1 round=1 mode=tiny up=1048576 down=1048576 sha256=OK throughput=8.19 Mbps duration=2.05s
+[PASS] conn=1 round=2 mode=mixed up=1048576 down=1048576 sha256=OK throughput=8.20 Mbps duration=2.05s
+[PASS] conn=1 round=3 mode=large up=1048576 down=1048576 sha256=OK throughput=8.50 Mbps duration=1.97s
+[client] conn=2/3 established in 227.8 ms
+[PASS] conn=2 round=1 mode=tiny up=1048576 down=1048576 sha256=OK throughput=6.14 Mbps duration=2.73s
+[PASS] conn=2 round=2 mode=mixed up=1048576 down=1048576 sha256=OK throughput=8.20 Mbps duration=2.05s
+[PASS] conn=2 round=3 mode=large up=1048576 down=1048576 sha256=OK throughput=7.81 Mbps duration=2.15s
+[client] conn=3/3 established in 160.0 ms
+[PASS] conn=3 round=1 mode=tiny up=1048576 down=1048576 sha256=OK throughput=8.13 Mbps duration=2.06s
+[PASS] conn=3 round=2 mode=mixed up=1048576 down=1048576 sha256=OK throughput=8.13 Mbps duration=2.06s
+[PASS] conn=3 round=3 mode=large up=1048576 down=1048576 sha256=OK throughput=8.92 Mbps duration=1.88s
+[SUMMARY] PASS rounds=9/9 connections=3 bytes=18874368 duration=20.55s avg_connect=182.6ms

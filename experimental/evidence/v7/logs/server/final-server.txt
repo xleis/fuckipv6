@@ -1,0 +1,71 @@
+== date ==
+2026-10-30T10:31:16Z
+== ip addr ==
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+eth0             UP             185.217.110.15/24 fe80::216:3cff:fea8:c66d/64 
+fuckipv6         UP             10.8.0.1/24 fd00::1001/128 fe80::d435:b776:11ed:c5fd/64 
+== ip route ==
+default via 185.217.110.1 dev eth0 proto static metric 100 initcwnd 10000 initrwnd 10000 
+10.8.0.0/24 dev fuckipv6 proto kernel scope link src 10.8.0.1 
+185.217.110.0/24 dev eth0 proto kernel scope link src 185.217.110.15 metric 100 
+== iptables ==
+-P INPUT ACCEPT
+-P FORWARD ACCEPT
+-P OUTPUT ACCEPT
+-N FKV6F-99E15423
+-A FORWARD -j FKV6F-99E15423
+-A FORWARD -i fuckipv6 -j ACCEPT
+-A FORWARD -o fuckipv6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A FKV6F-99E15423 -i fuckipv6 -j DROP
+-A FKV6F-99E15423 -o fuckipv6 -j DROP
+== listeners ==
+udp   UNCONN 0      0             0.0.0.0:39091      0.0.0.0:*    users:(("python3.9",pid=1141346,fd=4))                   
+udp   UNCONN 0      0                   *:443              *:*    users:(("sing-box",pid=625074,fd=9))                     
+tcp   LISTEN 0      16            0.0.0.0:39090      0.0.0.0:*    users:(("python3.9",pid=1142200,fd=3))                   
+tcp   LISTEN 0      2000   185.217.110.15:443        0.0.0.0:*    users:(("haproxy",pid=854,fd=5))                         
+tcp   LISTEN 0      4096        127.0.0.1:443        0.0.0.0:*    users:(("xray-linux-amd6",pid=625090,fd=5))              
+tcp   LISTEN 0      128           0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=844,fd=3))                            
+tcp   LISTEN 0      4096                *:80               *:*    users:(("xray-linux-amd6",pid=625090,fd=9))              
+tcp   LISTEN 0      128              [::]:22            [::]:*    users:(("sshd",pid=844,fd=4))                            
+== ss 39090 ==
+== lxt procs ==
+1141346 python3.9 /root/lxt_public_synack_v4/lxt_public_lab.py server-sidecar --interface eth0 --tcp-port 39090 --udp-port 39091
+1142200 python3.9 lxt_bulk_probe.py server --port 39090 --rate-mbps 10
+== nstat ==
+TcpRetransSegs                  5227457            0.0
+TcpExtTCPLostRetransmit         678458             0.0
+TcpExtTCPTimeouts               373899             0.0
+TcpExtTCPAbortOnData            1857437            0.0
+TcpExtTCPAbortOnClose           203719             0.0
+TcpExtTCPAbortOnMemory          0                  0.0
+TcpExtTCPAbortOnTimeout         36847              0.0
+TcpExtTCPAbortOnLinger          0                  0.0
+TcpExtTCPAbortFailed            0                  0.0
+== bulk-b ==
+[server] listen 0.0.0.0:39090; max 64 MiB/dir/round
+[server] accepted ('212.95.58.220', 35982)
+[server] closed with error: bad frame header/size
+== server-sidecar tail ==
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+[server-sidecar] HELLO verified from 111.91.22.14:47158
+== proxy-a ==
+[proxy] listening on 0.0.0.0:39090
+[proxy] CONNECT www.google.com:443 from 111.91.22.14:42700
+[proxy] upstream connected www.google.com:443 via 142.251.151.119:443
+[proxy] tunnel closed www.google.com:443 up=815 down=92909
+== proxy-b ==
+[proxy] listening on 0.0.0.0:39090
+== selinux ==
+Disabled
+== sshd ==
+active
+== firewalld ==
+inactive

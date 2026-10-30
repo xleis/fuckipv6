@@ -1,0 +1,70 @@
+[client-sidecar] iface=v8c0 TUN=lxtrescue0 server=10.80.3.2 UDP=36571 -> 39091
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] no matching active SYN for ack=1081863148, ignoring
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:44438 isn=3723037661
+[client-sidecar] injected SYN-ACK to 10.80.1.2:44438 (60 bytes); NAT remote=10.80.1.2:44438
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:41122 isn=954773184
+[client-sidecar] injected SYN-ACK to 10.80.1.2:41122 (60 bytes); NAT remote=10.80.1.2:41122
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:41134 isn=1906715601
+[client-sidecar] injected SYN-ACK to 10.80.1.2:41134 (60 bytes); NAT remote=10.80.1.2:41134
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:46752 isn=1372194318
+[client-sidecar] injected SYN-ACK to 10.80.1.2:46752 (60 bytes); NAT remote=10.80.1.2:46752
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified

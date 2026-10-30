@@ -1,0 +1,162 @@
+== 1793353661.345613438
+Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+== 1793353661.849688900
+Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+== 1793353662.353762717
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      87853   172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:476 rtt:157.826/11.416 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:20 bytes_sent:42017 bytes_acked:13058 segs_out:32 segs_in:8 data_segs_out:30 send 1467946bps lastsnd:136 lastrcv:296 lastack:136 pacing_rate 2935872bps delivery_rate 735272bps delivered:11 app_limited busy:292ms unacked:20 rcv_space:14480 rcv_ssthresh:64088 notsent:58893 minrtt:157.147 snd_wnd:59392
+== 1793353662.857832961
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      572985  172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:396 rtt:157.075/0.01 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:320 bytes_sent:909031 bytes_acked:447077 segs_out:632 segs_in:176 data_segs_out:630 send 23599427bps lastrcv:800 lastack:8 pacing_rate 47198736bps delivery_rate 11624536bps delivered:311 app_limited busy:796ms unacked:320 rcv_space:14480 rcv_ssthresh:64088 notsent:111030 minrtt:157.021 snd_wnd:778240
+== 1793353663.362181760
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:380 rtt:157.303/0.051 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:737 bytes_sent:1048601 bytes_acked:1048602 bytes_received:125432 segs_out:779 segs_in:555 data_segs_out:727 data_segs_in:97 send 54273650bps lastsnd:356 lastrcv:36 lastack:36 pacing_rate 108547208bps delivery_rate 26131696bps delivered:728 app_limited busy:1100ms rcv_rtt:157.125 rcv_space:64712 rcv_ssthresh:183912 minrtt:157.021 snd_wnd:1906688
+== 1793353663.866270401
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:380 rtt:157.303/0.051 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:737 bytes_sent:1048601 bytes_acked:1048602 bytes_received:916622 segs_out:1300 segs_in:1155 data_segs_out:727 data_segs_in:697 send 54273650bps lastsnd:860 lastrcv:16 lastack:16 pacing_rate 108547208bps delivery_rate 26131696bps delivered:728 app_limited busy:1100ms rcv_rtt:157.124 rcv_space:474991 rcv_ssthresh:1892504 minrtt:157.021 snd_wnd:1906688
+== 1793353664.370377333
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      191967  172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:376 rtt:157.521/0.721 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:282 bytes_sent:1380639 bytes_acked:1189059 bytes_received:1048640 segs_out:1632 segs_in:1290 data_segs_out:958 data_segs_in:798 send 20738111bps lastsnd:52 lastrcv:264 lastack:52 pacing_rate 41476216bps delivery_rate 26131696bps delivered:826 app_limited busy:1360ms unacked:133 rcv_rtt:157.592 rcv_space:474991 rcv_ssthresh:2182104 notsent:386 minrtt:157.021 snd_wnd:2189312
+== 1793353664.874599122
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      194448  172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:157.161/0.01 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:370 bytes_sent:2039799 bytes_acked:1846774 bytes_received:1048640 segs_out:2089 segs_in:1492 data_segs_out:1415 data_segs_in:798 send 27271906bps lastsnd:32 lastrcv:772 lastack:32 pacing_rate 54543808bps delivery_rate 26131696bps delivered:1282 app_limited busy:1868ms unacked:134 rcv_rtt:157.592 rcv_space:474991 rcv_ssthresh:2182104 notsent:1422 minrtt:157.021 snd_wnd:3454976
+== 1793353665.378807840
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:157.306/0.076 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:370 bytes_sent:2097203 bytes_acked:2097204 bytes_received:1310789 segs_out:2201 segs_in:1725 data_segs_out:1455 data_segs_in:998 send 27246767bps lastsnd:332 lastrcv:8 lastack:8 pacing_rate 54493448bps delivery_rate 26131696bps delivered:1456 app_limited busy:2200ms rcv_rtt:158.018 rcv_space:474991 rcv_ssthresh:2717880 minrtt:157.021 snd_wnd:3487744
+== 1793353665.883028454
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:157.306/0.076 ato:80 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:370 bytes_sent:2097203 bytes_acked:2097204 bytes_received:1900529 segs_out:2340 segs_in:2174 data_segs_out:1455 data_segs_in:1447 send 27246767bps lastsnd:836 lastrcv:44 lastack:44 pacing_rate 54493448bps delivery_rate 26131696bps delivered:1456 app_limited busy:2200ms rcv_rtt:158.391 rcv_space:474991 rcv_ssthresh:2850576 minrtt:157.021 snd_wnd:3487744
+== 1793353666.387202623
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      286685  172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:360 rtt:157.417/0.228 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:92 bytes_sent:2295580 bytes_acked:2162365 bytes_received:2097280 segs_out:2518 segs_in:2327 data_segs_out:1593 data_segs_in:1597 send 6770095bps lastsnd:76 lastrcv:236 lastack:80 pacing_rate 13540176bps delivery_rate 26131696bps delivered:1502 app_limited busy:2436ms unacked:92 rcv_rtt:166.206 rcv_space:474991 rcv_ssthresh:2850576 notsent:153469 minrtt:157.021 snd_wnd:3487744
+== 1793353666.891518406
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      224652  172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:160.128/5.195 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:486 bytes_sent:3058769 bytes_acked:2834494 bytes_received:2097280 segs_out:3046 segs_in:2364 data_segs_out:2121 data_segs_in:1597 send 35158273bps lastsnd:24 lastrcv:740 lastack:20 pacing_rate 70316488bps delivery_rate 16422880bps delivered:1967 app_limited busy:2940ms unacked:155 rcv_rtt:166.206 rcv_space:474991 rcv_ssthresh:2850576 notsent:376 minrtt:157.021 snd_wnd:3489792
+== 1793353667.395800655
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:160.001/4.777 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:486 bytes_sent:3145805 bytes_acked:3145806 bytes_received:2411212 segs_out:3146 segs_in:2618 data_segs_out:2182 data_segs_in:1836 send 35186180bps lastsnd:372 lastrcv:40 lastack:40 pacing_rate 70372024bps delivery_rate 16422880bps delivered:2183 app_limited busy:3228ms rcv_rtt:166.555 rcv_space:474991 rcv_ssthresh:2850576 minrtt:157.021 snd_wnd:3489792
+== 1793353667.899868059
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:51640 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:160.001/4.777 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:486 bytes_sent:3145805 bytes_acked:3145806 bytes_received:3025204 segs_out:3198 segs_in:3085 data_segs_out:2182 data_segs_in:2303 send 35186180bps lastsnd:876 lastrcv:4 lastack:4 pacing_rate 70372024bps delivery_rate 16422880bps delivered:2183 app_limited busy:3228ms rcv_rtt:172.776 rcv_space:474991 rcv_ssthresh:2850576 minrtt:157.021 snd_wnd:3489792
+== 1793353668.404191496
+Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+== 1793353668.908295970
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      44687   172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:684 rtt:227.606/113.803 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:10 bytes_sent:13057 bytes_acked:1 segs_out:12 segs_in:1 data_segs_out:10 send 508950bps lastsnd:56 lastrcv:56 lastack:56 pacing_rate 1017896bps delivered:1 app_limited busy:56ms unacked:10 rcv_space:14480 rcv_ssthresh:64088 notsent:31630 minrtt:227.606 snd_wnd:65160
+== 1793353669.412341493
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      99609   172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:636 rtt:227.373/2.093 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:40 bytes_sent:99937 bytes_acked:42018 segs_out:72 segs_in:15 data_segs_out:70 send 2037885bps lastsnd:104 lastrcv:560 lastack:104 pacing_rate 4075760bps delivery_rate 1018336bps delivered:31 busy:560ms unacked:40 rcv_space:14480 rcv_ssthresh:64088 notsent:41689 minrtt:227.161 snd_wnd:63488
+== 1793353669.916455435
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      322394  172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:544 rtt:227.19/0.017 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:160 bytes_sent:445922 bytes_acked:214717 segs_out:312 segs_in:78 data_segs_out:310 send 8158106bps lastsnd:148 lastrcv:1064 lastack:152 pacing_rate 16316160bps delivery_rate 4061408bps delivered:151 busy:1064ms unacked:160 rcv_space:14480 rcv_ssthresh:64088 notsent:91188 minrtt:227.134 snd_wnd:376832
+== 1793353670.420507226
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      139802  172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:496 rtt:228.44/0.111 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:640 bytes_sent:1048601 bytes_acked:908800 segs_out:729 segs_in:273 data_segs_out:727 send 32453861bps lastsnd:200 lastrcv:1568 lastack:196 pacing_rate 64907680bps delivery_rate 15984264bps delivered:631 app_limited busy:1568ms unacked:97 rcv_space:14480 rcv_ssthresh:64088 minrtt:227.134 snd_wnd:1748992
+== 1793353670.924663653
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:480 rtt:227.565/0.021 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:737 bytes_sent:1048601 bytes_acked:1048602 bytes_received:303516 segs_out:875 segs_in:545 data_segs_out:727 data_segs_in:232 send 37516349bps lastsnd:704 lastrcv:8 lastack:8 pacing_rate 75032568bps delivery_rate 16854104bps delivered:728 app_limited busy:1596ms rcv_rtt:227.125 rcv_space:65480 rcv_ssthresh:564456 minrtt:227.112 snd_wnd:2029568
+== 1793353671.428787759
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:480 rtt:227.565/0.021 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:737 bytes_sent:1048601 bytes_acked:1048602 bytes_received:1047364 segs_out:1348 segs_in:1109 data_segs_out:727 data_segs_in:796 send 37516349bps lastsnd:1208 lastrcv:60 lastack:60 pacing_rate 75032568bps delivery_rate 16854104bps delivered:728 app_limited busy:1596ms rcv_rtt:227.175 rcv_space:590941 rcv_ssthresh:2169128 minrtt:227.112 snd_wnd:2029568
+== 1793353671.932954976
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      272166  172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:468 rtt:228.298/2.034 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:323 bytes_sent:1520059 bytes_acked:1248427 bytes_received:1048640 segs_out:1676 segs_in:1153 data_segs_out:1054 data_segs_in:797 send 16389246bps lastsnd:32 lastrcv:348 pacing_rate 32778376bps delivery_rate 16854104bps delivered:867 app_limited busy:1944ms unacked:188 rcv_rtt:227.175 rcv_space:590941 rcv_ssthresh:2172024 notsent:533 minrtt:227.112 snd_wnd:2428928
+== 1793353672.437117060
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      262646  172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:448 rtt:227.337/0.046 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:463 bytes_sent:2096924 bytes_acked:1834558 bytes_received:1048640 segs_out:2076 segs_in:1331 data_segs_out:1454 data_segs_in:797 send 23592253bps lastsnd:64 lastrcv:852 lastack:44 pacing_rate 47184344bps delivery_rate 16854104bps delivered:1273 app_limited busy:2448ms unacked:182 rcv_rtt:227.175 rcv_space:590941 rcv_ssthresh:2172024 notsent:279 minrtt:227.112 snd_wnd:3428352
+== 1793353672.941171501
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:440 rtt:227.457/0.057 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:463 bytes_sent:2097203 bytes_acked:2097204 bytes_received:1376032 segs_out:2176 segs_in:1598 data_segs_out:1455 data_segs_in:1046 send 23579806bps lastsnd:444 lastrcv:4 lastack:4 pacing_rate 47159424bps delivery_rate 16854104bps delivered:1456 app_limited busy:2736ms rcv_rtt:227.175 rcv_space:590941 rcv_ssthresh:2840824 minrtt:227.112 snd_wnd:3434496
+== 1793353673.445360887
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:440 rtt:227.457/0.057 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:463 bytes_sent:2097203 bytes_acked:2097204 bytes_received:1968219 segs_out:2310 segs_in:2047 data_segs_out:1455 data_segs_in:1495 send 23579806bps lastsnd:948 lastrcv:36 lastack:36 pacing_rate 47159424bps delivery_rate 16854104bps delivered:1456 app_limited busy:2736ms rcv_rtt:246.812 rcv_space:590941 rcv_ssthresh:2850320 minrtt:227.112 snd_wnd:3434496
+== 1793353673.949848584
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      287001  172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:440 rtt:227.393/0.079 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:198 bytes_sent:2501105 bytes_acked:2215941 bytes_received:2097280 segs_out:2614 segs_in:2153 data_segs_out:1735 data_segs_in:1593 send 10086643bps lastsnd:44 lastrcv:316 lastack:88 pacing_rate 20173256bps delivery_rate 16854104bps delivered:1539 app_limited busy:3052ms unacked:197 rcv_rtt:250.418 rcv_space:590941 rcv_ssthresh:2850576 notsent:1836 minrtt:227.112 snd_wnd:3434496
+== 1793353674.455272678
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      300360  172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:436 rtt:227.524/0.229 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:537 bytes_sent:3144685 bytes_acked:2845446 bytes_received:2097280 segs_out:3059 segs_in:2180 data_segs_out:2180 data_segs_in:1593 send 27340448bps lastsnd:16 lastrcv:824 lastack:52 pacing_rate 54680832bps delivery_rate 16854104bps delivered:1974 app_limited busy:3560ms unacked:207 rcv_rtt:250.418 rcv_space:590941 rcv_ssthresh:2850576 notsent:1120 minrtt:227.112 snd_wnd:3434496
+== 1793353674.960263758
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:432 rtt:228.71/2.524 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:537 bytes_sent:3145805 bytes_acked:3145806 bytes_received:2308512 segs_out:3076 segs_in:2356 data_segs_out:2181 data_segs_in:1754 send 27198671bps lastsnd:384 lastrcv:40 lastack:40 pacing_rate 54397192bps delivery_rate 16854104bps delivered:2182 app_limited busy:3908ms rcv_rtt:250.418 rcv_space:590941 rcv_ssthresh:2850576 minrtt:227.112 snd_wnd:3434496
+== 1793353675.464439837
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:45140 185.217.110.15:39090
+	 cubic wscale:11,7 rto:432 rtt:228.71/2.524 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:537 bytes_sent:3145805 bytes_acked:3145806 bytes_received:2992184 segs_out:3127 segs_in:2875 data_segs_out:2181 data_segs_in:2273 send 27198671bps lastsnd:888 lastrcv:8 lastack:8 pacing_rate 54397192bps delivery_rate 16854104bps delivered:2182 app_limited busy:3908ms rcv_rtt:245.228 rcv_space:590941 rcv_ssthresh:2850576 minrtt:227.112 snd_wnd:3434496
+== 1793353675.968726231
+Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+== 1793353676.472897275
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      45057   172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:684 rtt:159.786/79.893 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:10 bytes_sent:13057 bytes_acked:1 segs_out:12 segs_in:1 data_segs_out:10 send 724970bps lastsnd:32 lastrcv:32 lastack:32 pacing_rate 1449936bps delivered:1 app_limited busy:32ms unacked:10 rcv_space:14480 rcv_ssthresh:64088 notsent:32000 minrtt:159.786 snd_wnd:65160
+== 1793353676.977027905
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      157966  172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:428 rtt:158.404/0.043 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:80 bytes_sent:214492 bytes_acked:99279 segs_out:152 segs_in:40 data_segs_out:150 send 5850357bps lastsnd:56 lastrcv:536 lastack:60 pacing_rate 11700704bps delivery_rate 2899968bps delivered:71 app_limited busy:536ms unacked:80 rcv_space:14480 rcv_ssthresh:64088 notsent:42752 minrtt:158.345 snd_wnd:143360
+== 1793353677.481236456
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      140406  172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:388 rtt:158.551/0.361 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:640 bytes_sent:1048601 bytes_acked:908196 segs_out:729 segs_in:407 data_segs_out:727 send 46759465bps lastsnd:88 lastrcv:1040 lastack:80 pacing_rate 93518704bps delivery_rate 22804264bps delivered:631 app_limited busy:1040ms unacked:97 rcv_space:14480 rcv_ssthresh:64088 minrtt:158.32 snd_wnd:1605632
+== 1793353677.985553316
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:380 rtt:158.653/0.045 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:737 bytes_sent:1048601 bytes_acked:1048602 bytes_received:314328 segs_out:854 segs_in:681 data_segs_out:727 data_segs_in:241 send 53811828bps lastsnd:592 lastrcv:68 lastack:68 pacing_rate 107623312bps delivery_rate 25108032bps delivered:728 app_limited busy:1112ms rcv_rtt:158.281 rcv_space:65480 rcv_ssthresh:581304 minrtt:158.32 snd_wnd:1871872
+== 1793353678.489680067
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:380 rtt:158.653/0.045 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:737 bytes_sent:1048601 bytes_acked:1048602 bytes_received:1048569 segs_out:1370 segs_in:1239 data_segs_out:727 data_segs_in:799 send 53811828bps lastsnd:1096 lastrcv:136 lastack:136 pacing_rate 107623312bps delivery_rate 25108032bps delivered:728 app_limited busy:1112ms rcv_rtt:160.323 rcv_space:511494 rcv_ssthresh:2181064 minrtt:158.32 snd_wnd:1871872
+== 1793353678.993775199
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      182863  172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:368 rtt:158.434/0.022 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:385 bytes_sent:1703879 bytes_acked:1522367 bytes_received:1048640 segs_out:1826 segs_in:1380 data_segs_out:1182 data_segs_in:800 send 28149513bps lastsnd:4 lastrcv:488 lastack:8 pacing_rate 56298976bps delivery_rate 25108032bps delivered:1057 app_limited busy:1600ms unacked:126 rcv_rtt:160.323 rcv_space:511494 rcv_ssthresh:2181064 notsent:1350 minrtt:158.32 snd_wnd:2822144
+== 1793353679.497931834
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      787     172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:158.611/0.127 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:385 bytes_sent:2097203 bytes_acked:2096417 bytes_received:1048640 segs_out:2099 segs_in:1505 data_segs_out:1455 data_segs_in:800 send 28118100bps lastsnd:40 lastrcv:992 lastack:40 pacing_rate 56236152bps delivery_rate 25108032bps delivered:1455 app_limited busy:2104ms unacked:1 rcv_rtt:160.323 rcv_space:511494 rcv_ssthresh:2181064 minrtt:158.32 snd_wnd:3491840
+== 1793353680.002062985
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:158.614/0.102 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:385 bytes_sent:2097203 bytes_acked:2097204 bytes_received:1572211 segs_out:2233 segs_in:1905 data_segs_out:1455 data_segs_in:1199 send 28117568bps lastsnd:544 lastrcv:4 lastack:4 pacing_rate 56235000bps delivery_rate 73016bps delivered:1456 busy:2224ms rcv_rtt:165.12 rcv_space:511494 rcv_ssthresh:2850320 minrtt:158.32 snd_wnd:3493888
+== 1793353680.506133186
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:158.614/0.102 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:385 bytes_sent:2097203 bytes_acked:2097204 bytes_received:2097248 segs_out:2348 segs_in:2304 data_segs_out:1455 data_segs_in:1598 send 28117568bps lastsnd:1048 lastrcv:96 lastack:96 pacing_rate 56235000bps delivery_rate 73016bps delivered:1456 busy:2224ms rcv_rtt:173.978 rcv_space:511494 rcv_ssthresh:2850320 minrtt:158.32 snd_wnd:3493888
+== 1793353681.010190187
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      405041  172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:158.806/0.437 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:192 bytes_sent:2581341 bytes_acked:2304269 bytes_received:2097280 segs_out:2685 segs_in:2310 data_segs_out:1791 data_segs_in:1599 send 14005315bps lastsnd:112 lastrcv:440 lastack:120 pacing_rate 28010496bps delivery_rate 6969344bps delivered:1600 busy:2664ms unacked:192 rcv_rtt:173.978 rcv_space:511494 rcv_ssthresh:2850320 notsent:127968 minrtt:158.32 snd_wnd:3416064
+== 1793353681.514191621
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      55196   172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:160.475/3.531 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:476 bytes_sent:3145805 bytes_acked:3090610 bytes_received:2097280 segs_out:3077 segs_in:2356 data_segs_out:2183 data_segs_in:1599 send 34360393bps lastsnd:96 lastrcv:944 lastack:4 pacing_rate 68720512bps delivery_rate 15107088bps delivered:2145 app_limited busy:3168ms unacked:39 rcv_rtt:173.978 rcv_space:511494 rcv_ssthresh:2850320 minrtt:158.32 snd_wnd:3493888
+== 1793353682.018272845
+Recv-Q Send-Q Local Address:Port    Peer Address:Port Process
+0      0       172.31.0.173:59546 185.217.110.15:39090
+	 cubic wscale:11,7 rto:364 rtt:161.203/4.549 ato:40 mss:1448 pmtu:1500 rcvmss:1320 advmss:1448 cwnd:476 bytes_sent:3145805 bytes_acked:3145806 bytes_received:2687328 segs_out:3124 segs_in:2808 data_segs_out:2183 data_segs_in:2048 send 34205220bps lastsnd:600 lastrcv:12 lastack:12 pacing_rate 68410384bps delivery_rate 15107088bps delivered:2184 app_limited busy:3232ms rcv_rtt:175.822 rcv_space:511494 rcv_ssthresh:2850576 minrtt:158.32 snd_wnd:3493888
+== 1793353682.522333909
+Recv-Q Send-Q Local Address:Port Peer Address:PortProcess

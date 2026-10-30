@@ -1,0 +1,16 @@
+[server] listen 0.0.0.0:39090; max 64 MiB/dir/round
+[server] accepted ('10.80.1.2', 41122)
+[server] conn=('10.80.1.2', 41122) round=1 upload=1048576 download=1048576 mode=tiny validated
+[server] conn=('10.80.1.2', 41122) round=2 upload=1048576 download=1048576 mode=mixed validated
+[server] conn=('10.80.1.2', 41122) round=3 upload=1048576 download=1048576 mode=large validated
+[server] closed normally rounds=3
+[server] accepted ('10.80.1.2', 41134)
+[server] conn=('10.80.1.2', 41134) round=1 upload=1048576 download=1048576 mode=tiny validated
+[server] conn=('10.80.1.2', 41134) round=2 upload=1048576 download=1048576 mode=mixed validated
+[server] conn=('10.80.1.2', 41134) round=3 upload=1048576 download=1048576 mode=large validated
+[server] closed normally rounds=3
+[server] accepted ('10.80.1.2', 46752)
+[server] conn=('10.80.1.2', 46752) round=1 upload=1048576 download=1048576 mode=tiny validated
+[server] conn=('10.80.1.2', 46752) round=2 upload=1048576 download=1048576 mode=mixed validated
+[server] conn=('10.80.1.2', 46752) round=3 upload=1048576 download=1048576 mode=large validated
+[server] closed normally rounds=3

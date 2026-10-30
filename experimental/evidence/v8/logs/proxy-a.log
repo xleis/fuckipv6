@@ -1,0 +1,4 @@
+[proxy] listening on 0.0.0.0:39090
+[proxy] CONNECT 10.80.3.2:8080 from 10.80.1.2:44438
+[proxy] upstream connected 10.80.3.2:8080 via 10.80.3.2:8080
+[proxy] tunnel closed 10.80.3.2:8080 up=78 down=268

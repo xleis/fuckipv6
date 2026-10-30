@@ -1,0 +1,6 @@
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+17:59:40.739862 IP 185.217.110.15.39090 > 172.31.0.173.41518: Flags [S.], seq 2018536621, ack 3403452689, win 65160, options [mss 1332,sackOK,TS val 2237257506 ecr 1107494080,nop,wscale 11], length 0
+1 packet captured
+1 packet received by filter
+0 packets dropped by kernel

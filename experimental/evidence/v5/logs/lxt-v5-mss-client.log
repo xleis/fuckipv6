@@ -1,0 +1,3 @@
+[client] conn=1/1 established in 160.5 ms
+[PASS] conn=1 round=1 mode=tiny up=1048576 down=1048576 sha256=OK throughput=7.53 Mbps duration=2.23s
+[SUMMARY] PASS rounds=1/1 connections=1 bytes=2097152 duration=2.39s avg_connect=160.5ms

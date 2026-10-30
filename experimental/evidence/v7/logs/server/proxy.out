@@ -1,0 +1,4 @@
+usage: lxt_http_proxy.py [-h] [--bind BIND] [--port PORT]
+                         [--connect-timeout CONNECT_TIMEOUT]
+                         [--read-timeout READ_TIMEOUT]
+lxt_http_proxy.py: error: unrecognized arguments: --log /root/lxt_v7/proxy.log

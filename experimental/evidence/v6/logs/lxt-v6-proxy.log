@@ -1,0 +1,10 @@
+[proxy] listening on 0.0.0.0:39090
+[proxy] CONNECT www.google.com:443 from 111.91.22.14:37588
+[proxy] upstream connected www.google.com:443 via 142.251.151.119:443
+[proxy] tunnel closed www.google.com:443 up=815 down=92907
+[proxy] CONNECT www.google.com:443 from 111.91.22.14:42278
+[proxy] upstream connected www.google.com:443 via 142.251.153.119:443
+[proxy] tunnel closed www.google.com:443 up=825 down=3589
+[proxy] CONNECT www.google.com:443 from 111.91.22.14:41518
+[proxy] upstream connected www.google.com:443 via 142.251.154.119:443
+[proxy] tunnel closed www.google.com:443 up=825 down=3588

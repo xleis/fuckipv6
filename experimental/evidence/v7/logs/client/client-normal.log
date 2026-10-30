@@ -1,0 +1,5 @@
+[client-sidecar] iface=lxtv7n TUN=lxtrescue0 server=185.217.110.15 UDP=51952 -> 39091
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified

@@ -1,0 +1,11 @@
+tcpdump: listening on lxtrescue0, link-type RAW (Raw IP), snapshot length 160 bytes
+17:47:42.060529 IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.51640: Flags [S.], cksum 0xfe47 (correct), seq 2569447128, ack 173085879, win 65160, options [mss 1460,sackOK,TS val 2236538852 ecr 1106775496,nop,wscale 11], length 0
+17:47:48.855733 IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.45140: Flags [S.], cksum 0xa758 (correct), seq 1126338288, ack 4108243863, win 65160, options [mss 1460,sackOK,TS val 2236545647 ecr 1106782222,nop,wscale 11], length 0
+17:47:56.443377 IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+    185.217.110.15.39090 > 172.31.0.173.59546: Flags [S.], cksum 0x2d7a (correct), seq 3555578796, ack 1959494704, win 65160, options [mss 1460,sackOK,TS val 2236553235 ecr 1106789877,nop,wscale 11], length 0
+
+3 packets captured
+3 packets received by filter
+0 packets dropped by kernel

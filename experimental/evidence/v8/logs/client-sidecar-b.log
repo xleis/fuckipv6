@@ -1,0 +1,57 @@
+[client-sidecar] iface=v8c0 TUN=lxtrescue0 server=10.80.3.2 UDP=42894 -> 39091
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:52430 isn=2543773650
+[client-sidecar] injected SYN-ACK to 10.80.1.2:52430 (60 bytes); NAT remote=10.80.1.2:52430
+[client-sidecar] pending SYN local=10.80.1.2:52444 isn=948894218
+[client-sidecar] injected SYN-ACK to 10.80.1.2:52444 (60 bytes); NAT remote=10.80.1.2:52444
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:52450 isn=2671857793
+[client-sidecar] injected SYN-ACK to 10.80.1.2:52450 (60 bytes); NAT remote=10.80.1.2:52450
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] pending SYN local=10.80.1.2:53862 isn=547702140
+[client-sidecar] injected SYN-ACK to 10.80.1.2:53862 (60 bytes); NAT remote=10.80.1.2:53862
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified

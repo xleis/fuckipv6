@@ -1,0 +1,6 @@
+table inet lxt_v4 {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "eth0" ip saddr 185.217.110.15 tcp sport 39090 tcp flags syn,ack / syn,ack counter packets 8 bytes 480 drop
+	}
+}

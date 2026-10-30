@@ -1,0 +1,76 @@
+== date ==
+2026-10-30T10:31:07Z
+== ip addr ==
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+eth0             UP             172.31.0.173/20 fe80::63e6:cac:b220:fa5b/64 
+lxtv7h@if11      UP             10.200.7.1/24 fe80::a4c8:86ff:fe3d:f2f5/64 
+== ip route ==
+default via 172.31.0.1 dev eth0 proto dhcp src 172.31.0.173 metric 100 
+10.200.7.0/24 dev lxtv7h proto kernel scope link src 10.200.7.1 
+169.254.169.254 via 172.31.15.254 dev eth0 proto dhcp src 172.31.0.173 metric 100 
+172.31.0.0/20 dev eth0 proto kernel scope link src 172.31.0.173 metric 100 
+== ip_forward ==
+1
+== netns ==
+lxtv7 (id: 0)
+== links ==
+eth0             UP             fa:16:3e:5a:3b:e8 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+lxtv7h@if11      UP             a6:c8:86:3d:f2:f5 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+== nft ruleset ==
+table inet lxt_v7_nat {
+	chain nat_post {
+		type nat hook postrouting priority srcnat; policy accept;
+		ip saddr 10.200.7.0/24 oifname "eth0" masquerade
+	}
+}
+table inet lxt_v7_obs {
+	chain obs_forward {
+		type filter hook forward priority filter + 10; policy accept;
+		iifname "lxtv7h" ip saddr 10.200.7.2 ip daddr 185.217.110.15 tcp dport 39090 tcp flags ! syn,rst tcp flags & ack == ack counter packets 14019 bytes 19645254
+	}
+}
+table inet lxt_v7_b {
+	chain prerouting {
+		type filter hook prerouting priority raw; policy accept;
+		iifname "eth0" ip saddr 185.217.110.15 ip daddr 172.31.0.173 tcp sport 39090 tcp flags syn,ack / syn,ack counter packets 14 bytes 840 drop
+	}
+}
+== iptables ==
+bash: line 11: iptables: command not found
+== conntrack 39090 ==
+== ss 39090 ==
+== listeners ==
+udp   UNCONN 0      0            0.0.0.0:53543      0.0.0.0:*    users:(("sing-box",pid=449246,fd=11))                                                
+udp   UNCONN 0      0               [::]:53543         [::]:*    users:(("sing-box",pid=449246,fd=12))                                                
+udp   UNCONN 0      0                  *:8881             *:*    users:(("sing-box",pid=449246,fd=10))                                                
+tcp   LISTEN 0      511          0.0.0.0:8880       0.0.0.0:*    users:(("nginx",pid=450438,fd=4),("nginx",pid=450437,fd=4),("nginx",pid=449243,fd=4))
+tcp   LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=450438,fd=8),("nginx",pid=450437,fd=8),("nginx",pid=449243,fd=8))
+tcp   LISTEN 0      511             [::]:8880          [::]:*    users:(("nginx",pid=450438,fd=5),("nginx",pid=450437,fd=5),("nginx",pid=449243,fd=5))
+tcp   LISTEN 0      511             [::]:443           [::]:*    users:(("nginx",pid=450438,fd=9),("nginx",pid=450437,fd=9),("nginx",pid=449243,fd=9))
+== sidecar procs ==
+667775 python3 lxt_public_lab.py client-sidecar --interface lxtv7n --server 185.217.110.15 --tcp-port 39090 --udp-port 39091
+== timer procs ==
+== nstat ==
+TcpRetransSegs                  10177              0.0
+TcpExtTCPLostRetransmit         2556               0.0
+TcpExtTCPTimeouts               7979               0.0
+TcpExtTCPAbortOnData            29236              0.0
+TcpExtTCPAbortOnClose           6338               0.0
+TcpExtTCPAbortOnMemory          0                  0.0
+TcpExtTCPAbortOnTimeout         437                0.0
+TcpExtTCPAbortOnLinger          0                  0.0
+TcpExtTCPAbortFailed            0                  0.0
+== v5-b ==
+[client] conn=1/1 established in 228.7 ms
+[FAIL] timed out
+== client-b tail ==
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified
+[client-sidecar] HELLO_ACK verified

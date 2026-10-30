@@ -8,11 +8,12 @@ use crate::config_manager::ConfigManager;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::runtime_metadata;
 use crate::node::{
-    NodeCommandBus, NodeEventBus, NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot,
-    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeRuntimePlan,
-    NodeStateStore, NodeTrafficSnapshot,
+    spawn_command_bus_with_services, NodeCommandBus, NodeEventBus, NodeEventKind, NodeLifecycle,
+    NodeLifecycleSnapshot, NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection,
+    NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode,
+    NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
 };
+use crate::symmetric::EmbeddedServiceManager;
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
 /// Linux IFNAMSIZ 限制为 16 字节（包含空终止符 \0），最大有效长度为 15 字符。
@@ -69,6 +70,7 @@ pub struct MultiNetworkSupervisor {
     state: NodeStateStore,
     events: NodeEventBus,
     commands: NodeCommandBus,
+    services: EmbeddedServiceManager,
 }
 
 impl MultiNetworkSupervisor {
@@ -76,8 +78,13 @@ impl MultiNetworkSupervisor {
         let events = NodeEventBus::default();
         let registry = MultiNetworkRegistry::new();
         let state = NodeStateStore::with_events(events.clone());
-        let commands =
-            crate::node::spawn_command_bus(state.clone(), registry.clone(), events.clone());
+        let services = EmbeddedServiceManager::spawn(8);
+        let commands = spawn_command_bus_with_services(
+            state.clone(),
+            registry.clone(),
+            events.clone(),
+            services.clone(),
+        );
         Self {
             registry,
             options,
@@ -85,6 +92,7 @@ impl MultiNetworkSupervisor {
             state,
             events,
             commands,
+            services,
         }
     }
 
@@ -110,6 +118,11 @@ impl MultiNetworkSupervisor {
     /// Shared command entrypoint for CLI, IPC, WebUI and future GPUI adapters.
     pub fn commands(&self) -> NodeCommandBus {
         self.commands.clone()
+    }
+
+    /// Embedded signaling/relay services owned by this node runtime.
+    pub fn services(&self) -> EmbeddedServiceManager {
+        self.services.clone()
     }
 
     async fn sync_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) {
@@ -541,6 +554,7 @@ impl MultiNetworkSupervisor {
         for h in handles {
             let _ = h.await;
         }
+        let _ = self.services.shutdown().await;
 
         let lifecycle = self.lifecycle.stopped().await;
         self.sync_lifecycle(lifecycle).await;

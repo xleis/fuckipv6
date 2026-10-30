@@ -6,6 +6,7 @@ use super::{
     NodeCommandResult, NodePeerProbeSnapshot, NodeProblem, NodeProblemCode, NodeStateStore,
 };
 use crate::ipc::MultiNetworkRegistry;
+use crate::symmetric::EmbeddedServiceManager;
 
 /// Production handler for operations backed by the live node runtime.
 ///
@@ -15,11 +16,24 @@ use crate::ipc::MultiNetworkRegistry;
 pub struct NodeRuntimeHandler {
     state: NodeStateStore,
     registry: MultiNetworkRegistry,
+    services: EmbeddedServiceManager,
 }
 
 impl NodeRuntimeHandler {
     pub fn new(state: NodeStateStore, registry: MultiNetworkRegistry) -> Self {
-        Self { state, registry }
+        Self::with_services(state, registry, EmbeddedServiceManager::spawn(8))
+    }
+
+    fn with_services(
+        state: NodeStateStore,
+        registry: MultiNetworkRegistry,
+        services: EmbeddedServiceManager,
+    ) -> Self {
+        Self {
+            state,
+            registry,
+            services,
+        }
     }
 }
 
@@ -27,6 +41,7 @@ impl NodeCommandHandler for NodeRuntimeHandler {
     fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
         let state = self.state.clone();
         let registry = self.registry.clone();
+        let services = self.services.clone();
 
         Box::pin(async move {
             let request_id = request.request_id;
@@ -44,7 +59,19 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 super::NodeCommand::ProbePeer(command) => {
                     probe_peer(&registry, request_id, command).await
                 }
-                super::NodeCommand::Shutdown => stop_all(&registry, request_id).await,
+                super::NodeCommand::Shutdown => {
+                    let result = stop_all(&registry, request_id).await;
+                    if !result.is_success() {
+                        return result;
+                    }
+                    match services.shutdown().await {
+                        Ok(_) => result,
+                        Err(error) => unavailable(
+                            request_id,
+                            format!("网络停止指令已下发，但释放内嵌网络服务失败: {error}"),
+                        ),
+                    }
+                }
                 super::NodeCommand::StartNetworks { .. } => unavailable(
                     request_id,
                     "动态启动网络尚未接入监督器；请先完成运行时 actor 化",
@@ -183,17 +210,28 @@ pub fn spawn_command_bus(
     registry: MultiNetworkRegistry,
     events: super::NodeEventBus,
 ) -> super::NodeCommandBus {
-    super::NodeCommandBus::spawn(
-        Arc::new(NodeRuntimeHandler::new(state, registry)),
-        events,
-        32,
-    )
+    let handler = NodeRuntimeHandler::new(state, registry);
+    super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
+}
+
+/// Spawn the command bus while sharing embedded service ownership with the
+/// node supervisor. This lets UI commands and the supervisor act on the same
+/// signaling/relay lifecycle instead of creating competing service owners.
+pub fn spawn_command_bus_with_services(
+    state: NodeStateStore,
+    registry: MultiNetworkRegistry,
+    events: super::NodeEventBus,
+    services: EmbeddedServiceManager,
+) -> super::NodeCommandBus {
+    let handler = NodeRuntimeHandler::with_services(state, registry, services);
+    super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::node::{NodeCommand, NodeCommandBus, NodeEventBus};
+    use crate::symmetric::EmbeddedServiceStartRequest;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -240,6 +278,33 @@ mod tests {
 
         assert!(result.is_success());
         assert_eq!(stop_rx.recv().await, Some(None));
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_shared_embedded_services() {
+        let registry = MultiNetworkRegistry::new();
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        registry.set_stop_sender(stop_tx);
+        let services = EmbeddedServiceManager::spawn(2);
+        services
+            .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
+            .await
+            .expect("start embedded service");
+        let bus = spawn_command_bus_with_services(
+            NodeStateStore::new(),
+            registry,
+            NodeEventBus::default(),
+            services.clone(),
+        );
+
+        let result = bus
+            .execute(NodeCommandRequest::new(20, NodeCommand::Shutdown))
+            .await
+            .expect("shutdown result");
+
+        assert!(result.is_success());
+        assert_eq!(stop_rx.recv().await, Some(None));
+        assert!(services.list().await.is_err());
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ pub use command::{
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
-pub use runtime_handler::{spawn_command_bus, NodeRuntimeHandler};
+pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{
     NodeAccessModel, NodeConfigurationSnapshot, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
     NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,

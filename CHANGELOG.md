@@ -10,6 +10,7 @@ All notable changes are documented here. The project follows semantic versioning
 - **QUIC Relay 客户端证书 allowlist**: Relay 的 QUIC TLS 现在只接受当前已完成签名注册的节点 Ed25519 公钥；allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。TLS 授权查询使用同步快照，不在握手回调中等待异步会话锁。新增授权、未列入、空名单、未注册证书握手拒绝和注销后撤销回归测试。该控制是当前在线会话准入，不等同于 CA、CRL/OCSP、持久撤销列表或网络级最终授权，独立安全审计仍未完成。
 
 ### Added
+- **共享节点 HTTP/WS 适配器**: 新增版本化快照、manifest、事件 WebSocket 和命令提交端点。快照/事件合并使用共享 `NodeStateStore`，动作及读取命令只提交 `NodeCommandBus`，schema 不匹配、非法请求、后端拒绝和 `Unavailable` 均有稳定 HTTP 映射；重复/过期 revision 被抑制，跳号与广播滞后会下发权威快照重同步。该适配器尚未挂载到现有 WebUI/GPUI。
 - **UI 运行模式 CLI 真值接线**: 顶层及 `host`/`join`/`connect`/`up`/`start` 支持互斥的 `--headless`、`--webui`、`--gpui`；`--gui` 保留为 WebUI 兼容别名。无显示环境、冲突参数和当前不可用的原生 GPUI 均明确失败，不再静默降级或把浏览器窗口标记为 GPUI。
 - **零网络节点身份**: 节点控制面启动时即加载或生成配置根目录下唯一的 `node_identity.pem`，并从可选 `node_identity.json` 读取 `display_name`；即使没有启动任何网络，共享 `NodeSnapshot` 也会包含节点 ID、公钥指纹和显示名。网络启动计划统一复用节点级密钥，测试确认身份跨重启稳定，且私钥、种子和本机路径不会进入 DTO。README 已补充配置根目录、元数据格式和私钥文件权限注意事项。
 - **统一节点命令错误契约**: 10 个 `NodeCommand` 均覆盖 JSON 序列化往返与至少一条拒绝路径；重复/非法网络名和无效载荷统一返回 `InvalidRequest`，网络名规则与 `ConfigManager` 的 ASCII 白名单对齐。`NodeProblem` 的 7 个错误码、`network_name` 和 `retryable` 已锁定线协议并可往返；handler 测试覆盖无运行时创建/加入、未知网络探测及 `RuntimeControlError` 映射，`UpdateRouting`/`SetNetworkRole` 在 EX-06/EX-07 完成前继续返回可重试的 `Unavailable`，不会伪装成功。

@@ -57,10 +57,11 @@
   - 依赖：EX-03、EX-15；涉及 CLI/WebUI 启动文件，合并时必须保留用户未提交改动。
   - 验收：默认 IPv4/IPv6 监听均为回环；`0.0.0.0`/`::` 仅能通过显式危险参数开启且缺少认证时启动失败；参数、日志、HTTP 响应和文档一致；覆盖拒绝启动、认证成功/失败和回环回归测试。
 
-- [ ] **NX-03 共享节点 HTTP/WS 适配器（细化 EX-10）**
+- [>] **NX-03 共享节点 HTTP/WS 适配器（细化 EX-10）**
   - 工作：提供版本化的快照、manifest 和事件 WebSocket 适配层，把 HTTP/WS DTO 转换为 `NodeCommandBus` 与 `NodeStateStore` 调用；不拥有业务状态。
   - 依赖：EX-01、EX-02、EX-04、NX-01。
   - 验收：快照只来自 `NodeStateStore`，动作只发往命令总线；manifest schema 版本不匹配时明确失败而非降级；WS 断线、重复事件、revision 跳跃和非授权请求均有契约测试；不存在第二套页面/动作定义。
+  - 进展（2026-10-30）：新增版本化 `/api/node/snapshot`、`/api/node/manifest`、WebSocket `/api/node/events` 和 `POST /api/node/commands`；读路径经命令总线取得共享状态，动作请求原样提交 `NodeCommandBus`。覆盖 schema 不匹配、非法请求、后端拒绝、`Unavailable`、重复/回退 revision、跳号与广播滞后重同步、断线。剩余：挂载到实际 WebUI/GPUI（NX-07/NX-08），并与 NX-02 的认证/暴露面策略接通后才算完整验收。
 
 - [ ] **NX-04 路由热更新后端（细化 EX-06）**
   - 工作：让 `UpdateRouting` 原子更新运行中的 Smart Route、Exit Node 配置、持久化配置、共享快照和事件；任何阶段失败都恢复旧运行态。

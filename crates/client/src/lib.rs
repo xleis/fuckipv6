@@ -20,6 +20,7 @@ pub mod gpui;
 ))]
 pub mod gpui_shell;
 pub mod ipc;
+pub mod local_ipc;
 pub mod logging;
 #[cfg(target_os = "linux")]
 pub(crate) mod lxt_rescue;

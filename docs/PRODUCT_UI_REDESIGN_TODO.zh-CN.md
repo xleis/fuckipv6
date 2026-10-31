@@ -48,7 +48,7 @@
 |---|---|---|---|---|
 | W0 现状冻结 | `[~]` | P0 | 无 | 映射表、代码清单、审计确认；`docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
-| W2 运行时拆分 | `[ ]` | P0 | W1 | 关 UI 不断网、崩溃恢复、服务监督 |
+| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC 传输与认证基座已落地；进程拆分、恢复和服务监督未完成 |
 | W3 所有者安全 | `[ ]` | P0 | W2 | Passkey、HTTPS、初始化码、恢复 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
@@ -329,14 +329,14 @@ WebUI 内嵌 manifest 一致性测试均通过。
 - [ ] 禁止 UI 每次启动创建第二份 runtime；
 - [ ] 输出进程模型图。
 
-### W2-02 IPC 契约与认证 `[ ]`
+### W2-02 IPC 契约与认证 `[~]`
 
-- [ ] Linux Unix Socket、Windows Named Pipe、macOS 等价通道；
-- [ ] 本机同用户认证和权限检查；
-- [ ] 与 HTTP API 共用命令/事件/错误模型；
-- [ ] 禁止远程无认证 IPC；
-- [ ] IPC 断线重连和快照同步；
-- [ ] 添加冒用、权限和重连测试。
+- [~] Linux Unix Socket、Windows Named Pipe、macOS 等价通道：已基于 owner-only 运行目录和 `interprocess` 本地套接字实现，Linux 已实测，Windows/macOS 尚缺目标平台编译与实机证据；
+- [~] 本机同用户认证和权限检查：Unix 校验 peer euid、目录 uid、0700 目录和 0600 socket；Windows 校验 peer token SID，当前仅有代码路径，尚无实机证据；
+- [x] 与 HTTP API 共用命令/事件/错误模型：IPC 请求复用 `NodeCommandRequest`，快照与事件复用 `NodeSnapshot`/`NodeEvent`，错误使用稳定 `IpcErrorCode`；
+- [x] 禁止远程无认证 IPC：不监听 TCP，Unix 使用本地 socket，Windows 使用 named pipe，并拒绝非当前用户 peer；
+- [~] IPC 断线重连和快照同步：已实现并测试断线后重新握手、以 `after_sequence` 重新订阅权威快照；尚未接入长期运行的 control/node 服务循环；
+- [~] 添加冒用、权限和重连测试：已有同用户/异用户授权、目录/socket 权限、版本错误、断线与快照恢复测试；尚无真实第二系统用户、Windows token 和长期事件缺口 E2E。
 
 ### W2-03 UI 与 node 生命周期解耦 `[ ]`
 

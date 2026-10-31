@@ -85,6 +85,9 @@ anyhow = "1"
 thiserror = "1"
 fs2 = "0.4"
 
+# 本机进程间通信
+interprocess = { version = "2.4.7", features = ["tokio"] }
+
 # 实用工具
 futures = "0.3"
 bytes = "1"

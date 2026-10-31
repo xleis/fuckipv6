@@ -42,6 +42,7 @@ axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
+interprocess = { workspace = true }
 
 clap = { workspace = true }
 tracing = { workspace = true }

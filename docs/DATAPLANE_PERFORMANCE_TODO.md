@@ -21,7 +21,7 @@
 ### 进度快照（2026-10-31）
 
 - **大项：0/8 完整验收。** 大项要求同时具备独立提交、回归/安全测试、实测证据和同口径性能结论，当前没有一项全部满足。
-- **PERF 明细：27/48 已勾选，21 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
+- **PERF 明细：27/49 已勾选，22 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
 - **最近可关闭：** PERF-4 的 UDP batch 与 64B/1420B syscall 证据、PERF-8 的 direct-path 前置断言已经完成；TUN batch 和生产 worker 不属于近期可关闭项。
 - **尚未证明：** 锁拆分、GSO/GRO、全链路池、真实密码认证组合压力测试、正式多 run 三实现排名，以及任何“已追平/超过 WireGuard”的结论。
 
@@ -347,7 +347,8 @@ P2-3 干净基准与 profiler 归因
 - [x] 让 `open_from_source()` 直接消费 owned buffer，并在认证成功后把 plaintext 移到前端复用同一 allocation。
 - [x] 为 pool 满、buffer 不足、短读、NAT rebind、relay ciphertext 和 replay 注入回归测试。
 - [x] 用 allocation counter 证明直连 UDP 热路径不再调用 `bytes.to_vec()`；记录 pool 命中率和耗尽次数。
-- [x] **状态：功能完成。** 64 包稳态测试要求 hit rate ≥ 95%、allocations ≤ 4、full returns = 0；精确运行值归档到 PERF-8 原始结果。
+- [x] **功能验证：** 64 包稳态测试要求 hit rate ≥ 95%、allocations ≤ 4、full returns = 0；精确运行值归档到 PERF-8 原始结果。
+- [ ] **最终证据：** 在包含当前数据面整合的独立提交上重跑 allocation counter 与 direct-path 端到端测试，绑定最终二进制并证明吞吐/分配收益。
 
 ### PERF-2 Signaling fallback 复制与边界
 
@@ -486,7 +487,18 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 **新增结论：** TCP 单流吞吐是 kernel WireGuard 的约 `0.44x`、wireguard-go 的约 `0.21x`；8 流没有改善，分别约 `0.43x` 和 `0.19x`。UDP 1420 已达到 wireguard-go 的约 `0.78x`，64B 饱和 UDP 与 wireguard-go 基本持平，但仍分别只有 kernel WireGuard 的 `0.36x` 和 `0.46x`。已接线的 UDP syscall 批处理没有单独消除 TCP 路径的数量级差距，也没有证明 TUN/事件循环/锁竞争已经追平；单 run 无法量化批处理本身的收益。
 
-**证据边界：** 仍是单 run、未绑核、`powersave` governor、无 CPU profile，且测试时宿主负载不满足正式 harness 门限。上述倍数只能用于定位方向，不能当作统计显著排名。
+为检查方向是否由单次噪声造成，同一二进制又执行了 3 run 重复 smoke，目录为 `target/benchmarks/dataplane-smoke-current-3run-20261031/`。18 个 case/实现组合共 54/54 样本有效，fuckipv6 的 18 次测量全部 direct-path 且 fallback delta 为 0；以下为中位数：
+
+| case | fuckipv6 | kernel WireGuard | wireguard-go | 对 kernel | 对 wireguard-go |
+|---|---:|---:|---:|---:|---:|
+| TCP 1 flow | 0.628 | 1.607 | 3.181 | 0.391x | 0.197x |
+| TCP 8 flow | 0.599 | 1.510 | 3.212 | 0.397x | 0.186x |
+| UDP 1420 saturated | 0.662 | 1.964 | 0.897 | 0.337x | 0.738x |
+| UDP 64 saturated | 0.044 | 0.094 | 0.043 | 0.465x | 1.015x |
+
+3 run 仍未改变方向：TCP 从单流增加到 8 流没有提升，wireguard-go 约快 `5.1x/5.4x`；UDP 1420 约为 wireguard-go 的 `0.74x`，64B 饱和 UDP 基本持平。metadata 绑定 HEAD `d6fceb4`、dirty worktree snapshot `ca06ad2a...54ff`、二进制 SHA256 `6574f1d3...cee60` 和 wireguard-go `b3bc704`。
+
+**证据边界：** 仍只有 5s stream、未绑核、`powersave` governor、无 CPU profile，且测试时宿主负载约 `2.9-6.2`，不满足正式 harness 门限。3 run 只能说明方向在当前机器上稳定复现，不能当作统计显著排名或正式验收。
 
 ### 3. `strace -c` 与内建 batch counter
 

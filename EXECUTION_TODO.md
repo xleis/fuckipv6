@@ -113,7 +113,7 @@
   - 工作：把 REKEY 接入真实 UDP、QUIC 和 relay 数据面，支持密钥世代切换、旧世代短暂重叠和失败保留旧会话。
   - 依赖：EX-16、现有 Secure Session 握手与数据面。
   - 验收：会话到期前触发 REKEY；切换期间不中断有效流量；重放/乱序/旧世代包有明确窗口；失败不降级为明文或旧弱参数；敏感旧密钥及时清零；UDP、QUIC、relay 均有集成测试。
-  - 进展（2026-10-31）：Secure Session 核心已支持按时间/字节/包计数提前调度换钥，维护路径会按 grace deadline 清理退役接收世代，并拒绝 REKEY 中的 cipher suite 降级；固定测试覆盖提前触发、退役密钥清理和降级拒绝。真实 UDP 接线仍在审查中，QUIC/relay 的认证 REKEY 通道、端到端切换流量测试和独立审计尚未完成，故保持进行中。
+  - 进展（2026-10-31）：Secure Session 核心已支持按时间/字节/包计数提前调度换钥，维护路径会按 grace deadline 清理退役接收世代，并拒绝 REKEY 中的 cipher suite 降级。常驻 UDP initiator 会在会话建立后继续轮询在线 REKEY，使用 staged/active/retired epoch 解密与接收 grace 完成世代切换，并实际驱动 CONFIRM 重传；10 项连接测试和 14 项安全运行时测试覆盖成功切换、失败保留、降级/回滚拒绝及重传路径。QUIC/relay 的认证 REKEY 通道、跨真实网络切换流量测试和独立审计尚未完成，故保持进行中。
 
 - [>] **NX-12 握手 DoS 与限速（细化 EX-16）**
   - 工作：实现握手 Cookie/挑战、每源地址与每身份配额、全局并发上限、有限握手状态、TTL 清理、背压和可观测指标。
@@ -125,7 +125,7 @@
   - 工作：把已选定的混合后量子 profile 接入能力协商、CONFIRM、握手 transcript、数据面密钥派生、版本/算法绑定和容量预算；禁止静默降级。
   - 依赖：NX-11；密码学原语已有测试但尚未完成生产接线。
   - 验收：双方支持时协商 PQ profile，不支持或确认失败时按策略拒绝而非弱降级；profile/算法版本进入 transcript 与审计事件；固定向量、篡改、降级和互操作测试通过；明确性能与流量开销；独立审计前不得宣称“后量子安全”或“超越 WireGuard”。
-  - 进展（2026-10-31）：新增不可拆分的 X-Wing draft-11 / ML-KEM-768 / Ed25519+ML-DSA-65 / HKDF-SHA-512 / AES-256-GCM 或 ChaCha20-Poly1305 profile 绑定，HELLO/ACCEPT 和 responder policy 对版本、profile、suite 精确匹配并失败关闭；104 项 secure-session 测试及 clippy 通过。三消息 wire 切片、SessionDriver/生产 UDP/TUN/QUIC/relay 接线、互操作、容量预算与独立审计仍未完成，禁止宣称已具备生产后量子安全。
+  - 进展（2026-10-31）：新增不可拆分的 X-Wing draft-11 / ML-KEM-768 / Ed25519+ML-DSA-65 / HKDF-SHA-512 / AES-256-GCM 或 ChaCha20-Poly1305 profile 绑定，HELLO/ACCEPT 和 responder policy 对版本、profile、suite 精确匹配并失败关闭。进一步加入严格 `HELLO/ACCEPT/CONFIRM` 实验 wire 编解码：固定 magic/kind/长度、16 KiB 上限，拒绝截断、尾部数据、非零 flags/reserved、版本/kind 别名和 body 解析前的 profile/suite 降级；CONFIRM 绑定 version/profile/suite/SID/TH2 后执行常量时间 HMAC 校验。启用 PQ 后 146 项单元测试、12 项集成测试及 clippy 通过。wire 层尚未接入 SessionDriver 或生产 UDP/QUIC/relay 控制通道，互操作、容量预算与独立审计仍未完成，禁止宣称已具备生产后量子安全。
 
 - [>] **NX-14 身份授权与撤销生命周期（细化 EX-16）**
   - 工作：建立网络级最终授权、持久撤销目录和一致的身份查找，使控制面、relay、P2P QUIC 和重连路径使用同一授权结论。

@@ -107,9 +107,9 @@ A crates/client/src/p2p/udp_batch.rs
 - 不自动清理其他在途改动；
 - secure-session 线格式/驱动与独立 UDP 适配器继续按依赖顺序单独提交。
 
-### 2.3 绝对不可提交的文件
+### 2.3 工作区文件边界
 
-以下三个文件在本轮所有提交中都必须排除：
+以下三个文件不再受保护，可由所属任务修改、暂存和提交：
 
 ```text
 crates/client/src/cli/commands.rs
@@ -117,7 +117,7 @@ crates/client/src/cli/mod.rs
 crates/client/src/webui/controller.rs
 ```
 
-提交前必须检查 `git diff --cached --name-only`，不能只依赖编辑器或提交消息判断。
+提交前仍必须检查 `git diff --cached --name-only` 并逐文件审阅，不能只依赖编辑器或提交消息判断；不得夹带与当前任务无关的改动。
 
 ## 3. 单二进制、进程角色与生命周期
 

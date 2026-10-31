@@ -14,8 +14,8 @@ use crate::rekey::{
     RekeyStateMachine,
 };
 use crate::{
-    DataCipherSuite, EpochSession, ReceiveCipher, RekeyMargins, SendCipher, SessionError,
-    SESSION_ID_LEN,
+    BatchOpenResult, DataCipherSuite, EpochSession, ReceiveCipher, RekeyMargins, SendCipher,
+    SessionError, SESSION_ID_LEN,
 };
 use std::time::Instant;
 use thiserror::Error;
@@ -204,6 +204,40 @@ impl RekeySession {
             return Err(SessionError::InvalidEpochState);
         }
         self.session.open_in_place(packet, now)
+    }
+
+    /// Authenticate a batch that belongs entirely to the active epoch.
+    ///
+    /// Staged rekey material is intentionally excluded here. The shared client
+    /// runtime first groups packets by epoch and uses its existing serial path
+    /// for staged or retained generations.
+    pub fn open_independent_batch_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        if self.poisoned {
+            return Err(SessionError::InvalidEpochState);
+        }
+        self.session.open_independent_batch_in_place(packets, now)
+    }
+
+    /// Authenticate an independent-buffer batch with one result per packet.
+    ///
+    /// A poisoned rekey state fails the whole operation before touching packet
+    /// buffers. Otherwise each packet is routed to the active or a retained
+    /// epoch independently and its replay state is updated only on success.
+    pub fn open_independent_batch_per_packet_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        now: Instant,
+    ) -> Result<Vec<BatchOpenResult>, SessionError> {
+        if self.poisoned {
+            return Err(SessionError::InvalidEpochState);
+        }
+        Ok(self
+            .session
+            .open_independent_batch_per_packet_in_place(packets, now))
     }
 
     /// Start a locally initiated rekey transaction.

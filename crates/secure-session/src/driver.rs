@@ -21,7 +21,9 @@ use crate::rekey::{RekeyAccept, RekeyCompletion, RekeyConfirm, RekeyInit, RekeyN
 use crate::rekey_session::{RekeyAcceptOffer, RekeySession, RekeySessionError};
 use crate::transcript::{TranscriptHash, ENDPOINT_CONTEXT_HASH_LEN};
 use crate::wire::{AcceptFrame, ConfirmFrame};
-use crate::{DataCipherSuite, EpochSession, RekeyMargins, SessionError, SESSION_ID_LEN};
+use crate::{
+    BatchOpenResult, DataCipherSuite, EpochSession, RekeyMargins, SessionError, SESSION_ID_LEN,
+};
 use std::time::Instant;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -268,6 +270,80 @@ impl SessionDriver {
                 Err(DriverError::Data(error))
             }
         }
+    }
+
+    /// Authenticate a batch that belongs entirely to the active epoch.
+    ///
+    /// The complete batch is authenticated before any packet is reported in the
+    /// driver statistics. Replay counters are committed atomically at the
+    /// [`EpochSession`] layer only after every packet authenticates.
+    pub fn open_independent_batch_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        now: Instant,
+    ) -> Result<usize, DriverError> {
+        let plaintext_bytes = packets
+            .iter()
+            .try_fold(0usize, |total, packet| {
+                let plaintext_len = packet
+                    .len()
+                    .checked_sub(crate::DATA_HEADER_LEN + crate::AEAD_TAG_LEN)?;
+                total.checked_add(plaintext_len)
+            })
+            .ok_or(DriverError::Data(SessionError::PacketTooShort))?;
+        let session = self.session.as_mut().ok_or(DriverError::Closed)?;
+        match session.open_independent_batch_in_place(packets, now) {
+            Ok(opened_bytes) => {
+                self.stats.packets_received += packets.len() as u64;
+                self.stats.plaintext_bytes_received += opened_bytes as u64;
+                Ok(plaintext_bytes)
+            }
+            Err(error) => {
+                match error {
+                    SessionError::AuthenticationFailed => {
+                        self.stats.authentication_failures += 1;
+                    }
+                    SessionError::ReplayDetected | SessionError::CounterTooOld => {
+                        self.stats.replay_rejections += 1;
+                    }
+                    _ => {}
+                }
+                Err(DriverError::Data(error))
+            }
+        }
+    }
+
+    /// Authenticate an independent-buffer batch and return one result per packet.
+    ///
+    /// The outer error is reserved for driver lifecycle failures. Packet-level
+    /// failures are returned in input order and affect only their own slot.
+    /// Statistics count each authenticated packet, authentication failure, and
+    /// replay rejection independently instead of treating the batch atomically.
+    pub fn open_independent_batch_per_packet_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        now: Instant,
+    ) -> Result<Vec<BatchOpenResult>, DriverError> {
+        let session = self.session.as_mut().ok_or(DriverError::Closed)?;
+        let results = session
+            .open_independent_batch_per_packet_in_place(packets, now)
+            .map_err(DriverError::Data)?;
+        for result in &results {
+            match result {
+                Ok(plaintext_len) => {
+                    self.stats.packets_received += 1;
+                    self.stats.plaintext_bytes_received += *plaintext_len as u64;
+                }
+                Err(SessionError::AuthenticationFailed) => {
+                    self.stats.authentication_failures += 1;
+                }
+                Err(SessionError::ReplayDetected | SessionError::CounterTooOld) => {
+                    self.stats.replay_rejections += 1;
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(results)
     }
 
     /// Start a locally initiated rekey transaction.

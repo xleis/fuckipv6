@@ -5,6 +5,19 @@
 > 建立日期：2026-10-31
 > 原则：先消除确定性的正确性/调度缺陷，再优化复制、锁和 syscall；每项都必须有回归测试或可复核计数。
 
+## 本轮八项执行清单（2026-10-31）
+
+> 这 8 项是当前性能收口的执行顺序；总表按 PERF-1..PERF-8 记录。状态只有同时具备源码、测试和实测证据时才改为完成。
+
+- [ ] **1. PERF-1 UDP/TUN 入站零复制。** 已去掉 UDP `recv_from` 后 `to_vec()`；补齐 signaling/QUIC relay 的 owned ciphertext 路径，避免 `Bytes -> Vec` 强制复制，并验证 pooled allocation 所有权。
+- [ ] **2. PERF-2 signaling fallback 复制与边界。** 复用同一逻辑密文、padded/oversized frame、断开重连和复制边界均已验证；受保护 CLI `Vec` 边界仍阻塞全链路零复制。
+- [ ] **3. PERF-3 有界入站队列。** 补 1024 默认容量下 4097+ 突发 drop-newest 断言，以及 peer remove、重放、rekey 组合压力测试。
+- [ ] **4. PERF-4 TUN/UDP syscall 批处理。** 复核 Linux TUN read batch 与 UDP `recvmmsg`/`sendmmsg` 生产接线；补 TUN write batch 或明确不可批处理边界；用 64B/1420B 计数与 `strace -c` 证明 syscall/包。
+- [ ] **5. PERF-5 AEAD batch/worker。** 验证串行预留 nonce、并行 AEAD、按 peer 顺序发送、失败关闭与过载可观测；做 serial batch vs worker batch 同口径微基准。
+- [ ] **6. PERF-6 会话热路径锁。** 先采集锁等待/profile；缩小 `SecurePeerState` 临界区，禁止持锁网络 I/O；补并发 seal/open、rekey、revoke、endpoint migration、remove 压力测试。
+- [ ] **7. PERF-7 buffer pool 与 GSO/GRO。** 完成剩余固定 buffer 所有权，探测并接入 Linux UDP GSO/GRO/TUN offload，失败自动回退；补边界和非 Linux 测试。
+- [ ] **8. PERF-8 可证明路径基准。** 基准启动时断言 direct UDP 且 fallback=0；记录 commit/diff/SHA、CPU、包长、syscall/profile；对比 fuckipv6、wireguard-go、kernel WireGuard，异常路径单列。
+
 ## 0. 工作约束
 
 - [ ] 所有性能结论必须记录实际 transport、endpoint、包长和吞吐，不能把 relay/fallback 混入直连结论。
@@ -22,6 +35,7 @@ P0-1 入站 ownership / 恢复丢包正确性
   -> P0-4 慢 fallback 移出中央 select 分支
 
 P1-1 receiver index / 去 PeerInfo clone
+  -> P1-1B session-scoped index（可选，追平 wireguard-go 粒度）
   -> P1-2 热路径去写锁、统计批量化
   -> P1-3 真 batch + buffer pool + per-peer queue
 
@@ -42,27 +56,27 @@ P2-3 干净基准与 profiler 归因
 
 **整改**
 
-- [ ] 删除 `AuthenticatedInboundCache`、容量常量、两次 BLAKE3 和所有 cache 清理逻辑。
-- [ ] 引入类型化入站 packet：`AuthenticatedPlaintext` 与 `SealedCiphertext` 不再共用模糊的 `(IpAddr, Vec<u8>)`。
-- [ ] UDP 直连认证成功后，将已解密的 plaintext ownership 直接交给主循环，不再入队密文。
-- [ ] 主循环对 `AuthenticatedPlaintext` 只做 ACL、peer/source 校验和 TUN 写入，不再二次解密。
-- [ ] QUIC relay/signaling 的 `SealedCiphertext` 仍调用 `decrypt_from_peer`，保持 relay 安全边界。
-- [ ] endpoint migration 只能在认证成功后发生，并保持对旧 session/revoked peer 的拒绝语义。
+- [x] 删除 `AuthenticatedInboundCache`、容量常量、两次 BLAKE3 和所有 cache 清理逻辑。
+- [x] 引入类型化入站 packet：`AuthenticatedPlaintext` 与 `SealedCiphertext` 不再共用模糊的 `(IpAddr, Vec<u8>)`。
+- [x] UDP 直连认证成功后，将已解密的 plaintext ownership 直接交给主循环，不再入队密文。
+- [x] 主循环对 `AuthenticatedPlaintext` 只做 ACL、peer/source 校验和 TUN 写入，不再二次解密。
+- [x] QUIC relay/signaling 的 `SealedCiphertext` 仍调用 `decrypt_from_peer`，保持 relay 安全边界。
+- [x] endpoint migration 只能在认证成功后发生，并保持对旧 session/revoked peer 的拒绝语义。
 
 **验收**
 
-- [ ] 直连有效包在进入主循环前只执行一次 AEAD open。
-- [ ] 入队数据是 plaintext，密文不再进入 P2P receive queue。
-- [ ] 连续/积压超过旧的 4096 条记录后，不出现由 cache 淘汰导致的 `ReplayDetected`/`CounterTooOld` 丢包。
-- [ ] 重放、篡改、未认证 plaintext、旧 session 延迟包仍被拒绝。
-- [ ] peer 移除/重绑定后没有明文残留。
-- [ ] `cargo test -p fuckipv6-client p2p::connection` 通过（若测试过滤器不匹配则运行该 crate 全量测试）。
+- [x] 直连有效包在进入主循环前只执行一次 AEAD open。
+- [x] 入队数据是 plaintext，密文不再进入 P2P receive queue。
+- [x] 连续/积压超过旧的 4096 条记录后，不出现由 cache 淘汰导致的 `ReplayDetected`/`CounterTooOld` 丢包。
+- [x] 重放、篡改、未认证 plaintext、旧 session 延迟包仍被拒绝。
+- [x] peer 移除/重绑定后没有明文残留。
+- [x] `cargo test -p fuckipv6-client p2p::connection` 通过（若测试过滤器不匹配则运行该 crate 全量测试）。
 
 **回归测试**
 
-- [ ] 将现有 data-transfer、endpoint-migration、replay、peer-rebind 测试改为断言 queue 中为已认证明文。
-- [ ] relay 密文仍通过 `decrypt_from_peer` 解密；同一 relay 密文第二次提交必须失败。
-- [ ] 增加至少 4097 个已认证入站包的积压测试，全部有效包按序可消费且无二次 open。
+- [x] 将现有 data-transfer、endpoint-migration、replay、peer-rebind 测试改为断言 queue 中为已认证明文。
+- [x] relay 密文仍通过 `decrypt_from_peer` 解密；同一 relay 密文第二次提交必须失败。
+- [x] 增加至少 4097 个已认证入站包的积压测试，全部有效包按序可消费且无二次 open。
 
 ## P0-2 TUN buffer 不再对 64B 包清零 64 KiB
 
@@ -74,17 +88,17 @@ P2-3 干净基准与 profiler 归因
 
 **整改**
 
-- [ ] pooled buffer 始终保持 65536 字节长度，不再 `clear`/`resize`。
-- [ ] TUN reader 向主循环传递 `{ buffer: Vec<u8>, len: usize }` 或等价类型。
-- [ ] 出站处理只使用 `buffer[..len]`；回收时只重置 `len`，不触碰 payload 容量内容。
-- [ ] 保持 `TUN_BUFFER_POOL_SIZE` 有界，队列满时采取明确策略，不能重新引入无界 Vec 分配。
+- [x] pooled buffer 始终保持 65536 字节长度，不再 `clear`/`resize`。
+- [x] TUN reader 向主循环传递 `{ buffer: Vec<u8>, len: usize }` 或等价类型。
+- [x] 出站处理只使用 `buffer[..len]`；回收时只重置 `len`，不触碰 payload 容量内容。
+- [x] 保持 `TUN_BUFFER_POOL_SIZE` 有界，队列满时采取明确策略，不能重新引入无界 Vec 分配。
 
 **验收**
 
-- [ ] 64B 包路径不再写满 64 KiB 零值。
-- [ ] 1420B/64B 包内容、长度、ACL、路由和发送行为不变。
-- [ ] buffer 回收次数稳定，池不会因错误路径泄漏。
-- [ ] 增加 64B/1420B 混合批次测试，验证每个包只暴露有效长度。
+- [x] 64B 包路径不再写满 64 KiB 零值。
+- [x] 1420B/64B 包内容、长度、ACL、路由和发送行为不变。
+- [x] buffer 回收次数稳定，池不会因错误路径泄漏。
+- [x] 增加 64B/1420B 混合批次测试，验证每个包只暴露有效长度。
 
 ## P0-3 fallback 复用同一密文，禁止重复 seal
 
@@ -96,17 +110,23 @@ P2-3 干净基准与 profiler 归因
 
 **整改**
 
-- [ ] 抽出“解析 peer + 生成一次密文”的出站发送接口。
-- [ ] UDP、QUIC relay、signaling fallback 复用同一个 sealed packet。
-- [ ] 保持 per-peer nonce 顺序、session revocation gate 和失败语义。
-- [ ] 明确只允许对同一 nonce/密文选择 transport，不能引入 AEAD 重放。
+- [x] 抽出“解析 peer + 生成一次密文”的出站发送接口。
+- [x] UDP、QUIC relay、signaling fallback 复用同一个 sealed packet。
+- [x] 保持 per-peer nonce 顺序、session revocation gate 和失败语义。
+- [x] 明确只允许对同一 nonce/密文选择 transport，不能引入 AEAD 重放。
 
 **验收**
 
-- [ ] 单次 fallback 链的 seal 计数最多为 1。
-- [ ] 不同业务包仍获得不同 nonce。
-- [ ] 三条 transport 的认证、重放窗口和 ACL 行为通过现有安全测试。
-- [ ] 增加 UDP 失败、QUIC 成功和全 fallback 的计数测试。
+- [x] 单次 fallback 链的 seal 计数最多为 1。
+- [x] 不同业务包仍获得不同 nonce。
+- [x] 三条 transport 的认证、重放窗口和 ACL 行为通过现有安全测试。
+- [x] 增加 UDP 失败、QUIC 成功和全 fallback 的计数测试。
+
+测试入口：
+
+- `cli::commands::tests::fallback_matrix_reuses_one_ciphertext_for_relay_and_signaling`
+- 矩阵覆盖 UDP 失败 + QUIC relay 成功，以及 UDP/QUIC 均失败 + signaling 成功。
+- 两条路径都断言整条 fallback 链只 seal 一次、后一 transport 收到与前一 transport 完全相同的密文、对端只能认证一次且再次提交会被 replay window 拒绝。
 
 ## P0-4 慢 fallback 移出中央数据面 select 分支
 
@@ -117,59 +137,129 @@ P2-3 干净基准与 profiler 归因
 
 **整改**
 
-- [ ] 中央循环只做快速校验、路由和直连发送；慢 relay/fallback 交给独立 owner task/channel。
-- [ ] per-peer 保持发送顺序，跨 peer 可以并行。
-- [ ] relay 断开、超时和自愈不能阻塞 TUN 读取与 UDP 接收。
+- [x] 中央循环只做快速校验、路由和同步入队；seal、直连、慢 relay/fallback 交给独立 owner task/channel。
+- [x] per-peer 保持发送顺序，跨 peer 可以并行。
+- [x] relay 断开、超时和自愈不能阻塞 TUN 读取与 UDP 接收。
+- [x] relay 重连从中央 heartbeat 分支移到独立 task，并用 generation 防止旧连接清理新连接。
 
 **验收**
 
-- [ ] relay 卡住 2 秒时，TUN 入站和已建立 UDP P2P 仍持续推进。
-- [ ] 控制命令和 shutdown 不被发送超时拖住。
-- [ ] 增加慢 transport 注入测试和中央循环心跳/次数断言。
+- [x] relay 卡住 2 秒时，TUN 入站和已建立 UDP P2P 仍持续推进。
+- [x] 控制命令和 shutdown 不被发送超时拖住。
+- [x] 增加慢 transport 注入测试和中央循环心跳/次数断言。
 
-## P1-1 receiver index：消除全连接扫描和 PeerInfo clone
+实现位置与约束：
+
+- `commands.rs::OutboundDispatcher::submit()` 只执行有界 `try_send`，不执行 crypto、网络 I/O 或 `await`。
+- `commands.rs::run_outbound_worker()` 为每个目标 peer 串行消费一个队列；不同 peer 的 worker 并行。
+- `OUTBOUND_QUEUE_CAPACITY = 256`。队列满时明确丢包并记录 `p2p_send_error`，不会无界堆积。
+- 每个目标 peer 保留一个 worker task；当前没有空闲 worker 回收机制。peer 数量增长时需在 P1/P2 引入 worker 生命周期管理或统一调度。
+
+测试入口：
+
+- `cli::commands::tests::slow_peer_worker_does_not_block_another_peer_or_deliver_out_of_order`
+- `cli::commands::tests::slow_worker_does_not_block_heartbeat_or_control_events`
+- `cli::commands::tests::stalled_outbound_worker_does_not_block_tun_or_inbound_progress`
+- `cli::commands::tests::outbound_queue_is_bounded_under_a_stalled_peer`
+
+## P1-1 receiver index：pair-scoped 单候选已完成，性能待验证
 
 **现状**
 
-- 出站每包 `get_peers()` clone 全部 `PeerInfo`。
-- 入站每包 `peer_by_ip()` clone 一个 `PeerInfo`，随后 `get_peers()` 再 clone 全部。
-- 数据帧按 receiver index 线性扫描全部 connections。
-- `PeerInfo` 含 `String`、`Vec<u8>`、`Vec<SocketAddr>`。
+- 出站热路径已改为轻量 IP 路由索引，不再每包 `get_peers()` clone 全部 `PeerInfo`。
+- 入站使用 `PeerRouteInfo`/`Arc<ReceiverRoute>`，不再 clone 完整 `PeerInfo`。
+- `ReceiverIndex` 使用 `(receiver_index, endpoint)` 主索引和 `receiver_index` 回退桶。
+- profile 3 的 receiver index 已从“本端静态 Ed25519 公钥前 4 字节”改为“有序双方公钥 + 本端角色”的域分离 BLAKE3 派生。
+- 同一节点对不同 peer 得到不同 index；同一 pair 的 initiator/responder index 也不同，双方无需新增协商字段即可得到一致映射。
+- 同一 pair 的 index 在重握手/rekey 后保持不变；session 隔离仍由 SID、epoch、密钥和 replay window 完成。
+- 已注册 endpoint 命中单候选；NAT rebind/未知 source 会按 pair-scoped index 查找，在当前 100-peer 场景下也是单候选。
+- endpoint 和 index 都只是未认证路由提示，最终仍由 `open_from_source()` 完成 AEAD、session、epoch 和 replay 校验。
 
-**整改**
+**已完成**
 
-- [ ] 建立 `receiver_index -> Arc<SecurePeerState>` O(1) 索引。
-- [ ] 建立轻量出站路由索引，不克隆完整控制面对象。
-- [ ] 入站 source/peer 校验使用 Arc/借用快照，不在包路径复制全部 peer 列表。
-- [ ] 索引更新和连接移除保持原子性，旧 session 延迟包仍拒绝。
+- [x] 建立轻量出站路由索引，不克隆完整控制面对象。
+- [x] 入站使用 `PeerRouteInfo`，移除每包完整 `PeerInfo` clone。
+- [x] 删除入站全连接线性扫描，增加 `(receiver_index, endpoint)` 索引。
+- [x] 删除静态公钥前缀映射，改为 pair-scoped、角色分离的 BLAKE3 receiver index。
+- [x] 100-peer 测试断言 100 个 `local_receiver_index()` 全部唯一。
+- [x] 100-peer 测试实测：已注册 endpoint 100 次 lookup 均返回 1 个候选。
+- [x] 未知 endpoint/NAT rebind 对目标 peer 只返回 1 个候选，不再返回旧实现的 100 个候选。
+- [x] 固定 key 测试覆盖同一 pair 稳定、initiator/responder 分离、换 peer 后 index 变化。
+- [x] 索引更新和连接移除保持原子性，旧 session/route 延迟包仍拒绝。
+- [x] `CLASSIC_PROFILE_ID` 从 1 升至 3 并更新固定向量，拒绝新旧 receiver-index 映射静默混用。
+- [x] 更新 `PROTOCOL_V2.md` 的 profile 3 与 index 语义。
 
-**验收**
+**仍未完成**
 
-- [ ] 每包不再 clone 全部 peer 列表。
-- [ ] 已建立 peer 的直连入站查找为 O(1)。
-- [ ] 多 peer（至少 100）下发送/接收正确，peer 增删无 stale route。
-- [ ] 增加分配计数或可观测热路径指标。
+- [ ] 32-bit 哈希碰撞仍会形成候选桶并逐个认证；增加碰撞注入和认证尝试计数测试。
+- [ ] 在真实多 peer/NAT 环境中采集 lookup 候选数、AEAD open 尝试数和尾延迟。
+- [ ] 用同一基线证明候选路径减少后是否带来吞吐/尾延迟收益；当前不能宣称性能提升。
+- [ ] 多 peer 并发、rekey 和 endpoint migration 压力测试。
 
-## P1-2 热路径锁与统计
+**当前状态：功能完成，性能待验证。静态共享桶的确定性 O(N) 已消除；无碰撞时为单候选，碰撞桶仍是安全回退。**
+
+## P1-1B session-scoped receiver index（对照 wireguard-go 的剩余差异）
+
+**目标**
+
+当前 profile 3 是 pair-scoped deterministic index。若需要完全追平 `wireguard-go` 的隔离粒度，再引入每握手/每 rekey 可轮换的 session-scoped index；这不是修复静态共享桶的必要前置条件。
+
+**设计前置**
+
+- [ ] 定义 index 的 CSPRNG 生成与碰撞重试策略，或定义从已认证握手随机量派生的会话级映射。
+- [ ] 定义双方如何认证绑定 local/peer index，避免未认证字段影响路由。
+- [ ] 定义 rekey 窗口内旧/新 index 并存、切换和退役时机。
+- [ ] 定义旧 session 延迟包、同 pair 多 active/retired epoch 和 endpoint migration 语义。
+- [ ] 明确 wire profile 升级和混合版本失败关闭策略。
+
+**实现与验收**
+
+- [ ] 每个 handshake/rekey 的 local receiver index 独立分配。
+- [ ] 未知 source/NAT rebind 仍只产生一个候选。
+- [ ] 碰撞、握手重放、rekey 延迟包、旧 session 包和 peer 移除均有回归测试。
+- [ ] 多 peer 并发发送、接收、rekey 和 endpoint 迁移压力测试通过。
+- [ ] 用候选数、AEAD open 次数和 profile 证明查找路径改善。
+
+**当前状态：待开始；属于可选的协议级隔离增强，不影响当前 pair-scoped 修复的结论。**
+
+## P1-2 热路径锁与统计：payload 已改为无锁记账，控制面保留低频锁
 
 **现状**
 
-- endpoint、health、global stats、peer stats 可能逐包取 `RwLock::write()`。
-- 同一包存在 `PeerHealth` 与 `StatsCollector` 两套更新。
+- `StatsCollector` 的全局计数和 per-peer 计数已改为独立原子变量。
+- 已有 peer 的普通包不再获取 global stats 或 peer map 写锁；首次创建 peer 仍取一次 map 写锁。
+- endpoint 未变化时只取 `connections.read()`，变化时才重新验证 session 并写回。
+- `PeerHealth` 已从整个 connections 表拆成独立 `Arc<PeerHealth>`；发送路径一次取出 session/health 句柄，成功发送后直接记账，不再二次查询 connections 表。
+- payload/activity 使用无锁原子状态：一个最后活动时间戳和 31 个 1 秒流量桶；每个桶用 generation 防止跨秒旧值污染。
+- probe 样本、RTT、远端质量等低频控制状态仍由 `Mutex<ProbeHealth>` 保护；payload 路径不进入该 mutex，只有 snapshot 和探针事件会进入。
+- 当前精确计数使用 32-bit 桶值，单 peer 单秒超过约 4 GiB 会饱和；它影响展示带宽精度，不影响数据面转发或安全状态。是否需要 64-bit 无锁桶由真实 10/40/100GbE profile 决定。
+- 尚未提供 mutex/lock 等待数据，也没有证明原子化带来了吞吐提升。
 
 **整改**
 
-- [ ] endpoint fast path 使用读锁/原子比较，仅变化时写。
-- [ ] 统计改为 per-peer atomic counter 或异步批量聚合。
-- [ ] 避免在持锁状态下 await 或执行加解密/网络发送。
-- [ ] 明确锁顺序，消除连接索引与统计之间的潜在争用。
+- [x] endpoint fast path 使用读锁/原子比较，仅变化时写。
+- [x] 统计改为 per-peer atomic counter，普通包不获取全局/peer map 写锁。
+- [x] 避免在持锁状态下 await 或执行加解密/网络发送。
+- [x] 将 `PeerHealth` 锁从 connections 表拆出。
+- [x] 删除 `record_peer_payload()` 的逐包 connections 查询和 health 写锁。
+- [x] 发送路径复用已取得的 `(secure session, health)` 句柄，UDP/QUIC 成功路径不再二次查找。
+- [x] 直连入站路由携带 `Arc<PeerHealth>`，认证成功后直接进行无锁 payload 记账。
+- [x] 31 个秒级流量桶替代逐包 `Instant`/`VecDeque` 维护，保持 30 秒带宽窗口语义。
+- [x] 覆盖并发 payload 不丢计数、probe mutex 持有期间 payload 不阻塞、并发 snapshot/probe/payload 一致性。
+- [ ] 真实多 peer remove/rekey/endpoint migration 压力测试覆盖原子桶与路由句柄生命周期。
+- [ ] 明确并验证锁顺序，覆盖并发 remove/rekey。
+- [ ] 增加 mutex/profile 等待指标。
 
 **验收**
 
-- [ ] 普通直连包不获取全局统计写锁。
-- [ ] endpoint 不变的包不获取 endpoint 写锁。
-- [ ] 并发收发和 peer remove/rekey 压力测试无死锁。
+- [x] 普通直连包不获取全局统计写锁。
+- [x] endpoint 不变的包不获取 endpoint 写锁。
+- [x] 普通 payload 不获取 per-peer health `RwLock`，也不等待 probe/RTT mutex。
+- [x] 8 线程并发 80,000 次 payload 更新全部保留；probe mutex 被占用时 payload 仍可完成。
+- [ ] 并发收发和 peer remove/rekey 压力测试证明无死锁、无旧 session 复活。
 - [ ] 输出至少一组 mutex/lock 等待计数或 profile 证据。
+
+**当前状态：payload 记账功能完成且已无锁；控制面低频状态仍有 mutex；复制、syscall、batch/worker 等成本仍在，性能待同口径基准确认。**
 
 ## P1-3 真 batch、buffer pool、per-peer 顺序队列
 
@@ -181,14 +271,26 @@ P2-3 干净基准与 profiler 归因
 
 **整改**
 
-- [ ] 定义每 peer 的顺序发送队列和有界缓冲策略。
+- [x] **P1-3a 消除不必要的整包复制/分配。**
+  - [x] 认证成功后把 plaintext 原位移到 receive `Vec` 前端并截断，删除 `open_in_place(...).to_vec()` 的第二个明文分配。
+  - [x] relay/fallback 的已拥有密文直接交给 in-place 认证，删除运行时路径上的 `payload.to_vec()` 兼容克隆。
+  - [x] TUN reader 把池化 `TunPacket` 所有权直接交给 per-peer 发送队列，删除 `route_tun_packet()` 的 `packet.to_vec()`；发送完成、队列满或路由拒绝时归还原 buffer。
+  - [x] TUN allocation 预留 `DATA_HEADER_LEN + AEAD_TAG_LEN`，生产路径通过 `send_to_or_fallback_in_place()` 在 pooled allocation 上原地 seal；direct/QUIC/relay/signaling 复用同一密文。
+  - [ ] UDP receiver 仍因共享 `recv_from` buffer 执行一次 `bytes.to_vec()`；后续用可变 pooled receive ownership 消除。
+  - [ ] signaling `relay_packet` 仍因 owned `Vec` API 执行一次 `encrypted.to_vec()`；后续改为 pooled/Bytes ownership 或可复用帧缓冲。该复制不影响“fallback 只 seal 一次”的结论。
+  - [ ] 兼容 API `SecurePeerState::seal()`、`EpochSession::seal()` 和 P2P `send_to_or_fallback()` 仍会分配/复制；生产 TUN 数据面已不经过这些入口，后续确认调用方后再迁移或删除。
+- [x] **P1-3b 已建立 TUN pool 的跨任务 ownership 和出站原地 seal。** 生产路径不再为每个 TUN 包额外分配 payload `Vec` 或第二份密文；64 个固定 buffer 形成天然背压，队列满时丢弃并回收。
+- [ ] **P1-3c 完备 buffer pool。** UDP RX/TX、seal/open 输出和 fallback 仍需统一固定池，目标为稳态零逐包分配。
+- [x] 定义每 peer 的顺序发送队列和有界缓冲策略（P0-4 已完成）。
 - [ ] batch 读 TUN、按 peer 分组、批量 UDP send/recv。
-- [ ] 保证 nonce 顺序分配与发送顺序一致。
-- [ ] 引入可复用 buffer pool，减少整包 Vec 分配。
+- [ ] 保证 batch nonce 顺序分配与发送顺序一致。
 
 **验收**
 
-- [ ] 峰值路径分配次数和 syscall 次数可量化下降。
+- [x] 定向测试证明 pooled TUN buffer 以原地址穿过 outbound packet 并归还池，pooled outbound payload 没有复制分配。
+- [x] 定向测试证明 AEAD open 结果复用 receive allocation，没有第二份明文 `Vec`。
+- [x] 定向测试证明 driver/epoch session 可在预留 header/tag 的 packet slot 中原地 seal，fallback 矩阵每条链只 seal 一次并复用同一密文。
+- [ ] 峰值路径分配次数和 syscall 次数可量化下降（需要 allocation/syscall counter 或 profiler）。
 - [ ] 64B/1420B 单流与多流吞吐有干净的前后对比。
 - [ ] 丢包、乱序、重放和 peer 移除安全测试通过。
 
@@ -218,11 +320,125 @@ P2-3 干净基准与 profiler 归因
 
 | 项目 | 状态 | 备注 |
 |---|---|---|
-| P0-1 入站 ownership | 待开始 | 第一个实现项 |
-| P0-2 TUN buffer | 待开始 | 依赖 P0-1 稳定后小步修改 |
-| P0-3 fallback 复用密文 | 待开始 | 需要先梳理三种 transport 接口 |
-| P0-4 慢 fallback 离环 | 待开始 | 与 P0-3 一起设计 owner task |
-| P1/P2 | 待开始 | 以 P0 基准收益为前提继续 |
+| P0-1 入站 ownership | 功能完成，待独立提交/性能验证 | 4097 包积压与重放测试通过 |
+| P0-2 TUN buffer | 功能完成，待独立提交/性能验证 | 64B/1420B 混合测试与 clippy 通过 |
+| P0-3 fallback 复用密文 | 功能完成，待独立提交/性能验证 | UDP→QUIC 与 UDP→QUIC→signaling 矩阵通过；每条链 seal=1 |
+| P0-4 慢 fallback 离环 | 功能完成，待独立提交/性能验证 | per-peer 有界队列/worker；TUN、UDP、heartbeat、control、shutdown 响应测试通过 |
+| P1-1 receiver index 路由 | 功能完成，性能待验证 | pair-scoped index；100-peer 全唯一，已注册/未知 endpoint 均单候选；32-bit 碰撞桶仍在 |
+| P1-1B session-scoped index | 待开始（可选） | 当前不是静态共享桶阻塞项；用于追平 wireguard-go 的每握手唯一/轮换粒度 |
+| P1-2 统计/endpoint/health 锁隔离 | 功能完成，性能待验证 | payload 使用原子时间戳/31 个流量桶；probe/RTT 保留低频 mutex；无锁等待指标或吞吐基准 |
+| P1-3a/b | 部分完成，性能待验证 | TUN 池化 ownership、出站原地 seal、认证明文复用分配、runtime relay 去 clone 已完成；UDP RX 和 signaling owned frame 仍各有一次复制；兼容 `seal()` 仍分配 |
+| P1-3c/P2 | 待开始 | 真 batch、完整 buffer pool、worker、GSO/GRO、干净基准 |
+
+## 下一执行批次：8 项性能收口
+
+这一批按“先消除确定性和可观测成本，再引入并发/offload”的顺序执行。每项完成必须同时满足源码、回归测试、度量证据和文档四项，不能只凭功能测试勾选性能完成。
+
+### PERF-1 UDP RX 使用 owned pooled buffer
+
+- [x] 定义可回收 UDP receive buffer pool；每个 datagram 从 `recv_from` 起持有唯一 ownership，不再复制共享 `bytes`。
+- [x] 让 `open_from_source()` 直接消费 owned buffer，并在认证成功后把 plaintext 移到前端复用同一 allocation。
+- [x] 为 pool 满、buffer 不足、短读、NAT rebind、relay ciphertext 和 replay 注入回归测试。
+- [x] 用 allocation counter 证明直连 UDP 热路径不再调用 `bytes.to_vec()`；记录 pool 命中率和耗尽次数。
+- [x] **状态：功能完成。** 64 包稳态测试要求 hit rate ≥ 95%、allocations ≤ 4、full returns = 0；精确运行值归档到 PERF-8 原始结果。
+
+### PERF-2 Signaling fallback 复制与边界
+
+- [x] relay 与 signaling 共用一个逻辑密文；不得重新 seal、重分配 nonce 或改变 nonce 顺序。
+- [x] fallback 矩阵复用同一密文，并以 allocation identity 断言 relay 层没有额外 `Vec` 复制。
+- [x] 1 MiB postcard/signaling frame 上限、64 KiB relay payload 上限，以及 trailing/padding 拒绝均有测试。
+- [x] signaling 断开后自动重连并重新注册、保留虚拟地址的测试通过。
+- [x] 对外 QUIC relay `send_packet(Bytes)` 零复制；`&[u8]`/`&Vec<u8>` 是显式兼容复制路径。
+- [x] 记录剩余复制边界：客户端 `Vec -> Bytes` 可转移 ownership；postcard 编码把 payload 写入 frame buffer；客户端解码后仍因受保护的 CLI 边界执行一次 `Bytes -> Vec`；协调端 decode/re-encode 各物化一份 payload；随后 `Vec -> BytesMut` 可原地认证。
+- [ ] **阻塞项：** 受保护的 `crates/client/src/cli/commands.rs` 仍把 `SignalingEvent::RelayPacket` 当作 `Vec<u8>` 消费；该边界合入前不能宣称 signaling 全链路零复制。
+- [ ] **待实测：** 记录 peaked allocation/CPU 对吞吐和尾延迟的影响；当前只有所有权与边界证据。
+
+### PERF-3 入站队列有界背压
+
+- [x] 用有界入站队列替代 `UnboundedSender`，容量必须可配置且有安全上限。
+- [x] 定义队列满时的策略：直连可丢最新包并计数；安全控制帧不得被普通数据淹没。
+- [x] 删除 `incoming_rx` 外层不必要的锁，保证单消费者语义。
+- [x] 增加突发、慢消费者、重放、4097+ 积压、shutdown 和 peer remove 测试；暴露 queue depth、drop 和阻塞次数。
+- [x] **默认容量突发：** 向容量 1024 连续提交 8193 个包，严格保留最早 1024 个、drop-newest 丢弃 7169 个；消费集合与入队集合一致，最终 depth 为 0。
+- [x] **组合压力：** peer remove、重放、future generation、两代 rekey 窗口混合出 10240 个 admission 候选，并发生成恰好 1024 个入队和 9216 个队列满丢弃；入队/丢弃集合互斥、消费集合一致、计数无遗漏。
+- [ ] **测试边界：** 上述组合压力使用测试内 admission 等价模型，尚未覆盖真实密码认证和 `P2pEngine` 控制器；完整功能提交后仍需保留该说明，不能把模型测试表述为端到端 P2P 压测。
+
+验证命令（工作树）：
+
+```text
+cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib
+# 10 passed; 375 filtered out
+cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-features
+# passed
+```
+
+### PERF-4 TUN/UDP syscall 批处理
+
+- [ ] Linux TUN 路径实现 batch read/write（优先 multi-buffer 或等价接口），非 Linux 保留逐包 fallback。
+- [ ] UDP 使用 `recvmmsg`/`sendmmsg` 或等价异步 batch API，batch 上限有界且可配置。
+- [ ] 批量发送遵守每 peer nonce 顺序；batch 内单包失败不能破坏后续 nonce 或 replay 状态。
+- [ ] 用 syscall counter/`strace -c` 证明相同流量下 syscall/包下降；记录 64B 和 1420B 两组。
+
+### PERF-5 密码批处理接线与 worker 化
+
+- [ ] 在 TUN/UDP batch 之上按 peer 构造连续 packet batch，明确 header/tag/stride 布局。
+- [ ] 串行预留 counter/nonce 后并行执行 AEAD，保持每 peer 发送顺序和失败关闭语义。
+- [ ] worker 数按可用 CPU 配置，队列有界，过载策略可观测。
+- [ ] 增加 batch 重排、部分失败、counter 耗尽、rekey 竞争、重放和乱序测试。
+- [ ] 用同一基准比较 serial batch 与 worker batch 的 pps、CPU/包和尾延迟。
+- [x] **微基准：** 同口径处理 64 包/批、固定 4 workers，覆盖 64B、1280B、1420B；基准启动断言实际进入 worker 且初始化失败数为 0，避免静默 fallback。
+  - 环境：AMD Ryzen 7 5800H，16 逻辑 CPU，Linux，rustc 1.99.1。
+  - 命令：`cargo bench -p fuckipv6-secure-session --bench dataplane -- 'secure_session_v2_batch_(64|1280|1420)_w4' --warm-up-time 1 --measurement-time 3 --sample-size 20`
+
+| Payload | Serial seal | Worker seal | Serial open | Worker open |
+|---|---:|---:|---:|---:|
+| 64B | 93.854 µs | 40.004 µs | 98.498 µs | 45.243 µs |
+| 1280B | 157.75 µs | 59.841 µs | 146.81 µs | 61.015 µs |
+| 1420B | 161.52 µs | 64.680 µs | 163.66 µs | 67.047 µs |
+
+  - 1420B seal：约 536.6 → 1308.6 MiB/s；open：约 529.6 → 1262.4 MiB/s。
+  - **边界：** 这是 4-worker AEAD 微基准，不是端到端 P2P 性能，不能据此宣称吞吐超过 WireGuard；端到端收益仍需 PERF-8 在 direct UDP、fallback=0 的固定环境验证。
+
+### PERF-6 移除会话热路径 async mutex
+
+- [ ] 拆分 `SecurePeerState` 的 admission、session/epoch、driver 和统计状态，缩小临界区。
+- [ ] 采用每 peer actor、同步短锁或所有权转移，禁止在持锁期间执行网络 I/O 或 await。
+- [ ] 保持 revoke/rekey/transport handoff 的线性化和旧 session 拒绝语义。
+- [ ] 增加并发 seal/open、rekey、revoke、endpoint migration 和 peer remove 压力测试；采集 lock wait/hold 分布。
+
+### PERF-7 完整 buffer pool、CPU worker 与 GSO/GRO
+
+- [ ] 统一 TUN RX/TX、UDP RX/TX、seal/open 和 fallback frame 的固定大小 buffer pool，稳态零逐包分配。
+- [ ] 接入 per-CPU crypto workers，并让每 peer 的 nonce 排序与 worker 完成顺序解耦。
+- [ ] Linux UDP GSO/GRO 和 TUN offload 按 capability 探测，失败时自动回退。
+- [ ] 增加 pool 泄漏、double-return、OOM、worker backlog、GSO 边界和非 Linux fallback 测试。
+- [ ] 用 profile 证明 worker/offload 改善端到端 pps，而不是只改善微基准。
+
+### PERF-8 可证明路径的干净基准
+
+- [ ] 基准启动后断言实际 transport/endpoint；每轮记录 direct UDP、QUIC relay、signaling relay 和 fallback 次数。
+- [ ] 固定 commit/工作树 diff、二进制 SHA256、编译 profile、CPU governor、MTU、包长、流数、warmup 和时长。
+- [ ] 采集 iperf3 原始日志、CPU profile、syscall、allocation、队列深度、锁等待和丢包原因。
+- [ ] 对比 fuckipv6、wireguard-go 和内核 WireGuard；异常路径样本不得进入排名。
+- [ ] 输出机器可读汇总与 Markdown 报告；明确哪些收益有统计显著性，哪些只是功能完成。
+
+## 本轮验证记录
+
+日期：2026-10-31
+
+```text
+cargo fmt --all -- --check
+git diff --check
+cargo test -p fuckipv6-secure-session --lib
+cargo clippy -p fuckipv6-client --all-targets -- -D warnings
+cargo test -p fuckipv6-client -- --nocapture
+```
+
+结果：secure-session 114 passed；client 335 passed、2 ignored；integration test 1/1
+通过；clippy 无项目警告。仅剩依赖 `proc-macro-error2 v2.0.1` 的
+future-incompatibility 提示。
+
+注意：这些是功能/回归证据，不是吞吐收益证据。P0 与 P1 的已完成项仍需在独立提交后使用同一基准测量；出站 TUN 已消除第二份密文，但 UDP RX 和 signaling owned frame 复制、syscall、串行 batch、会话锁、worker/GSO/GRO 和入站背压仍在。receiver index 已消除静态共享桶并恢复未知 endpoint 单候选，但仍有 32-bit 碰撞桶，且没有吞吐/尾延迟数据。
 
 ## 完成定义
 

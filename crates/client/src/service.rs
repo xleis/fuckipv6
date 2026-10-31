@@ -519,7 +519,7 @@ impl ServiceManager {
         let state = quote_systemd(path_str(&self.layout.state_dir)?);
         let log = quote_systemd(path_str(&self.layout.log_dir)?);
         let mut definition = String::from(
-            "[Unit]\nDescription=fuckipv6 node and control service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\n",
+            "[Unit]\nDescription=fuckipv6 node and control service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=30s\nStartLimitBurst=3\n\n[Service]\nType=simple\n",
         );
         if self.layout.scope == ServiceScope::System {
             definition.push_str("User=root\nGroup=root\nNoNewPrivileges=false\n");
@@ -540,9 +540,7 @@ impl ServiceManager {
             quote_systemd(&format!("FUCKIPV6_RUNTIME_DIR={}", self.layout.runtime_dir.display())),
             quote_systemd(&format!("RUST_LOG={}", "info")),
         ));
-        definition.push_str(
-            "UMask=0077\nRestart=on-failure\nRestartSec=5s\nStartLimitIntervalSec=30s\nStartLimitBurst=3\n",
-        );
+        definition.push_str("UMask=0077\nRestart=on-failure\nRestartSec=5s\n");
         definition.push_str(&format!(
             "KillMode=mixed\nTimeoutStopSec={STOP_TIMEOUT_SECONDS}s\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=fuckipv6\n\n[Install]\n{}\n",
             if self.layout.scope == ServiceScope::System {
@@ -1043,6 +1041,11 @@ mod tests {
         assert!(unit.contains("KillMode=mixed"));
         assert!(unit.contains("TimeoutStopSec=75s"));
         assert!(!unit.contains("--headless"));
+        let (unit_section, service_section) = unit.split_once("[Service]").unwrap();
+        assert!(unit_section.contains("StartLimitIntervalSec=30s"));
+        assert!(unit_section.contains("StartLimitBurst=3"));
+        assert!(!service_section.contains("StartLimitIntervalSec="));
+        assert!(!service_section.contains("StartLimitBurst="));
         assert_eq!(fs::read_to_string(&manager.layout.binary)?, "binary-v1");
         let options = fs::read_to_string(manager.layout.options_file())?;
         assert!(options.contains("\"webui_port\":8088"));

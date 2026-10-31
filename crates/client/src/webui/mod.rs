@@ -2882,7 +2882,7 @@ tun_name = "fuckipv6"</div>
       document.getElementById('runtime-tun-name').textContent = available ? (network.tun_name || '--') : '--';
       document.getElementById('runtime-p2p-addr').textContent = available ? (statusData.runtime_p2p_addr || '--') : '--';
       document.getElementById('runtime-uptime').textContent = available && traffic.uptime_secs != null ? formatDuration(traffic.uptime_secs) : '--';
-      document.getElementById('runtime-source').textContent = available ? 'IPC 实时快照' : '无活动运行时';
+      document.getElementById('runtime-source').textContent = available ? '节点实时快照' : '无活动运行时';
     }
 
     function endpointPort(value) {
@@ -4129,11 +4129,11 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_card_uses_ipc_snapshot_instead_of_static_platform_values() {
+    fn test_runtime_card_uses_node_snapshot_instead_of_static_platform_values() {
         assert!(UNIFIED_MASTER_HTML.contains("renderRuntimeCard"));
         assert!(UNIFIED_MASTER_HTML.contains("runtime-p2p-addr"));
         assert!(UNIFIED_MASTER_HTML.contains("runtime-card-state"));
-        assert!(UNIFIED_MASTER_HTML.contains("IPC 实时快照"));
+        assert!(UNIFIED_MASTER_HTML.contains("节点实时快照"));
         assert!(!UNIFIED_MASTER_HTML.contains("1420 字节"));
         assert!(!UNIFIED_MASTER_HTML.contains("Linux x86_64 Musl"));
     }
@@ -4182,7 +4182,7 @@ mod tests {
         let (ban_status, Json(ban_body)) = ban_error;
         assert_eq!(ban_status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!ban_body.success);
-        assert!(ban_body.message.contains("本地协调服务未运行"));
+        assert!(ban_body.message.contains("节点命令协议尚未提供封禁操作"));
         assert!(ban_body.blacklist.is_empty());
 
         let unban_error = handle_blacklist_unban(
@@ -4196,7 +4196,7 @@ mod tests {
         let (unban_status, Json(unban_body)) = unban_error;
         assert_eq!(unban_status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!unban_body.success);
-        assert!(unban_body.message.contains("本地协调服务未运行"));
+        assert!(unban_body.message.contains("节点命令协议尚未提供解封操作"));
         assert!(unban_body.blacklist.is_empty());
     }
 }

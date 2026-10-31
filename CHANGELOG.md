@@ -9,6 +9,7 @@ All notable changes are documented here. The project follows semantic versioning
 
 ### Fixed
 - **建网邀请票据改为类型化所有者结果**: `CreateNetwork` 不再把邀请票据拼进通用完成文本供 WebUI 反向解析，而是返回结构化 `NetworkCreated`；CLI、GPUI 和 WebUI 消费同一结果。票据不进入 `NodeSnapshot`、事件或日志，通用 `Debug` 输出脱敏；WebUI 仅有本地投影时仍不提供重启后的票据持久化/查询，NX-07 保持进行中。
+- **WebUI 控制器改为单一权威节点后端**: `AppController` 现在强制依赖共享 `NodeStateStore + NodeCommandBus`，移除 legacy `AppUiState` 写状态、TCP IPC 轮询、`EmbeddedCoordinator`、取消通道和重复网络状态机。连接、断开、建网、停网、Peer 探测和路由更新只提交类型化节点命令；黑名单与地址池热更新因命令协议尚未提供而明确失败关闭，不再写入第二套 Coordinator。建网票据仍只保留在本地所有者投影，重启后的 owner-only 查询尚未完成；WebUI 端到端场景矩阵与完整类型化错误透传仍属于 NX-07。
 
 ### Security
 - **Secure Session classic UDP 无状态 Cookie retry**: 共享 UDP classic 握手现在对初次 `HELLO` 返回 `COOKIE_CHALLENGE`，只绑定源 IP/端口、双方身份、ephemeral 公钥哈希和签发时间；Cookie 验证通过后的 `HELLO_WITH_COOKIE` 才执行 admission、签名验证和 responder crypto。初次请求不分配 admission 或 pending responder，相同 retry 幂等，endpoint/health 仅由成功认证的控制帧更新；Initiator 拒绝来自未注册/未认证端点的 challenge，避免伪造 challenge 替换 pending retry 或反射到攻击地址。新增真实 UDP 挑战及未受信 challenge 来源、源、身份、ephemeral key、MAC、过期和准入前拒绝测试。生产 Cookie 密钥现在使用 256-bit root secret 和域分离 HMAC-SHA-256 按 60 秒 epoch 轮换，只保留当前/前一代，轮换周期不得短于 Cookie 有效期；新增当前/前一代接受、两代前拒绝、墙钟回退、周期下限、多线程共享和生产周期测试。共享握手准入器进一步增加全局 HELLO 验证预算：已注册或已认证来源在空载且预算可用时可走 direct path，否则回退 Cookie challenge；`HELLO_WITH_COOKIE` 在 Cookie 校验后仍必须取得同一预算，预算耗尽时失败关闭，防止绕过 Cookie 持续触发签名和 KEM。预算使用 RAII 释放，无效 Cookie 不消耗预算，预算耗尽不计为终端拒绝；新增共享预算、挑战回退、恢复、签名失败释放和幂等重传测试。负载自适应 Cookie、准入前 `O(N)` Peer 扫描优化、产品指标/UI、跨节点压测和独立 DoS 审计仍未完成，NX-12 保持进行中，不宣称全量 DoS 防护或超过 WireGuard。

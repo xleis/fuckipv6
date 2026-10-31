@@ -17,7 +17,7 @@
 - [x] **EX-06 路由热更新后端**：把 `UpdateRouting` 接入 `NetworkRuntimeManager`，同步 Smart Route、Exit Node 配置、持久化和共享快照。验收：成功与失败均回滚一致，网络运行中切换不重启节点；完成后解除 CLI/WebUI 迁移的 `Unavailable`。已由 NX-04 完成统一命令总线、运行态与控制通道接线；CLI/WebUI 自身迁移仍分别由 EX-08/EX-09 跟踪。
 - [>] **EX-07 网络角色热更新后端**：把 `SetNetworkRole` 接到持久化与运行时重配置，覆盖成员、发现、中继和 Exit Node 角色。验收：非法组合明确拒绝，停止后可释放服务，角色变化发布状态与事件。Exit Node 热更新、持久化恢复、失败回滚、串行化、共享快照/事件与停止释放已由 NX-05 完成；成员作为基线角色不可禁用；Discovery/Relay 独立热启停仍未实现，继续明确返回 `Unavailable`。
 - [ ] **EX-08 CLI 统一命令迁移**：CLI 的网络创建、加入、启停、探测和关闭只通过 `NodeCommandBus`。验收：不保留第二套业务规则，输出消费统一结果和错误码。
-- [ ] **EX-09 WebUI 统一命令迁移**：WebUI 的节点操作与状态读取只通过共享命令总线和 `NodeStateStore`。验收：移除 controller 内部独立网络/状态变更逻辑，HTTP 适配层只转换 DTO。
+- [>] **EX-09 WebUI 统一命令迁移**：WebUI 的节点操作与状态读取只通过共享命令总线和 `NodeStateStore`。验收：移除 controller 内部独立网络/状态变更逻辑，HTTP 适配层只转换 DTO。
 
 ## P1：双 UI 与模式选择
 
@@ -83,10 +83,11 @@
   - 依赖：NX-01、NX-03、NX-04、NX-05；涉及 `crates/client/src/cli/commands.rs` 与 `crates/client/src/cli/mod.rs`，提交前必须逐文件审阅。
   - 验收：删除或封存 CLI 内独立运行时状态机和直接配置写入；帮助文本、退出码和错误输出消费统一 `NodeProblem`；无网络、运行网络、失败回滚和多网络场景有端到端测试；不改变节点唯一产品模型。
 
-- [ ] **NX-07 WebUI 统一命令迁移（细化 EX-09）**
+- [>] **NX-07 WebUI 统一命令迁移（细化 EX-09）**
   - 工作：WebUI 节点操作和状态读取只通过共享命令总线、状态存储和事件流；controller 只保留连接/展示适配，不直接改业务状态。
   - 依赖：NX-03、NX-04、NX-05；涉及 `crates/client/src/webui/controller.rs`，提交前必须逐文件审阅。
   - 验收：移除 controller 内重复的网络/路由/Exit Node 状态机及直接运行时写入；HTTP 层只做 DTO 和鉴权转换；所有失败透传错误码与可重试标记；无网络、双网络、断线重连和权限拒绝均有集成测试。
+  - 进展（2026-11-01）：`AppController` 生产与测试构造均强制持有权威 `NodeStateStore + NodeCommandBus`，删除内部 legacy `AppUiState` 写状态、TCP IPC 轮询、`EmbeddedCoordinator`、取消通道和第二套网络状态机；连接、断开、建网、停网、Peer 探测与路由更新只提交类型化节点命令，快照、Peer 与流量只投影共享状态。旧黑名单和地址池热更新回退已移除并明确失败关闭；建网票据仅保留在本地所有者投影，不进入共享快照、事件或日志。客户端 480 项单元测试、1 项注册检查、8 项运行时进程测试与 clippy 已通过。剩余：NodeCommand 尚未提供黑名单/地址池变更，所有者票据尚无重启后 owner-only 持久化/查询，HTTP 层错误仍不是完整类型化 `NodeProblem` 透传，且无网络/双网络/断线重连/权限拒绝的 WebUI 端到端矩阵尚未完成。
 
 ### P0-B：GPUI 与 UI 对等
 

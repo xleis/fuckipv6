@@ -18,7 +18,7 @@ use super::{
     NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeRuntimePlan,
     NodeSetNetworkRoleCommand, NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
 };
-use crate::cli::commands::{self, RuntimeOptions};
+use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
 use crate::config_manager::{ConfigManager, NetworkConfig};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::runtime_metadata;
@@ -128,6 +128,7 @@ pub(crate) struct StopFailure {
 pub(crate) struct StopSummary {
     pub stopped: Vec<String>,
     pub failed: Vec<StopFailure>,
+    pub cleanup: RuntimeCleanupReport,
 }
 
 impl StopSummary {
@@ -144,6 +145,10 @@ impl StopSummary {
                 .collect::<Vec<_>>()
                 .join("; ");
             parts.push(format!("{} 个网络停止失败 ({failures})", self.failed.len()));
+        }
+        let cleanup_issues = self.cleanup.resource_failures();
+        if !cleanup_issues.is_empty() {
+            parts.push(format!("资源清理未完成 ({})", cleanup_issues.join("; ")));
         }
         parts.join("；")
     }
@@ -184,6 +189,9 @@ pub(crate) struct RuntimeCleanupReport {
     pub peers_remaining: usize,
     pub embedded_services_remaining: usize,
     pub configuration_retained: bool,
+    /// Per-network runtime cleanup results returned by the owner of the TUN,
+    /// routes, DNS, relay and P2P resources.
+    pub runtime_outcomes: BTreeMap<String, RuntimeCleanupOutcome>,
     /// Networks with a session, listener or peer residue. Embedded services
     /// are intentionally retained across a network restart and never appear
     /// here.
@@ -195,6 +203,20 @@ impl RuntimeCleanupReport {
         self.residual_networks
             .iter()
             .any(|name| name == network_name)
+            || self
+                .runtime_outcomes
+                .get(network_name)
+                .is_some_and(|outcome| !outcome.is_clean())
+    }
+
+    fn resource_failures(&self) -> Vec<String> {
+        self.runtime_outcomes
+            .iter()
+            .filter_map(|(network, outcome)| {
+                let issues = outcome.issues();
+                (!issues.is_empty()).then(|| format!("{network}: {}", issues.join("; ")))
+            })
+            .collect()
     }
 }
 
@@ -229,10 +251,14 @@ impl RestartSummary {
                 .join("; ");
             parts.push(format!("{} 个网络重启失败 ({failures})", self.failed.len()));
         }
-        let residue = if self.cleanup.residual_networks.is_empty() {
+        let residue = if self.cleanup.residual_networks.is_empty()
+            && self.cleanup.resource_failures().is_empty()
+        {
             "none".to_string()
         } else {
-            self.cleanup.residual_networks.join(", ")
+            let mut residue = self.cleanup.residual_networks.clone();
+            residue.extend(self.cleanup.resource_failures());
+            residue.join(", ")
         };
         parts.push(format!(
             "清理检查: sessions={}, listeners={}, peers={}, embedded_services={}, residual_networks=[{}]; 持久化配置{}",
@@ -290,7 +316,7 @@ struct StartedNetworkRuntime {
     identity: NodeIdentitySnapshot,
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
-    handle: JoinHandle<()>,
+    handle: JoinHandle<RuntimeCleanupOutcome>,
 }
 
 trait NetworkRuntimeLauncher: Send + Sync + 'static {
@@ -353,36 +379,108 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let network_name = request.network_name.clone();
             let handle = tokio::spawn(async move {
                 tracing::info!("网络 [{network_name}] 正在启动事件循环");
-                if let Err(error) = runtime.run_with_shutdown(&mut shutdown_rx).await {
-                    tracing::error!("网络 [{network_name}] 事件循环异常退出: {error:#}");
-                }
-                tracing::info!("网络 [{network_name}] 正在清理资源");
-                runtime.shutdown().await;
-                registry.unregister(&network_name).await;
-                state
-                    .update(|snapshot| {
-                        if let Some(network) = snapshot
-                            .networks
-                            .iter_mut()
-                            .find(|network| network.name == network_name)
-                        {
-                            network.status = NodeNetworkStatus::Offline;
-                            network.assigned_ipv6 = None;
-                            network.assigned_ipv4 = None;
-                            network.p2p_listen_addr = None;
-                            network.uptime_secs = 0;
-                            network.peer_count = 0;
+                let (disconnect_reply, event_error) =
+                    match runtime.run_with_shutdown(&mut shutdown_rx).await {
+                        Ok(reply) => (reply, None),
+                        Err(error) => {
+                            tracing::error!("网络 [{network_name}] 事件循环异常退出: {error:#}");
+                            (None, Some(format!("{error:#}")))
                         }
-                        snapshot
-                            .peers
-                            .retain(|peer| peer.network_name != network_name);
-                    })
-                    .await;
+                    };
+                tracing::info!("网络 [{network_name}] 正在清理资源");
+                let cleanup = runtime.shutdown().await;
+                drop(runtime);
+
+                let cleanup_clean = cleanup.is_clean();
+                let cleanup_issues = cleanup.issues();
+                let status = if cleanup_clean && event_error.is_none() {
+                    NodeNetworkStatus::Offline
+                } else {
+                    NodeNetworkStatus::Failed
+                };
+                let failure_message = event_error
+                    .iter()
+                    .chain(cleanup_issues.iter())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+
+                if cleanup_clean {
+                    registry.unregister(&network_name).await;
+                    state
+                        .update(|snapshot| {
+                            if let Some(network) = snapshot
+                                .networks
+                                .iter_mut()
+                                .find(|network| network.name == network_name)
+                            {
+                                network.status = status;
+                                network.assigned_ipv6 = None;
+                                network.assigned_ipv4 = None;
+                                network.p2p_listen_addr = None;
+                                network.uptime_secs = 0;
+                                network.peer_count = 0;
+                            }
+                            snapshot
+                                .peers
+                                .retain(|peer| peer.network_name != network_name);
+                            if !failure_message.is_empty() {
+                                snapshot.last_error = Some(
+                                    NodeProblem::new(
+                                        NodeProblemCode::Unavailable,
+                                        failure_message.clone(),
+                                    )
+                                    .for_network(&network_name)
+                                    .retryable(true),
+                                );
+                            }
+                        })
+                        .await;
+                } else {
+                    state
+                        .update(|snapshot| {
+                            if let Some(network) = snapshot
+                                .networks
+                                .iter_mut()
+                                .find(|network| network.name == network_name)
+                            {
+                                network.status = NodeNetworkStatus::Failed;
+                            }
+                            snapshot.last_error = Some(
+                                NodeProblem::new(
+                                    NodeProblemCode::Unavailable,
+                                    format!(
+                                        "网络 [{network_name}] 资源清理未完成: {}",
+                                        cleanup.summary()
+                                    ),
+                                )
+                                .for_network(&network_name)
+                                .retryable(true),
+                            );
+                        })
+                        .await;
+                }
                 events.publish(NodeEventKind::NetworkChanged {
                     network_name: network_name.clone(),
-                    status: NodeNetworkStatus::Offline,
+                    status,
                 });
-                tracing::info!("网络 [{network_name}] 已安全下线");
+                if let Some(reply) = disconnect_reply {
+                    let result = if cleanup_clean {
+                        Ok(())
+                    } else {
+                        Err(cleanup.summary())
+                    };
+                    let _ = reply.send(result);
+                }
+                if cleanup_clean {
+                    tracing::info!("网络 [{network_name}] 已安全下线");
+                } else {
+                    tracing::error!(
+                        "网络 [{network_name}] 清理未完成，保留残留状态: {}",
+                        cleanup.summary()
+                    );
+                }
+                cleanup
             });
 
             Ok(StartedNetworkRuntime {
@@ -402,7 +500,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
 struct NetworkRuntimeSession {
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
-    handle: JoinHandle<()>,
+    handle: JoinHandle<RuntimeCleanupOutcome>,
 }
 
 /// A manager-wide single-flight gate for lifecycle operations. The permit is
@@ -604,6 +702,8 @@ impl NetworkRuntimeManager {
                 services,
                 launcher,
                 sessions: HashMap::new(),
+                cleanup_failures: BTreeMap::new(),
+                completed_cleanup: BTreeMap::new(),
                 timeouts,
             },
         ));
@@ -903,6 +1003,8 @@ struct NetworkRuntimeActor {
     services: EmbeddedServiceManager,
     launcher: Arc<dyn NetworkRuntimeLauncher>,
     sessions: HashMap<String, NetworkRuntimeSession>,
+    cleanup_failures: BTreeMap<String, RuntimeCleanupOutcome>,
+    completed_cleanup: BTreeMap<String, RuntimeCleanupOutcome>,
     timeouts: RuntimeTimeouts,
 }
 
@@ -961,7 +1063,7 @@ impl NetworkRuntimeActor {
         deadline: Instant,
         skip_networks: &BTreeSet<String>,
     ) -> Result<StartSummary, RuntimeControlError> {
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
         let configured = plan.len();
         let mut summary = StartSummary {
             requested: configured,
@@ -1017,7 +1119,7 @@ impl NetworkRuntimeActor {
             }
         }
 
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
         let active = self.sessions.len();
         let failed = summary
             .failed
@@ -1132,9 +1234,10 @@ impl NetworkRuntimeActor {
             Ok(summary) => summary,
             Err(error) => return Err(self.fail_lifecycle(error).await),
         };
-        self.mark_network_status(None, NodeNetworkStatus::Offline)
-            .await;
-        let lifecycle = if summary.failed.is_empty() {
+        let cleanly_stopped = summary.failed.is_empty()
+            && summary.cleanup.residual_networks.is_empty()
+            && summary.cleanup.resource_failures().is_empty();
+        let lifecycle = if cleanly_stopped {
             self.lifecycle.stopped().await
         } else {
             self.lifecycle.failed().await
@@ -1170,16 +1273,10 @@ impl NetworkRuntimeActor {
             Ok(summary) => summary,
             Err(error) => return Err(self.fail_lifecycle(error).await),
         };
-        self.mark_network_status(None, NodeNetworkStatus::Offline)
-            .await;
 
         let mut summary = RestartSummary {
             requested: plan.len(),
             ..RestartSummary::default()
-        };
-        summary.cleanup = match self.inspect_cleanup(&names).await {
-            Ok(cleanup) => cleanup,
-            Err(error) => return Err(self.fail_lifecycle(error).await),
         };
         for failure in stopped.failed {
             summary.failed.push(RestartFailure {
@@ -1189,27 +1286,33 @@ impl NetworkRuntimeActor {
             });
         }
 
-        let stopping_failed = summary
+        let stopped_runtime_outcomes = stopped.cleanup.runtime_outcomes;
+        summary.cleanup = match self.inspect_cleanup(&names).await {
+            Ok(cleanup) => cleanup,
+            Err(error) => return Err(self.fail_lifecycle(error).await),
+        };
+        summary.cleanup.runtime_outcomes = stopped_runtime_outcomes.clone();
+
+        let mut blocked = summary
             .failed
             .iter()
             .map(|failure| failure.network_name.clone())
             .collect::<BTreeSet<_>>();
-        if !summary.cleanup.residual_networks.is_empty() {
-            for name in summary.cleanup.residual_networks.clone() {
-                if !stopping_failed.contains(&name) {
-                    summary.failed.push(RestartFailure {
-                        network_name: name,
-                        phase: RestartPhase::Cleanup,
-                        message: "停止后仍检测到 session、listener 或 peer 残留".into(),
-                    });
-                }
+        for name in &names {
+            if summary.cleanup.blocks_restart(name) && !blocked.contains(name) {
+                summary.failed.push(RestartFailure {
+                    network_name: name.clone(),
+                    phase: RestartPhase::Cleanup,
+                    message: cleanup_block_message(&summary.cleanup, name),
+                });
+                blocked.insert(name.clone());
             }
         }
 
         let lifecycle = self.lifecycle.begin_start(plan.len(), Vec::new()).await;
         self.state.set_lifecycle(lifecycle).await;
         let started = match self
-            .start_persisted_plan_until(networks, plan, deadline, &stopping_failed)
+            .start_persisted_plan_until(networks, plan, deadline, &blocked)
             .await
         {
             Ok(summary) => summary,
@@ -1224,7 +1327,10 @@ impl NetworkRuntimeActor {
             });
         }
         summary.cleanup = match self.inspect_cleanup(&names).await {
-            Ok(cleanup) => cleanup,
+            Ok(mut cleanup) => {
+                cleanup.runtime_outcomes = stopped_runtime_outcomes;
+                cleanup
+            }
             Err(error) => return Err(self.fail_lifecycle(error).await),
         };
         self.publish_restart_lifecycle(&summary).await;
@@ -1254,7 +1360,7 @@ impl NetworkRuntimeActor {
         plan: NodeRuntimePlan,
         deadline: Instant,
     ) -> Result<StartSummary, RuntimeControlError> {
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
         let requested = plan.len();
         let mut summary = StartSummary {
             requested,
@@ -1296,6 +1402,13 @@ impl NetworkRuntimeActor {
         mut spec: super::NodeNetworkSpec,
         deadline: Instant,
     ) -> Result<(), RuntimeControlError> {
+        if let Some(outcome) = self.cleanup_failures.get(&spec.name) {
+            return Err(RuntimeControlError::Unavailable(format!(
+                "start/cleanup: 网络 [{}] 的既有运行资源尚未清理，禁止重新启动: {}",
+                spec.name,
+                outcome.summary()
+            )));
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(RuntimeControlError::Timeout(format!(
@@ -1381,6 +1494,8 @@ impl NetworkRuntimeActor {
                 }
             })
             .await;
+        self.cleanup_failures.remove(&network_name);
+        self.completed_cleanup.remove(&network_name);
         self.sessions.insert(
             network_name,
             NetworkRuntimeSession {
@@ -1581,7 +1696,7 @@ impl NetworkRuntimeActor {
         &mut self,
         command: NodeUpdateRoutingCommand,
     ) -> Result<ipc::RoutingUpdateResult, RuntimeControlError> {
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
 
         let network_name = command.network_name.clone();
         let routing_control = self
@@ -1705,7 +1820,7 @@ impl NetworkRuntimeActor {
         &mut self,
         command: NodeSetNetworkRoleCommand,
     ) -> Result<RoleUpdateResult, RuntimeControlError> {
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
 
         match command.role {
             NodeNetworkRole::Member => {
@@ -1849,7 +1964,7 @@ impl NetworkRuntimeActor {
         stop_embedded_services: bool,
         deadline: Instant,
     ) -> Result<StopSummary, RuntimeControlError> {
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
         let services = if stop_embedded_services {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1877,12 +1992,19 @@ impl NetworkRuntimeActor {
                 .keys()
                 .cloned()
                 .chain(services.iter().cloned())
+                .chain(self.cleanup_failures.keys().cloned())
+                .chain(self.completed_cleanup.keys().cloned())
                 .collect::<BTreeSet<_>>()
         } else {
             let requested = networks.into_iter().collect::<BTreeSet<_>>();
             let missing = requested
                 .iter()
-                .filter(|name| !self.sessions.contains_key(*name) && !services.contains(*name))
+                .filter(|name| {
+                    !self.sessions.contains_key(*name)
+                        && !services.contains(*name)
+                        && !self.cleanup_failures.contains_key(*name)
+                        && !self.completed_cleanup.contains_key(*name)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -1920,14 +2042,8 @@ impl NetworkRuntimeActor {
             pending_sessions
                 .into_iter()
                 .map(|(network_name, session, accepted)| async move {
-                    let result = wait_for_session_shutdown(
-                        network_name.clone(),
-                        session,
-                        accepted,
-                        deadline,
-                    )
-                    .await;
-                    (network_name, result)
+                    wait_for_session_shutdown(network_name.clone(), session, accepted, deadline)
+                        .await
                 });
         let service_waits = service_targets.into_iter().map(|network_name| {
             let services = services.clone();
@@ -1939,29 +2055,101 @@ impl NetworkRuntimeActor {
         let (session_results, service_results) =
             tokio::join!(join_all(session_waits), join_all(service_waits));
 
-        // A timed-out actor is aborted, but its shared registry/state entries
-        // must still be removed before a later start can create a replacement.
-        let stopped_session_names = session_results
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        join_all(
-            stopped_session_names
-                .iter()
-                .map(|name| self.registry.unregister(name)),
-        )
-        .await;
-        if !stopped_session_names.is_empty() {
-            let stopped_session_names = stopped_session_names
-                .iter()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>();
+        let mut failures = BTreeMap::<String, Vec<String>>::new();
+        let mut runtime_outcomes = BTreeMap::new();
+        let mut clean_session_names = BTreeSet::new();
+        let mut observed_session_names = BTreeSet::new();
+        for session_result in session_results {
+            let network_name = session_result.network_name;
+            observed_session_names.insert(network_name.clone());
+            if let Some(session) = session_result.retry_session {
+                // The task is still running its bounded cleanup. Keep the
+                // session so a later stop can observe the real outcome.
+                self.sessions.insert(network_name.clone(), session);
+                let message = session_result.result.err().map_or_else(
+                    || "停止任务未返回清理结果".into(),
+                    |error| error.to_string(),
+                );
+                failures
+                    .entry(network_name.clone())
+                    .or_default()
+                    .push(message.clone());
+                let mut outcome = RuntimeCleanupOutcome::default();
+                outcome.record("运行时清理", CleanupStatus::Unknown(message));
+                self.cleanup_failures
+                    .insert(network_name.clone(), outcome.clone());
+                runtime_outcomes.insert(network_name.clone(), outcome);
+                self.mark_network_status(Some(&network_name), NodeNetworkStatus::Failed)
+                    .await;
+                continue;
+            }
+
+            match session_result.result {
+                Ok(outcome) => {
+                    if outcome.is_clean() {
+                        clean_session_names.insert(network_name.clone());
+                        self.cleanup_failures.remove(&network_name);
+                    } else {
+                        failures
+                            .entry(network_name.clone())
+                            .or_default()
+                            .push(format!("资源清理未完成: {}", outcome.summary()));
+                        self.cleanup_failures
+                            .insert(network_name.clone(), outcome.clone());
+                        self.mark_network_status(Some(&network_name), NodeNetworkStatus::Failed)
+                            .await;
+                    }
+                    runtime_outcomes.insert(network_name, outcome);
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    failures
+                        .entry(network_name.clone())
+                        .or_default()
+                        .push(message.clone());
+                    let mut outcome = RuntimeCleanupOutcome::default();
+                    outcome.record("运行时清理", CleanupStatus::Unknown(message));
+                    self.cleanup_failures
+                        .insert(network_name.clone(), outcome.clone());
+                    runtime_outcomes.insert(network_name.clone(), outcome);
+                    self.mark_network_status(Some(&network_name), NodeNetworkStatus::Failed)
+                        .await;
+                }
+            }
+        }
+        for name in &targets {
+            if observed_session_names.contains(name) {
+                continue;
+            }
+            if let Some(outcome) = self.completed_cleanup.remove(name) {
+                clean_session_names.insert(name.clone());
+                runtime_outcomes.insert(name.clone(), outcome);
+                continue;
+            }
+            if let Some(outcome) = self.cleanup_failures.get(name).cloned() {
+                failures
+                    .entry(name.clone())
+                    .or_default()
+                    .push(format!("资源清理仍未完成: {}", outcome.summary()));
+                runtime_outcomes.insert(name.clone(), outcome);
+                self.mark_network_status(Some(name), NodeNetworkStatus::Failed)
+                    .await;
+            }
+        }
+
+        if !clean_session_names.is_empty() {
+            join_all(
+                clean_session_names
+                    .iter()
+                    .map(|name| self.registry.unregister(name)),
+            )
+            .await;
             self.state
                 .update(|snapshot| {
                     for network in snapshot
                         .networks
                         .iter_mut()
-                        .filter(|network| stopped_session_names.contains(network.name.as_str()))
+                        .filter(|network| clean_session_names.contains(network.name.as_str()))
                     {
                         network.status = NodeNetworkStatus::Offline;
                         network.assigned_ipv6 = None;
@@ -1972,19 +2160,9 @@ impl NetworkRuntimeActor {
                     }
                     snapshot
                         .peers
-                        .retain(|peer| !stopped_session_names.contains(peer.network_name.as_str()));
+                        .retain(|peer| !clean_session_names.contains(peer.network_name.as_str()));
                 })
                 .await;
-        }
-
-        let mut failures = BTreeMap::<String, Vec<String>>::new();
-        for (network_name, result) in session_results {
-            if let Err(error) = result {
-                failures
-                    .entry(network_name)
-                    .or_default()
-                    .push(error.to_string());
-            }
         }
         for (network_name, result) in service_results {
             match result {
@@ -2009,6 +2187,7 @@ impl NetworkRuntimeActor {
             }
         }
 
+        let target_names = targets.iter().cloned().collect::<Vec<_>>();
         let mut stopped = Vec::with_capacity(targets.len());
         let mut failed = Vec::new();
         for name in targets {
@@ -2024,8 +2203,14 @@ impl NetworkRuntimeActor {
             }
         }
 
+        let mut cleanup = self.inspect_cleanup(&target_names).await?;
+        cleanup.runtime_outcomes = runtime_outcomes;
         self.publish_stop_lifecycle(&failed).await;
-        Ok(StopSummary { stopped, failed })
+        Ok(StopSummary {
+            stopped,
+            failed,
+            cleanup,
+        })
     }
 
     async fn restart(
@@ -2033,15 +2218,24 @@ impl NetworkRuntimeActor {
         networks: Vec<String>,
         all: bool,
     ) -> Result<RestartSummary, RuntimeControlError> {
-        self.prune_finished_sessions();
+        self.reconcile_finished_sessions().await;
         let deadline = Instant::now() + self.timeouts.restart;
         let targets = if all {
-            self.sessions.keys().cloned().collect::<BTreeSet<_>>()
+            self.sessions
+                .keys()
+                .chain(self.cleanup_failures.keys())
+                .chain(self.completed_cleanup.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>()
         } else {
             let requested = networks.into_iter().collect::<BTreeSet<_>>();
             let missing = requested
                 .iter()
-                .filter(|name| !self.sessions.contains_key(*name))
+                .filter(|name| {
+                    !self.sessions.contains_key(*name)
+                        && !self.cleanup_failures.contains_key(*name)
+                        && !self.completed_cleanup.contains_key(*name)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -2094,18 +2288,20 @@ impl NetworkRuntimeActor {
         }
 
         summary.cleanup = self.inspect_cleanup(&names).await?;
+        summary.cleanup.runtime_outcomes = stopped_summary.cleanup.runtime_outcomes;
         for name in &names {
-            if !stopped.contains(name) {
+            if !summary.cleanup.blocks_restart(name) {
                 continue;
             }
-            if summary.cleanup.blocks_restart(name) {
-                summary.failed.push(RestartFailure {
-                    network_name: name.clone(),
-                    phase: RestartPhase::Cleanup,
-                    message: "停止后仍检测到 session、listener 或 peer 残留".into(),
-                });
-                stopped.remove(name);
-            }
+            stopped.remove(name);
+            summary
+                .failed
+                .retain(|failure| failure.network_name != *name);
+            summary.failed.push(RestartFailure {
+                network_name: name.clone(),
+                phase: RestartPhase::Cleanup,
+                message: cleanup_block_message(&summary.cleanup, name),
+            });
         }
 
         for spec in plan.into_networks() {
@@ -2176,6 +2372,12 @@ impl NetworkRuntimeActor {
             peers_remaining: peer_names.len(),
             embedded_services_remaining: embedded_services,
             configuration_retained: names.iter().all(|name| self.configs.network_exists(name)),
+            runtime_outcomes: self
+                .cleanup_failures
+                .iter()
+                .filter(|(name, _)| name_set.contains(name.as_str()))
+                .map(|(name, outcome)| (name.clone(), outcome.clone()))
+                .collect(),
             residual_networks,
         })
     }
@@ -2188,9 +2390,43 @@ impl NetworkRuntimeActor {
         }
     }
 
-    fn prune_finished_sessions(&mut self) {
-        self.sessions
-            .retain(|_, session| !session.handle.is_finished());
+    async fn reconcile_finished_sessions(&mut self) {
+        let finished = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.handle.is_finished())
+            .map(|(network_name, _)| network_name.clone())
+            .collect::<Vec<_>>();
+
+        for network_name in finished {
+            let Some(session) = self.sessions.remove(&network_name) else {
+                continue;
+            };
+            match session.handle.await {
+                Ok(outcome) if outcome.is_clean() => {
+                    self.cleanup_failures.remove(&network_name);
+                    self.completed_cleanup.insert(network_name.clone(), outcome);
+                    self.registry.unregister(&network_name).await;
+                }
+                Ok(outcome) => {
+                    self.completed_cleanup.remove(&network_name);
+                    self.cleanup_failures.insert(network_name.clone(), outcome);
+                    self.mark_network_status(Some(&network_name), NodeNetworkStatus::Failed)
+                        .await;
+                }
+                Err(error) => {
+                    let message = format!(
+                        "网络 [{network_name}] 的运行时任务异常退出，清理结果未知: {error}"
+                    );
+                    let mut outcome = RuntimeCleanupOutcome::default();
+                    outcome.record("运行时清理", CleanupStatus::Unknown(message));
+                    self.completed_cleanup.remove(&network_name);
+                    self.cleanup_failures.insert(network_name.clone(), outcome);
+                    self.mark_network_status(Some(&network_name), NodeNetworkStatus::Failed)
+                        .await;
+                }
+            }
+        }
     }
 
     async fn rollback_created_network(&mut self, network_name: &str) {
@@ -2518,42 +2754,104 @@ impl NetworkRuntimeActor {
     }
 }
 
+struct SessionShutdownResult {
+    network_name: String,
+    result: Result<RuntimeCleanupOutcome, RuntimeControlError>,
+    retry_session: Option<NetworkRuntimeSession>,
+}
+
 async fn wait_for_session_shutdown(
     network_name: String,
     session: NetworkRuntimeSession,
     accepted: bool,
     deadline: Instant,
-) -> Result<(), RuntimeControlError> {
-    let mut handle = session.handle;
+) -> SessionShutdownResult {
+    let NetworkRuntimeSession {
+        routing_control,
+        shutdown,
+        mut handle,
+    } = session;
     if !accepted {
-        handle.abort();
-        let _ = handle.await;
-        return Err(RuntimeControlError::Unavailable(format!(
-            "stop/channel_closed: 网络 [{network_name}] 的关闭通道已断开；已强制清理共享状态"
-        )));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return SessionShutdownResult {
+                network_name: network_name.clone(),
+                result: Err(RuntimeControlError::Timeout(format!(
+                    "stop/timeout: 网络 [{network_name}] 的关闭通道已断开且任务未退出；清理结果未知"
+                ))),
+                retry_session: Some(NetworkRuntimeSession {
+                    routing_control,
+                    shutdown,
+                    handle,
+                }),
+            };
+        }
+        return match timeout(remaining, &mut handle).await {
+            Ok(Ok(outcome)) => SessionShutdownResult {
+                network_name: network_name.clone(),
+                result: Ok(outcome),
+                retry_session: None,
+            },
+            Ok(Err(error)) => SessionShutdownResult {
+                network_name: network_name.clone(),
+                result: Err(RuntimeControlError::Unavailable(format!(
+                    "stop/task_failed: 网络 [{network_name}] 的运行时任务异常退出: {error}"
+                ))),
+                retry_session: None,
+            },
+            Err(_) => SessionShutdownResult {
+                network_name: network_name.clone(),
+                result: Err(RuntimeControlError::Timeout(format!(
+                    "stop/timeout: 网络 [{network_name}] 的关闭通道已断开且任务未退出；清理结果未知"
+                ))),
+                retry_session: Some(NetworkRuntimeSession {
+                    routing_control,
+                    shutdown,
+                    handle,
+                }),
+            },
+        };
     }
 
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        handle.abort();
-        let _ = handle.await;
-        return Err(RuntimeControlError::Timeout(format!(
-            "stop/timeout: 网络 [{network_name}] 未在期限内退出；已中止并清理共享状态"
-        )));
+        return SessionShutdownResult {
+            network_name: network_name.clone(),
+            result: Err(RuntimeControlError::Timeout(format!(
+                "stop/timeout: 网络 [{network_name}] 未在期限内退出；清理结果未知，任务继续执行清理"
+            ))),
+            retry_session: Some(NetworkRuntimeSession {
+                routing_control,
+                shutdown,
+                handle,
+            }),
+        };
     }
 
     match timeout(remaining, &mut handle).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(RuntimeControlError::Unavailable(format!(
-            "stop/task_failed: 网络 [{network_name}] 的运行时任务异常退出；已清理共享状态: {error}"
-        ))),
-        Err(_) => {
-            handle.abort();
-            let _ = handle.await;
-            Err(RuntimeControlError::Timeout(format!(
-                "stop/timeout: 网络 [{network_name}] 未在期限内退出；已中止并清理共享状态"
-            )))
-        }
+        Ok(Ok(outcome)) => SessionShutdownResult {
+            network_name: network_name.clone(),
+            result: Ok(outcome),
+            retry_session: None,
+        },
+        Ok(Err(error)) => SessionShutdownResult {
+            network_name: network_name.clone(),
+            result: Err(RuntimeControlError::Unavailable(format!(
+                "stop/task_failed: 网络 [{network_name}] 的运行时任务异常退出，清理结果未知: {error}"
+            ))),
+            retry_session: None,
+        },
+        Err(_) => SessionShutdownResult {
+            network_name: network_name.clone(),
+            result: Err(RuntimeControlError::Timeout(format!(
+                "stop/timeout: 网络 [{network_name}] 未在期限内退出；清理结果未知，任务继续执行清理"
+            ))),
+            retry_session: Some(NetworkRuntimeSession {
+                routing_control,
+                shutdown,
+                handle,
+            }),
+        },
     }
 }
 
@@ -2605,6 +2903,25 @@ fn parse_join_target(target: &str) -> Result<(String, String), RuntimeControlErr
     ))
 }
 
+fn cleanup_block_message(report: &RuntimeCleanupReport, network_name: &str) -> String {
+    let mut reasons = Vec::new();
+    if report
+        .residual_networks
+        .iter()
+        .any(|name| name == network_name)
+    {
+        reasons.push("仍检测到 session、listener 或 peer 残留".to_string());
+    }
+    if let Some(outcome) = report.runtime_outcomes.get(network_name) {
+        reasons.extend(outcome.issues());
+    }
+    if reasons.is_empty() {
+        "停止后的资源清理结果不干净".into()
+    } else {
+        reasons.join("; ")
+    }
+}
+
 fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
     match error {
         EmbeddedServiceError::InvalidRequest(message) => RuntimeControlError::Invalid(message),
@@ -2620,6 +2937,15 @@ fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
         } => RuntimeControlError::Launch(format!(
             "网络 [{network_name}] 的内嵌服务启动失败: {message}"
         )),
+        EmbeddedServiceError::StopFailed {
+            network_name,
+            message,
+        } => RuntimeControlError::Unavailable(format!(
+            "网络 [{network_name}] 的内嵌服务停止失败: {message}"
+        )),
+        EmbeddedServiceError::ShutdownFailed { message } => {
+            RuntimeControlError::Unavailable(format!("内嵌网络服务关闭未完全成功: {message}"))
+        }
         EmbeddedServiceError::ActorClosed => RuntimeControlError::ActorClosed,
     }
 }
@@ -2729,8 +3055,10 @@ mod tests {
         NodeCommand, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeEvent,
         NodePeerSnapshot,
     };
+    use crate::p2p::connection::P2pEngine;
+    use crate::stats::StatsCollector;
     use std::collections::HashSet;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -2747,6 +3075,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct FakeLauncher {
+        registry: Option<MultiNetworkRegistry>,
         launches: Arc<Mutex<Vec<String>>>,
         failures: Arc<Mutex<HashSet<String>>>,
         shutdowns: Arc<AtomicUsize>,
@@ -2762,10 +3091,18 @@ mod tests {
         launch_attempts: Arc<AtomicUsize>,
         shutdown_delay_ms: Arc<AtomicU64>,
         shutdown_delays_ms: Arc<Mutex<HashMap<String, u64>>>,
+        cleanup_failures: Arc<Mutex<HashSet<String>>>,
         launched_tun_names: Arc<Mutex<Vec<(String, String)>>>,
     }
 
     impl FakeLauncher {
+        fn with_registry(registry: MultiNetworkRegistry) -> Self {
+            Self {
+                registry: Some(registry),
+                ..Self::default()
+            }
+        }
+
         fn fail(&self, network_name: &str) {
             self.failures
                 .lock()
@@ -2854,6 +3191,13 @@ mod tests {
                 .insert(network_name.into(), delay.as_millis() as u64);
         }
 
+        fn fail_cleanup(&self, network_name: &str) {
+            self.cleanup_failures
+                .lock()
+                .expect("cleanup failure lock poisoned")
+                .insert(network_name.into());
+        }
+
         fn launched_tun_names(&self) -> Vec<(String, String)> {
             self.launched_tun_names
                 .lock()
@@ -2879,7 +3223,9 @@ mod tests {
             let launch_attempts = self.launch_attempts.clone();
             let shutdown_delay_ms = self.shutdown_delay_ms.clone();
             let shutdown_delays_ms = self.shutdown_delays_ms.clone();
+            let cleanup_failures = self.cleanup_failures.clone();
             let launched_tun_names = self.launched_tun_names.clone();
+            let registry = self.registry.clone();
 
             Box::pin(async move {
                 launch_attempts.fetch_add(1, Ordering::SeqCst);
@@ -2918,6 +3264,24 @@ mod tests {
                 let shutdown_network_name = network_name.clone();
                 let config_path = PathBuf::from(request.config_path);
                 let mut current_config = request.config;
+                let p2p = P2pEngine::new_loopback_for_test()
+                    .await
+                    .expect("create loopback p2p engine");
+                let p2p_listen_addr = p2p.local_addr();
+                if let Some(registry) = &registry {
+                    registry
+                        .register(NetworkSessionHandle {
+                            network_name: network_name.clone(),
+                            tun_name: tun_name.clone(),
+                            assigned_ip: Ipv6Addr::LOCALHOST,
+                            assigned_ipv4: Some(Ipv4Addr::LOCALHOST),
+                            p2p: p2p.clone(),
+                            stats: StatsCollector::new(),
+                        })
+                        .await;
+                }
+                let cleanup_registry = registry.clone();
+                let cleanup_p2p = p2p.clone();
                 let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
                 let (shutdown, mut shutdown_rx) = watch::channel(false);
                 let handle = tokio::spawn(async move {
@@ -3040,13 +3404,35 @@ mod tests {
                         }
                     }
                     shutdowns.fetch_add(1, Ordering::SeqCst);
+                    let mut cleanup = RuntimeCleanupOutcome::default();
+                    let status = if cleanup_failures
+                        .lock()
+                        .expect("cleanup failure lock poisoned")
+                        .contains(&shutdown_network_name)
+                    {
+                        CleanupStatus::Failed("测试清理失败".into())
+                    } else {
+                        CleanupStatus::Removed
+                    };
+                    cleanup.record("测试运行时", status);
+                    if cleanup.is_clean() {
+                        if let Err(error) = cleanup_p2p.shutdown().await {
+                            cleanup.record("测试 P2P", CleanupStatus::Failed(format!("{error:#}")));
+                        }
+                    }
+                    if cleanup.is_clean() {
+                        if let Some(registry) = cleanup_registry {
+                            registry.unregister(&shutdown_network_name).await;
+                        }
+                    }
+                    cleanup
                 });
 
                 Ok(StartedNetworkRuntime {
                     tun_name,
                     assigned_ipv6: Ipv6Addr::LOCALHOST,
                     assigned_ipv4: Some(Ipv4Addr::LOCALHOST),
-                    p2p_listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                    p2p_listen_addr,
                     identity: NodeIdentitySnapshot {
                         node_id: format!("node-{network_name}"),
                         display_name: None,
@@ -3103,9 +3489,9 @@ mod tests {
             let lifecycle = NodeLifecycle::new();
             let running = lifecycle.running(0, Vec::new()).await;
             state.set_lifecycle(running).await;
-            let services = EmbeddedServiceManager::spawn(4);
+            let services = EmbeddedServiceManager::spawn_with_config(4, configs.clone());
             let registry = MultiNetworkRegistry::new();
-            let fake = FakeLauncher::default();
+            let fake = FakeLauncher::with_registry(registry.clone());
             let runtime = NetworkRuntimeManager::spawn_with_launcher_and_timeouts(
                 configs.clone(),
                 RuntimeOptions::default(),
@@ -3133,6 +3519,10 @@ mod tests {
 
         async fn shutdown(&self) {
             let _ = self.runtime.shutdown().await;
+            for session in self.registry.get_all().await {
+                let _ = session.p2p.shutdown().await;
+                self.registry.unregister(&session.network_name).await;
+            }
             let _ = std::fs::remove_dir_all(&self.config_dir);
         }
     }
@@ -5008,11 +5398,20 @@ mod tests {
         assert_eq!(summary.failed.len(), 1);
         assert_eq!(summary.failed[0].network_name, "slow-stop");
         assert!(summary.failed[0].message.contains("stop/timeout"));
-        assert!(harness.registry.get_all().await.is_empty());
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == "slow-stop")
+                .expect("failed network")
+                .status,
+            NodeNetworkStatus::Failed
+        );
 
         let lifecycle = harness.lifecycle.snapshot().await;
         assert_eq!(lifecycle.phase, NodePhase::Running);
-        assert_eq!(lifecycle.active_networks, 0);
+        assert_eq!(lifecycle.active_networks, 1);
         assert_eq!(lifecycle.failed_networks, vec!["slow-stop"]);
 
         harness.shutdown().await;
@@ -5059,13 +5458,13 @@ mod tests {
             "network shutdowns were serialized: {:?}",
             started.elapsed()
         );
-        assert!(harness.registry.get_all().await.is_empty());
+        assert_eq!(summary.cleanup.runtime_outcomes.len(), 12);
 
         harness.shutdown().await;
     }
 
     #[tokio::test]
-    async fn stop_timeout_force_cleans_shared_runtime_state() {
+    async fn stop_timeout_keeps_residue_until_the_runtime_reports_cleanup() {
         let harness = TestHarness::new_with_timeouts(
             "stop-timeout",
             RuntimeTimeouts {
@@ -5086,7 +5485,49 @@ mod tests {
         assert_eq!(summary.failed.len(), 1);
         assert_eq!(summary.failed[0].network_name, "slow-stop");
         assert!(summary.failed[0].message.contains("stop/timeout"));
-        assert!(summary.failed[0].message.contains("已中止并清理共享状态"));
+        assert!(summary.failed[0].message.contains("清理结果未知"));
+        assert_eq!(summary.cleanup.sessions_remaining, 1);
+        assert_eq!(summary.cleanup.listeners_remaining, 1);
+        assert_eq!(summary.cleanup.residual_networks, vec!["slow-stop"]);
+        assert_eq!(harness.registry.get_all().await.len(), 1);
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "slow-stop")
+            .expect("failed network state");
+        assert_eq!(network.status, NodeNetworkStatus::Failed);
+
+        let restarted = harness
+            .runtime
+            .restart(vec!["slow-stop".into()], false)
+            .await
+            .expect("restart waits for the real cleanup outcome");
+        assert_eq!(restarted.restarted, vec!["slow-stop"]);
+        assert!(restarted.failed.is_empty());
+        assert!(restarted
+            .cleanup
+            .runtime_outcomes
+            .get("slow-stop")
+            .expect("runtime cleanup outcome")
+            .is_clean());
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "slow-stop")
+            .expect("restarted network state");
+        assert_eq!(network.status, NodeNetworkStatus::Online);
+        assert_eq!(harness.fake.launch_attempts(), 2);
+
+        harness.fake.set_shutdown_delay(Duration::ZERO);
+        let retried = harness
+            .runtime
+            .stop(vec!["slow-stop".into()], false)
+            .await
+            .expect("stop after restart cleans the replacement runtime");
+        assert_eq!(retried.stopped, vec!["slow-stop"]);
+        assert!(retried.failed.is_empty());
         assert!(harness.registry.get_all().await.is_empty());
         let snapshot = harness.state.snapshot().await;
         let network = snapshot
@@ -5095,8 +5536,73 @@ mod tests {
             .find(|network| network.name == "slow-stop")
             .expect("offline network state");
         assert_eq!(network.status, NodeNetworkStatus::Offline);
-        assert_eq!(network.peer_count, 0);
-        assert!(snapshot.peers.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_keeps_residue_and_blocks_restart_before_launch() {
+        let harness = TestHarness::new("cleanup-failure").await;
+        start_fake_network(&harness, "broken-cleanup").await;
+        harness
+            .state
+            .update(|snapshot| {
+                if let Some(network) = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "broken-cleanup")
+                {
+                    network.peer_count = 1;
+                }
+                snapshot.peers.push(peer_snapshot("broken-cleanup"));
+            })
+            .await;
+        harness.fake.fail_cleanup("broken-cleanup");
+
+        let summary = harness
+            .runtime
+            .stop(vec!["broken-cleanup".into()], false)
+            .await
+            .expect("cleanup failure returns a partial-failure summary");
+        assert!(summary.stopped.is_empty());
+        assert_eq!(summary.failed.len(), 1);
+        let outcome = summary
+            .cleanup
+            .runtime_outcomes
+            .get("broken-cleanup")
+            .expect("runtime cleanup outcome");
+        assert!(!outcome.is_clean());
+        assert!(outcome.summary().contains("测试清理失败"));
+        assert_eq!(summary.cleanup.peers_remaining, 1);
+        assert_eq!(summary.cleanup.listeners_remaining, 1);
+        assert_eq!(summary.cleanup.residual_networks, vec!["broken-cleanup"]);
+        assert_eq!(harness.registry.get_all().await.len(), 1);
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "broken-cleanup")
+            .expect("failed network state");
+        assert_eq!(network.status, NodeNetworkStatus::Failed);
+        assert_eq!(network.peer_count, 1);
+        assert!(snapshot
+            .peers
+            .iter()
+            .any(|peer| peer.network_name == "broken-cleanup"));
+
+        let launches_before_restart = harness.fake.launch_attempts();
+        let restart = harness
+            .runtime
+            .restart(vec!["broken-cleanup".into()], false)
+            .await
+            .expect("restart returns a cleanup-phase failure");
+        assert!(restart.restarted.is_empty());
+        assert_eq!(restart.failed.len(), 1);
+        assert_eq!(restart.failed[0].phase, RestartPhase::Cleanup);
+        assert!(restart.failed[0].message.contains("测试清理失败"));
+        assert_eq!(harness.fake.launch_attempts(), launches_before_restart);
+        assert_eq!(restart.cleanup.residual_networks, vec!["broken-cleanup"]);
+        assert_eq!(harness.registry.get_all().await.len(), 1);
 
         harness.shutdown().await;
     }

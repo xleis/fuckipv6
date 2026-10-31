@@ -63,8 +63,11 @@ impl ConfigManager {
         Ok(Self { config_dir })
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_for_dir(config_dir: PathBuf) -> Result<Self> {
+    /// Create a manager rooted at an explicit directory.
+    ///
+    /// This is used by embedders and tests that must not touch the user's
+    /// default configuration directory.
+    pub fn new_for_dir(config_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&config_dir).context("无法创建配置目录")?;
         Ok(Self { config_dir })
     }
@@ -195,9 +198,13 @@ impl ConfigManager {
     ) -> Result<PathBuf> {
         Self::validate_network_name(network_name)?;
         let network_dir = self.get_network_dir(network_name);
+        let config_file = network_dir.join("config.toml");
         let mut list = self.load_network_list()?;
 
-        if list.networks.contains_key(network_name) || network_dir.exists() {
+        // The coordinator persists coordinator.toml under the same per-network
+        // directory before the client configuration is created. Only an
+        // existing client config (or list entry) is a duplicate network.
+        if list.networks.contains_key(network_name) || config_file.exists() {
             anyhow::bail!("网络配置已存在: {}", network_name);
         }
 
@@ -219,7 +226,6 @@ impl ConfigManager {
             exit_node: Default::default(),
         };
 
-        let config_file = network_dir.join("config.toml");
         config
             .save_to_file(&config_file)
             .with_context(|| format!("无法保存网络配置: {}", config_file.display()))?;
@@ -514,6 +520,25 @@ mod tests {
             .create_network("../escape", "ws://escape.example:6666", false)
             .is_err());
         assert!(!manager.network_exists("../escape"));
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn creates_client_config_when_coordinator_state_directory_exists() -> anyhow::Result<()> {
+        let dir = temp_config_dir("coordinator-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let coordinator_config = manager.coordinator_config_path("hosted")?;
+        std::fs::create_dir_all(coordinator_config.parent().expect("coordinator parent"))?;
+        std::fs::write(&coordinator_config, "persisted coordinator state")?;
+
+        let config = manager.create_network("hosted", "ws://127.0.0.1:6666", true)?;
+
+        assert!(config.exists());
+        assert!(coordinator_config.exists());
+        assert!(manager.network_exists("hosted"));
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

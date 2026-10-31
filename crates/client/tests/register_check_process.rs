@@ -10,13 +10,15 @@ use tokio::process::Command;
 async fn register_check_command_registers_with_embedded_host() -> Result<()> {
     let node_bin = workspace_bin("fuckipv6")?;
     let signaling_addr = free_loopback_addr().await?;
-    let coordinator = EmbeddedCoordinator::start(
+    let config_dir = unique_temp_dir("coordinator");
+    let mut coordinator = EmbeddedCoordinator::start_with_config_dir(
         "register-check-test",
         signaling_addr.port(),
         0,
         None,
         Some("127.0.0.1".to_string()),
         None,
+        config_dir.clone(),
     )
     .await?;
     let advertised_relay_addr = SocketAddr::new(signaling_addr.ip(), coordinator.relay_addr.port());
@@ -42,8 +44,10 @@ async fn register_check_command_registers_with_embedded_host() -> Result<()> {
     .context("register-check process timed out")?
     .context("failed to run register-check process")?;
 
+    coordinator.shutdown().await?;
     drop(coordinator);
     let _ = std::fs::remove_file(&key_path);
+    let _ = std::fs::remove_dir_all(&config_dir);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -104,12 +108,13 @@ fn workspace_bin(name: &str) -> Result<PathBuf> {
 }
 
 fn unique_temp_key_path() -> PathBuf {
+    unique_temp_dir("register-check").with_extension("key")
+}
+
+fn unique_temp_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!(
-        "fuckipv6-register-check-{}-{nanos}.key",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("fuckipv6-{label}-{}-{nanos}", std::process::id(),))
 }

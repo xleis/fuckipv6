@@ -190,6 +190,74 @@ pub async fn start_with_config_and_options(
     anyhow::bail!(CONFIG_START_REPLACEMENT)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CleanupStatus {
+    Removed,
+    NotOwned,
+    Deferred(String),
+    Failed(String),
+    Unknown(String),
+}
+
+impl CleanupStatus {
+    pub(crate) fn is_clean(&self) -> bool {
+        matches!(self, Self::Removed | Self::NotOwned)
+    }
+
+    fn issue(&self) -> Option<String> {
+        match self {
+            Self::Removed | Self::NotOwned => None,
+            Self::Deferred(message) => Some(format!("延迟完成: {message}")),
+            Self::Failed(message) => Some(format!("失败: {message}")),
+            Self::Unknown(message) => Some(format!("状态未知: {message}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CleanupStep {
+    pub resource: &'static str,
+    pub status: CleanupStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeCleanupOutcome {
+    pub steps: Vec<CleanupStep>,
+}
+
+impl RuntimeCleanupOutcome {
+    pub(crate) fn record(&mut self, resource: &'static str, status: CleanupStatus) {
+        self.steps.push(CleanupStep { resource, status });
+    }
+
+    pub(crate) fn is_clean(&self) -> bool {
+        !self.steps.is_empty() && self.steps.iter().all(|step| step.status.is_clean())
+    }
+
+    pub(crate) fn issues(&self) -> Vec<String> {
+        if self.steps.is_empty() {
+            return vec!["运行时未返回清理结果".into()];
+        }
+        self.steps
+            .iter()
+            .filter_map(|step| {
+                step.status
+                    .issue()
+                    .map(|issue| format!("{} {issue}", step.resource))
+            })
+            .collect()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let issues = self.issues();
+        if issues.is_empty() {
+            "运行资源已清理".into()
+        } else {
+            issues.join("; ")
+        }
+    }
+}
+
 pub(crate) struct ClientRuntime {
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
@@ -213,9 +281,9 @@ pub(crate) struct ClientRuntime {
     pub(crate) config_path: String,
     pub(crate) config: ClientConfig,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
-    pub(crate) ipc_task: JoinHandle<()>,
-    pub(crate) config_reload_task: JoinHandle<()>,
-    pub(crate) tun_reader_task: JoinHandle<()>,
+    pub(crate) ipc_task: Option<JoinHandle<()>>,
+    pub(crate) config_reload_task: Option<JoinHandle<()>>,
+    pub(crate) tun_reader_task: Option<JoinHandle<()>>,
 }
 
 impl ClientRuntime {
@@ -226,21 +294,21 @@ impl ClientRuntime {
     pub(crate) async fn run_with_shutdown(
         &mut self,
         shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
-    ) -> Result<()> {
+    ) -> Result<Option<DisconnectReply>> {
         run_client_event_loop_with_shutdown(self, shutdown_rx).await
     }
 
-    pub(crate) async fn shutdown(&mut self) {
-        shutdown_runtime(self).await;
+    pub(crate) async fn shutdown(&mut self) -> RuntimeCleanupOutcome {
+        shutdown_runtime(self).await
     }
 }
 
 impl Drop for ClientRuntime {
     fn drop(&mut self) {
         self.signaling.shutdown();
-        self.ipc_task.abort();
-        self.config_reload_task.abort();
-        self.tun_reader_task.abort();
+        abort_task(&self.ipc_task);
+        abort_task(&self.config_reload_task);
+        abort_task(&self.tun_reader_task);
     }
 }
 
@@ -351,7 +419,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 .add_peer_bypasses(&peer.client_id, &peer.endpoints)
                 .await
             {
-                manager.rollback().await;
+                let _ = manager.rollback().await;
                 signaling.shutdown();
                 if let Some(relay) = relay.as_ref() {
                     relay.close().await;
@@ -364,7 +432,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         {
             Ok(forwarder) => forwarder,
             Err(error) => {
-                manager.rollback().await;
+                let _ = manager.rollback().await;
                 signaling.shutdown();
                 if let Some(relay) = relay.as_ref() {
                     relay.close().await;
@@ -440,9 +508,9 @@ pub(crate) async fn prepare_client_runtime_ext(
         config_path: config_path.to_string(),
         config,
         control_rx,
-        ipc_task: tasks.ipc_task,
-        config_reload_task: tasks.config_reload_task,
-        tun_reader_task: tasks.tun_reader_task,
+        ipc_task: Some(tasks.ipc_task),
+        config_reload_task: Some(tasks.config_reload_task),
+        tun_reader_task: Some(tasks.tun_reader_task),
     })
 }
 
@@ -772,10 +840,17 @@ async fn connect_quic_relay(
     }
 }
 
+pub(crate) type DisconnectReply = tokio::sync::oneshot::Sender<std::result::Result<(), String>>;
+
+enum RuntimeCommandOutcome {
+    Continue,
+    Disconnect(DisconnectReply),
+}
+
 pub(crate) async fn run_client_event_loop_with_shutdown(
     runtime: &mut ClientRuntime,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
-) -> Result<()> {
+) -> Result<Option<DisconnectReply>> {
     loop {
         tokio::select! {
             // 从TUN设备读取数据包
@@ -797,7 +872,6 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         "信令重连后虚拟网络租约无法维持，客户端已失败关闭",
                     );
                     tracing::error!("{error:#}");
-                    shutdown_runtime(runtime).await;
                     return Err(error);
                 }
             }
@@ -831,8 +905,9 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
 
             // 本地控制接口下发的运行时命令
             Some(command) = runtime.control_rx.recv() => {
-                if handle_runtime_command(runtime, command).await {
-                    break;
+                match handle_runtime_command(runtime, command).await {
+                    RuntimeCommandOutcome::Continue => {}
+                    RuntimeCommandOutcome::Disconnect(reply) => return Ok(Some(reply)),
                 }
             }
 
@@ -849,20 +924,22 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
             }
 
             // 监听停止信号
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    tracing::info!("收到停止信号，正在优雅退出运行时...");
-                    shutdown_runtime(runtime).await;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    tracing::info!("收到停止信号，正在退出运行时事件循环...");
                     break;
                 }
             }
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
-async fn handle_runtime_command(runtime: &mut ClientRuntime, command: ipc::RuntimeCommand) -> bool {
+async fn handle_runtime_command(
+    runtime: &mut ClientRuntime,
+    command: ipc::RuntimeCommand,
+) -> RuntimeCommandOutcome {
     match command {
         ipc::RuntimeCommand::ProbePeer {
             target,
@@ -876,7 +953,7 @@ async fn handle_runtime_command(runtime: &mut ClientRuntime, command: ipc::Runti
                 .await
                 .ok_or_else(|| format!("未找到在线对等节点: {target}"));
             let _ = reply.send(result);
-            false
+            RuntimeCommandOutcome::Continue
         }
         ipc::RuntimeCommand::UpdateRouting {
             mode,
@@ -886,13 +963,11 @@ async fn handle_runtime_command(runtime: &mut ClientRuntime, command: ipc::Runti
         } => {
             let result = apply_runtime_routing(runtime, &mode, exit_node, is_exit_node).await;
             let _ = reply.send(result);
-            false
+            RuntimeCommandOutcome::Continue
         }
         ipc::RuntimeCommand::Disconnect { reply } => {
-            tracing::info!("收到本地控制接口的断开请求");
-            shutdown_runtime(runtime).await;
-            let _ = reply.send(Ok(()));
-            true
+            tracing::info!("收到本地控制接口的断开请求，等待 launcher 完成资源清理");
+            RuntimeCommandOutcome::Disconnect(reply)
         }
     }
 }
@@ -962,7 +1037,7 @@ async fn apply_runtime_routing(
     #[cfg(target_os = "linux")]
     if let Err(error) = apply_linux_routing_mode(runtime, parsed_mode).await {
         if let Some(mut forwarder) = staged_exit_forwarder.take() {
-            forwarder.rollback();
+            let _ = forwarder.rollback();
         }
         return Err(format!("Linux 策略路由热更新失败: {error:#}"));
     }
@@ -975,7 +1050,7 @@ async fn apply_runtime_routing(
 
         #[cfg(target_os = "linux")]
         if let Some(mut forwarder) = staged_exit_forwarder.take() {
-            forwarder.rollback();
+            let _ = forwarder.rollback();
         }
 
         return match rollback_error {
@@ -998,7 +1073,7 @@ async fn apply_runtime_routing(
         }
         ExitForwardingAction::Remove => {
             if let Some(mut forwarder) = runtime.exit_forwarder.take() {
-                forwarder.rollback();
+                let _ = forwarder.rollback();
             }
         }
         ExitForwardingAction::Keep => {}
@@ -1421,29 +1496,104 @@ async fn write_payloads_to_tun(
     }
 }
 
-async fn shutdown_runtime(runtime: &mut ClientRuntime) {
+fn abort_task(task: &Option<JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
+    }
+}
+
+async fn stop_runtime_task(task: &mut Option<JoinHandle<()>>) -> CleanupStatus {
+    let Some(handle) = task.as_mut() else {
+        return CleanupStatus::NotOwned;
+    };
+
+    // Request cancellation first, then join the handle so the task can release
+    // cloned TUN/socket ownership before the corresponding device is removed.
+    handle.abort();
+    match tokio::time::timeout(Duration::from_secs(2), &mut *handle).await {
+        Ok(Ok(())) => {
+            *task = None;
+            CleanupStatus::Removed
+        }
+        Ok(Err(error)) if error.is_cancelled() => {
+            *task = None;
+            CleanupStatus::Removed
+        }
+        Ok(Err(error)) => {
+            *task = None;
+            CleanupStatus::Failed(error.to_string())
+        }
+        Err(_) => CleanupStatus::Deferred("任务在取消后 2 秒内仍未退出".into()),
+    }
+}
+
+async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome {
+    let mut outcome = RuntimeCleanupOutcome::default();
+
+    // TUN reader owns a device handle and must be joined before delete(). The
+    // config watcher and private IPC listener are stopped under the same bound.
+    let (ipc, config_reload, tun_reader) = tokio::join!(
+        stop_runtime_task(&mut runtime.ipc_task),
+        stop_runtime_task(&mut runtime.config_reload_task),
+        stop_runtime_task(&mut runtime.tun_reader_task),
+    );
+    outcome.record("控制监听任务", ipc);
+    outcome.record("配置监听任务", config_reload);
+    outcome.record("TUN 读取任务", tun_reader);
+
+    match runtime.signaling.close().await {
+        Ok(()) => outcome.record("信令连接", CleanupStatus::Removed),
+        Err(error) => outcome.record("信令连接", CleanupStatus::Failed(format!("{error:#}"))),
+    }
+
+    let relay = runtime.outbound.close_relay().await;
+    outcome.record("QUIC 中继", relay);
+
+    match runtime.p2p.shutdown().await {
+        Ok(()) => outcome.record("P2P UDP 监听与子任务", CleanupStatus::Removed),
+        Err(error) => outcome.record(
+            "P2P UDP 监听与子任务",
+            CleanupStatus::Failed(format!("{error:#}")),
+        ),
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
-            forwarder.rollback();
+            match forwarder.rollback() {
+                Ok(()) => {
+                    runtime.exit_forwarder = None;
+                    outcome.record("Exit 转发规则", CleanupStatus::Removed);
+                }
+                Err(error) => {
+                    outcome.record("Exit 转发规则", CleanupStatus::Failed(format!("{error:#}")))
+                }
+            }
+        } else {
+            outcome.record("Exit 转发规则", CleanupStatus::NotOwned);
         }
-        runtime.exit_forwarder = None;
-        runtime.route_manager.rollback().await;
+        match tokio::time::timeout(Duration::from_secs(5), runtime.route_manager.rollback()).await {
+            Ok(Ok(())) => outcome.record("路由与 DNS", CleanupStatus::Removed),
+            Ok(Err(error)) => {
+                outcome.record("路由与 DNS", CleanupStatus::Failed(format!("{error:#}")))
+            }
+            Err(_) => outcome.record(
+                "路由与 DNS",
+                CleanupStatus::Deferred("回滚在 5 秒内未完成".into()),
+            ),
+        }
     }
 
-    if let Err(e) = runtime.signaling.close().await {
-        tracing::warn!("关闭信令连接失败: {:?}", e);
+    match tokio::time::timeout(Duration::from_secs(2), runtime.tun.delete()).await {
+        Ok(Ok(())) => outcome.record("TUN 设备", CleanupStatus::Removed),
+        Ok(Err(error)) => outcome.record("TUN 设备", CleanupStatus::Failed(format!("{error:#}"))),
+        Err(_) => outcome.record(
+            "TUN 设备",
+            CleanupStatus::Deferred("删除在 2 秒内未完成".into()),
+        ),
     }
 
-    runtime.outbound.close_relay().await;
-
-    if let Err(e) = runtime.tun.delete().await {
-        tracing::warn!("删除TUN设备失败: {:?}", e);
-    }
-
-    runtime.ipc_task.abort();
-    runtime.config_reload_task.abort();
-    runtime.tun_reader_task.abort();
+    outcome
 }
 
 fn spawn_tun_reader(
@@ -2100,9 +2250,13 @@ impl OutboundDispatcher {
         self.relay_state.clear_relay(generation).await
     }
 
-    async fn close_relay(&self) {
-        if let Some(relay) = self.relay_state.take_relay().await {
-            relay.client.close().await;
+    async fn close_relay(&self) -> CleanupStatus {
+        match self.relay_state.take_relay().await {
+            Some(relay) => {
+                relay.client.close().await;
+                CleanupStatus::Removed
+            }
+            None => CleanupStatus::NotOwned,
         }
     }
 

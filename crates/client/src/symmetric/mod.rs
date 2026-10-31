@@ -26,8 +26,8 @@ pub struct EmbeddedCoordinator {
     pub signaling_addr: SocketAddr,
     pub relay_addr: SocketAddr,
     pub session_manager: Arc<SessionManager>,
-    _signaling_task: JoinHandle<Result<()>>,
-    _relay_task: JoinHandle<Result<()>>,
+    signaling_task: Option<JoinHandle<Result<()>>>,
+    relay_task: Option<JoinHandle<Result<()>>>,
 }
 
 impl EmbeddedCoordinator {
@@ -40,11 +40,58 @@ impl EmbeddedCoordinator {
         external_host: Option<String>,
         ip_pool: Option<&str>,
     ) -> Result<Self> {
+        let config_manager = ConfigManager::new().context("无法确定节点配置目录")?;
+        Self::start_with_config_manager(
+            network_name,
+            signaling_port,
+            relay_port,
+            host_public_key,
+            external_host,
+            ip_pool,
+            config_manager,
+        )
+        .await
+    }
+
+    /// Start an embedded coordinator using an explicitly isolated config
+    /// directory. Intended for embedders and tests that must not read or write
+    /// the user's default config directory.
+    pub async fn start_with_config_dir(
+        network_name: &str,
+        signaling_port: u16,
+        relay_port: u16,
+        host_public_key: Option<[u8; 32]>,
+        external_host: Option<String>,
+        ip_pool: Option<&str>,
+        config_dir: std::path::PathBuf,
+    ) -> Result<Self> {
+        let config_manager =
+            ConfigManager::new_for_dir(config_dir).context("无法初始化内嵌协调端配置目录")?;
+        Self::start_with_config_manager(
+            network_name,
+            signaling_port,
+            relay_port,
+            host_public_key,
+            external_host,
+            ip_pool,
+            config_manager,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_config_manager(
+        network_name: &str,
+        signaling_port: u16,
+        relay_port: u16,
+        host_public_key: Option<[u8; 32]>,
+        external_host: Option<String>,
+        ip_pool: Option<&str>,
+        config_manager: ConfigManager,
+    ) -> Result<Self> {
         let pool = ip_pool.unwrap_or("fd00::1000/120");
         let session_manager =
             Arc::new(SessionManager::new(pool).context("无法初始化内嵌协调器地址池")?);
 
-        let config_manager = ConfigManager::new().context("无法确定节点配置目录")?;
         let blacklist_path = config_manager
             .coordinator_config_path(network_name)
             .context("无法确定协调端黑名单持久化路径")?;
@@ -140,16 +187,46 @@ impl EmbeddedCoordinator {
             signaling_addr,
             relay_addr: actual_relay_addr,
             session_manager,
-            _signaling_task: signaling_task,
-            _relay_task: relay_task,
+            signaling_task: Some(signaling_task),
+            relay_task: Some(relay_task),
         })
+    }
+
+    /// Stop and join both listener tasks so their TCP/UDP ports are released
+    /// before the caller treats the service as stopped.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for (name, task) in [
+            ("信令", self.signaling_task.take()),
+            ("QUIC 中继", self.relay_task.take()),
+        ] {
+            let Some(task) = task else {
+                continue;
+            };
+            task.abort();
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(format!("{name}服务异常退出: {error:#}")),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => failures.push(format!("{name}服务任务异常: {error}")),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("{}", failures.join("; "))
+        }
     }
 }
 
 impl Drop for EmbeddedCoordinator {
     fn drop(&mut self) {
-        self._signaling_task.abort();
-        self._relay_task.abort();
+        if let Some(task) = self.signaling_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.relay_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -159,14 +236,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_embedded_coordinator_startup() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-embedded-coordinator-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
         // 使用端口 0 避免冲突 (信令使用系统空闲端口)
-        let coordinator = EmbeddedCoordinator::start(
+        let mut coordinator = EmbeddedCoordinator::start_with_config_dir(
             "test-mesh",
             0, // random free port
             0,
             None,
             Some("127.0.0.1".to_string()),
             Some("fd00::1000/120"),
+            config_dir.clone(),
         )
         .await
         .expect("start embedded coordinator failed");
@@ -175,5 +258,7 @@ mod tests {
         assert!(coordinator.ticket.to_string().starts_with("fk://"));
         assert_ne!(coordinator.signaling_addr.port(), 0);
         assert_ne!(coordinator.relay_addr.port(), 0);
+        coordinator.shutdown().await.expect("shutdown coordinator");
+        let _ = std::fs::remove_dir_all(config_dir);
     }
 }

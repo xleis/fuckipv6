@@ -11,11 +11,13 @@ use fuckipv6_secure_session::{DataHeader, AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DAT
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 
 use super::admission::{HandshakeAdmission, HandshakeAdmissionMetrics};
@@ -325,7 +327,11 @@ impl From<&PeerInfo> for PeerRouteInfo {
 #[derive(Clone)]
 pub struct P2pEngine {
     local_addr: SocketAddr,
-    socket: Arc<UdpSocket>,
+    socket: Arc<StdMutex<Option<Arc<UdpSocket>>>>,
+    shutdown: watch::Sender<bool>,
+    shutdown_started: Arc<AtomicBool>,
+    receiver_task: Arc<StdMutex<Option<JoinHandle<()>>>>,
+    child_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
     ip_index: Arc<RwLock<HashMap<IpAddr, Arc<str>>>>,
     receiver_index: Arc<RwLock<ReceiverIndex>>,
@@ -352,6 +358,18 @@ pub struct P2pEngine {
 }
 
 impl P2pEngine {
+    #[cfg(test)]
+    pub(crate) async fn new_loopback_for_test() -> Result<Self> {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .context("无法绑定测试用回环 UDP socket")?;
+        Self::from_socket_with_limits(
+            socket,
+            DEFAULT_INBOUND_QUEUE_CAPACITY,
+            DEFAULT_UDP_BATCH_SIZE,
+        )
+    }
+
     /// 创建P2P引擎
     pub async fn new(listen_port: u16) -> Result<Self> {
         Self::new_with_limits(
@@ -466,7 +484,8 @@ impl P2pEngine {
         let udp_batch_stats = Arc::new(UdpBatchStats::default());
         let (incoming_tx, incoming_rx, _) = inbound_queue::channel(inbound_queue_capacity);
 
-        spawn_udp_receiver(
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let receiver_task = spawn_udp_receiver(
             socket.clone(),
             connections.clone(),
             ip_index.clone(),
@@ -477,11 +496,16 @@ impl P2pEngine {
             local_ip.clone(),
             overlay.clone(),
             incoming_tx.clone(),
+            shutdown_rx,
         );
 
         Ok(Self {
             local_addr,
-            socket,
+            socket: Arc::new(StdMutex::new(Some(socket))),
+            shutdown,
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            receiver_task: Arc::new(StdMutex::new(Some(receiver_task))),
+            child_tasks: Arc::new(StdMutex::new(Vec::new())),
             connections,
             ip_index,
             receiver_index,
@@ -720,12 +744,9 @@ impl P2pEngine {
             .unwrap_or(IpAddr::V6(peer_info.virtual_ip));
         self.start_endpoint_probing(client_id.clone(), primary_ip);
         if secure.is_initiator() {
-            spawn_secure_initiator(
-                self.socket.clone(),
-                self.connections.clone(),
-                client_id,
-                secure,
-            );
+            let task =
+                spawn_secure_initiator(self.socket()?, self.connections.clone(), client_id, secure);
+            self.register_child_task(task);
         }
 
         Ok(())
@@ -962,8 +983,8 @@ impl P2pEngine {
             }
         }
 
-        match self
-            .socket
+        let socket = self.socket()?;
+        match socket
             .send_to(
                 &packet[..encoded_len],
                 dual_stack_send_endpoint(destination),
@@ -1111,6 +1132,7 @@ impl P2pEngine {
             }
         }
 
+        let socket = self.socket()?;
         if prefix_len > 0 {
             let destination = sealed[0]
                 .as_ref()
@@ -1131,7 +1153,7 @@ impl P2pEngine {
                     let injected = self.send_batch_short_return.load(Ordering::Relaxed);
                     if injected == usize::MAX {
                         udp_batch::send_batch(
-                            &self.socket,
+                            &socket,
                             dual_stack_send_endpoint(destination),
                             &send_refs,
                         )
@@ -1143,7 +1165,7 @@ impl P2pEngine {
                 #[cfg(not(test))]
                 {
                     udp_batch::send_batch(
-                        &self.socket,
+                        &socket,
                         dual_stack_send_endpoint(destination),
                         &send_refs,
                     )
@@ -1516,9 +1538,9 @@ impl P2pEngine {
         let data = codec::encode(&ping).ok()?;
 
         record_peer_probe_sent(&self.connections, client_id.as_ref(), timestamp).await;
+        let socket = self.socket().ok()?;
         for endpoint in &endpoints {
-            let _ = self
-                .socket
+            let _ = socket
                 .send_to(&data, dual_stack_send_endpoint(*endpoint))
                 .await;
         }
@@ -1557,11 +1579,13 @@ impl P2pEngine {
     }
 
     fn start_endpoint_probing(&self, client_id: String, _peer_primary_ip: IpAddr) {
-        let socket = self.socket.clone();
+        let Ok(socket) = self.socket() else {
+            return;
+        };
         let connections = self.connections.clone();
         let local_ip = self.local_ip.clone();
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut attempts = 0usize;
             loop {
                 let Some(src_ip) = *local_ip.read().await else {
@@ -1603,6 +1627,83 @@ impl P2pEngine {
                 sleep(interval).await;
             }
         });
+        self.register_child_task(task);
+    }
+
+    fn socket(&self) -> Result<Arc<UdpSocket>> {
+        self.socket
+            .lock()
+            .expect("P2P socket slot poisoned")
+            .clone()
+            .context("P2P 引擎已停止")
+    }
+
+    fn register_child_task(&self, task: JoinHandle<()>) {
+        let mut tasks = self
+            .child_tasks
+            .lock()
+            .expect("P2P child task registry poisoned");
+        if self.shutdown_started.load(Ordering::Acquire) {
+            task.abort();
+        } else {
+            tasks.push(task);
+        }
+    }
+
+    /// Stop the UDP receiver and all P2P background tasks, wait for them to
+    /// release the socket, and make later sends fail explicitly.
+    pub async fn shutdown(&self) -> Result<()> {
+        let first_shutdown = !self.shutdown_started.swap(true, Ordering::AcqRel);
+        if first_shutdown {
+            let _ = self.shutdown.send(true);
+        }
+
+        let receiver = self
+            .receiver_task
+            .lock()
+            .expect("P2P receiver task slot poisoned")
+            .take();
+        let mut failures = Vec::new();
+        if let Some(mut task) = receiver {
+            match tokio::time::timeout(Duration::from_secs(1), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    failures.push(format!("UDP 接收任务异常退出: {error}"));
+                }
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    failures.push("UDP 接收任务未在期限内停止，已中止".to_string());
+                }
+            }
+        }
+
+        let child_tasks = self
+            .child_tasks
+            .lock()
+            .expect("P2P child task registry poisoned")
+            .drain(..)
+            .collect::<Vec<_>>();
+        for task in child_tasks {
+            task.abort();
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    failures.push(format!("P2P 子任务异常退出: {error}"));
+                }
+            }
+        }
+
+        self.connections.write().await.clear();
+        self.ip_index.write().await.clear();
+        *self.receiver_index.write().await = ReceiverIndex::default();
+        self.quic_mesh.write().await.take();
+        self.socket.lock().expect("P2P socket slot poisoned").take();
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("{}", failures.join("; "))
+        }
     }
 }
 
@@ -1611,7 +1712,7 @@ fn spawn_secure_initiator(
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
     client_id: String,
     secure: Arc<SecurePeerState>,
-) {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let endpoints = {
@@ -1688,7 +1789,7 @@ fn spawn_secure_initiator(
 
             sleep(SECURE_HANDSHAKE_RETRY_INTERVAL).await;
         }
-    });
+    })
 }
 
 /// A dual-stack IPv6 UDP socket requires IPv4 destinations in IPv4-mapped
@@ -1792,12 +1893,23 @@ fn spawn_udp_receiver(
     local_ip: Arc<RwLock<Option<IpAddr>>>,
     overlay: Arc<super::overlay::P2pOverlay>,
     incoming_tx: InboundQueueSender,
-) {
+    mut shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut receive_scratch = udp_batch::UdpReceiveScratch::default();
         loop {
             let mut payloads: Vec<_> = (0..udp_batch_size).map(|_| buffer_pool.acquire()).collect();
-            match udp_batch::receive_batch(&socket, &mut payloads, &mut receive_scratch).await {
+            let receive_result = tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                result = udp_batch::receive_batch(&socket, &mut payloads, &mut receive_scratch) => result,
+            };
+            match receive_result {
                 Ok(received) if !received.is_empty() => {
                     udp_batch_stats.record_recv(received.len());
                     let mut datagrams = Vec::with_capacity(received.len());
@@ -1828,7 +1940,7 @@ fn spawn_udp_receiver(
                 }
             }
         }
-    });
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2801,6 +2913,7 @@ mod tests {
     #[tokio::test]
     async fn udp_dispatch_batches_out_of_order_direct_plaintext() -> Result<()> {
         let (engine_a, engine_b, ip_a, ip_b, endpoint_a, _) = established_direct_peers().await?;
+        let socket_b = engine_b.socket()?;
         let payloads = (0..8u8)
             .map(|marker| vec![marker; 1_420])
             .collect::<Vec<_>>();
@@ -2819,7 +2932,7 @@ mod tests {
             .store(0, Ordering::Relaxed);
         let before = fuckipv6_secure_session::crypto_batch_metrics();
         dispatch_udp_batch(
-            &engine_b.socket,
+            &socket_b,
             &engine_b.connections,
             &engine_b.ip_index,
             &engine_b.receiver_index,
@@ -2873,6 +2986,7 @@ mod tests {
         for bad_index in [0usize, 3, 7] {
             let (engine_a, engine_b, _ip_a, ip_b, endpoint_a, _) =
                 established_direct_peers().await?;
+            let socket_b = engine_b.socket()?;
             let payloads = (0..8u8)
                 .map(|marker| vec![0x80 + marker; 1_420])
                 .collect::<Vec<_>>();
@@ -2885,7 +2999,7 @@ mod tests {
 
             let (incoming_tx, mut incoming_rx, _) = inbound_queue::channel(32);
             dispatch_udp_batch(
-                &engine_b.socket,
+                &socket_b,
                 &engine_b.connections,
                 &engine_b.ip_index,
                 &engine_b.receiver_index,
@@ -2924,7 +3038,7 @@ mod tests {
             // replacement must be accepted; a second copy must then be rejected.
             for attempt in 0..2 {
                 dispatch_udp_batch(
-                    &engine_b.socket,
+                    &socket_b,
                     &engine_b.connections,
                     &engine_b.ip_index,
                     &engine_b.receiver_index,
@@ -2958,6 +3072,7 @@ mod tests {
     #[tokio::test]
     async fn udp_dispatch_route_collision_falls_back_to_single_candidates() -> Result<()> {
         let (engine_a, engine_b, ip_a, ip_b, endpoint_a, _) = established_direct_peers().await?;
+        let socket_b = engine_b.socket()?;
         let (secure, health) = {
             let connections = engine_b.connections.read().await;
             let peer = connections.get("a").expect("peer A");
@@ -2997,7 +3112,7 @@ mod tests {
         }
         let (incoming_tx, mut incoming_rx, _) = inbound_queue::channel(32);
         dispatch_udp_batch(
-            &engine_b.socket,
+            &socket_b,
             &engine_b.connections,
             &engine_b.ip_index,
             &engine_b.receiver_index,
@@ -3085,9 +3200,10 @@ mod tests {
         }
 
         let ciphertext = engine_a.encrypt_for_peer(ip_b, b"second candidate").await?;
+        let socket_b = engine_b.socket()?;
         let (incoming_tx, mut incoming_rx, _) = inbound_queue::channel(4);
         dispatch_udp_batch(
-            &engine_b.socket,
+            &socket_b,
             &engine_b.connections,
             &engine_b.ip_index,
             &engine_b.receiver_index,
@@ -4267,6 +4383,19 @@ mod tests {
                 .is_err(),
             "a send started after removal must fail instead of using the retired session mapping"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_udp_listener_and_is_idempotent() -> Result<()> {
+        let engine = P2pEngine::new(0).await?;
+        let port = engine.local_addr().port();
+
+        engine.shutdown().await?;
+        engine.shutdown().await?;
+
+        let rebound = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).await?;
+        assert_eq!(rebound.local_addr()?.port(), port);
         Ok(())
     }
 

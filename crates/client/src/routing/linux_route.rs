@@ -187,7 +187,7 @@ impl LinuxRouteManager {
         .await;
 
         if let Err(error) = setup_result {
-            manager.rollback().await;
+            let _ = manager.rollback().await;
             return Err(error).context("安装代理策略路由失败，已回滚");
         }
 
@@ -197,7 +197,7 @@ impl LinuxRouteManager {
         match DohDnsGuard::install().await {
             Ok(guard) => manager.dns_guard = guard,
             Err(error) => {
-                manager.rollback().await;
+                let _ = manager.rollback().await;
                 return Err(error).context("安装 DoH DNS 代理失败，已回滚代理策略路由");
             }
         }
@@ -429,12 +429,10 @@ impl LinuxRouteManager {
         }
     }
 
-    /// Remove only routes and rules owned by this manager. Safe to call more
-    /// than once.
-    pub async fn rollback(&mut self) {
-        if let Err(error) = self.rollback_checked().await {
-            tracing::warn!("策略路由回滚未完全成功: {error:#}");
-        }
+    /// Remove only routes, rules and DNS resources owned by this manager.
+    /// Failed resources are retained so a later call can retry them.
+    pub async fn rollback(&mut self) -> Result<()> {
+        self.rollback_checked().await
     }
 
     async fn rollback_checked(&mut self) -> Result<()> {
@@ -469,15 +467,32 @@ impl LinuxRouteManager {
         self.active_families.clear();
         self.static_bypasses.clear();
 
-        match first_error {
-            Some(error) => Err(error).context("部分策略路由未能回滚，将在对象销毁时重试"),
-            None => {
-                if let Some(mut guard) = self.dns_guard.take() {
-                    guard.shutdown();
+        let dns_error = if let Some(mut guard) = self.dns_guard.take() {
+            match guard.shutdown().await {
+                Ok(()) => None,
+                Err(error) => {
+                    self.dns_guard = Some(guard);
+                    Some(error)
                 }
+            }
+        } else {
+            None
+        };
+
+        match (first_error, dns_error) {
+            (None, None) => {
                 self.plan = None;
                 Ok(())
             }
+            (Some(route_error), None) => {
+                Err(route_error).context("部分策略路由未能回滚，失败资源已保留以便重试")
+            }
+            (None, Some(dns_error)) => {
+                Err(dns_error).context("策略路由已回滚，但 DNS 配置恢复失败，将在重试时继续恢复")
+            }
+            (Some(route_error), Some(dns_error)) => Err(anyhow::anyhow!(
+                "部分策略路由未能回滚: {route_error:#}; DNS 配置恢复失败: {dns_error:#}"
+            )),
         }
     }
 

@@ -363,14 +363,16 @@ control ─────┼── spawn / adopt / health-check ──► node
 - [x] 删除 UI 进程持有 supervisor 的设计：GPUI 与 WebUI 均通过 `RemoteNodeSession` 连接 control/node；
 - [x] 添加 UI 退出不断网 E2E：`closing_headless_webui_does_not_stop_the_node` 在 `ab18b8e` 验证关闭 WebUI 进程后 node PID 不变且 IPC 仍可查询。
 
-### W2-04 start/stop/restart 语义 `[ ]`
+### W2-04 start/stop/restart 语义 `[x]`
 
-- [ ] stop node 保留 control/WebUI；
-- [ ] start node 从持久化配置恢复成员关系；
-- [ ] restart 有硬超时和失败诊断；
-- [ ] 操作期间禁止重复提交；
-- [ ] 清理 TUN、路由、DNS、监听和子进程；
-- [ ] 添加停止后残留资源检查。
+- [x] stop node 保留 control/WebUI；
+- [x] start node 从持久化配置恢复成员关系；
+- [x] restart 有硬超时和失败诊断；
+- [x] 操作期间禁止重复提交；
+- [x] 清理 TUN、路由、DNS、监听和子进程；
+- [x] 添加停止后残留资源检查。
+
+**验收**：运行时返回逐项清理结果；只有清理成功才注销监听和 peer 注册。停止超时、清理失败或子任务未退出时保留残留事实并阻止同一网络重启。回归覆盖停止超时后延迟完成、确定性清理失败、重启前清理门禁、12 个网络并行停止、固定端口释放，以及 fake runner 下的 TUN/路由/DNS/监听资源恢复。
 
 ### W2-05 control 崩溃恢复 `[~]`
 

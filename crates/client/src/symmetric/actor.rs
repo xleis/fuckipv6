@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 
 use super::EmbeddedCoordinator;
+use crate::config_manager::ConfigManager;
 
 /// Request to start the embedded signaling and relay services for one network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +126,13 @@ pub enum EmbeddedServiceError {
         network_name: String,
         message: String,
     },
+    #[error("内嵌网络服务停止失败: {network_name}: {message}")]
+    StopFailed {
+        network_name: String,
+        message: String,
+    },
+    #[error("内嵌网络服务关闭未完全成功: {message}")]
+    ShutdownFailed { message: String },
     #[error("内嵌网络服务 actor 已关闭")]
     ActorClosed,
 }
@@ -142,7 +150,7 @@ enum EmbeddedServiceCommand {
         reply: oneshot::Sender<Vec<EmbeddedServiceSnapshot>>,
     },
     Shutdown {
-        reply: oneshot::Sender<usize>,
+        reply: oneshot::Sender<Result<usize, EmbeddedServiceError>>,
     },
 }
 
@@ -157,23 +165,48 @@ pub struct EmbeddedServiceManager {
 
 impl EmbeddedServiceManager {
     pub fn spawn(capacity: usize) -> Self {
+        Self::spawn_inner(capacity, ConfigManager::new())
+    }
+
+    /// Spawn a manager whose embedded services persist state under `configs`.
+    /// The node supervisor passes its already-resolved config manager here so
+    /// service lifecycle state and the node share one isolated config root.
+    pub(crate) fn spawn_with_config(capacity: usize, configs: ConfigManager) -> Self {
+        Self::spawn_inner(capacity, Ok(configs))
+    }
+
+    fn spawn_inner(capacity: usize, configs: Result<ConfigManager, anyhow::Error>) -> Self {
         let (sender, mut receiver) = mpsc::channel::<EmbeddedServiceCommand>(capacity.max(1));
 
         tokio::spawn(async move {
             let mut services = HashMap::<String, EmbeddedCoordinator>::new();
+            let configs = configs.map_err(|error| format!("无法确定节点配置目录: {error:#}"));
 
             while let Some(command) = receiver.recv().await {
                 match command {
                     EmbeddedServiceCommand::Start { request, reply } => {
-                        let result = start_service(&mut services, request).await;
+                        let result = match configs.as_ref() {
+                            Ok(configs) => start_service(&mut services, request, configs).await,
+                            Err(message) => Err(EmbeddedServiceError::StartFailed {
+                                network_name: request.network_name,
+                                message: message.clone(),
+                            }),
+                        };
                         let _ = reply.send(result);
                     }
                     EmbeddedServiceCommand::Stop {
                         network_name,
                         reply,
                     } => {
-                        let result = if let Some(coordinator) = services.remove(&network_name) {
-                            Ok(EmbeddedServiceSnapshot::from(&coordinator))
+                        let result = if let Some(mut coordinator) = services.remove(&network_name) {
+                            let snapshot = EmbeddedServiceSnapshot::from(&coordinator);
+                            match coordinator.shutdown().await {
+                                Ok(()) => Ok(snapshot),
+                                Err(error) => Err(EmbeddedServiceError::StopFailed {
+                                    network_name,
+                                    message: format!("{error:#}"),
+                                }),
+                            }
                         } else {
                             Err(EmbeddedServiceError::NotFound(network_name))
                         };
@@ -189,8 +222,20 @@ impl EmbeddedServiceManager {
                     }
                     EmbeddedServiceCommand::Shutdown { reply } => {
                         let count = services.len();
-                        services.clear();
-                        let _ = reply.send(count);
+                        let mut failures = Vec::new();
+                        for (network_name, mut coordinator) in services.drain() {
+                            if let Err(error) = coordinator.shutdown().await {
+                                failures.push(format!("{network_name}: {error:#}"));
+                            }
+                        }
+                        let result = if failures.is_empty() {
+                            Ok(count)
+                        } else {
+                            Err(EmbeddedServiceError::ShutdownFailed {
+                                message: failures.join("; "),
+                            })
+                        };
+                        let _ = reply.send(result);
                         break;
                     }
                 }
@@ -250,26 +295,28 @@ impl EmbeddedServiceManager {
             .map_err(|_| EmbeddedServiceError::ActorClosed)?;
         response
             .await
-            .map_err(|_| EmbeddedServiceError::ActorClosed)
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
     }
 }
 
 async fn start_service(
     services: &mut HashMap<String, EmbeddedCoordinator>,
     request: EmbeddedServiceStartRequest,
+    configs: &ConfigManager,
 ) -> Result<EmbeddedServiceSnapshot, EmbeddedServiceError> {
     request.validate()?;
     if services.contains_key(&request.network_name) {
         return Err(EmbeddedServiceError::AlreadyRunning(request.network_name));
     }
 
-    let coordinator = EmbeddedCoordinator::start(
+    let coordinator = EmbeddedCoordinator::start_with_config_manager(
         &request.network_name,
         request.signaling_port,
         request.relay_port,
         request.host_public_key,
         request.external_host,
         request.ip_pool.as_deref(),
+        configs.clone(),
     )
     .await
     .map_err(|error| EmbeddedServiceError::StartFailed {
@@ -285,10 +332,45 @@ async fn start_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Deref;
+
+    struct TestManager {
+        services: EmbeddedServiceManager,
+        config_dir: std::path::PathBuf,
+    }
+
+    impl Deref for TestManager {
+        type Target = EmbeddedServiceManager;
+
+        fn deref(&self) -> &Self::Target {
+            &self.services
+        }
+    }
+
+    impl Drop for TestManager {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.config_dir);
+        }
+    }
+
+    fn test_manager(capacity: usize) -> TestManager {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-embedded-services-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("config manager");
+        TestManager {
+            services: EmbeddedServiceManager::spawn_with_config(capacity, configs),
+            config_dir,
+        }
+    }
 
     #[tokio::test]
     async fn actor_owns_service_lifecycle_and_rejects_duplicates() {
-        let manager = EmbeddedServiceManager::spawn(4);
+        let manager = test_manager(4);
         let request = EmbeddedServiceStartRequest::new("lab", 0, 0)
             .with_external_host("127.0.0.1")
             .with_ip_pool("fd00::1000/120");
@@ -318,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_releases_services_and_closes_actor() {
-        let manager = EmbeddedServiceManager::spawn(2);
+        let manager = test_manager(2);
         manager
             .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
             .await
@@ -336,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unsafe_network_names_before_starting_services() {
-        let manager = EmbeddedServiceManager::spawn(1);
+        let manager = test_manager(1);
         for name in ["", "../escape", " server", "server "] {
             let error = manager
                 .start(EmbeddedServiceStartRequest::new(name, 0, 0))
@@ -345,5 +427,34 @@ mod tests {
             assert!(matches!(error, EmbeddedServiceError::InvalidRequest(_)));
         }
         assert!(manager.list().await.expect("list services").is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_waits_until_fixed_listener_ports_are_released() {
+        let signaling_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
+            listener.local_addr().expect("TCP address").port()
+        };
+        let relay_port = {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UDP port");
+            socket.local_addr().expect("UDP address").port()
+        };
+        let manager = test_manager(2);
+        manager
+            .start(
+                EmbeddedServiceStartRequest::new("port-release", signaling_port, relay_port)
+                    .with_external_host("127.0.0.1"),
+            )
+            .await
+            .expect("start service on fixed ports");
+
+        manager.stop("port-release").await.expect("stop service");
+
+        tokio::net::TcpListener::bind(("127.0.0.1", signaling_port))
+            .await
+            .expect("signaling TCP port must be released after stop");
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
+            .await
+            .expect("relay UDP port must be released after stop");
     }
 }

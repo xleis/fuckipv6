@@ -172,7 +172,9 @@ impl LinuxExitForwarder {
 
     async fn install_resources(&mut self) -> Result<()> {
         if let Err(error) = self.install_forwarding().await {
-            self.rollback();
+            if let Err(cleanup_error) = self.rollback() {
+                tracing::warn!("Exit Node 安装失败后的清理未完成，将继续重试: {cleanup_error:#}");
+            }
             return Err(error);
         }
         Ok(())
@@ -441,27 +443,56 @@ impl LinuxExitForwarder {
     }
 
     /// Remove every resource owned by this manager. Safe to call twice.
-    pub fn rollback(&mut self) {
+    pub fn rollback(&mut self) -> Result<()> {
         if self.cleaned {
-            return;
+            return Ok(());
         }
-        self.cleaned = true;
 
-        for state in self.clients.values_mut() {
+        let mut failures = Vec::new();
+        let clients = std::mem::take(&mut self.clients);
+        for (client_id, mut state) in clients {
+            let mut failed_rules = Vec::new();
             for rule in state.rules.iter().rev() {
-                let _ = run_iptables_sync_delete(self.runner.as_ref(), rule);
+                if let Err(error) = run_iptables_sync_delete(self.runner.as_ref(), rule) {
+                    if !is_missing_firewall_resource(&error) {
+                        failures.push(format!(
+                            "删除 Exit 客户端 {client_id} iptables 规则失败: {error:#}"
+                        ));
+                        failed_rules.push(rule.clone());
+                    }
+                }
             }
+            failed_rules.reverse();
+
+            let mut failed_routes = Vec::new();
             for address in state.owned_routes.iter().rev() {
-                let _ = remove_return_route_sync(self.runner.as_ref(), &self.tun_name, *address);
+                if let Err(error) =
+                    remove_return_route_sync(self.runner.as_ref(), &self.tun_name, *address)
+                {
+                    failures.push(format!(
+                        "删除 Exit 客户端 {client_id} 回程路由失败: {error:#}"
+                    ));
+                    failed_routes.push(*address);
+                }
+            }
+            failed_routes.reverse();
+            state.rules = failed_rules;
+            state.owned_routes = failed_routes;
+            if !state.rules.is_empty() || !state.owned_routes.is_empty() {
+                self.clients.insert(client_id, state);
             }
         }
-        self.clients.clear();
 
-        for (program, table, builtin, chain) in [
+        let chains = [
             ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
             ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-        ] {
-            cleanup_iptables_chain_sync(self.runner.as_ref(), program, table, builtin, chain);
+        ];
+        for (program, table, builtin, chain) in chains {
+            if let Err(error) =
+                cleanup_iptables_chain_sync(self.runner.as_ref(), program, table, builtin, chain)
+            {
+                failures.push(format!("清理 {program} 链 {chain} 失败: {error:#}"));
+            }
         }
         if self.external_v6_interface.is_some() {
             for (program, table, builtin, chain) in [
@@ -473,25 +504,48 @@ impl LinuxExitForwarder {
                 ),
                 ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
             ] {
-                cleanup_iptables_chain_sync(self.runner.as_ref(), program, table, builtin, chain);
+                if let Err(error) = cleanup_iptables_chain_sync(
+                    self.runner.as_ref(),
+                    program,
+                    table,
+                    builtin,
+                    chain,
+                ) {
+                    failures.push(format!("清理 {program} 链 {chain} 失败: {error:#}"));
+                }
             }
         }
 
         if self.ipv4_forward_changed {
-            let _ = restore_sysctl(self.runner.as_ref(), "/proc/sys/net/ipv4/ip_forward");
+            match restore_sysctl(self.runner.as_ref(), "/proc/sys/net/ipv4/ip_forward") {
+                Ok(()) => self.ipv4_forward_changed = false,
+                Err(error) => failures.push(format!("恢复 IPv4 转发开关失败: {error:#}")),
+            }
         }
         if self.ipv6_forward_changed {
-            let _ = restore_sysctl(
+            match restore_sysctl(
                 self.runner.as_ref(),
                 "/proc/sys/net/ipv6/conf/all/forwarding",
-            );
+            ) {
+                Ok(()) => self.ipv6_forward_changed = false,
+                Err(error) => failures.push(format!("恢复 IPv6 转发开关失败: {error:#}")),
+            }
+        }
+
+        if failures.is_empty() {
+            self.cleaned = true;
+            Ok(())
+        } else {
+            failures.sort();
+            failures.dedup();
+            Err(anyhow::anyhow!("{}", failures.join("; ")))
         }
     }
 }
 
 impl Drop for LinuxExitForwarder {
     fn drop(&mut self) {
-        self.rollback();
+        let _ = self.rollback();
     }
 }
 
@@ -822,14 +876,37 @@ fn cleanup_iptables_chain_sync(
     table: &str,
     builtin: &str,
     chain: &str,
-) {
+) -> Result<()> {
+    let mut failures = Vec::new();
     for _ in 0..MAX_STALE_JUMP_RULES {
-        if run_iptables_sync(runner, program, Some(table), &["-D", builtin, "-j", chain]).is_err() {
-            break;
+        match run_iptables_sync(runner, program, Some(table), &["-D", builtin, "-j", chain]) {
+            Ok(()) => {}
+            Err(error) if is_missing_firewall_resource(&error) => break,
+            Err(error) => {
+                failures.push(format!("删除跳转规则失败: {error:#}"));
+                break;
+            }
         }
     }
-    let _ = run_iptables_sync(runner, program, Some(table), &["-F", chain]);
-    let _ = run_iptables_sync(runner, program, Some(table), &["-X", chain]);
+    for args in [["-F", chain], ["-X", chain]] {
+        if let Err(error) = run_iptables_sync(runner, program, Some(table), &args) {
+            if !is_missing_firewall_resource(&error) {
+                failures.push(format!("{} {} 失败: {error:#}", args[0], chain));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("{}", failures.join("; ")))
+    }
+}
+
+fn is_missing_firewall_resource(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("No chain/target/match")
+        || message.contains("Bad rule (does a matching rule exist")
+        || message.contains("No such file or directory")
 }
 
 async fn run_iptables(
@@ -1182,7 +1259,7 @@ mod tests {
             );
         }
 
-        forwarder.rollback();
+        forwarder.rollback().expect("rollback loopback forwarder");
         assert_eq!(
             runner.file("/proc/sys/net/ipv4/ip_forward").as_deref(),
             Some("0\n")
@@ -1281,7 +1358,7 @@ mod tests {
         );
 
         let cleanup_count = sync_runs.len();
-        forwarder.rollback();
+        forwarder.rollback().expect("rollback loopback forwarder");
         assert_eq!(runner.sync_runs().len(), cleanup_count);
     }
 
@@ -1472,8 +1549,10 @@ mod tests {
             "revoked client traffic still traversed the Exit Node"
         );
 
-        forwarder.rollback();
-        forwarder.rollback();
+        forwarder.rollback().expect("rollback loopback forwarder");
+        forwarder
+            .rollback()
+            .expect("repeat rollback loopback forwarder");
         assert_exit_resources_absent("fip6tun");
     }
 

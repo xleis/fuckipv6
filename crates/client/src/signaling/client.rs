@@ -6,8 +6,9 @@ use fuckipv6_common::{
 };
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, watch, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -33,6 +34,7 @@ pub struct SignalingClient {
     relay_endpoints_rx: watch::Receiver<Vec<RelayEndpoint>>,
     known_peers_rx: watch::Receiver<Vec<PeerInfo>>,
     shutdown_tx: watch::Sender<bool>,
+    task: StdMutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -130,7 +132,7 @@ impl SignalingClient {
             max_reconnect_delay: MAX_RECONNECT_DELAY,
         };
 
-        tokio::spawn(connection_manager(
+        let task = tokio::spawn(connection_manager(
             connection_config,
             outbound_rx,
             event_tx,
@@ -151,6 +153,7 @@ impl SignalingClient {
             relay_endpoints_rx,
             known_peers_rx,
             shutdown_tx,
+            task: StdMutex::new(Some(task)),
         };
 
         client.wait_for_initial_registration().await?;
@@ -191,16 +194,41 @@ impl SignalingClient {
         self.send(SignalingMessage::heartbeat())
     }
 
-    /// 关闭信令连接
+    /// 关闭信令连接，并等待连接任务退出。
     pub async fn close(&self) -> Result<()> {
         tracing::info!("正在关闭信令连接...");
-        self.shutdown();
-        Ok(())
+        let _ = self.shutdown_tx.send(true);
+        let Some(mut task) = self
+            .task
+            .lock()
+            .expect("signaling task slot poisoned")
+            .take()
+        else {
+            return Ok(());
+        };
+        match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => anyhow::bail!("信令连接任务异常退出: {error}"),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                anyhow::bail!("信令连接任务未在期限内退出，已中止")
+            }
+        }
     }
 
-    /// 同步触发信令管理器关闭
+    /// 同步触发信令管理器关闭。Async callers should prefer [`close`](Self::close)
+    /// so listener/task teardown can be observed.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+        if let Some(task) = self
+            .task
+            .lock()
+            .expect("signaling task slot poisoned")
+            .take()
+        {
+            task.abort();
+        }
     }
 
     /// 接收事件

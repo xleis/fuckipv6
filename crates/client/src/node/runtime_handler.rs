@@ -722,7 +722,14 @@ mod tests {
         let registry = MultiNetworkRegistry::new();
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
         registry.set_stop_sender(stop_tx);
-        let services = EmbeddedServiceManager::spawn(2);
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-runtime-handler-services-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = crate::config_manager::ConfigManager::new_for_dir(config_dir.clone())
+            .expect("config manager");
+        let services = EmbeddedServiceManager::spawn_with_config(2, configs);
         services
             .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
             .await
@@ -742,6 +749,7 @@ mod tests {
         assert!(result.is_success());
         assert_eq!(stop_rx.recv().await, Some(None));
         assert!(services.list().await.is_err());
+        let _ = std::fs::remove_dir_all(config_dir);
     }
 
     #[tokio::test]

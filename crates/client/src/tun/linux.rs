@@ -307,11 +307,14 @@ impl LinuxTun {
         }
 
         if !request_link_close(&self.lifetime) {
-            tracing::info!(
-                "TUN 设备仍被其他 clone 使用，延迟删除: {}",
+            tracing::warn!(
+                "TUN 设备仍被其他 clone 使用，删除被延迟: {}",
                 self.lifetime.name
             );
-            return Ok(());
+            anyhow::bail!(
+                "TUN 设备 {} 仍被其他任务持有，删除未完成",
+                self.lifetime.name
+            );
         }
 
         tracing::info!("正在删除 TUN 设备: {}", self.lifetime.name);

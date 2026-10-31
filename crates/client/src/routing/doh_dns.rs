@@ -99,24 +99,54 @@ impl DohDnsGuard {
         }))
     }
 
-    /// Stop accepting DNS requests and restore the original resolver config.
-    pub(crate) fn shutdown(&mut self) {
+    /// Stop accepting DNS requests, wait for both listeners to exit, and
+    /// restore the original resolver config. Errors keep the guard owned by the
+    /// route manager so cleanup can be retried.
+    pub(crate) async fn shutdown(&mut self) -> Result<()> {
+        let _ = self.shutdown.send(true);
+        let mut failures = Vec::new();
+        for task in self.tasks.drain(..) {
+            task.abort();
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    failures.push(format!("DoH DNS 任务异常退出: {error}"));
+                }
+            }
+        }
+
+        if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &self.previous_resolv_conf) {
+            failures.push(format!("恢复 /etc/resolv.conf 失败: {error}"));
+        } else if let Err(error) = std::fs::remove_file(BACKUP_PATH) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                failures.push(format!("删除 DNS 配置备份失败: {error}"));
+            }
+        } else {
+            tracing::info!("已恢复原 DNS 解析配置");
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("{}", failures.join("; "))
+        }
+    }
+
+    fn abort_tasks(&mut self) {
         let _ = self.shutdown.send(true);
         for task in self.tasks.drain(..) {
             task.abort();
-        }
-        if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &self.previous_resolv_conf) {
-            tracing::warn!("恢复 /etc/resolv.conf 失败: {error:#}");
-        } else {
-            let _ = std::fs::remove_file(BACKUP_PATH);
-            tracing::info!("已恢复原 DNS 解析配置");
         }
     }
 }
 
 impl Drop for DohDnsGuard {
     fn drop(&mut self) {
-        self.shutdown();
+        self.abort_tasks();
+        if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &self.previous_resolv_conf) {
+            tracing::warn!("恢复 /etc/resolv.conf 失败: {error:#}");
+        } else {
+            let _ = std::fs::remove_file(BACKUP_PATH);
+        }
     }
 }
 

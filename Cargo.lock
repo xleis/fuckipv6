@@ -2453,6 +2453,7 @@ dependencies = [
  "chrono",
  "clap",
  "ed25519-dalek",
+ "fs2",
  "fuckipv6-common",
  "fuckipv6-coordinator",
  "fuckipv6-secure-session",

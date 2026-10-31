@@ -221,6 +221,17 @@ impl LocalConnection {
             .map_err(|_| anyhow::anyhow!("读取本地 IPC 帧超时"))?
     }
 
+    /// Wait for the next frame without an idle deadline.
+    ///
+    /// Long-lived event subscriptions are intentionally allowed to sit idle;
+    /// callers cancel the future to stop waiting. Individual frames remain
+    /// bounded by [`MAX_FRAME_BYTES`].
+    pub(crate) async fn receive_next<T: for<'de> Deserialize<'de>>(
+        &mut self,
+    ) -> Result<(FrameKind, T)> {
+        read_frame(&mut self.stream).await
+    }
+
     pub async fn send_response(&mut self, response: &LocalResponse) -> Result<()> {
         self.send(FrameKind::Response, response).await
     }

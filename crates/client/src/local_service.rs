@@ -38,7 +38,33 @@ pub async fn serve_node(
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    serve_node_inner(server, commands, state, events, shutdown, None).await
+}
+
+/// Serve a node whose lifecycle is owned by this process. Unlike the generic
+/// [`serve_node`] entrypoint, this variant can honor `StopNode`: it acknowledges
+/// the request only after arming the same shutdown channel that tears down the
+/// listener and all active subscriptions.
+pub async fn serve_owned_node(
+    server: LocalServer,
+    commands: NodeCommandBus,
+    state: NodeStateStore,
+    events: NodeEventBus,
+    shutdown: watch::Sender<bool>,
+) -> Result<()> {
+    let shutdown_rx = shutdown.subscribe();
+    serve_node_inner(server, commands, state, events, shutdown_rx, Some(shutdown)).await
+}
+
+async fn serve_node_inner(
+    server: LocalServer,
+    commands: NodeCommandBus,
+    state: NodeStateStore,
+    events: NodeEventBus,
     mut shutdown: watch::Receiver<bool>,
+    stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
     if server.role() != EndpointRole::Node {
         bail!("节点命令服务只能绑定 node IPC endpoint");
@@ -62,6 +88,7 @@ pub async fn serve_node(
                         let task_state = state.clone();
                         let task_events = events.clone();
                         let task_shutdown = shutdown.clone();
+                        let task_stop_controller = stop_controller.clone();
                         connections.spawn(async move {
                             let mut connection = task_server.finish_handshake(connection).await?;
                             debug!(
@@ -75,6 +102,7 @@ pub async fn serve_node(
                                 task_state,
                                 task_events,
                                 task_shutdown,
+                                task_stop_controller,
                             )
                             .await
                         });
@@ -137,6 +165,7 @@ async fn serve_connection(
     state: NodeStateStore,
     events: NodeEventBus,
     mut shutdown: watch::Receiver<bool>,
+    stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
     loop {
         let (kind, payload) = tokio::select! {
@@ -257,18 +286,31 @@ async fn serve_connection(
                 .await?;
                 return Ok(());
             }
-            crate::local_ipc::LocalCommand::StopNode => {
-                // W2-04 owns the node-role stop transition. Returning a typed
-                // unsupported error is safer than acknowledging a no-op.
-                send_local_error(
-                    connection,
-                    LocalError::new(
-                        IpcErrorCode::Unsupported,
-                        "StopNode 尚未接入独立节点角色生命周期",
-                    ),
-                )
-                .await?;
-            }
+            crate::local_ipc::LocalCommand::StopNode => match &stop_controller {
+                Some(controller) => {
+                    // The response is written before the service observes the
+                    // shutdown channel. This lets the control process distinguish
+                    // an acknowledged stop from a transport failure.
+                    connection
+                        .send_response(&LocalResponse::Accepted {
+                            message: "节点正在停止".into(),
+                        })
+                        .await?;
+                    let _ = controller.send(true);
+                }
+                None => {
+                    // Standalone adapters that do not own a process lifetime must
+                    // not acknowledge a no-op.
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前服务没有节点进程生命周期控制权",
+                        ),
+                    )
+                    .await?;
+                }
+            },
         }
     }
 }
@@ -385,7 +427,7 @@ fn log_connection_result(result: std::result::Result<Result<()>, tokio::task::Jo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -674,7 +716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_node_is_typed_unsupported_until_lifecycle_is_owned() -> Result<()> {
+    async fn stop_node_is_typed_unsupported_without_process_ownership() -> Result<()> {
         let fixture = Fixture::new("stop-node", 8).await?;
         let error = request(
             &fixture.endpoint,
@@ -686,12 +728,59 @@ mod tests {
         )
         .await
         .expect_err("StopNode must not acknowledge a no-op");
-        assert!(error.to_string().contains("StopNode"));
+        assert!(error.to_string().contains("生命周期控制权"));
         assert!(
             socket_path(&fixture.endpoint).exists(),
             "control service must remain live"
         );
 
         fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn owned_stop_node_acknowledges_and_stops_the_service() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-owned-local-service-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+        let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
+        let (shutdown_tx, mut stop_rx) = watch::channel(false);
+        let service = tokio::spawn(serve_owned_node(
+            server,
+            commands,
+            state,
+            events,
+            shutdown_tx.clone(),
+        ));
+
+        let response = request(
+            &endpoint,
+            IpcRole::Cli,
+            &LocalRequest {
+                request_id: 41,
+                command: crate::local_ipc::LocalCommand::StopNode,
+            },
+        )
+        .await?;
+        assert!(matches!(response, LocalResponse::Accepted { .. }));
+        stop_rx.changed().await?;
+        assert!(*stop_rx.borrow());
+        timeout(Duration::from_secs(15), service)
+            .await
+            .context("owned local service shutdown timed out")???;
+        assert!(!socket_path(&endpoint).exists());
+        drop(shutdown_tx);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 }

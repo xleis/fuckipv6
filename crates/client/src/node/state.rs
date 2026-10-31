@@ -640,6 +640,19 @@ impl NodeStateStore {
     pub async fn set_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) -> NodeSnapshot {
         self.update(|snapshot| snapshot.lifecycle = lifecycle).await
     }
+
+    /// Replace the local projection with a snapshot produced by the authoritative
+    /// node process.
+    ///
+    /// Remote adapters must not manufacture a new revision: the node process's
+    /// revision is the ordering source shared by every attached UI. The watch
+    /// notification still wakes all local renderers.
+    pub async fn replace_authoritative(&self, mut snapshot: NodeSnapshot) {
+        snapshot.refresh_capability_states();
+        let mut current = self.snapshot.write().await;
+        *current = snapshot.clone();
+        self.updates.send_replace(snapshot);
+    }
 }
 
 impl Default for NodeStateStore {

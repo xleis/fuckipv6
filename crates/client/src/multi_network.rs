@@ -180,7 +180,7 @@ impl MultiNetworkSupervisor {
         }
     }
 
-    async fn refresh_runtime_state(&self) {
+    pub(crate) async fn refresh_runtime_state(&self) {
         let runtime = ipc::multi_status_snapshot(&self.registry).await;
         let logs = runtime_metadata::recent_log_entries();
         self.state

@@ -37,7 +37,11 @@ use x25519_dalek::{PublicKey as X25519PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Marker byte for the experimental X25519 + Ed25519 profile.
-pub const CLASSIC_PROFILE_ID: u8 = 1;
+///
+/// Profile 3 uses pair-scoped receiver indices instead of the profile-1
+/// public-key-prefix mapping. Reusing profile 1 would silently make mixed
+/// clients unable to agree on the data-frame routing label.
+pub const CLASSIC_PROFILE_ID: u8 = 3;
 /// Domain for deriving a stable identity identifier from an Ed25519 key.
 pub const IDENTITY_DOMAIN: &[u8] = b"fuckipv6-v2 classic ed25519 identity";
 /// Domain for the initiator `HELLO` signature input.
@@ -1140,6 +1144,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_profile_one_is_rejected_on_both_handshake_sides() {
+        let initiator = start();
+        let mut hello = initiator.hello().clone();
+        hello.profile = 1;
+        let mut responder =
+            ClassicResponder::new(responder_identity(), initiator_identity().verifying_key())
+                .expect("responder");
+        assert_eq!(
+            responder.accept(&hello, ENDPOINT, EPOCH, NOW).unwrap_err(),
+            HandshakeError::UnsupportedProfile(1)
+        );
+
+        let (initiator, hello, mut accept) = signed_accept_fixture();
+        accept.profile = 1;
+        resign_accept(&mut accept, &hello, &responder_identity());
+        assert_eq!(
+            initiator.finish(&accept, NOW).unwrap_err(),
+            HandshakeError::UnsupportedProfile(1)
+        );
+    }
+
+    #[test]
     fn wrong_epoch_and_zero_session_id_fail_closed() {
         let initiator = start();
         let hello = initiator.hello().clone();
@@ -1208,10 +1234,10 @@ mod tests {
         assert_eq!(
             hello.signing_hash(),
             [
-                97, 25, 186, 193, 188, 152, 129, 236, 85, 195, 8, 111, 15, 61, 70, 239, 57, 130,
-                244, 181, 236, 228, 117, 6, 70, 52, 214, 157, 114, 215, 97, 196, 82, 6, 44, 39,
-                238, 163, 155, 219, 125, 29, 50, 40, 171, 104, 175, 240, 112, 49, 114, 210, 217,
-                20, 63, 2, 145, 72, 22, 115, 83, 16, 111, 241,
+                26, 23, 121, 177, 247, 32, 123, 168, 60, 141, 220, 187, 47, 192, 196, 51, 239, 91,
+                153, 119, 8, 119, 218, 207, 207, 87, 71, 188, 97, 8, 70, 226, 140, 127, 103, 232,
+                156, 181, 58, 188, 76, 51, 221, 74, 81, 12, 136, 158, 73, 94, 91, 141, 101, 112,
+                228, 230, 156, 83, 235, 223, 199, 205, 2, 162,
             ]
         );
     }

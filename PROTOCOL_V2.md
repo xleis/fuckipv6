@@ -211,7 +211,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 
 #### 4.3.1 实验性 classic profile
 
-`crates/secure-session/src/handshake.rs` 实现 `CLASSIC_PROFILE_ID = 3`，并已由 `P2pEngine` 接入生产 UDP/TUN 路径。profile 3 将 receiver index 从“本端静态公钥前缀”改为按有序双方公钥和角色做域分离 BLAKE3 派生，使同一节点的每个 peer pair 获得独立路由标签；profile 1 的旧映射不再兼容。它是当前可运行的迁移 profile，但不是本文最终混合后量子候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
+`crates/secure-session/src/handshake.rs` 实现 `CLASSIC_PROFILE_ID = 3`，并已由 `P2pEngine` 接入生产 UDP/TUN 路径。profile 3 将 receiver index 从“本端静态公钥前缀”改为按有序双方公钥和角色做域分离 BLAKE3 派生，使同一节点的每个 peer pair 获得独立路由标签。该标签是 pair-scoped deterministic mapping，不是每握手随机 index；同一 pair 重握手/rekey 后 index 可复用，由 SID/epoch 区分会话。profile 1 的旧映射不再兼容。它是当前可运行的迁移 profile，但不是本文最终混合后量子候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
 
 - `HELLO` 使用 Ed25519 长期身份签名，包含双方 `IdentityId`、X25519 临时公钥、256-bit `NI`、Unix 时间、endpoint context hash、协议版本、profile 和候选数据套件；`ACCEPT` 包含 SID、epoch、双方临时公钥、`NI/NR`、时间和 Responder 签名。
 - `IdentityId = SHA-512(L("fuckipv6-v2 classic ed25519 identity") || L(Ed25519PublicKey))[0..32]`。验证方必须同时校验公钥对应的 IdentityId 与消息字段。
@@ -369,7 +369,7 @@ aad   = header[0..16] || L(SID) || L(payload_length)
 
 - `direction_prefix` 固定为 `0x00000001`（I→R）或 `0x00000002`（R→I）；方向密钥本身也不同，两个方向不能共用密钥空间。
 - `counter` 严格递增，重协商后新 epoch 使用新的密钥和计数器零点。每个 epoch 只允许 `0..2^32-1`，达到上限必须重新握手，不能回绕。
-- `receiver_index` 是接收端本地 32-bit 索引，仅在当前 epoch 有效；发送端必须写入对端公布的索引，接收端必须与自己的本地索引匹配。该字段不能作为会话身份或认证凭据。
+- `receiver_index` 是接收端本地 32-bit 路由标签。profile 3 从有序双方 Ed25519 公钥和角色派生；同一 pair 的两个方向得到不同 index，双方无需新增协商字段。该映射在重握手/rekey 后不轮换，发送端写入对端角色的 index，接收端必须与本地 role index 匹配；session/epoch 仍由 SID、epoch、密钥和 replay window 区分。32-bit 碰撞允许形成候选桶并逐个认证，不能错误接受。该字段不能作为会话身份或认证凭据。
 - `flags` 保留位必须为零；未知位直接拒绝。
 - `epoch` 为 16-bit。达到 `0xffff` 后必须建立新会话，不能回绕；按 120 秒重协商上限可覆盖约 91 天连续会话。
 - 不使用逐包随机 nonce、逐包 JSON/postcard、逐包 `Vec` 和逐包哈希表加锁。

@@ -843,11 +843,11 @@ mod tests {
         for (frame, expected) in [
             (
                 hello().encode_control(),
-                "09e7cf433b1e34142451ade5e70bca051c92d546eb4672600d63b97dd10c352e",
+                "08b0d8978644e0e95e50fb1115e7526a7a0194668138c3620ca776fa6ea7f1a6",
             ),
             (
                 accept().encode(),
-                "f817d6316effa499ee96e7698ec58b3ee35e4468d0afa05290b4d74bb80ba77c",
+                "b605810e8186b96047e8004a9a47afa94d6a36255323d545a0aabfb6294095db",
             ),
             (
                 confirm().encode(),
@@ -859,7 +859,7 @@ mod tests {
             ),
             (
                 hello_with_cookie().encode(),
-                "cb10360428e4318dbd3ec58f7cd82c8fc0ccb3602722eaafeae7f4c21f914bed",
+                "cae202429bbe8f61ce50b025a1fed0219ee0f05307311fb433a59bd111d64730",
             ),
         ] {
             let digest = Sha256::digest(&frame);

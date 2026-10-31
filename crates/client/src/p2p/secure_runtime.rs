@@ -7,8 +7,8 @@
 //!
 //! Role selection is deterministic: the lexicographically smaller long-term
 //! Ed25519 public key is the initiator. This avoids simultaneous-open glare and
-//! gives both endpoints the same receiver-index mapping without trusting an
-//! unauthenticated negotiated role field.
+//! lets both endpoints derive the same pair-scoped receiver indices without
+//! trusting an unauthenticated negotiated role field.
 
 use ed25519_dalek::VerifyingKey;
 use fuckipv6_common::PeerInfo;
@@ -1128,9 +1128,23 @@ fn is_unknown_epoch(error: &DriverError) -> bool {
     matches!(error, DriverError::Data(SessionError::UnknownEpoch))
 }
 
+/// Derive a receiver index from the ordered peer pair and the local role.
+///
+/// The index is a routing label, not identity or key material. Hashing both
+/// public keys gives every peer pair its own index while still letting both
+/// endpoints compute the same mapping without adding a negotiation field.
+fn derive_receiver_index(role: u8, initiator: &[u8; 32], responder: &[u8; 32]) -> u32 {
+    let mut hasher = blake3::Hasher::new_derive_key("fuckipv6-v2 classic receiver index v1");
+    hasher.update(&[role]);
+    hasher.update(initiator);
+    hasher.update(responder);
+    let hash = hasher.finalize();
+    u32::from_be_bytes(hash.as_bytes()[..4].try_into().expect("four bytes"))
+}
+
 fn derive_receiver_indices(initiator: &[u8; 32], responder: &[u8; 32]) -> (u32, u32) {
-    let mut initiator_index = u32::from_be_bytes(initiator[..4].try_into().expect("four bytes"));
-    let mut responder_index = u32::from_be_bytes(responder[..4].try_into().expect("four bytes"));
+    let mut initiator_index = derive_receiver_index(b'i', initiator, responder);
+    let mut responder_index = derive_receiver_index(b'r', initiator, responder);
     if initiator_index == 0 {
         initiator_index = 1;
     }
@@ -1201,6 +1215,27 @@ mod tests {
 
     const INITIATOR_SEED: [u8; 32] = [0x11; 32];
     const RESPONDER_SEED: [u8; 32] = [0x22; 32];
+
+    #[test]
+    fn receiver_indices_are_pair_scoped_and_role_separated() {
+        let initiator = INITIATOR_SEED;
+        let peer = RESPONDER_SEED;
+        let other_peer = [0x33; 32];
+
+        let (initiator_index, responder_index) = derive_receiver_indices(&initiator, &peer);
+        assert_ne!(initiator_index, responder_index);
+        assert_eq!(
+            (initiator_index, responder_index),
+            derive_receiver_indices(&initiator, &peer)
+        );
+
+        // The same local node must not reuse one static receiver index across
+        // peers, regardless of whether it is the initiator or responder.
+        let (other_initiator_index, _) = derive_receiver_indices(&initiator, &other_peer);
+        let (_, other_responder_index) = derive_receiver_indices(&other_peer, &initiator);
+        assert_ne!(initiator_index, other_initiator_index);
+        assert_ne!(responder_index, other_responder_index);
+    }
 
     fn peer(
         client_id: &str,

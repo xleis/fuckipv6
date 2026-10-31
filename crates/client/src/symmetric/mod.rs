@@ -180,7 +180,10 @@ impl EmbeddedCoordinator {
             signaling_addr,
             actual_relay_addr
         );
-        tracing::info!("🎫 邀请票据: {}", ticket);
+        tracing::info!(
+            "🎫 网络 [{}] 邀请票据已生成（敏感值不写入日志）",
+            network_name
+        );
 
         Ok(Self {
             ticket,

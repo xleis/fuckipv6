@@ -104,6 +104,22 @@
           "properties": {
             "status": {
               "type": "string",
+              "const": "network_created"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeCreatedNetwork"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
               "const": "accepted"
             },
             "data": {
@@ -1569,6 +1585,30 @@
         "p2p_active",
         "timed_out"
       ]
+    },
+    "NodeCreatedNetwork": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "config_saved": {
+          "type": "boolean"
+        },
+        "started": {
+          "type": "boolean"
+        },
+        "invitation_ticket": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "config_saved",
+        "started",
+        "invitation_ticket"
+      ],
+      "description": "Owner-local result of creating a network.\n\nThe invitation ticket is deliberately returned only by this command result\nand is never added to `NodeSnapshot`, events, or logs. Its `Debug` output is\nredacted so an adapter cannot accidentally leak it through generic error\nformatting."
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-command-result-v1.schema.json",

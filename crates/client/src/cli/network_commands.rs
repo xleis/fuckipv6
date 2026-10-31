@@ -154,6 +154,7 @@ pub async fn connect(
 fn completed_message(outcome: NodeCommandOutcome) -> Result<String> {
     match outcome {
         NodeCommandOutcome::Completed { message } => Ok(message),
+        NodeCommandOutcome::NetworkCreated(created) => Ok(created.owner_message()),
         other => anyhow::bail!("节点命令返回了意外结果: {other:?}"),
     }
 }

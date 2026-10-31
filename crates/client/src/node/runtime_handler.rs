@@ -322,18 +322,12 @@ async fn create_runtime_network(
     match runtime.create(command).await {
         Ok(result) => NodeCommandResult::completed(
             request_id,
-            NodeCommandOutcome::Completed {
-                message: format!(
-                    "网络 [{}] 已创建并保存；{}；邀请票据: {}",
-                    result.network_name,
-                    if result.started {
-                        "本地运行时已启动"
-                    } else {
-                        "本地运行时未自动启动"
-                    },
-                    result.ticket
-                ),
-            },
+            NodeCommandOutcome::NetworkCreated(super::NodeCreatedNetwork {
+                network_name: result.network_name,
+                config_saved: result.config_saved,
+                started: result.started,
+                invitation_ticket: result.ticket,
+            }),
         ),
         Err(error) => runtime_rejection(request_id, error),
     }

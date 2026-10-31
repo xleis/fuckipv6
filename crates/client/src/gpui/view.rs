@@ -257,6 +257,9 @@ impl GpuiShell {
                     probe.peer_id, probe.rtt_us, probe.timed_out, probe.p2p_active
                 ));
             }
+            NodeCommandOutcome::NetworkCreated(created) => {
+                self.notice = Some(created.owner_message());
+            }
             NodeCommandOutcome::Diagnostics(diagnostics) => {
                 let residue = &diagnostics.residue;
                 let summary = if residue.is_clean() {

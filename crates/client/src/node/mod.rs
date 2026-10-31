@@ -15,9 +15,9 @@ pub use command::{
     NodeCleanupStepSnapshot, NodeCleanupStepStatus, NodeCommand, NodeCommandBus,
     NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
     NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeCreateNetworkCommand,
-    NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodePeerProbeSnapshot, NodeProbePeerCommand,
-    NodeResidualCleanupResult, NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand,
-    NodeUpdateRoutingCommand,
+    NodeCreatedNetwork, NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodePeerProbeSnapshot,
+    NodeProbePeerCommand, NodeResidualCleanupResult, NodeRuntimeResidueSnapshot,
+    NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
 };
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use http_adapter::{

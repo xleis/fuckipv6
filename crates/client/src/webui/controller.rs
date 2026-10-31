@@ -668,24 +668,19 @@ impl AppController {
                     auto_connect,
                 }))
                 .await?;
-            let NodeCommandOutcome::Completed { message } = outcome else {
+            let NodeCommandOutcome::NetworkCreated(created) = outcome else {
                 anyhow::bail!("创建网络返回了意外结果: {outcome:?}");
             };
-            let ticket = message
-                .split_once("邀请票据: ")
-                .map(|(_, ticket)| ticket.trim().to_string())
-                .filter(|ticket| !ticket.is_empty())
-                .context("节点已创建网络，但完成消息未包含邀请票据")?;
             let mut st = self.state.write().await;
-            st.network_name = Some(name);
-            st.hosting_ticket = Some(ticket.clone());
+            st.network_name = Some(created.network_name);
+            st.hosting_ticket = Some(created.invitation_ticket.clone());
             st.coordinator_active = true;
             st.coordinator_signaling_addr = Some(format!("0.0.0.0:{port}"));
             st.coordinator_relay_addr = Some(format!("0.0.0.0:{relay_port}"));
             drop(st);
-            self.log(format!("[网络] 对等网络已创建成功！邀请票据: {ticket}"))
+            self.log("[网络] 对等网络已创建成功；邀请票据仅保留在所有者控制面")
                 .await;
-            return Ok(ticket);
+            return Ok(created.invitation_ticket);
         }
 
         self.log(format!(

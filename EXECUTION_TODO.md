@@ -63,6 +63,7 @@
   - 依赖：EX-01、EX-02、EX-04、NX-01。
   - 验收：快照只来自 `NodeStateStore`，动作只发往命令总线；manifest schema 版本不匹配时明确失败而非降级；WS 断线、重复事件、revision 跳跃和非授权请求均有契约测试；不存在第二套页面/动作定义。
   - 进展（2026-10-30）：新增版本化 `/api/node/snapshot`、`/api/node/manifest`、WebSocket `/api/node/events` 和 `POST /api/node/commands`；读路径经命令总线取得共享状态，动作请求原样提交 `NodeCommandBus`。覆盖 schema 不匹配、非法请求、后端拒绝、`Unavailable`、重复/回退 revision、跳号与广播滞后重同步、断线。manifest 现在在 HTTP 适配器交付前检查 schema、固定页面集合与顺序、命令覆盖、动作/字段唯一性、必填字段校验、命令权限与后端状态一致性；格式错误返回 `ContractViolation` 而不是交给 UI 降级渲染。剩余：挂载到实际 WebUI/GPUI（NX-07/NX-08），并与 NX-02 的认证/暴露面策略接通后才算完整验收。
+  - 进展（2026-11-01）：`CreateNetwork` 返回类型化 `NetworkCreated` 结果，邀请票据不再从完成消息文本截取；该结果只由本地所有者命令返回，不进入共享快照、事件或日志，通用 `Debug` 输出会脱敏票据。CLI、GPUI、WebUI 已消费同一类型化结果。WebUI 双状态机迁移与 owner-only 持久化/读取仍属于 NX-07。
 
 - [x] **NX-04 路由热更新后端（细化 EX-06）**
   - 工作：让 `UpdateRouting` 原子更新运行中的 Smart Route、Exit Node 配置、持久化配置、共享快照和事件；任何阶段失败都恢复旧运行态。

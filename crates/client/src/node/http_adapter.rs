@@ -392,6 +392,7 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::Diagnostics(_)
         | NodeCommandOutcome::Cleanup(_)
         | NodeCommandOutcome::Probe(_)
+        | NodeCommandOutcome::NetworkCreated(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
     }
 }

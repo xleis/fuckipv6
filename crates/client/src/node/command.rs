@@ -458,6 +458,48 @@ pub struct NodePeerProbeSnapshot {
     pub timed_out: bool,
 }
 
+/// Owner-local result of creating a network.
+///
+/// The invitation ticket is deliberately returned only by this command result
+/// and is never added to `NodeSnapshot`, events, or logs. Its `Debug` output is
+/// redacted so an adapter cannot accidentally leak it through generic error
+/// formatting.
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCreatedNetwork {
+    pub network_name: String,
+    pub config_saved: bool,
+    pub started: bool,
+    pub invitation_ticket: String,
+}
+
+impl NodeCreatedNetwork {
+    /// Human-readable result for an owner-facing CLI or local UI.
+    pub fn owner_message(&self) -> String {
+        format!(
+            "网络 [{}] 已创建并保存；{}；邀请票据: {}",
+            self.network_name,
+            if self.started {
+                "本地运行时已启动"
+            } else {
+                "本地运行时未自动启动"
+            },
+            self.invitation_ticket
+        )
+    }
+}
+
+impl std::fmt::Debug for NodeCreatedNetwork {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeCreatedNetwork")
+            .field("network_name", &self.network_name)
+            .field("config_saved", &self.config_saved)
+            .field("started", &self.started)
+            .field("invitation_ticket", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeCleanupStepStatus {
@@ -550,6 +592,7 @@ pub enum NodeCommandOutcome {
     Diagnostics(NodeDiagnosticsSnapshot),
     Cleanup(NodeResidualCleanupResult),
     Probe(NodePeerProbeSnapshot),
+    NetworkCreated(NodeCreatedNetwork),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -714,6 +757,21 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[test]
+    fn created_network_debug_redacts_the_invitation_ticket() {
+        let created = NodeCreatedNetwork {
+            network_name: "home".into(),
+            config_saved: true,
+            started: true,
+            invitation_ticket: "fk://sensitive-owner-secret@vpn.example:6666".into(),
+        };
+
+        let debug = format!("{created:?}");
+        assert!(debug.contains("home"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("sensitive-owner-secret"));
     }
 
     #[test]

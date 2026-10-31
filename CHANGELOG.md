@@ -91,6 +91,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
+- 归档 LXT UDP 辅助 TCP 握手救援实验 V4–V8，共记录 8 个测试科目、Python 实验代码、5 份报告和原始日志/抓包证据；入口见 `experimental/README.md`。实验验证了在可控 SYN-ACK 阻断和部分真实公网路径上的握手救援，但也确认 PREROUTING/conntrack 前丢弃、严格 invalid 过滤、UDP 不可达及真实第三方中间盒仍是关键边界。该实现未接入 Rust 构建、CLI、发布物或生产数据面，不能视为生产级传输或通用穿透方案。
 - 对齐 README、快速开始、部署、迁移清单与变更记录中的统一节点模型：产品层只有节点，`host`/`join` 是同一程序创建或加入网络的操作；明确 NX-08 已交付真实 GPUI 原生外壳，但 11 个业务页面、GPUI/WebUI 语义对等测试和跨平台实机验证仍未完成，不能把目标状态描述为已交付。
 - 固化统一节点目标架构：唯一产品身份为节点，协调/信令/中继/Exit Node 都是按网络承担的服务角色；明确 GPUI/WebUI 必须共享命令层、状态契约与能力清单，并列出独立协调二进制、浏览器伪桌面和重复 UI 业务逻辑的迁移/删除边界。
 - 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。

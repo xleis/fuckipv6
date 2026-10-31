@@ -196,6 +196,11 @@ Coordinator-side observability:
    - Coordinator advertises distributed QUIC relay clusters in `RegisterAck`.
    - Clients perform concurrent RTT/handshake probing at connection time and connect to the selected relay; this is not continuous migration or dynamic load balancing.
 
+4. **LXT handshake rescue experiment (non-production)**:
+   - `experimental/` archives a Python prototype that relays a server-generated TCP SYN-ACK over an HMAC-authenticated UDP channel and injects it into a client TUN when the normal SYN-ACK path is blocked.
+   - The experiment is not wired into the Rust binary, CLI, release artifacts, or production QUIC/UDP data plane. It does not transport application TCP data over UDP: after the rescued handshake, traffic remains native TCP.
+   - Public-network and namespace tests show that success depends on UDP reachability and middlebox/NAT state. Dropping SYN-ACK before conntrack on a NAT path, or enforcing strict `ct state invalid drop`, breaks the follow-up TCP ACK/data path. Real third-party middleboxes, MSS handling, authentication hardening, and an independent security review remain unverified.
+
 ## Current Boundaries
 
 ### Directly usable
@@ -225,6 +230,7 @@ Coordinator-side observability:
 - GPUI business pages/action forms for the 11-page manifest, automated GPUI/WebUI semantic parity tests, and cross-platform GPUI runtime validation.
 - User-space NAT; the current Exit Node path is Linux kernel-based.
 - Windows/macOS Exit Node parity with the Linux implementation.
+- Product integration of the LXT handshake-rescue experiment; the current Python archive is neither compiled nor exposed by the node runtime.
 - Repeatable real cross-host NAT, production WAN scale, independent security audit, and target-platform runtime validation.
 
 ## Verification Baseline

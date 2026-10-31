@@ -154,4 +154,4 @@ python3 lxt_bulk_probe.py client --server 198.51.100.10 --port 39090 \
 - 本目录不包含任何真实预共享密钥（PSK）。所有命令使用 `LXT_LAB_KEY` 环境变量占位；测试密钥应使用 `openssl rand -hex 32` 生成，且不要提交 Git/写入公开日志。
 - 阻断规则只应在**客户端实验机**上临时创建，必须带 TTL/trap 自动清理；不要对朋友的服务器改 SSH、默认路由、iptables/firewalld 或既有业务。
 - 仅 IPv4；sidecar 需要 root/RAW/TUN；peer map 目前只按源 IP；MSS 仍建议做路径 clamp；代理无认证/ACL/限流。
-- 本目录是实验归档，不是生产代码；`fuckipv6` 主工程未修改。
+- 本目录是实验归档，不是生产代码；实验 Python 快照未接入 `fuckipv6` 的 Rust 构建、CLI 或数据面，主工程运行时代码不依赖本目录。

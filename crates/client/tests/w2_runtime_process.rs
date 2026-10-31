@@ -124,18 +124,24 @@ fn spawn_headless_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
 }
 
 fn spawn_service(directory: &Path, port: u16) -> Result<ProcessGuard> {
+    let config_dir = directory.join("config/fuckipv6");
+    let options_file = directory.join("service.json");
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::write(
+        &options_file,
+        format!(
+            r#"{{"routing_mode":null,"exit_node":null,"is_exit_node":null,"webui_port":{port}}}"#
+        ),
+    )?;
     Ok(ProcessGuard {
         child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
             .arg("__service")
+            .arg("--options-file")
+            .arg(&options_file)
+            .arg("--config-dir")
+            .arg(&config_dir)
             .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
-            .env("XDG_CONFIG_HOME", directory.join("config"))
             .env("HOME", directory.join("home"))
-            .env(
-                "FUCKIPV6_INTERNAL_OPTIONS",
-                format!(
-                    r#"{{"routing_mode":null,"exit_node":null,"is_exit_node":null,"webui_port":{port}}}"#
-                ),
-            )
             .env("RUST_LOG", "error")
             .current_dir(directory)
             .stdin(Stdio::null())

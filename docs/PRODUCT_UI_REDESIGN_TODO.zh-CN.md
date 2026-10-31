@@ -374,14 +374,16 @@ control ─────┼── spawn / adopt / health-check ──► node
 
 **验收**：运行时返回逐项清理结果；只有清理成功才注销监听和 peer 注册。停止超时、清理失败或子任务未退出时保留残留事实并阻止同一网络重启。回归覆盖停止超时后延迟完成、确定性清理失败、重启前清理门禁、12 个网络并行停止、固定端口释放，以及 fake runner 下的 TUN/路由/DNS/监听资源恢复。
 
-### W2-05 control 崩溃恢复 `[~]`
+### W2-05 control 崩溃恢复 `[x]`
 
 - [x] control 崩溃时 node 按最后有效策略继续；
-- [ ] 服务管理器重启 control：UI 启动路径可补拉 control，systemd/launchd/Windows Service 尚未落地；
+- [x] UI 启动路径可补拉 control；systemd/launchd/Windows Service 归入 W2-08；
 - [x] control 重新读取 node 真实状态；
 - [x] 事件缺口触发快照重拉；
 - [x] 不因 control 恢复重启数据面；
 - [x] 添加 SIGKILL/硬重启测试。
+
+**验收**：`new_headless_ui_restarts_crashed_control_and_adopts_live_node` 覆盖旧 control 被 SIGKILL、旧 UI 关闭、新 UI 启动后自动补拉 control；新 control 接管原 node，node PID 不变，新 WebUI 可查询权威快照。UI 对 detached control 设置独立收尸线程，避免 control 异常退出后在 UI 生命周期内遗留僵尸进程。
 
 ### W2-06 node 故障处理 `[~]`
 

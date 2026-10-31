@@ -453,7 +453,13 @@ fn spawn_detached_control(options: &RuntimeOptions) -> Result<()> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command.spawn().context("无法启动控制进程")?;
+    let mut child = command.spawn().context("无法启动控制进程")?;
+    // The UI deliberately does not own control's lifetime, but it is still the
+    // parent on Unix. Reap control if it exits while the UI remains open so a
+    // crashed supervisor cannot linger as a zombie until the UI closes.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

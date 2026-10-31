@@ -134,6 +134,15 @@ fn send_signal(pid: u32, signal: &str) -> Result<()> {
 }
 
 fn process_alive(pid: u32) -> bool {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if stat
+            .rsplit_once(") ")
+            .and_then(|(_, fields)| fields.chars().next())
+            .is_some_and(|state| matches!(state, 'Z' | 'X'))
+        {
+            return false;
+        }
+    }
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -346,6 +355,84 @@ async fn replacement_control_adopts_node_after_control_sigkill() -> Result<()> {
     let status = wait_for_exit(&mut replacement_control).await?;
     assert!(status.success(), "replacement control exited with {status}");
     assert!(!process_alive(node_pid), "node was not stopped");
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_headless_ui_restarts_crashed_control_and_adopts_live_node() -> Result<()> {
+    let directory = temp_dir("ui-control-recovery")?;
+    let runtime_dir = directory.join("runtime");
+    let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
+    let control_lock = runtime_dir.join("control.lock");
+    let node_lock = runtime_dir.join("node.lock");
+    let first_port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+
+    let mut first_ui = spawn_headless_ui(&directory, first_port)?;
+    wait_until_ready(&node_endpoint).await?;
+    wait_for_webui(first_port).await?;
+
+    let first_control_pid = read_pid(&control_lock)?;
+    let node_pid = read_pid(&node_lock)?;
+    send_signal(first_control_pid, "KILL")?;
+    wait_for_process_exit(first_control_pid).await?;
+    assert!(process_alive(node_pid), "node must outlive a control crash");
+
+    let first_ui_pid = first_ui.child.id();
+    send_signal(first_ui_pid, "TERM")?;
+    let status = wait_for_exit(&mut first_ui).await?;
+    assert!(
+        status.success(),
+        "first headless WebUI exited with {status}"
+    );
+    assert_eq!(
+        read_pid(&node_lock)?,
+        node_pid,
+        "closing the first UI restarted the node"
+    );
+
+    let second_port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+    let mut second_ui = spawn_headless_ui(&directory, second_port)?;
+    let replacement_control_pid = wait_for_new_pid(&control_lock, first_control_pid).await?;
+    wait_for_webui(second_port).await?;
+    wait_until_ready(&node_endpoint).await?;
+
+    assert!(
+        process_alive(replacement_control_pid),
+        "new UI did not leave a replacement control resident"
+    );
+    assert_eq!(
+        read_pid(&node_lock)?,
+        node_pid,
+        "control recovery restarted the data-plane node"
+    );
+    assert!(matches!(
+        local_ipc::request(
+            &node_endpoint,
+            local_ipc::IpcRole::WebUi,
+            &LocalRequest {
+                request_id: 11,
+                command: LocalCommand::Snapshot,
+            },
+        )
+        .await?,
+        LocalResponse::Snapshot { .. }
+    ));
+
+    send_signal(replacement_control_pid, "TERM")?;
+    wait_for_process_exit(replacement_control_pid).await?;
+    wait_for_process_exit(node_pid).await?;
+    let second_ui_pid = second_ui.child.id();
+    send_signal(second_ui_pid, "TERM")?;
+    let status = wait_for_exit(&mut second_ui).await?;
+    assert!(
+        status.success(),
+        "second headless WebUI exited with {status}"
+    );
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }

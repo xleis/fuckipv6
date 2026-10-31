@@ -1157,6 +1157,9 @@ fn action_label(id: &str) -> &'static str {
         "update_routing" => "更新路由",
         "set_exit_node_role" => "设置 Exit Node 角色",
         "set_relay_role" => "设置 Relay 角色",
+        "start_node" => "启动节点",
+        "stop_node" => "停止节点",
+        "restart_node" => "重启节点",
         "shutdown_node" => "关闭节点",
         _ => "未知动作",
     }

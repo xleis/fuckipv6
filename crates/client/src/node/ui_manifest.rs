@@ -286,6 +286,9 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::UpdateRouting => NodeUiAudit::record("routing.update"),
         NodeCommandKind::SetNetworkRole => NodeUiAudit::record("network.role.set"),
         NodeCommandKind::ProbePeer => NodeUiAudit::record("peer.probe"),
+        NodeCommandKind::StartNode => NodeUiAudit::record("node.start"),
+        NodeCommandKind::StopNode => NodeUiAudit::record("node.stop"),
+        NodeCommandKind::RestartNode => NodeUiAudit::record("node.restart"),
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
 }
@@ -345,16 +348,52 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 "overview",
                 "nav.overview",
                 "page.overview",
-                vec![action(
-                    "refresh_snapshot",
-                    "action.refresh_snapshot",
-                    NodeCommandKind::GetSnapshot,
-                    NodeUiBackendStatus::Implemented,
-                    NodePermission::ViewState,
-                    NodeUiAvailability::Always,
-                    vec![],
-                    None,
-                )],
+                vec![
+                    action(
+                        "refresh_snapshot",
+                        "action.refresh_snapshot",
+                        NodeCommandKind::GetSnapshot,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "start_node",
+                        "action.start_node",
+                        NodeCommandKind::StartNode,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "stop_node",
+                        "action.stop_node",
+                        NodeCommandKind::StopNode,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::StopNode,
+                        NodeUiAvailability::NodeRunning,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "restart_node",
+                        "action.restart_node",
+                        NodeCommandKind::RestartNode,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![],
+                        Some(confirmation(
+                            "confirm.restart_node.title",
+                            "confirm.restart_node.consequence",
+                            true,
+                        )),
+                    ),
+                ],
             ),
             page(
                 "networks",
@@ -982,6 +1021,9 @@ mod tests {
             NodeCommandKind::StartNetworks,
             NodeCommandKind::CreateNetwork,
             NodeCommandKind::JoinNetwork,
+            NodeCommandKind::StartNode,
+            NodeCommandKind::StopNode,
+            NodeCommandKind::RestartNode,
         ] {
             assert_eq!(
                 status(command),
@@ -1012,6 +1054,16 @@ mod tests {
             .expect("shutdown action");
 
         assert!(shutdown
+            .confirmation
+            .as_ref()
+            .is_some_and(|confirmation| confirmation.destructive));
+        let restart = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeCommandKind::RestartNode)
+            .expect("restart node action");
+        assert!(restart
             .confirmation
             .as_ref()
             .is_some_and(|confirmation| confirmation.destructive));

@@ -91,11 +91,14 @@ pub enum ActionBinding {
     UpdateRouting,
     SetExitNodeRole,
     SetRelayRole,
+    StartNode,
+    StopNode,
+    RestartNode,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::RefreshSnapshot,
         Self::CreateNetwork,
         Self::JoinNetwork,
@@ -106,6 +109,9 @@ impl ActionBinding {
         Self::UpdateRouting,
         Self::SetExitNodeRole,
         Self::SetRelayRole,
+        Self::StartNode,
+        Self::StopNode,
+        Self::RestartNode,
         Self::ShutdownNode,
     ];
 
@@ -121,6 +127,9 @@ impl ActionBinding {
             Self::UpdateRouting => "update_routing",
             Self::SetExitNodeRole => "set_exit_node_role",
             Self::SetRelayRole => "set_relay_role",
+            Self::StartNode => "start_node",
+            Self::StopNode => "stop_node",
+            Self::RestartNode => "restart_node",
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -328,6 +337,9 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::SetNetworkRole,
         ),
         "set_relay_role" => (ActionBinding::SetRelayRole, NodeCommandKind::SetNetworkRole),
+        "start_node" => (ActionBinding::StartNode, NodeCommandKind::StartNode),
+        "stop_node" => (ActionBinding::StopNode, NodeCommandKind::StopNode),
+        "restart_node" => (ActionBinding::RestartNode, NodeCommandKind::RestartNode),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -492,6 +504,9 @@ pub fn build_command(
                 enabled: parse_bool(action, "enabled", &required("enabled")?)?,
             }))
         }
+        Ok(ActionBinding::StartNode) => Ok(NodeCommand::StartNode),
+        Ok(ActionBinding::StopNode) => Ok(NodeCommand::StopNode),
+        Ok(ActionBinding::RestartNode) => Ok(NodeCommand::RestartNode),
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -523,7 +538,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "set_exit_node_role" | "set_relay_role" => {
             HashSet::from(["network_name", "role", "enabled"])
         }
-        "shutdown_node" => HashSet::from([]),
+        "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
     };
     let actual = action

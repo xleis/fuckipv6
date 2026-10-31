@@ -132,6 +132,52 @@
               "availability": "always",
               "fields": [],
               "confirmation": null
+            },
+            {
+              "id": "start_node",
+              "label_key": "action.start_node",
+              "command": "start_node",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "node.start"
+              },
+              "availability": "always",
+              "fields": [],
+              "confirmation": null
+            },
+            {
+              "id": "stop_node",
+              "label_key": "action.stop_node",
+              "command": "stop_node",
+              "backend_status": "implemented",
+              "permission": "stop_node",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "node.stop"
+              },
+              "availability": "node_running",
+              "fields": [],
+              "confirmation": null
+            },
+            {
+              "id": "restart_node",
+              "label_key": "action.restart_node",
+              "command": "restart_node",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "node.restart"
+              },
+              "availability": "node_running",
+              "fields": [],
+              "confirmation": {
+                "title_key": "confirm.restart_node.title",
+                "consequence_key": "confirm.restart_node.consequence",
+                "destructive": true
+              }
             }
           ]
         },
@@ -601,6 +647,9 @@
       "action.update_routing": "更新路由",
       "action.set_exit_node_role": "设置 Exit Node 角色",
       "action.set_relay_role": "设置中继角色",
+      "action.start_node": "启动节点",
+      "action.stop_node": "停止节点",
+      "action.restart_node": "重启节点",
       "action.shutdown_node": "关闭节点",
       "field.network_name": "网络名称",
       "field.signaling_port": "信令端口",
@@ -628,6 +677,8 @@
       "confirm.set_exit_node_role.consequence": "角色变更会立即影响此节点在网络中的能力。",
       "confirm.set_relay_role.title": "确认角色变更",
       "confirm.set_relay_role.consequence": "角色变更会立即影响此节点在网络中的能力。",
+      "confirm.restart_node.title": "确认重启节点",
+      "confirm.restart_node.consequence": "所有数据面和自托管服务会停止，随后按持久化配置重新启动。",
       "confirm.shutdown_node.title": "确认关闭节点",
       "confirm.shutdown_node.consequence": "所有网络和数据面会停止，且当前操作不可撤销。"
     }
@@ -1331,6 +1382,10 @@
             enabled: booleanValue(required(values, "enabled")),
           },
         };
+      case "start_node":
+      case "stop_node":
+      case "restart_node":
+        return { command };
       case "shutdown_node":
         return { command };
       default:

@@ -30,6 +30,7 @@ pub struct RemoteNodeSession {
     runtime: Option<Runtime>,
     state: NodeStateStore,
     commands: NodeCommandBus,
+    events: NodeEventBus,
     cancel: watch::Sender<bool>,
     sync: Option<JoinHandle<()>>,
 }
@@ -52,7 +53,7 @@ impl RemoteNodeSession {
             .build()
             .context("无法创建 UI IPC 运行时")?;
 
-        let (state, commands, cancel, sync) = runtime.block_on(async {
+        let (state, commands, events, cancel, sync) = runtime.block_on(async {
             timeout(
                 INITIAL_CONNECT_TIMEOUT,
                 runtime_process::ensure_control(&options),
@@ -70,16 +71,17 @@ impl RemoteNodeSession {
                 endpoint: endpoint.clone(),
                 role: role.clone(),
             });
-            let commands = NodeCommandBus::spawn(handler, events, 32);
+            let commands = NodeCommandBus::spawn(handler, events.clone(), 32);
             let (cancel, cancel_rx) = watch::channel(false);
             let sync = tokio::spawn(sync_node_state(endpoint, role, state.clone(), cancel_rx));
-            Ok::<_, anyhow::Error>((state, commands, cancel, sync))
+            Ok::<_, anyhow::Error>((state, commands, events, cancel, sync))
         })?;
 
         Ok(Self {
             runtime: Some(runtime),
             state,
             commands,
+            events,
             cancel,
             sync: Some(sync),
         })
@@ -91,6 +93,12 @@ impl RemoteNodeSession {
 
     pub fn commands(&self) -> NodeCommandBus {
         self.commands.clone()
+    }
+
+    /// Event stream associated with `commands()`. UI transports use this to
+    /// notify renderers after state or command revisions change.
+    pub fn events(&self) -> NodeEventBus {
+        self.events.clone()
     }
 
     /// Disconnect the UI. The control and node processes deliberately keep

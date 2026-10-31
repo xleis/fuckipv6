@@ -397,7 +397,7 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-5 密码批处理接线与 worker 化
 
-- [x] **底层同 peer 原地批处理：** `4ea9c17` 提供 `seal_batch_in_place`、独立 buffer 的逐包 open 结果和 `Bytes` 原地 open；完整 nonce 在 AEAD 前预留。
+- [x] **底层同 peer 原地批处理：** `0e316e1` 提供 `seal_batch_in_place`、独立 buffer 的逐包 open 结果和 `Bytes` 原地 open；完整 nonce 在 AEAD 前预留。
 - [ ] 在 TUN/UDP batch 之上按 peer 构造连续 packet batch，明确 header/tag/stride 布局。
 - [ ] 串行预留 counter/nonce 后并行执行 AEAD，保持每 peer 发送顺序和失败关闭语义。
 - [ ] worker 数按可用 CPU 配置，队列有界，过载策略可观测。
@@ -418,7 +418,7 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-6 移除会话热路径 async mutex
 
-- [x] **锁等待/持锁指标：** `4ea9c17` 增加真实 `try_lock` 竞争计数、wait/hold 总时长与最大值，并覆盖并发 seal 的线性化测试。
+- [x] **锁等待/持锁指标：** `0e316e1` 增加真实 `try_lock` 竞争计数、wait/hold 总时长与最大值，并覆盖并发 seal 的线性化测试。
 - [x] **同 peer 批量临界区：** `seal_batch_in_place` 一次持锁预留完整 nonce 范围并完成批量 AEAD；这是缩小锁获取次数，不是移除热路径锁。
 - [ ] 拆分 `SecurePeerState` 的 admission、session/epoch、driver 和统计状态，缩小临界区。
 - [ ] 采用每 peer actor、同步短锁或所有权转移，禁止在持锁期间执行网络 I/O 或 await。
@@ -537,7 +537,7 @@ strace 的手工调用数高于内建“成功 batch syscall”数，因为 `asy
 
 日期：2026-10-31
 
-### secure-runtime 独立提交 `4ea9c17`
+### secure-runtime 独立提交 `0e316e1`
 
 ```text
 cargo fmt --all -- --check

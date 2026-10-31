@@ -5,6 +5,9 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Security
+- **Secure Session 在线重协商基础**: 核心会话支持按时间、明文字节和发送包计数提前调度 REKEY，维护路径按 grace deadline 清理退役接收世代，并拒绝 REKEY 尝试切换 cipher suite。真实 UDP 接线仍待审查，QUIC/relay 认证 REKEY 通道和端到端切换测试未完成，NX-11 保持进行中。
+- **混合后量子 profile fail-closed 策略**: 新增不可拆分的 X-Wing draft-11、ML-KEM-768、Ed25519+ML-DSA-65、HKDF-SHA-512 与 AES-256-GCM/ChaCha20-Poly1305 profile 绑定；HELLO/ACCEPT 和 responder policy 对版本、profile、suite 精确匹配，拒绝未知算法与静默降级。该切片尚未接入生产数据面，NX-13 保持进行中，不宣称后量子安全。
+- **Exit Node Linux netns 验收**: 新增特权 network namespace 脚本，在隔离拓扑中验证内核转发、iptables NAT、客户端授权撤销、资源清理以及 POSTROUTING 安装失败回滚；当前主机两个场景均通过。这不替代 Windows/macOS 实机验证或真实互联网链路测试，NX-15 保持进行中。
 - **NX-16 用户态 NAT 隔离原型**: 新增默认关闭的 `userspace-nat-prototype` feature，未接入任何生产路径。原型包含严格 IPv4/TCP/UDP 解析与校验和、TCP/UDP 有界连接跟踪、确定性超时与端口复用、每源/全局容量限制、无在线流驱逐的失败关闭策略，以及 12 个确定性测试。文档给出逻辑内存预算和待测性能门禁；尚无包重写、真实转发吞吐/延迟/RSS 或安全审计证据，因此结论为 **NO-GO，禁止产品接入**。
 - **Coordinator 持久授权撤销**: 新增与配置目录绑定的稳定网络标识和持久授权撤销目录，旧路径哈希记录可安全迁移，歧义记录拒绝自动改写；撤销/注册通过授权门串行，使用进程内互斥、跨进程文件锁与原子替换避免并发丢更新。目录缺失、读取失败、存储不支持撤销和跨网络撤销写入均失败关闭；重启后撤销继续生效，在线会话被断开且证书 allowlist 被移除，QUIC relay 对已建立连接逐包重查撤销。新增重启恢复、独立子进程并发、跨网络和存储故障负向测试。Coordinator 撤销 API 已提供；产品 CLI/WebUI/GPUI 撤销入口、稳定节点身份与当前公钥解耦、多 Coordinator 即时同步、P2P QUIC Mesh 完整撤销/重连策略及授权 epoch/租约绑定仍未完成，NX-14 保持进行中。
 - **节点私钥文件权限**: Unix 上创建 `node_identity.pem` 时直接使用 `0600` 模式，不再依赖进程 umask；覆盖已有身份文件时会在写入私钥前收紧权限，并新增新文件与宽松旧权限两类回归测试。

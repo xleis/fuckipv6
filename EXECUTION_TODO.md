@@ -109,10 +109,11 @@
 
 ### P1-C：安全能力生产化
 
-- [ ] **NX-11 生产数据面在线重协商（细化 EX-16）**
+- [>] **NX-11 生产数据面在线重协商（细化 EX-16）**
   - 工作：把 REKEY 接入真实 UDP、QUIC 和 relay 数据面，支持密钥世代切换、旧世代短暂重叠和失败保留旧会话。
   - 依赖：EX-16、现有 Secure Session 握手与数据面。
   - 验收：会话到期前触发 REKEY；切换期间不中断有效流量；重放/乱序/旧世代包有明确窗口；失败不降级为明文或旧弱参数；敏感旧密钥及时清零；UDP、QUIC、relay 均有集成测试。
+  - 进展（2026-10-31）：Secure Session 核心已支持按时间/字节/包计数提前调度换钥，维护路径会按 grace deadline 清理退役接收世代，并拒绝 REKEY 中的 cipher suite 降级；固定测试覆盖提前触发、退役密钥清理和降级拒绝。真实 UDP 接线仍在审查中，QUIC/relay 的认证 REKEY 通道、端到端切换流量测试和独立审计尚未完成，故保持进行中。
 
 - [>] **NX-12 握手 DoS 与限速（细化 EX-16）**
   - 工作：实现握手 Cookie/挑战、每源地址与每身份配额、全局并发上限、有限握手状态、TTL 清理、背压和可观测指标。
@@ -120,10 +121,11 @@
   - 验收：伪造源地址泛洪不能无限分配内存或 CPU；达到配额返回可识别错误而非崩溃；有效节点不被短时突发永久饿死；状态表有硬上限和淘汰测试；日志不泄露密钥或完整敏感票据。
   - 进展（2026-10-30）：新增共享握手准入守卫，并接入实际 UDP Secure Session v2 HELLO 分配点和 QUIC 入站 accept 路径。守卫提供每源地址/每身份/全局配额、10 秒 TTL、RAII 释放、冻结活跃预留的硬表上限、IPv4-mapped IPv6 归一化、分类拒绝指标与无敏感数据的拒绝日志；QUIC 在 TLS 后绑定单证书 Ed25519 身份，UDP 重传复用同一预留。覆盖伪造源泛洪、TTL 恢复、活跃行不可淘汰、全局/身份硬上限、短突发下有效节点推进及 QUIC 正常握手释放。剩余：Cookie/挑战尚未实现；指标尚未进入产品 API/UI；UDP 在准入前仍会解码控制帧并扫描 Peer，QUIC 身份只能 TLS 后绑定且监听器尚未由完整运行时就绪编排；统一身份目录、跨节点压测和独立 DoS 评审未完成，故本项保持进行中。
 
-- [ ] **NX-13 后量子 profile 生产接入（细化 EX-16）**
+- [>] **NX-13 后量子 profile 生产接入（细化 EX-16）**
   - 工作：把已选定的混合后量子 profile 接入能力协商、CONFIRM、握手 transcript、数据面密钥派生、版本/算法绑定和容量预算；禁止静默降级。
   - 依赖：NX-11；密码学原语已有测试但尚未完成生产接线。
   - 验收：双方支持时协商 PQ profile，不支持或确认失败时按策略拒绝而非弱降级；profile/算法版本进入 transcript 与审计事件；固定向量、篡改、降级和互操作测试通过；明确性能与流量开销；独立审计前不得宣称“后量子安全”或“超越 WireGuard”。
+  - 进展（2026-10-31）：新增不可拆分的 X-Wing draft-11 / ML-KEM-768 / Ed25519+ML-DSA-65 / HKDF-SHA-512 / AES-256-GCM 或 ChaCha20-Poly1305 profile 绑定，HELLO/ACCEPT 和 responder policy 对版本、profile、suite 精确匹配并失败关闭；104 项 secure-session 测试及 clippy 通过。三消息 wire 切片、SessionDriver/生产 UDP/TUN/QUIC/relay 接线、互操作、容量预算与独立审计仍未完成，禁止宣称已具备生产后量子安全。
 
 - [>] **NX-14 身份授权与撤销生命周期（细化 EX-16）**
   - 工作：建立网络级最终授权、持久撤销目录和一致的身份查找，使控制面、relay、P2P QUIC 和重连路径使用同一授权结论。
@@ -135,7 +137,7 @@
   - 工作：补齐 Linux network namespace 自动化，并为 Windows/macOS 实现等价转发/NAT 能力或明确能力探测与禁用原因。
   - 依赖：NX-04、NX-05。
   - 验收：Linux 覆盖启动、路由、NAT、清理和故障回滚；Windows/macOS 要么通过实机集成测试，要么 UI/CLI/API 明确报告不支持且禁用动作；任何平台都不得显示虚假的 Exit Node 成功状态。
-  - 进展（2026-10-30）：共享 `ExitNodeCapabilities` 契约已发布稳定 schema，区分平台、转发/NAT/清理能力与类型化禁用原因；非 Linux 的能力探测固定失败关闭，启用 Exit Node 的配置加载/保存会被拒绝。`NodeSnapshot` 暴露 capability 真值，旧快照缺少字段时重新探测；Exit Node 启用类命令在快照报告不支持时返回不可重试的 `unsupported`，HTTP 映射为 422，支持但运行时后端未接线时仍明确返回 `unavailable`。Linux 转发器改为可注入命令执行器，并以单元测试覆盖内核转发、过滤/NAT 链、客户端规则、回程路由、清理幂等和安装/客户端失败回滚。剩余：受保护 CLI/WebUI adapter 与尚不存在的 GPUI 页面尚未消费能力字段禁用入口，未增加需要特权网络命名空间的实机集成测试，Windows/macOS 无真实数据面且未做实机测试；NX-04 的运行中路由重配置已接通。
+  - 进展（2026-10-31）：共享 `ExitNodeCapabilities` 契约已发布稳定 schema，区分平台、转发/NAT/清理能力与类型化禁用原因；非 Linux 的能力探测固定失败关闭，启用 Exit Node 的配置加载/保存会被拒绝。`NodeSnapshot` 暴露 capability 真值，旧快照缺少字段时重新探测；Exit Node 启用类命令在快照报告不支持时返回不可重试的 `unsupported`，HTTP 映射为 422，支持但运行时后端未接线时仍明确返回 `unavailable`。Linux 转发器改为可注入命令执行器，并以单元测试覆盖内核转发、过滤/NAT 链、客户端规则、回程路由、清理幂等和安装/客户端失败回滚。新增特权 Linux network namespace 验收脚本，已在当前主机真实通过启动、转发、NAT、授权撤销、清理和 POSTROUTING 故障回滚场景。剩余：受保护 CLI/WebUI adapter 与 GPUI 页面尚未消费能力字段禁用入口，Windows/macOS 无真实数据面且未做实机测试；NX-04 的运行中路由重配置已接通。
 
 - [x] **NX-16 用户态 NAT 可行性原型（细化 EX-16）**
   - 工作：原型实现 TCP/UDP 连接跟踪、超时、端口复用、资源上限和失败关闭策略，评估作为无内核转发平台后备路径的可行性。

@@ -132,6 +132,10 @@ fn worker() -> Option<&'static CryptoWorker> {
 /// The caller must then execute the same operation serially.
 pub(crate) fn try_run<R: Send>(job: impl FnOnce() -> R + Send) -> Option<R> {
     let worker = worker()?;
+    try_run_on(worker, job)
+}
+
+fn try_run_on<R: Send>(worker: &CryptoWorker, job: impl FnOnce() -> R + Send) -> Option<R> {
     acquire_slot(worker)?;
     struct Permit<'a>(&'a AtomicUsize);
     impl Drop for Permit<'_> {
@@ -203,4 +207,22 @@ pub fn crypto_batch_metrics() -> CryptoBatchMetrics {
 
 pub(crate) fn parallel_threshold_reached(packet_count: usize, plaintext_bytes: usize) -> bool {
     packet_count >= 4 && plaintext_bytes >= 4096
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_in_flight_gate_falls_back_and_records_overload() {
+        let worker = CryptoWorker::new(1).expect("create isolated crypto worker");
+        worker.in_flight.store(1, Ordering::Release);
+
+        assert_eq!(try_run_on(&worker, || 7usize), None);
+        assert_eq!(worker.metrics.overloaded_jobs.load(Ordering::Relaxed), 1);
+
+        worker.in_flight.store(0, Ordering::Release);
+        assert_eq!(try_run_on(&worker, || 9usize), Some(9));
+        assert_eq!(worker.in_flight.load(Ordering::Acquire), 0);
+    }
 }

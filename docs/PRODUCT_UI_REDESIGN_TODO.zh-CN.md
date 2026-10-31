@@ -48,7 +48,7 @@
 |---|---|---|---|---|
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
-| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI 远程接线、control 崩溃接管和 node 崩溃恢复已落地；WebUI 接线、stop/start 语义、服务管理器和完整资源看门狗未完成 |
+| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
 | W3 所有者安全 | `[ ]` | P0 | W2 | Passkey、HTTPS、初始化码、恢复 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
@@ -386,14 +386,19 @@ control ─────┼── spawn / adopt / health-check ──► node
 
 **验收**：`new_headless_ui_restarts_crashed_control_and_adopts_live_node` 覆盖旧 control 被 SIGKILL、旧 UI 关闭、新 UI 启动后自动补拉 control；新 control 接管原 node，node PID 不变，新 WebUI 可查询权威快照。UI 对 detached control 设置独立收尸线程，避免 control 异常退出后在 UI 生命周期内遗留僵尸进程。
 
-### W2-06 node 故障处理 `[~]`
+### W2-06 node 故障处理 `[x]`
 
 - [x] node 异常退出时依赖动作失败关闭；
 - [x] control 保持可用；
 - [x] UI 显示节点故障而非控制服务异常；
-- [ ] 提供重启、诊断和残留清理入口；
+- [x] 提供重启、诊断和残留清理入口；
 - [x] 不静默直连；
 - [x] 添加 node crash 故障注入。
+
+**验收**：共享 manifest 暴露 `restart_node`、`get_node_diagnostics` 与
+`cleanup_node_residuals`；GPUI 和 WebUI 均通过同一类型化命令层执行。运行中会话不能被
+cleanup 绕过，超时或 owner 丢失会保持残留事实并允许重试；部分成功、owner 丢失和
+超时后成功重试均有运行时测试覆盖。
 
 ### W2-07 启动 UI 策略 `[x]`
 
@@ -421,8 +426,13 @@ control ─────┼── spawn / adopt / health-check ──► node
 - [x] 失败后杀进程并可观察；
 - [ ] 恢复 DNS/策略路由/路由表/TUN；
 - [x] 用户不需要手工 kill；
-- [ ] 生成脱敏诊断；
+- [x] 生成脱敏诊断；
 - [ ] 清理失败是发布阻断。
+
+**已有证据**：`get_node_diagnostics` 返回 owner-only 运行时生命周期、保留 owner、
+cleanup 候选、会话/监听器/Peer/内嵌服务计数，以及逐项 cleanup step；不包含凭据或
+敏感配置值。GPUI/WebUI 使用共享诊断结果展示可恢复问题，WebUI 对未知 cleanup 状态和
+失败原因失败关闭。
 
 ## 6. W3：所有者认证与公网安全
 

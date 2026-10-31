@@ -395,14 +395,16 @@ control ─────┼── spawn / adopt / health-check ──► node
 - [x] 不静默直连；
 - [x] 添加 node crash 故障注入。
 
-### W2-07 启动 UI 策略 `[ ]`
+### W2-07 启动 UI 策略 `[x]`
 
-- [ ] 图形会话默认 GPUI；
-- [ ] 无头按配置启用 WebUI；
-- [ ] 不按公网 IP 推断；
-- [ ] 所有入口连接同一 control；
-- [ ] 命令子入口和顶层入口一致；
-- [ ] 添加 X11/Wayland/无 DISPLAY 场景测试。
+- [x] 图形会话默认 GPUI；
+- [x] 无头按配置启用 WebUI；
+- [x] 不按公网 IP 推断；
+- [x] 所有入口连接同一 control；
+- [x] 命令子入口和顶层入口一致；
+- [x] 添加 X11/Wayland/无 DISPLAY 场景测试。
+
+**验收**：X11、Wayland、Windows/macOS 桌面在 GPUI 可用时自动选择 GPUI，GPUI 不可用时回退 WebUI；无 DISPLAY 自动选择 Headless，显式 WebUI 仍可运行；`FUCKIPV6_PUBLIC_IP` 不参与显示环境判断。顶层入口与 `host/join/connect/up/start` 子入口使用同一模式解析，GPUI 只在 OS 主线程启动。`headless_command_entrypoint_reexports_the_same_control` 验证 `up` 子入口关闭 UI 后仍连接同一 control/node。
 
 ### W2-08 服务监督 `[ ]`
 

@@ -475,7 +475,7 @@ fn requested_ui_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn runtime_options(
+fn runtime_options_with_capabilities(
     routing_mode: Option<String>,
     exit_node: Option<String>,
     is_exit_node: Option<bool>,
@@ -483,20 +483,18 @@ fn runtime_options(
     webui: bool,
     gpui: bool,
     webui_port: u16,
+    capabilities: UiCapabilities,
 ) -> Result<commands::RuntimeOptions> {
     let requested = requested_ui_mode(headless, webui, gpui)?;
-    let effective = resolve_ui_mode(requested, UiCapabilities::detect())?.effective;
+    let effective = resolve_ui_mode(requested, capabilities)?.effective;
 
     let (headless, gui) = match effective {
         UiMode::Headless => (true, false),
         UiMode::WebUi => (false, true),
-        // Runtime subcommands historically use the legacy desktop adapter when
-        // no explicit mode is supplied. Explicit --gpui must never be silently
-        // downgraded to that browser-hosted path.
-        UiMode::Gpui if requested == UiModeRequest::Auto => (false, true),
-        UiMode::Gpui => {
-            anyhow::bail!("GPUI 原生入口目前只支持顶层 `fuckipv6 --gpui`；命令子入口尚未接线")
-        }
+        // RuntimeOptions still carries the legacy two-bit adapter shape. GPUI
+        // is neither the headless node core nor the browser-hosted `gui`
+        // adapter; the native launch decision is carried by UiModeResolution.
+        UiMode::Gpui => (false, false),
     };
 
     Ok(commands::RuntimeOptions {
@@ -509,25 +507,99 @@ fn runtime_options(
     })
 }
 
-fn command_requests_gpui(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::Host { gpui: true, .. }
-            | Commands::Join { gpui: true, .. }
-            | Commands::Connect { gpui: true, .. }
-            | Commands::Up { gpui: true, .. }
-            | Commands::Start { gpui: true, .. }
+#[allow(clippy::too_many_arguments)]
+fn runtime_options(
+    routing_mode: Option<String>,
+    exit_node: Option<String>,
+    is_exit_node: Option<bool>,
+    headless: bool,
+    webui: bool,
+    gpui: bool,
+    webui_port: u16,
+) -> Result<commands::RuntimeOptions> {
+    runtime_options_with_capabilities(
+        routing_mode,
+        exit_node,
+        is_exit_node,
+        headless,
+        webui,
+        gpui,
+        webui_port,
+        UiCapabilities::detect(),
     )
 }
 
-fn reject_unwired_subcommand_gpui(command: &Commands) -> Result<()> {
-    if command_requests_gpui(command) {
-        resolve_ui_mode(UiModeRequest::Gpui, UiCapabilities::detect())?;
-        anyhow::bail!(
-            "GPUI 原生入口目前只支持顶层 `fuckipv6 --gpui`；请先进入原生应用，再通过共享命令创建或加入网络"
-        );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandUiIntent {
+    requested: UiModeRequest,
+    webui_port: u16,
+}
+
+fn command_ui_intent(command: &Commands) -> Option<CommandUiIntent> {
+    let (requested, webui_port) = match command {
+        Commands::Host {
+            headless,
+            webui,
+            gpui,
+            webui_port,
+            ..
+        }
+        | Commands::Join {
+            headless,
+            webui,
+            gpui,
+            webui_port,
+            ..
+        }
+        | Commands::Connect {
+            headless,
+            webui,
+            gpui,
+            webui_port,
+            ..
+        }
+        | Commands::Up {
+            headless,
+            webui,
+            gpui,
+            webui_port,
+            ..
+        }
+        | Commands::Start {
+            headless,
+            webui,
+            gpui,
+            webui_port,
+            ..
+        } => (
+            requested_ui_mode(*headless, *webui, *gpui).ok()?,
+            *webui_port,
+        ),
+        _ => return None,
+    };
+    Some(CommandUiIntent {
+        requested,
+        webui_port,
+    })
+}
+
+async fn run_command_ui(intent: CommandUiIntent, ui_mode: UiMode) -> Result<()> {
+    if ui_mode.is_gpui() {
+        anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过进程入口运行");
     }
-    Ok(())
+
+    run_default_app(
+        intent.webui_port,
+        intent.requested,
+        false,
+        "default".to_string(),
+        6666,
+        6667,
+        true,
+        None,
+        None,
+    )
+    .await
 }
 
 fn async_runtime() -> Result<tokio::runtime::Runtime> {
@@ -542,13 +614,29 @@ fn async_runtime() -> Result<tokio::runtime::Runtime> {
 pub fn run_entrypoint() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Some(command) = cli.command.as_ref() {
-        reject_unwired_subcommand_gpui(command)?;
-    } else {
+    if let Some(intent) = cli.command.as_ref().and_then(command_ui_intent) {
+        let effective = resolve_ui_mode(intent.requested, UiCapabilities::detect())?.effective;
+        if effective.is_gpui() {
+            let command = cli
+                .command
+                .expect("command UI intent requires a parsed subcommand");
+            async_runtime()?.block_on(run_command(command))?;
+            return run_native_app(commands::RuntimeOptions {
+                is_exit_node: None,
+                headless: false,
+                gui: false,
+                webui_port: 0,
+                ..commands::RuntimeOptions::default()
+            });
+        }
+    } else if cli.command.is_none() {
         let requested_ui = requested_ui_mode(cli.headless, cli.webui, cli.gpui)?;
         let effective = resolve_ui_mode(requested_ui, UiCapabilities::detect())?.effective;
         if effective.is_gpui() {
-            return run_native_default_app(cli);
+            if cli.host {
+                async_runtime()?.block_on(run_top_level_host_prelude(&cli))?;
+            }
+            return run_native_app(native_runtime_options(cli.is_exit_node));
         }
     }
 
@@ -564,7 +652,23 @@ pub async fn run() -> Result<()> {
 
 async fn run_parsed(cli: Cli) -> Result<()> {
     if let Some(command) = cli.command {
-        run_command(command).await
+        let command_ui = command_ui_intent(&command)
+            .map(|intent| {
+                resolve_ui_mode(intent.requested, UiCapabilities::detect())
+                    .map(|resolution| (intent, resolution.effective))
+            })
+            .transpose()?;
+        if let Some((_, ui_mode)) = command_ui {
+            if ui_mode.is_gpui() {
+                anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过进程入口运行");
+            }
+        }
+
+        run_command(command).await?;
+        if let Some((intent, ui_mode)) = command_ui {
+            run_command_ui(intent, ui_mode).await?;
+        }
+        Ok(())
     } else {
         let requested_ui = requested_ui_mode(cli.headless, cli.webui, cli.gpui)?;
         run_default_app(
@@ -582,6 +686,36 @@ async fn run_parsed(cli: Cli) -> Result<()> {
     }
 }
 
+async fn run_top_level_host_prelude(cli: &Cli) -> Result<()> {
+    network_commands::host(
+        &cli.host_name,
+        cli.host_port,
+        cli.host_relay_port,
+        cli.external_host.clone(),
+        cli.auto_connect,
+        commands::RuntimeOptions {
+            is_exit_node: cli.is_exit_node,
+            headless: false,
+            gui: false,
+            webui_port: 0,
+            ..commands::RuntimeOptions::default()
+        },
+    )
+    .await
+}
+
+fn native_runtime_options(is_exit_node: Option<bool>) -> commands::RuntimeOptions {
+    commands::RuntimeOptions {
+        is_exit_node,
+        headless: false,
+        // GPUI is not the browser-hosted `gui` adapter. Port 0 prevents a
+        // future shared runtime plan from implicitly opening WebUI.
+        gui: false,
+        webui_port: 0,
+        ..commands::RuntimeOptions::default()
+    }
+}
+
 #[cfg(all(
     feature = "gpui-shell",
     any(
@@ -590,24 +724,9 @@ async fn run_parsed(cli: Cli) -> Result<()> {
         target_os = "macos"
     )
 ))]
-fn run_native_default_app(cli: Cli) -> Result<()> {
-    if cli.host {
-        anyhow::bail!(
-            "NX-08 尚未把顶层 --host 接入原生外壳；请使用 --webui，或去掉 --host 后在应用内创建网络"
-        );
-    }
-
+fn run_native_app(options: commands::RuntimeOptions) -> Result<()> {
     logging::init_default()?;
-    crate::gpui_shell::run(commands::RuntimeOptions {
-        routing_mode: None,
-        exit_node: None,
-        is_exit_node: cli.is_exit_node,
-        headless: false,
-        // GPUI is not the browser-hosted `gui` adapter. Port 0 prevents a
-        // future shared runtime plan from implicitly opening WebUI.
-        gui: false,
-        webui_port: 0,
-    })
+    crate::gpui_shell::run(options)
 }
 
 #[cfg(not(all(
@@ -618,7 +737,7 @@ fn run_native_default_app(cli: Cli) -> Result<()> {
         target_os = "macos"
     )
 )))]
-fn run_native_default_app(_cli: Cli) -> Result<()> {
+fn run_native_app(_options: commands::RuntimeOptions) -> Result<()> {
     anyhow::bail!("当前构建未包含可用的原生 GPUI 外壳")
 }
 
@@ -1113,15 +1232,134 @@ mod tests {
 
     #[test]
     fn gpui_mode_is_never_silently_downgraded() {
-        let error = runtime_options(None, None, None, false, false, true, 8080)
-            .expect_err("unavailable native GPUI must fail explicitly");
+        let available = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::LinuxX11,
+            gpui_available: true,
+        };
+        let options = runtime_options_with_capabilities(
+            None, None, None, false, false, true, 8080, available,
+        )
+        .expect("available GPUI must be preserved");
+        assert!(!options.headless);
+        assert!(!options.gui);
+
+        let unavailable = UiCapabilities {
+            gpui_available: false,
+            ..available
+        };
+        let error = runtime_options_with_capabilities(
+            None,
+            None,
+            None,
+            false,
+            false,
+            true,
+            8080,
+            unavailable,
+        )
+        .expect_err("unavailable native GPUI must fail explicitly");
         assert!(error.to_string().contains("GPUI"));
     }
 
     #[test]
+    fn automatic_gpui_command_options_do_not_select_webui() {
+        let capabilities = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::LinuxWayland,
+            gpui_available: true,
+        };
+
+        let options = runtime_options_with_capabilities(
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            8080,
+            capabilities,
+        )
+        .expect("automatic desktop mode");
+
+        assert!(!options.headless);
+        assert!(!options.gui);
+        assert_eq!(
+            resolve_ui_mode(UiModeRequest::Auto, capabilities)
+                .expect("automatic mode")
+                .effective,
+            UiMode::Gpui
+        );
+    }
+
+    #[test]
+    fn command_ui_intents_share_the_top_level_policy() {
+        for (display, gpui_available, expected) in [
+            (crate::ui::DisplayEnvironment::LinuxX11, true, UiMode::Gpui),
+            (
+                crate::ui::DisplayEnvironment::LinuxWayland,
+                true,
+                UiMode::Gpui,
+            ),
+            (
+                crate::ui::DisplayEnvironment::Headless,
+                true,
+                UiMode::Headless,
+            ),
+            (
+                crate::ui::DisplayEnvironment::LinuxX11,
+                false,
+                UiMode::WebUi,
+            ),
+            (
+                crate::ui::DisplayEnvironment::Headless,
+                false,
+                UiMode::Headless,
+            ),
+        ] {
+            let capabilities = UiCapabilities {
+                display,
+                gpui_available,
+            };
+            let top_level = resolve_ui_mode(UiModeRequest::Auto, capabilities)
+                .expect("top-level automatic mode");
+            assert_eq!(top_level.effective, expected);
+
+            for args in [
+                vec!["fuckipv6", "host"],
+                vec!["fuckipv6", "join", "fk://example"],
+                vec!["fuckipv6", "connect"],
+                vec!["fuckipv6", "up"],
+                vec!["fuckipv6", "start"],
+            ] {
+                let cli = Cli::try_parse_from(args).expect("parse UI-capable command");
+                let intent = cli
+                    .command
+                    .as_ref()
+                    .and_then(command_ui_intent)
+                    .expect("command must carry a UI intent");
+                let command_mode =
+                    resolve_ui_mode(intent.requested, capabilities).expect("command UI mode");
+                assert_eq!(command_mode.effective, top_level.effective);
+            }
+        }
+    }
+
+    #[test]
     fn legacy_gui_maps_to_webui_runtime_options() {
-        let options = runtime_options(None, None, None, false, true, false, 8080)
-            .expect("legacy GUI should map to WebUI");
+        let capabilities = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::LinuxX11,
+            gpui_available: false,
+        };
+        let options = runtime_options_with_capabilities(
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            8080,
+            capabilities,
+        )
+        .expect("legacy GUI should map to WebUI");
         assert!(!options.headless);
         assert!(options.gui);
         assert_eq!(options.webui_port, 8080);

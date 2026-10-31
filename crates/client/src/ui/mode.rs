@@ -352,20 +352,37 @@ mod tests {
 
     #[test]
     fn auto_mode_selects_gpui_only_when_both_capabilities_are_available() {
-        assert_eq!(
-            resolve_ui_mode(UiModeRequest::Auto, DESKTOP)
-                .expect("desktop resolution")
+        for display in [
+            DisplayEnvironment::LinuxX11,
+            DisplayEnvironment::LinuxWayland,
+            DisplayEnvironment::WindowsDesktop,
+            DisplayEnvironment::MacosDesktop,
+        ] {
+            assert_eq!(
+                resolve_ui_mode(
+                    UiModeRequest::Auto,
+                    UiCapabilities {
+                        display,
+                        gpui_available: true,
+                    },
+                )
+                .expect("desktop GPUI resolution")
                 .effective,
-            UiMode::WebUi
-        );
-        assert_eq!(
-            resolve_ui_mode(UiModeRequest::Auto, UiCapabilities::detect())
-                .map(|resolution| resolution.effective)
-                .unwrap_or(UiMode::Headless),
-            resolve_legacy_ui_mode(false, false)
-                .map(|resolution| resolution.effective)
-                .unwrap_or(UiMode::Headless)
-        );
+                UiMode::Gpui
+            );
+            assert_eq!(
+                resolve_ui_mode(
+                    UiModeRequest::Auto,
+                    UiCapabilities {
+                        display,
+                        gpui_available: false,
+                    },
+                )
+                .expect("desktop WebUI fallback")
+                .effective,
+                UiMode::WebUi
+            );
+        }
         assert_eq!(
             resolve_ui_mode(
                 UiModeRequest::Auto,
@@ -413,15 +430,59 @@ mod tests {
             _ => None,
         });
         assert_eq!(wayland, DisplayEnvironment::LinuxWayland);
+        assert_eq!(
+            resolve_ui_mode(
+                UiModeRequest::Auto,
+                UiCapabilities {
+                    display: wayland,
+                    gpui_available: true,
+                },
+            )
+            .expect("Wayland automatic mode")
+            .effective,
+            UiMode::Gpui
+        );
 
         let x11 = DisplayEnvironment::detect_with(|key| match key {
             "DISPLAY" => Some(":0".into()),
             _ => None,
         });
         assert_eq!(x11, DisplayEnvironment::LinuxX11);
+        assert_eq!(
+            resolve_ui_mode(
+                UiModeRequest::Auto,
+                UiCapabilities {
+                    display: x11,
+                    gpui_available: true,
+                },
+            )
+            .expect("X11 automatic mode")
+            .effective,
+            UiMode::Gpui
+        );
 
         let headless = DisplayEnvironment::detect_with(|_| None);
         assert_eq!(headless, DisplayEnvironment::Headless);
+        assert_eq!(
+            resolve_ui_mode(
+                UiModeRequest::Auto,
+                UiCapabilities {
+                    display: headless,
+                    gpui_available: true,
+                },
+            )
+            .expect("headless automatic mode")
+            .effective,
+            UiMode::Headless
+        );
+
+        let public_ip_does_not_select_a_display = DisplayEnvironment::detect_with(|key| {
+            (key == "FUCKIPV6_PUBLIC_IP").then(|| "203.0.113.10".to_string())
+        });
+        assert_eq!(
+            public_ip_does_not_select_a_display,
+            DisplayEnvironment::Headless
+        );
 
         let forced_headless = DisplayEnvironment::detect_with(|key| match key {
             "DISPLAY" => Some(":0".into()),

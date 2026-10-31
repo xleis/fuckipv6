@@ -123,6 +123,24 @@ fn spawn_headless_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
     })
 }
 
+fn spawn_headless_up_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
+    Ok(ProcessGuard {
+        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+            .args(["up", "--all", "--headless", "--webui-port"])
+            .arg(port.to_string())
+            .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
+            .env("XDG_CONFIG_HOME", directory.join("config"))
+            .env("HOME", directory.join("home"))
+            .env("RUST_LOG", "error")
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("无法启动无头命令 UI 集成测试进程")?,
+    })
+}
+
 fn send_signal(pid: u32, signal: &str) -> Result<()> {
     let status = Command::new("kill")
         .arg(format!("-{signal}"))
@@ -433,6 +451,54 @@ async fn new_headless_ui_restarts_crashed_control_and_adopts_live_node() -> Resu
         status.success(),
         "second headless WebUI exited with {status}"
     );
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn headless_command_entrypoint_reexports_the_same_control() -> Result<()> {
+    let directory = temp_dir("command-ui-entrypoint")?;
+    let runtime_dir = directory.join("runtime");
+    let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+
+    let mut ui = spawn_headless_up_ui(&directory, port)?;
+    wait_until_ready(&node_endpoint).await?;
+    wait_for_webui(port).await?;
+
+    let control_pid = read_pid(&runtime_dir.join("control.lock"))?;
+    let node_pid = read_pid(&runtime_dir.join("node.lock"))?;
+
+    let ui_pid = ui.child.id();
+    send_signal(ui_pid, "TERM")?;
+    let status = wait_for_exit(&mut ui).await?;
+    assert!(status.success(), "command UI exited with {status}");
+    assert!(
+        process_alive(control_pid),
+        "closing the command UI stopped control"
+    );
+    assert!(
+        process_alive(node_pid),
+        "closing the command UI stopped the node"
+    );
+    assert!(matches!(
+        local_ipc::request(
+            &node_endpoint,
+            local_ipc::IpcRole::WebUi,
+            &LocalRequest {
+                request_id: 12,
+                command: LocalCommand::Snapshot,
+            },
+        )
+        .await?,
+        LocalResponse::Snapshot { .. }
+    ));
+
+    send_signal(control_pid, "TERM")?;
+    wait_for_process_exit(control_pid).await?;
+    wait_for_process_exit(node_pid).await?;
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }

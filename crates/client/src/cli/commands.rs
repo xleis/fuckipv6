@@ -18,12 +18,18 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
+use crate::local_ipc::IpcRole;
 use crate::logging;
+use crate::node::{
+    NodeCommand, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot, NodeNetworkStatus,
+    NodeProbePeerCommand, NodeSnapshot,
+};
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
 use crate::p2p::punching;
 use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
+use crate::remote_node::RemoteNodeSession;
 #[cfg(target_os = "linux")]
 use crate::routing::linux_exit::LinuxExitForwarder;
 #[cfg(target_os = "linux")]
@@ -2434,6 +2440,375 @@ async fn remove_offline_peer(p2p: &P2pEngine, stats: &StatsCollector, client_id:
     }
 }
 
+fn cli_node_session() -> Result<RemoteNodeSession> {
+    RemoteNodeSession::start_with_role(
+        RuntimeOptions {
+            headless: true,
+            ..RuntimeOptions::default()
+        },
+        IpcRole::Cli,
+    )
+}
+
+fn node_network_status_label(status: NodeNetworkStatus) -> &'static str {
+    match status {
+        NodeNetworkStatus::Offline => "离线",
+        NodeNetworkStatus::Connecting => "连接中",
+        NodeNetworkStatus::Online => "在线",
+        NodeNetworkStatus::Degraded => "运行降级",
+        NodeNetworkStatus::Stopping => "停止中",
+        NodeNetworkStatus::Failed => "启动失败",
+    }
+}
+
+fn node_network_roles(network: &NodeNetworkSnapshot) -> String {
+    network
+        .roles
+        .iter()
+        .map(|role| match role {
+            crate::node::NodeNetworkRole::Member => "Member",
+            crate::node::NodeNetworkRole::Discovery => "Discovery",
+            crate::node::NodeNetworkRole::Relay => "Relay",
+            crate::node::NodeNetworkRole::ExitNode => "ExitNode",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Print the authoritative node snapshot through the shared node control plane.
+pub async fn node_status(json: bool) -> Result<()> {
+    let session = cli_node_session()?;
+    let snapshot = session.state().snapshot().await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        session.shutdown();
+        return Ok(());
+    }
+
+    println!("节点状态 (Node Status)");
+    println!("─────────────────────────────────────");
+    println!("生命周期:        {:?}", snapshot.lifecycle.phase);
+    println!(
+        "网络:            活动 {} / 已配置 {}",
+        snapshot.lifecycle.active_networks, snapshot.lifecycle.configured_networks
+    );
+    println!(
+        "在线 Peer:       {}",
+        snapshot.peers.iter().filter(|peer| peer.online).count()
+    );
+
+    for service in &snapshot.embedded_services {
+        println!(
+            "控制服务:        {} · {:?} · signaling={} relay={}",
+            service.network_name,
+            service.status,
+            service
+                .signaling_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            service
+                .relay_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+
+    if snapshot.networks.is_empty() {
+        println!();
+        println!("当前没有已启动的网络。");
+    }
+
+    for network in &snapshot.networks {
+        println!();
+        println!("🌐 虚拟网络:        {}", network.name);
+        println!(
+            "   状态:            {}",
+            node_network_status_label(network.status)
+        );
+        println!("   TUN 接口:        {}", network.tun_name);
+        println!(
+            "   虚拟 IPv6:       {}",
+            network
+                .assigned_ipv6
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "   虚拟 IPv4:       {}",
+            network
+                .assigned_ipv4
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "   P2P 监听:        {}",
+            network
+                .p2p_listen_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!("   角色:            {}", node_network_roles(network));
+        println!(
+            "   运行时间:        {}",
+            format_duration(network.uptime_secs)
+        );
+        println!("   在线对等节点:    {}", network.peer_count);
+        println!(
+            "   TUN 流量:        {} 收 / {} 发 数据包 ({} 字节)",
+            network.traffic.tun_rx_packets,
+            network.traffic.tun_tx_packets,
+            network
+                .traffic
+                .tun_rx_bytes
+                .saturating_add(network.traffic.tun_tx_bytes)
+        );
+        println!(
+            "   P2P 流量:        {} 收 / {} 发 数据包 ({} 字节)",
+            network.traffic.p2p_rx_packets,
+            network.traffic.p2p_tx_packets,
+            network
+                .traffic
+                .p2p_rx_bytes
+                .saturating_add(network.traffic.p2p_tx_bytes)
+        );
+        println!("   错误计数:        {}", network.traffic.error_count);
+    }
+
+    if let Some(error) = &snapshot.last_error {
+        println!();
+        println!("最近错误:        {:?}: {}", error.code, error.message);
+    }
+
+    session.shutdown();
+    Ok(())
+}
+
+/// Print peers from the same canonical snapshot consumed by WebUI and GPUI.
+pub async fn node_peers() -> Result<()> {
+    let session = cli_node_session()?;
+    let snapshot = session.state().snapshot().await;
+    let peers = snapshot
+        .peers
+        .iter()
+        .filter(|peer| peer.online)
+        .collect::<Vec<_>>();
+
+    println!("已连接对等节点 (Connected Peers)");
+    println!("─────────────────────────────────────");
+    println!();
+
+    if peers.is_empty() {
+        println!("当前无已连接的对等节点。");
+        session.shutdown();
+        return Ok(());
+    }
+
+    println!(
+        "{:<12}  {:<18}  {:<26}  {:<10}  {:<8}  {:<8}  {:<10}  {:<12}  公网物理端点",
+        "所属网络",
+        "虚拟 IP",
+        "客户端标识 (Client ID)",
+        "链路模式",
+        "往返时延",
+        "丢包率",
+        "收/发包",
+        "流量字节"
+    );
+    println!("{}", "─".repeat(150));
+
+    for peer in peers {
+        let path = if peer.p2p_active && peer.p2p_healthy {
+            "P2P直连"
+        } else {
+            "QUIC中继"
+        };
+        let rtt = peer
+            .rtt_us
+            .map(format_rtt)
+            .unwrap_or_else(|| "-".to_string());
+        let packets = format!(
+            "{}/{}",
+            peer.traffic.p2p_rx_packets, peer.traffic.p2p_tx_packets
+        );
+        let traffic_bytes = peer
+            .traffic
+            .p2p_rx_bytes
+            .saturating_add(peer.traffic.p2p_tx_bytes);
+        let endpoint = peer
+            .endpoints
+            .first()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        println!(
+            "{:<12}  {:<18}  {:<26}  {:<10}  {:<8}  {:<8}  {:<10}  {:<12}  {}",
+            peer.network_name,
+            peer.virtual_ipv6,
+            abbreviate(&peer.peer_id, 26),
+            path,
+            rtt,
+            format!("{:.1}%", peer.loss_rate * 100.0),
+            packets,
+            traffic_bytes,
+            endpoint
+        );
+    }
+
+    session.shutdown();
+    Ok(())
+}
+
+fn select_probe_network<'a>(
+    snapshot: &'a NodeSnapshot,
+    target: &str,
+) -> Result<&'a NodeNetworkSnapshot> {
+    if let Some(peer) = snapshot.peers.iter().find(|peer| {
+        peer.peer_id == target
+            || peer.peer_id.starts_with(target)
+            || peer.virtual_ipv6.to_string() == target
+            || peer.virtual_ipv4.is_some_and(|ip| ip.to_string() == target)
+    }) {
+        return snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == peer.network_name)
+            .with_context(|| format!("匹配到 Peer，但其网络 {} 当前未运行", peer.network_name));
+    }
+
+    snapshot
+        .networks
+        .iter()
+        .find(|network| {
+            matches!(
+                network.status,
+                NodeNetworkStatus::Online
+                    | NodeNetworkStatus::Degraded
+                    | NodeNetworkStatus::Connecting
+            )
+        })
+        .or_else(|| snapshot.networks.first())
+        .context("当前没有可探测的网络")
+}
+
+/// Probe a peer through the node runtime instead of shelling out to system ping.
+pub async fn node_ping(target: &str, count: u32) -> Result<()> {
+    let target = target.trim();
+    if target.is_empty() {
+        anyhow::bail!("探测目标不能为空");
+    }
+
+    let session = cli_node_session()?;
+    let snapshot = session.state().snapshot().await;
+    let network = select_probe_network(&snapshot, target)?;
+    let network_name = network.name.clone();
+    let attempts = count.max(1);
+    let mut succeeded = 0_u32;
+
+    println!("正在通过节点运行时探测: {target} (网络: {network_name})");
+    println!("─────────────────────────────────────");
+
+    for attempt in 1..=attempts {
+        let result = session
+            .commands()
+            .execute(NodeCommandRequest::new(
+                u64::from(attempt),
+                NodeCommand::ProbePeer(NodeProbePeerCommand {
+                    network_name: network_name.clone(),
+                    target: target.to_string(),
+                    timeout_ms: 3_000,
+                }),
+            ))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        match result.outcome {
+            NodeCommandOutcome::Probe(probe) => {
+                if probe.timed_out {
+                    println!("第 {attempt} 次: 超时");
+                } else {
+                    succeeded = succeeded.saturating_add(1);
+                    println!(
+                        "第 {attempt} 次: 成功 · {} · {} · RTT {} · endpoint {}",
+                        probe.peer_id,
+                        if probe.p2p_active {
+                            "P2P直连"
+                        } else {
+                            "QUIC中继"
+                        },
+                        probe
+                            .rtt_us
+                            .map(format_rtt)
+                            .unwrap_or_else(|| "-".to_string()),
+                        probe
+                            .endpoint
+                            .map(|addr| addr.to_string())
+                            .unwrap_or_else(|| "-".to_string())
+                    );
+                }
+            }
+            NodeCommandOutcome::Rejected(problem) => anyhow::bail!(problem.message),
+            other => anyhow::bail!("Peer 探测返回了意外结果: {other:?}"),
+        }
+
+        if attempt < attempts {
+            sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    session.shutdown();
+    if succeeded == 0 {
+        anyhow::bail!("全部 {attempts} 次节点运行时探测均失败");
+    }
+    println!();
+    println!("探测完成: {succeeded}/{attempts} 次成功");
+    Ok(())
+}
+
+/// Print canonical runtime counters for every active network.
+pub async fn node_stats() -> Result<()> {
+    let session = cli_node_session()?;
+    let snapshot = session.state().snapshot().await;
+
+    println!("网络统计信息 (Node Runtime Statistics)");
+    println!("─────────────────────────────────────");
+
+    if snapshot.networks.is_empty() {
+        println!();
+        println!("当前没有活跃网络，暂无运行时流量统计。");
+        session.shutdown();
+        return Ok(());
+    }
+
+    for network in &snapshot.networks {
+        println!();
+        println!("🌐 {}", network.name);
+        println!(
+            "   状态:       {}",
+            node_network_status_label(network.status)
+        );
+        println!("   运行时间:   {}", format_duration(network.uptime_secs));
+        println!(
+            "   TUN:        {} 包收 / {} 包发 · {} 字节收 / {} 字节发",
+            network.traffic.tun_rx_packets,
+            network.traffic.tun_tx_packets,
+            network.traffic.tun_rx_bytes,
+            network.traffic.tun_tx_bytes
+        );
+        println!(
+            "   P2P:        {} 包收 / {} 包发 · {} 字节收 / {} 字节发",
+            network.traffic.p2p_rx_packets,
+            network.traffic.p2p_tx_packets,
+            network.traffic.p2p_rx_bytes,
+            network.traffic.p2p_tx_bytes
+        );
+        println!("   错误计数:   {}", network.traffic.error_count);
+    }
+
+    session.shutdown();
+    Ok(())
+}
+
 pub async fn status(json: bool) -> Result<()> {
     let response = ipc::request(IpcRequest::Status).await?;
 
@@ -4453,5 +4828,57 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
                 tx_bytes: 1024,
             })
         );
+    }
+
+    #[test]
+    fn probe_network_prefers_the_matching_peer_network() {
+        use crate::node::{NodeNetworkRole, NodePeerSnapshot, NodeTrafficSnapshot};
+
+        let network = |name: &str, status| NodeNetworkSnapshot {
+            name: name.to_string(),
+            tun_name: format!("fuckipv6-{name}"),
+            status,
+            assigned_ipv6: None,
+            assigned_ipv4: None,
+            p2p_listen_addr: None,
+            uptime_secs: 0,
+            roles: vec![NodeNetworkRole::Member],
+            peer_count: 0,
+            traffic: NodeTrafficSnapshot::default(),
+        };
+        let snapshot = NodeSnapshot {
+            networks: vec![
+                network("office", NodeNetworkStatus::Online),
+                network("lab", NodeNetworkStatus::Degraded),
+            ],
+            peers: vec![NodePeerSnapshot {
+                peer_id: "peer-lab".to_string(),
+                network_name: "lab".to_string(),
+                virtual_ipv6: "fd00::2".parse().unwrap(),
+                virtual_ipv4: Some("10.8.0.2".parse().unwrap()),
+                endpoints: Vec::new(),
+                online: true,
+                p2p_active: true,
+                p2p_healthy: true,
+                rtt_us: Some(1_000),
+                loss_rate: 0.0,
+                traffic: NodeTrafficSnapshot::default(),
+            }],
+            ..NodeSnapshot::default()
+        };
+
+        assert_eq!(
+            select_probe_network(&snapshot, "peer-lab")
+                .expect("matching peer network")
+                .name,
+            "lab"
+        );
+        assert_eq!(
+            select_probe_network(&snapshot, "203.0.113.1")
+                .expect("fallback network")
+                .name,
+            "office"
+        );
+        assert!(select_probe_network(&NodeSnapshot::default(), "203.0.113.1").is_err());
     }
 }

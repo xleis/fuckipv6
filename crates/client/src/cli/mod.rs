@@ -708,9 +708,9 @@ pub async fn run_default_app(
     {
         tokio::signal::ctrl_c().await?;
     }
-    tracing::info!("接收到退出信号，正在关闭应用...");
-    controller.disconnect().await.ok();
-    controller.stop_host().await.ok();
+    tracing::info!("接收到退出信号，正在关闭 WebUI；节点网络与控制面保持运行...");
+    server_handle.abort();
+    let _ = server_handle.await;
     Ok(())
 }
 
@@ -890,19 +890,19 @@ async fn run_runtime_command(command: Commands) -> Result<()> {
         }
         Commands::Status { json } => {
             logging::init_default()?;
-            commands::status(json).await?;
+            commands::node_status(json).await?;
         }
         Commands::Peers => {
             logging::init_default()?;
-            commands::peers().await?;
+            commands::node_peers().await?;
         }
         Commands::Ping { target, count } => {
             logging::init_default()?;
-            commands::ping(&target, count).await?;
+            commands::node_ping(&target, count).await?;
         }
         Commands::Stats => {
             logging::init_default()?;
-            commands::stats().await?;
+            commands::node_stats().await?;
         }
         Commands::Route { interface, all } => {
             logging::init_default()?;

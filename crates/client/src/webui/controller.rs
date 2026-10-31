@@ -4,13 +4,21 @@ use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
 use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock};
 
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::ipc::{GlobalStatsSnapshot, NetworkSessionSnapshot, StatusSnapshot};
+use crate::node::{
+    NodeCommand, NodeCommandBus, NodeCommandOutcome, NodeCommandRequest, NodeCreateNetworkCommand,
+    NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkRole, NodeNetworkStatus,
+    NodePeerProbeSnapshot, NodeProbePeerCommand, NodeRoutingMode, NodeSnapshot, NodeStateStore,
+    NodeUpdateRoutingCommand,
+};
 use crate::p2p::connection::PeerProbeOutcome;
+use crate::remote_node::RemoteNodeSession;
 use crate::symmetric::EmbeddedCoordinator;
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,24 +234,73 @@ pub struct UpdateRoutingRequest {
 }
 
 #[derive(Clone)]
+struct NodeBackend {
+    state: NodeStateStore,
+    commands: NodeCommandBus,
+    /// Keep the UI-owned IPC session alive exactly as long as this adapter.
+    /// Dropping it only disconnects the adapter; the node process continues.
+    _session: Option<Arc<RemoteNodeSession>>,
+}
+
+#[derive(Clone)]
 pub struct AppController {
     state: Arc<RwLock<AppUiState>>,
     cancel_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     coordinator: Arc<RwLock<Option<EmbeddedCoordinator>>>,
     recent_logs: Arc<RwLock<VecDeque<String>>>,
+    node: Option<NodeBackend>,
+    request_id: Arc<AtomicU64>,
 }
 
 impl AppController {
+    /// Legacy in-process controller used by focused unit tests and migration
+    /// callers that have not yet supplied a node backend.
     pub fn new() -> Self {
+        Self::from_parts(None)
+    }
+
+    /// Attach a WebUI controller to the shared node state and command bus while
+    /// keeping ownership of the local IPC session guard.
+    pub fn from_node_session(session: RemoteNodeSession) -> Self {
+        let backend = NodeBackend {
+            state: session.state(),
+            commands: session.commands(),
+            _session: Some(Arc::new(session)),
+        };
+        Self::from_parts(Some(backend))
+    }
+
+    /// Attach to a node running in the same process through the same canonical
+    /// state/command interfaces used by remote UI adapters.
+    pub(crate) fn from_node_parts(state: NodeStateStore, commands: NodeCommandBus) -> Self {
+        Self::from_parts(Some(NodeBackend {
+            state,
+            commands,
+            _session: None,
+        }))
+    }
+
+    fn from_parts(node: Option<NodeBackend>) -> Self {
         Self {
             state: Arc::new(RwLock::new(AppUiState::offline())),
             cancel_tx: Arc::new(RwLock::new(None)),
             coordinator: Arc::new(RwLock::new(None)),
             recent_logs: Arc::new(RwLock::new(VecDeque::with_capacity(200))),
+            node,
+            request_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
     pub async fn get_state(&self) -> AppUiState {
+        if let Some(node) = self.node.as_ref() {
+            let snapshot = node.state.snapshot().await;
+            let local_ticket = self.state.read().await.hosting_ticket.clone();
+            let mut projected = project_node_snapshot(&snapshot, local_ticket);
+            let local_logs = self.recent_logs.read().await;
+            projected.logs.extend(local_logs.iter().cloned());
+            return projected;
+        }
+
         let mut s = self.state.read().await.clone();
         let logs: Vec<String> = self.recent_logs.read().await.iter().cloned().collect();
         s.logs = logs;
@@ -375,6 +432,31 @@ impl AppController {
         }
     }
 
+    async fn node_snapshot(&self) -> Result<NodeSnapshot> {
+        let node = self
+            .node
+            .as_ref()
+            .context("当前 WebUI 未连接本地节点控制面")?;
+        Ok(node.state.snapshot().await)
+    }
+
+    async fn execute_node_command(&self, command: NodeCommand) -> Result<NodeCommandOutcome> {
+        let node = self
+            .node
+            .as_ref()
+            .context("当前 WebUI 未连接本地节点控制面")?;
+        let request_id = self.request_id.fetch_add(1, Ordering::Relaxed);
+        let result = node
+            .commands
+            .execute(NodeCommandRequest::new(request_id, command))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        match result.outcome {
+            NodeCommandOutcome::Rejected(problem) => anyhow::bail!(problem.message),
+            outcome => Ok(outcome),
+        }
+    }
+
     pub async fn update_state<F>(&self, f: F)
     where
         F: FnOnce(&mut AppUiState),
@@ -402,6 +484,10 @@ impl AppController {
         routing_mode: Option<String>,
         exit_node: Option<String>,
     ) -> Result<()> {
+        if self.node.is_some() {
+            return self.connect_node(target, routing_mode, exit_node).await;
+        }
+
         let target = target.trim().to_string();
         if target.is_empty() {
             anyhow::bail!("连接目标不能为空");
@@ -551,8 +637,105 @@ impl AppController {
         Ok(())
     }
 
+    async fn connect_node(
+        &self,
+        target: String,
+        routing_mode: Option<String>,
+        exit_node: Option<String>,
+    ) -> Result<()> {
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            anyhow::bail!("连接目标不能为空");
+        }
+
+        self.log(format!("发起网络连接 -> 目标: {target}")).await;
+        let previous_snapshot = self.node_snapshot().await?;
+        self.disconnect().await?;
+
+        let network_name = if target.starts_with(NetworkTicket::URI_SCHEME) {
+            let ticket = NetworkTicket::parse(&target).context("解析 fk:// 邀请票据失败")?;
+            self.log(format!(
+                "[票据] 成功解析网络邀请票据: 网络={}, 端点={}",
+                ticket.network_name, ticket.endpoint
+            ))
+            .await;
+            ticket.network_name
+        } else {
+            "default".to_string()
+        };
+
+        {
+            let mut st = self.state.write().await;
+            st.status = "connecting".to_string();
+            st.connected_target = Some(target.clone());
+            st.network_name = Some(network_name.clone());
+            if let Some(mode) = routing_mode.as_ref() {
+                st.routing_mode = mode.clone();
+            }
+            st.exit_node = exit_node.clone();
+        }
+
+        self.execute_node_command(NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+            target,
+            network_name: Some(network_name.clone()),
+            start: true,
+        }))
+        .await?;
+
+        let snapshot = self.node_snapshot().await?;
+        let is_exit_node = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == network_name)
+            .is_some_and(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
+            || snapshot
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == network_name)
+                .is_some_and(|network| network.exit_node_enabled);
+
+        let previous_mode = routing_mode
+            .is_none()
+            .then(|| config_routing_mode(&previous_snapshot, Some(&network_name)))
+            .flatten();
+        let mode = routing_mode
+            .as_deref()
+            .map(node_routing_mode)
+            .transpose()?
+            .or(previous_mode)
+            .unwrap_or(NodeRoutingMode::MeshOnly);
+        self.execute_node_command(NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+            network_name,
+            mode,
+            exit_node,
+            is_exit_node,
+        }))
+        .await?;
+
+        Ok(())
+    }
+
     /// 断开当前网络连接，并等待运行中的客户端确认已经释放资源。
     pub async fn disconnect(&self) -> Result<()> {
+        if self.node.is_some() {
+            self.log("正在请求节点停止全部网络；控制面将保持运行...")
+                .await;
+            self.execute_node_command(NodeCommand::StopNetworks {
+                networks: Vec::new(),
+                all: true,
+            })
+            .await?;
+            let mut st = self.state.write().await;
+            st.status = "offline".to_string();
+            st.virtual_ipv6 = None;
+            st.virtual_ipv4 = None;
+            st.connected_target = None;
+            st.hosting_ticket = None;
+            st.peers.clear();
+            return Ok(());
+        }
+
         let has_runtime = {
             let st = self.state.read().await;
             matches!(st.status.as_str(), "online" | "connecting")
@@ -582,6 +765,35 @@ impl AppController {
         if target.trim().is_empty() {
             anyhow::bail!("探测目标不能为空");
         }
+        if self.node.is_some() {
+            let snapshot = self.node_snapshot().await?;
+            let network_name = primary_network_name(&snapshot).context("当前没有可探测的网络")?;
+            let outcome = self
+                .execute_node_command(NodeCommand::ProbePeer(NodeProbePeerCommand {
+                    network_name,
+                    target,
+                    timeout_ms,
+                }))
+                .await?;
+            return match outcome {
+                NodeCommandOutcome::Probe(NodePeerProbeSnapshot {
+                    peer_id,
+                    virtual_ipv6,
+                    endpoint,
+                    rtt_us,
+                    p2p_active,
+                    timed_out,
+                }) => Ok(PeerProbeOutcome {
+                    client_id: peer_id,
+                    virtual_ip: virtual_ipv6,
+                    endpoint,
+                    rtt_us,
+                    p2p_active,
+                    timed_out,
+                }),
+                other => anyhow::bail!("节点探针返回了意外结果: {other:?}"),
+            };
+        }
         match crate::ipc::request(crate::ipc::IpcRequest::ProbePeer { target, timeout_ms }).await? {
             crate::ipc::IpcResponse::PeerProbe(outcome) => Ok(outcome),
             crate::ipc::IpcResponse::Error { message } => anyhow::bail!(message),
@@ -598,6 +810,40 @@ impl AppController {
         auto_connect: bool,
         external_host: Option<String>,
     ) -> Result<String> {
+        if self.node.is_some() {
+            self.log(format!(
+                "[启动] 正在通过节点创建网络: {name} (信令={port}, 中继={relay_port})"
+            ))
+            .await;
+            let outcome = self
+                .execute_node_command(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+                    name: name.clone(),
+                    signaling_port: port,
+                    relay_port,
+                    external_host,
+                    auto_connect,
+                }))
+                .await?;
+            let NodeCommandOutcome::Completed { message } = outcome else {
+                anyhow::bail!("创建网络返回了意外结果: {outcome:?}");
+            };
+            let ticket = message
+                .split_once("邀请票据: ")
+                .map(|(_, ticket)| ticket.trim().to_string())
+                .filter(|ticket| !ticket.is_empty())
+                .context("节点已创建网络，但完成消息未包含邀请票据")?;
+            let mut st = self.state.write().await;
+            st.network_name = Some(name);
+            st.hosting_ticket = Some(ticket.clone());
+            st.coordinator_active = true;
+            st.coordinator_signaling_addr = Some(format!("0.0.0.0:{port}"));
+            st.coordinator_relay_addr = Some(format!("0.0.0.0:{relay_port}"));
+            drop(st);
+            self.log(format!("[网络] 对等网络已创建成功！邀请票据: {ticket}"))
+                .await;
+            return Ok(ticket);
+        }
+
         self.log(format!(
             "[启动] 正在启动本地协调 Actor 创建网络: {name} (信令={port}, 中继={relay_port})"
         ))
@@ -648,6 +894,33 @@ impl AppController {
 
     /// 停止自建网络
     pub async fn stop_host(&self) -> Result<()> {
+        if self.node.is_some() {
+            let snapshot = self.node_snapshot().await?;
+            let hosted: Vec<String> = snapshot
+                .embedded_services
+                .iter()
+                .filter(|service| service.status != NodeEmbeddedServiceStatus::Stopped)
+                .map(|service| service.network_name.clone())
+                .collect();
+            self.log("正在停止当前节点托管的网络服务...").await;
+            if !hosted.is_empty() {
+                self.execute_node_command(NodeCommand::StopNetworks {
+                    networks: hosted,
+                    all: false,
+                })
+                .await?;
+            }
+            let mut st = self.state.write().await;
+            st.hosting_ticket = None;
+            st.coordinator_active = false;
+            st.coordinator_signaling_addr = None;
+            st.coordinator_relay_addr = None;
+            st.status = "offline".to_string();
+            drop(st);
+            self.log("节点托管的网络服务已停止").await;
+            return Ok(());
+        }
+
         self.log("正在停止本地对等协调 Actor...").await;
         *self.coordinator.write().await = None;
         self.disconnect().await?;
@@ -667,6 +940,9 @@ impl AppController {
 
     /// 协调中枢封禁客户端
     pub async fn ban_client(&self, client_id: String) -> Result<()> {
+        if self.node.is_some() {
+            anyhow::bail!("当前节点命令协议尚未提供封禁操作，无法封禁客户端 {client_id}");
+        }
         let coord = self.coordinator.read().await;
         if let Some(c) = coord.as_ref() {
             c.session_manager.ban_client(client_id.clone()).await;
@@ -680,6 +956,9 @@ impl AppController {
 
     /// 协调中枢解封客户端
     pub async fn unban_client(&self, client_id: &str) -> Result<bool> {
+        if self.node.is_some() {
+            anyhow::bail!("当前节点命令协议尚未提供解封操作，无法解封客户端 {client_id}");
+        }
         let coord = self.coordinator.read().await;
         if let Some(c) = coord.as_ref() {
             let res = c.session_manager.unban_client(client_id).await;
@@ -698,6 +977,27 @@ impl AppController {
         exit_node: Option<String>,
         is_exit_node: bool,
     ) -> Result<()> {
+        if self.node.is_some() {
+            let snapshot = self.node_snapshot().await?;
+            let network_name =
+                primary_network_name(&snapshot).context("当前没有可更新路由的网络")?;
+            let mode = node_routing_mode(&mode)?;
+            self.execute_node_command(NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name,
+                mode,
+                exit_node: exit_node.clone(),
+                is_exit_node,
+            }))
+            .await?;
+            let mut st = self.state.write().await;
+            st.routing_mode = mode_name(mode).to_string();
+            st.exit_node = exit_node;
+            st.is_exit_node = is_exit_node;
+            drop(st);
+            self.log("节点路由配置已热更新").await;
+            return Ok(());
+        }
+
         let result = match crate::ipc::request(crate::ipc::IpcRequest::UpdateRouting {
             mode,
             exit_node,
@@ -728,6 +1028,12 @@ impl AppController {
 
     /// 刷新在线对端信息
     pub async fn refresh_peers(&self) {
+        if self.node.is_some() {
+            // The node subscription keeps NodeStateStore authoritative. A
+            // legacy TCP IPC polling here would query a parallel state source.
+            return;
+        }
+
         let mut state = self.state.write().await;
         if let Some(status) = self.runtime_status().await {
             apply_runtime_status(&mut state, &status);
@@ -738,6 +1044,11 @@ impl AppController {
 
     /// 获取全网对等节点快照列表 (兼容原有拓扑与节点管理)
     pub async fn get_peers_snapshots(&self) -> Vec<PeerSnapshot> {
+        if let Some(node) = self.node.as_ref() {
+            let snapshot = node.state.snapshot().await;
+            return snapshot.peers.iter().map(node_peer_to_snapshot).collect();
+        }
+
         let default_net = self
             .state
             .read()
@@ -810,6 +1121,26 @@ impl AppController {
 
     /// 查询当前专网网段与地址池配置
     pub async fn get_network_config(&self) -> NetworkConfigDto {
+        if self.node.is_some() {
+            let snapshot = self.node_snapshot().await.ok();
+            let config = snapshot
+                .as_ref()
+                .and_then(|snapshot| primary_network_config(snapshot));
+            let mode = config
+                .and_then(|config| config.virtual_mode)
+                .unwrap_or(fuckipv6_common::NetworkMode::DualStack);
+            let ipv4_pool = fuckipv6_common::default_ipv4_pool();
+            let ipv6_pool = fuckipv6_common::default_ipv6_pool();
+            return NetworkConfigDto {
+                mode,
+                ipv4_prefix: cidr_prefix(&ipv4_pool, 24),
+                ipv6_prefix: cidr_prefix(&ipv6_pool, 120),
+                ipv4_pool,
+                ipv6_pool,
+                config_file: None,
+            };
+        }
+
         if let Some(coord) = self.coordinator.read().await.as_ref() {
             let alloc = coord.session_manager.current_network_allocation().await;
             let ipv4_prefix = coord.session_manager.ipv4_prefix().await;
@@ -840,6 +1171,14 @@ impl AppController {
         &self,
         req: UpdateNetworkConfigRequest,
     ) -> Result<NetworkConfigDto> {
+        if self.node.is_some() {
+            anyhow::bail!(
+                "当前节点命令协议尚未提供地址池热更新，未应用请求: mode={:?}, IPv4={}, IPv6={}",
+                req.mode,
+                req.ipv4_pool,
+                req.ipv6_pool
+            );
+        }
         if let Some(coord) = self.coordinator.read().await.as_ref() {
             if req.mode.is_ipv4_enabled() {
                 fuckipv6_common::validate_ipv4_cidr(&req.ipv4_pool, "ipv4_pool")?;
@@ -870,6 +1209,9 @@ impl AppController {
 
     /// 获取黑名单列表
     pub async fn get_blacklist(&self) -> Vec<String> {
+        if self.node.is_some() {
+            return Vec::new();
+        }
         if let Some(coord) = self.coordinator.read().await.as_ref() {
             coord.session_manager.get_blacklist().await
         } else {
@@ -938,6 +1280,303 @@ impl AppController {
             }
         }
     }
+}
+
+fn project_node_snapshot(snapshot: &NodeSnapshot, local_ticket: Option<String>) -> AppUiState {
+    let primary = primary_network(snapshot);
+    let primary_config = primary_network_config(snapshot);
+    let coordinator = active_coordinator_service(snapshot);
+    let coordinator_active = coordinator.is_some();
+    let network_online = snapshot.networks.iter().any(|network| {
+        matches!(
+            network.status,
+            NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+        )
+    });
+    let network_connecting = snapshot
+        .networks
+        .iter()
+        .any(|network| network.status == NodeNetworkStatus::Connecting);
+    let network_degraded = snapshot
+        .networks
+        .iter()
+        .any(|network| network.status == NodeNetworkStatus::Degraded);
+    let status = if network_degraded {
+        "degraded"
+    } else if network_online {
+        "online"
+    } else if network_connecting {
+        "connecting"
+    } else if coordinator_active {
+        "hosting"
+    } else {
+        "offline"
+    };
+
+    let peers: Vec<PeerUiInfo> = snapshot
+        .peers
+        .iter()
+        .filter(|peer| peer.online)
+        .map(|peer| PeerUiInfo {
+            client_id: peer.peer_id.clone(),
+            virtual_ip: peer.virtual_ipv6.to_string(),
+            virtual_ipv4: peer.virtual_ipv4.map(|ip| ip.to_string()),
+            direct: peer.p2p_active,
+            latency_ms: peer.rtt_us.map(|rtt| rtt as f64 / 1000.0),
+            network_name: Some(peer.network_name.clone()),
+            networks: vec![peer.network_name.clone()],
+        })
+        .collect();
+
+    let mut networks: Vec<NetworkUiDto> = snapshot
+        .networks
+        .iter()
+        .map(|network| NetworkUiDto {
+            name: network.name.clone(),
+            tun_name: network.tun_name.clone(),
+            assigned_ip: network.assigned_ipv6.map(|ip| ip.to_string()),
+            assigned_ipv4: network.assigned_ipv4.map(|ip| ip.to_string()),
+            peer_count: network.peer_count,
+            status: network_status_label(network.status).to_string(),
+        })
+        .collect();
+
+    if networks.is_empty() {
+        if let Some(service) = coordinator {
+            let name = service.network_name.clone();
+            let tun_name = snapshot
+                .configuration
+                .networks
+                .iter()
+                .find(|config| config.network_name == name)
+                .map(|config| config.tun_name.clone())
+                .unwrap_or_else(|| crate::multi_network::derive_tun_name(Some(&name), "fuckipv6"));
+            networks.push(NetworkUiDto {
+                name,
+                tun_name,
+                assigned_ip: None,
+                assigned_ipv4: None,
+                peer_count: 0,
+                status: "协调中枢托管中".to_string(),
+            });
+        }
+    }
+
+    let network_name = primary
+        .map(|network| network.name.clone())
+        .or_else(|| {
+            snapshot
+                .configuration
+                .networks
+                .first()
+                .map(|config| config.network_name.clone())
+        })
+        .or_else(|| coordinator.map(|service| service.network_name.clone()))
+        .or_else(|| Some("default".to_string()));
+    let coordinator_ticket = coordinator_active.then_some(local_ticket).flatten();
+
+    AppUiState {
+        status: status.to_string(),
+        virtual_ipv6: primary.and_then(|network| network.assigned_ipv6.map(|ip| ip.to_string())),
+        virtual_ipv4: primary.and_then(|network| network.assigned_ipv4.map(|ip| ip.to_string())),
+        routing_mode: primary_config
+            .map(|config| mode_name(config.routing_mode).to_string())
+            .unwrap_or_else(|| "MeshOnly".to_string()),
+        exit_node: primary_config.and_then(|config| config.exit_node.clone()),
+        is_exit_node: primary
+            .is_some_and(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
+            || primary_config.is_some_and(|config| config.exit_node_enabled),
+        connected_target: primary_config.map(|config| config.coordinator_url.clone()),
+        hosting_ticket: coordinator_ticket,
+        peers,
+        logs: snapshot
+            .logs
+            .iter()
+            .map(|entry| {
+                format!(
+                    "[{}] {}: {}",
+                    node_log_level_label(entry.level),
+                    entry.target,
+                    entry.message
+                )
+            })
+            .collect(),
+        network_name,
+        networks,
+        coordinator_active,
+        coordinator_signaling_addr: coordinator
+            .and_then(|service| service.signaling_addr)
+            .map(|addr| addr.to_string()),
+        coordinator_relay_addr: coordinator
+            .and_then(|service| service.relay_addr)
+            .map(|addr| addr.to_string()),
+        coordinator_online_clients: coordinator.map_or(0, |service| {
+            snapshot
+                .peers
+                .iter()
+                .filter(|peer| peer.online && peer.network_name == service.network_name)
+                .count()
+        }),
+        // The node snapshot does not currently expose coordinator-only relay
+        // counters or blacklist entries. Keep them unknown/empty instead of
+        // manufacturing values from unrelated local traffic counters.
+        coordinator_traffic: None,
+        coordinator_peers: Vec::new(),
+        coordinator_blacklist: Vec::new(),
+        runtime_available: !snapshot.networks.is_empty(),
+        runtime_p2p_addr: primary
+            .and_then(|network| network.p2p_listen_addr)
+            .map(|addr| addr.to_string()),
+        runtime_traffic: primary.map(|network| RuntimeTrafficDto {
+            uptime_secs: network.uptime_secs,
+            tun_rx_packets: network.traffic.tun_rx_packets,
+            tun_rx_bytes: network.traffic.tun_rx_bytes,
+            tun_tx_packets: network.traffic.tun_tx_packets,
+            tun_tx_bytes: network.traffic.tun_tx_bytes,
+            p2p_rx_packets: network.traffic.p2p_rx_packets,
+            p2p_rx_bytes: network.traffic.p2p_rx_bytes,
+            p2p_tx_packets: network.traffic.p2p_tx_packets,
+            p2p_tx_bytes: network.traffic.p2p_tx_bytes,
+            ..RuntimeTrafficDto::default()
+        }),
+    }
+}
+
+fn primary_network(snapshot: &NodeSnapshot) -> Option<&crate::node::NodeNetworkSnapshot> {
+    snapshot
+        .networks
+        .iter()
+        .max_by_key(|network| match network.status {
+            NodeNetworkStatus::Online => 5,
+            NodeNetworkStatus::Degraded => 4,
+            NodeNetworkStatus::Connecting => 3,
+            NodeNetworkStatus::Stopping => 2,
+            NodeNetworkStatus::Failed => 1,
+            NodeNetworkStatus::Offline => 0,
+        })
+}
+
+fn primary_network_config(
+    snapshot: &NodeSnapshot,
+) -> Option<&crate::node::NodeNetworkConfigSnapshot> {
+    let primary_name = primary_network(snapshot).map(|network| network.name.as_str());
+    primary_name
+        .and_then(|name| {
+            snapshot
+                .configuration
+                .networks
+                .iter()
+                .find(|config| config.network_name == name)
+        })
+        .or_else(|| snapshot.configuration.networks.first())
+}
+
+fn config_routing_mode(
+    snapshot: &NodeSnapshot,
+    network_name: Option<&str>,
+) -> Option<NodeRoutingMode> {
+    network_name
+        .and_then(|name| {
+            snapshot
+                .configuration
+                .networks
+                .iter()
+                .find(|config| config.network_name == name)
+        })
+        .or_else(|| primary_network_config(snapshot))
+        .map(|config| config.routing_mode)
+}
+
+fn primary_network_name(snapshot: &NodeSnapshot) -> Option<String> {
+    primary_network(snapshot)
+        .map(|network| network.name.clone())
+        .or_else(|| {
+            snapshot
+                .configuration
+                .networks
+                .first()
+                .map(|config| config.network_name.clone())
+        })
+}
+
+fn active_coordinator_service(
+    snapshot: &NodeSnapshot,
+) -> Option<&crate::node::NodeEmbeddedServiceSnapshot> {
+    snapshot
+        .embedded_services
+        .iter()
+        .find(|service| service.status == NodeEmbeddedServiceStatus::Running)
+        .or_else(|| {
+            snapshot.embedded_services.iter().find(|service| {
+                matches!(
+                    service.status,
+                    NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
+                )
+            })
+        })
+}
+
+fn node_peer_to_snapshot(peer: &crate::node::NodePeerSnapshot) -> PeerSnapshot {
+    PeerSnapshot {
+        client_id: peer.peer_id.clone(),
+        virtual_ip: peer.virtual_ipv6,
+        virtual_ipv4: peer.virtual_ipv4,
+        endpoints: peer.endpoints.clone(),
+        // NAT type and per-peer idle/connected durations are not present in the
+        // canonical NodePeerSnapshot. Mark NAT explicitly unknown and keep the
+        // unavailable durations at zero rather than inferring them.
+        nat_type: "unknown".to_string(),
+        connected_secs: 0,
+        idle_secs: 0,
+        network_name: Some(peer.network_name.clone()),
+        networks: vec![peer.network_name.clone()],
+    }
+}
+
+fn node_routing_mode(mode: &str) -> Result<NodeRoutingMode> {
+    match mode.to_lowercase().as_str() {
+        "meshonly" | "mesh-only" | "mesh_only" => Ok(NodeRoutingMode::MeshOnly),
+        "bypassmainland" | "bypass-mainland" | "bypass_mainland" => {
+            Ok(NodeRoutingMode::BypassMainland)
+        }
+        "globalproxy" | "global-proxy" | "global_proxy" => Ok(NodeRoutingMode::GlobalProxy),
+        other => anyhow::bail!("不支持的路由模式: {other}"),
+    }
+}
+
+fn mode_name(mode: NodeRoutingMode) -> &'static str {
+    match mode {
+        NodeRoutingMode::MeshOnly => "MeshOnly",
+        NodeRoutingMode::BypassMainland => "BypassMainland",
+        NodeRoutingMode::GlobalProxy => "GlobalProxy",
+    }
+}
+
+fn network_status_label(status: NodeNetworkStatus) -> &'static str {
+    match status {
+        NodeNetworkStatus::Offline => "离线",
+        NodeNetworkStatus::Connecting => "连接中",
+        NodeNetworkStatus::Online => "在线",
+        NodeNetworkStatus::Degraded => "运行降级",
+        NodeNetworkStatus::Stopping => "停止中",
+        NodeNetworkStatus::Failed => "启动失败",
+    }
+}
+
+fn node_log_level_label(level: crate::node::NodeLogLevel) -> &'static str {
+    match level {
+        crate::node::NodeLogLevel::Trace => "TRACE",
+        crate::node::NodeLogLevel::Debug => "DEBUG",
+        crate::node::NodeLogLevel::Info => "INFO",
+        crate::node::NodeLogLevel::Warn => "WARN",
+        crate::node::NodeLogLevel::Error => "ERROR",
+    }
+}
+
+fn cidr_prefix(cidr: &str, fallback: u8) -> u8 {
+    cidr.rsplit_once('/')
+        .and_then(|(_, prefix)| prefix.parse().ok())
+        .unwrap_or(fallback)
 }
 
 fn runtime_traffic_from_status(status: &StatusSnapshot) -> RuntimeTrafficDto {
@@ -1082,6 +1721,10 @@ impl Default for AppController {
 mod tests {
     use super::*;
     use crate::ipc::{PeerSnapshot as IpcPeerSnapshot, StatusSnapshot};
+    use crate::node::{
+        NodeEmbeddedServiceSnapshot, NodeNetworkConfigSnapshot, NodeNetworkSnapshot,
+        NodePeerSnapshot, NodeTrafficSnapshot,
+    };
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     fn zero_global() -> GlobalStatsSnapshot {
@@ -1169,6 +1812,77 @@ mod tests {
         }
     }
 
+    fn node_network_config(name: &str, mode: NodeRoutingMode) -> NodeNetworkConfigSnapshot {
+        NodeNetworkConfigSnapshot {
+            network_name: name.to_string(),
+            coordinator_url: "ws://coordinator.example:6666".to_string(),
+            virtual_mode: Some(fuckipv6_common::NetworkMode::DualStack),
+            preferred_ipv4: None,
+            preferred_ipv6: None,
+            virtual_network: Some("fd00::/64".to_string()),
+            tun_name: format!("fuckipv6-{name}"),
+            mtu: 1420,
+            p2p_listen_port: 40000,
+            p2p_connect_timeout_secs: 30,
+            p2p_heartbeat_interval_secs: 5,
+            routing_mode: mode,
+            exit_node: Some("peer-exit".to_string()),
+            direct_cidrs: vec!["10.0.0.0/8".to_string()],
+            proxy_cidrs: vec!["0.0.0.0/0".to_string()],
+            exit_node_enabled: true,
+            exit_node_allowed_clients: Vec::new(),
+            exit_node_allow_lan_access: false,
+            exit_node_region: Some("test".to_string()),
+            acl_enabled: false,
+            acl_default_action: fuckipv6_common::AclAction::Allow,
+            acl_rule_count: 0,
+            log_level: "info".to_string(),
+            log_file_configured: false,
+            identity_configured: true,
+        }
+    }
+
+    fn node_network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
+        NodeNetworkSnapshot {
+            name: name.to_string(),
+            tun_name: format!("fuckipv6-{name}"),
+            status,
+            assigned_ipv6: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 1)),
+            assigned_ipv4: Some(Ipv4Addr::new(10, 8, 0, 1)),
+            p2p_listen_addr: Some("127.0.0.1:40000".parse().unwrap()),
+            uptime_secs: 90,
+            roles: vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode],
+            peer_count: 2,
+            traffic: NodeTrafficSnapshot {
+                tun_rx_packets: 20,
+                tun_rx_bytes: 2_000,
+                tun_tx_packets: 10,
+                tun_tx_bytes: 1_000,
+                p2p_rx_packets: 8,
+                p2p_rx_bytes: 800,
+                p2p_tx_packets: 6,
+                p2p_tx_bytes: 600,
+                error_count: 2,
+            },
+        }
+    }
+
+    fn node_peer(name: &str, peer_id: &str, online: bool) -> NodePeerSnapshot {
+        NodePeerSnapshot {
+            peer_id: peer_id.to_string(),
+            network_name: name.to_string(),
+            virtual_ipv6: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x10, 2),
+            virtual_ipv4: Some(Ipv4Addr::new(10, 8, 0, 2)),
+            endpoints: vec!["127.0.0.1:41000".parse().unwrap()],
+            online,
+            p2p_active: true,
+            p2p_healthy: true,
+            rtt_us: Some(23_000),
+            loss_rate: 0.0,
+            traffic: NodeTrafficSnapshot::default(),
+        }
+    }
+
     #[test]
     fn runtime_status_updates_ui_identity_networks_peers_and_traffic() {
         let mut state = AppUiState::offline();
@@ -1227,5 +1941,141 @@ mod tests {
         assert!(state.runtime_p2p_addr.is_none());
         assert!(state.runtime_traffic.is_none());
         assert!(state.peers.is_empty());
+    }
+
+    #[test]
+    fn node_snapshot_projection_uses_authoritative_network_and_traffic_state() {
+        let mut network = node_network("office", NodeNetworkStatus::Online);
+        network.traffic.error_count = 3;
+        let snapshot = NodeSnapshot {
+            configuration: crate::node::NodeConfigurationSnapshot {
+                networks: vec![node_network_config(
+                    "office",
+                    NodeRoutingMode::BypassMainland,
+                )],
+            },
+            networks: vec![network],
+            peers: vec![
+                node_peer("office", "peer-alpha", true),
+                node_peer("office", "peer-offline", false),
+            ],
+            logs: vec![crate::node::NodeLogEntry {
+                unix_ms: 1,
+                level: crate::node::NodeLogLevel::Info,
+                target: "node".to_string(),
+                message: "ready".to_string(),
+            }],
+            ..NodeSnapshot::default()
+        };
+
+        let state = project_node_snapshot(&snapshot, None);
+
+        assert_eq!(state.status, "online");
+        assert_eq!(state.virtual_ipv6.as_deref(), Some("fd00::10:1"));
+        assert_eq!(state.virtual_ipv4.as_deref(), Some("10.8.0.1"));
+        assert_eq!(state.routing_mode, "BypassMainland");
+        assert_eq!(state.exit_node.as_deref(), Some("peer-exit"));
+        assert!(state.is_exit_node);
+        assert_eq!(state.network_name.as_deref(), Some("office"));
+        assert_eq!(state.networks.len(), 1);
+        assert_eq!(state.networks[0].status, "在线");
+        assert_eq!(state.networks[0].peer_count, 2);
+        assert_eq!(state.peers.len(), 1);
+        assert_eq!(state.peers[0].client_id, "peer-alpha");
+        assert_eq!(state.peers[0].latency_ms, Some(23.0));
+        assert_eq!(state.logs, vec!["[INFO] node: ready"]);
+        let traffic = state.runtime_traffic.expect("runtime traffic");
+        assert_eq!(traffic.uptime_secs, 90);
+        assert_eq!(traffic.tun_rx_bytes, 2_000);
+        assert_eq!(traffic.p2p_tx_bytes, 600);
+    }
+
+    #[test]
+    fn node_snapshot_projection_distinguishes_degraded_and_connecting() {
+        let degraded = NodeSnapshot {
+            networks: vec![node_network("office", NodeNetworkStatus::Degraded)],
+            ..NodeSnapshot::default()
+        };
+        let degraded = project_node_snapshot(&degraded, None);
+        assert_eq!(degraded.status, "degraded");
+        assert_eq!(degraded.networks[0].status, "运行降级");
+
+        let connecting = NodeSnapshot {
+            networks: vec![node_network("office", NodeNetworkStatus::Connecting)],
+            ..NodeSnapshot::default()
+        };
+        assert_eq!(
+            project_node_snapshot(&connecting, None).status,
+            "connecting"
+        );
+    }
+
+    #[test]
+    fn node_snapshot_projection_maps_coordinator_service_and_scopes_clients() {
+        let snapshot = NodeSnapshot {
+            configuration: crate::node::NodeConfigurationSnapshot {
+                networks: vec![node_network_config("office", NodeRoutingMode::MeshOnly)],
+            },
+            embedded_services: vec![NodeEmbeddedServiceSnapshot {
+                network_name: "office".to_string(),
+                status: NodeEmbeddedServiceStatus::Running,
+                signaling_addr: Some("127.0.0.1:6666".parse().unwrap()),
+                relay_addr: Some("127.0.0.1:6667".parse().unwrap()),
+            }],
+            peers: vec![
+                node_peer("office", "peer-office", true),
+                node_peer("lab", "peer-lab", true),
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        let state = project_node_snapshot(&snapshot, Some("fk://invite".to_string()));
+
+        assert_eq!(state.status, "hosting");
+        assert!(state.coordinator_active);
+        assert_eq!(
+            state.coordinator_signaling_addr.as_deref(),
+            Some("127.0.0.1:6666")
+        );
+        assert_eq!(
+            state.coordinator_relay_addr.as_deref(),
+            Some("127.0.0.1:6667")
+        );
+        assert_eq!(state.coordinator_online_clients, 1);
+        assert_eq!(state.hosting_ticket.as_deref(), Some("fk://invite"));
+        assert_eq!(state.network_name.as_deref(), Some("office"));
+        assert_eq!(state.networks.len(), 1);
+        assert_eq!(state.networks[0].status, "协调中枢托管中");
+    }
+
+    #[test]
+    fn node_peer_projection_marks_unavailable_nat_metadata_unknown() {
+        let projected = node_peer_to_snapshot(&node_peer("office", "peer-alpha", true));
+        assert_eq!(projected.nat_type, "unknown");
+        assert_eq!(projected.connected_secs, 0);
+        assert_eq!(projected.idle_secs, 0);
+        assert_eq!(projected.network_name.as_deref(), Some("office"));
+    }
+
+    #[test]
+    fn routing_mode_falls_back_to_matching_or_current_configuration() {
+        let snapshot = NodeSnapshot {
+            configuration: crate::node::NodeConfigurationSnapshot {
+                networks: vec![
+                    node_network_config("office", NodeRoutingMode::GlobalProxy),
+                    node_network_config("lab", NodeRoutingMode::MeshOnly),
+                ],
+            },
+            ..NodeSnapshot::default()
+        };
+
+        assert_eq!(
+            config_routing_mode(&snapshot, Some("lab")),
+            Some(NodeRoutingMode::MeshOnly)
+        );
+        assert_eq!(
+            config_routing_mode(&snapshot, Some("new-network")),
+            Some(NodeRoutingMode::GlobalProxy)
+        );
     }
 }

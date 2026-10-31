@@ -642,13 +642,22 @@ pub async fn run_default_app(
         anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过 `fuckipv6 --gpui` 运行");
     }
 
-    let controller = std::sync::Arc::new(crate::webui::AppController::new());
-    if let Some(enabled) = is_exit_node {
-        controller
-            .update_state(|state| state.is_exit_node = enabled)
-            .await;
-    }
-    let _server_handle = crate::webui::start_app_webui(port, controller.clone()).await?;
+    let session = crate::remote_node::RemoteNodeSession::start_with_role(
+        commands::RuntimeOptions {
+            routing_mode: None,
+            exit_node: None,
+            is_exit_node,
+            headless: ui_mode.effective.is_headless(),
+            gui: false,
+            webui_port: port,
+        },
+        crate::local_ipc::IpcRole::WebUi,
+    )?;
+    let node_http =
+        crate::node::NodeHttpAdapter::new(session.commands(), session.state(), session.events());
+    let controller = std::sync::Arc::new(crate::webui::AppController::from_node_session(session));
+    let server_handle =
+        crate::webui::start_app_webui_with_node(port, controller.clone(), node_http).await?;
 
     if host {
         if let Err(e) = controller

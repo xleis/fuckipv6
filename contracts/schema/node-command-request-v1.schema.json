@@ -1,0 +1,373 @@
+{
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "command": {
+      "$ref": "#/$defs/NodeCommand"
+    }
+  },
+  "required": [
+    "request_id",
+    "command"
+  ],
+  "description": "One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.",
+  "title": "NodeCommandRequest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "NodeCommand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "get_snapshot"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "get_ui_manifest"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "description": "Bootstrap query for the declarative UI contract. This is not rendered as\na page action and should be called before an adapter builds its UI."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "start_networks"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "selection": {
+                  "$ref": "#/$defs/NodeNetworkSelection"
+                }
+              },
+              "required": [
+                "selection"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "stop_networks"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "networks": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "networks",
+                "all"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "create_network"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeCreateNetworkCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "join_network"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeJoinNetworkCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "update_routing"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeUpdateRoutingCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "set_network_role"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeSetNetworkRoleCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "probe_peer"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeProbePeerCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "shutdown"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      ],
+      "description": "Product-neutral node operations. A node creates, joins or serves a network;\nthere are deliberately no product-level client/server command variants."
+    },
+    "NodeNetworkSelection": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "default",
+            "all"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "none",
+          "description": "Keep the node and its control surfaces running without joining a network."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "How a node should choose the networks it loads at startup."
+    },
+    "NodeCreateNetworkCommand": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "signaling_port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "relay_port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "external_host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auto_connect": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "signaling_port",
+        "relay_port",
+        "auto_connect"
+      ]
+    },
+    "NodeJoinNetworkCommand": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target",
+        "start"
+      ]
+    },
+    "NodeUpdateRoutingCommand": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/NodeRoutingMode"
+        },
+        "exit_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_exit_node": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "network_name",
+        "mode",
+        "is_exit_node"
+      ]
+    },
+    "NodeRoutingMode": {
+      "type": "string",
+      "enum": [
+        "mesh_only",
+        "bypass_mainland",
+        "global_proxy"
+      ]
+    },
+    "NodeSetNetworkRoleCommand": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/NodeNetworkRole"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "network_name",
+        "role",
+        "enabled"
+      ]
+    },
+    "NodeNetworkRole": {
+      "type": "string",
+      "enum": [
+        "member",
+        "discovery",
+        "relay",
+        "exit_node"
+      ],
+      "description": "Network roles are capabilities within a network, never product identities."
+    },
+    "NodeProbePeerCommand": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "network_name",
+        "target",
+        "timeout_ms"
+      ]
+    }
+  },
+  "$id": "https://relay.xlei.cc/contracts/schema/node-command-request-v1.schema.json",
+  "x-fuckipv6-contract-version": 1,
+  "x-fuckipv6-rust-source": "fuckipv6-client::node"
+}

@@ -1,4 +1,5 @@
 mod command;
+pub mod contract;
 mod event;
 mod http_adapter;
 mod lifecycle;
@@ -11,7 +12,7 @@ mod ui_manifest;
 
 pub use command::{
     validate_network_name, NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandFuture,
-    NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
+    NodeCommandHandler, NodeCommandKind, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeCreateNetworkCommand, NodeJoinNetworkCommand, NodePeerProbeSnapshot, NodeProbePeerCommand,
     NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
 };
@@ -36,7 +37,7 @@ pub use state::{
     NodeTrafficSnapshot,
 };
 pub use ui_manifest::{
-    node_ui_manifest, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiCommandKind,
-    NodeUiConfirmation, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiValidation,
+    node_ui_manifest, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiConfirmation,
+    NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiValidation,
     NODE_UI_MANIFEST_SCHEMA_VERSION,
 };

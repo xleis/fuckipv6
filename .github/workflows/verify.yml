@@ -37,6 +37,45 @@ jobs:
           path: target/docs
           if-no-files-found: warn
 
+  contracts:
+    name: Node contract drift and bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: contracts/typescript/package-lock.json
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install TypeScript dependencies
+        run: npm ci --ignore-scripts --prefix contracts/typescript
+
+      - name: Check TypeScript bindings
+        run: npm run check --prefix contracts/typescript
+
+      - name: Test schemas and generated consumers
+        run: ./scripts/check-contracts.sh
+
+      - name: Regenerate all contract artifacts
+        run: ./scripts/generate-contracts.sh
+
+      - name: Reject generated drift
+        run: git diff --exit-code -- contracts
+
   supply-chain:
     name: Supply-chain audit
     runs-on: ubuntu-latest
@@ -196,7 +235,7 @@ jobs:
   aggregate:
     name: Aggregate release decision
     if: always()
-    needs: [docs, supply-chain, gpui-smoke, linux, windows, macos]
+    needs: [docs, contracts, supply-chain, gpui-smoke, linux, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -218,6 +257,7 @@ jobs:
             --reports target/release-gate/*.json \
             --output target/release-gate/aggregate.json \
             --upstream-result "docs=${{ needs.docs.result }}" \
+            --upstream-result "contracts=${{ needs.contracts.result }}" \
             --upstream-result "supply-chain=${{ needs.supply-chain.result }}" \
             --upstream-result "gpui-smoke=${{ needs.gpui-smoke.result }}" \
             --upstream-result "linux=${{ needs.linux.result }}" \

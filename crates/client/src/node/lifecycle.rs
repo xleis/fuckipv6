@@ -1,10 +1,11 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 /// Node-global lifecycle. Network sessions may come and go while the node
 /// remains in one of these phases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePhase {
     Stopped,
@@ -15,7 +16,7 @@ pub enum NodePhase {
 }
 
 /// Shared lifecycle snapshot consumed by CLI, IPC, WebUI, and (later) GPUI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeLifecycleSnapshot {
     pub phase: NodePhase,
     pub configured_networks: usize,

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -10,7 +11,7 @@ use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot};
 use crate::ui::UiModeResolution;
 
 /// Stable, transport-neutral state rendered by every node UI adapter.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSnapshot {
     pub revision: u64,
     pub lifecycle: NodeLifecycleSnapshot,
@@ -123,7 +124,7 @@ fn collect_duplicate_names<'a>(
 }
 
 /// Effective, non-secret network configuration exposed to every UI adapter.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeConfigurationSnapshot {
     pub networks: Vec<NodeNetworkConfigSnapshot>,
 }
@@ -132,7 +133,7 @@ pub struct NodeConfigurationSnapshot {
 ///
 /// Filesystem paths and other host-local details are deliberately omitted. The
 /// boolean fields only state whether optional host-local settings are present.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeNetworkConfigSnapshot {
     pub network_name: String,
     pub coordinator_url: String,
@@ -164,7 +165,7 @@ pub struct NodeNetworkConfigSnapshot {
 /// Non-secret runtime state for one network's embedded signaling and relay
 /// services. Invitation tickets, identity material, and host-local paths are
 /// deliberately excluded from this shared UI contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeEmbeddedServiceSnapshot {
     pub network_name: String,
     pub status: NodeEmbeddedServiceStatus,
@@ -172,7 +173,7 @@ pub struct NodeEmbeddedServiceSnapshot {
     pub relay_addr: Option<SocketAddr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeEmbeddedServiceStatus {
     Starting,
@@ -186,13 +187,13 @@ pub enum NodeEmbeddedServiceStatus {
 ///
 /// `TrustedControlPlane` means the runtime accepts every connected adapter as
 /// fully privileged. It does not mean per-user or remote authentication exists.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodePermissionSnapshot {
     pub access_model: NodeAccessModel,
     pub permissions: Vec<NodePermission>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeAccessModel {
     #[default]
@@ -200,7 +201,7 @@ pub enum NodeAccessModel {
 }
 
 /// Stable capability classes used by both the permission snapshot and UI actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePermission {
     ViewState,
@@ -225,7 +226,7 @@ impl NodePermission {
 }
 
 /// Public node identity metadata. Secret key material must never enter this DTO.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeIdentitySnapshot {
     pub node_id: String,
     pub display_name: Option<String>,
@@ -233,7 +234,7 @@ pub struct NodeIdentitySnapshot {
 }
 
 /// One local network and the roles this node currently performs in it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeNetworkSnapshot {
     pub name: String,
     pub tun_name: String,
@@ -248,7 +249,7 @@ pub struct NodeNetworkSnapshot {
 }
 
 /// Network roles are capabilities within a network, never product identities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeNetworkRole {
     Member,
@@ -257,7 +258,7 @@ pub enum NodeNetworkRole {
     ExitNode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRoutingMode {
     MeshOnly,
@@ -265,7 +266,7 @@ pub enum NodeRoutingMode {
     GlobalProxy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeNetworkStatus {
     Offline,
@@ -276,7 +277,7 @@ pub enum NodeNetworkStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeTrafficSnapshot {
     pub tun_rx_packets: u64,
     pub tun_rx_bytes: u64,
@@ -290,7 +291,7 @@ pub struct NodeTrafficSnapshot {
 }
 
 /// Peer state scoped to a network. The same node may appear in multiple networks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodePeerSnapshot {
     pub peer_id: String,
     pub network_name: String,
@@ -305,7 +306,7 @@ pub struct NodePeerSnapshot {
     pub traffic: NodeTrafficSnapshot,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeLogLevel {
     Trace,
@@ -315,7 +316,7 @@ pub enum NodeLogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeLogEntry {
     pub unix_ms: u64,
     pub level: NodeLogLevel,
@@ -324,7 +325,7 @@ pub struct NodeLogEntry {
 }
 
 /// UI- and transport-neutral error returned by every node command adapter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeProblem {
     pub code: NodeProblemCode,
     pub message: String,
@@ -332,7 +333,7 @@ pub struct NodeProblem {
     pub retryable: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeProblemCode {
     InvalidRequest,

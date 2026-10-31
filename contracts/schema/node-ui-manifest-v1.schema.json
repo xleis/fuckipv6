@@ -1,0 +1,225 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NodeUiPage"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "pages"
+  ],
+  "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic.",
+  "title": "NodeUiManifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "NodeUiPage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "nav_label_key": {
+          "type": "string"
+        },
+        "title_key": {
+          "type": "string"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeUiAction"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "nav_label_key",
+        "title_key",
+        "actions"
+      ]
+    },
+    "NodeUiAction": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label_key": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string",
+          "enum": [
+            "get_snapshot",
+            "start_networks",
+            "stop_networks",
+            "create_network",
+            "join_network",
+            "update_routing",
+            "set_network_role",
+            "probe_peer",
+            "shutdown"
+          ]
+        },
+        "backend_status": {
+          "$ref": "#/$defs/NodeUiBackendStatus"
+        },
+        "permission": {
+          "$ref": "#/$defs/NodePermission"
+        },
+        "availability": {
+          "$ref": "#/$defs/NodeUiAvailability"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeUiField"
+          }
+        },
+        "confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeUiConfirmation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label_key",
+        "command",
+        "backend_status",
+        "permission",
+        "availability",
+        "fields"
+      ]
+    },
+    "NodeUiBackendStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "implemented",
+          "description": "The production command handler currently accepts this command."
+        },
+        {
+          "type": "string",
+          "const": "unavailable",
+          "description": "The shared command exists, but the runtime backend rejects it as unavailable."
+        }
+      ]
+    },
+    "NodePermission": {
+      "type": "string",
+      "enum": [
+        "view_state",
+        "manage_networks",
+        "change_routing",
+        "manage_roles",
+        "probe_peers",
+        "stop_node",
+        "view_logs"
+      ],
+      "description": "Stable capability classes used by both the permission snapshot and UI actions."
+    },
+    "NodeUiAvailability": {
+      "type": "string",
+      "enum": [
+        "always",
+        "node_running",
+        "network_online",
+        "network_selected"
+      ]
+    },
+    "NodeUiField": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label_key": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/NodeUiInputKind"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "validation": {
+          "$ref": "#/$defs/NodeUiValidation"
+        }
+      },
+      "required": [
+        "id",
+        "label_key",
+        "input",
+        "required",
+        "validation"
+      ]
+    },
+    "NodeUiInputKind": {
+      "type": "string",
+      "enum": [
+        "boolean",
+        "external_host",
+        "network_name",
+        "network_selection",
+        "peer_target",
+        "port",
+        "role",
+        "routing_mode",
+        "url_or_ticket",
+        "timeout_ms"
+      ]
+    },
+    "NodeUiValidation": {
+      "type": "string",
+      "enum": [
+        "none",
+        "non_empty",
+        "network_name",
+        "port",
+        "distinct_ports",
+        "network_selection",
+        "role",
+        "routing_mode",
+        "positive_timeout"
+      ]
+    },
+    "NodeUiConfirmation": {
+      "type": "object",
+      "properties": {
+        "title_key": {
+          "type": "string"
+        },
+        "consequence_key": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title_key",
+        "consequence_key",
+        "destructive"
+      ]
+    }
+  },
+  "$id": "https://relay.xlei.cc/contracts/schema/node-ui-manifest-v1.schema.json",
+  "x-fuckipv6-contract-version": 1,
+  "x-fuckipv6-rust-source": "fuckipv6-client::node"
+}

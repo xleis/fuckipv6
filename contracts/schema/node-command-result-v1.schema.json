@@ -1,0 +1,1237 @@
+{
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "outcome": {
+      "$ref": "#/$defs/NodeCommandOutcome"
+    }
+  },
+  "required": [
+    "request_id",
+    "outcome"
+  ],
+  "title": "NodeCommandResult",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "NodeCommandOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "snapshot"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeSnapshot"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "ui_manifest"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeUiManifest"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "probe"
+            },
+            "data": {
+              "$ref": "#/$defs/NodePeerProbeSnapshot"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "accepted"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operation_id"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "completed"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeProblem"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        }
+      ]
+    },
+    "NodeSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/NodeLifecycleSnapshot"
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeIdentitySnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configuration": {
+          "$ref": "#/$defs/NodeConfigurationSnapshot",
+          "default": {
+            "networks": []
+          }
+        },
+        "exit_node_capabilities": {
+          "$ref": "#/$defs/ExitNodeCapabilities",
+          "description": "Runtime capability truth for this host. Adapters must disable Exit Node\nactions when `supported` is false and render the typed reasons instead\nof inferring success from configuration alone.",
+          "default": {
+            "schema_version": 1,
+            "platform": "linux",
+            "supported": false,
+            "ipv4_forwarding": false,
+            "ipv6_forwarding": false,
+            "nat": false,
+            "cleanup": false,
+            "unsupported_reasons": [
+              "privileges_required",
+              "ipv4_forwarding_unavailable"
+            ]
+          }
+        },
+        "permissions": {
+          "$ref": "#/$defs/NodePermissionSnapshot",
+          "default": {
+            "access_model": "trusted_control_plane",
+            "permissions": []
+          }
+        },
+        "embedded_services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeEmbeddedServiceSnapshot"
+          },
+          "default": []
+        },
+        "ui_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiModeResolution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "networks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeNetworkSnapshot"
+          }
+        },
+        "peers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodePeerSnapshot"
+          }
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeLogEntry"
+          }
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "lifecycle",
+        "networks",
+        "peers",
+        "logs"
+      ],
+      "description": "Stable, transport-neutral state rendered by every node UI adapter."
+    },
+    "NodeLifecycleSnapshot": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/NodePhase"
+        },
+        "configured_networks": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "active_networks": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "failed_networks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "phase",
+        "configured_networks",
+        "active_networks",
+        "failed_networks"
+      ],
+      "description": "Shared lifecycle snapshot consumed by CLI, IPC, WebUI, and (later) GPUI."
+    },
+    "NodePhase": {
+      "type": "string",
+      "enum": [
+        "stopped",
+        "starting",
+        "running",
+        "stopping",
+        "failed"
+      ],
+      "description": "Node-global lifecycle. Network sessions may come and go while the node\nremains in one of these phases."
+    },
+    "NodeIdentitySnapshot": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_key_fingerprint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "public_key_fingerprint"
+      ],
+      "description": "Public node identity metadata. Secret key material must never enter this DTO."
+    },
+    "NodeConfigurationSnapshot": {
+      "type": "object",
+      "properties": {
+        "networks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeNetworkConfigSnapshot"
+          }
+        }
+      },
+      "required": [
+        "networks"
+      ],
+      "description": "Effective, non-secret network configuration exposed to every UI adapter."
+    },
+    "NodeNetworkConfigSnapshot": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "coordinator_url": {
+          "type": "string"
+        },
+        "virtual_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preferred_ipv4": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ipv4"
+        },
+        "preferred_ipv6": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ipv6"
+        },
+        "virtual_network": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tun_name": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "p2p_listen_port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "p2p_connect_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p2p_heartbeat_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "routing_mode": {
+          "$ref": "#/$defs/NodeRoutingMode"
+        },
+        "exit_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "direct_cidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "proxy_cidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_node_enabled": {
+          "type": "boolean"
+        },
+        "exit_node_allowed_clients": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_node_allow_lan_access": {
+          "type": "boolean"
+        },
+        "exit_node_region": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "acl_enabled": {
+          "type": "boolean"
+        },
+        "acl_default_action": {
+          "$ref": "#/$defs/AclAction"
+        },
+        "acl_rule_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "log_level": {
+          "type": "string"
+        },
+        "log_file_configured": {
+          "type": "boolean"
+        },
+        "identity_configured": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "network_name",
+        "coordinator_url",
+        "tun_name",
+        "mtu",
+        "p2p_listen_port",
+        "p2p_connect_timeout_secs",
+        "p2p_heartbeat_interval_secs",
+        "routing_mode",
+        "direct_cidrs",
+        "proxy_cidrs",
+        "exit_node_enabled",
+        "exit_node_allowed_clients",
+        "exit_node_allow_lan_access",
+        "acl_enabled",
+        "acl_default_action",
+        "acl_rule_count",
+        "log_level",
+        "log_file_configured",
+        "identity_configured"
+      ],
+      "description": "One network's effective configuration after loading startup overrides.\n\nFilesystem paths and other host-local details are deliberately omitted. The\nboolean fields only state whether optional host-local settings are present."
+    },
+    "NetworkMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "ipv4_only",
+          "description": "仅使用 IPv4 虚拟内网"
+        },
+        {
+          "type": "string",
+          "const": "ipv6_only",
+          "description": "仅使用 IPv6 虚拟内网"
+        },
+        {
+          "type": "string",
+          "const": "dual_stack",
+          "description": "同时支持 IPv4 和 IPv6 虚拟双栈"
+        }
+      ],
+      "description": "虚拟网络工作模式"
+    },
+    "NodeRoutingMode": {
+      "type": "string",
+      "enum": [
+        "mesh_only",
+        "bypass_mainland",
+        "global_proxy"
+      ]
+    },
+    "AclAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "description": "访问控制规则动作"
+    },
+    "ExitNodeCapabilities": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "platform": {
+          "$ref": "#/$defs/ExitNodePlatform"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "ipv4_forwarding": {
+          "type": "boolean"
+        },
+        "ipv6_forwarding": {
+          "type": "boolean"
+        },
+        "nat": {
+          "type": "boolean"
+        },
+        "cleanup": {
+          "type": "boolean"
+        },
+        "unsupported_reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExitNodeUnsupportedReason"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "platform",
+        "supported",
+        "ipv4_forwarding",
+        "ipv6_forwarding",
+        "nat",
+        "cleanup",
+        "unsupported_reasons"
+      ],
+      "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable."
+    },
+    "ExitNodePlatform": {
+      "type": "string",
+      "enum": [
+        "linux",
+        "windows",
+        "macos",
+        "other"
+      ],
+      "description": "Host platforms with distinct Exit Node implementation requirements."
+    },
+    "ExitNodeUnsupportedReason": {
+      "type": "string",
+      "enum": [
+        "platform_not_linux",
+        "privileges_required",
+        "routing_tool_unavailable",
+        "iptables_unavailable",
+        "ipv4_forwarding_unavailable"
+      ],
+      "description": "Machine-readable reasons that make an Exit Node action unavailable.\n\nAdapters must render these reasons instead of treating an enabled config\nflag as proof that kernel forwarding and NAT were installed."
+    },
+    "NodePermissionSnapshot": {
+      "type": "object",
+      "properties": {
+        "access_model": {
+          "$ref": "#/$defs/NodeAccessModel"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodePermission"
+          }
+        }
+      },
+      "required": [
+        "access_model",
+        "permissions"
+      ],
+      "description": "Control-plane authorization posture shared with UI adapters.\n\n`TrustedControlPlane` means the runtime accepts every connected adapter as\nfully privileged. It does not mean per-user or remote authentication exists."
+    },
+    "NodeAccessModel": {
+      "type": "string",
+      "enum": [
+        "trusted_control_plane"
+      ]
+    },
+    "NodePermission": {
+      "type": "string",
+      "enum": [
+        "view_state",
+        "manage_networks",
+        "change_routing",
+        "manage_roles",
+        "probe_peers",
+        "stop_node",
+        "view_logs"
+      ],
+      "description": "Stable capability classes used by both the permission snapshot and UI actions."
+    },
+    "NodeEmbeddedServiceSnapshot": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeEmbeddedServiceStatus"
+        },
+        "signaling_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relay_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "network_name",
+        "status"
+      ],
+      "description": "Non-secret runtime state for one network's embedded signaling and relay\nservices. Invitation tickets, identity material, and host-local paths are\ndeliberately excluded from this shared UI contract."
+    },
+    "NodeEmbeddedServiceStatus": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "stopping",
+        "stopped",
+        "failed"
+      ]
+    },
+    "UiModeResolution": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "$ref": "#/$defs/UiModeRequest"
+        },
+        "effective": {
+          "$ref": "#/$defs/UiMode"
+        },
+        "display": {
+          "$ref": "#/$defs/DisplayEnvironment"
+        },
+        "gpui_available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requested",
+        "effective",
+        "display",
+        "gpui_available"
+      ]
+    },
+    "UiModeRequest": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "gpui",
+        "web_ui",
+        "headless"
+      ]
+    },
+    "UiMode": {
+      "type": "string",
+      "enum": [
+        "gpui",
+        "web_ui",
+        "headless"
+      ],
+      "description": "The actual rendering surface selected for this node process.\n\n`WebUi` describes the browser-hosted control surface, even when the browser\nis launched in app-window mode. It must never be represented as `Gpui`."
+    },
+    "DisplayEnvironment": {
+      "type": "string",
+      "enum": [
+        "linux_x11",
+        "linux_wayland",
+        "windows_desktop",
+        "macos_desktop",
+        "headless"
+      ]
+    },
+    "NodeNetworkSnapshot": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "tun_name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeNetworkStatus"
+        },
+        "assigned_ipv6": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ipv6"
+        },
+        "assigned_ipv4": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ipv4"
+        },
+        "p2p_listen_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uptime_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeNetworkRole"
+          }
+        },
+        "peer_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "traffic": {
+          "$ref": "#/$defs/NodeTrafficSnapshot"
+        }
+      },
+      "required": [
+        "name",
+        "tun_name",
+        "status",
+        "uptime_secs",
+        "roles",
+        "peer_count",
+        "traffic"
+      ],
+      "description": "One local network and the roles this node currently performs in it."
+    },
+    "NodeNetworkStatus": {
+      "type": "string",
+      "enum": [
+        "offline",
+        "connecting",
+        "online",
+        "degraded",
+        "stopping",
+        "failed"
+      ]
+    },
+    "NodeNetworkRole": {
+      "type": "string",
+      "enum": [
+        "member",
+        "discovery",
+        "relay",
+        "exit_node"
+      ],
+      "description": "Network roles are capabilities within a network, never product identities."
+    },
+    "NodeTrafficSnapshot": {
+      "type": "object",
+      "properties": {
+        "tun_rx_packets": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tun_rx_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tun_tx_packets": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tun_tx_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p2p_rx_packets": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p2p_rx_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p2p_tx_packets": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p2p_tx_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tun_rx_packets",
+        "tun_rx_bytes",
+        "tun_tx_packets",
+        "tun_tx_bytes",
+        "p2p_rx_packets",
+        "p2p_rx_bytes",
+        "p2p_tx_packets",
+        "p2p_tx_bytes",
+        "error_count"
+      ]
+    },
+    "NodePeerSnapshot": {
+      "type": "object",
+      "properties": {
+        "peer_id": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "virtual_ipv6": {
+          "type": "string",
+          "format": "ipv6"
+        },
+        "virtual_ipv4": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ipv4"
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "p2p_active": {
+          "type": "boolean"
+        },
+        "p2p_healthy": {
+          "type": "boolean"
+        },
+        "rtt_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "loss_rate": {
+          "type": "number",
+          "format": "float"
+        },
+        "traffic": {
+          "$ref": "#/$defs/NodeTrafficSnapshot"
+        }
+      },
+      "required": [
+        "peer_id",
+        "network_name",
+        "virtual_ipv6",
+        "endpoints",
+        "online",
+        "p2p_active",
+        "p2p_healthy",
+        "loss_rate",
+        "traffic"
+      ],
+      "description": "Peer state scoped to a network. The same node may appear in multiple networks."
+    },
+    "NodeLogEntry": {
+      "type": "object",
+      "properties": {
+        "unix_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "level": {
+          "$ref": "#/$defs/NodeLogLevel"
+        },
+        "target": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "unix_ms",
+        "level",
+        "target",
+        "message"
+      ]
+    },
+    "NodeLogLevel": {
+      "type": "string",
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "NodeProblem": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/NodeProblemCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "description": "UI- and transport-neutral error returned by every node command adapter."
+    },
+    "NodeProblemCode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "not_found",
+            "conflict",
+            "unavailable",
+            "permission_denied",
+            "cancelled",
+            "internal"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "unsupported",
+          "description": "The operation is valid but unavailable on this platform or host."
+        }
+      ]
+    },
+    "NodeUiManifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeUiPage"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "pages"
+      ],
+      "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic."
+    },
+    "NodeUiPage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "nav_label_key": {
+          "type": "string"
+        },
+        "title_key": {
+          "type": "string"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeUiAction"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "nav_label_key",
+        "title_key",
+        "actions"
+      ]
+    },
+    "NodeUiAction": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label_key": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string",
+          "enum": [
+            "get_snapshot",
+            "start_networks",
+            "stop_networks",
+            "create_network",
+            "join_network",
+            "update_routing",
+            "set_network_role",
+            "probe_peer",
+            "shutdown"
+          ]
+        },
+        "backend_status": {
+          "$ref": "#/$defs/NodeUiBackendStatus"
+        },
+        "permission": {
+          "$ref": "#/$defs/NodePermission"
+        },
+        "availability": {
+          "$ref": "#/$defs/NodeUiAvailability"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeUiField"
+          }
+        },
+        "confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeUiConfirmation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label_key",
+        "command",
+        "backend_status",
+        "permission",
+        "availability",
+        "fields"
+      ]
+    },
+    "NodeUiBackendStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "implemented",
+          "description": "The production command handler currently accepts this command."
+        },
+        {
+          "type": "string",
+          "const": "unavailable",
+          "description": "The shared command exists, but the runtime backend rejects it as unavailable."
+        }
+      ]
+    },
+    "NodeUiAvailability": {
+      "type": "string",
+      "enum": [
+        "always",
+        "node_running",
+        "network_online",
+        "network_selected"
+      ]
+    },
+    "NodeUiField": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label_key": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/NodeUiInputKind"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "validation": {
+          "$ref": "#/$defs/NodeUiValidation"
+        }
+      },
+      "required": [
+        "id",
+        "label_key",
+        "input",
+        "required",
+        "validation"
+      ]
+    },
+    "NodeUiInputKind": {
+      "type": "string",
+      "enum": [
+        "boolean",
+        "external_host",
+        "network_name",
+        "network_selection",
+        "peer_target",
+        "port",
+        "role",
+        "routing_mode",
+        "url_or_ticket",
+        "timeout_ms"
+      ]
+    },
+    "NodeUiValidation": {
+      "type": "string",
+      "enum": [
+        "none",
+        "non_empty",
+        "network_name",
+        "port",
+        "distinct_ports",
+        "network_selection",
+        "role",
+        "routing_mode",
+        "positive_timeout"
+      ]
+    },
+    "NodeUiConfirmation": {
+      "type": "object",
+      "properties": {
+        "title_key": {
+          "type": "string"
+        },
+        "consequence_key": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title_key",
+        "consequence_key",
+        "destructive"
+      ]
+    },
+    "NodePeerProbeSnapshot": {
+      "type": "object",
+      "properties": {
+        "peer_id": {
+          "type": "string"
+        },
+        "virtual_ipv6": {
+          "type": "string",
+          "format": "ipv6"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rtt_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p2p_active": {
+          "type": "boolean"
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "peer_id",
+        "virtual_ipv6",
+        "p2p_active",
+        "timed_out"
+      ]
+    }
+  },
+  "$id": "https://relay.xlei.cc/contracts/schema/node-command-result-v1.schema.json",
+  "x-fuckipv6-contract-version": 1,
+  "x-fuckipv6-rust-source": "fuckipv6-client::node"
+}

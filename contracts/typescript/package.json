@@ -1,0 +1,12 @@
+{
+  "name": "@fuckipv6/node-contract",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.emit.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

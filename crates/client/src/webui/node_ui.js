@@ -1094,16 +1094,19 @@
   }
 
   function commandForAction(action, values) {
+    const expected = ACTION_CONTRACT[action.id];
+    assertContract(expected, "unknown action command: " + action.id);
+    const command = expected.command;
     const errors = validateActionValues(action, values);
     if (errors.length) {
       throw new Error(errors.join("；"));
     }
     switch (action.id) {
       case "refresh_snapshot":
-        return { command: "get_snapshot" };
+        return { command };
       case "create_network":
         return {
-          command: "create_network",
+          command,
           payload: {
             name: String(required(values, "name")).trim(),
             signaling_port: Number(required(values, "signaling_port")),
@@ -1114,7 +1117,7 @@
         };
       case "join_network":
         return {
-          command: "join_network",
+          command,
           payload: {
             target: String(required(values, "target")).trim(),
             network_name: optional(values, "network_name"),
@@ -1123,19 +1126,19 @@
         };
       case "start_networks":
         return {
-          command: "start_networks",
+          command,
           payload: { selection: networkSelection(required(values, "selection")) },
         };
       case "stop_networks": {
         const all = booleanValue(values.all);
         return {
-          command: "stop_networks",
+          command,
           payload: { networks: all ? [] : splitNames(values.networks), all },
         };
       }
       case "probe_peer":
         return {
-          command: "probe_peer",
+          command,
           payload: {
             network_name: String(required(values, "network_name")).trim(),
             target: String(required(values, "target")).trim(),
@@ -1144,7 +1147,7 @@
         };
       case "update_routing":
         return {
-          command: "update_routing",
+          command,
           payload: {
             network_name: String(required(values, "network_name")).trim(),
             mode: String(required(values, "mode")),
@@ -1155,7 +1158,7 @@
       case "set_exit_node_role":
       case "set_relay_role":
         return {
-          command: "set_network_role",
+          command,
           payload: {
             network_name: String(required(values, "network_name")).trim(),
             role: String(required(values, "role")),
@@ -1163,7 +1166,7 @@
           },
         };
       case "shutdown_node":
-        return { command: "shutdown" };
+        return { command };
       default:
         throw new Error("拒绝为未知动作构造命令: " + action.id);
     }

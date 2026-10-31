@@ -47,7 +47,7 @@
 | 工作包 | 状态 | 优先级 | 依赖 | 完成证据 |
 |---|---|---|---|---|
 | W0 现状冻结 | `[~]` | P0 | 无 | 映射表、代码清单、审计确认；`docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
-| W1 领域契约 | `[ ]` | P0 | W0 | schema、状态机、权限和契约测试 |
+| W1 领域契约 | `[~]` | P0 | W0 | 版本化 schema 与消费端已冻结；其余领域状态机待完成 |
 | W2 运行时拆分 | `[ ]` | P0 | W1 | 关 UI 不断网、崩溃恢复、服务监督 |
 | W3 所有者安全 | `[ ]` | P0 | W2 | Passkey、HTTPS、初始化码、恢复 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
@@ -274,23 +274,31 @@ W6-W16
 - [ ] 明确第一版不做同步、实时镜像和系统挂载；
 - [ ] 添加路径安全和续传状态测试。
 
-### W1-11 Schema 与生成类型 `[ ]`
+### W1-11 Schema 与生成类型 `[~]`
 
-- [ ] 从 Rust 模型生成 OpenAPI/JSON Schema；
-- [ ] 生成 TypeScript 类型和客户端；
-- [ ] 生成或校验 Android JSON 绑定；
-- [ ] 将生成漂移检查加入 CI；
-- [ ] 冻结 schema version 和兼容策略；
-- [ ] 禁止手写第二套命令枚举。
+- [x] 从 Rust 模型生成 JSON Schema draft 2020-12；
+- [x] 生成 TypeScript 类型和客户端；
+- [x] 生成并校验 Android 命令枚举与请求信封绑定；完整 Android DTO 尚未生成；
+- [x] 将生成漂移检查加入 CI；
+- [x] 冻结 schema version 和兼容策略；
+- [x] 禁止手写第二套命令枚举。
 
-### W1-12 契约门禁 `[ ]`
+证据：`contracts/schema/`、`contracts/typescript/`、`contracts/android/`、
+`crates/client/src/node/contract.rs`、`scripts/check-contracts.sh`，以及 CI 的
+`contracts` 作业。Rust、TypeScript、Java 均包含未知值或版本不匹配的失败关闭测试。
 
-- [ ] 每个可见 UI 动作在后端有处理；
-- [ ] 每个后端动作有权限、状态和审计声明；
-- [ ] 每个能力在模型中有未知/不支持语义；
+### W1-12 契约门禁 `[~]`
+
+- [x] 每个可见 UI 动作在后端有处理；manifest 动作集合与 canonical `ACTIONS`
+  完全一致，生产 handler 对 `NodeCommand` 做无通配符穷尽分派；
+- [ ] 每个后端动作有权限、状态和审计声明；权限与状态已声明，审计声明尚未完成；
+- [ ] 每个能力在模型中有未知/不支持语义；四种能力的统一注册表尚未完成；
 - [ ] 每个状态有唯一主状态映射；
-- [ ] `cargo fmt --check`；
-- [ ] clippy 和 workspace 测试通过。
+- [x] `cargo fmt --check`；
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`；
+- [x] `cargo test --workspace`。
+
+W1-12 在权限/审计、能力注册表和状态映射完成前保持进行中，不能因契约生成通过而标记完成。
 
 ## 5. W2：运行时拆分与生命周期
 

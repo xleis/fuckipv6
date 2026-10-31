@@ -1,10 +1,11 @@
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// 路由分流动作
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub enum RoutingAction {
     /// 直连（走本地物理网卡默认网关）
     Direct,
@@ -17,7 +18,7 @@ pub enum RoutingAction {
 }
 
 /// 客户端智能分流模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize, Default)]
 pub enum RoutingMode {
     /// 仅虚拟局域网（默认模式，不接管公网出口）
     #[default]
@@ -29,7 +30,7 @@ pub enum RoutingMode {
 }
 
 /// 智能分流与出口网关客户端配置
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize, Default)]
 pub struct RoutingConfig {
     /// 路由分流模式 (MeshOnly, BypassMainland, GlobalProxy)
     #[serde(default)]
@@ -49,7 +50,7 @@ pub struct RoutingConfig {
 }
 
 /// 出口网关（Exit Node）声明配置
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize, Default)]
 pub struct ExitNodeConfig {
     /// 是否开启作为出口网关
     pub enabled: bool,
@@ -69,7 +70,7 @@ pub struct ExitNodeConfig {
 pub const EXIT_NODE_CAPABILITY_SCHEMA_VERSION: u16 = 1;
 
 /// Host platforms with distinct Exit Node implementation requirements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitNodePlatform {
     Linux,
@@ -113,7 +114,7 @@ impl Default for ExitNodePlatform {
 ///
 /// Adapters must render these reasons instead of treating an enabled config
 /// flag as proof that kernel forwarding and NAT were installed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitNodeUnsupportedReason {
     PlatformNotLinux,
@@ -146,7 +147,7 @@ impl fmt::Display for ExitNodeUnsupportedReason {
 /// `supported` describes whether a basic IPv4 Exit Node can be installed now.
 /// `ipv6_forwarding` is independent because an IPv6-only limitation does not
 /// make the IPv4 Exit Node implementation unusable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct ExitNodeCapabilities {
     pub schema_version: u16,
     pub platform: ExitNodePlatform,

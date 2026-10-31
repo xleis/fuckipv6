@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::future::Future;
@@ -11,7 +12,7 @@ use super::{
 };
 
 /// One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCommandRequest {
     pub request_id: u64,
     pub command: NodeCommand,
@@ -30,9 +31,71 @@ impl NodeCommandRequest {
     }
 }
 
+/// Canonical command identity shared by the wire protocol, UI manifest, schema
+/// generation and adapters. Payload-bearing variants remain in `NodeCommand`;
+/// this enum is the single command-name source for every generated artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCommandKind {
+    GetSnapshot,
+    GetUiManifest,
+    StartNetworks,
+    StopNetworks,
+    CreateNetwork,
+    JoinNetwork,
+    UpdateRouting,
+    SetNetworkRole,
+    ProbePeer,
+    Shutdown,
+}
+
+impl NodeCommandKind {
+    pub const ALL: [Self; 10] = [
+        Self::GetSnapshot,
+        Self::GetUiManifest,
+        Self::StartNetworks,
+        Self::StopNetworks,
+        Self::CreateNetwork,
+        Self::JoinNetwork,
+        Self::UpdateRouting,
+        Self::SetNetworkRole,
+        Self::ProbePeer,
+        Self::Shutdown,
+    ];
+
+    /// Commands that must be reachable through a user-visible manifest action.
+    /// The manifest bootstrap command is deliberately excluded.
+    pub const ACTIONS: [Self; 9] = [
+        Self::GetSnapshot,
+        Self::StartNetworks,
+        Self::StopNetworks,
+        Self::CreateNetwork,
+        Self::JoinNetwork,
+        Self::UpdateRouting,
+        Self::SetNetworkRole,
+        Self::ProbePeer,
+        Self::Shutdown,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GetSnapshot => "get_snapshot",
+            Self::GetUiManifest => "get_ui_manifest",
+            Self::StartNetworks => "start_networks",
+            Self::StopNetworks => "stop_networks",
+            Self::CreateNetwork => "create_network",
+            Self::JoinNetwork => "join_network",
+            Self::UpdateRouting => "update_routing",
+            Self::SetNetworkRole => "set_network_role",
+            Self::ProbePeer => "probe_peer",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
 /// Product-neutral node operations. A node creates, joins or serves a network;
 /// there are deliberately no product-level client/server command variants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "command", content = "payload", rename_all = "snake_case")]
 pub enum NodeCommand {
     GetSnapshot,
@@ -55,6 +118,21 @@ pub enum NodeCommand {
 }
 
 impl NodeCommand {
+    pub const fn kind(&self) -> NodeCommandKind {
+        match self {
+            Self::GetSnapshot => NodeCommandKind::GetSnapshot,
+            Self::GetUiManifest => NodeCommandKind::GetUiManifest,
+            Self::StartNetworks { .. } => NodeCommandKind::StartNetworks,
+            Self::StopNetworks { .. } => NodeCommandKind::StopNetworks,
+            Self::CreateNetwork(_) => NodeCommandKind::CreateNetwork,
+            Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
+            Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
+            Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
+            Self::ProbePeer(_) => NodeCommandKind::ProbePeer,
+            Self::Shutdown => NodeCommandKind::Shutdown,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), NodeProblem> {
         match self {
             Self::GetSnapshot | Self::GetUiManifest | Self::Shutdown => Ok(()),
@@ -82,7 +160,7 @@ impl NodeCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCreateNetworkCommand {
     pub name: String,
     pub signaling_port: u16,
@@ -114,7 +192,7 @@ impl NodeCreateNetworkCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeJoinNetworkCommand {
     pub target: String,
     pub network_name: Option<String>,
@@ -133,7 +211,7 @@ impl NodeJoinNetworkCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUpdateRoutingCommand {
     pub network_name: String,
     pub mode: NodeRoutingMode,
@@ -157,7 +235,7 @@ impl NodeUpdateRoutingCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSetNetworkRoleCommand {
     pub network_name: String,
     pub role: NodeNetworkRole,
@@ -175,7 +253,7 @@ impl NodeSetNetworkRoleCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeProbePeerCommand {
     pub network_name: String,
     pub target: String,
@@ -246,7 +324,7 @@ fn invalid(message: impl Into<String>) -> NodeProblem {
     NodeProblem::new(NodeProblemCode::InvalidRequest, message)
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCommandResult {
     pub request_id: u64,
     pub outcome: NodeCommandOutcome,
@@ -280,7 +358,7 @@ impl NodeCommandResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodePeerProbeSnapshot {
     pub peer_id: String,
     pub virtual_ipv6: std::net::Ipv6Addr,
@@ -290,7 +368,7 @@ pub struct NodePeerProbeSnapshot {
     pub timed_out: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
     Snapshot(Box<NodeSnapshot>),

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::node::{
-    NodeCommand, NodeCreateNetworkCommand, NodeJoinNetworkCommand, NodeNetworkRole,
-    NodeNetworkSelection, NodePhase, NodeProbePeerCommand, NodeRoutingMode,
+    NodeCommand, NodeCommandKind, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
+    NodeNetworkRole, NodeNetworkSelection, NodePhase, NodeProbePeerCommand, NodeRoutingMode,
     NodeSetNetworkRoleCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus,
-    NodeUiCommandKind, NodeUiManifest, NodeUiPage, NodeUiPermission, NodeUpdateRoutingCommand,
+    NodeUiManifest, NodeUiPage, NodeUiPermission, NodeUpdateRoutingCommand,
 };
 
 /// Typed views supported by the native adapter. Keeping this closed set separate
@@ -191,8 +191,8 @@ pub enum ModelError {
     },
     ActionCommandMismatch {
         action_id: String,
-        expected: NodeUiCommandKind,
-        actual: NodeUiCommandKind,
+        expected: NodeCommandKind,
+        actual: NodeCommandKind,
     },
 }
 
@@ -307,34 +307,19 @@ pub fn build_page_model_for_page(
 
 pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
     let expected = match action.id.as_str() {
-        "refresh_snapshot" => (
-            ActionBinding::RefreshSnapshot,
-            NodeUiCommandKind::GetSnapshot,
-        ),
-        "create_network" => (
-            ActionBinding::CreateNetwork,
-            NodeUiCommandKind::CreateNetwork,
-        ),
-        "join_network" => (ActionBinding::JoinNetwork, NodeUiCommandKind::JoinNetwork),
-        "start_networks" => (
-            ActionBinding::StartNetworks,
-            NodeUiCommandKind::StartNetworks,
-        ),
-        "stop_networks" => (ActionBinding::StopNetworks, NodeUiCommandKind::StopNetworks),
-        "probe_peer" => (ActionBinding::ProbePeer, NodeUiCommandKind::ProbePeer),
-        "update_routing" => (
-            ActionBinding::UpdateRouting,
-            NodeUiCommandKind::UpdateRouting,
-        ),
+        "refresh_snapshot" => (ActionBinding::RefreshSnapshot, NodeCommandKind::GetSnapshot),
+        "create_network" => (ActionBinding::CreateNetwork, NodeCommandKind::CreateNetwork),
+        "join_network" => (ActionBinding::JoinNetwork, NodeCommandKind::JoinNetwork),
+        "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
+        "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
+        "probe_peer" => (ActionBinding::ProbePeer, NodeCommandKind::ProbePeer),
+        "update_routing" => (ActionBinding::UpdateRouting, NodeCommandKind::UpdateRouting),
         "set_exit_node_role" => (
             ActionBinding::SetExitNodeRole,
-            NodeUiCommandKind::SetNetworkRole,
+            NodeCommandKind::SetNetworkRole,
         ),
-        "set_relay_role" => (
-            ActionBinding::SetRelayRole,
-            NodeUiCommandKind::SetNetworkRole,
-        ),
-        "shutdown_node" => (ActionBinding::ShutdownNode, NodeUiCommandKind::Shutdown),
+        "set_relay_role" => (ActionBinding::SetRelayRole, NodeCommandKind::SetNetworkRole),
+        "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
                 page_id: String::new(),
@@ -1381,7 +1366,7 @@ mod tests {
     #[test]
     fn action_command_mismatch_fails_closed() {
         let mut action = node_ui_manifest().pages[1].actions[0].clone();
-        action.command = NodeUiCommandKind::Shutdown;
+        action.command = NodeCommandKind::Shutdown;
         assert!(matches!(
             bind_action(&action),
             Err(ModelError::ActionCommandMismatch { .. })

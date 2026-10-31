@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -5,7 +6,7 @@ use std::fmt;
 ///
 /// `WebUi` describes the browser-hosted control surface, even when the browser
 /// is launched in app-window mode. It must never be represented as `Gpui`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiMode {
     Gpui,
@@ -40,7 +41,7 @@ impl UiMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiModeRequest {
     Auto,
@@ -49,7 +50,7 @@ pub enum UiModeRequest {
     Headless,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayEnvironment {
     LinuxX11,
@@ -170,7 +171,7 @@ pub const fn gpui_shell_available() -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct UiModeResolution {
     pub requested: UiModeRequest,
     pub effective: UiMode,

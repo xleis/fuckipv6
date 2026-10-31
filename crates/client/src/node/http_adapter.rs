@@ -17,6 +17,7 @@ use axum::{
     Router,
 };
 use futures::SinkExt as _;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -34,14 +35,14 @@ pub const NODE_HTTP_SCHEMA_VERSION: u16 = 1;
 pub const NODE_HTTP_API_PREFIX: &str = "/api/node";
 
 /// Versioned DTO returned by the snapshot endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSnapshotResponse {
     pub schema_version: u16,
     pub snapshot: NodeSnapshot,
 }
 
 /// Versioned DTO returned by the UI-manifest endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeManifestResponse {
     pub schema_version: u16,
     pub manifest: NodeUiManifest,
@@ -51,7 +52,7 @@ pub struct NodeManifestResponse {
 ///
 /// The embedded `NodeCommandRequest` is forwarded unchanged to
 /// `NodeCommandBus`; the adapter does not inspect or mutate node state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCommandHttpRequest {
     pub schema_version: u16,
     pub request: NodeCommandRequest,
@@ -59,14 +60,14 @@ pub struct NodeCommandHttpRequest {
 
 /// Versioned response DTO containing the exact result returned by the command
 /// bus. Rejected results remain visible in the body alongside their HTTP status.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCommandHttpResponse {
     pub schema_version: u16,
     pub result: NodeCommandResult,
 }
 
 /// Stable error codes for HTTP version negotiation and backend failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
@@ -78,7 +79,7 @@ pub enum NodeHttpErrorCode {
 
 /// Versioned HTTP error DTO. It is also used for WebSocket version mismatches
 /// so clients receive a machine-readable failure before an upgrade.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeHttpErrorResponse {
     pub schema_version: u16,
     pub code: NodeHttpErrorCode,
@@ -93,7 +94,7 @@ pub struct NodeHttpErrorResponse {
 
 /// Versioned WebSocket messages. A snapshot is sent immediately after upgrade;
 /// every later state or operational event carries the same adapter version.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NodeWsMessage {
     Snapshot {
@@ -128,7 +129,7 @@ impl NodeWsMessage {
 }
 
 /// Why the server replaced the event stream with a fresh canonical snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeWsResyncReason {
     /// The broadcast receiver fell behind and lost one or more events.

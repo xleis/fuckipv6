@@ -1,10 +1,11 @@
 use ipnet::IpNet;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 /// 访问控制规则动作
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AclAction {
     #[default]

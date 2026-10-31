@@ -395,6 +395,45 @@ Configuration is process-environment based so the protected CLI startup paths do
 | `POST` | `/api/coordinator/ban` | Compatibility alias returning full client state |
 | `POST` | `/api/coordinator/unban` | Compatibility alias returning full client state |
 
+### Versioned node contract artifacts
+
+The node domain model in `crates/client/src/node` is the single source of truth
+for the shared control-plane contract. JSON Schema draft 2020-12 artifacts are
+checked in under `contracts/schema/`:
+
+- `node-command-v1.schema.json`
+- `node-command-request-v1.schema.json`
+- `node-command-result-v1.schema.json`
+- `node-event-v1.schema.json`
+- `node-ui-manifest-v1.schema.json`
+- `node-http-v1.schema.json`
+- `node-snapshot-v1.schema.json`
+
+Each file carries `x-fuckipv6-contract-version: 1` and a stable `$id` below
+`https://relay.xlei.cc/contracts/schema/`. Generated consumers are checked in at
+`contracts/typescript/node-contract-v1.ts` and
+`contracts/android/src/main/java/cc/xlei/fuckipv6/contract/NodeContractV1.java`.
+`NodeCommandKind` is the only Rust command-name enum; `get_ui_manifest` is
+bootstrap-only and cannot appear as a manifest action.
+
+Version 1 permits additive optional fields. Renaming or removing fields,
+changing enum meaning, making an optional field required, or changing validation
+semantics requires a new contract version. Adapters must reject unsupported
+versions, unknown commands, unknown action names, request-ID mismatches, and
+malformed manifests; they must not perform best-effort downgrade or infer a
+command from an action label.
+
+Regenerate and verify the complete contract surface with:
+
+```bash
+./scripts/generate-contracts.sh
+./scripts/check-contracts.sh
+```
+
+The CI `contracts` job installs Rust, Node.js, and Java, executes the Rust schema
+tests, TypeScript tests, Java binding tests, regenerates every artifact, and
+fails on any checked-in drift.
+
 ### GET /api/status
 
 Returns a flattened status object. It intentionally uses `status`, unlike the WebSocket snapshot which uses `client_status`.

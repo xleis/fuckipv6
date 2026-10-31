@@ -31,6 +31,9 @@ Thumbs.db
 /release/*.zip
 /release/fuckipv6-windows/*.exe
 
+# JavaScript dependencies
+**/node_modules/
+
 # Python caches
 __pycache__/
 *.py[cod]

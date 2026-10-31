@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
+use super::command::NodeCommandKind;
 use super::state::NodePermission;
 
 pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
@@ -11,7 +13,7 @@ pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
 /// Adapters may choose different widgets and rendering, but page availability,
 /// commands, fields, validation, confirmations, permission classes and backend
 /// maturity come from this manifest rather than duplicated UI business logic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiManifest {
     pub schema_version: u16,
     pub pages: Vec<NodeUiPage>,
@@ -77,6 +79,9 @@ impl NodeUiManifest {
                 if !action_ids.insert(action.id.as_str()) {
                     violations.push(format!("duplicate_action_id:{}", action.id));
                 }
+                if action.command == NodeCommandKind::GetUiManifest {
+                    violations.push(format!("bootstrap_command_exposed_as_action:{}", action.id));
+                }
 
                 if let Some((backend_status, permission)) =
                     command_modes.insert(action.command, (action.backend_status, action.permission))
@@ -84,17 +89,17 @@ impl NodeUiManifest {
                     // SetNetworkRole is role-scoped: Exit Node is implemented,
                     // while Discovery and Relay hot toggles remain unavailable.
                     let backend_status_is_role_scoped =
-                        action.command == NodeUiCommandKind::SetNetworkRole;
+                        action.command == NodeCommandKind::SetNetworkRole;
                     if !backend_status_is_role_scoped && backend_status != action.backend_status {
                         violations.push(format!(
                             "inconsistent_backend_status:{}:{context}",
-                            command_wire_name(action.command)
+                            action.command.as_str()
                         ));
                     }
                     if permission != action.permission {
                         violations.push(format!(
                             "inconsistent_permission:{}:{context}",
-                            command_wire_name(action.command)
+                            action.command.as_str()
                         ));
                     }
                 }
@@ -105,7 +110,7 @@ impl NodeUiManifest {
                         violations.push(format!("confirmation_has_empty_key:{context}"));
                     }
                 }
-                if action.command == NodeUiCommandKind::Shutdown
+                if action.command == NodeCommandKind::Shutdown
                     && !action
                         .confirmation
                         .as_ref()
@@ -137,12 +142,9 @@ impl NodeUiManifest {
             }
         }
 
-        for command in NodeUiCommandKind::ALL {
+        for command in NodeCommandKind::ACTIONS {
             if !command_modes.contains_key(&command) {
-                violations.push(format!(
-                    "missing_command_action:{}",
-                    command_wire_name(command)
-                ));
+                violations.push(format!("missing_command_action:{}", command.as_str()));
             }
         }
 
@@ -154,7 +156,7 @@ impl NodeUiManifest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiPage {
     pub id: String,
     pub nav_label_key: String,
@@ -162,11 +164,12 @@ pub struct NodeUiPage {
     pub actions: Vec<NodeUiAction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiAction {
     pub id: String,
     pub label_key: String,
-    pub command: NodeUiCommandKind,
+    #[schemars(schema_with = "ui_action_command_schema")]
+    pub command: NodeCommandKind,
     pub backend_status: NodeUiBackendStatus,
     pub permission: NodePermission,
     pub availability: NodeUiAvailability,
@@ -174,7 +177,17 @@ pub struct NodeUiAction {
     pub confirmation: Option<NodeUiConfirmation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+fn ui_action_command_schema(generator: &mut SchemaGenerator) -> Schema {
+    let allowed: Vec<_> = NodeCommandKind::ACTIONS
+        .into_iter()
+        .map(NodeCommandKind::as_str)
+        .collect();
+    let mut schema = String::json_schema(generator);
+    schema.insert("enum".into(), serde_json::json!(allowed));
+    schema
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiField {
     pub id: String,
     pub label_key: String,
@@ -183,42 +196,14 @@ pub struct NodeUiField {
     pub validation: NodeUiValidation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiConfirmation {
     pub title_key: String,
     pub consequence_key: String,
     pub destructive: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeUiCommandKind {
-    GetSnapshot,
-    StartNetworks,
-    StopNetworks,
-    CreateNetwork,
-    JoinNetwork,
-    UpdateRouting,
-    SetNetworkRole,
-    ProbePeer,
-    Shutdown,
-}
-
-impl NodeUiCommandKind {
-    pub const ALL: [Self; 9] = [
-        Self::GetSnapshot,
-        Self::StartNetworks,
-        Self::StopNetworks,
-        Self::CreateNetwork,
-        Self::JoinNetwork,
-        Self::UpdateRouting,
-        Self::SetNetworkRole,
-        Self::ProbePeer,
-        Self::Shutdown,
-    ];
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeUiBackendStatus {
     /// The production command handler currently accepts this command.
@@ -227,7 +212,7 @@ pub enum NodeUiBackendStatus {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeUiAvailability {
     Always,
@@ -236,7 +221,7 @@ pub enum NodeUiAvailability {
     NetworkSelected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeUiInputKind {
     Boolean,
@@ -251,7 +236,7 @@ pub enum NodeUiInputKind {
     TimeoutMs,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeUiValidation {
     None,
@@ -265,20 +250,6 @@ pub enum NodeUiValidation {
     PositiveTimeout,
 }
 
-fn command_wire_name(command: NodeUiCommandKind) -> &'static str {
-    match command {
-        NodeUiCommandKind::GetSnapshot => "get_snapshot",
-        NodeUiCommandKind::StartNetworks => "start_networks",
-        NodeUiCommandKind::StopNetworks => "stop_networks",
-        NodeUiCommandKind::CreateNetwork => "create_network",
-        NodeUiCommandKind::JoinNetwork => "join_network",
-        NodeUiCommandKind::UpdateRouting => "update_routing",
-        NodeUiCommandKind::SetNetworkRole => "set_network_role",
-        NodeUiCommandKind::ProbePeer => "probe_peer",
-        NodeUiCommandKind::Shutdown => "shutdown",
-    }
-}
-
 pub fn node_ui_manifest() -> NodeUiManifest {
     NodeUiManifest {
         schema_version: NODE_UI_MANIFEST_SCHEMA_VERSION,
@@ -290,7 +261,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 vec![action(
                     "refresh_snapshot",
                     "action.refresh_snapshot",
-                    NodeUiCommandKind::GetSnapshot,
+                    NodeCommandKind::GetSnapshot,
                     NodeUiBackendStatus::Implemented,
                     NodePermission::ViewState,
                     NodeUiAvailability::Always,
@@ -306,7 +277,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     action(
                         "create_network",
                         "action.create_network",
-                        NodeUiCommandKind::CreateNetwork,
+                        NodeCommandKind::CreateNetwork,
                         NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
@@ -352,7 +323,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     action(
                         "join_network",
                         "action.join_network",
-                        NodeUiCommandKind::JoinNetwork,
+                        NodeCommandKind::JoinNetwork,
                         NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
@@ -384,7 +355,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     action(
                         "start_networks",
                         "action.start_networks",
-                        NodeUiCommandKind::StartNetworks,
+                        NodeCommandKind::StartNetworks,
                         NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
@@ -400,7 +371,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     action(
                         "stop_networks",
                         "action.stop_networks",
-                        NodeUiCommandKind::StopNetworks,
+                        NodeCommandKind::StopNetworks,
                         NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NetworkOnline,
@@ -435,7 +406,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 vec![action(
                     "probe_peer",
                     "action.probe_peer",
-                    NodeUiCommandKind::ProbePeer,
+                    NodeCommandKind::ProbePeer,
                     NodeUiBackendStatus::Implemented,
                     NodePermission::ProbePeers,
                     NodeUiAvailability::NetworkOnline,
@@ -474,7 +445,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 vec![action(
                     "update_routing",
                     "action.update_routing",
-                    NodeUiCommandKind::UpdateRouting,
+                    NodeCommandKind::UpdateRouting,
                     NodeUiBackendStatus::Implemented,
                     NodePermission::ChangeRouting,
                     NodeUiAvailability::NetworkSelected,
@@ -522,7 +493,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 vec![action(
                     "set_exit_node_role",
                     "action.set_exit_node_role",
-                    NodeUiCommandKind::SetNetworkRole,
+                    NodeCommandKind::SetNetworkRole,
                     NodeUiBackendStatus::Implemented,
                     NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
@@ -563,7 +534,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 vec![action(
                     "set_relay_role",
                     "action.set_relay_role",
-                    NodeUiCommandKind::SetNetworkRole,
+                    NodeCommandKind::SetNetworkRole,
                     NodeUiBackendStatus::Unavailable,
                     NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
@@ -606,7 +577,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 vec![action(
                     "shutdown_node",
                     "action.shutdown_node",
-                    NodeUiCommandKind::Shutdown,
+                    NodeCommandKind::Shutdown,
                     NodeUiBackendStatus::Implemented,
                     NodePermission::StopNode,
                     NodeUiAvailability::NodeRunning,
@@ -635,7 +606,7 @@ fn page(id: &str, nav_label_key: &str, title_key: &str, actions: Vec<NodeUiActio
 fn action(
     id: &str,
     label_key: &str,
-    command: NodeUiCommandKind,
+    command: NodeCommandKind,
     backend_status: NodeUiBackendStatus,
     permission: NodePermission,
     availability: NodeUiAvailability,
@@ -714,7 +685,7 @@ mod tests {
             .pages
             .iter_mut()
             .flat_map(|page| &mut page.actions)
-            .find(|action| action.command == NodeUiCommandKind::CreateNetwork)
+            .find(|action| action.command == NodeCommandKind::CreateNetwork)
             .expect("create action");
         action.fields[1].id = action.fields[0].id.clone();
         action.fields[0].validation = NodeUiValidation::None;
@@ -798,6 +769,21 @@ mod tests {
     }
 
     #[test]
+    fn visible_actions_exactly_cover_canonical_action_commands() {
+        let manifest = node_ui_manifest();
+        let visible = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .map(|action| action.command)
+            .collect::<HashSet<_>>();
+        let canonical = NodeCommandKind::ACTIONS.into_iter().collect::<HashSet<_>>();
+
+        assert_eq!(visible, canonical);
+        assert!(!visible.contains(&NodeCommandKind::GetUiManifest));
+    }
+
+    #[test]
     fn manifest_backend_status_matches_the_live_command_handler() {
         let manifest = node_ui_manifest();
         let status = |command| {
@@ -811,25 +797,25 @@ mod tests {
         };
 
         assert_eq!(
-            status(NodeUiCommandKind::GetSnapshot),
+            status(NodeCommandKind::GetSnapshot),
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         assert_eq!(
-            status(NodeUiCommandKind::StopNetworks),
+            status(NodeCommandKind::StopNetworks),
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         assert_eq!(
-            status(NodeUiCommandKind::ProbePeer),
+            status(NodeCommandKind::ProbePeer),
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         assert_eq!(
-            status(NodeUiCommandKind::Shutdown),
+            status(NodeCommandKind::Shutdown),
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         for command in [
-            NodeUiCommandKind::StartNetworks,
-            NodeUiCommandKind::CreateNetwork,
-            NodeUiCommandKind::JoinNetwork,
+            NodeCommandKind::StartNetworks,
+            NodeCommandKind::CreateNetwork,
+            NodeCommandKind::JoinNetwork,
         ] {
             assert_eq!(
                 status(command),
@@ -837,11 +823,11 @@ mod tests {
             );
         }
         assert_eq!(
-            status(NodeUiCommandKind::UpdateRouting),
+            status(NodeCommandKind::UpdateRouting),
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         assert_eq!(
-            status(NodeUiCommandKind::SetNetworkRole),
+            status(NodeCommandKind::SetNetworkRole),
             HashSet::from([
                 NodeUiBackendStatus::Implemented,
                 NodeUiBackendStatus::Unavailable,
@@ -856,7 +842,7 @@ mod tests {
             .pages
             .iter()
             .flat_map(|page| &page.actions)
-            .find(|action| action.command == NodeUiCommandKind::Shutdown)
+            .find(|action| action.command == NodeCommandKind::Shutdown)
             .expect("shutdown action");
 
         assert!(shutdown

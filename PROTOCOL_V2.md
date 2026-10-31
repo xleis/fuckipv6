@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。classic 共享 UDP 握手现要求初次 `HELLO` 先取得无状态 Cookie challenge，只有验证通过的 retry 才进入 admission、签名和 responder crypto；生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传。Cookie key rotation、负载触发 Cookie 的自适应策略、产品指标/UI、跨节点压测和独立 DoS 审计，以及 QUIC/relay 认证 REKEY 通道仍未完成。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的 wire 层尚未接入 `SessionDriver`、生产控制通道或数据面；混合 profile 的生产 Cookie/限速、容量/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。classic 共享 UDP 握手现要求初次 `HELLO` 先取得无状态 Cookie challenge，只有验证通过的 retry 才进入 admission、签名和 responder crypto；生产 Cookie 密钥使用 256-bit CSPRNG root secret，按 60 秒 epoch 派生 HMAC-SHA-256 密钥，只保留当前与前一代，旧代在两个轮换周期后于 admission、签名和 responder crypto 前拒绝。生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传。负载触发 Cookie 的自适应策略、产品指标/UI、跨节点压测和独立 DoS 审计，以及 QUIC/relay 认证 REKEY 通道仍未完成。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的 wire 层尚未接入 `SessionDriver`、生产控制通道或数据面；混合 profile 的生产 Cookie/限速、容量/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -219,7 +219,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation，以及 SS-08 的认证数据 epoch 桥接。canonical `ACCEPT` 携带 Responder confirmation，`CONFIRM` 携带 Initiator confirmation；只有验证对端方向 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index。SS-10 使桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。生产 `P2pEngine` 已使用共享 UDP socket 完成该握手、按认证 endpoint 路由数据并在 TUN/ACL 前认证解密；SS-09 的在线重协商已在该路径接入，classic 无状态 Cookie challenge/retry 也已接入，Cookie key rotation、产品指标/UI 和独立 DoS 审计仍未完成。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation，以及 SS-08 的认证数据 epoch 桥接。canonical `ACCEPT` 携带 Responder confirmation，`CONFIRM` 携带 Initiator confirmation；只有验证对端方向 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index。SS-10 使桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。生产 `P2pEngine` 已使用共享 UDP socket 完成该握手、按认证 endpoint 路由数据并在 TUN/ACL 前认证解密；SS-09 的在线重协商已在该路径接入，classic 无状态 Cookie challenge/retry 及 Cookie 密钥轮换也已接入，产品指标/UI 和独立 DoS 审计仍未完成。
 
 #### 4.3.2 实验性 hybrid profile
 
@@ -290,12 +290,12 @@ sha256_ephemeral_public_key, issued_at
 - endpoint 迁移和 health 入站记录只允许由成功处理的认证控制帧触发；初次未认证 `HELLO`、未受信 `COOKIE_CHALLENGE` 和失败 Cookie 校验不得改变 peer endpoint。
 - cookie 只证明源地址可达性，不认证 peer。精确的 `HELLO` 重放在 cookie 生命周期内仍可能被转发，必须由签名验证后的有界握手重放缓存拒绝；调用方仍须执行每源/每身份速率限制。
 
-当前 classic 共享 UDP 路径已实现上述 challenge/retry、真实发包和失败关闭测试；`P2pEngine` 每个实例生成一次 256-bit `CookieKey` 并注入该实例的所有 peer，密钥不进入 DTO、UI 或日志。Cookie key rotation、负载触发 Cookie 的自适应策略、指标 API/UI、准入前 Peer 扫描消除、统一身份目录、跨节点压力测试和独立 DoS 审计仍未完成，不能把当前接入等同于全量 DoS 防护或独立安全验收。
+当前 classic 共享 UDP 路径已实现上述 challenge/retry、真实发包和失败关闭测试；`P2pEngine` 每个实例生成一次 256-bit CSPRNG root secret 并注入该实例的所有 peer，密钥不进入 DTO、UI 或日志。生产配置按 60 秒 epoch 使用 HMAC-SHA-256 域分离派生 Cookie key，只保留当前与前一代；轮换周期不得短于 Cookie 有效期，因此未过期 Cookie 最多跨越一个轮换边界。状态单调前进，墙钟回退不会恢复已淘汰的代际；两次轮换后的旧代会在 admission、签名验证和 responder crypto 前因 MAC 验证失败被拒绝。负载触发 Cookie 的自适应策略、指标 API/UI、准入前 Peer 扫描消除、统一身份目录、跨节点压力测试和独立 DoS 审计仍未完成，不能把当前接入等同于全量 DoS 防护或独立安全验收。
 
 规则：
 
-- `K_cookie` 至少 256-bit，由 CSPRNG 生成，每 60 秒轮换并接受前一代。
-- cookie 密钥不得全部为零，并必须经过 CSPRNG 生成；轮换期间只能同时接受当前和前一代密钥。
+- `K_cookie` 使用至少 256-bit 的 CSPRNG root secret；每个 epoch key 通过域分离 HMAC-SHA-256 派生。生产默认每 60 秒轮换，并只接受当前和前一代。
+- cookie root secret 和派生密钥不得全部为零；轮换周期不得短于 Cookie 有效期，轮换期间只能同时保留当前和前一代密钥。
 - 验证失败返回统一错误或静默丢弃，不得通过不同的错误内容和时序泄露身份是否存在。
 
 ## 5. 密钥派生
@@ -548,6 +548,7 @@ Idle
 - 重放、乱序、窗口边界、计数器回绕、epoch 混淆和方向反射。
 - 重协商成功、失败、超时、旧 epoch 宽限和擦除。
 - cookie 错误、过期、重放、跨源使用和负载下 retry。
+- Cookie 密钥当前/前一代接受、两代前拒绝、墙钟回退不回滚、轮换周期下限和多线程共享验证。
 - 截断、超长、未知 flags、非零 reserved、16 KiB 边界和随机模糊输入。
 - 多线程并发握手、会话表竞争、资源上限和日志限速。
 - 协议状态机模型检查；关键密钥材料使用后不可读测试。

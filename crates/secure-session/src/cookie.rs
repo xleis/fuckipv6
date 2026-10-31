@@ -19,15 +19,19 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+type ZeroizingCookieKey = Zeroizing<[u8; COOKIE_KEY_LEN]>;
 
 /// Domain separating cookie MACs from all other v2 keyed operations.
 pub const COOKIE_MAC_DOMAIN: &[u8] = b"fuckipv6-v2 stateless cookie mac";
 /// Domain separating ephemeral-key hashes from identity and transcript hashes.
 pub const EPHEMERAL_KEY_HASH_DOMAIN: &[u8] = b"fuckipv6-v2 ephemeral key hash";
+/// Domain separating epoch-derived cookie keys from other HMAC uses.
+const COOKIE_ROTATION_KEY_DOMAIN: &[u8] = b"fuckipv6-v2 cookie rotation key";
 /// Version of the stateless cookie wire format.
 pub const COOKIE_VERSION: u8 = 1;
 /// Required cookie master-key length.
@@ -42,6 +46,12 @@ pub const COOKIE_WIRE_LEN: usize = 1 + COOKIE_TIMESTAMP_LEN + COOKIE_MAC_LEN;
 pub const COOKIE_LIFETIME_SECS: u64 = 30;
 /// Default maximum accepted future skew for a cookie timestamp.
 pub const COOKIE_FUTURE_SKEW_SECS: u64 = 2;
+/// Production cookie-key rotation interval.
+///
+/// The value must not be shorter than the cookie lifetime so that an
+/// unexpired cookie can cross at most one rotation boundary and remain
+/// verifiable with the current or immediately previous generation.
+pub const COOKIE_KEY_ROTATION_SECS: u64 = 60;
 /// Defensive upper bound for a configurable cookie lifetime.
 pub const MAX_COOKIE_LIFETIME_SECS: u64 = 300;
 /// Challenge packet kind. It is distinct from v2 data and rekey frames.
@@ -260,9 +270,24 @@ impl Default for CookiePolicy {
     }
 }
 
+enum CookieKeyMaterial {
+    Static(ZeroizingCookieKey),
+    Rotating {
+        root_secret: ZeroizingCookieKey,
+        rotation_interval_secs: u64,
+        state: Mutex<Option<RotationState>>,
+    },
+}
+
+struct RotationState {
+    epoch: u64,
+    current: ZeroizingCookieKey,
+    previous: Option<ZeroizingCookieKey>,
+}
+
 /// Secret key and validity policy used to issue and validate stateless cookies.
 pub struct CookieKey {
-    bytes: Zeroizing<[u8; COOKIE_KEY_LEN]>,
+    material: CookieKeyMaterial,
     policy: CookiePolicy,
 }
 
@@ -281,14 +306,47 @@ impl CookieKey {
         if bytes.iter().all(|byte| *byte == 0) {
             return Err(CookieError::InvalidCookieKey);
         }
-        Ok(Self { bytes, policy })
+        Ok(Self {
+            material: CookieKeyMaterial::Static(bytes),
+            policy,
+        })
     }
 
-    /// Generate a cookie key and the default validity policy from OS entropy.
+    /// Construct a deterministic rotating cookie key for tests and deployments
+    /// that provide their own root secret.
+    ///
+    /// The root secret is expanded with HMAC-SHA-256 into the current and
+    /// previous epoch keys. Only those two derived keys are retained. The
+    /// rotation interval must be at least the cookie lifetime so an unexpired
+    /// cookie can cross at most one epoch boundary.
+    pub fn from_bytes_with_rotation(
+        bytes: [u8; COOKIE_KEY_LEN],
+        policy: CookiePolicy,
+        rotation_interval_secs: u64,
+    ) -> Result<Self, CookieError> {
+        let bytes = Zeroizing::new(bytes);
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(CookieError::InvalidCookieKey);
+        }
+        if rotation_interval_secs < policy.lifetime_secs {
+            return Err(CookieError::InvalidCookieRotationInterval);
+        }
+        Ok(Self {
+            material: CookieKeyMaterial::Rotating {
+                root_secret: bytes,
+                rotation_interval_secs,
+                state: Mutex::new(None),
+            },
+            policy,
+        })
+    }
+
+    /// Generate a random rotating cookie key and the default validity policy
+    /// from OS entropy.
     pub fn generate() -> Result<Self, CookieError> {
         let mut bytes = [0u8; COOKIE_KEY_LEN];
         fill_random(&mut bytes).map_err(|_| CookieError::RandomnessUnavailable)?;
-        Self::from_bytes(bytes)
+        Self::from_bytes_with_rotation(bytes, CookiePolicy::default(), COOKIE_KEY_ROTATION_SECS)
     }
 
     /// Validity policy enforced by this key.
@@ -298,7 +356,8 @@ impl CookieKey {
 
     /// Issue a cookie for one binding at `now` (Unix seconds).
     pub fn issue(&self, binding: &CookieBinding, now: u64) -> Cookie {
-        let mac = cookie_mac(&self.bytes, binding, now);
+        let (current, _) = self.current_and_previous_keys(now);
+        let mac = cookie_mac(&current, binding, now);
         Cookie {
             issued_at: now,
             mac,
@@ -317,12 +376,14 @@ impl CookieKey {
         now: u64,
     ) -> Result<VerifiedCookie, CookieError> {
         let cookie = Cookie::decode(encoded)?;
-        let mut verifier = HmacSha256::new_from_slice(&self.bytes[..])
-            .expect("cookie keys always have a valid HMAC key length");
-        update_cookie_fields(&mut verifier, binding, cookie.issued_at);
-        verifier
-            .verify_slice(&cookie.mac)
-            .map_err(|_| CookieError::InvalidMac)?;
+        let (current, previous) = self.current_and_previous_keys(now);
+        let previous_matches = previous
+            .as_ref()
+            .map(|key| cookie_mac_matches(key, binding, &cookie))
+            .unwrap_or(false);
+        if !cookie_mac_matches(&current, binding, &cookie) && !previous_matches {
+            return Err(CookieError::InvalidMac);
+        }
 
         if cookie.issued_at > now.saturating_add(self.policy.future_skew_secs) {
             return Err(CookieError::NotYetValid);
@@ -334,13 +395,50 @@ impl CookieKey {
             issued_at: cookie.issued_at,
         })
     }
+
+    fn current_and_previous_keys(
+        &self,
+        now: u64,
+    ) -> (ZeroizingCookieKey, Option<ZeroizingCookieKey>) {
+        match &self.material {
+            CookieKeyMaterial::Static(bytes) => (bytes.clone(), None),
+            CookieKeyMaterial::Rotating {
+                root_secret,
+                rotation_interval_secs,
+                state,
+            } => {
+                let target_epoch = now / rotation_interval_secs;
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state
+                    .as_ref()
+                    .map(|rotation| target_epoch > rotation.epoch)
+                    .unwrap_or(true)
+                {
+                    let previous = target_epoch
+                        .checked_sub(1)
+                        .map(|epoch| derive_rotation_key(root_secret, epoch));
+                    *state = Some(RotationState {
+                        epoch: target_epoch,
+                        current: derive_rotation_key(root_secret, target_epoch),
+                        previous,
+                    });
+                }
+
+                let rotation = state.as_ref().expect("rotation state is initialized");
+                (rotation.current.clone(), rotation.previous.clone())
+            }
+        }
+    }
 }
 
 impl fmt::Debug for CookieKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CookieKey")
-            .field("bytes", &"<redacted>")
+            .field("material", &"<redacted>")
+            .field("policy", &self.policy)
             .finish()
     }
 }
@@ -411,6 +509,8 @@ pub enum CookieError {
     InvalidCookieKey,
     #[error("cookie lifetime must be 1..=300 seconds and future skew must not exceed it")]
     InvalidCookiePolicy,
+    #[error("cookie rotation interval must be at least the cookie lifetime")]
+    InvalidCookieRotationInterval,
     #[error("{0} identity must not be all zero")]
     InvalidIdentity(&'static str),
     #[error("initiator and responder identities must differ")]
@@ -455,6 +555,25 @@ fn cookie_mac(
     mac.finalize().into_bytes().into()
 }
 
+fn cookie_mac_matches(
+    key: &[u8; COOKIE_KEY_LEN],
+    binding: &CookieBinding,
+    cookie: &Cookie,
+) -> bool {
+    let mut verifier =
+        HmacSha256::new_from_slice(key).expect("cookie keys always have a valid HMAC key length");
+    update_cookie_fields(&mut verifier, binding, cookie.issued_at);
+    verifier.verify_slice(&cookie.mac).is_ok()
+}
+
+fn derive_rotation_key(root_secret: &[u8; COOKIE_KEY_LEN], epoch: u64) -> ZeroizingCookieKey {
+    let mut derivation = HmacSha256::new_from_slice(root_secret)
+        .expect("cookie root secrets always have a valid HMAC key length");
+    update_field(|bytes| derivation.update(bytes), COOKIE_ROTATION_KEY_DOMAIN);
+    derivation.update(&epoch.to_be_bytes());
+    Zeroizing::new(derivation.finalize().into_bytes().into())
+}
+
 fn update_cookie_fields(mac: &mut HmacSha256, binding: &CookieBinding, issued_at: u64) {
     update_field(|bytes| mac.update(bytes), COOKIE_MAC_DOMAIN);
     update_field(|bytes| mac.update(bytes), &[PROTOCOL_VERSION]);
@@ -475,6 +594,7 @@ fn update_field(mut update: impl FnMut(&[u8]), value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     const KEY: [u8; COOKIE_KEY_LEN] = [0x11; COOKIE_KEY_LEN];
     const INITIATOR: [u8; IDENTITY_ID_LEN] = [0x22; IDENTITY_ID_LEN];
@@ -762,6 +882,105 @@ mod tests {
             key.verify(&binding(), &cookie, NOW - 2),
             Err(CookieError::NotYetValid)
         );
+    }
+
+    #[test]
+    fn rotating_cookie_key_accepts_one_previous_generation_and_rejects_two_generations_old() {
+        let policy = CookiePolicy::new(2, 0).expect("short deterministic policy");
+        let key = CookieKey::from_bytes_with_rotation(KEY, policy, 2)
+            .expect("deterministic rotating key");
+        let cookie = key.issue(&binding(), 0).encode();
+
+        assert_eq!(
+            key.verify(&binding(), &cookie, 1)
+                .expect("current generation"),
+            VerifiedCookie { issued_at: 0 }
+        );
+        assert_eq!(
+            key.verify(&binding(), &cookie, 2)
+                .expect("previous generation"),
+            VerifiedCookie { issued_at: 0 }
+        );
+        assert_eq!(
+            key.verify(&binding(), &cookie, 3)
+                .expect_err("cookie lifetime still applies within the previous generation"),
+            CookieError::Expired
+        );
+        assert_eq!(
+            key.verify(&binding(), &cookie, 4),
+            Err(CookieError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn rotation_does_not_rewind_discarded_generations_after_clock_rollback() {
+        let policy = CookiePolicy::new(2, 0).expect("short deterministic policy");
+        let key = CookieKey::from_bytes_with_rotation(KEY, policy, 2)
+            .expect("deterministic rotating key");
+        let oldest = key.issue(&binding(), 0).encode();
+        let current = key.issue(&binding(), 4).encode();
+
+        // Advancing to epoch 2 dropped epoch 0. A later wall-clock rollback to
+        // epoch 0 must not restore that key or make the current state rewind.
+        assert_eq!(
+            key.verify(&binding(), &oldest, 0),
+            Err(CookieError::InvalidMac)
+        );
+        assert_eq!(
+            key.verify(&binding(), &current, 4)
+                .expect("monotonic current generation"),
+            VerifiedCookie { issued_at: 4 }
+        );
+    }
+
+    #[test]
+    fn rotation_interval_must_not_be_shorter_than_cookie_lifetime() {
+        let policy = CookiePolicy::new(10, 0).expect("deterministic policy");
+
+        assert_eq!(
+            CookieKey::from_bytes_with_rotation(KEY, policy, 9).unwrap_err(),
+            CookieError::InvalidCookieRotationInterval
+        );
+        assert!(CookieKey::from_bytes_with_rotation(KEY, policy, 10).is_ok());
+    }
+
+    #[test]
+    fn rotating_cookie_key_can_be_shared_across_threads() {
+        let policy = CookiePolicy::new(2, 0).expect("short deterministic policy");
+        let key = Arc::new(
+            CookieKey::from_bytes_with_rotation(KEY, policy, 2)
+                .expect("deterministic rotating key"),
+        );
+        let binding = binding();
+        let encoded = key.issue(&binding, NOW).encode();
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..64 {
+                        assert_eq!(
+                            key.verify(&binding, &encoded, NOW)
+                                .expect("concurrent verification"),
+                            VerifiedCookie { issued_at: NOW }
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn generated_key_uses_the_documented_rotation_interval() {
+        let key = CookieKey::generate().expect("generated rotating key");
+        let CookieKeyMaterial::Rotating {
+            rotation_interval_secs,
+            ..
+        } = key.material
+        else {
+            panic!("generated cookie keys must rotate");
+        };
+        assert_eq!(rotation_interval_secs, COOKIE_KEY_ROTATION_SECS);
+        assert!(COOKIE_KEY_ROTATION_SECS >= CookiePolicy::default().lifetime_secs);
     }
 
     #[test]

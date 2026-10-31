@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -11,9 +12,49 @@ use tokio::io::Interest;
 pub struct LinuxTun {
     reader: Arc<AsyncFd<tun::platform::posix::Reader>>,
     writer: Arc<AsyncFd<File>>,
+    // This is deliberately the final field. On the last handle, the reader and
+    // writer descriptors close before `LinkLifetime::drop` starts link removal.
+    lifetime: Arc<LinkLifetime>,
+}
+
+struct LinkLifetime {
     name: String,
     virtual_ips: VirtualIps,
-    cleanup_on_drop: bool,
+    close_requested: AtomicBool,
+    deletion_started: AtomicBool,
+}
+
+impl LinkLifetime {
+    fn new(name: String, virtual_ips: VirtualIps) -> Self {
+        Self {
+            name,
+            virtual_ips,
+            close_requested: AtomicBool::new(false),
+            deletion_started: AtomicBool::new(false),
+        }
+    }
+
+    fn begin_deletion(&self) -> bool {
+        self.deletion_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+impl Drop for LinkLifetime {
+    fn drop(&mut self) {
+        if !self.begin_deletion() {
+            return;
+        }
+
+        tracing::info!("正在释放 TUN 网卡资源: {}", self.name);
+        let name = self.name.clone();
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("ip")
+                .args(["link", "delete", &name])
+                .status();
+        });
+    }
 }
 
 impl Clone for LinuxTun {
@@ -21,9 +62,7 @@ impl Clone for LinuxTun {
         Self {
             reader: self.reader.clone(),
             writer: self.writer.clone(),
-            name: self.name.clone(),
-            virtual_ips: self.virtual_ips.clone(),
-            cleanup_on_drop: false,
+            lifetime: Arc::clone(&self.lifetime),
         }
     }
 }
@@ -86,56 +125,58 @@ impl LinuxTun {
             } else {
                 bring_link_up(name).await?;
             }
-            open_tun_device(name).await
+
+            let device = open_tun_device(name).await?;
+            let (reader, split_writer) = device.split();
+            drop(split_writer);
+
+            set_nonblocking(reader.as_raw_fd()).context("设置 TUN 为非阻塞模式失败")?;
+            let writer_fd = duplicate_fd(reader.as_raw_fd()).context("复制 TUN 文件描述符失败")?;
+            // SAFETY: duplicate_fd returned a new owned descriptor, and File
+            // assumes responsibility for closing it exactly once.
+            let writer_file = unsafe { File::from_raw_fd(writer_fd) };
+
+            // SAFETY: both values are owning `File`s whose descriptors stay
+            // open and unchanged for the complete lifetime of their AsyncFd
+            // wrappers.
+            let reader = unsafe { AsyncFd::register(reader) }.context("注册 TUN 读事件失败")?;
+            // SAFETY: `writer_file` owns the duplicated descriptor and retains
+            // it until this `AsyncFd` is dropped.
+            let writer =
+                unsafe { AsyncFd::register(writer_file) }.context("注册 TUN 写事件失败")?;
+
+            Ok::<_, anyhow::Error>((reader, writer))
         }
         .await;
 
-        let device = match setup_result {
-            Ok(device) => device,
-            Err(e) => {
-                let _ = delete_link(name).await;
-                return Err(e);
+        let (reader, writer) = cleanup_after_failed_setup(setup_result, || async {
+            if let Err(error) = delete_link(name).await {
+                tracing::error!(%error, "删除初始化失败的 TUN 设备时出错: {}", name);
             }
-        };
-
-        let (reader, split_writer) = device.split();
-        drop(split_writer);
-        set_nonblocking(reader.as_raw_fd()).context("设置 TUN 为非阻塞模式失败")?;
-        let writer_fd = duplicate_fd(reader.as_raw_fd()).context("复制 TUN 文件描述符失败")?;
-        // SAFETY: duplicate_fd returned a new owned descriptor, and File assumes
-        // responsibility for closing it exactly once.
-        let writer_file = unsafe { File::from_raw_fd(writer_fd) };
+        })
+        .await?;
 
         tracing::info!("TUN 设备已完全配置并打开: {}", name);
-
-        // SAFETY: both values are owning `File`s whose descriptors stay open
-        // and unchanged for the complete lifetime of their `AsyncFd` wrappers.
-        let reader = unsafe { AsyncFd::register(reader) }.context("注册 TUN 读事件失败")?;
-        // SAFETY: `writer_file` owns the duplicated descriptor and retains it
-        // until this `AsyncFd` is dropped.
-        let writer = unsafe { AsyncFd::register(writer_file) }.context("注册 TUN 写事件失败")?;
 
         Ok(Self {
             reader: Arc::new(reader),
             writer: Arc::new(writer),
-            name: name.to_string(),
-            virtual_ips: virtual_ips.clone(),
-            cleanup_on_drop: true,
+            lifetime: Arc::new(LinkLifetime::new(name.to_string(), virtual_ips.clone())),
         })
     }
 
     pub fn name(&self) -> &str {
-        &self.name
+        &self.lifetime.name
     }
 
     #[allow(dead_code)]
     pub fn virtual_ips(&self) -> &VirtualIps {
-        &self.virtual_ips
+        &self.lifetime.virtual_ips
     }
 
     #[allow(dead_code)]
     pub fn ip(&self) -> Ipv6Addr {
-        self.virtual_ips.primary_ipv6()
+        self.lifetime.virtual_ips.primary_ipv6()
     }
 
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -145,6 +186,40 @@ impl LinuxTun {
             })
             .await
             .context("Failed to read from TUN device")
+    }
+
+    /// Await one readable edge, then drain additional queued L3 packets while
+    /// the nonblocking descriptor remains ready. Linux TUN has no
+    /// multi-message read syscall, so this reduces wakeups/task handoffs but
+    /// deliberately does not claim to reduce one `read(2)` per packet.
+    pub async fn read_batch(&mut self, buffers: &mut [&mut [u8]]) -> Result<Vec<usize>> {
+        let Some(first) = buffers.first_mut() else {
+            return Ok(Vec::new());
+        };
+        let first_len = self.read(first).await;
+
+        let (lengths, drain_error) =
+            collect_read_batch(first_len, &mut buffers[1..], |buffer| self.try_read(buffer))?;
+        if let Some(error) = drain_error {
+            // The first packet is already valid. Keep the successful prefix so
+            // a transient drain failure cannot terminate the reader task.
+            tracing::warn!(
+                %error,
+                packets = lengths.len(),
+                "读取 TUN 批次后续数据包失败，返回已成功读取的前缀"
+            );
+        }
+        Ok(lengths)
+    }
+
+    fn try_read(&mut self, buf: &mut [u8]) -> Result<Option<usize>> {
+        match self.reader.try_io(Interest::READABLE, |reader| {
+            read_fd(reader.as_raw_fd(), buf)
+        }) {
+            Ok(length) => Ok(Some(length)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error).context("Failed to drain readable TUN batch"),
+        }
     }
 
     pub async fn write(&mut self, packet: &[u8]) -> Result<()> {
@@ -165,49 +240,102 @@ impl LinuxTun {
         Ok(())
     }
 
-    /// 删除 TUN 设备
+    /// 请求删除 TUN 设备。
+    ///
+    /// 生命周期由所有 clone 共享。只要还有其他 handle 存活，本方法只记录
+    /// 关闭请求并成功返回，不会删除链路；最后一个 handle 显式调用本方法或
+    /// 被 drop 时才执行一次实际删除。这样任一 clone 都不会使其他 clone 的
+    /// 链路失效。
     pub async fn delete(&mut self) -> Result<()> {
-        tracing::info!("正在删除 TUN 设备: {}", self.name);
+        if self.lifetime.close_requested.swap(true, Ordering::AcqRel) {
+            tracing::debug!("重复的 TUN 关闭请求: {}", self.lifetime.name);
+        }
 
-        if let Some(ipv6) = self.virtual_ips.ipv6 {
+        if !request_link_close(&self.lifetime) {
+            tracing::info!(
+                "TUN 设备仍被其他 clone 使用，延迟删除: {}",
+                self.lifetime.name
+            );
+            return Ok(());
+        }
+
+        tracing::info!("正在删除 TUN 设备: {}", self.lifetime.name);
+
+        if let Some(ipv6) = self.lifetime.virtual_ips.ipv6 {
             let addr_cmd = format!("{}/128", ipv6);
             let _ = tokio::process::Command::new("ip")
-                .args(["-6", "addr", "del", &addr_cmd, "dev", &self.name])
+                .args(["-6", "addr", "del", &addr_cmd, "dev", &self.lifetime.name])
                 .stderr(std::process::Stdio::null())
                 .status()
                 .await;
         }
 
-        if let Some(ipv4) = self.virtual_ips.ipv4 {
+        if let Some(ipv4) = self.lifetime.virtual_ips.ipv4 {
             let addr_cmd = format!("{}/32", ipv4);
             let _ = tokio::process::Command::new("ip")
-                .args(["addr", "del", &addr_cmd, "dev", &self.name])
+                .args(["addr", "del", &addr_cmd, "dev", &self.lifetime.name])
                 .stderr(std::process::Stdio::null())
                 .status()
                 .await;
         }
 
-        delete_link(&self.name).await?;
-        self.cleanup_on_drop = false;
+        if !self.lifetime.begin_deletion() {
+            tracing::debug!("TUN 设备删除已启动: {}", self.lifetime.name);
+            return Ok(());
+        }
+
+        delete_link(&self.lifetime.name).await?;
         tracing::info!("TUN 设备已删除");
 
         Ok(())
     }
 }
 
-impl Drop for LinuxTun {
-    fn drop(&mut self) {
-        if !self.cleanup_on_drop {
-            return;
-        }
+fn request_link_close(lifetime: &Arc<LinkLifetime>) -> bool {
+    lifetime.close_requested.store(true, Ordering::Release);
+    Arc::strong_count(lifetime) == 1
+}
 
-        tracing::info!("正在释放 TUN 网卡资源: {}", self.name);
-        let name = self.name.clone();
-        std::thread::spawn(move || {
-            let _ = std::process::Command::new("ip")
-                .args(["link", "delete", &name])
-                .status();
-        });
+fn collect_read_batch<E, F>(
+    first: std::result::Result<usize, E>,
+    buffers: &mut [&mut [u8]],
+    mut drain: F,
+) -> std::result::Result<(Vec<usize>, Option<E>), E>
+where
+    F: FnMut(&mut [u8]) -> std::result::Result<Option<usize>, E>,
+{
+    let first_len = first?;
+    let mut lengths = vec![first_len];
+    if first_len == 0 {
+        return Ok((lengths, None));
+    }
+
+    for buffer in buffers {
+        match drain(buffer) {
+            // A zero-length read means EOF. The first EOF is retained as a
+            // sentinel so the reader can stop, but an EOF encountered while
+            // draining after valid packets must not be forwarded as an extra
+            // zero-length entry.
+            Ok(Some(0)) | Ok(None) => break,
+            Ok(Some(length)) => lengths.push(length),
+            Err(error) => return Ok((lengths, Some(error))),
+        }
+    }
+
+    Ok((lengths, None))
+}
+
+async fn cleanup_after_failed_setup<T, F, Fut>(setup: Result<T>, cleanup: F) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    match setup {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            cleanup().await;
+            Err(error)
+        }
     }
 }
 
@@ -512,6 +640,7 @@ async fn delete_link(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn classify_permission_error() {
@@ -531,5 +660,143 @@ mod tests {
     fn validate_rejects_ipv6_mtu_below_minimum() {
         let err = validate_tun_inputs("tun0", 1279).unwrap_err().to_string();
         assert!(err.contains("1280"));
+    }
+
+    #[test]
+    fn read_batch_preserves_prefix_on_drain_error() {
+        let mut first = [0u8; 64];
+        let mut second = [0u8; 64];
+        let mut third = [0u8; 64];
+        let mut buffers: [&mut [u8]; 3] = [&mut first[..], &mut second[..], &mut third[..]];
+        let mut calls = 0;
+
+        let (lengths, error) = collect_read_batch(Ok::<usize, io::Error>(96), &mut buffers, |_| {
+            calls += 1;
+            match calls {
+                1 => Ok(Some(48)),
+                2 => Err(io::Error::from_raw_os_error(libc::EIO)),
+                _ => panic!("drain must stop after its first error"),
+            }
+        })
+        .expect("a successful first packet must be preserved");
+
+        assert_eq!(lengths, vec![96, 48]);
+        assert_eq!(error.expect("drain error").raw_os_error(), Some(libc::EIO));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn read_batch_preserves_first_packet_error() {
+        let mut buffer = [0u8; 64];
+        let mut buffers: [&mut [u8]; 1] = [&mut buffer[..]];
+
+        let result = collect_read_batch(
+            Err::<usize, io::Error>(io::Error::other("first read failed")),
+            &mut buffers,
+            |_| -> std::result::Result<Option<usize>, io::Error> { panic!("drain must not run") },
+        );
+
+        assert_eq!(result.unwrap_err().to_string(), "first read failed");
+    }
+
+    #[test]
+    fn read_batch_stops_on_would_block_or_eof() {
+        fn assert_terminal(terminal: Option<usize>) {
+            let mut buffer = [0u8; 64];
+            let mut buffers: [&mut [u8]; 1] = [&mut buffer[..]];
+            let mut calls = 0;
+
+            let (lengths, error) =
+                collect_read_batch(Ok::<usize, io::Error>(96), &mut buffers, |_| {
+                    calls += 1;
+                    Ok(terminal)
+                })
+                .expect("terminal drain state is not an error");
+
+            assert_eq!(lengths, vec![96]);
+            assert!(error.is_none());
+            assert_eq!(calls, 1);
+        }
+
+        assert_terminal(None);
+        assert_terminal(Some(0));
+    }
+
+    #[tokio::test]
+    async fn post_open_failure_deletes_link_exactly_once() {
+        let deletions = AtomicUsize::new(0);
+        let setup_result: Result<()> = Err(anyhow::anyhow!("register TUN reader failed"));
+
+        let result = cleanup_after_failed_setup(setup_result, || async {
+            deletions.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("register TUN reader failed"));
+        assert_eq!(deletions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn post_open_success_does_not_delete_link() {
+        let deletions = AtomicUsize::new(0);
+
+        let result = cleanup_after_failed_setup(Ok::<_, anyhow::Error>(7), || async {
+            deletions.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(deletions.load(Ordering::SeqCst), 0);
+    }
+
+    fn test_lifetime() -> Arc<LinkLifetime> {
+        Arc::new(LinkLifetime::new(
+            "tun-test".to_string(),
+            VirtualIps::from_ipv6(Ipv6Addr::LOCALHOST),
+        ))
+    }
+
+    #[test]
+    fn clone_lifetime_defers_delete_until_last_handle() {
+        let original = test_lifetime();
+        let clone = Arc::clone(&original);
+        let deletions = AtomicUsize::new(0);
+
+        assert!(!request_link_close(&original));
+        assert!(original.close_requested.load(Ordering::Acquire));
+        assert_eq!(deletions.load(Ordering::SeqCst), 0);
+
+        drop(original);
+        assert_eq!(Arc::strong_count(&clone), 1);
+        assert_eq!(deletions.load(Ordering::SeqCst), 0);
+        assert!(!clone.deletion_started.load(Ordering::Acquire));
+        if request_link_close(&clone) && clone.begin_deletion() {
+            deletions.fetch_add(1, Ordering::SeqCst);
+        }
+
+        assert_eq!(deletions.load(Ordering::SeqCst), 1);
+        // The simulated link deletion already claimed the lifetime, so dropping
+        // the final handle must not schedule another deletion.
+        drop(clone);
+        assert_eq!(deletions.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn link_deletion_is_idempotent() {
+        let lifetime = test_lifetime();
+        let deletions = AtomicUsize::new(0);
+
+        for _ in 0..3 {
+            if lifetime.begin_deletion() {
+                deletions.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        assert_eq!(deletions.load(Ordering::SeqCst), 1);
+        drop(lifetime);
+        assert_eq!(deletions.load(Ordering::SeqCst), 1);
     }
 }

@@ -91,6 +91,23 @@ impl TunDevice {
         self.inner.read(buf).await
     }
 
+    /// Read one packet, then drain immediately available packets on platforms
+    /// that expose a nonblocking readiness primitive. Other platforms retain
+    /// the single-packet behavior.
+    pub async fn read_batch(&mut self, buffers: &mut [&mut [u8]]) -> Result<Vec<usize>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.read_batch(buffers).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Some(first) = buffers.first_mut() else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![self.inner.read(first).await?])
+        }
+    }
+
     /// 写入数据包
     pub async fn write(&mut self, packet: &[u8]) -> Result<()> {
         self.inner.write(packet).await

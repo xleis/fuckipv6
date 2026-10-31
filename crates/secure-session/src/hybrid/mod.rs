@@ -9,6 +9,7 @@
 pub mod handshake;
 pub mod identity;
 pub mod profile;
+pub mod wire;
 pub mod xwing;
 
 pub use handshake::{
@@ -23,6 +24,12 @@ pub use identity::{
 pub use profile::{
     DataAead, HandshakeKdf, HybridProfilePolicy, HybridSuite, KemAlgorithm,
     NegotiatedHybridProfile, ProfileNegotiationError, SignatureAlgorithm, XWING_DRAFT_VERSION,
+};
+pub use wire::{
+    decode_control, decode_control_for_profile, HybridConfirm, HybridConfirmError,
+    HybridControlCodecError, HybridControlKind, HybridControlMessage, HYBRID_ACCEPT_BODY_LEN,
+    HYBRID_CONFIRM_BODY_LEN, HYBRID_CONTROL_HEADER_LEN, HYBRID_CONTROL_MAGIC,
+    HYBRID_HELLO_BODY_LEN, MAX_HYBRID_CONTROL_FRAME_LEN,
 };
 pub use xwing::{
     XWingCiphertext, XWingDecapsulationKey, XWingEncapsulationKey, XWingError, XWingSharedSecret,

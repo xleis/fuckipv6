@@ -240,7 +240,7 @@ async fn start_runtime_node(runtime: &NetworkRuntimeManager, request_id: u64) ->
 
 async fn stop_runtime_node(runtime: &NetworkRuntimeManager, request_id: u64) -> NodeCommandResult {
     match runtime.stop_node().await {
-        Ok(summary) if summary.failed.is_empty() => NodeCommandResult::completed(
+        Ok(summary) if summary.is_success() => NodeCommandResult::completed(
             request_id,
             NodeCommandOutcome::Completed {
                 message: summary.message(),
@@ -335,13 +335,13 @@ async fn stop_runtime_networks(
     all: bool,
 ) -> NodeCommandResult {
     match runtime.stop(networks, all).await {
-        Ok(summary) if summary.failed.is_empty() => NodeCommandResult::completed(
+        Ok(summary) if summary.is_success() => NodeCommandResult::completed(
             request_id,
             NodeCommandOutcome::Completed {
                 message: if summary.stopped.is_empty() {
                     "没有正在运行或托管服务的网络".into()
                 } else {
-                    format!("已停止网络: {}", summary.stopped.join(", "))
+                    summary.message()
                 },
             },
         ),

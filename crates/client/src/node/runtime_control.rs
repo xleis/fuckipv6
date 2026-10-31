@@ -132,6 +132,10 @@ pub(crate) struct StopSummary {
 }
 
 impl StopSummary {
+    pub fn is_success(&self) -> bool {
+        self.failed.is_empty() && self.cleanup.is_clean_for_stop()
+    }
+
     pub fn message(&self) -> String {
         let mut parts = vec![format!("已停止网络: {}", self.stopped.len())];
         if !self.stopped.is_empty() {
@@ -146,7 +150,7 @@ impl StopSummary {
                 .join("; ");
             parts.push(format!("{} 个网络停止失败 ({failures})", self.failed.len()));
         }
-        let cleanup_issues = self.cleanup.resource_failures();
+        let cleanup_issues = self.cleanup.stop_issues();
         if !cleanup_issues.is_empty() {
             parts.push(format!("资源清理未完成 ({})", cleanup_issues.join("; ")));
         }
@@ -199,6 +203,39 @@ pub(crate) struct RuntimeCleanupReport {
 }
 
 impl RuntimeCleanupReport {
+    fn is_clean_for_stop(&self) -> bool {
+        self.sessions_remaining == 0
+            && self.listeners_remaining == 0
+            && self.peers_remaining == 0
+            && self.embedded_services_remaining == 0
+            && self.residual_networks.is_empty()
+            && self.resource_failures().is_empty()
+    }
+
+    fn stop_issues(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if !self.residual_networks.is_empty() {
+            issues.push(format!("残留网络: {}", self.residual_networks.join(", ")));
+        }
+        if self.sessions_remaining > 0 {
+            issues.push(format!("运行时任务残留 {} 个", self.sessions_remaining));
+        }
+        if self.listeners_remaining > 0 {
+            issues.push(format!("监听器残留 {} 个", self.listeners_remaining));
+        }
+        if self.peers_remaining > 0 {
+            issues.push(format!("Peer 记录残留 {} 个", self.peers_remaining));
+        }
+        if self.embedded_services_remaining > 0 {
+            issues.push(format!(
+                "内嵌服务残留 {} 个",
+                self.embedded_services_remaining
+            ));
+        }
+        issues.extend(self.resource_failures());
+        issues
+    }
+
     fn blocks_restart(&self, network_name: &str) -> bool {
         self.residual_networks
             .iter()
@@ -1234,9 +1271,7 @@ impl NetworkRuntimeActor {
             Ok(summary) => summary,
             Err(error) => return Err(self.fail_lifecycle(error).await),
         };
-        let cleanly_stopped = summary.failed.is_empty()
-            && summary.cleanup.residual_networks.is_empty()
-            && summary.cleanup.resource_failures().is_empty();
+        let cleanly_stopped = summary.is_success();
         let lifecycle = if cleanly_stopped {
             self.lifecycle.stopped().await
         } else {
@@ -4951,6 +4986,7 @@ mod tests {
             .expect("stop node data plane");
         assert_eq!(stopped.stopped, vec!["owned"]);
         assert!(stopped.failed.is_empty());
+        assert!(stopped.is_success());
         assert!(harness
             .services
             .list()
@@ -5608,6 +5644,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_node_with_cleanup_residue_reports_a_failed_lifecycle() {
+        let harness = TestHarness::new("stop-node-cleanup-failure").await;
+        start_fake_network(&harness, "broken-stop-node").await;
+        harness.fake.fail_cleanup("broken-stop-node");
+
+        let summary = harness
+            .runtime
+            .stop_node()
+            .await
+            .expect("cleanup failure returns a partial-failure summary");
+        assert!(!summary.is_success());
+        assert!(!summary.failed.is_empty());
+        assert!(!summary.cleanup.residual_networks.is_empty());
+        assert_eq!(harness.lifecycle.snapshot().await.phase, NodePhase::Failed);
+        assert_eq!(harness.registry.get_all().await.len(), 1);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn start_timeout_records_failed_network_and_error() {
         let harness = TestHarness::new_with_timeouts(
             "start-timeout",
@@ -5730,6 +5786,96 @@ mod tests {
         };
         assert!(report.blocks_restart("alpha"));
         assert!(!report.blocks_restart("beta"));
+    }
+
+    #[test]
+    fn stop_success_requires_a_clean_cleanup_report() {
+        let mut clean_outcome = RuntimeCleanupOutcome::default();
+        clean_outcome.record("TUN 设备", CleanupStatus::Removed);
+        clean_outcome.record("Exit 转发规则", CleanupStatus::NotOwned);
+        let clean = StopSummary {
+            stopped: vec!["alpha".into()],
+            cleanup: RuntimeCleanupReport {
+                runtime_outcomes: BTreeMap::from([("alpha".into(), clean_outcome)]),
+                ..RuntimeCleanupReport::default()
+            },
+            ..StopSummary::default()
+        };
+        assert!(clean.is_success());
+
+        let residue_reports = [
+            RuntimeCleanupReport {
+                sessions_remaining: 1,
+                residual_networks: vec!["alpha".into()],
+                ..RuntimeCleanupReport::default()
+            },
+            RuntimeCleanupReport {
+                listeners_remaining: 1,
+                residual_networks: vec!["alpha".into()],
+                ..RuntimeCleanupReport::default()
+            },
+            RuntimeCleanupReport {
+                peers_remaining: 1,
+                residual_networks: vec!["alpha".into()],
+                ..RuntimeCleanupReport::default()
+            },
+            RuntimeCleanupReport {
+                embedded_services_remaining: 1,
+                ..RuntimeCleanupReport::default()
+            },
+            RuntimeCleanupReport {
+                residual_networks: vec!["alpha".into()],
+                ..RuntimeCleanupReport::default()
+            },
+        ];
+        for report in residue_reports {
+            let summary = StopSummary {
+                stopped: vec!["alpha".into()],
+                cleanup: report,
+                ..StopSummary::default()
+            };
+            assert!(!summary.is_success(), "residue must fail the stop");
+        }
+
+        let mut failed_outcome = RuntimeCleanupOutcome::default();
+        failed_outcome.record("TUN 设备", CleanupStatus::Failed("删除失败".into()));
+        let runtime_failure = StopSummary {
+            stopped: vec!["alpha".into()],
+            cleanup: RuntimeCleanupReport {
+                runtime_outcomes: BTreeMap::from([("alpha".into(), failed_outcome)]),
+                ..RuntimeCleanupReport::default()
+            },
+            ..StopSummary::default()
+        };
+        assert!(!runtime_failure.is_success());
+    }
+
+    #[test]
+    fn stop_message_lists_every_cleanup_issue() {
+        let mut outcome = RuntimeCleanupOutcome::default();
+        outcome.record("TUN 设备", CleanupStatus::Failed("TUN 删除失败".into()));
+        let summary = StopSummary {
+            stopped: vec!["alpha".into()],
+            cleanup: RuntimeCleanupReport {
+                sessions_remaining: 1,
+                listeners_remaining: 2,
+                peers_remaining: 3,
+                embedded_services_remaining: 4,
+                runtime_outcomes: BTreeMap::from([("alpha".into(), outcome)]),
+                residual_networks: vec!["alpha".into()],
+                ..RuntimeCleanupReport::default()
+            },
+            ..StopSummary::default()
+        };
+
+        let message = summary.message();
+        assert!(!summary.is_success());
+        assert!(message.contains("残留网络: alpha"));
+        assert!(message.contains("运行时任务残留 1 个"));
+        assert!(message.contains("监听器残留 2 个"));
+        assert!(message.contains("Peer 记录残留 3 个"));
+        assert!(message.contains("内嵌服务残留 4 个"));
+        assert!(message.contains("TUN 删除失败"));
     }
 
     #[tokio::test]

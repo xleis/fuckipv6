@@ -16,14 +16,14 @@
 - [ ] **5. PERF-5 AEAD batch/worker。** 串行预留 nonce、原地批量 seal/open 和 4-worker 微基准已具备；生产批量 worker、过载策略和端到端收益仍未验收。
 - [ ] **6. PERF-6 会话热路径锁。** 已加入 `try_lock` 竞争/等待/持锁指标和同 peer 批量临界区；`SecurePeerState` 仍以单一 `Mutex<SecureState>` 保护 send/open 状态，锁拆分和 profile 尚未完成。
 - [ ] **7. PERF-7 buffer pool 与 GSO/GRO。** UDP receive pool 已分片并降低稳态分配；全链路统一池、Linux UDP GSO/GRO、TUN offload 和非 Linux 回退仍未实现。
-- [ ] **8. PERF-8 可证明路径基准。** direct UDP/fallback=0 断言、原始 JSON、metadata、syscall 证据和三实现 smoke 已完成；正式多 run、perf 归因和可绑定最终二进制的排名仍未完成。
+- [ ] **8. PERF-8 可证明路径基准。** direct UDP/fallback=0 断言、原始 JSON、metadata、syscall 证据和三实现 smoke 已完成；`651629c → 672df9c` 的 3 run/10s A/B 为 54/54 有效，但仍缺逐项隔离、正式 5×30s 排名、同轮 perf 归因和统计显著性。
 
 ### 进度快照（2026-10-31）
 
 - **大项：0/8 完整验收。** 大项要求同时具备独立提交、回归/安全测试、实测证据和同口径性能结论，当前没有一项全部满足。
-- **PERF 明细：29/49 已勾选，20 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
-- **最近可关闭：** PERF-4 的 UDP batch 与 64B/1420B syscall 证据、PERF-8 的 direct-path 前置断言已经完成；TUN batch 和生产 worker 不属于近期可关闭项。
-- **尚未证明：** 锁拆分、GSO/GRO、全链路池、真实密码认证组合压力测试、正式多 run 三实现排名，以及任何“已追平/超过 WireGuard”的结论。
+- **PERF 明细：28/49 已勾选，21 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
+- **最近可关闭：** PERF-8 的 3 run/10s 三实现对比已经完成；仍需逐项 A/B、正式 5×30s 和同轮 profiler，才能关闭 PERF-8。
+- **尚未证明：** 锁拆分、GSO/GRO、全链路池、生产 worker、真实密码认证组合压力测试、正式排名，以及任何“已追平/超过 WireGuard”的结论。
 
 ## 0. 工作约束
 
@@ -298,7 +298,7 @@ P2-3 干净基准与 profiler 归因
 - [x] 定向测试证明 AEAD open 结果复用 receive allocation，没有第二份明文 `Vec`。
 - [x] 定向测试证明 driver/epoch session 可在预留 header/tag 的 packet slot 中原地 seal，fallback 矩阵每条链只 seal 一次并复用同一密文。
 - [ ] 峰值路径分配次数和 syscall 次数可量化下降（需要 allocation/syscall counter 或 profiler）。
-- [ ] 64B/1420B 单流与多流吞吐有干净的前后对比。
+- [x] 64B/1420B 单流与多流吞吐有 clean A/B 对比：`651629c → 672df9c` 为 3 run/10s、CPU pinning、direct/fallback=0；仍属 smoke，不作为正式排名。
 - [ ] 丢包、乱序、重放和 peer 移除安全测试通过。
 
 ## P2-1 密码学 worker pool
@@ -317,9 +317,9 @@ P2-3 干净基准与 profiler 归因
 
 ## P2-3 干净基准与 profiler 归因
 
-- [ ] 基准启动后断言 active endpoint 和 transport，排除意外 relay/fallback。
-- [ ] 固定 commit、编译 profile、CPU governor、MTU、包长、流数和时长。
-- [ ] 输出 fuckipv6、wireguard-go、内核 WireGuard 原始日志和汇总。
+- [x] 基准启动后断言 active endpoint 和 transport，排除意外 relay/fallback。
+- [x] 固定 commit、CPU governor、MTU、包长、流数、warmup 和时长；编译 profile 仍需写入 metadata。
+- [x] 输出 fuckipv6、wireguard-go、内核 WireGuard 原始日志和汇总。
 - [ ] 至少采集 CPU profile、syscall 计数、分配计数和锁等待。
 - [ ] 每完成一个 P0 复跑同一基准，记录增益和回归。
 
@@ -333,7 +333,7 @@ P2-3 干净基准与 profiler 归因
 | P0-4 慢 fallback 离环 | 功能完成，待独立提交/性能验证 | per-peer 有界队列/worker；TUN、UDP、heartbeat、control、shutdown 响应测试通过 |
 | P1-1 receiver index 路由 | 功能完成，性能待验证 | pair-scoped index；100-peer 全唯一，已注册/未知 endpoint 均单候选；32-bit 碰撞桶仍在 |
 | P1-1B session-scoped index | 待开始（可选） | 当前不是静态共享桶阻塞项；用于追平 wireguard-go 的每握手唯一/轮换粒度 |
-| P1-2 统计/endpoint/health 锁隔离 | 功能完成，性能待验证 | payload 使用原子时间戳/31 个流量桶；probe/RTT 保留低频 mutex；无锁等待指标或吞吐基准 |
+| P1-2 统计/endpoint/health 锁隔离 | 功能完成，性能待验证 | payload 使用原子时间戳/31 个流量桶；probe/RTT 保留低频 mutex；secure lock 诊断默认 compile-out；A/B 收益仅约 0.5%–2.1% |
 | P1-3a/b | 部分完成，性能待验证 | TUN 池化 ownership、出站原地 seal、UDP owned RX、signaling `Bytes` ownership、runtime relay 去 clone 已完成；全链路仍有 frame 编码和兼容分配 |
 | P1-3c/P2 | 部分完成 | UDP `sendmmsg/recvmmsg` 已接线并实测；TUN 仍逐包 syscall，完整 buffer pool、生产 crypto worker、GSO/GRO 和正式干净基准未完成 |
 
@@ -436,10 +436,10 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-8 可证明路径的干净基准
 
-- [x] 基准每轮采集 direct-path/endpoint 与 fallback counter；修正后的 smoke 18/18 样本有效且 `fallback_packets_delta=0`。这些 smoke 不构成正式排名。
+- [x] 基准每轮采集 direct-path/endpoint 与 fallback counter；最新 A/B 的 fuckipv6 `18/18` 样本均为 direct，且 `fallback_packets_delta=0`。
 - [ ] 固定 commit/工作树 diff、二进制 SHA256、编译 profile、CPU governor、MTU、包长、流数、warmup 和时长。
 - [ ] 采集 iperf3 原始日志、CPU profile、syscall、allocation、队列深度、锁等待和丢包原因。
-- [ ] 对比 fuckipv6、wireguard-go 和内核 WireGuard；异常路径样本不得进入排名。
+- [x] 对比 fuckipv6、wireguard-go 和内核 WireGuard；最新 A/B 与补充 wireguard-go 合并为 54/54 有效样本。
 - [ ] 输出机器可读汇总与 Markdown 报告；明确哪些收益有统计显著性，哪些只是功能完成。
 
 ## 性能与 syscall 证据（2026-10-31）
@@ -499,6 +499,51 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 3 run 仍未改变方向：TCP 从单流增加到 8 流没有提升，wireguard-go 约快 `5.1x/5.4x`；UDP 1420 约为 wireguard-go 的 `0.74x`，64B 饱和 UDP 基本持平。metadata 绑定 HEAD `d6fceb4`、dirty worktree snapshot `ca06ad2a...54ff`、二进制 SHA256 `6574f1d3...cee60` 和 wireguard-go `b3bc704`。
 
 **证据边界：** 仍只有 5s stream、未绑核、`powersave` governor、无 CPU profile，且测试时宿主负载约 `2.9-6.2`，不满足正式 harness 门限。3 run 只能说明方向在当前机器上稳定复现，不能当作统计显著排名或正式验收。
+
+### 2.2 最新三实现 A/B（`651629c → 672df9c`）
+
+这是当前最新的同口径性能证据。基线提交为 `651629c`，候选提交为 `672df9c`，候选包含：
+
+- `60fe0d3 perf(client): compile out secure lock instrumentation`；
+- `672df9c perf(client): carry authenticated peer route through ingress`。
+
+基线二进制：`/tmp/fuckipv6-ab-672df9c/fuckipv6-baseline-651629c`，SHA256 `d84eb34ad4a0195c4611e2476394d50628dc3efd10491bcefb67ac958bf42e2e`。候选二进制：`/tmp/fuckipv6-ab-672df9c/fuckipv6-candidate-672df9c`，SHA256 `64cde57c193ee07ba1b300efc552e06d2dff2f4b8508bd5d4e4352993fdf04f5`。wireguard-go 固定为 `b3bc704ef0ee21a36298601a9e1e5ff90377ac52`。
+
+条件：3 run、10s、omit 1s、MTU 1420、client CPU `2-3`、server CPU `4-5`、control CPU `6`、`powersave` governor、Linux `7.2.11-zen1-1-zen`。fuckipv6 与 wireguard-kernel 首轮完整，wireguard-go 因现场缺样补跑 18/18；最后按实现替换不完整的 wireguard-go 记录并合并为 54/54 有效样本。
+
+| 用例 | 基线 fuckipv6 | 候选 fuckipv6 | 候选变化 | 基线 wireguard-go | 候选 wireguard-go | 候选 / wireguard-go | 基线内核 WireGuard | 候选内核 WireGuard |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| TCP 1 flow | 0.545806 | 0.550118 | +0.79% | 2.734404 | 2.784579 | 0.1976x（慢 5.06x） | 1.429839 | 1.507363 |
+| TCP 8 flows | 0.512751 | 0.515267 | +0.49% | 2.691804 | 2.831624 | 0.1820x（慢 5.49x） | 1.373105 | 1.479419 |
+| UDP 1420 saturated | 0.421113 | 0.430114 | +2.14% | 0.497915 | 0.501604 | 0.8575x（低 14.25%） | 1.893631 | 1.944597 |
+| UDP 64 saturated | 0.0219851 | 0.0223424 | +1.63% | 0.0210720 | 0.0222739 | 1.0031x（高 0.31%） | 0.0958662 | 0.0954928 |
+
+吞吐单位为 Gbit/s。受控 UDP 的 50/5 Mbit/s 上限仍只用于验证零丢包，不用于峰值排名。
+
+**路径与计数断言：**
+
+- fuckipv6 的 `18/18` 个样本均为 `direct_path=true`。
+- 全部 `fallback_packets_delta=0`，合计 fallback 包数为 0。
+- 每个样本的 `p2p_tx_packets_delta`、`p2p_rx_packets_delta` 和 `global_p2p_rx_packets_delta` 均大于 0。
+- 每个样本的 `p2p_rx_packets_delta == global_p2p_rx_packets_delta`。
+- 54 个样本全部 `valid=true` 且 `invalid_reason=null`。
+
+**结果解释：**
+
+1. 两个提交的组合收益只有 `+0.49%` 到 `+2.14%`，不是数量级改善。当前 A/B 不能隔离两个提交各自的贡献。
+2. 同一轮 wireguard-go 的 TCP 中位数也分别提升 `1.83%/5.19%`，因此候选相对 wireguard-go 的 TCP 差距仍约为 `5.1–5.5x`；不能用候选自身的小幅提升宣称差距缩小。
+3. 候选 TCP cycles/byte：fuckipv6 `358.80/377.10`，wireguard-go `64.15/64.06`，比值约 `5.59x/5.89x`，与吞吐差距一致。
+4. UDP 1420 饱和吞吐比 wireguard-go 低 `14.25%`；历史锁分类中 UDP 1420 contention 仅约 `0.03%`，因此不能把这一差距归因于会话锁竞争。
+5. UDP 64 饱和比 wireguard-go 高 `0.31%`，在 3 run 噪声范围内，应表述为“基本持平”，不能表述为胜出。
+6. 锁 instrumentation 已在默认构建中 compile-out，但 TCP 仍约慢 5 倍，说明剩余主因是 TUN 逐包、中央单包调度、会话/队列结构、内存所有权和缺少 worker/offload，而不是诊断计数本身。
+7. 这是有路径证明和 CPU pinning 的 3 run smoke，仍不是正式 5×30s 排名；宿主为 `powersave`，且没有逐项性能改动隔离。
+
+数据目录：
+
+- 基线：`target/benchmarks/dataplane-ab-baseline-651629c-20261031/`
+- 候选原始：`target/benchmarks/dataplane-ab-candidate-672df9c-20261031/`
+- wireguard-go 补跑：`target/benchmarks/dataplane-ab-candidate-672df9c-wg-go-20261031/`
+- 合并结果与汇总：`target/benchmarks/dataplane-ab-candidate-672df9c-20261031/merged/results.jsonl`、`summary.csv`、`provenance.json`
 
 ### 3. `strace -c` 与内建 batch counter
 

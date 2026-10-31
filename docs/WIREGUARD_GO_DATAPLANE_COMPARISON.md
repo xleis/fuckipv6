@@ -236,40 +236,44 @@ UDP shared bytes
 
 本报告没有在固定快照上重新运行测试、吞吐或 profiler；历史测试计数和历史基准不能自动归因给 `39ca637`。可勾选的 `[x]` 只限于快照中可直接读到并已有对应单元测试的底层原语；生产接线、端到端安全和性能保持未验证。
 
-### 1.2 后续提交与工作树复核（新增结论）
+### 1.4 后续提交与最新 A/B 复核（新增结论）
 
-> 本节补充 2026-10-31 后续整改，不修改 1.1 对固定快照 `39ca637` 的历史结论。当前已提交 HEAD 为 `b3376ca6dc3a7bb7eb915fcb6585bdbeec79dd6e`；生产连接层整合仍有大量未提交修改，因此必须同时区分“已提交原语”“工作树已接线”“实测二进制”。
+> 本节补充 2026-10-31 后续整改，不修改 1.1 对固定快照 `39ca637` 的历史结论。最新复核对象是提交 `672df9c`（基线 `651629c` 加 `60fe0d3`、`672df9c` 两个数据面优化），结果仍属于 3 run、10s 的性能 smoke，不是正式 5×30s 排名。
 
-| 数据面结论 | 固定快照 `39ca637` | 当前状态 |
+| 数据面结论 | 固定快照 `39ca637` | 当前 HEAD `672df9c` |
 |---|---|---|
-| UDP RX ownership | `recv_from` 后 `to_vec()`，认证 cache/二次 open | 工作树已用 owned pooled buffer；认证后直接把 plaintext ownership 交主循环 |
-| signaling ciphertext | 有 `Bytes -> Vec` 边界 | 工作树 payload 已改为 `Bytes`，经 CLI `SignalingAction` 原样持有 |
-| 入站队列 | 无界通道，积压可过 replay/cache 悬崖 | 工作树为默认 1024 有界队列，drop-newest 与指标已测；真实密码认证组合压测未做 |
-| UDP syscall | 逐包 `send_to/recv_from` | 工作树生产 RX/TX 已接 Linux `recvmmsg/sendmmsg`，默认 32、上限 128 |
-| TUN syscall | 逐包 read/write | 仍是每次 readiness edge 后逐包 `read(2)`，write 仍一包一次；只是减少唤醒，不是 batch syscall |
-| 会话锁 | 单状态锁，batch 串行 | `SecurePeerState` 仍是单一 `Mutex<SecureState>`；已加 lock 指标和同 peer 批量原语，但未拆锁 |
+| UDP RX ownership | `recv_from` 后 `to_vec()`，认证 cache/二次 open | owned pooled buffer 已提交；认证后直接把 plaintext ownership 交主循环 |
+| 直连入站路由 | 认证后再次按源 IP 查询 peer route | `AuthenticatedPlaintext` 携带 `PeerRouteInfo`，直连快速路径不再逐包查询 peer route |
+| relay 入站路由 | 解密后再做连接/peer 查询 | `SealedCiphertext` 仅在 AEAD open 成功后查询一次 peer route |
+| signaling ciphertext | 有 `Bytes -> Vec` 边界 | `SignalingEvent::RelayPacket.payload` 为 `Bytes`，经 CLI `SignalingAction` 原样持有 |
+| 入站队列 | 无界通道，积压可过 replay/cache 悬崖 | 默认 1024 有界队列，drop-newest 与指标已测；真实密码认证组合压测未做 |
+| UDP syscall | 逐包 `send_to/recv_from` | 生产 RX/TX 已接 Linux `recvmmsg/sendmmsg`，默认 32、上限 128 |
+| TUN syscall | 逐包 read/write | 仍是 readiness-edge 后逐包 `read(2)`/`write(2)`；没有 multi-message batch |
+| 锁诊断 | 无分类指标 | `secure-lock-metrics` 只在测试或显式 feature 构建启用；默认生产构建不执行 `try_lock`、计时和 hold/wait 原子更新 |
+| 会话锁 | 单状态锁 | `SecurePeerState` 仍是单一 `Mutex<SecureState>`；compile-out 诊断减少额外成本，但没有拆锁 |
 | buffer/offload | 逐包分配，无 GSO/GRO | UDP receive pool 已分片；全链路统一池、GSO/GRO、TUN offload 仍未实现 |
-| 基准路径证明 | direct/fallback 混入风险 | 已断言 direct 且 fallback=0；修正 UDP 1420 口径；当前只有 1 run smoke，正式结果未生成 |
+| 基准路径证明 | direct/fallback 混入风险 | 最新 18/18 个 fuckipv6 样本均为 direct，fallback delta 为 0 |
 
-**新的源码级判断：**
+**最新 A/B 数据。** 固定基线二进制为 `/tmp/fuckipv6-ab-672df9c/fuckipv6-baseline-651629c`（SHA256 `d84eb34ad4a0195c4611e2476394d50628dc3efd10491bcefb67ac958bf42e2e`），候选二进制为 `/tmp/fuckipv6-ab-672df9c/fuckipv6-candidate-672df9c`（SHA256 `64cde57c193ee07ba1b300efc552e06d2dff2f4b8508bd5d4e4352993fdf04f5`）。条件为 3 run、10s、omit 1s、MTU 1420、client CPU `2-3`、server CPU `4-5`、control CPU `6`、`powersave` governor、Linux `7.2.11-zen1-1-zen`。合并后的 54/54 样本均有效，原始记录和汇总位于 `target/benchmarks/dataplane-ab-candidate-672df9c-20261031/merged/`。
 
-1. `wireguard-go` 的核心优势不只是“批量 syscall”，而是 TUN/UDP 批量、per-peer 顺序队列、crypto worker 和内存所有权的组合。当前 fuckipv6 只补齐了 UDP 消息批处理；TUN 每包一次 syscall 仍是明确差距，不能仅凭 UDP `sendmmsg` 就认为数据面路径已追平。
-2. `seal_batch_in_place` 的 4-worker 微基准有约 2.4x 加速，但生产数据面仍未把批量 seal、worker 和每 peer 顺序发送完整连起来；微基准不能外推为端到端吞吐。
-3. signaling `RelayPacket` 的 CLI `Bytes -> Vec` 复制已消除，这是本轮明确的复制优化；但 postcard/frame 编码和协调端 decode/re-encode 仍会物化 payload，不能宣称整个 relay 链路零复制。
-4. `SecurePeerState` 仍让 send/open 共用一把状态锁。已有 `try_lock` 等待/持锁指标和批量临界区只能说明锁竞争可观测、获取次数可下降，不能说明锁已拆分或热路径已无争用。
-5. UDP pool sharding 解决了同一批 acquire/recycle 的集中竞争，但不是 TUN、seal/open、fallback 共用的固定 buffer 池；没有 GSO/GRO 时，64B 小包路径仍受每包开销限制。
+| 用例 | 基线 fuckipv6 | 候选 fuckipv6 | 候选相对基线 | 基线 wireguard-go | 候选 wireguard-go | 候选 / wireguard-go | 基线内核 WireGuard | 候选内核 WireGuard |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| TCP 1 flow | 0.545806 | 0.550118 | +0.79% | 2.734404 | 2.784579 | 0.1976x（约慢 5.06x） | 1.429839 | 1.507363 |
+| TCP 8 flows | 0.512751 | 0.515267 | +0.49% | 2.691804 | 2.831624 | 0.1820x（约慢 5.49x） | 1.373105 | 1.479419 |
+| UDP 1420 saturated | 0.421113 | 0.430114 | +2.14% | 0.497915 | 0.501604 | 0.8575x（低 14.25%） | 1.893631 | 1.944597 |
+| UDP 64 saturated | 0.0219851 | 0.0223424 | +1.63% | 0.0210720 | 0.0222739 | 1.0031x（高 0.31%） | 0.0958662 | 0.0954928 |
 
-**当前工作树 smoke（dirty HEAD `d6fceb4`，binary SHA256 `6574f1d3...cee60`）：** 单 run 为 18/18 有效；3 run 复核为 54/54 有效，fuckipv6 的 18 次测量全部 direct-path 且 fallback delta 为 0。3 run 中位数显示 TCP 单流/8 流约为 kernel WireGuard 的 `0.391x/0.397x`、wireguard-go 的 `0.197x/0.186x`；UDP 1420 饱和约为二者的 `0.337x/0.738x`；64B 饱和 UDP 约为 `0.465x/1.015x`。这组数据与“UDP syscall 已批量、但 TCP 仍受 TUN 逐包、中央事件循环和会话锁等共同限制”的诊断一致，不支持已经追平 WireGuard 的结论。该组仍为 5s stream、未绑核、`powersave`、无 perf profile，且宿主负载不满足正式门限；3 run 只能确认方向稳定，不能量化批处理收益或形成正式排名。
+受控 UDP 的 50/5 Mbit/s 发送上限把实现都压在 `0.050/0.005 Gbit/s`，不用于峰值排名。上表全部为有效样本的中位数，吞吐单位为 Gbit/s。
 
-**新采集的 syscall 证据：**
+**新的性能结论：**
 
-- 目录：`target/benchmarks/syscall-evidence-20261031/udp1420-clean/`、`udp64-clean/`；direct-path=true，fallback=0。
-- 1372B iperf3 payload（1420B 隧道包）：成功 TX batch 约 31.65 包/次，RX 约 20.42 包/次。
-- 64B payload：成功 TX batch 约 31.83 包/次，RX 约 17.12 包/次。
-- 外部 `strace -c` 同时显示 TUN `read/write` 次数与包数近似 1:1，证明 TUN 仍逐包穿越内核。
-- metadata 中的 `ec234b3a...` 是只读 strace wrapper hash；被测 binary hash 是 `720d02cc...786c1c`。
+1. **两个优化是可确认的小幅改善，但不是数量级修复。** 相对基线，TCP 单流/8 流提升 `0.79%/0.49%`，UDP 1420 饱和提升 `2.14%`，UDP 64 饱和提升 `1.63%`。这是两个提交的组合效果，尚未隔离锁诊断 compile-out 与 peer-route 传递各自的贡献，不能把全部收益归因于其中一项。
+2. **同一轮对照中 wireguard-go 也变快，TCP 相对差距没有缩小。** 对照实现的 TCP 中位数分别提升 `1.83%/5.19%`，因此候选 fuckipv6 相对 wireguard-go 仍约为 `0.198x/0.182x`。在相同候选轮次，fuckipv6 的 TCP cycles/byte 为 `358.80/377.10`，wireguard-go 为 `64.15/64.06`，约 `5.59x/5.89x`；这与约 `5.1–5.5x` 的吞吐差距方向一致。
+3. **TCP 主因不是锁诊断本身。** 默认生产构建已经编译掉 secure lock instrumentation，但 TCP 仍慢约 5 倍。历史锁分类中 TCP 确实有约 `25.5–27.0%` acquisition contention，其中 lifecycle admission 等待约 6s；UDP 1420 的 contention 仅约 `0.03%`。因此锁拆分仍值得做，但它不能解释 UDP 饱和吞吐差距，也不是关闭 TCP 差距的充分条件。
+4. **UDP 饱和吞吐主要受每包固定成本限制。** 候选 UDP 1420 比 wireguard-go 低 14.25%，UDP 64 基本持平（差异仅 0.31%，不足以宣称胜出）。已有 profile 来自更早、仍含锁诊断的二进制，不能直接当作最终归因；其中 `read_hpet`、syscall 返回、用户态 copy 和调度成本明显高于 ChaCha20/Poly1305，且 `TrafficWindow::record_payload()` 仍逐包取 `elapsed()`、TUN 仍逐包 syscall。这支持“syscall/调度/复制/时钟读取的固定成本”继续作为下一阶段重点。
+5. **3 run 10s 证据足以否定“追平 WireGuard”和“仅靠两个优化解决差距”，不足以做发布排名。** 仍需至少 5 run、30s、omit warmup、低负载宿主、逐项 A/B、CPU profile、syscall/allocation/队列/锁等待同轮采集；当前不能给出统计显著性或最终倍数。
 
-**当前性能结论边界：** 修正后的三实现 smoke 为 1 run、5s、`--no-perf`，只能证明路径、有效样本和方向性差异，不能作为最终排名。当前仍为 **0/8 大项完整验收**；近期能关闭的是 UDP batch 与 syscall 证据，不能关闭 TUN batch、锁拆分、GSO/GRO 或端到端 worker 优化。
+**当前性能答案：** 当前 HEAD 的 TCP 约为 wireguard-go 的 `18%–20%`，不是历史 48 倍，但仍有约 `5.1–5.5x` 的实质差距；UDP 1420 饱和约为 `86%`，UDP 64 饱和基本持平。两个已完成优化只带来约 `0.5%–2.1%` 的组合提升，主要差距仍在 TUN 逐包、中央调度、会话/队列结构、内存所有权和缺少 worker/offload 等数据面工程。
 
 ## 2. 对比方法和适用边界
 
@@ -1064,47 +1068,60 @@ sudo env WG_GO_BIN=/path/to/wireguard-go \
 
 ### “性能差这么多吗？”
 
-- **历史答案：旧实现确实有确定性架构缺陷，但不能用现有数据把差距精确写成 48 倍或内核的 3.7%。** 入站 cache/replay 悬崖、逐包 ownership 错误、全量 `PeerInfo` clone、64B 包每轮清零 64 KiB、热路径写锁、中央单消费者、fallback 重复加密和最多 2 秒阻塞，解释了旧基准为何先卡在每包固定成本上。
-- **固定快照答案：上述正确性和调度缺陷仍存在于生产路径，不能写成已完成整改。** TUN 每包清零、分配式 seal、authenticated cache/二次 open、fallback 重复 seal、中央循环阻塞、逐包锁和线性 peer 扫描都仍可从 `39ca637` 源码直接确认；底层 `seal_in_place` 与 pair-scoped index 派生尚未接入对应生产路径。固定快照也没有同一 transport、同一 commit 口径的新吞吐/尾延迟数据。
-- **精确答案仍待实测：** 下一轮必须记录并断言 active endpoint/transport，保存 fallback/replay 计数，再决定差距是一个数量级还是更小。
+- **历史 48 倍不是当前可靠答案。** 旧基准混有路径不确定、无 pinning、短样本和异常样本；它揭示了确定性架构缺陷，但不能作为最终排名。
+- **固定快照 `39ca637` 的答案：确实存在生产数据面结构问题。** authenticated cache/二次 open、逐包清零、分配式 seal、fallback 重复 seal、中央循环阻塞、逐包锁和线性 peer 扫描都能从源码直接确认。
+- **当前 HEAD `672df9c` 的实测答案：TCP 仍慢约 `5.1–5.5x`。** 在 3 run、10s、CPU pinning、direct/fallback=0 的 A/B 中，fuckipv6 TCP 1/8 流为 `0.550/0.515 Gbit/s`，wireguard-go 为 `2.785/2.832 Gbit/s`；候选相对自身的基线只提升 `0.79%/0.49%`。
+- **UDP 已接近但未全面追平。** 1420B 饱和 UDP 为 wireguard-go 的 `85.75%`，64B 饱和 UDP 为 `100.31%`，后者差异不足以宣称胜出；UDP 1420 的锁竞争历史数据只有约 `0.03%`，不能把差距归因于会话锁。
+- **两个新提交不是数量级修复。** 锁诊断 compile-out 和直连 peer-route 传递的组合收益约为 `0.5%–2.1%`；且同轮 wireguard-go TCP 自身提升 `1.8%–5.2%`，所以相对 TCP 差距并未缩小。下一步必须逐项隔离 A/B，不能把组合收益全部算给任一提交。
+
+### 当前剩余差距的主因排序
+
+1. **TUN 仍是每包 syscall，中央数据面仍以单包处理为主。** wireguard-go 先批量读 TUN、按 peer 分组，再进入加密和批量发送流水线。
+2. **生产数据面没有完整的 per-CPU crypto worker 与 per-peer 顺序提交。** 4-worker 微基准能加速，但尚未接到 direct UDP 端到端路径。
+3. **单把 `SecurePeerState` 状态锁仍未拆分。** 默认构建已移除锁 instrumentation 的额外成本，但 send/open 仍需争用同一状态；需要在 revoke/rekey/migration/remove 语义下重做锁边界。
+4. **buffer ownership 和 offload 尚未闭环。** UDP RX pool 和 UDP batch syscall 已落地，但 TUN、seal/open、fallback frame 尚未统一池化，也没有 UDP GSO/GRO 或 TUN offload。
+5. **每包固定成本仍然过高。** profile 指向时钟读取、syscall 返回、用户态 copy、调度和内存访问；ChaCha20/Poly1305 本身不是 5 倍端到端差距的首要解释。
 
 ### “我们的代码这么烂吗？”
 
 更准确的评价是：
 
-> **不能因为总代码量大就评价“烂”；但数据面确实存在具体、可定位、可验收的设计错误，不是单纯“还没优化好”。**
+> **不能说整个项目“烂”，但数据面工程成熟度确实明显低于 wireguard-go；问题是具体、可定位、可验收的设计和实现差距。**
 
-固定快照中可以确认的基础是：
+已经成立的基础：
 
-- secure-session/driver 已有原地 seal 原语、短缓冲和 tamper/replay 局部测试。
-- 固定 TUN buffer pool 和认证成功后再迁移 endpoint 的逻辑存在，但前者仍每包清零，后者仍走连接表写锁。
-- pair-scoped receiver-index 派生函数及一个局部单测存在。
-- 控制面和产品能力较完整。
+- secure-session/driver 有原地 seal/open、短缓冲、tamper/replay 局部测试。
+- 已删除 authenticated cache/二次 open，建立有界入站队列，并提交 owned plaintext 与 peer-route 传递。
+- UDP RX/TX 已使用 `recvmmsg/sendmmsg`，direct-path 与 fallback 已被基准断言。
+- 统计、endpoint 和 payload health 的大部分热路径已从全局写锁拆出。
+- 协调器、信令、QUIC relay、路由、出口节点、Web/UI/IPC 等产品功能明显多于 wireguard-go，不能用总行数直接比较代码质量。
 
-固定快照的未完成项必须与“底层 API 存在”分开记录：
+仍不能宣称完成的部分：
 
-- [x] **仅限底层原语**：driver/session/epoch/rekey `seal_in_place` 存在，`tests/driver.rs:182-241` 覆盖短缓冲、tamper/replay 不污染会话；没有生产 TUN/P2P 接线或端到端性能证据。
-- [x] **仅限派生函数**：pair-scoped receiver-index 派生和角色/稳定性单测存在；没有生产索引表、100-peer/NAT rebind 测试或 O(1) 分派。
-- [ ] 已认证明文直接交给后续阶段，删除 cache/replay 双状态。
-- [ ] relay fallback 复用已 seal 密文，并把慢发送移出中央循环。
-- [ ] TUN allocation 预留 header/tag，生产路径原地 seal；direct/QUIC/relay/signaling 共享同一密文。
-- [ ] 生产 receiver index 分派、不可变 peer 快照和避免逐包全量 clone。
-- [ ] 统计、endpoint 和 payload health 从数据面主锁中拆出。
-- [ ] 真正的批处理、worker pool、per-peer 顺序队列、完整 buffer pool 和 GSO/GRO。
-- [ ] 路径可证明的干净基准与 profiler 归因。
+- [ ] TUN batch read/write 和完整 offload。
+- [ ] 生产 crypto worker、每 peer 顺序提交与过载策略。
+- [ ] `SecurePeerState` 锁拆分及 rekey/revoke/migration/remove 并发压力测试。
+- [ ] 全链路统一 buffer pool、稳态 allocation 归零和 GSO/GRO。
+- [ ] 正式 5×30s 多 run、低负载宿主、逐项 A/B、统计显著性与同轮 profiler 归因。
+- [ ] 真实 `P2pEngine` + 密码认证组合压力测试。
 
-优先级建议：
+当前 8 个性能大项仍是 **0/8 完整验收**；“功能已接线”不能等同于“性能已追平”。
+
+### 下一步优先级
 
 ```text
-先用固定 commit + 实际 transport + replay/fallback 计数建立可复现基准
-  -> 待完成：owned plaintext，删除 4096 cache/replay 悬崖
-  -> 待完成：relay 发送移出中央循环，fallback 不重复 seal
-  -> 待完成：去全量 clone、生产 receiver-index 分派、全局统计写锁、payload health 写锁
-  -> 待完成：出站 TUN 原地 seal，fallback 复用同一密文
-  -> 待完成：UDP RX ownership、入站背压和会话热路径锁
-  -> 待完成：真 batch + pool + 独立队列
-  -> P3 crypto worker + per-peer queue + GSO/GRO
-  -> 安全回归和干净基准验收
+逐项隔离 60fe0d3 / 672df9c 的 A/B
+  -> TUN batch read/write
+  -> SecurePeerState 锁拆分与并发安全压测
+  -> 生产 crypto worker + per-peer 顺序队列
+  -> 全链路 buffer pool + UDP GSO/GRO + TUN offload
+  -> 5×30s 三实现正式排名与同轮 profiler 归因
 ```
 
-下一步应基于固定快照和可复现基准定位剩余瓶颈，而不是把底层原语或局部单测当作生产整改、性能提升、加密等级或安全等级已经达到某个结论。
+## 18. 可复核数据与命令
+
+- 基线结果：`target/benchmarks/dataplane-ab-baseline-651629c-20261031/`。
+- 候选原始结果：`target/benchmarks/dataplane-ab-candidate-672df9c-20261031/`；补跑的 wireguard-go 在相邻目录 `target/benchmarks/dataplane-ab-candidate-672df9c-wg-go-20261031/`。
+- 54 样本合并结果与中位数：`target/benchmarks/dataplane-ab-candidate-672df9c-20261031/merged/`。
+- 路径断言：fuckipv6 `18/18` 个样本 `direct_path=true`、`fallback_packets_delta=0`、P2P TX/RX 与 global P2P RX 计数均增长且 RX 计数一致。
+- 当前结论只适用于上述 CPU、MTU、governor、内核和二进制 SHA256，不适用于未记录条件的开发机或历史 48 倍数据。

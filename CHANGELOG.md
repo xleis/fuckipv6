@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## Unreleased
 
+### Services
+- **统一服务生命周期管理**: 新增 `fuckipv6 service install/status/restart/stop/start/upgrade/uninstall`，统一生成并管理 Linux systemd、macOS launchd 与 Windows SCM 服务定义；内部 `__service` 角色独立于 UI 监督 control/node/WebUI。安装脚本已改为只调用统一入口，并补充安装、升级、重启、停止、卸载和服务定义测试。Linux 当前主机已通过 systemd unit 校验；macOS/Windows 仍待实机服务验证，Android 前台服务未实现，因此 W2-08 保持部分完成。
+
 ### Security
 - **Secure Session classic UDP 无状态 Cookie retry**: 共享 UDP classic 握手现在对初次 `HELLO` 返回 `COOKIE_CHALLENGE`，只绑定源 IP/端口、双方身份、ephemeral 公钥哈希和签发时间；Cookie 验证通过后的 `HELLO_WITH_COOKIE` 才执行 admission、签名验证和 responder crypto。初次请求不分配 admission 或 pending responder，相同 retry 幂等，endpoint/health 仅由成功认证的控制帧更新；Initiator 拒绝来自未注册/未认证端点的 challenge，避免伪造 challenge 替换 pending retry 或反射到攻击地址。新增真实 UDP 挑战及未受信 challenge 来源、源、身份、ephemeral key、MAC、过期和准入前拒绝测试。生产 Cookie 密钥现在使用 256-bit root secret 和域分离 HMAC-SHA-256 按 60 秒 epoch 轮换，只保留当前/前一代，轮换周期不得短于 Cookie 有效期；新增当前/前一代接受、两代前拒绝、墙钟回退、周期下限、多线程共享和生产周期测试。共享握手准入器进一步增加全局 HELLO 验证预算：已注册或已认证来源在空载且预算可用时可走 direct path，否则回退 Cookie challenge；`HELLO_WITH_COOKIE` 在 Cookie 校验后仍必须取得同一预算，预算耗尽时失败关闭，防止绕过 Cookie 持续触发签名和 KEM。预算使用 RAII 释放，无效 Cookie 不消耗预算，预算耗尽不计为终端拒绝；新增共享预算、挑战回退、恢复、签名失败释放和幂等重传测试。负载自适应 Cookie、准入前 `O(N)` Peer 扫描优化、产品指标/UI、跨节点压测和独立 DoS 审计仍未完成，NX-12 保持进行中，不宣称全量 DoS 防护或超过 WireGuard。
 - **Secure Session UDP 在线重协商**: 核心会话支持按时间、明文字节和发送包计数提前调度 REKEY，维护路径按 grace deadline 清理退役接收世代，并拒绝 REKEY 尝试切换 cipher suite。常驻 UDP initiator 在建立后继续发起在线 REKEY，通过 staged/active/retired epoch 接收和实际 CONFIRM 重传完成切换；端到端测试覆盖成功切换、失败保留和降级/回滚拒绝。QUIC/relay 认证 REKEY 通道、跨真实网络切换流量测试和独立审计未完成，NX-11 保持进行中。

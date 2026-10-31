@@ -411,14 +411,21 @@ cleanup 绕过，超时或 owner 丢失会保持残留事实并允许重试；�
 
 **验收**：X11、Wayland、Windows/macOS 桌面在 GPUI 可用时自动选择 GPUI，GPUI 不可用时回退 WebUI；无 DISPLAY 自动选择 Headless，显式 WebUI 仍可运行；`FUCKIPV6_PUBLIC_IP` 不参与显示环境判断。顶层入口与 `host/join/connect/up/start` 子入口使用同一模式解析，GPUI 只在 OS 主线程启动。`headless_command_entrypoint_reexports_the_same_control` 验证 `up` 子入口关闭 UI 后仍连接同一 control/node。
 
-### W2-08 服务监督 `[ ]`
+### W2-08 服务监督 `[~]`
 
-- [ ] Linux systemd 用户/系统服务方案；
-- [ ] macOS launchd 方案；
-- [ ] Windows Service 方案；
+- [x] Linux systemd 用户/系统服务方案；
+- [x] macOS launchd 方案；
+- [x] Windows Service 方案；
 - [ ] Android 前台服务方案（W16）；
-- [ ] 安装、升级、重启和卸载行为；
-- [ ] 不依赖打开图形界面来维持网络。
+- [x] 安装、升级、重启和卸载行为；
+- [x] 不依赖打开图形界面来维持网络。
+
+**已有证据**：统一 `fuckipv6 service` 已生成 systemd unit、launchd plist 和
+Windows SCM 定义，安装脚本只调用该入口；`__service` 负责监督 control/node/WebUI，
+安装、升级、重启、停止和卸载均有自动化生命周期测试。当前主机已通过
+`systemd-analyze verify`，launchd plist 可被 `plistlib` 解析，Windows GNU target
+可交叉编译。macOS/Windows 尚无实机服务验证，Android 前台服务尚未实现，因此整体保持
+`[~]`，相关实机验收仍由 W16/W17 跟踪。
 
 ### W2-09 关闭与清理看门狗 `[~]`
 

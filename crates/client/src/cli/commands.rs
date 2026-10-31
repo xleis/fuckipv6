@@ -2543,6 +2543,20 @@ fn print_dataplane_status(dataplane: &ipc::DataplaneMetricsSnapshot, prefix: &st
         "{prefix}  持锁时间:     均值/峰值 {}/{} ns, 总计 {} ns",
         lock.hold_ns_avg, lock.hold_ns_max, lock.hold_ns_total
     );
+    let operations = lock.operations;
+    println!(
+        "{prefix}  分类获取/竞争: 发 {}/{}, 收 {}/{}, 控 {}/{}, 生命周期 {}/{}, 诊断 {}/{}",
+        operations.outbound.acquisitions,
+        operations.outbound.contended_acquisitions,
+        operations.inbound.acquisitions,
+        operations.inbound.contended_acquisitions,
+        operations.control.acquisitions,
+        operations.control.contended_acquisitions,
+        operations.lifecycle.acquisitions,
+        operations.lifecycle.contended_acquisitions,
+        operations.diagnostics.acquisitions,
+        operations.diagnostics.contended_acquisitions
+    );
 }
 
 pub async fn peers() -> Result<()> {

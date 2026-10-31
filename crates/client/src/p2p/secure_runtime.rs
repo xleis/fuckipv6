@@ -158,12 +158,32 @@ struct RetiredGeneration {
 /// claiming that the state has already been split. A snapshot makes contention
 /// and the cost of moving batch AEAD under the lock measurable before changing
 /// concurrency semantics.
-#[allow(
-    dead_code,
-    reason = "surfaced by the connection metrics in the next commit"
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecureLockOperation {
+    Outbound,
+    Inbound,
+    Control,
+    Lifecycle,
+    Diagnostics,
+}
+
+impl SecureLockOperation {
+    const COUNT: usize = 5;
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Outbound => 0,
+            Self::Inbound => 1,
+            Self::Control => 2,
+            Self::Lifecycle => 3,
+            Self::Diagnostics => 4,
+        }
+    }
+}
+
+/// Lock acquisition and hold-time counters for one secure-state operation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SecureLockMetrics {
+pub(crate) struct SecureLockOperationMetrics {
     pub acquisitions: u64,
     pub contended_acquisitions: u64,
     pub wait_ns_total: u64,
@@ -172,10 +192,37 @@ pub(crate) struct SecureLockMetrics {
     pub hold_ns_max: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "surfaced by the connection metrics in the next commit"
-)]
+impl SecureLockOperationMetrics {
+    fn merge(&mut self, other: Self) {
+        self.acquisitions = self.acquisitions.saturating_add(other.acquisitions);
+        self.contended_acquisitions = self
+            .contended_acquisitions
+            .saturating_add(other.contended_acquisitions);
+        self.wait_ns_total = self.wait_ns_total.saturating_add(other.wait_ns_total);
+        self.wait_ns_max = self.wait_ns_max.max(other.wait_ns_max);
+        self.hold_ns_total = self.hold_ns_total.saturating_add(other.hold_ns_total);
+        self.hold_ns_max = self.hold_ns_max.max(other.hold_ns_max);
+    }
+}
+
+/// Per-peer secure-state lock counters, including an operation breakdown.
+///
+/// The aggregate fields describe the current mutex boundary. The operation
+/// array separates outbound sealing, inbound opening, control/rekey, lifecycle
+/// admission, and diagnostics so contention can be attributed before changing
+/// the locking model. Array order is outbound, inbound, control, lifecycle,
+/// diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SecureLockMetrics {
+    pub acquisitions: u64,
+    pub contended_acquisitions: u64,
+    pub wait_ns_total: u64,
+    pub wait_ns_max: u64,
+    pub hold_ns_total: u64,
+    pub hold_ns_max: u64,
+    pub operations: [SecureLockOperationMetrics; SecureLockOperation::COUNT],
+}
+
 impl SecureLockMetrics {
     pub(crate) fn merge(&mut self, other: Self) {
         self.acquisitions = self.acquisitions.saturating_add(other.acquisitions);
@@ -186,6 +233,9 @@ impl SecureLockMetrics {
         self.wait_ns_max = self.wait_ns_max.max(other.wait_ns_max);
         self.hold_ns_total = self.hold_ns_total.saturating_add(other.hold_ns_total);
         self.hold_ns_max = self.hold_ns_max.max(other.hold_ns_max);
+        for (operation, other_operation) in self.operations.iter_mut().zip(other.operations) {
+            operation.merge(other_operation);
+        }
     }
 
     pub(crate) fn average_wait_ns(self) -> u64 {
@@ -202,7 +252,7 @@ impl SecureLockMetrics {
 }
 
 #[derive(Default)]
-struct SecureLockCounters {
+struct SecureLockOperationCounters {
     acquisitions: AtomicU64,
     contended_acquisitions: AtomicU64,
     wait_ns_total: AtomicU64,
@@ -211,10 +261,9 @@ struct SecureLockCounters {
     hold_ns_max: AtomicU64,
 }
 
-impl SecureLockCounters {
-    #[allow(dead_code, reason = "called by SecurePeerState::lock_metrics")]
-    fn snapshot(&self) -> SecureLockMetrics {
-        SecureLockMetrics {
+impl SecureLockOperationCounters {
+    fn snapshot(&self) -> SecureLockOperationMetrics {
+        SecureLockOperationMetrics {
             acquisitions: self.acquisitions.load(Ordering::Relaxed),
             contended_acquisitions: self.contended_acquisitions.load(Ordering::Relaxed),
             wait_ns_total: self.wait_ns_total.load(Ordering::Relaxed),
@@ -225,9 +274,36 @@ impl SecureLockCounters {
     }
 }
 
+#[derive(Default)]
+struct SecureLockCounters {
+    total: SecureLockOperationCounters,
+    by_operation: [SecureLockOperationCounters; SecureLockOperation::COUNT],
+}
+
+impl SecureLockCounters {
+    fn operation(&self, operation: SecureLockOperation) -> &SecureLockOperationCounters {
+        &self.by_operation[operation.index()]
+    }
+
+    fn snapshot(&self) -> SecureLockMetrics {
+        let total = self.total.snapshot();
+        let operations = std::array::from_fn(|index| self.by_operation[index].snapshot());
+        SecureLockMetrics {
+            acquisitions: total.acquisitions,
+            contended_acquisitions: total.contended_acquisitions,
+            wait_ns_total: total.wait_ns_total,
+            wait_ns_max: total.wait_ns_max,
+            hold_ns_total: total.hold_ns_total,
+            hold_ns_max: total.hold_ns_max,
+            operations,
+        }
+    }
+}
+
 struct SecureLockGuard<'a> {
     guard: Option<MutexGuard<'a, SecureState>>,
-    counters: &'a SecureLockCounters,
+    total: &'a SecureLockOperationCounters,
+    operation: &'a SecureLockOperationCounters,
     acquired_at: Instant,
 }
 
@@ -252,8 +328,10 @@ impl DerefMut for SecureLockGuard<'_> {
 impl Drop for SecureLockGuard<'_> {
     fn drop(&mut self) {
         let held = duration_ns(self.acquired_at.elapsed());
-        add_atomic(&self.counters.hold_ns_total, held);
-        update_atomic_max(&self.counters.hold_ns_max, held);
+        for counters in [self.total, self.operation] {
+            add_atomic(&counters.hold_ns_total, held);
+            update_atomic_max(&counters.hold_ns_max, held);
+        }
         drop(self.guard.take());
     }
 }
@@ -419,27 +497,34 @@ impl SecurePeerState {
     }
 
     /// Acquire the per-peer state lock and account for wait and hold time.
-    async fn lock_state(&self) -> SecureLockGuard<'_> {
+    async fn lock_state(&self, operation: SecureLockOperation) -> SecureLockGuard<'_> {
         let started = Instant::now();
+        let total = &self.state_lock_counters.total;
+        let operation_counters = self.state_lock_counters.operation(operation);
         let guard = match self.state.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
-                self.state_lock_counters
-                    .contended_acquisitions
-                    .fetch_add(1, Ordering::Relaxed);
+                for counters in [total, operation_counters] {
+                    counters
+                        .contended_acquisitions
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 let guard = self.state.lock().await;
                 let waited = duration_ns(started.elapsed());
-                add_atomic(&self.state_lock_counters.wait_ns_total, waited);
-                update_atomic_max(&self.state_lock_counters.wait_ns_max, waited);
+                for counters in [total, operation_counters] {
+                    add_atomic(&counters.wait_ns_total, waited);
+                    update_atomic_max(&counters.wait_ns_max, waited);
+                }
                 guard
             }
         };
-        self.state_lock_counters
-            .acquisitions
-            .fetch_add(1, Ordering::Relaxed);
+        for counters in [total, operation_counters] {
+            counters.acquisitions.fetch_add(1, Ordering::Relaxed);
+        }
         SecureLockGuard {
             guard: Some(guard),
-            counters: &self.state_lock_counters,
+            total,
+            operation: operation_counters,
             acquired_at: Instant::now(),
         }
     }
@@ -459,7 +544,7 @@ impl SecurePeerState {
 
     /// Whether an authenticated v2 driver is installed.
     pub(crate) async fn is_established(&self) -> bool {
-        let state = self.lock_state().await;
+        let state = self.lock_state(SecureLockOperation::Diagnostics).await;
         !state.revoked && state.driver.is_some()
     }
 
@@ -474,7 +559,11 @@ impl SecurePeerState {
         &self,
     ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, SecureRuntimeError> {
         let permission = self.lifecycle_gate.read().await;
-        if self.lock_state().await.revoked {
+        if self
+            .lock_state(SecureLockOperation::Lifecycle)
+            .await
+            .revoked
+        {
             return Err(SecureRuntimeError::Revoked);
         }
         Ok(permission)
@@ -490,7 +579,7 @@ impl SecurePeerState {
     /// is outside this session object's control.
     pub(crate) async fn revoke(&self) -> bool {
         let _lifecycle = self.lifecycle_gate.write().await;
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Lifecycle).await;
         if state.revoked {
             return false;
         }
@@ -511,13 +600,15 @@ impl SecurePeerState {
     /// Endpoint authenticated by the completed handshake.
     #[cfg(test)]
     pub(crate) async fn authenticated_peer(&self) -> Option<SocketAddr> {
-        self.lock_state().await.authenticated_peer
+        self.lock_state(SecureLockOperation::Diagnostics)
+            .await
+            .authenticated_peer
     }
 
     /// Session identifier for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn session_id(&self) -> Option<[u8; fuckipv6_secure_session::SESSION_ID_LEN]> {
-        self.lock_state()
+        self.lock_state(SecureLockOperation::Diagnostics)
             .await
             .driver
             .as_ref()
@@ -527,7 +618,7 @@ impl SecurePeerState {
     /// Active data epoch for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn epoch(&self) -> Option<u16> {
-        self.lock_state()
+        self.lock_state(SecureLockOperation::Diagnostics)
             .await
             .driver
             .as_ref()
@@ -539,7 +630,7 @@ impl SecurePeerState {
     /// time policy remains unchanged.
     #[cfg(test)]
     pub(crate) async fn force_rekey_due(&self) {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Diagnostics).await;
         if state.driver.is_some() {
             let rekey_age = MAX_EPOCH_LIFETIME
                 .saturating_sub(REKEY_LEAD_TIME)
@@ -551,7 +642,7 @@ impl SecurePeerState {
     /// Driver counters for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn stats(&self) -> Option<DriverStats> {
-        self.lock_state()
+        self.lock_state(SecureLockOperation::Diagnostics)
             .await
             .driver
             .as_ref()
@@ -564,7 +655,7 @@ impl SecurePeerState {
     /// responder's replay cache can recognize retransmissions. An abandoned
     /// attempt is replaced after [`HELLO_REFRESH_AFTER`].
     pub(crate) async fn initiate_frame(&self) -> Result<Option<Vec<u8>>, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Control).await;
         let now = Instant::now();
         prune_state(&mut state, now);
         if state.revoked {
@@ -623,7 +714,7 @@ impl SecurePeerState {
     pub(crate) async fn retry_staged_confirm(
         &self,
     ) -> Result<Option<SecureControlAction>, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Control).await;
         prune_state(&mut state, Instant::now());
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
@@ -650,7 +741,7 @@ impl SecurePeerState {
             frame = control_variant(&message),
             "收到 Secure Session v2 控制帧"
         );
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Control).await;
         prune_state(&mut state, Instant::now());
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
@@ -1028,7 +1119,7 @@ impl SecurePeerState {
             });
         }
 
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Outbound).await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -1080,7 +1171,7 @@ impl SecurePeerState {
             }
         }
 
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Outbound).await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -1104,7 +1195,7 @@ impl SecurePeerState {
         source: SocketAddr,
         packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Inbound).await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -1130,7 +1221,7 @@ impl SecurePeerState {
         &self,
         packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Inbound).await;
         open_with_driver(&mut state, packet)
     }
 
@@ -1149,7 +1240,7 @@ impl SecurePeerState {
         &self,
         packet: Bytes,
     ) -> Result<BytesMut, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Inbound).await;
         let mut packet = match packet.try_into_mut() {
             Ok(packet) => packet,
             Err(packet) => BytesMut::from(packet.as_ref()),
@@ -1169,7 +1260,7 @@ impl SecurePeerState {
         source: SocketAddr,
         packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Inbound).await;
         let plaintext = open_with_driver(&mut state, packet)?;
         state.authenticated_peer = Some(canonical_endpoint(source));
         Ok(plaintext)
@@ -1189,7 +1280,7 @@ impl SecurePeerState {
         source: SocketAddr,
         packet: &mut [u8],
     ) -> Result<usize, SecureRuntimeError> {
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Inbound).await;
         let plaintext_len = open_with_driver_core(&mut state, packet)?;
         let plaintext_len = move_plaintext_to_front(packet, plaintext_len);
         state.authenticated_peer = Some(canonical_endpoint(source));
@@ -1219,7 +1310,7 @@ impl SecurePeerState {
         if packets.is_empty() {
             return Ok(Vec::new());
         }
-        let mut state = self.lock_state().await;
+        let mut state = self.lock_state(SecureLockOperation::Inbound).await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -1268,7 +1359,7 @@ impl SecurePeerState {
     /// or key confirmation has been checked. The subsequent `handle_control`
     /// call remains responsible for all authentication.
     pub(crate) async fn matches_control(&self, message: &ControlMessage) -> bool {
-        let state = self.lock_state().await;
+        let state = self.lock_state(SecureLockOperation::Control).await;
         if state.revoked {
             return false;
         }
@@ -1653,10 +1744,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn lock_state_metrics_record_real_contention_hold_time_and_averages() {
         let (peer, _, _, _) = pair();
-        let holder = peer.lock_state().await;
+        let holder = peer.lock_state(SecureLockOperation::Diagnostics).await;
         let baseline = peer.lock_metrics();
         assert_eq!(baseline.acquisitions, 1);
         assert_eq!(baseline.contended_acquisitions, 0);
+        assert_eq!(baseline.operations[4].acquisitions, 1);
+        assert_eq!(baseline.operations[0].acquisitions, 0);
 
         let (attempting_tx, attempting_rx) = tokio::sync::oneshot::channel();
         let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
@@ -1666,7 +1759,9 @@ mod tests {
             attempting_tx
                 .send(())
                 .expect("holder must wait for contender attempt");
-            let guard = contender_peer.lock_state().await;
+            let guard = contender_peer
+                .lock_state(SecureLockOperation::Diagnostics)
+                .await;
             acquired_tx
                 .send(())
                 .expect("holder must wait for contender acquisition");
@@ -1718,10 +1813,63 @@ mod tests {
             metrics.average_hold_ns(),
             metrics.hold_ns_total / metrics.acquisitions
         );
+        assert_eq!(metrics.operations[4].acquisitions, metrics.acquisitions);
+        assert_eq!(
+            metrics.operations[4].contended_acquisitions,
+            metrics.contended_acquisitions
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lock_metrics_classify_each_secure_state_operation() {
+        let (peer, _, _, _) = pair();
+        for operation in [
+            SecureLockOperation::Outbound,
+            SecureLockOperation::Inbound,
+            SecureLockOperation::Control,
+            SecureLockOperation::Lifecycle,
+            SecureLockOperation::Diagnostics,
+        ] {
+            drop(peer.lock_state(operation).await);
+        }
+
+        let metrics = peer.lock_metrics();
+        assert_eq!(metrics.acquisitions, 5);
+        for operation in metrics.operations {
+            assert_eq!(operation.acquisitions, 1);
+            assert_eq!(operation.contended_acquisitions, 0);
+            assert_eq!(operation.wait_ns_total, 0);
+        }
+        assert_eq!(
+            metrics
+                .operations
+                .iter()
+                .map(|operation| operation.acquisitions)
+                .sum::<u64>(),
+            metrics.acquisitions
+        );
     }
 
     #[test]
     fn lock_metrics_merge_sums_counters_and_keeps_global_maxima() {
+        let mut first_operations = [SecureLockOperationMetrics::default(); 5];
+        first_operations[0] = SecureLockOperationMetrics {
+            acquisitions: 2,
+            contended_acquisitions: 1,
+            wait_ns_total: 10,
+            wait_ns_max: 10,
+            hold_ns_total: 30,
+            hold_ns_max: 20,
+        };
+        let mut second_operations = [SecureLockOperationMetrics::default(); 5];
+        second_operations[0] = SecureLockOperationMetrics {
+            acquisitions: 3,
+            contended_acquisitions: 2,
+            wait_ns_total: 25,
+            wait_ns_max: 15,
+            hold_ns_total: 40,
+            hold_ns_max: 25,
+        };
         let mut aggregate = SecureLockMetrics {
             acquisitions: 2,
             contended_acquisitions: 1,
@@ -1729,6 +1877,7 @@ mod tests {
             wait_ns_max: 10,
             hold_ns_total: 30,
             hold_ns_max: 20,
+            operations: first_operations,
         };
         aggregate.merge(SecureLockMetrics {
             acquisitions: 3,
@@ -1737,8 +1886,18 @@ mod tests {
             wait_ns_max: 15,
             hold_ns_total: 40,
             hold_ns_max: 25,
+            operations: second_operations,
         });
 
+        let mut expected_operations = [SecureLockOperationMetrics::default(); 5];
+        expected_operations[0] = SecureLockOperationMetrics {
+            acquisitions: 5,
+            contended_acquisitions: 3,
+            wait_ns_total: 35,
+            wait_ns_max: 15,
+            hold_ns_total: 70,
+            hold_ns_max: 25,
+        };
         assert_eq!(
             aggregate,
             SecureLockMetrics {
@@ -1748,6 +1907,7 @@ mod tests {
                 wait_ns_max: 15,
                 hold_ns_total: 70,
                 hold_ns_max: 25,
+                operations: expected_operations,
             }
         );
         assert_eq!(aggregate.average_wait_ns(), 7);
@@ -2473,7 +2633,7 @@ mod tests {
         let after = admission.metrics(Instant::now());
         assert_eq!(after.admitted, before.admitted);
         assert_eq!(after.active_reservations, before.active_reservations);
-        let state = responder.lock_state().await;
+        let state = responder.lock_state(SecureLockOperation::Diagnostics).await;
         assert!(state.pending_responder.is_none());
         assert!(state.authenticated_peer.is_none());
         drop(state);
@@ -2491,7 +2651,11 @@ mod tests {
             initiator.handle_control(responder_addr, wrong_peer).await,
             Err(SecureRuntimeError::UnexpectedFrame { .. })
         ));
-        assert!(initiator.lock_state().await.pending_initiator.is_some());
+        assert!(initiator
+            .lock_state(SecureLockOperation::Diagnostics)
+            .await
+            .pending_initiator
+            .is_some());
     }
 
     #[tokio::test]
@@ -2677,7 +2841,11 @@ mod tests {
         assert_eq!(after_signature_failure.hello_validation_active, 0);
         assert_eq!(after_signature_failure.active_reservations, 0);
         assert_eq!(after_signature_failure.dropped, 1);
-        assert!(responder.lock_state().await.pending_responder.is_none());
+        assert!(responder
+            .lock_state(SecureLockOperation::Diagnostics)
+            .await
+            .pending_responder
+            .is_none());
 
         let accept = responder
             .handle_control(
@@ -2730,7 +2898,7 @@ mod tests {
                 .await,
             Err(SecureRuntimeError::UntrustedControlSource { actual }) if actual == attacker_addr
         ));
-        let pending = initiator.lock_state().await;
+        let pending = initiator.lock_state(SecureLockOperation::Diagnostics).await;
         assert_eq!(
             pending
                 .pending_initiator
@@ -2854,7 +3022,11 @@ mod tests {
         ));
 
         assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
-        assert!(responder.lock_state().await.pending_responder.is_none());
+        assert!(responder
+            .lock_state(SecureLockOperation::Diagnostics)
+            .await
+            .pending_responder
+            .is_none());
 
         let first_accept = responder
             .handle_control(
@@ -2914,7 +3086,11 @@ mod tests {
             Err(SecureRuntimeError::Cookie(CookieError::Expired))
         ));
         assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
-        assert!(responder.lock_state().await.pending_responder.is_none());
+        assert!(responder
+            .lock_state(SecureLockOperation::Diagnostics)
+            .await
+            .pending_responder
+            .is_none());
     }
 
     #[tokio::test]

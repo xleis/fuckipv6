@@ -132,6 +132,27 @@ pub struct SecureLockSnapshot {
     pub hold_ns_total: u64,
     pub hold_ns_max: u64,
     pub hold_ns_avg: u64,
+    #[serde(default)]
+    pub operations: SecureLockOperationsSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecureLockOperationsSnapshot {
+    pub outbound: SecureLockOperationSnapshot,
+    pub inbound: SecureLockOperationSnapshot,
+    pub control: SecureLockOperationSnapshot,
+    pub lifecycle: SecureLockOperationSnapshot,
+    pub diagnostics: SecureLockOperationSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecureLockOperationSnapshot {
+    pub acquisitions: u64,
+    pub contended_acquisitions: u64,
+    pub wait_ns_total: u64,
+    pub wait_ns_max: u64,
+    pub hold_ns_total: u64,
+    pub hold_ns_max: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -919,7 +940,27 @@ async fn dataplane_metrics(p2p: &P2pEngine) -> DataplaneMetricsSnapshot {
             hold_ns_total: secure_lock.hold_ns_total,
             hold_ns_max: secure_lock.hold_ns_max,
             hold_ns_avg: secure_lock.average_hold_ns(),
+            operations: SecureLockOperationsSnapshot {
+                outbound: secure_lock_operation_snapshot(secure_lock.operations[0]),
+                inbound: secure_lock_operation_snapshot(secure_lock.operations[1]),
+                control: secure_lock_operation_snapshot(secure_lock.operations[2]),
+                lifecycle: secure_lock_operation_snapshot(secure_lock.operations[3]),
+                diagnostics: secure_lock_operation_snapshot(secure_lock.operations[4]),
+            },
         },
+    }
+}
+
+fn secure_lock_operation_snapshot(
+    metrics: crate::p2p::secure_runtime::SecureLockOperationMetrics,
+) -> SecureLockOperationSnapshot {
+    SecureLockOperationSnapshot {
+        acquisitions: metrics.acquisitions,
+        contended_acquisitions: metrics.contended_acquisitions,
+        wait_ns_total: metrics.wait_ns_total,
+        wait_ns_max: metrics.wait_ns_max,
+        hold_ns_total: metrics.hold_ns_total,
+        hold_ns_max: metrics.hold_ns_max,
     }
 }
 

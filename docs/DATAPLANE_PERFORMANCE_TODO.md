@@ -21,7 +21,7 @@
 ### 进度快照（2026-10-31）
 
 - **大项：0/8 完整验收。** 大项要求同时具备独立提交、回归/安全测试、实测证据和同口径性能结论，当前没有一项全部满足。
-- **PERF 明细：27/49 已勾选，22 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
+- **PERF 明细：29/49 已勾选，20 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
 - **最近可关闭：** PERF-4 的 UDP batch 与 64B/1420B syscall 证据、PERF-8 的 direct-path 前置断言已经完成；TUN batch 和生产 worker 不属于近期可关闭项。
 - **尚未证明：** 锁拆分、GSO/GRO、全链路池、真实密码认证组合压力测试、正式多 run 三实现排名，以及任何“已追平/超过 WireGuard”的结论。
 
@@ -255,7 +255,7 @@ P2-3 干净基准与 profiler 归因
 - [x] 覆盖并发 payload 不丢计数、probe mutex 持有期间 payload 不阻塞、并发 snapshot/probe/payload 一致性。
 - [ ] 真实多 peer remove/rekey/endpoint migration 压力测试覆盖原子桶与路由句柄生命周期。
 - [ ] 明确并验证锁顺序，覆盖并发 remove/rekey。
-- [ ] 增加 mutex/profile 等待指标。
+- [x] 增加 mutex/profile 等待指标；安全状态锁现按发、收、控制、生命周期和诊断分类记录获取/竞争/wait/hold。
 
 **验收**
 
@@ -264,9 +264,9 @@ P2-3 干净基准与 profiler 归因
 - [x] 普通 payload 不获取 per-peer health `RwLock`，也不等待 probe/RTT mutex。
 - [x] 8 线程并发 80,000 次 payload 更新全部保留；probe mutex 被占用时 payload 仍可完成。
 - [ ] 并发收发和 peer remove/rekey 压力测试证明无死锁、无旧 session 复活。
-- [ ] 输出至少一组 mutex/lock 等待计数或 profile 证据。
+- [x] 输出至少一组 mutex/lock 等待计数或 profile 证据；`status --json` 同时输出总和与五类操作细分。
 
-**当前状态：payload 记账功能完成且已无锁；控制面低频状态仍有 mutex；复制、syscall、batch/worker 等成本仍在，性能待同口径基准确认。**
+**当前状态：payload 记账功能完成且已无锁；控制面低频状态仍有 mutex；会话锁已能按五类操作归因，但尚未拆分锁边界或证明拆分收益；复制、syscall、batch/worker 等成本仍在，性能待同口径基准确认。**
 
 ## P1-3 真 batch、buffer pool、per-peer 顺序队列
 
@@ -418,7 +418,7 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-6 移除会话热路径 async mutex
 
-- [x] **锁等待/持锁指标：** `0e316e1` 增加真实 `try_lock` 竞争计数、wait/hold 总时长与最大值，并覆盖并发 seal 的线性化测试。
+- [x] **锁等待/持锁指标：** `0e316e1` 增加真实 `try_lock` 竞争计数、wait/hold 总时长与最大值；后续按 outbound/inbound/control/lifecycle/diagnostics 分类，并覆盖竞争、合并和分类计数测试。
 - [x] **同 peer 批量临界区：** `seal_batch_in_place` 一次持锁预留完整 nonce 范围并完成批量 AEAD；这是缩小锁获取次数，不是移除热路径锁。
 - [ ] 拆分 `SecurePeerState` 的 admission、session/epoch、driver 和统计状态，缩小临界区。
 - [ ] 采用每 peer actor、同步短锁或所有权转移，禁止在持锁期间执行网络 I/O 或 await。

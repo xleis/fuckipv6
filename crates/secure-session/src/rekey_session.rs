@@ -180,6 +180,20 @@ impl RekeySession {
         self.session.seal_in_place(packet, plaintext_len, now)
     }
 
+    /// Encrypt a batch whose plaintexts already occupy their packet buffers.
+    pub fn seal_batch_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        plaintext_lens: &[usize],
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        if self.poisoned {
+            return Err(SessionError::InvalidEpochState);
+        }
+        self.session
+            .seal_batch_in_place(packets, plaintext_lens, now)
+    }
+
     /// Authenticate and decrypt a packet under the active or retained epoch.
     pub fn open_in_place<'a>(
         &mut self,

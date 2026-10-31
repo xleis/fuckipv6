@@ -12,6 +12,7 @@
 
 pub mod confirmation;
 pub mod cookie;
+mod crypto_batch;
 pub mod data_cipher;
 pub mod driver;
 pub mod handshake;
@@ -27,6 +28,7 @@ pub mod rekey_session;
 pub mod transcript;
 pub mod wire;
 
+pub use crypto_batch::{configure_crypto_workers, crypto_batch_metrics, CryptoBatchMetrics};
 use data_cipher::AeadCipher;
 pub use data_cipher::DataCipherSuite;
 use std::time::{Duration, Instant};
@@ -429,15 +431,220 @@ impl SendCipher {
             }
         }
 
-        for (index, plaintext) in plaintexts.iter().enumerate() {
-            let offset = index
-                .checked_mul(stride)
-                .ok_or(SessionError::PacketTooLong)?;
-            let slot = &mut packets[offset..offset + stride];
-            self.seal(plaintext, slot)?;
+        let start_counter = self.next_send_counter;
+        let batch_bytes = plaintexts
+            .len()
+            .checked_mul(stride)
+            .ok_or(SessionError::PacketTooLong)?;
+        let mut slots: Vec<&mut [u8]> = Vec::with_capacity(plaintexts.len());
+        for (slot, plaintext) in packets[..batch_bytes]
+            .chunks_exact_mut(stride)
+            .zip(plaintexts)
+        {
+            slot[DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext.len()].copy_from_slice(plaintext);
+            slots.push(slot);
         }
+        let plaintext_lens: Vec<usize> =
+            plaintexts.iter().map(|plaintext| plaintext.len()).collect();
+        seal_prepared_slots(
+            &self.cipher,
+            BatchSealContext {
+                session_id: self.session_id,
+                direction: self.direction,
+                peer_receiver_index: self.peer_receiver_index,
+                epoch: self.epoch,
+                start_counter,
+            },
+            &mut slots,
+            &plaintext_lens,
+        )?;
+        self.next_send_counter += plaintexts.len() as u64;
         Ok(plaintexts.len())
     }
+
+    /// Seal packets whose plaintext already occupies each buffer at
+    /// `DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext_len`.
+    ///
+    /// Validation and counter reservation complete before any buffer is
+    /// modified. Counters are committed only after every AEAD operation
+    /// succeeds, so an error cannot create a nonce gap or advance the sender.
+    /// Large batches use the bounded process-wide crypto worker pool; small
+    /// batches stay serial to avoid dispatch overhead.
+    pub fn seal_batch_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        plaintext_lens: &[usize],
+    ) -> Result<usize, SessionError> {
+        let _next = validate_in_place_batch(packets, plaintext_lens, self.next_send_counter)?;
+        let start_counter = self.next_send_counter;
+        seal_prepared_slots(
+            &self.cipher,
+            BatchSealContext {
+                session_id: self.session_id,
+                direction: self.direction,
+                peer_receiver_index: self.peer_receiver_index,
+                epoch: self.epoch,
+                start_counter,
+            },
+            packets,
+            plaintext_lens,
+        )?;
+        self.next_send_counter += packets.len() as u64;
+        Ok(packets.len())
+    }
+}
+
+fn validate_in_place_batch(
+    packets: &[&mut [u8]],
+    plaintext_lens: &[usize],
+    next_send_counter: u64,
+) -> Result<u64, SessionError> {
+    if packets.len() != plaintext_lens.len() {
+        return Err(SessionError::BufferTooSmall);
+    }
+    let packet_count = u64::try_from(packets.len()).map_err(|_| SessionError::PacketTooLong)?;
+    let next = next_send_counter
+        .checked_add(packet_count)
+        .filter(|next| *next <= MAX_PACKETS_PER_EPOCH)
+        .ok_or(SessionError::CounterExhausted)?;
+    for (packet, plaintext_len) in packets.iter().zip(plaintext_lens) {
+        let required = data_packet_len(*plaintext_len)?;
+        if packet.len() < required {
+            return Err(SessionError::BufferTooSmall);
+        }
+    }
+    Ok(next)
+}
+
+#[derive(Clone, Copy)]
+struct BatchSealContext {
+    session_id: [u8; SESSION_ID_LEN],
+    direction: Direction,
+    peer_receiver_index: u32,
+    epoch: u16,
+    start_counter: u64,
+}
+
+#[derive(Clone, Copy)]
+struct BatchOpenContext {
+    session_id: [u8; SESSION_ID_LEN],
+    direction: Direction,
+    epoch: u16,
+    local_receiver_index: u32,
+}
+
+fn decrypt_prepared_packet(
+    cipher: &AeadCipher,
+    context: BatchOpenContext,
+    packet: &mut [u8],
+) -> Result<(), SessionError> {
+    let header = DataHeader::decode(packet)?;
+    if header.receiver_index != context.local_receiver_index {
+        return Err(SessionError::ReceiverIndexMismatch);
+    }
+    if header.epoch != context.epoch {
+        return Err(SessionError::EpochMismatch);
+    }
+    if header.counter >= MAX_PACKETS_PER_EPOCH {
+        return Err(SessionError::CounterExhausted);
+    }
+    let plaintext_len = packet.len() - DATA_HEADER_LEN - AEAD_TAG_LEN;
+    let aad = data_aad(header, context.session_id, plaintext_len as u16);
+    let nonce = nonce_for(context.direction, header.counter);
+    let (_, tail) = packet.split_at_mut(DATA_HEADER_LEN);
+    let (plaintext, tag) = tail.split_at_mut(plaintext_len);
+    let mut encoded_tag = [0u8; AEAD_TAG_LEN];
+    encoded_tag.copy_from_slice(tag);
+    cipher
+        .decrypt_in_place_detached(&nonce, &aad, plaintext, &encoded_tag)
+        .map_err(|_| SessionError::AuthenticationFailed)
+}
+
+fn decrypt_batch_serial(
+    cipher: &AeadCipher,
+    context: BatchOpenContext,
+    packets: &mut [u8],
+    packet_lengths: &[usize],
+    stride: usize,
+) -> Result<(), SessionError> {
+    packets
+        .chunks_mut(stride)
+        .zip(packet_lengths)
+        .try_for_each(|(packet, packet_len)| {
+            decrypt_prepared_packet(cipher, context, &mut packet[..*packet_len])
+        })
+}
+
+fn decrypt_batch_parallel(
+    cipher: &AeadCipher,
+    context: BatchOpenContext,
+    packets: &mut [u8],
+    packet_lengths: &[usize],
+    stride: usize,
+) -> Result<(), SessionError> {
+    use rayon::prelude::*;
+
+    packets
+        .par_chunks_mut(stride)
+        .zip(packet_lengths.par_iter())
+        .try_for_each(|(packet, packet_len)| {
+            decrypt_prepared_packet(cipher, context, &mut packet[..*packet_len])
+        })
+}
+
+fn seal_prepared_slots(
+    cipher: &AeadCipher,
+    context: BatchSealContext,
+    packets: &mut [&mut [u8]],
+    plaintext_lens: &[usize],
+) -> Result<(), SessionError> {
+    use rayon::prelude::*;
+
+    let plaintext_bytes = plaintext_lens
+        .iter()
+        .try_fold(0usize, |total, len| total.checked_add(*len))
+        .ok_or(SessionError::PacketTooLong)?;
+    let parallel = crate::crypto_batch::parallel_threshold_reached(packets.len(), plaintext_bytes);
+
+    let seal_one = |(index, (packet, plaintext_len)): (usize, (&mut &mut [u8], &usize))| {
+        let plaintext_len = *plaintext_len;
+        let packet_len = data_packet_len(plaintext_len)?;
+        let counter = context.start_counter + index as u64;
+        let header = DataHeader::new(context.peer_receiver_index, context.epoch, counter);
+        packet[..DATA_HEADER_LEN].copy_from_slice(&header.encode());
+        let aad = data_aad(header, context.session_id, plaintext_len as u16);
+        let nonce = nonce_for(context.direction, counter);
+        let tag = cipher
+            .encrypt_in_place_detached(
+                &nonce,
+                &aad,
+                &mut packet[DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext_len],
+            )
+            .map_err(|_| SessionError::AuthenticationFailed)?;
+        packet[DATA_HEADER_LEN + plaintext_len..packet_len].copy_from_slice(&tag);
+        Ok::<(), SessionError>(())
+    };
+
+    if parallel {
+        let worker_result = crate::crypto_batch::try_run(|| {
+            packets
+                .par_iter_mut()
+                .zip(plaintext_lens.par_iter())
+                .enumerate()
+                .try_for_each(seal_one)
+        });
+        if let Some(result) = worker_result {
+            crate::crypto_batch::record_parallel(packets.len());
+            return result;
+        }
+    }
+
+    crate::crypto_batch::record_serial();
+    packets
+        .iter_mut()
+        .zip(plaintext_lens)
+        .enumerate()
+        .try_for_each(seal_one)
 }
 
 /// Receiving state for one direction of a v2 session epoch.
@@ -570,11 +777,15 @@ impl ReceiveCipher {
     /// Authenticate and decrypt multiple packets from one preallocated buffer.
     ///
     /// `packet_lengths[i]` is the exact datagram length at
-    /// `packets[i * stride]`. The complete layout is validated before any
-    /// packet is decrypted. Authentication errors are fail-fast: packets before
-    /// the failing index may already be decrypted and marked in the replay
-    /// window, while the failing packet does not consume its counter. The caller
-    /// owns all storage; this method performs no per-packet allocation.
+    /// `packets[i * stride]`. The complete layout and replay windows are
+    /// validated before any packet is decrypted. AEAD work may run in parallel;
+    /// replay counters are committed in ascending counter order only after the
+    /// complete batch authenticates, so worker completion order cannot reorder
+    /// replay state and an out-of-order batch cannot expire its own members.
+    /// On any error no packet in this batch consumes a replay counter, but
+    /// successfully authenticated packets may already have been decrypted in
+    /// place. The caller must discard or clear the complete output batch after
+    /// every error; the valid prefix is not a stable API contract.
     ///
     /// Returns the total number of authenticated plaintext bytes.
     pub fn open_batch_in_place(
@@ -588,15 +799,63 @@ impl ReceiveCipher {
         }
         validate_batch_layout(packets.len(), packet_lengths, stride)?;
 
+        let mut headers = Vec::with_capacity(packet_lengths.len());
         let mut plaintext_bytes = 0usize;
         for (index, packet_len) in packet_lengths.iter().copied().enumerate() {
             let offset = index
                 .checked_mul(stride)
                 .ok_or(SessionError::PacketTooLong)?;
-            let plaintext = self.open_in_place(&mut packets[offset..offset + packet_len])?;
+            let packet = &packets[offset..offset + packet_len];
+            let header = DataHeader::decode(packet)?;
+            if header.receiver_index != self.local_receiver_index {
+                return Err(SessionError::ReceiverIndexMismatch);
+            }
+            if header.epoch != self.epoch {
+                return Err(SessionError::EpochMismatch);
+            }
+            if header.counter >= MAX_PACKETS_PER_EPOCH {
+                return Err(SessionError::CounterExhausted);
+            }
+            self.replay_window.check(header.counter)?;
             plaintext_bytes = plaintext_bytes
-                .checked_add(plaintext.len())
+                .checked_add(packet_len - DATA_HEADER_LEN - AEAD_TAG_LEN)
                 .ok_or(SessionError::PacketTooLong)?;
+            headers.push(header);
+        }
+        headers.sort_unstable_by_key(|header| header.counter);
+        if headers
+            .windows(2)
+            .any(|pair| pair[0].counter == pair[1].counter)
+        {
+            return Err(SessionError::ReplayDetected);
+        }
+
+        let context = BatchOpenContext {
+            session_id: self.session_id,
+            direction: self.direction,
+            epoch: self.epoch,
+            local_receiver_index: self.local_receiver_index,
+        };
+        let parallel =
+            crate::crypto_batch::parallel_threshold_reached(packet_lengths.len(), plaintext_bytes);
+        if parallel {
+            if let Some(result) = crate::crypto_batch::try_run(|| {
+                decrypt_batch_parallel(&self.cipher, context, packets, packet_lengths, stride)
+            }) {
+                crate::crypto_batch::record_parallel(packet_lengths.len());
+                result?;
+            } else {
+                crate::crypto_batch::record_serial();
+                decrypt_batch_serial(&self.cipher, context, packets, packet_lengths, stride)?;
+            }
+        } else {
+            crate::crypto_batch::record_serial();
+            decrypt_batch_serial(&self.cipher, context, packets, packet_lengths, stride)?;
+        }
+
+        headers.sort_unstable_by_key(|header| header.counter);
+        for header in headers {
+            self.replay_window.mark_authenticated(header.counter)?;
         }
         Ok(plaintext_bytes)
     }
@@ -723,11 +982,40 @@ impl EpochSession {
         Ok(sealed)
     }
 
+    /// Encrypt a batch whose plaintexts already occupy their packet buffers.
+    ///
+    /// Validation and epoch byte accounting succeed before the output buffers
+    /// are modified. The active sender commits all counters only after every
+    /// AEAD operation succeeds.
+    pub fn seal_batch_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        plaintext_lens: &[usize],
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        self.prune_retired_receive(now);
+        let plaintext_bytes = plaintext_lens
+            .iter()
+            .try_fold(0u64, |total, len| total.checked_add(*len as u64));
+        let plaintext_bytes = plaintext_bytes.ok_or(SessionError::RekeyRequired)?;
+        self.ensure_active_epoch_bytes(plaintext_bytes, now)?;
+        let sealed = self
+            .active_send
+            .seal_batch_in_place(packets, plaintext_lens)?;
+        self.sent_bytes = self
+            .sent_bytes
+            .checked_add(plaintext_bytes)
+            .ok_or(SessionError::RekeyRequired)?;
+        Ok(sealed)
+    }
+
     /// Authenticate and decrypt a batch, routing each packet to its epoch.
     ///
-    /// The complete buffer layout is validated first. Per-packet authentication
-    /// is fail-fast with the same committed-prefix semantics as
-    /// [`ReceiveCipher::open_batch_in_place`]. No per-packet allocation is
+    /// The complete buffer layout is validated first. Packets are opened
+    /// serially and fail-fast, so replay counters for a successfully opened
+    /// prefix remain committed if a later packet fails. This differs from
+    /// [`ReceiveCipher::open_batch_in_place`], which commits no replay counters
+    /// unless the complete batch authenticates. No per-packet allocation is
     /// performed.
     pub fn open_batch_in_place(
         &mut self,
@@ -1480,6 +1768,291 @@ mod tests {
             let offset = index * stride + DATA_HEADER_LEN;
             assert_eq!(&packets[offset..offset + expected.len()], *expected);
         }
+    }
+
+    #[test]
+    fn in_place_batch_uses_worker_pool_and_preserves_nonce_order() {
+        let mut sender = SendCipher::new_with_suite(
+            DataCipherSuite::Aes256Gcm,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let payloads: Vec<Vec<u8>> = (0..32).map(|index| vec![index as u8; 1420]).collect();
+        let mut packets: Vec<Vec<u8>> = payloads
+            .iter()
+            .map(|payload| {
+                let mut packet = vec![0u8; DATA_HEADER_LEN + payload.len() + AEAD_TAG_LEN];
+                packet[DATA_HEADER_LEN..DATA_HEADER_LEN + payload.len()].copy_from_slice(payload);
+                packet
+            })
+            .collect();
+        let mut slots: Vec<&mut [u8]> = packets.iter_mut().map(Vec::as_mut_slice).collect();
+        let lens: Vec<usize> = payloads.iter().map(Vec::len).collect();
+
+        assert_eq!(
+            sender
+                .seal_batch_in_place(&mut slots, &lens)
+                .expect("parallel in-place seal"),
+            payloads.len()
+        );
+        assert_eq!(sender.next_send_counter(), payloads.len() as u64);
+        drop(slots);
+
+        let metrics = crate::crypto_batch_metrics();
+        assert!(metrics.worker_threads > 0);
+        assert!(metrics.parallel_packets >= payloads.len() as u64);
+
+        let mut receiver = ReceiveCipher::new_with_suite(
+            DataCipherSuite::Aes256Gcm,
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        for (index, packet) in packets.iter_mut().enumerate() {
+            let header = DataHeader::decode(packet).expect("decode ordered packet");
+            assert_eq!(header.counter, index as u64);
+            let plaintext = receiver.open_in_place(packet).expect("open ordered packet");
+            assert_eq!(plaintext, payloads[index]);
+        }
+    }
+
+    fn seal_contiguous_batch(payloads: &[&[u8]], stride: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut sender = SendCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let mut packets = vec![0u8; stride * payloads.len()];
+        assert_eq!(
+            sender
+                .seal_batch(payloads, &mut packets, stride)
+                .expect("seal test batch"),
+            payloads.len()
+        );
+        let lengths = payloads
+            .iter()
+            .map(|payload| DATA_HEADER_LEN + payload.len() + AEAD_TAG_LEN)
+            .collect();
+        (packets, lengths)
+    }
+
+    fn receive_batch_cipher() -> ReceiveCipher {
+        ReceiveCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        )
+    }
+
+    #[test]
+    fn parallel_batch_open_marks_every_counter_for_replay() {
+        let payload = vec![0x5a; 1420];
+        let payloads = vec![payload.as_slice(); 32];
+        let stride = DATA_HEADER_LEN + payload.len() + AEAD_TAG_LEN;
+        let (mut packets, lengths) = seal_contiguous_batch(&payloads, stride);
+        let mut receiver = receive_batch_cipher();
+        let before = crate::crypto_batch_metrics();
+
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut packets, &lengths, stride)
+                .expect("parallel batch open"),
+            payloads.len() * payload.len()
+        );
+
+        let after = crate::crypto_batch_metrics();
+        assert!(after.parallel_jobs > before.parallel_jobs);
+        assert!(
+            after
+                .parallel_packets
+                .saturating_sub(before.parallel_packets)
+                >= payloads.len() as u64
+        );
+        for (index, packet_len) in lengths.iter().copied().enumerate() {
+            let offset = index * stride;
+            let header = DataHeader::decode(&packets[offset..offset + packet_len])
+                .expect("decode authenticated batch header");
+            assert_eq!(
+                receiver.replay_window.check(header.counter),
+                Err(SessionError::ReplayDetected)
+            );
+        }
+        assert_eq!(
+            receiver.open_batch_in_place(&mut packets, &lengths, stride),
+            Err(SessionError::ReplayDetected)
+        );
+    }
+
+    #[test]
+    fn batch_open_authentication_failure_commits_no_replay_counter() {
+        let payload = vec![0x31; 1420];
+        let payloads = vec![payload.as_slice(); 8];
+        let stride = DATA_HEADER_LEN + payload.len() + AEAD_TAG_LEN;
+        let (mut tampered, lengths) = seal_contiguous_batch(&payloads, stride);
+        let clean = tampered.clone();
+        tampered[stride + lengths[1] - 1] ^= 1;
+        let mut receiver = receive_batch_cipher();
+
+        assert_eq!(
+            receiver.open_batch_in_place(&mut tampered, &lengths, stride),
+            Err(SessionError::AuthenticationFailed)
+        );
+        let mut retry = clean;
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut retry, &lengths, stride)
+                .expect("failed batch must not consume replay state"),
+            payloads.len() * payload.len()
+        );
+    }
+
+    #[test]
+    fn batch_open_rejects_duplicate_counter_before_decrypting() {
+        let payloads: [&[u8]; 2] = [b"duplicate-a", b"duplicate-b"];
+        let stride = 64usize;
+        let (source, lengths) = seal_contiguous_batch(&payloads, stride);
+        let mut duplicated = vec![0u8; stride * 3];
+        duplicated[..stride].copy_from_slice(&source[..stride]);
+        duplicated[stride..stride * 2].copy_from_slice(&source[..stride]);
+        duplicated[stride * 2..stride * 3].copy_from_slice(&source[stride..stride * 2]);
+        let duplicate_lengths = [lengths[0], lengths[0], lengths[1]];
+        let mut receiver = receive_batch_cipher();
+
+        assert_eq!(
+            receiver.open_batch_in_place(&mut duplicated, &duplicate_lengths, stride),
+            Err(SessionError::ReplayDetected)
+        );
+        let mut clean = source;
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut clean, &lengths, stride)
+                .expect("duplicate preflight must not consume counters"),
+            payloads.iter().map(|payload| payload.len()).sum()
+        );
+    }
+
+    #[test]
+    fn batch_open_commits_out_of_order_counters_without_self_expiry() {
+        let payloads: [&[u8]; 4] = [
+            b"counter-zero",
+            b"counter-one",
+            b"counter-two",
+            b"counter-three",
+        ];
+        let stride = 64usize;
+        let (source, lengths) = seal_contiguous_batch(&payloads, stride);
+        let order = [3usize, 0, 2, 1];
+        let mut reordered = vec![0u8; stride * order.len()];
+        for (destination, source_index) in order.into_iter().enumerate() {
+            reordered[destination * stride..(destination + 1) * stride]
+                .copy_from_slice(&source[source_index * stride..(source_index + 1) * stride]);
+        }
+        let reordered_lengths: Vec<usize> = order.iter().map(|index| lengths[*index]).collect();
+        let mut receiver = receive_batch_cipher();
+
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut reordered, &reordered_lengths, stride)
+                .expect("out-of-order batch open"),
+            payloads.iter().map(|payload| payload.len()).sum()
+        );
+        for (destination, source_index) in order.into_iter().enumerate() {
+            let offset = destination * stride + DATA_HEADER_LEN;
+            assert_eq!(
+                &reordered[offset..offset + payloads[source_index].len()],
+                payloads[source_index]
+            );
+        }
+    }
+
+    #[test]
+    fn batch_open_rejects_expired_and_exhausted_counters_before_decrypt() {
+        let mut sender = SendCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let stride = 64usize;
+        let mut packets = vec![0u8; stride * 2];
+        let old_len = sender
+            .seal(b"old", &mut packets[..stride])
+            .expect("seal old packet");
+        sender.next_send_counter = REPLAY_WINDOW_SIZE + 1;
+        let new_len = sender
+            .seal(b"new", &mut packets[stride..stride * 2])
+            .expect("seal new packet");
+        let mut receiver = receive_batch_cipher();
+        receiver
+            .replay_window
+            .mark_authenticated(REPLAY_WINDOW_SIZE)
+            .expect("advance replay window");
+
+        assert_eq!(
+            receiver.open_batch_in_place(&mut packets, &[old_len, new_len], stride),
+            Err(SessionError::CounterTooOld)
+        );
+        assert_eq!(
+            receiver
+                .open_in_place(&mut packets[stride..stride + new_len])
+                .expect("expired batch must leave newer counter untouched"),
+            b"new"
+        );
+
+        let mut exhausted = vec![0u8; MIN_DATA_PACKET_LEN];
+        exhausted[..DATA_HEADER_LEN]
+            .copy_from_slice(&DataHeader::new(0x0102_0304, 17, MAX_PACKETS_PER_EPOCH).encode());
+        let mut receiver = receive_batch_cipher();
+        assert_eq!(
+            receiver.open_batch_in_place(&mut exhausted, &[MIN_DATA_PACKET_LEN], stride),
+            Err(SessionError::CounterExhausted)
+        );
+    }
+
+    #[test]
+    fn in_place_batch_layout_error_does_not_advance_counter() {
+        let mut sender = SendCipher::new(
+            TEST_KEY,
+            TEST_SESSION_ID,
+            Direction::InitiatorToResponder,
+            17,
+            0x0102_0304,
+        );
+        let mut first = vec![0u8; MIN_DATA_PACKET_LEN];
+        let mut too_short = vec![0u8; MIN_DATA_PACKET_LEN - 1];
+        let mut slots: Vec<&mut [u8]> = vec![&mut first, &mut too_short];
+        assert_eq!(
+            sender.seal_batch_in_place(&mut slots, &[0, 0]),
+            Err(SessionError::BufferTooSmall)
+        );
+        assert_eq!(sender.next_send_counter(), 0);
+    }
+
+    #[test]
+    fn batch_open_accepts_compact_trailing_slot_without_panicking() {
+        let payloads: [&[u8]; 2] = [b"first", b"second"];
+        let stride = 64usize;
+        let (source, lengths) = seal_contiguous_batch(&payloads, stride);
+        let compact_len = stride + lengths[1];
+        let mut compact = source[..compact_len].to_vec();
+        let mut receiver = receive_batch_cipher();
+
+        assert_eq!(
+            receiver
+                .open_batch_in_place(&mut compact, &lengths, stride)
+                .expect("compact trailing slot"),
+            payloads.iter().map(|payload| payload.len()).sum()
+        );
     }
 
     #[test]

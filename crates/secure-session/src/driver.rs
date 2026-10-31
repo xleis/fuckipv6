@@ -221,6 +221,27 @@ impl SessionDriver {
         Ok(packet_len)
     }
 
+    /// Encrypt a batch whose plaintexts already occupy their packet buffers.
+    pub fn seal_batch_in_place(
+        &mut self,
+        packets: &mut [&mut [u8]],
+        plaintext_lens: &[usize],
+        now: Instant,
+    ) -> Result<usize, DriverError> {
+        let plaintext_bytes = plaintext_lens
+            .iter()
+            .try_fold(0u64, |total, len| total.checked_add(*len as u64));
+        let plaintext_bytes =
+            plaintext_bytes.ok_or(DriverError::Data(SessionError::PacketTooLong))?;
+        let session = self.session.as_mut().ok_or(DriverError::Closed)?;
+        let sealed = session
+            .seal_batch_in_place(packets, plaintext_lens, now)
+            .map_err(DriverError::Data)?;
+        self.stats.packets_sent += sealed as u64;
+        self.stats.plaintext_bytes_sent += plaintext_bytes;
+        Ok(sealed)
+    }
+
     /// Authenticate and decrypt one packet under the active or retired epoch.
     pub fn open_in_place<'a>(
         &mut self,

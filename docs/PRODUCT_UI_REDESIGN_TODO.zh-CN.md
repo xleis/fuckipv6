@@ -48,7 +48,7 @@
 |---|---|---|---|---|
 | W0 现状冻结 | `[~]` | P0 | 无 | 映射表、代码清单、审计确认；`docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
-| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC 传输与认证基座已落地；进程拆分、恢复和服务监督未完成 |
+| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC 传输、认证与服务循环已落地；进程拆分、恢复和服务监督未完成 |
 | W3 所有者安全 | `[ ]` | P0 | W2 | Passkey、HTTPS、初始化码、恢复 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
@@ -335,8 +335,10 @@ WebUI 内嵌 manifest 一致性测试均通过。
 - [~] 本机同用户认证和权限检查：Unix 校验 peer euid、目录 uid、0700 目录和 0600 socket；Windows 校验 peer token SID，当前仅有代码路径，尚无实机证据；
 - [x] 与 HTTP API 共用命令/事件/错误模型：IPC 请求复用 `NodeCommandRequest`，快照与事件复用 `NodeSnapshot`/`NodeEvent`，错误使用稳定 `IpcErrorCode`；
 - [x] 禁止远程无认证 IPC：不监听 TCP，Unix 使用本地 socket，Windows 使用 named pipe，并拒绝非当前用户 peer；
-- [~] IPC 断线重连和快照同步：已实现并测试断线后重新握手、以 `after_sequence` 重新订阅权威快照；尚未接入长期运行的 control/node 服务循环；
-- [~] 添加冒用、权限和重连测试：已有同用户/异用户授权、目录/socket 权限、版本错误、断线与快照恢复测试；尚无真实第二系统用户、Windows token 和长期事件缺口 E2E。
+- [x] IPC 断线重连和快照同步：已实现断线后重新握手、以权威快照和原子事件边界重新订阅；事件序号断档或广播滞后返回可重试的 `event_gap`，由客户端重连取快照；
+- [x] 长期运行服务循环：已实现认证连接接受、并发握手、snapshot/execute/subscribe 分发、请求 ID 校验、命令超时、事件推送、关闭宽限和 socket 清理；
+- [~] 添加冒用、权限和重连测试：已有同用户/异用户授权、目录/socket 权限、版本错误、断线快照恢复、请求 ID、订阅顺序和事件缺口测试；尚无真实第二系统用户、Windows token 和生产进程接线 E2E；
+- [ ] 将服务循环接入实际 control/node 进程并完成启动、崩溃、停止和服务监督联调。
 
 ### W2-03 UI 与 node 生命周期解耦 `[ ]`
 

@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 use super::{NodeEmbeddedServiceStatus, NodeLogLevel, NodeNetworkStatus, NodeRoutingMode};
@@ -55,6 +55,7 @@ pub enum NodeEventKind {
 pub struct NodeEventBus {
     sender: broadcast::Sender<NodeEvent>,
     sequence: Arc<AtomicU64>,
+    subscription_lock: Arc<Mutex<()>>,
 }
 
 impl NodeEventBus {
@@ -63,6 +64,7 @@ impl NodeEventBus {
         Self {
             sender,
             sequence: Arc::new(AtomicU64::new(0)),
+            subscription_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -70,8 +72,31 @@ impl NodeEventBus {
         self.sender.subscribe()
     }
 
+    /// Subscribe and capture an exact event boundary atomically with respect to
+    /// `publish`. Adapters use the returned sequence as the point from which an
+    /// authoritative snapshot must be followed. Events after that boundary are
+    /// guaranteed to be queued for the returned receiver.
+    pub fn subscribe_with_sequence(&self) -> (broadcast::Receiver<NodeEvent>, u64) {
+        let _guard = self
+            .subscription_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let receiver = self.sender.subscribe();
+        let sequence = self.sequence.load(Ordering::Acquire);
+        (receiver, sequence)
+    }
+
+    /// Return the latest published sequence without creating a subscriber.
+    pub fn latest_sequence(&self) -> u64 {
+        self.sequence.load(Ordering::Acquire)
+    }
+
     pub fn publish(&self, kind: NodeEventKind) -> NodeEvent {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let _guard = self
+            .subscription_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let event = NodeEvent { sequence, kind };
         let _ = self.sender.send(event.clone());
         event

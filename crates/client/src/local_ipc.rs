@@ -131,6 +131,8 @@ pub enum IpcErrorCode {
     MalformedRequest,
     RequestIdMismatch,
     BackendUnavailable,
+    EventGap,
+    Unsupported,
     Timeout,
     Internal,
 }
@@ -286,7 +288,14 @@ impl LocalServer {
         &self.endpoint
     }
 
-    pub async fn accept(&self) -> Result<LocalConnection> {
+    pub(crate) fn role(&self) -> EndpointRole {
+        self.role
+    }
+
+    /// Accept and authenticate a peer without waiting for its application
+    /// handshake. Long-running services use this to perform untrusted
+    /// handshakes in separate tasks instead of blocking the accept loop.
+    pub(crate) async fn accept_raw(&self) -> Result<LocalConnection> {
         let stream = self
             .listener
             .accept()
@@ -294,8 +303,15 @@ impl LocalServer {
             .context("接受本地 IPC 连接失败")?;
         let peer = peer_identity(&stream)?;
         authorize_peer(peer, current_user_id())?;
+        Ok(LocalConnection { stream, peer })
+    }
 
-        let mut connection = LocalConnection { stream, peer };
+    /// Complete the versioned client/server handshake for an authenticated
+    /// connection returned by [`LocalServer::accept_raw`].
+    pub(crate) async fn finish_handshake(
+        &self,
+        mut connection: LocalConnection,
+    ) -> Result<LocalConnection> {
         let (kind, hello): (FrameKind, ClientHello) = connection.receive().await?;
         if kind != FrameKind::ClientHello {
             send_protocol_error(
@@ -334,6 +350,11 @@ impl LocalServer {
         };
         connection.send(FrameKind::ServerHello, &ack).await?;
         Ok(connection)
+    }
+
+    pub async fn accept(&self) -> Result<LocalConnection> {
+        let connection = self.accept_raw().await?;
+        self.finish_handshake(connection).await
     }
 }
 

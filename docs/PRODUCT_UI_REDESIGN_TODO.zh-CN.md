@@ -334,13 +334,13 @@ control ─────┼── spawn / adopt / health-check ──► node
    └── instance lock + bounded shutdown watchdog    └── TUN/P2P/relay/exit/File
 ```
 
-### W2-01 control/node 进程模型 `[~]`
+### W2-01 control/node 进程模型 `[x]`
 
 - [x] 同一二进制支持 control 与 node 内部角色；
 - [x] 明确启动参数、环境、IPC 地址和退出码；
 - [x] control 不要求 TUN/路由特权；
 - [x] node 不直接暴露公网 WebUI；
-- [ ] 禁止 UI 每次启动创建第二份 runtime：GPUI 已改为远程 IPC；WebUI 仍待接线；
+- [x] 禁止 UI 每次启动创建第二份 runtime：GPUI 与 WebUI 均通过 `RemoteNodeSession` 连接同一 control/node 控制面；
 - [x] 输出进程模型图。
 
 ### W2-02 IPC 契约与认证 `[~]`

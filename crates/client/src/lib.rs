@@ -31,6 +31,7 @@ pub mod p2p;
 pub mod remote_node;
 pub mod routing;
 pub mod runtime_process;
+pub mod service;
 pub mod signaling;
 pub mod stats;
 pub mod symmetric;
@@ -39,3 +40,5 @@ pub mod ui;
 #[cfg(feature = "userspace-nat-prototype")]
 pub mod userspace_nat_prototype;
 pub mod webui;
+#[cfg(windows)]
+mod windows_service;

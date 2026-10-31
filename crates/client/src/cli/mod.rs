@@ -377,6 +377,9 @@ pub enum Commands {
         output: Option<String>,
     },
 
+    /// 安装、升级和管理 systemd/launchd/Windows 系统服务
+    Service(crate::service::ServiceArgs),
+
     /// 查看版本信息
     Version,
 
@@ -853,6 +856,7 @@ async fn run_command(command: Commands) -> Result<()> {
         | Commands::QuicInfo
         | Commands::RegisterCheck { .. }) => run_runtime_command(command).await?,
         command @ Commands::LxtRescue { .. } => run_lxt_rescue_command(command).await?,
+        Commands::Service(args) => crate::service::run(args)?,
         command @ (Commands::InitConfig { .. }
         | Commands::EncryptConfig { .. }
         | Commands::DecryptConfig { .. }
@@ -1147,6 +1151,31 @@ mod tests {
 
         let explicit_false = Cli::try_parse_from(["fuckipv6", "--is-exit-node=false"]).unwrap();
         assert_eq!(explicit_false.is_exit_node, Some(false));
+    }
+
+    #[test]
+    fn parses_service_management_commands() {
+        let cli = Cli::try_parse_from([
+            "fuckipv6",
+            "service",
+            "install",
+            "--scope",
+            "user",
+            "--webui-port",
+            "9090",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Service(args)) => {
+                assert!(matches!(
+                    args.action,
+                    crate::service::ServiceAction::Install
+                ));
+                assert_eq!(args.scope, crate::service::ServiceScope::User);
+                assert_eq!(args.webui_port, 9090);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

@@ -31,8 +31,11 @@ use crate::node::{NodeCommand, NodeCommandRequest};
 const CONTROL_ARGUMENT: &str = "__control";
 const NODE_ARGUMENT: &str = "__node";
 const SERVICE_ARGUMENT: &str = "__service";
+#[cfg(windows)]
+const WINDOWS_SERVICE_ARGUMENT: &str = "--windows-service";
 const OPTIONS_ENV: &str = "FUCKIPV6_INTERNAL_OPTIONS";
 const OPTIONS_FILE_ARGUMENT: &str = "--options-file";
+const CONFIG_DIR_ARGUMENT: &str = "--config-dir";
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NODE_UNHEALTHY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -134,10 +137,29 @@ pub fn internal_entrypoint() -> Option<i32> {
         }
     };
 
+    if matches!(role, InternalRole::Service) {
+        match argument_value(&arguments, CONFIG_DIR_ARGUMENT) {
+            Ok(Some(config_dir)) => std::env::set_var("FUCKIPV6_CONFIG_DIR", config_dir),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("fuckipv6 内部进程参数错误: {error:#}");
+                return Some(InternalExitCode::Configuration as i32);
+            }
+        }
+    }
+
     let result = match role {
         InternalRole::Control => run_runtime(|runtime| runtime.block_on(run_control(options))),
         InternalRole::Node => run_runtime(|runtime| runtime.block_on(run_node(options))),
-        InternalRole::Service => run_runtime(|runtime| runtime.block_on(run_service(options))),
+        #[cfg(windows)]
+        InternalRole::Service if is_windows_service_invocation(&arguments) => {
+            crate::windows_service::run(move |shutdown| {
+                run_runtime(|runtime| runtime.block_on(run_service(options, Some(shutdown))))
+            })
+        }
+        InternalRole::Service => {
+            run_runtime(|runtime| runtime.block_on(run_service(options, None)))
+        }
     };
     Some(match result {
         Ok(()) => InternalExitCode::Success as i32,
@@ -146,6 +168,13 @@ pub fn internal_entrypoint() -> Option<i32> {
             InternalExitCode::RuntimeFailure as i32
         }
     })
+}
+
+#[cfg(windows)]
+fn is_windows_service_invocation(arguments: &[std::ffi::OsString]) -> bool {
+    arguments
+        .iter()
+        .any(|argument| argument == WINDOWS_SERVICE_ARGUMENT)
 }
 
 fn internal_role(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Option<InternalRole> {
@@ -159,13 +188,7 @@ fn internal_role(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Opt
 }
 
 fn internal_options(arguments: &[std::ffi::OsString]) -> Result<InternalOptions> {
-    if let Some(index) = arguments
-        .iter()
-        .position(|argument| argument == OPTIONS_FILE_ARGUMENT)
-    {
-        let path = arguments
-            .get(index + 1)
-            .context("内部服务参数缺少 --options-file 路径")?;
+    if let Some(path) = argument_value(arguments, OPTIONS_FILE_ARGUMENT)? {
         let encoded = std::fs::read_to_string(path)
             .with_context(|| format!("无法读取内部服务参数 {}", PathBuf::from(path).display()))?;
         return InternalOptions::decode(&encoded);
@@ -173,6 +196,30 @@ fn internal_options(arguments: &[std::ffi::OsString]) -> Result<InternalOptions>
 
     let encoded = std::env::var(OPTIONS_ENV).context("缺少内部进程参数")?;
     InternalOptions::decode(&encoded)
+}
+
+fn argument_value<'a>(
+    arguments: &'a [std::ffi::OsString],
+    name: &str,
+) -> Result<Option<&'a std::ffi::OsStr>> {
+    let Some(index) = arguments.iter().position(|argument| argument == name) else {
+        return Ok(None);
+    };
+    arguments
+        .get(index + 1)
+        .map(std::ffi::OsString::as_os_str)
+        .map(Some)
+        .with_context(|| format!("内部进程参数 {name} 缺少路径"))
+}
+
+pub(crate) fn service_options_json(webui_port: u16) -> Result<String> {
+    InternalOptions {
+        routing_mode: None,
+        exit_node: None,
+        is_exit_node: None,
+        webui_port,
+    }
+    .encode()
 }
 
 fn run_runtime(run: impl FnOnce(&tokio::runtime::Runtime) -> Result<()>) -> Result<()> {
@@ -332,7 +379,10 @@ async fn run_control(options: InternalOptions) -> Result<()> {
     run_control_loop(options, wait_for_shutdown_signal()).await
 }
 
-async fn run_service(options: InternalOptions) -> Result<()> {
+async fn run_service(
+    options: InternalOptions,
+    windows_shutdown: Option<watch::Receiver<bool>>,
+) -> Result<()> {
     logging::init_default()?;
     if options.webui_port == 0 {
         bail!("服务模式要求非零 WebUI 监听端口");
@@ -368,9 +418,11 @@ async fn run_service(options: InternalOptions) -> Result<()> {
             crate::webui::start_app_webui_with_node(options.webui_port, controller, node_http)
                 .await?,
         );
+        #[cfg(windows)]
+        crate::windows_service::report_running();
 
         let exit_result = tokio::select! {
-            _ = wait_for_shutdown_signal() => Ok(()),
+            _ = wait_for_service_shutdown(windows_shutdown.clone()) => Ok(()),
             result = control.as_mut().expect("control task is live") => {
                 control = None;
                 match result {
@@ -696,6 +748,23 @@ async fn request_node_stop() -> bool {
         .await,
         Ok(Ok(LocalResponse::Accepted { .. }))
     )
+}
+
+async fn wait_for_service_shutdown(mut windows_shutdown: Option<watch::Receiver<bool>>) {
+    let Some(mut shutdown) = windows_shutdown.take() else {
+        wait_for_shutdown_signal().await;
+        return;
+    };
+    tokio::select! {
+        _ = wait_for_shutdown_signal() => {}
+        _ = async {
+            while !*shutdown.borrow() {
+                if shutdown.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {}
+    }
 }
 
 async fn wait_for_shutdown_signal() {

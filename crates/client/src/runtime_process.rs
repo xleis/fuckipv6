@@ -6,6 +6,7 @@
 //! IPC boundary instead of constructing a second node runtime.
 
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -29,7 +30,9 @@ use crate::node::{NodeCommand, NodeCommandRequest};
 
 const CONTROL_ARGUMENT: &str = "__control";
 const NODE_ARGUMENT: &str = "__node";
+const SERVICE_ARGUMENT: &str = "__service";
 const OPTIONS_ENV: &str = "FUCKIPV6_INTERNAL_OPTIONS";
+const OPTIONS_FILE_ARGUMENT: &str = "--options-file";
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NODE_UNHEALTHY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -40,6 +43,7 @@ const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(45);
 const NODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(35);
 const COMMAND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SUPERVISOR_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 const RESTART_BACKOFF_MIN: Duration = Duration::from_millis(250);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
@@ -89,6 +93,17 @@ impl InternalOptions {
         }
     }
 
+    fn webui_runtime_options(&self) -> RuntimeOptions {
+        RuntimeOptions {
+            routing_mode: self.routing_mode.clone(),
+            exit_node: self.exit_node.clone(),
+            is_exit_node: self.is_exit_node,
+            headless: true,
+            gui: false,
+            webui_port: self.webui_port,
+        }
+    }
+
     fn encode(&self) -> Result<String> {
         serde_json::to_string(self).context("无法编码内部进程参数")
     }
@@ -101,6 +116,7 @@ impl InternalOptions {
 enum InternalRole {
     Control,
     Node,
+    Service,
 }
 
 /// Dispatch an internal process role before clap parses the public CLI.
@@ -108,11 +124,9 @@ enum InternalRole {
 /// Returns `None` for every normal invocation, allowing `main` to preserve the
 /// existing public CLI and native-GPUI main-thread requirements.
 pub fn internal_entrypoint() -> Option<i32> {
-    let role = internal_role(std::env::args_os())?;
-    let options = match std::env::var(OPTIONS_ENV)
-        .map_err(anyhow::Error::from)
-        .and_then(|encoded| InternalOptions::decode(&encoded))
-    {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let role = internal_role(arguments.iter().cloned())?;
+    let options = match internal_options(&arguments) {
         Ok(options) => options,
         Err(error) => {
             eprintln!("fuckipv6 内部进程参数错误: {error:#}");
@@ -123,6 +137,7 @@ pub fn internal_entrypoint() -> Option<i32> {
     let result = match role {
         InternalRole::Control => run_runtime(|runtime| runtime.block_on(run_control(options))),
         InternalRole::Node => run_runtime(|runtime| runtime.block_on(run_node(options))),
+        InternalRole::Service => run_runtime(|runtime| runtime.block_on(run_service(options))),
     };
     Some(match result {
         Ok(()) => InternalExitCode::Success as i32,
@@ -138,8 +153,26 @@ fn internal_role(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Opt
     match role.to_str()? {
         CONTROL_ARGUMENT => Some(InternalRole::Control),
         NODE_ARGUMENT => Some(InternalRole::Node),
+        SERVICE_ARGUMENT => Some(InternalRole::Service),
         _ => None,
     }
+}
+
+fn internal_options(arguments: &[std::ffi::OsString]) -> Result<InternalOptions> {
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == OPTIONS_FILE_ARGUMENT)
+    {
+        let path = arguments
+            .get(index + 1)
+            .context("内部服务参数缺少 --options-file 路径")?;
+        let encoded = std::fs::read_to_string(path)
+            .with_context(|| format!("无法读取内部服务参数 {}", PathBuf::from(path).display()))?;
+        return InternalOptions::decode(&encoded);
+    }
+
+    let encoded = std::env::var(OPTIONS_ENV).context("缺少内部进程参数")?;
+    InternalOptions::decode(&encoded)
 }
 
 fn run_runtime(run: impl FnOnce(&tokio::runtime::Runtime) -> Result<()>) -> Result<()> {
@@ -296,15 +329,95 @@ async fn run_control(options: InternalOptions) -> Result<()> {
         return Ok(());
     };
 
+    run_control_loop(options, wait_for_shutdown_signal()).await
+}
+
+async fn run_service(options: InternalOptions) -> Result<()> {
+    logging::init_default()?;
+    if options.webui_port == 0 {
+        bail!("服务模式要求非零 WebUI 监听端口");
+    }
+
+    // The service process must own the control lease. If another control already
+    // exists, failing closed avoids a unit that appears healthy while its stop
+    // action cannot stop the authority responsible for the node/data plane.
+    let _control_lock = acquire_instance_lock("control")?
+        .context("已有 control 进程运行；请先停止交互式实例再启动系统服务")?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut control = Some(tokio::spawn(run_control_loop(
+        options.clone(),
+        wait_for_control_shutdown(shutdown_rx),
+    )));
+
+    let result = async {
+        wait_for_node_ready(READY_TIMEOUT).await?;
+
+        let session = crate::remote_node::RemoteNodeSession::start_with_role_async(
+            options.webui_runtime_options(),
+            IpcRole::WebUi,
+        )
+        .await?;
+        let node_http = crate::node::NodeHttpAdapter::new(
+            session.commands(),
+            session.state(),
+            session.events(),
+        );
+        let controller =
+            std::sync::Arc::new(crate::webui::AppController::from_node_session(session));
+        let mut webui = Some(
+            crate::webui::start_app_webui_with_node(options.webui_port, controller, node_http)
+                .await?,
+        );
+
+        let exit_result = tokio::select! {
+            _ = wait_for_shutdown_signal() => Ok(()),
+            result = control.as_mut().expect("control task is live") => {
+                control = None;
+                match result {
+                    Ok(Ok(())) => Err(anyhow::anyhow!("control 在服务停止请求前退出")),
+                    Ok(Err(error)) => Err(error.context("control 异常退出")),
+                    Err(error) => Err(anyhow::Error::from(error).context("等待 control 失败")),
+                }
+            }
+            result = webui.as_mut().expect("WebUI task is live") => {
+                webui = None;
+                match result {
+                    Ok(()) => Err(anyhow::anyhow!("WebUI 在服务停止请求前退出")),
+                    Err(error) => Err(anyhow::Error::from(error).context("等待 WebUI 失败")),
+                }
+            }
+        };
+
+        if let Some(webui) = webui.take() {
+            webui.abort();
+            let _ = webui.await;
+        }
+        let _ = shutdown_tx.send(true);
+        let cleanup_result = stop_control_task(control.take()).await;
+        exit_result.and(cleanup_result)
+    }
+    .await;
+
+    if control.is_some() {
+        let _ = shutdown_tx.send(true);
+        let _ = stop_control_task(control.take()).await;
+    }
+    result
+}
+
+async fn run_control_loop<F>(options: InternalOptions, shutdown: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
     let mut child: Option<Child> = None;
     let mut adopted_node = false;
     let mut restart_delay = RESTART_BACKOFF_MIN;
     let mut unhealthy_since: Option<Instant> = None;
-    let mut signal = Box::pin(wait_for_shutdown_signal());
+    let mut shutdown = Box::pin(shutdown);
 
     loop {
         tokio::select! {
-            _ = &mut signal => break,
+            _ = &mut shutdown => break,
             _ = sleep(READY_POLL_INTERVAL) => {}
         }
 
@@ -361,6 +474,36 @@ async fn run_control(options: InternalOptions) -> Result<()> {
 
     stop_managed_node(child).await;
     Ok(())
+}
+
+async fn wait_for_control_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
+}
+
+async fn stop_control_task(control: Option<tokio::task::JoinHandle<Result<()>>>) -> Result<()> {
+    let Some(mut control) = control else {
+        return Ok(());
+    };
+    match timeout(SUPERVISOR_STOP_TIMEOUT, &mut control).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(error.context("control 关闭失败")),
+        Ok(Err(error)) => Err(anyhow::Error::from(error).context("等待 control 关闭失败")),
+        Err(_) => {
+            control.abort();
+            let _ = control.await;
+            bail!(
+                "control 未能在 {} 秒内关闭；服务管理器必须终止整个服务进程组",
+                SUPERVISOR_STOP_TIMEOUT.as_secs()
+            )
+        }
+    }
 }
 
 fn acquire_instance_lock(role: &str) -> Result<Option<File>> {

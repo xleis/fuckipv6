@@ -123,6 +123,29 @@ fn spawn_headless_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
     })
 }
 
+fn spawn_service(directory: &Path, port: u16) -> Result<ProcessGuard> {
+    Ok(ProcessGuard {
+        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+            .arg("__service")
+            .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
+            .env("XDG_CONFIG_HOME", directory.join("config"))
+            .env("HOME", directory.join("home"))
+            .env(
+                "FUCKIPV6_INTERNAL_OPTIONS",
+                format!(
+                    r#"{{"routing_mode":null,"exit_node":null,"is_exit_node":null,"webui_port":{port}}}"#
+                ),
+            )
+            .env("RUST_LOG", "error")
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("无法启动 __service 集成测试进程")?,
+    })
+}
+
 fn spawn_headless_up_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
     Ok(ProcessGuard {
         child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
@@ -285,6 +308,44 @@ async fn control_supervises_one_node_and_ui_disconnect_leaves_it_running() -> Re
     assert!(status.success(), "control exited with {status}: {output}");
     assert!(!endpoint_path(&node_endpoint).exists());
     assert!(!endpoint_path(&control_endpoint).exists());
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn service_process_owns_control_and_stops_node_on_termination() -> Result<()> {
+    let directory = temp_dir("service-lifecycle")?;
+    let runtime_dir = directory.join("runtime");
+    let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
+    let control_lock = runtime_dir.join("control.lock");
+    let node_lock = runtime_dir.join("node.lock");
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+
+    let mut service = spawn_service(&directory, port)?;
+    let service_pid = service.child.id();
+    wait_for_webui(port).await?;
+    wait_until_ready(&node_endpoint).await?;
+    assert_eq!(
+        read_pid(&control_lock)?,
+        service_pid,
+        "service manager must supervise the process holding the control lease"
+    );
+    let node_pid = read_pid(&node_lock)?;
+    assert_ne!(
+        node_pid, service_pid,
+        "node remains an isolated child process"
+    );
+
+    send_signal(service_pid, "TERM")?;
+    let status = wait_for_exit(&mut service).await?;
+    assert!(status.success(), "service exited with {status}");
+    wait_for_process_exit(node_pid).await?;
+    assert!(
+        !runtime_dir.join("node.sock").exists(),
+        "service shutdown left the node IPC endpoint behind"
+    );
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }

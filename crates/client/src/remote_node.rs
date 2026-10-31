@@ -36,6 +36,15 @@ pub struct RemoteNodeSession {
 
 impl RemoteNodeSession {
     pub fn start(options: RuntimeOptions) -> Result<Self> {
+        Self::start_with_role(options, IpcRole::Gpui)
+    }
+
+    /// Connect an arbitrary local UI adapter using its authenticated IPC role.
+    ///
+    /// The role is carried through the initial snapshot request, every command,
+    /// and the event subscription so the node process can authorize each
+    /// transport consistently.
+    pub fn start_with_role(options: RuntimeOptions, role: IpcRole) -> Result<Self> {
         let runtime = Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("fuckipv6-remote-node")
@@ -52,17 +61,18 @@ impl RemoteNodeSession {
             .context("连接节点控制面超时")??;
 
             let endpoint = local_ipc::endpoint(EndpointRole::Node)?;
-            let snapshot = request_snapshot(&endpoint).await?;
+            let snapshot = request_snapshot(&endpoint, role.clone()).await?;
             let state = NodeStateStore::new();
             state.replace_authoritative(snapshot).await;
 
             let events = NodeEventBus::default();
             let handler = Arc::new(RemoteNodeHandler {
                 endpoint: endpoint.clone(),
+                role: role.clone(),
             });
             let commands = NodeCommandBus::spawn(handler, events, 32);
             let (cancel, cancel_rx) = watch::channel(false);
-            let sync = tokio::spawn(sync_node_state(endpoint, state.clone(), cancel_rx));
+            let sync = tokio::spawn(sync_node_state(endpoint, role, state.clone(), cancel_rx));
             Ok::<_, anyhow::Error>((state, commands, cancel, sync))
         })?;
 
@@ -109,14 +119,16 @@ impl Drop for RemoteNodeSession {
 
 struct RemoteNodeHandler {
     endpoint: local_ipc::LocalEndpoint,
+    role: IpcRole,
 }
 
 impl NodeCommandHandler for RemoteNodeHandler {
     fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
         let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
         Box::pin(async move {
             let request_id = request.request_id;
-            match local_ipc::execute(&endpoint, IpcRole::Gpui, request).await {
+            match local_ipc::execute(&endpoint, role, request).await {
                 Ok(result) => result,
                 Err(error) => NodeCommandResult {
                     request_id,
@@ -158,10 +170,11 @@ fn remote_problem(request_id: u64, error: anyhow::Error) -> NodeProblem {
 
 async fn request_snapshot(
     endpoint: &local_ipc::LocalEndpoint,
+    role: IpcRole,
 ) -> Result<crate::node::NodeSnapshot> {
     match local_ipc::request(
         endpoint,
-        IpcRole::Gpui,
+        role,
         &LocalRequest {
             request_id: 1,
             command: LocalCommand::Snapshot,
@@ -176,6 +189,7 @@ async fn request_snapshot(
 
 async fn sync_node_state(
     endpoint: local_ipc::LocalEndpoint,
+    role: IpcRole,
     state: NodeStateStore,
     mut cancel: watch::Receiver<bool>,
 ) {
@@ -184,7 +198,7 @@ async fn sync_node_state(
         if *cancel.borrow() {
             return;
         }
-        match sync_subscription(&endpoint, &state, &mut cancel).await {
+        match sync_subscription(&endpoint, role.clone(), &state, &mut cancel).await {
             Ok(()) if *cancel.borrow() => return,
             Ok(()) => {}
             Err(error) => {
@@ -206,10 +220,11 @@ async fn sync_node_state(
 
 async fn sync_subscription(
     endpoint: &local_ipc::LocalEndpoint,
+    role: IpcRole,
     state: &NodeStateStore,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut connection = local_ipc::connect(endpoint, IpcRole::Gpui).await?;
+    let mut connection = local_ipc::connect(endpoint, role.clone()).await?;
     connection
         .send(
             FrameKind::Request,
@@ -263,7 +278,7 @@ async fn sync_subscription(
                 let event: LocalEvent =
                     serde_json::from_value(value).context("无法解析节点事件")?;
                 if matches!(event.event.kind, NodeEventKind::StateChanged { .. }) {
-                    let snapshot = request_snapshot(endpoint).await?;
+                    let snapshot = request_snapshot(endpoint, role.clone()).await?;
                     state.replace_authoritative(snapshot).await;
                 }
             }

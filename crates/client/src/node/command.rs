@@ -41,6 +41,7 @@ pub enum NodeCommandKind {
     GetUiManifest,
     StartNetworks,
     StopNetworks,
+    RestartNetworks,
     CreateNetwork,
     JoinNetwork,
     UpdateRouting,
@@ -50,11 +51,12 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::StartNetworks,
         Self::StopNetworks,
+        Self::RestartNetworks,
         Self::CreateNetwork,
         Self::JoinNetwork,
         Self::UpdateRouting,
@@ -65,10 +67,11 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 9] = [
+    pub const ACTIONS: [Self; 10] = [
         Self::GetSnapshot,
         Self::StartNetworks,
         Self::StopNetworks,
+        Self::RestartNetworks,
         Self::CreateNetwork,
         Self::JoinNetwork,
         Self::UpdateRouting,
@@ -83,6 +86,7 @@ impl NodeCommandKind {
             Self::GetUiManifest => "get_ui_manifest",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
+            Self::RestartNetworks => "restart_networks",
             Self::CreateNetwork => "create_network",
             Self::JoinNetwork => "join_network",
             Self::UpdateRouting => "update_routing",
@@ -109,6 +113,10 @@ pub enum NodeCommand {
         networks: Vec<String>,
         all: bool,
     },
+    RestartNetworks {
+        networks: Vec<String>,
+        all: bool,
+    },
     CreateNetwork(NodeCreateNetworkCommand),
     JoinNetwork(NodeJoinNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
@@ -124,6 +132,7 @@ impl NodeCommand {
             Self::GetUiManifest => NodeCommandKind::GetUiManifest,
             Self::StartNetworks { .. } => NodeCommandKind::StartNetworks,
             Self::StopNetworks { .. } => NodeCommandKind::StopNetworks,
+            Self::RestartNetworks { .. } => NodeCommandKind::RestartNetworks,
             Self::CreateNetwork(_) => NodeCommandKind::CreateNetwork,
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
@@ -148,6 +157,20 @@ impl NodeCommand {
                 }
                 if networks.is_empty() {
                     return Err(invalid("停止网络时必须指定网络名称，或设置 all=true"));
+                }
+                validate_network_names(networks)
+            }
+            Self::RestartNetworks { networks, all } => {
+                if *all {
+                    if !networks.is_empty() {
+                        return Err(invalid(
+                            "重启全部网络时不能同时指定网络名称，请只设置 all=true",
+                        ));
+                    }
+                    return Ok(());
+                }
+                if networks.is_empty() {
+                    return Err(invalid("重启网络时必须指定网络名称，或设置 all=true"));
                 }
                 validate_network_names(networks)
             }
@@ -474,6 +497,10 @@ mod tests {
                 networks: Vec::new(),
                 all: true,
             },
+            NodeCommand::RestartNetworks {
+                networks: vec!["home".into()],
+                all: false,
+            },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
                 signaling_port: 6666,
@@ -545,6 +572,11 @@ mod tests {
             all: false,
         };
         assert!(command.validate().is_err());
+        let command = NodeCommand::RestartNetworks {
+            networks: vec!["home".into(), "home".into()],
+            all: false,
+        };
+        assert!(command.validate().is_err());
 
         assert_invalid(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
             name: "局域网".into(),
@@ -579,6 +611,14 @@ mod tests {
                 all: false,
             },
             NodeCommand::StopNetworks {
+                networks: vec!["home".into()],
+                all: true,
+            },
+            NodeCommand::RestartNetworks {
+                networks: Vec::new(),
+                all: false,
+            },
+            NodeCommand::RestartNetworks {
                 networks: vec!["home".into()],
                 all: true,
             },

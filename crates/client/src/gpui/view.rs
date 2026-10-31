@@ -1128,6 +1128,7 @@ fn action_label(id: &str) -> &'static str {
         "join_network" => "加入网络",
         "start_networks" => "启动网络",
         "stop_networks" => "停止网络",
+        "restart_networks" => "重启网络",
         "probe_peer" => "探测 Peer",
         "update_routing" => "更新路由",
         "set_exit_node_role" => "设置 Exit Node 角色",
@@ -1167,7 +1168,11 @@ fn placeholder_for(input: &NodeUiInputKind, action_id: &str, field_id: &str) -> 
         NodeUiInputKind::PeerTarget => "peer-id 或 IPv6",
         NodeUiInputKind::Port => "1-65535",
         NodeUiInputKind::TimeoutMs => "1500",
-        _ if action_id == "stop_networks" && field_id == "networks" => "home,office",
+        _ if matches!(action_id, "stop_networks" | "restart_networks")
+            && field_id == "networks" =>
+        {
+            "home,office"
+        }
         _ => "输入值",
     }
 }

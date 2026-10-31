@@ -282,6 +282,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
         NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),
+        NodeCommandKind::RestartNetworks => NodeUiAudit::record("network.restart"),
         NodeCommandKind::UpdateRouting => NodeUiAudit::record("routing.update"),
         NodeCommandKind::SetNetworkRole => NodeUiAudit::record("network.role.set"),
         NodeCommandKind::ProbePeer => NodeUiAudit::record("peer.probe"),
@@ -480,6 +481,35 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         Some(confirmation(
                             "confirm.stop_networks.title",
                             "confirm.stop_networks.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "restart_networks",
+                        "action.restart_networks",
+                        NodeCommandKind::RestartNetworks,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkOnline,
+                        vec![
+                            field(
+                                "networks",
+                                "field.network_selection",
+                                NodeUiInputKind::NetworkSelection,
+                                false,
+                                NodeUiValidation::NetworkSelection,
+                            ),
+                            field(
+                                "all",
+                                "field.all_networks",
+                                NodeUiInputKind::Boolean,
+                                false,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        Some(confirmation(
+                            "confirm.restart_networks.title",
+                            "confirm.restart_networks.consequence",
                             false,
                         )),
                     ),
@@ -934,6 +964,10 @@ mod tests {
         );
         assert_eq!(
             status(NodeCommandKind::StopNetworks),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        assert_eq!(
+            status(NodeCommandKind::RestartNetworks),
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         assert_eq!(

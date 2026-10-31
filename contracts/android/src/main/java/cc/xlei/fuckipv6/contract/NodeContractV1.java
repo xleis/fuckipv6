@@ -225,6 +225,7 @@ public final class NodeContractV1 {
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
         PROBE_PEER("probe_peer"),
+        RESTART_NETWORKS("restart_networks"),
         SET_NETWORK_ROLE("set_network_role"),
         SHUTDOWN("shutdown"),
         START_NETWORKS("start_networks"),
@@ -1384,6 +1385,25 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class RestartNetworks extends NodeCommand {
+            public final RestartNetworksPayload payload;
+
+            public RestartNetworks(RestartNetworksPayload payload) {
+                super(NodeCommandKind.RESTART_NETWORKS);
+                this.payload = payload;
+            }
+            /** DTO for RestartNetworksPayload. */
+            public static final class RestartNetworksPayload {
+                public final List<String> networks;
+                public final Boolean all;
+
+                public RestartNetworksPayload(List<String> networks, Boolean all) {
+                    this.networks = networks;
+                    this.all = all;
+                }
+            }
+        }
+
         public static final class CreateNetwork extends NodeCommand {
             public final NodeCreateNetworkCommand payload;
 
@@ -1790,6 +1810,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.PROBE_PEER ||
+            command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SHUTDOWN ||
             command == NodeCommandKind.START_NETWORKS ||

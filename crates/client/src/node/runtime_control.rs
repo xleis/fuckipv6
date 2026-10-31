@@ -1502,7 +1502,8 @@ impl NetworkRuntimeActor {
         let plan = NodeRuntimePlan::load(&self.configs, NodeNetworkSelection::Named(names.clone()))
             .map_err(|error| {
                 RuntimeControlError::Persistence(format!(
-                    "restart/persist_load: 加载重启配置失败，现有运行态未改变: {error:#}"
+                    "restart/{}: 加载重启配置失败，现有运行态未改变: {error:#}",
+                    RestartPhase::PersistLoad.as_str()
                 ))
             })?;
         if Instant::now() >= deadline {

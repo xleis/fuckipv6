@@ -279,6 +279,39 @@
                 "consequence_key": "confirm.stop_networks.consequence",
                 "destructive": false
               }
+            },
+            {
+              "id": "restart_networks",
+              "label_key": "action.restart_networks",
+              "command": "restart_networks",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.restart"
+              },
+              "availability": "network_online",
+              "fields": [
+                {
+                  "id": "networks",
+                  "label_key": "field.network_selection",
+                  "input": "network_selection",
+                  "required": false,
+                  "validation": "network_selection"
+                },
+                {
+                  "id": "all",
+                  "label_key": "field.all_networks",
+                  "input": "boolean",
+                  "required": false,
+                  "validation": "none"
+                }
+              ],
+              "confirmation": {
+                "title_key": "confirm.restart_networks.title",
+                "consequence_key": "confirm.restart_networks.consequence",
+                "destructive": false
+              }
             }
           ]
         },
@@ -562,6 +595,7 @@
       "action.join_network": "加入网络",
       "action.start_networks": "启动网络",
       "action.stop_networks": "停止网络",
+      "action.restart_networks": "重启网络",
       "action.probe_peer": "探测节点",
       "action.update_routing": "更新路由",
       "action.set_exit_node_role": "设置 Exit Node 角色",
@@ -585,6 +619,8 @@
       "field.enabled": "启用",
       "confirm.stop_networks.title": "确认停止网络",
       "confirm.stop_networks.consequence": "所选网络及其 Peer 会话会停止。",
+      "confirm.restart_networks.title": "确认重启网络",
+      "confirm.restart_networks.consequence": "所选网络会停止并按持久化配置重新启动。",
       "confirm.update_routing.title": "确认更新路由",
       "confirm.update_routing.consequence": "新路由会热应用到当前网络，不重启网络。",
       "confirm.set_exit_node_role.title": "确认角色变更",
@@ -1116,8 +1152,9 @@
         errors.push("信令端口和中继端口不能相同");
       }
     }
-    if (action.id === "stop_networks" && !booleanValue(values.all) && !splitNames(values.networks).length) {
-      errors.push("停止网络时必须指定网络名称，或勾选全部网络");
+    if ((action.id === "stop_networks" || action.id === "restart_networks") &&
+        !booleanValue(values.all) && !splitNames(values.networks).length) {
+      errors.push((action.id === "restart_networks" ? "重启" : "停止") + "网络时必须指定网络名称，或勾选全部网络");
     }
     return errors;
   }
@@ -1170,6 +1207,13 @@
           payload: { selection: networkSelection(required(values, "selection")) },
         };
       case "stop_networks": {
+        const all = booleanValue(values.all);
+        return {
+          command,
+          payload: { networks: all ? [] : splitNames(values.networks), all },
+        };
+      }
+      case "restart_networks": {
         const all = booleanValue(values.all);
         return {
           command,

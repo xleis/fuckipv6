@@ -86,6 +86,7 @@ pub enum ActionBinding {
     JoinNetwork,
     StartNetworks,
     StopNetworks,
+    RestartNetworks,
     ProbePeer,
     UpdateRouting,
     SetExitNodeRole,
@@ -94,12 +95,13 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::RefreshSnapshot,
         Self::CreateNetwork,
         Self::JoinNetwork,
         Self::StartNetworks,
         Self::StopNetworks,
+        Self::RestartNetworks,
         Self::ProbePeer,
         Self::UpdateRouting,
         Self::SetExitNodeRole,
@@ -114,6 +116,7 @@ impl ActionBinding {
             Self::JoinNetwork => "join_network",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
+            Self::RestartNetworks => "restart_networks",
             Self::ProbePeer => "probe_peer",
             Self::UpdateRouting => "update_routing",
             Self::SetExitNodeRole => "set_exit_node_role",
@@ -314,6 +317,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
         "join_network" => (ActionBinding::JoinNetwork, NodeCommandKind::JoinNetwork),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
         "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
+        "restart_networks" => (
+            ActionBinding::RestartNetworks,
+            NodeCommandKind::RestartNetworks,
+        ),
         "probe_peer" => (ActionBinding::ProbePeer, NodeCommandKind::ProbePeer),
         "update_routing" => (ActionBinding::UpdateRouting, NodeCommandKind::UpdateRouting),
         "set_exit_node_role" => (
@@ -399,6 +406,8 @@ pub fn default_form_values(
                 ("start_networks", "selection") => "default".into(),
                 ("stop_networks", "networks") => selected_network.unwrap_or_default().into(),
                 ("stop_networks", "all") => "false".into(),
+                ("restart_networks", "networks") => selected_network.unwrap_or_default().into(),
+                ("restart_networks", "all") => "false".into(),
                 ("update_routing", "mode") => "mesh_only".into(),
                 ("update_routing", "is_exit_node") => "false".into(),
                 ("set_exit_node_role", "role") => "exit_node".into(),
@@ -459,6 +468,10 @@ pub fn build_command(
             networks: split_names(&field("networks")),
             all: parse_bool(action, "all", &field("all"))?,
         }),
+        Ok(ActionBinding::RestartNetworks) => Ok(NodeCommand::RestartNetworks {
+            networks: split_names(&field("networks")),
+            all: parse_bool(action, "all", &field("all"))?,
+        }),
         Ok(ActionBinding::ProbePeer) => Ok(NodeCommand::ProbePeer(NodeProbePeerCommand {
             network_name: field("network_name"),
             target: field("target"),
@@ -504,6 +517,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "join_network" => HashSet::from(["target", "network_name", "start"]),
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
+        "restart_networks" => HashSet::from(["networks", "all"]),
         "probe_peer" => HashSet::from(["network_name", "target", "timeout_ms"]),
         "update_routing" => HashSet::from(["network_name", "mode", "exit_node", "is_exit_node"]),
         "set_exit_node_role" | "set_relay_role" => {

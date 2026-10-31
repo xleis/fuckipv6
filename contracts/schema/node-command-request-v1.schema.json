@@ -105,6 +105,37 @@
           "properties": {
             "command": {
               "type": "string",
+              "const": "restart_networks"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "networks": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "networks",
+                "all"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
               "const": "create_network"
             },
             "payload": {

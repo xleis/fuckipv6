@@ -201,6 +201,10 @@ mod tests {
                 networks: vec!["home".into()],
                 all: false,
             },
+            NodeCommand::RestartNetworks {
+                networks: vec!["home".into()],
+                all: false,
+            },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
                 signaling_port: 41000,

@@ -80,6 +80,12 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                     }
                     None => stop_networks(&registry, request_id, &networks, all).await,
                 },
+                super::NodeCommand::RestartNetworks { networks, all } => match runtime {
+                    Some(runtime) => {
+                        restart_runtime_networks(&runtime, request_id, networks, all).await
+                    }
+                    None => unavailable(request_id, "重启网络需要运行中的多网络监督器控制通道"),
+                },
                 super::NodeCommand::ProbePeer(command) => {
                     probe_peer(&registry, request_id, command).await
                 }
@@ -267,6 +273,23 @@ async fn stop_runtime_networks(
                 } else {
                     format!("已停止网络: {}", summary.stopped.join(", "))
                 },
+            },
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn restart_runtime_networks(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    networks: Vec<String>,
+    all: bool,
+) -> NodeCommandResult {
+    match runtime.restart(networks, all).await {
+        Ok(summary) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: summary.message(),
             },
         ),
         Err(error) => runtime_rejection(request_id, error),

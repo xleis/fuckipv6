@@ -63,6 +63,7 @@
             "get_snapshot",
             "start_networks",
             "stop_networks",
+            "restart_networks",
             "create_network",
             "join_network",
             "update_routing",

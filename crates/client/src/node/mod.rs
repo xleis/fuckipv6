@@ -25,7 +25,10 @@ pub use http_adapter::{
 };
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
-pub(crate) use runtime_control::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
+pub(crate) use runtime_control::{
+    NetworkRuntimeManager, RuntimeControlError, StartSummary, RESTART_TIMEOUT, START_TIMEOUT,
+    STOP_TIMEOUT,
+};
 pub(crate) use runtime_handler::spawn_command_bus_with_runtime;
 pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{

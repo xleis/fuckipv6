@@ -47,11 +47,14 @@ pub enum NodeCommandKind {
     UpdateRouting,
     SetNetworkRole,
     ProbePeer,
+    StartNode,
+    StopNode,
+    RestartNode,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::StartNetworks,
@@ -62,12 +65,15 @@ impl NodeCommandKind {
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::ProbePeer,
+        Self::StartNode,
+        Self::StopNode,
+        Self::RestartNode,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 10] = [
+    pub const ACTIONS: [Self; 13] = [
         Self::GetSnapshot,
         Self::StartNetworks,
         Self::StopNetworks,
@@ -77,6 +83,9 @@ impl NodeCommandKind {
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::ProbePeer,
+        Self::StartNode,
+        Self::StopNode,
+        Self::RestartNode,
         Self::Shutdown,
     ];
 
@@ -92,6 +101,9 @@ impl NodeCommandKind {
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
             Self::ProbePeer => "probe_peer",
+            Self::StartNode => "start_node",
+            Self::StopNode => "stop_node",
+            Self::RestartNode => "restart_node",
             Self::Shutdown => "shutdown",
         }
     }
@@ -122,6 +134,15 @@ pub enum NodeCommand {
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
     ProbePeer(NodeProbePeerCommand),
+    /// Start all persistently configured networks while keeping this node IPC
+    /// and the control/UI processes alive.
+    StartNode,
+    /// Stop all data-plane sessions and owned embedded services while keeping
+    /// this node IPC and the control/UI processes alive.
+    StopNode,
+    /// Reload every persisted network and replace the complete data plane under
+    /// one single-flight lifecycle operation.
+    RestartNode,
     Shutdown,
 }
 
@@ -138,13 +159,21 @@ impl NodeCommand {
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
             Self::ProbePeer(_) => NodeCommandKind::ProbePeer,
+            Self::StartNode => NodeCommandKind::StartNode,
+            Self::StopNode => NodeCommandKind::StopNode,
+            Self::RestartNode => NodeCommandKind::RestartNode,
             Self::Shutdown => NodeCommandKind::Shutdown,
         }
     }
 
     pub fn validate(&self) -> Result<(), NodeProblem> {
         match self {
-            Self::GetSnapshot | Self::GetUiManifest | Self::Shutdown => Ok(()),
+            Self::GetSnapshot
+            | Self::GetUiManifest
+            | Self::StartNode
+            | Self::StopNode
+            | Self::RestartNode
+            | Self::Shutdown => Ok(()),
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
                 if *all {

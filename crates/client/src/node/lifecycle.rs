@@ -136,6 +136,20 @@ impl NodeLifecycle {
         .await
     }
 
+    pub async fn failed_with_configuration(
+        &self,
+        configured_networks: usize,
+        failed_networks: Vec<String>,
+    ) -> NodeLifecycleSnapshot {
+        self.set(NodeLifecycleSnapshot {
+            phase: NodePhase::Failed,
+            configured_networks,
+            active_networks: 0,
+            failed_networks: normalize_failures(failed_networks),
+        })
+        .await
+    }
+
     async fn set(&self, next: NodeLifecycleSnapshot) -> NodeLifecycleSnapshot {
         let mut current = self.snapshot.write().await;
         *current = next;
@@ -203,5 +217,20 @@ mod tests {
         assert_eq!(snapshot.phase, NodePhase::Failed);
         assert_eq!(snapshot.configured_networks, 1);
         assert_eq!(snapshot.active_networks, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_with_configuration_publishes_network_failures() {
+        let lifecycle = NodeLifecycle::new();
+        lifecycle.begin_start(2, Vec::new()).await;
+        lifecycle
+            .failed_with_configuration(2, vec!["office".into(), "office".into()])
+            .await;
+
+        let snapshot = lifecycle.snapshot().await;
+        assert_eq!(snapshot.phase, NodePhase::Failed);
+        assert_eq!(snapshot.configured_networks, 2);
+        assert_eq!(snapshot.active_networks, 0);
+        assert_eq!(snapshot.failed_networks, vec!["office"]);
     }
 }

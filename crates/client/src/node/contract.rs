@@ -233,6 +233,9 @@ mod tests {
                 target: "peer".into(),
                 timeout_ms: 1000,
             }),
+            NodeCommand::StartNode,
+            NodeCommand::StopNode,
+            NodeCommand::RestartNode,
             NodeCommand::Shutdown,
         ]
     }

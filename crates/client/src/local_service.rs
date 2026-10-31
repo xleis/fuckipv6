@@ -23,6 +23,11 @@ use crate::node::{NodeCommandBus, NodeCommandBusError, NodeEventBus, NodeStateSt
 /// Commands may perform persistence and runtime transitions, so they get a
 /// larger budget than individual frame I/O operations.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Lifecycle commands can wait for stop, start and cleanup phases in sequence.
+/// Keep the IPC budget above the runtime actor's longest 60 second deadline so
+/// the actor can report its own outcome instead of being reported as an IPC
+/// timeout while it is still completing cleanup.
+pub const LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_CONNECTIONS: usize = 64;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -235,7 +240,8 @@ async fn serve_connection(
                     continue;
                 }
 
-                let result = match timeout(COMMAND_TIMEOUT, commands.execute(command_request)).await
+                let command_timeout = command_timeout(&command_request.command);
+                let result = match timeout(command_timeout, commands.execute(command_request)).await
                 {
                     Ok(Ok(result)) => result,
                     Ok(Err(error)) => {
@@ -247,7 +253,7 @@ async fn serve_connection(
                             connection,
                             LocalError::new(
                                 IpcErrorCode::Timeout,
-                                format!("节点命令在 {} 秒内未完成", COMMAND_TIMEOUT.as_secs()),
+                                format!("节点命令在 {} 秒内未完成", command_timeout.as_secs()),
                             )
                             .retryable(true),
                         )
@@ -312,6 +318,30 @@ async fn serve_connection(
                 }
             },
         }
+    }
+}
+
+fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
+    use crate::node::{NodeCommandKind, RESTART_TIMEOUT, START_TIMEOUT, STOP_TIMEOUT};
+
+    let lifecycle_timeout = LIFECYCLE_COMMAND_TIMEOUT
+        .max(STOP_TIMEOUT.max(START_TIMEOUT).max(RESTART_TIMEOUT) + Duration::from_secs(30));
+
+    match command.kind() {
+        NodeCommandKind::StartNetworks
+        | NodeCommandKind::StopNetworks
+        | NodeCommandKind::RestartNetworks
+        | NodeCommandKind::CreateNetwork
+        | NodeCommandKind::JoinNetwork
+        | NodeCommandKind::StartNode
+        | NodeCommandKind::StopNode
+        | NodeCommandKind::RestartNode
+        | NodeCommandKind::Shutdown => lifecycle_timeout,
+        NodeCommandKind::GetSnapshot
+        | NodeCommandKind::GetUiManifest
+        | NodeCommandKind::UpdateRouting
+        | NodeCommandKind::SetNetworkRole
+        | NodeCommandKind::ProbePeer => COMMAND_TIMEOUT,
     }
 }
 
@@ -439,8 +469,35 @@ mod tests {
     use crate::local_ipc::{connect, execute, request, IpcRole, LocalEndpoint, LocalRequest};
     use crate::node::{
         NodeCommand, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
-        NodeCommandResult, NodeEventKind, NodeLogLevel,
+        NodeCommandResult, NodeEventKind, NodeLogLevel, RESTART_TIMEOUT, START_TIMEOUT,
+        STOP_TIMEOUT,
     };
+
+    #[test]
+    fn lifecycle_ipc_timeout_exceeds_runtime_actor_deadlines() {
+        let runtime_longest = STOP_TIMEOUT.max(START_TIMEOUT).max(RESTART_TIMEOUT);
+        assert!(LIFECYCLE_COMMAND_TIMEOUT > runtime_longest);
+        for command in [
+            NodeCommand::StartNetworks {
+                selection: crate::node::NodeNetworkSelection::None,
+            },
+            NodeCommand::StopNetworks {
+                networks: Vec::new(),
+                all: true,
+            },
+            NodeCommand::RestartNetworks {
+                networks: Vec::new(),
+                all: true,
+            },
+            NodeCommand::StartNode,
+            NodeCommand::StopNode,
+            NodeCommand::RestartNode,
+            NodeCommand::Shutdown,
+        ] {
+            assert_eq!(command_timeout(&command), LIFECYCLE_COMMAND_TIMEOUT);
+        }
+        assert_eq!(command_timeout(&NodeCommand::GetSnapshot), COMMAND_TIMEOUT);
+    }
 
     struct EchoHandler;
 

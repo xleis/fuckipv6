@@ -30,10 +30,14 @@ use crate::node::{NodeCommand, NodeCommandRequest};
 const CONTROL_ARGUMENT: &str = "__control";
 const NODE_ARGUMENT: &str = "__node";
 const OPTIONS_ENV: &str = "FUCKIPV6_INTERNAL_OPTIONS";
-const READY_TIMEOUT: Duration = Duration::from_secs(15);
+const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NODE_UNHEALTHY_TIMEOUT: Duration = Duration::from_secs(20);
-const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+// The node first drains data-plane work, then drains its IPC service. Keep the
+// supervisor's grace period longer than both inner deadlines so it does not
+// SIGKILL a node that is still making legitimate shutdown progress.
+const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(45);
+const NODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(35);
 const COMMAND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const RESTART_BACKOFF_MIN: Duration = Duration::from_millis(250);
@@ -160,14 +164,46 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     let server = LocalServer::bind(endpoint, EndpointRole::Node)
         .await
         .context("无法启动节点 IPC 服务")?;
+    let commands = supervisor.commands();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut service = tokio::spawn(serve_owned_node(
         server,
-        supervisor.commands(),
+        commands.clone(),
         supervisor.state().clone(),
         supervisor.event_bus(),
         shutdown_tx.clone(),
     ));
+
+    // The IPC listener is live first so startup failures remain observable, but
+    // `ready` is deliberately not reported until the persisted data plane has
+    // had a chance to start. The control process uses stdout readiness as the
+    // barrier before exposing the node to UI clients.
+    match timeout(
+        NODE_STARTUP_TIMEOUT,
+        commands.execute(NodeCommandRequest::new(
+            u64::MAX - 1,
+            NodeCommand::StartNode,
+        )),
+    )
+    .await
+    {
+        Ok(Ok(result)) if result.is_success() => {
+            tracing::info!(?result.outcome, "节点持久化数据面启动完成");
+        }
+        Ok(Ok(result)) => {
+            tracing::warn!(?result.outcome, "节点持久化数据面启动失败，IPC 保持可用");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "节点持久化数据面启动命令未送达，IPC 保持可用");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "节点持久化数据面启动超过 {} 秒，IPC 保持可用",
+                NODE_STARTUP_TIMEOUT.as_secs()
+            );
+        }
+    }
+    supervisor.refresh_runtime_state().await;
 
     println!(
         "{}",
@@ -177,6 +213,9 @@ async fn run_node(options: InternalOptions) -> Result<()> {
             "state": "ready",
         })
     );
+
+    let (command_stop_tx, mut command_stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    supervisor.registry().set_stop_sender(command_stop_tx);
 
     let mut signal = Box::pin(wait_for_shutdown_signal());
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
@@ -188,6 +227,11 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     loop {
         tokio::select! {
             _ = &mut signal => break,
+            Some(stop_target) = command_stop_rx.recv() => {
+                if stop_target.is_none() {
+                    break;
+                }
+            }
             result = &mut service => {
                 service_finished = true;
                 match result {
@@ -212,14 +256,14 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     }
 
     let _ = shutdown_tx.send(true);
-    let commands = supervisor.commands();
-    let shutdown_command =
-        commands.execute(NodeCommandRequest::new(u64::MAX, NodeCommand::Shutdown));
-    match timeout(COMMAND_SHUTDOWN_TIMEOUT, shutdown_command).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => tracing::warn!(%error, "节点关闭命令未完成"),
+    // The supervisor owns the actor and its service manager. Shutting them down
+    // directly is deterministic and does not depend on the registry control
+    // channel used by the long-running CLI supervisor path.
+    match timeout(COMMAND_SHUTDOWN_TIMEOUT, supervisor.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "节点数据面关闭失败"),
         Err(_) => tracing::warn!(
-            "节点关闭命令超过 {} 秒，继续回收 IPC 服务",
+            "节点数据面关闭超过 {} 秒，继续回收 IPC 服务",
             COMMAND_SHUTDOWN_TIMEOUT.as_secs()
         ),
     }
@@ -595,6 +639,14 @@ mod tests {
         assert_eq!(
             instance_lock_path(directory, "node"),
             directory.join("node.lock")
+        );
+    }
+
+    #[test]
+    fn node_stop_timeout_covers_all_inner_shutdown_deadlines() {
+        assert!(
+            NODE_STOP_TIMEOUT > COMMAND_SHUTDOWN_TIMEOUT + SERVICE_SHUTDOWN_TIMEOUT,
+            "node supervisor must allow data-plane and IPC shutdown to finish"
         );
     }
 }

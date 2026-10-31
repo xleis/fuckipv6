@@ -149,6 +149,32 @@ impl MultiNetworkSupervisor {
         self.services.clone()
     }
 
+    /// Stop the complete data plane and every service owned by this supervisor.
+    /// The standalone node process uses this after its IPC listener exits; the
+    /// long-running CLI supervisor reaches the same actor through `run_plan`.
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        self.mark_network_status(None, NodeNetworkStatus::Stopping)
+            .await;
+        let lifecycle = self.lifecycle.begin_stop().await;
+        self.sync_lifecycle(lifecycle).await;
+
+        let result = self.runtimes.shutdown().await;
+        // `NetworkRuntimeManager::shutdown` closes the shared service actor. A
+        // second shutdown is tolerant and still releases services if the actor
+        // failed before its command was dispatched.
+        let _ = self.services.shutdown().await;
+
+        let lifecycle = if result.is_ok() {
+            self.lifecycle.stopped().await
+        } else {
+            self.lifecycle.failed().await
+        };
+        self.sync_lifecycle(lifecycle).await;
+        result
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("关闭节点数据面失败: {error}"))
+    }
+
     async fn sync_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) {
         self.state.set_lifecycle(lifecycle).await;
     }

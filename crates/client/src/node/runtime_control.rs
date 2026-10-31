@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fuckipv6_common::{ClientConfig, NetworkTicket};
+use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
@@ -18,7 +19,7 @@ use super::{
     NodeSetNetworkRoleCommand, NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, RuntimeOptions};
-use crate::config_manager::ConfigManager;
+use crate::config_manager::{ConfigManager, NetworkConfig};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::node::runtime_metadata;
 use crate::symmetric::{
@@ -26,9 +27,9 @@ use crate::symmetric::{
     EmbeddedServiceStartRequest,
 };
 
-const STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const START_TIMEOUT: Duration = Duration::from_secs(30);
-const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,8 +119,34 @@ impl StartSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StopFailure {
+    pub network_name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StopSummary {
     pub stopped: Vec<String>,
+    pub failed: Vec<StopFailure>,
+}
+
+impl StopSummary {
+    pub fn message(&self) -> String {
+        let mut parts = vec![format!("已停止网络: {}", self.stopped.len())];
+        if !self.stopped.is_empty() {
+            parts.push(self.stopped.join(", "));
+        }
+        if !self.failed.is_empty() {
+            let failures = self
+                .failed
+                .iter()
+                .map(|failure| format!("{}: {}", failure.network_name, failure.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            parts.push(format!("{} 个网络停止失败 ({failures})", self.failed.len()));
+        }
+        parts.join("；")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +482,18 @@ enum RuntimeControlCommand {
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<RestartSummary, RuntimeControlError>>,
     },
+    StartNode {
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<StartSummary, RuntimeControlError>>,
+    },
+    StopNode {
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<StopSummary, RuntimeControlError>>,
+    },
+    RestartNode {
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<RestartSummary, RuntimeControlError>>,
+    },
     Shutdown {
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<StopSummary, RuntimeControlError>>,
@@ -704,6 +743,50 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    /// Restore every persisted network while retaining the node IPC process.
+    pub async fn start_node(&self) -> Result<StartSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::StartNode {
+            _operation: operation,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    /// Stop every data-plane session and owned embedded service while retaining
+    /// the node IPC process so a later start can restore persisted networks.
+    pub async fn stop_node(&self) -> Result<StopSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::StopNode {
+            _operation: operation,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    /// Replace the complete data plane from persisted configuration under one
+    /// operation permit and one restart deadline.
+    pub async fn restart_node(&self) -> Result<RestartSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::RestartNode {
+            _operation: operation,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn shutdown(&self) -> Result<StopSummary, RuntimeControlError> {
         let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
@@ -789,6 +872,18 @@ async fn run_actor(
                 let result = actor.restart(networks, all).await;
                 let _ = reply.send(result);
             }
+            RuntimeControlCommand::StartNode { _operation, reply } => {
+                let result = actor.start_node().await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::StopNode { _operation, reply } => {
+                let result = actor.stop_node().await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::RestartNode { _operation, reply } => {
+                let result = actor.restart_node().await;
+                let _ = reply.send(result);
+            }
             RuntimeControlCommand::Shutdown { _operation, reply } => {
                 let result = actor.shutdown().await;
                 let _ = reply.send(result);
@@ -812,6 +907,330 @@ struct NetworkRuntimeActor {
 }
 
 impl NetworkRuntimeActor {
+    async fn start_node(&mut self) -> Result<StartSummary, RuntimeControlError> {
+        self.start_node_until(Instant::now() + self.timeouts.start)
+            .await
+    }
+
+    async fn fail_lifecycle(&self, error: RuntimeControlError) -> RuntimeControlError {
+        let lifecycle = self.lifecycle.failed().await;
+        self.state.set_lifecycle(lifecycle).await;
+        error
+    }
+
+    async fn start_node_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<StartSummary, RuntimeControlError> {
+        let networks = self.configs.list_networks().map_err(|error| {
+            RuntimeControlError::Persistence(format!("加载持久化网络列表失败: {error:#}"))
+        })?;
+        let configured = networks.len();
+        self.state
+            .update(|snapshot| {
+                snapshot.permissions = runtime_metadata::trusted_control_plane_permissions();
+                snapshot.configuration.networks.clear();
+            })
+            .await;
+        let lifecycle = self.lifecycle.begin_start(configured, Vec::new()).await;
+        self.state.set_lifecycle(lifecycle).await;
+
+        let plan = match NodeRuntimePlan::load(&self.configs, NodeNetworkSelection::All) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let lifecycle = self.lifecycle.failed().await;
+                self.state.set_lifecycle(lifecycle).await;
+                return Err(RuntimeControlError::Persistence(format!(
+                    "加载节点启动计划失败: {error:#}"
+                )));
+            }
+        };
+        match self
+            .start_persisted_plan_until(networks, plan, deadline, &BTreeSet::new())
+            .await
+        {
+            Ok(summary) => Ok(summary),
+            Err(error) => Err(self.fail_lifecycle(error).await),
+        }
+    }
+
+    async fn start_persisted_plan_until(
+        &mut self,
+        networks: Vec<NetworkConfig>,
+        plan: NodeRuntimePlan,
+        deadline: Instant,
+        skip_networks: &BTreeSet<String>,
+    ) -> Result<StartSummary, RuntimeControlError> {
+        self.prune_finished_sessions();
+        let configured = plan.len();
+        let mut summary = StartSummary {
+            requested: configured,
+            ..StartSummary::default()
+        };
+
+        let running_services = self
+            .services
+            .list()
+            .await
+            .map_err(map_service_error)?
+            .into_iter()
+            .map(|service| service.network_name)
+            .collect::<BTreeSet<_>>();
+        let mut service_failures = HashMap::new();
+        for network in networks.iter().filter(|network| {
+            network.owns_embedded_services && !skip_networks.contains(&network.name)
+        }) {
+            if let Err(error) = self
+                .restore_owned_embedded_service(network, &running_services, deadline)
+                .await
+            {
+                service_failures.insert(network.name.clone(), error.to_string());
+            }
+        }
+
+        for spec in plan.into_networks() {
+            if skip_networks.contains(&spec.name) {
+                continue;
+            }
+            if self.sessions.contains_key(&spec.name) {
+                summary.already_running.push(spec.name);
+                continue;
+            }
+            if let Some(message) = service_failures.remove(&spec.name) {
+                let error = RuntimeControlError::Launch(format!(
+                    "内嵌服务恢复失败，未启动数据面: {message}"
+                ));
+                self.record_launch_failure(&spec.name, &error).await;
+                summary.failed.push(StartFailure {
+                    network_name: spec.name,
+                    message: error.to_string(),
+                });
+                continue;
+            }
+            let network_name = spec.name.clone();
+            match self.start_spec_until(spec, deadline).await {
+                Ok(()) => summary.started.push(network_name),
+                Err(error) => summary.failed.push(StartFailure {
+                    network_name,
+                    message: error.to_string(),
+                }),
+            }
+        }
+
+        self.prune_finished_sessions();
+        let active = self.sessions.len();
+        let failed = summary
+            .failed
+            .iter()
+            .map(|failure| failure.network_name.clone())
+            .collect::<Vec<_>>();
+        let lifecycle = if configured > 0 && active == 0 {
+            self.lifecycle
+                .failed_with_configuration(configured, failed)
+                .await
+        } else {
+            self.lifecycle.running(active, failed).await
+        };
+        self.state.set_lifecycle(lifecycle).await;
+        Ok(summary)
+    }
+
+    async fn restore_owned_embedded_service(
+        &self,
+        network: &NetworkConfig,
+        running_services: &BTreeSet<String>,
+        deadline: Instant,
+    ) -> Result<(), RuntimeControlError> {
+        if running_services.contains(&network.name) {
+            if let Some(service) = self
+                .services
+                .list()
+                .await
+                .map_err(map_service_error)?
+                .into_iter()
+                .find(|service| service.network_name == network.name)
+            {
+                self.record_running_embedded_service(&service).await;
+                return Ok(());
+            }
+        }
+
+        self.mark_embedded_service_status(&network.name, NodeEmbeddedServiceStatus::Starting)
+            .await;
+        let host_public_key = self
+            .configs
+            .load_node_identity()
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{}] 加载节点身份失败: {error:#}",
+                    network.name
+                ))
+            })?
+            .public_key_bytes();
+        let request = EmbeddedServiceStartRequest::new(
+            network.name.clone(),
+            network.signaling_port.unwrap_or(0),
+            network.relay_port.unwrap_or(0),
+        )
+        .with_host_public_key(host_public_key);
+        let request = match network.external_host.clone() {
+            Some(host) => request.with_external_host(host),
+            None => request.with_external_host("127.0.0.1"),
+        };
+        let request = match network.ip_pool.clone() {
+            Some(pool) => request.with_ip_pool(pool),
+            None => request,
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            self.mark_embedded_service_status(&network.name, NodeEmbeddedServiceStatus::Failed)
+                .await;
+            return Err(RuntimeControlError::Timeout(format!(
+                "start/timeout: 网络 [{}] 的内嵌服务未在启动期限内恢复",
+                network.name
+            )));
+        }
+        let service = match timeout(remaining, self.services.start(request)).await {
+            Ok(Ok(service)) => service,
+            Ok(Err(error)) => {
+                self.mark_embedded_service_status(&network.name, NodeEmbeddedServiceStatus::Failed)
+                    .await;
+                return Err(map_service_error(error));
+            }
+            Err(_) => {
+                self.mark_embedded_service_status(&network.name, NodeEmbeddedServiceStatus::Failed)
+                    .await;
+                return Err(RuntimeControlError::Timeout(format!(
+                    "start/timeout: 网络 [{}] 的内嵌服务未在期限内恢复",
+                    network.name
+                )));
+            }
+        };
+        self.record_running_embedded_service(&service).await;
+
+        if let Err(error) = self.configs.set_embedded_service_metadata(
+            &network.name,
+            service.signaling_addr.port(),
+            service.relay_addr.port(),
+            network.external_host.clone(),
+            network.ip_pool.clone(),
+        ) {
+            self.stop_embedded_service(&network.name).await;
+            return Err(RuntimeControlError::Persistence(format!(
+                "网络 [{}] 的内嵌服务已启动，但端点持久化失败: {error:#}",
+                network.name
+            )));
+        }
+        Ok(())
+    }
+
+    async fn stop_node(&mut self) -> Result<StopSummary, RuntimeControlError> {
+        let deadline = Instant::now() + self.timeouts.stop;
+        let lifecycle = self.lifecycle.begin_stop().await;
+        self.state.set_lifecycle(lifecycle).await;
+        let summary = match self.stop_until(Vec::new(), true, true, deadline).await {
+            Ok(summary) => summary,
+            Err(error) => return Err(self.fail_lifecycle(error).await),
+        };
+        self.mark_network_status(None, NodeNetworkStatus::Offline)
+            .await;
+        let lifecycle = if summary.failed.is_empty() {
+            self.lifecycle.stopped().await
+        } else {
+            self.lifecycle.failed().await
+        };
+        self.state.set_lifecycle(lifecycle).await;
+        Ok(summary)
+    }
+
+    async fn restart_node(&mut self) -> Result<RestartSummary, RuntimeControlError> {
+        let deadline = Instant::now() + self.timeouts.restart;
+        let networks = self.configs.list_networks().map_err(|error| {
+            RuntimeControlError::Persistence(format!(
+                "restart/{}: 加载持久化网络列表失败，现有运行态未改变: {error:#}",
+                RestartPhase::PersistLoad.as_str()
+            ))
+        })?;
+        let plan =
+            NodeRuntimePlan::load(&self.configs, NodeNetworkSelection::All).map_err(|error| {
+                RuntimeControlError::Persistence(format!(
+                    "restart/{}: 加载重启配置失败，现有运行态未改变: {error:#}",
+                    RestartPhase::PersistLoad.as_str()
+                ))
+            })?;
+        let names = plan
+            .networks()
+            .iter()
+            .map(|network| network.name.clone())
+            .collect::<Vec<_>>();
+
+        let lifecycle = self.lifecycle.begin_stop().await;
+        self.state.set_lifecycle(lifecycle).await;
+        let stopped = match self.stop_until(Vec::new(), true, true, deadline).await {
+            Ok(summary) => summary,
+            Err(error) => return Err(self.fail_lifecycle(error).await),
+        };
+        self.mark_network_status(None, NodeNetworkStatus::Offline)
+            .await;
+
+        let mut summary = RestartSummary {
+            requested: plan.len(),
+            ..RestartSummary::default()
+        };
+        summary.cleanup = match self.inspect_cleanup(&names).await {
+            Ok(cleanup) => cleanup,
+            Err(error) => return Err(self.fail_lifecycle(error).await),
+        };
+        for failure in stopped.failed {
+            summary.failed.push(RestartFailure {
+                network_name: failure.network_name,
+                phase: RestartPhase::Stop,
+                message: failure.message,
+            });
+        }
+
+        let stopping_failed = summary
+            .failed
+            .iter()
+            .map(|failure| failure.network_name.clone())
+            .collect::<BTreeSet<_>>();
+        if !summary.cleanup.residual_networks.is_empty() {
+            for name in summary.cleanup.residual_networks.clone() {
+                if !stopping_failed.contains(&name) {
+                    summary.failed.push(RestartFailure {
+                        network_name: name,
+                        phase: RestartPhase::Cleanup,
+                        message: "停止后仍检测到 session、listener 或 peer 残留".into(),
+                    });
+                }
+            }
+        }
+
+        let lifecycle = self.lifecycle.begin_start(plan.len(), Vec::new()).await;
+        self.state.set_lifecycle(lifecycle).await;
+        let started = match self
+            .start_persisted_plan_until(networks, plan, deadline, &stopping_failed)
+            .await
+        {
+            Ok(summary) => summary,
+            Err(error) => return Err(self.fail_lifecycle(error).await),
+        };
+        summary.restarted = started.started;
+        for failure in started.failed {
+            summary.failed.push(RestartFailure {
+                network_name: failure.network_name,
+                phase: RestartPhase::Start,
+                message: failure.message,
+            });
+        }
+        summary.cleanup = match self.inspect_cleanup(&names).await {
+            Ok(cleanup) => cleanup,
+            Err(error) => return Err(self.fail_lifecycle(error).await),
+        };
+        self.publish_restart_lifecycle(&summary).await;
+        Ok(summary)
+    }
+
     async fn start_selection(
         &mut self,
         selection: NodeNetworkSelection,
@@ -993,11 +1412,22 @@ impl NetworkRuntimeActor {
             )));
         }
 
+        let host_public_key = self
+            .configs
+            .load_node_identity()
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{}] 加载节点身份失败: {error:#}",
+                    command.name
+                ))
+            })?
+            .public_key_bytes();
         let service_request = EmbeddedServiceStartRequest::new(
             command.name.clone(),
             command.signaling_port,
             command.relay_port,
-        );
+        )
+        .with_host_public_key(host_public_key);
         let service_request = match command.external_host.clone() {
             Some(host) => service_request.with_external_host(host),
             None => service_request.with_external_host("127.0.0.1"),
@@ -1029,6 +1459,19 @@ impl NetworkRuntimeActor {
                 )));
             }
         };
+        if let Err(error) = self.configs.set_embedded_service_metadata(
+            &command.name,
+            service.signaling_addr.port(),
+            service.relay_addr.port(),
+            command.external_host.clone(),
+            None,
+        ) {
+            self.rollback_created_network(&command.name).await;
+            return Err(RuntimeControlError::Persistence(format!(
+                "网络 [{}] 的内嵌服务已启动，但端点持久化失败，已回滚: {error:#}",
+                command.name
+            )));
+        }
         let config = match ClientConfig::from_file(&config_file) {
             Ok(config) => config,
             Err(error) => {
@@ -1395,15 +1838,40 @@ impl NetworkRuntimeActor {
         networks: Vec<String>,
         all: bool,
     ) -> Result<StopSummary, RuntimeControlError> {
+        let deadline = Instant::now() + self.timeouts.stop;
+        self.stop_until(networks, all, true, deadline).await
+    }
+
+    async fn stop_until(
+        &mut self,
+        networks: Vec<String>,
+        all: bool,
+        stop_embedded_services: bool,
+        deadline: Instant,
+    ) -> Result<StopSummary, RuntimeControlError> {
         self.prune_finished_sessions();
-        let services = self
-            .services
-            .list()
-            .await
-            .map_err(map_service_error)?
-            .into_iter()
-            .map(|service| service.network_name)
-            .collect::<BTreeSet<_>>();
+        let services = if stop_embedded_services {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RuntimeControlError::Timeout(
+                    "stop/timeout: 在枚举待停止网络前已超过期限".into(),
+                ));
+            }
+            match timeout(remaining, self.services.list()).await {
+                Ok(Ok(services)) => services
+                    .into_iter()
+                    .map(|service| service.network_name)
+                    .collect::<BTreeSet<_>>(),
+                Ok(Err(error)) => return Err(map_service_error(error)),
+                Err(_) => {
+                    return Err(RuntimeControlError::Timeout(
+                        "stop/timeout: 枚举内嵌服务超过停止期限".into(),
+                    ));
+                }
+            }
+        } else {
+            BTreeSet::new()
+        };
         let targets = if all {
             self.sessions
                 .keys()
@@ -1426,45 +1894,138 @@ impl NetworkRuntimeActor {
             requested
         };
 
-        let mut stopped = Vec::with_capacity(targets.len());
-        for name in targets {
-            let has_embedded_service = services.contains(&name);
-            if has_embedded_service {
-                self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Stopping)
+        // Send every shutdown signal before waiting. This lets independent
+        // network actors and owned services stop concurrently under one
+        // manager-wide deadline instead of multiplying the timeout by target
+        // count.
+        let mut pending_sessions = Vec::new();
+        let mut service_targets = Vec::new();
+        for name in &targets {
+            if let Some(session) = self.sessions.remove(name) {
+                self.mark_network_status(Some(name), NodeNetworkStatus::Stopping)
                     .await;
+                let accepted = session.shutdown.send(true).is_ok();
+                pending_sessions.push((name.clone(), session, accepted));
             }
-            if self.sessions.contains_key(&name) {
-                self.stop_session(&name, self.timeouts.stop).await?;
-            }
+            let has_embedded_service = services.contains(name);
             if has_embedded_service {
-                match timeout(self.timeouts.stop, self.services.stop(&name)).await {
-                    Ok(Ok(_)) | Ok(Err(EmbeddedServiceError::NotFound(_))) => {
-                        self.mark_embedded_service_status(
-                            &name,
-                            NodeEmbeddedServiceStatus::Stopped,
-                        )
-                        .await;
-                    }
-                    Ok(Err(error)) => {
-                        self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Failed)
-                            .await;
-                        return Err(map_service_error(error));
-                    }
-                    Err(_) => {
-                        self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Failed)
-                            .await;
-                        return Err(RuntimeControlError::Timeout(format!(
-                            "stop/timeout: 内嵌服务 [{name}] 未在 {} 秒内停止",
-                            self.timeouts.stop.as_secs()
-                        )));
-                    }
-                }
+                self.mark_embedded_service_status(name, NodeEmbeddedServiceStatus::Stopping)
+                    .await;
+                service_targets.push(name.clone());
             }
-            stopped.push(name);
         }
 
-        self.publish_dynamic_lifecycle().await;
-        Ok(StopSummary { stopped })
+        let services = self.services.clone();
+        let session_waits =
+            pending_sessions
+                .into_iter()
+                .map(|(network_name, session, accepted)| async move {
+                    let result = wait_for_session_shutdown(
+                        network_name.clone(),
+                        session,
+                        accepted,
+                        deadline,
+                    )
+                    .await;
+                    (network_name, result)
+                });
+        let service_waits = service_targets.into_iter().map(|network_name| {
+            let services = services.clone();
+            async move {
+                let result = stop_embedded_service_until(&services, &network_name, deadline).await;
+                (network_name, result)
+            }
+        });
+        let (session_results, service_results) =
+            tokio::join!(join_all(session_waits), join_all(service_waits));
+
+        // A timed-out actor is aborted, but its shared registry/state entries
+        // must still be removed before a later start can create a replacement.
+        let stopped_session_names = session_results
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        join_all(
+            stopped_session_names
+                .iter()
+                .map(|name| self.registry.unregister(name)),
+        )
+        .await;
+        if !stopped_session_names.is_empty() {
+            let stopped_session_names = stopped_session_names
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            self.state
+                .update(|snapshot| {
+                    for network in snapshot
+                        .networks
+                        .iter_mut()
+                        .filter(|network| stopped_session_names.contains(network.name.as_str()))
+                    {
+                        network.status = NodeNetworkStatus::Offline;
+                        network.assigned_ipv6 = None;
+                        network.assigned_ipv4 = None;
+                        network.p2p_listen_addr = None;
+                        network.uptime_secs = 0;
+                        network.peer_count = 0;
+                    }
+                    snapshot
+                        .peers
+                        .retain(|peer| !stopped_session_names.contains(peer.network_name.as_str()));
+                })
+                .await;
+        }
+
+        let mut failures = BTreeMap::<String, Vec<String>>::new();
+        for (network_name, result) in session_results {
+            if let Err(error) = result {
+                failures
+                    .entry(network_name)
+                    .or_default()
+                    .push(error.to_string());
+            }
+        }
+        for (network_name, result) in service_results {
+            match result {
+                Ok(()) => {
+                    self.mark_embedded_service_status(
+                        &network_name,
+                        NodeEmbeddedServiceStatus::Stopped,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    self.mark_embedded_service_status(
+                        &network_name,
+                        NodeEmbeddedServiceStatus::Failed,
+                    )
+                    .await;
+                    failures
+                        .entry(network_name)
+                        .or_default()
+                        .push(error.to_string());
+                }
+            }
+        }
+
+        let mut stopped = Vec::with_capacity(targets.len());
+        let mut failed = Vec::new();
+        for name in targets {
+            if let Some(mut messages) = failures.remove(&name) {
+                messages.sort();
+                messages.dedup();
+                failed.push(StopFailure {
+                    network_name: name,
+                    message: messages.join("; "),
+                });
+            } else {
+                stopped.push(name);
+            }
+        }
+
+        self.publish_stop_lifecycle(&failed).await;
+        Ok(StopSummary { stopped, failed })
     }
 
     async fn restart(
@@ -1516,21 +2077,20 @@ impl NetworkRuntimeActor {
             requested: names.len(),
             ..RestartSummary::default()
         };
-        let mut stopped = BTreeSet::new();
-        for name in &names {
-            match self
-                .stop_session(name, deadline.saturating_duration_since(Instant::now()))
-                .await
-            {
-                Ok(()) => {
-                    stopped.insert(name.clone());
-                }
-                Err(error) => summary.failed.push(RestartFailure {
-                    network_name: name.clone(),
-                    phase: RestartPhase::Stop,
-                    message: error.to_string(),
-                }),
-            }
+        let stopped_summary = self
+            .stop_until(names.clone(), false, false, deadline)
+            .await?;
+        let mut stopped = stopped_summary
+            .stopped
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for failure in stopped_summary.failed {
+            summary.failed.push(RestartFailure {
+                network_name: failure.network_name,
+                phase: RestartPhase::Stop,
+                message: failure.message,
+            });
         }
 
         summary.cleanup = self.inspect_cleanup(&names).await?;
@@ -1563,65 +2123,8 @@ impl NetworkRuntimeActor {
             }
         }
 
-        self.publish_dynamic_lifecycle().await;
+        self.publish_restart_lifecycle(&summary).await;
         Ok(summary)
-    }
-
-    async fn stop_session(
-        &mut self,
-        network_name: &str,
-        limit: Duration,
-    ) -> Result<(), RuntimeControlError> {
-        let Some(mut session) = self.sessions.remove(network_name) else {
-            return Err(RuntimeControlError::NotFound(format!(
-                "网络未运行: {network_name}"
-            )));
-        };
-
-        self.mark_network_status(Some(network_name), NodeNetworkStatus::Stopping)
-            .await;
-        let accepted = session.shutdown.send(true).is_ok();
-        let stopped =
-            accepted && !limit.is_zero() && timeout(limit, &mut session.handle).await.is_ok();
-        if !stopped {
-            session.handle.abort();
-            let _ = timeout(Duration::from_secs(1), &mut session.handle).await;
-        }
-
-        // Even a timed-out actor is removed from every shared registry before a
-        // restart is allowed to create a replacement session.
-        self.registry.unregister(network_name).await;
-        self.state
-            .update(|snapshot| {
-                if let Some(network) = snapshot
-                    .networks
-                    .iter_mut()
-                    .find(|network| network.name == network_name)
-                {
-                    network.status = NodeNetworkStatus::Offline;
-                    network.assigned_ipv6 = None;
-                    network.assigned_ipv4 = None;
-                    network.p2p_listen_addr = None;
-                    network.uptime_secs = 0;
-                    network.peer_count = 0;
-                }
-                snapshot
-                    .peers
-                    .retain(|peer| peer.network_name != network_name);
-            })
-            .await;
-
-        if !accepted {
-            return Err(RuntimeControlError::Unavailable(format!(
-                "stop/channel_closed: 网络 [{network_name}] 的关闭通道已断开；已强制清理共享状态"
-            )));
-        }
-        if !stopped {
-            return Err(RuntimeControlError::Timeout(format!(
-                "stop/timeout: 网络 [{network_name}] 未在期限内退出；已中止并清理共享状态"
-            )));
-        }
-        Ok(())
     }
 
     async fn inspect_cleanup(
@@ -1981,6 +2484,98 @@ impl NetworkRuntimeActor {
             .await;
         self.state.set_lifecycle(lifecycle).await;
     }
+
+    async fn publish_restart_lifecycle(&self, summary: &RestartSummary) {
+        let failed = summary
+            .failed
+            .iter()
+            .map(|failure| failure.network_name.clone())
+            .collect();
+        let lifecycle = self
+            .lifecycle
+            .running_with_configuration(summary.requested, self.sessions.len(), failed)
+            .await;
+        self.state.set_lifecycle(lifecycle).await;
+    }
+
+    async fn publish_stop_lifecycle(&self, failures: &[StopFailure]) {
+        if self.lifecycle.snapshot().await.phase != NodePhase::Running {
+            return;
+        }
+        let configured = self
+            .configs
+            .list_networks()
+            .map_or(0, |networks| networks.len());
+        let failed = failures
+            .iter()
+            .map(|failure| failure.network_name.clone())
+            .collect();
+        let lifecycle = self
+            .lifecycle
+            .running_with_configuration(configured, self.sessions.len(), failed)
+            .await;
+        self.state.set_lifecycle(lifecycle).await;
+    }
+}
+
+async fn wait_for_session_shutdown(
+    network_name: String,
+    session: NetworkRuntimeSession,
+    accepted: bool,
+    deadline: Instant,
+) -> Result<(), RuntimeControlError> {
+    let mut handle = session.handle;
+    if !accepted {
+        handle.abort();
+        let _ = handle.await;
+        return Err(RuntimeControlError::Unavailable(format!(
+            "stop/channel_closed: 网络 [{network_name}] 的关闭通道已断开；已强制清理共享状态"
+        )));
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        handle.abort();
+        let _ = handle.await;
+        return Err(RuntimeControlError::Timeout(format!(
+            "stop/timeout: 网络 [{network_name}] 未在期限内退出；已中止并清理共享状态"
+        )));
+    }
+
+    match timeout(remaining, &mut handle).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(RuntimeControlError::Unavailable(format!(
+            "stop/task_failed: 网络 [{network_name}] 的运行时任务异常退出；已清理共享状态: {error}"
+        ))),
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            Err(RuntimeControlError::Timeout(format!(
+                "stop/timeout: 网络 [{network_name}] 未在期限内退出；已中止并清理共享状态"
+            )))
+        }
+    }
+}
+
+async fn stop_embedded_service_until(
+    services: &EmbeddedServiceManager,
+    network_name: &str,
+    deadline: Instant,
+) -> Result<(), RuntimeControlError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(RuntimeControlError::Timeout(format!(
+            "stop/timeout: 网络 [{network_name}] 的内嵌服务未在停止期限内退出"
+        )));
+    }
+
+    match timeout(remaining, services.stop(network_name)).await {
+        Ok(Ok(_)) | Ok(Err(EmbeddedServiceError::NotFound(_))) => Ok(()),
+        Ok(Err(error)) => Err(map_service_error(error)),
+        Err(_) => Err(RuntimeControlError::Timeout(format!(
+            "stop/timeout: 网络 [{network_name}] 的内嵌服务未在停止期限内退出"
+        ))),
+    }
 }
 
 fn parse_join_target(target: &str) -> Result<(String, String), RuntimeControlError> {
@@ -2166,6 +2761,7 @@ mod tests {
         launch_delay_ms: Arc<AtomicU64>,
         launch_attempts: Arc<AtomicUsize>,
         shutdown_delay_ms: Arc<AtomicU64>,
+        shutdown_delays_ms: Arc<Mutex<HashMap<String, u64>>>,
         launched_tun_names: Arc<Mutex<Vec<(String, String)>>>,
     }
 
@@ -2251,6 +2847,13 @@ mod tests {
                 .store(delay.as_millis() as u64, Ordering::SeqCst);
         }
 
+        fn set_shutdown_delay_for(&self, network_name: &str, delay: Duration) {
+            self.shutdown_delays_ms
+                .lock()
+                .expect("shutdown delays lock poisoned")
+                .insert(network_name.into(), delay.as_millis() as u64);
+        }
+
         fn launched_tun_names(&self) -> Vec<(String, String)> {
             self.launched_tun_names
                 .lock()
@@ -2275,6 +2878,7 @@ mod tests {
             let launch_delay_ms = self.launch_delay_ms.clone();
             let launch_attempts = self.launch_attempts.clone();
             let shutdown_delay_ms = self.shutdown_delay_ms.clone();
+            let shutdown_delays_ms = self.shutdown_delays_ms.clone();
             let launched_tun_names = self.launched_tun_names.clone();
 
             Box::pin(async move {
@@ -2311,6 +2915,7 @@ mod tests {
                     ));
                 let network_name = request.network_name.clone();
                 let routing_network_name = network_name.clone();
+                let shutdown_network_name = network_name.clone();
                 let config_path = PathBuf::from(request.config_path);
                 let mut current_config = request.config;
                 let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
@@ -2320,7 +2925,12 @@ mod tests {
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
                                 if changed.is_err() || *shutdown_rx.borrow() {
-                                    let shutdown_delay = shutdown_delay_ms.load(Ordering::SeqCst);
+                                    let shutdown_delay = shutdown_delays_ms
+                                        .lock()
+                                        .expect("shutdown delays lock poisoned")
+                                        .get(&shutdown_network_name)
+                                        .copied()
+                                        .unwrap_or_else(|| shutdown_delay_ms.load(Ordering::SeqCst));
                                     if shutdown_delay > 0 {
                                         tokio::time::sleep(Duration::from_millis(shutdown_delay)).await;
                                     }
@@ -3789,6 +4399,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_node_without_networks_reaches_running() {
+        let harness = TestHarness::new("start-node-empty").await;
+
+        let summary = harness
+            .runtime
+            .start_node()
+            .await
+            .expect("start empty node");
+        assert_eq!(summary.requested, 0);
+        assert!(summary.started.is_empty());
+        assert!(summary.failed.is_empty());
+
+        let lifecycle = harness.lifecycle.snapshot().await;
+        assert_eq!(lifecycle.phase, NodePhase::Running);
+        assert_eq!(lifecycle.configured_networks, 0);
+        assert_eq!(lifecycle.active_networks, 0);
+        assert!(lifecycle.failed_networks.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn start_node_with_partial_failure_stays_running_and_reports_failed_network() {
+        let harness = TestHarness::new("start-node-partial").await;
+        harness
+            .configs
+            .create_network("home", "ws://home.example:6666", false)
+            .expect("create home");
+        harness
+            .configs
+            .create_network("office", "ws://office.example:6666", false)
+            .expect("create office");
+        harness.fake.fail("office");
+
+        let summary = harness.runtime.start_node().await.expect("start node");
+        assert_eq!(summary.requested, 2);
+        assert_eq!(summary.started, vec!["home"]);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].network_name, "office");
+
+        let lifecycle = harness.lifecycle.snapshot().await;
+        assert_eq!(lifecycle.phase, NodePhase::Running);
+        assert_eq!(lifecycle.active_networks, 1);
+        assert_eq!(lifecycle.failed_networks, vec!["office"]);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn start_node_with_only_failures_reaches_failed_with_network_context() {
+        let harness = TestHarness::new("start-node-failed").await;
+        harness
+            .configs
+            .create_network("broken", "ws://broken.example:6666", false)
+            .expect("create broken");
+        harness.fake.fail("broken");
+
+        let summary = harness.runtime.start_node().await.expect("start node");
+        assert_eq!(summary.requested, 1);
+        assert!(summary.started.is_empty());
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].network_name, "broken");
+
+        let lifecycle = harness.lifecycle.snapshot().await;
+        assert_eq!(lifecycle.phase, NodePhase::Failed);
+        assert_eq!(lifecycle.configured_networks, 1);
+        assert_eq!(lifecycle.active_networks, 0);
+        assert_eq!(lifecycle.failed_networks, vec!["broken"]);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn create_exposes_running_embedded_service_without_secrets_or_paths() {
         let harness = TestHarness::new("service-running").await;
         let mut events = harness.events.subscribe();
@@ -3814,8 +4497,20 @@ mod tests {
             .find(|service| service.network_name == "local")
             .expect("embedded service snapshot");
         assert_eq!(service.status, NodeEmbeddedServiceStatus::Running);
-        assert!(service.signaling_addr.is_some());
-        assert!(service.relay_addr.is_some());
+        let signaling_addr = service.signaling_addr.expect("signaling address");
+        let relay_addr = service.relay_addr.expect("relay address");
+        let persisted = harness
+            .configs
+            .list_networks()
+            .expect("load persisted networks")
+            .into_iter()
+            .find(|network| network.name == "local")
+            .expect("persisted network metadata");
+        assert!(persisted.owns_embedded_services);
+        assert_eq!(persisted.signaling_port, Some(signaling_addr.port()));
+        assert_eq!(persisted.relay_port, Some(relay_addr.port()));
+        assert_eq!(persisted.external_host, None);
+        assert_eq!(persisted.ip_pool, None);
         assert!(snapshot
             .configuration
             .networks
@@ -3828,6 +4523,75 @@ mod tests {
         assert!(!encoded.contains("private_key"));
         assert!(!encoded.contains("secret_key"));
         assert!(!encoded.contains("config_path"));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stop_then_start_node_restores_owned_embedded_service_endpoints() {
+        let harness = TestHarness::new("node-lifecycle-owned").await;
+        harness
+            .runtime
+            .create(create_command("owned", false))
+            .await
+            .expect("create detached network");
+
+        let before = harness.services.list().await.expect("list services");
+        assert_eq!(before.len(), 1);
+        let persisted_before = harness
+            .configs
+            .list_networks()
+            .expect("load networks before stop")
+            .into_iter()
+            .find(|network| network.name == "owned")
+            .expect("owned network metadata");
+        assert_eq!(
+            persisted_before.signaling_port,
+            Some(before[0].signaling_addr.port())
+        );
+        assert_eq!(
+            persisted_before.relay_port,
+            Some(before[0].relay_addr.port())
+        );
+
+        let stopped = harness
+            .runtime
+            .stop_node()
+            .await
+            .expect("stop node data plane");
+        assert_eq!(stopped.stopped, vec!["owned"]);
+        assert!(stopped.failed.is_empty());
+        assert!(harness
+            .services
+            .list()
+            .await
+            .expect("list stopped services")
+            .is_empty());
+
+        let started = harness.runtime.start_node().await.expect("start node");
+        assert_eq!(started.started, vec!["owned"]);
+        let after = harness
+            .services
+            .list()
+            .await
+            .expect("list restored services");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].signaling_addr, before[0].signaling_addr);
+        assert_eq!(after[0].relay_addr, before[0].relay_addr);
+        assert_eq!(after[0].ticket, before[0].ticket);
+
+        let persisted_after = harness
+            .configs
+            .list_networks()
+            .expect("load networks after restart")
+            .into_iter()
+            .find(|network| network.name == "owned")
+            .expect("restored network metadata");
+        assert_eq!(
+            persisted_after.signaling_port,
+            Some(after[0].signaling_addr.port())
+        );
+        assert_eq!(persisted_after.relay_port, Some(after[0].relay_addr.port()));
 
         harness.shutdown().await;
     }
@@ -4162,6 +4926,18 @@ mod tests {
             Err(RuntimeControlError::Conflict(_))
         ));
         assert!(matches!(
+            harness.runtime.start_node().await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        assert!(matches!(
+            harness.runtime.stop_node().await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        assert!(matches!(
+            harness.runtime.restart_node().await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        assert!(matches!(
             harness
                 .runtime
                 .create(create_command("blocked-create", false))
@@ -4194,6 +4970,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_network_stop_failure_does_not_block_other_networks() {
+        let harness = TestHarness::new_with_timeouts(
+            "stop-isolation",
+            RuntimeTimeouts {
+                stop: Duration::from_millis(30),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        for name in ["fast-stop", "slow-stop"] {
+            harness
+                .configs
+                .create_network(name, "ws://127.0.0.1:6666", false)
+                .expect("create test config");
+        }
+        let plan = NodeRuntimePlan::load(
+            &harness.configs,
+            NodeNetworkSelection::Named(vec!["fast-stop".into(), "slow-stop".into()]),
+        )
+        .expect("load test plan");
+        harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start networks");
+        harness
+            .fake
+            .set_shutdown_delay_for("slow-stop", Duration::from_millis(250));
+
+        let summary = harness
+            .runtime
+            .stop(Vec::new(), true)
+            .await
+            .expect("partial stop returns a summary");
+        assert_eq!(summary.stopped, vec!["fast-stop"]);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].network_name, "slow-stop");
+        assert!(summary.failed[0].message.contains("stop/timeout"));
+        assert!(harness.registry.get_all().await.is_empty());
+
+        let lifecycle = harness.lifecycle.snapshot().await;
+        assert_eq!(lifecycle.phase, NodePhase::Running);
+        assert_eq!(lifecycle.active_networks, 0);
+        assert_eq!(lifecycle.failed_networks, vec!["slow-stop"]);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn multi_network_stop_uses_one_shared_deadline() {
+        let harness = TestHarness::new_with_timeouts(
+            "stop-shared-deadline",
+            RuntimeTimeouts {
+                stop: Duration::from_millis(50),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        let names = (0..12)
+            .map(|index| format!("parallel-{index:02}"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            harness
+                .configs
+                .create_network(name, "ws://127.0.0.1:6666", false)
+                .expect("create test config");
+        }
+        let plan =
+            NodeRuntimePlan::load(&harness.configs, NodeNetworkSelection::Named(names.clone()))
+                .expect("load test plan");
+        harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start networks");
+        harness.fake.set_shutdown_delay(Duration::from_secs(2));
+
+        let started = Instant::now();
+        let summary = timeout(Duration::from_secs(2), harness.runtime.stop(names, false))
+            .await
+            .expect("parallel stop must finish")
+            .expect("stop returns a summary");
+        assert!(summary.stopped.is_empty());
+        assert_eq!(summary.failed.len(), 12);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "network shutdowns were serialized: {:?}",
+            started.elapsed()
+        );
+        assert!(harness.registry.get_all().await.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn stop_timeout_force_cleans_shared_runtime_state() {
         let harness = TestHarness::new_with_timeouts(
             "stop-timeout",
@@ -4206,16 +5077,16 @@ mod tests {
         start_fake_network(&harness, "slow-stop").await;
         harness.fake.set_shutdown_delay(Duration::from_millis(250));
 
-        let error = harness
+        let summary = harness
             .runtime
             .stop(vec!["slow-stop".into()], false)
             .await
-            .expect_err("slow stop must time out");
-        assert!(matches!(
-            error,
-            RuntimeControlError::Timeout(ref message)
-                if message.contains("stop/timeout") && message.contains("已中止并清理共享状态")
-        ));
+            .expect("slow stop must return a partial-failure summary");
+        assert!(summary.stopped.is_empty());
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].network_name, "slow-stop");
+        assert!(summary.failed[0].message.contains("stop/timeout"));
+        assert!(summary.failed[0].message.contains("已中止并清理共享状态"));
         assert!(harness.registry.get_all().await.is_empty());
         let snapshot = harness.state.snapshot().await;
         let network = snapshot
@@ -4299,6 +5170,49 @@ mod tests {
             NodeNetworkStatus::Failed
         );
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restart_node_failure_converges_to_failed_instead_of_stopping() {
+        let harness = TestHarness::new("restart-node-failed").await;
+        harness
+            .configs
+            .create_network("restart-node", "ws://127.0.0.1:6666", false)
+            .expect("create test config");
+        let plan = NodeRuntimePlan::load(
+            &harness.configs,
+            NodeNetworkSelection::Named(vec!["restart-node".into()]),
+        )
+        .expect("load test plan");
+        harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start test network");
+
+        // Closing the service actor forces the restart to fail after entering
+        // the stopping phase, exercising lifecycle error convergence.
+        harness
+            .services
+            .shutdown()
+            .await
+            .expect("close service manager");
+        let error = harness
+            .runtime
+            .restart_node()
+            .await
+            .expect_err("restart must report the unavailable service manager");
+        assert!(matches!(error, RuntimeControlError::ActorClosed));
+
+        let lifecycle = harness.lifecycle.snapshot().await;
+        assert_eq!(lifecycle.phase, NodePhase::Failed);
+        assert_ne!(lifecycle.phase, NodePhase::Stopping);
+
+        let _ = harness
+            .runtime
+            .stop(vec!["restart-node".into()], false)
+            .await;
         harness.shutdown().await;
     }
 

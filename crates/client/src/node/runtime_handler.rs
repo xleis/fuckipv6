@@ -116,6 +116,20 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                         "动态启动网络尚未接入监督器；请先完成运行时 actor 化",
                     ),
                 },
+                super::NodeCommand::StartNode => match runtime {
+                    Some(runtime) => start_runtime_node(&runtime, request_id).await,
+                    None => unavailable(request_id, "启动节点需要运行中的多网络监督器控制通道"),
+                },
+                super::NodeCommand::StopNode => match runtime {
+                    Some(runtime) => stop_runtime_node(&runtime, request_id).await,
+                    None => {
+                        unavailable(request_id, "停止节点数据面需要运行中的多网络监督器控制通道")
+                    }
+                },
+                super::NodeCommand::RestartNode => match runtime {
+                    Some(runtime) => restart_runtime_node(&runtime, request_id).await,
+                    None => unavailable(request_id, "重启节点需要运行中的多网络监督器控制通道"),
+                },
                 super::NodeCommand::CreateNetwork(command) => match runtime {
                     Some(runtime) => create_runtime_network(&runtime, request_id, command).await,
                     None => unavailable(request_id, "创建网络尚未接入内嵌网络服务 actor"),
@@ -203,6 +217,62 @@ async fn start_runtime_networks(
     }
 }
 
+async fn start_runtime_node(runtime: &NetworkRuntimeManager, request_id: u64) -> NodeCommandResult {
+    match runtime.start_node().await {
+        Ok(summary)
+            if summary.requested > 0
+                && summary.started.is_empty()
+                && summary.already_running.is_empty() =>
+        {
+            NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    summary.message("启动节点失败"),
+                )
+                .retryable(true),
+            )
+        }
+        Ok(summary) => completed_summary(request_id, summary, "启动节点"),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn stop_runtime_node(runtime: &NetworkRuntimeManager, request_id: u64) -> NodeCommandResult {
+    match runtime.stop_node().await {
+        Ok(summary) if summary.failed.is_empty() => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: summary.message(),
+            },
+        ),
+        Ok(summary) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn restart_runtime_node(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+) -> NodeCommandResult {
+    match runtime.restart_node().await {
+        Ok(summary) if summary.failed.is_empty() => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: summary.message(),
+            },
+        ),
+        Ok(summary) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
 async fn create_runtime_network(
     runtime: &NetworkRuntimeManager,
     request_id: u64,
@@ -265,7 +335,7 @@ async fn stop_runtime_networks(
     all: bool,
 ) -> NodeCommandResult {
     match runtime.stop(networks, all).await {
-        Ok(summary) => NodeCommandResult::completed(
+        Ok(summary) if summary.failed.is_empty() => NodeCommandResult::completed(
             request_id,
             NodeCommandOutcome::Completed {
                 message: if summary.stopped.is_empty() {
@@ -274,6 +344,10 @@ async fn stop_runtime_networks(
                     format!("已停止网络: {}", summary.stopped.join(", "))
                 },
             },
+        ),
+        Ok(summary) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
         ),
         Err(error) => runtime_rejection(request_id, error),
     }
@@ -286,11 +360,15 @@ async fn restart_runtime_networks(
     all: bool,
 ) -> NodeCommandResult {
     match runtime.restart(networks, all).await {
-        Ok(summary) => NodeCommandResult::completed(
+        Ok(summary) if summary.failed.is_empty() => NodeCommandResult::completed(
             request_id,
             NodeCommandOutcome::Completed {
                 message: summary.message(),
             },
+        ),
+        Ok(summary) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
         ),
         Err(error) => runtime_rejection(request_id, error),
     }

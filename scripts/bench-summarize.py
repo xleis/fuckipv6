@@ -26,9 +26,14 @@ def _as_int(value: Any) -> int | None:
     return int(number) if number is not None else None
 
 
-def _iperf_summary(document: dict[str, Any]) -> dict[str, Any]:
+def _iperf_summary(document: dict[str, Any], test: str) -> dict[str, Any]:
     end = document.get("end", {})
-    summary = end.get("sum_received") or end.get("sum") or end.get("sum_sent")
+    if test.startswith("udp_"):
+        # end.sum is the sender aggregate on UDP. Only sum_received contains the
+        # receiver's delivery counters, so never substitute sender bytes there.
+        summary = end.get("sum_received")
+    else:
+        summary = end.get("sum_received") or end.get("sum") or end.get("sum_sent")
     if not isinstance(summary, dict):
         error = document.get("error") or "iperf3 output has no result summary"
         raise ValueError(str(error))
@@ -78,7 +83,7 @@ def parse_perf(path: Path | None) -> dict[str, float]:
 
 def record(args: argparse.Namespace) -> None:
     document = json.loads(args.iperf_json.read_text(encoding="utf-8"))
-    summary = _iperf_summary(document)
+    summary = _iperf_summary(document, args.test)
     sent_summary = _iperf_sent_summary(document)
     throughput_bps = _as_float(summary.get("bits_per_second"))
     offered_throughput_bps = _as_float(sent_summary.get("bits_per_second"))
@@ -128,6 +133,8 @@ def record(args: argparse.Namespace) -> None:
         "impl": args.impl,
         "test": args.test,
         "run": args.run,
+        "valid": True,
+        "invalid_reason": None,
         "metrics": {
             "throughput_gbps": throughput_bps / 1e9
             if throughput_bps is not None
@@ -153,8 +160,31 @@ def record(args: argparse.Namespace) -> None:
         },
     }
 
+    invalid_reason = None
+    if args.test.startswith("udp_") and sent_packet_count and sent_packet_count > 0:
+        if received_packet_count == 0 or not transferred_bytes:
+            invalid_reason = "zero_received_payload"
+    elif transferred_bytes == 0:
+        invalid_reason = "zero_received_payload"
+
+    if invalid_reason is not None:
+        result["valid"] = False
+        result["invalid_reason"] = invalid_reason
+        result["metrics"]["throughput_gbps"] = None
+        result["metrics"]["packets_per_second"] = None
+        result["metrics"]["cpu_seconds_per_byte"] = None
+        result["metrics"]["cycles_per_byte"] = None
+        result["metrics"]["instructions_per_byte"] = None
+
     with args.results.open("a", encoding="utf-8") as output:
         output.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
+
+    if invalid_reason is not None:
+        raise ValueError(
+            f"invalid {args.impl}/{args.test}/run {args.run}: {invalid_reason} "
+            f"(offered={offered_throughput_bps or 0:.3f} bit/s, "
+            f"sent_packets={sent_packet_count or 0})"
+        )
 
     print(
         f"{args.impl:20} {args.test:20} run={args.run} "
@@ -202,14 +232,17 @@ def aggregate(args: argparse.Namespace) -> None:
     ]
     with args.csv.open("w", encoding="utf-8", newline="") as output:
         writer = csv.writer(output)
-        writer.writerow(["impl", "test", "runs", *metrics])
+        writer.writerow(["impl", "test", "runs", "valid_runs", "invalid_runs", *metrics])
         for (implementation, test), rows in sorted(grouped.items()):
+            valid_rows = [row for row in rows if row.get("valid") is not False]
             writer.writerow(
                 [
                     implementation,
                     test,
                     len(rows),
-                    *[_format(_median(rows, metric)) for metric in metrics],
+                    len(valid_rows),
+                    len(rows) - len(valid_rows),
+                    *[_format(_median(valid_rows, metric)) for metric in metrics],
                 ]
             )
 

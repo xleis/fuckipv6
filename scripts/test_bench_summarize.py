@@ -92,6 +92,56 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(row["cpu_seconds_per_byte"], "1.25e-08")
         self.assertEqual(row["cycles_per_byte"], "30")
 
+    def test_udp_zero_receive_is_invalid_and_does_not_use_sender_summary(self) -> None:
+        document = {
+            "end": {
+                "sum_received": {
+                    "bits_per_second": 0,
+                    "bytes": 0,
+                    "seconds": 5.0,
+                    "lost_packets": 0,
+                    "packets": 0,
+                    "lost_percent": 0,
+                },
+                "sum_sent": {
+                    "bits_per_second": 49_999_446,
+                    "bytes": 31_251_360,
+                    "seconds": 5.0,
+                    "packets": 22_008,
+                },
+                "sum": {
+                    "bits_per_second": 49_999_446,
+                    "bytes": 31_251_360,
+                    "seconds": 5.0,
+                    "packets": 22_008,
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            iperf_json = root / "iperf.json"
+            results = root / "results.jsonl"
+            iperf_json.write_text(json.dumps(document), encoding="utf-8")
+            args = Namespace(
+                iperf_json=iperf_json,
+                perf_csv=None,
+                results=results,
+                impl="test",
+                test="udp_1420_controlled",
+                run=1,
+                field=[],
+            )
+            with self.assertRaisesRegex(ValueError, "zero_received_payload"):
+                SUMMARIZER.record(args)
+            record = json.loads(results.read_text(encoding="utf-8"))
+
+        self.assertFalse(record["valid"])
+        self.assertEqual(record["invalid_reason"], "zero_received_payload")
+        self.assertIsNone(record["metrics"]["throughput_gbps"])
+        self.assertAlmostEqual(
+            record["metrics"]["offered_throughput_gbps"], 0.049999446, places=9
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

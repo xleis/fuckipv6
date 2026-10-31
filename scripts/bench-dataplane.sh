@@ -15,6 +15,7 @@ set -Eeuo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FUCKIPV6_BIN="${FUCKIPV6_BIN:-$PROJECT_ROOT/target/release/fuckipv6}"
 WG_GO_BIN="${WG_GO_BIN:-$(command -v wireguard-go || true)}"
+WG_GO_SRC="${WG_GO_SRC:-}"
 SUMMARIZER="$PROJECT_ROOT/scripts/bench-summarize.py"
 IMPLS="fuckipv6 wireguard-kernel"
 RUNS=3
@@ -39,7 +40,7 @@ Options:
   --duration SECONDS   iperf3 measurement duration (default: 10)
   --omit SECONDS       Initial iperf3 warm-up omitted from results (default: 0)
   --mtu BYTES          TUN interface MTU (default: 1420)
-  --udp-1420-rate RATE Controlled UDP 1420-byte offered rate (default: 50M)
+  --udp-1420-rate RATE Controlled 1420-byte tunnel-packet UDP rate (default: 50M)
   --udp-64-rate RATE   Controlled UDP 64-byte offered rate (default: 5M)
   --client-cpus LIST   Pin client-side processes with taskset (for example: 2 or 2-3)
   --server-cpus LIST   Pin server-side processes with taskset (for example: 3 or 3-4)
@@ -51,6 +52,7 @@ Options:
 Environment:
   FUCKIPV6_BIN         Release node binary
   WG_GO_BIN            wireguard-go binary (required for wireguard-go)
+  WG_GO_SRC            optional wireguard-go source checkout for commit metadata
 EOF
 }
 
@@ -132,6 +134,11 @@ done
 [[ "$UDP_64_RATE" =~ ^[1-9][0-9]*[KMG]?$ ]] \
     || fail "--udp-64-rate must look like 100M, 1G, or 500K"
 (( DURATION > OMIT + 1 )) || fail "--duration must exceed --omit by at least two seconds"
+(( MTU > 48 )) || fail "--mtu must leave room for IPv6 and UDP headers"
+# iperf3 -l is the application payload. An IPv6 UDP packet adds 48 bytes, so
+# use MTU - 48 to exercise exactly one MTU-sized inner packet without IPv6
+# fragmentation. Keep the historical test name for report continuity.
+UDP_1420_PAYLOAD="$(( MTU - 48 ))"
 
 if [ "$IMPLS" = "all" ]; then
     IMPLS="fuckipv6 wireguard-kernel wireguard-go"
@@ -184,9 +191,12 @@ LOG_DIR="$OUTPUT_DIR/logs"
 WORK_DIR="$OUTPUT_DIR/work"
 RESULTS_JSONL="$OUTPUT_DIR/results.jsonl"
 SUMMARY_CSV="$OUTPUT_DIR/summary.csv"
-mkdir -p "$RAW_DIR" "$LOG_DIR" "$WORK_DIR/secrets"
+mkdir -p "$RAW_DIR" "$LOG_DIR" "$WORK_DIR/secrets" "$WORK_DIR/xdg-config"
 chmod 700 "$WORK_DIR" "$WORK_DIR/secrets"
 [ ! -e "$RESULTS_JSONL" ] || fail "Result file already exists: $RESULTS_JSONL"
+# FuckIPv6 stores network discovery state below XDG_CONFIG_HOME. Isolate every
+# benchmark from the invoking user's existing `default` network.
+export XDG_CONFIG_HOME="$WORK_DIR/xdg-config"
 
 SUFFIX="$(printf '%04d' "$(( $$ % 10000 ))")"
 BRIDGE="fip6b$SUFFIX"
@@ -221,7 +231,7 @@ import socket
 
 sockets = []
 try:
-    for _ in range(4):
+    for _ in range(3):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("", 0))
         sockets.append(sock)
@@ -346,11 +356,112 @@ wait_for_ping() {
     return 1
 }
 
+capture_fuckipv6_status() {
+    local namespace="$1"
+    local destination="$2"
+    ip netns exec "$namespace" "$FUCKIPV6_BIN" status --json >"$destination" 2>"${destination%.json}.stderr"
+    python3 -m json.tool "$destination" >/dev/null
+}
+
+validate_direct_status() {
+    local before_ns1="$1"
+    local before_ns2="$2"
+    local after_ns1="$3"
+    local after_ns2="$4"
+    local expected_peer1="$5"
+    local expected_peer2="$6"
+    local expected_ns1_endpoint="$7"
+    local expected_ns2_endpoint="$8"
+    python3 - "$before_ns1" "$before_ns2" "$after_ns1" "$after_ns2"         "$expected_peer1" "$expected_peer2"         "$expected_ns1_endpoint" "$expected_ns2_endpoint" <<'PY'
+import json
+import pathlib
+import sys
+
+def load(path):
+    return json.loads(pathlib.Path(path).read_text())
+
+def session(document):
+    return document.get("peers") or [], document.get("networks") or []
+
+def peer(document, expected_ip):
+    peers, _ = session(document)
+    matches = [p for p in peers if p.get("virtual_ip") == expected_ip]
+    if len(matches) != 1:
+        raise SystemExit(f"expected exactly one peer {expected_ip}, got {len(matches)}")
+    return matches[0]
+
+def endpoint_ip(value):
+    if not value:
+        return None
+    if value.startswith("["):
+        return value[1:value.index("]")]
+    return value.rsplit(":", 1)[0]
+
+before1, before2, after1, after2 = map(load, sys.argv[1:5])
+peer1, peer2, expected_endpoint1, expected_endpoint2 = sys.argv[5:9]
+p1b, p1a = peer(before1, peer1), peer(after1, peer1)
+p2b, p2a = peer(before2, peer2), peer(after2, peer2)
+if endpoint_ip(p1a.get("active_endpoint")) != expected_endpoint1:
+    raise SystemExit(f"direct endpoint mismatch on ns1: {p1a.get('active_endpoint')} != {expected_endpoint1}")
+if endpoint_ip(p2a.get("active_endpoint")) != expected_endpoint2:
+    raise SystemExit(f"direct endpoint mismatch on ns2: {p2a.get('active_endpoint')} != {expected_endpoint2}")
+
+def fallback(document):
+    _, networks = session(document)
+    values = [
+        ((network.get("dataplane") or {}).get("udp") or {}).get("fallback_packets", 0)
+        for network in networks
+    ]
+    dp = document.get("dataplane") or {}
+    if dp:
+        values.append((dp.get("udp") or {}).get("fallback_packets", 0))
+    return max(values or [0])
+
+def global_p2p_rx(document):
+    # The top-level global snapshot is the aggregate across configured
+    # networks. Fall back to per-network counters for older status payloads.
+    value = (document.get("global") or {}).get("p2p_rx_packets")
+    if value is not None:
+        return int(value)
+    return sum(
+        int((network.get("global") or {}).get("p2p_rx_packets", 0))
+        for network in (document.get("networks") or [])
+    )
+
+fallback_delta = (fallback(after1) - fallback(before1)) + (fallback(after2) - fallback(before2))
+tx_delta = (p1a["tx_packets"] - p1b["tx_packets"]) + (p2a["tx_packets"] - p2b["tx_packets"])
+rx_delta = (p1a["rx_packets"] - p1b["rx_packets"]) + (p2a["rx_packets"] - p2b["rx_packets"])
+global_rx_delta = (
+    global_p2p_rx(after1) - global_p2p_rx(before1)
+    + global_p2p_rx(after2) - global_p2p_rx(before2)
+)
+if fallback_delta != 0:
+    raise SystemExit(f"direct benchmark used fallback: {fallback_delta} packets")
+if tx_delta <= 0 or rx_delta <= 0 or global_rx_delta <= 0:
+    raise SystemExit(
+        "no direct P2P counter growth: "
+        f"tx_delta={tx_delta} rx_delta={rx_delta} "
+        f"global_rx_delta={global_rx_delta}"
+    )
+if not all(p.get("p2p_active") for p in (p1a, p2a)):
+    raise SystemExit("direct benchmark peer is not active on both ends")
+
+print("direct_path=true")
+print(f"fallback_packets_delta={fallback_delta}")
+print(f"p2p_tx_packets_delta={tx_delta}")
+print(f"p2p_rx_packets_delta={rx_delta}")
+print(f"global_p2p_rx_packets_delta={global_rx_delta}")
+print(f"active_endpoint_ns1={p1a['active_endpoint']}")
+print(f"active_endpoint_ns2={p2a['active_endpoint']}")
+PY
+}
+
 start_fuckipv6() {
     local host_log="$LOG_DIR/fuckipv6-host.log"
     "${CONTROL_AFFINITY[@]}" env RUST_LOG=info "$FUCKIPV6_BIN" host \
         --port "$SIGNALING_PORT" \
         --relay-port "$RELAY_PORT" \
+        --auto-connect=false \
         >"$host_log" 2>&1 &
     HOST_PID=$!
     OTHER_PIDS+=("$HOST_PID")
@@ -499,6 +610,7 @@ record_metadata() {
         dirty="dirty"
     fi
     python3 - "$OUTPUT_DIR/metadata.json" <<PY
+import hashlib
 import json
 import pathlib
 import platform
@@ -510,6 +622,45 @@ def command(*args):
         return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+def bytes_command(*args):
+    try:
+        return subprocess.check_output(args, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return b""
+
+def governor():
+    try:
+        return pathlib.Path('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor').read_text().strip()
+    except OSError:
+        return None
+
+def untracked_sha256():
+    digest = hashlib.sha256()
+    try:
+        names = subprocess.check_output(
+            ['git', '-C', '$PROJECT_ROOT', 'ls-files', '--others', '--exclude-standard', '-z'],
+            stderr=subprocess.DEVNULL,
+        ).split(b'\0')
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    root = pathlib.Path('$PROJECT_ROOT')
+    for raw_name in sorted(name for name in names if name):
+        digest.update(len(raw_name).to_bytes(8, 'big'))
+        digest.update(raw_name)
+        try:
+            digest.update((root / raw_name.decode()).read_bytes())
+        except OSError:
+            digest.update(b'<unreadable>')
+    return digest.hexdigest()
+
+def worktree_sha256(diff_digest, untracked_digest):
+    if diff_digest is None or untracked_digest is None:
+        return None
+    digest = hashlib.sha256()
+    digest.update(bytes.fromhex(diff_digest))
+    digest.update(bytes.fromhex(untracked_digest))
+    return digest.hexdigest()
 
 cpu = None
 try:
@@ -533,6 +684,7 @@ metadata = {
     'runs': int('$RUNS'),
     'mtu': int('$MTU'),
     'udp_1420_controlled_rate': '$UDP_1420_RATE',
+    'udp_1420_payload_bytes': int('$UDP_1420_PAYLOAD'),
     'udp_64_controlled_rate': '$UDP_64_RATE',
     'cpu_affinity': {
         'control_cpus': '$CONTROL_CPUS' or None,
@@ -544,11 +696,18 @@ metadata = {
     'iperf3': command('iperf3', '--version'),
     'wg': command('wg', '--version'),
     'wireguard_go': command('$WG_GO_BIN', '--version') if '$WG_GO_BIN' else None,
+    'wireguard_go_commit': command('git', '-C', '$WG_GO_SRC', 'rev-parse', 'HEAD') if '$WG_GO_SRC' else None,
+    'cpu_governor': governor(),
     'perf_enabled': bool(int('$USE_PERF')),
     'perf_scope': 'system-wide task-clock/cycles/instructions' if int('$USE_PERF') else None,
     'implementations': '$IMPLS'.split(),
-    'fuckipv6_binary_sha256': command('sha256sum', '$FUCKIPV6_BIN'),
+    'fuckipv6_binary_sha256': (command('sha256sum', '$FUCKIPV6_BIN') or '').split()[0] or None,
+    'git_diff_binary_sha256': hashlib.sha256(bytes_command('git', '-C', '$PROJECT_ROOT', 'diff', '--binary')).hexdigest(),
+    'git_untracked_sha256': untracked_sha256(),
 }
+metadata['git_worktree_snapshot_sha256'] = worktree_sha256(
+    metadata['git_diff_binary_sha256'], metadata['git_untracked_sha256']
+)
 pathlib.Path(sys.argv[1]).write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
 PY
     git -C "$PROJECT_ROOT" status --porcelain >"$OUTPUT_DIR/git-status.txt" 2>/dev/null || true
@@ -566,6 +725,7 @@ record_result() {
     local cpu_seconds="$8"
     local iperf_json="$RAW_DIR/${impl}__${test}__run${run}.json"
     local perf_csv="$RAW_DIR/${impl}__${test}__run${run}.perf.csv"
+    local -a extra_fields=("${@:9}")
     local -a summarize=(python3 "$SUMMARIZER" record
         --iperf-json "$iperf_json"
         --results "$RESULTS_JSONL"
@@ -583,6 +743,10 @@ record_result() {
         --field "client_cpus=$CLIENT_CPUS"
         --field "server_cpus=$SERVER_CPUS"
         --field "control_cpus=$CONTROL_CPUS")
+    local field
+    for field in "${extra_fields[@]}"; do
+        [ -n "$field" ] && summarize+=(--field "$field")
+    done
     if [ "$USE_PERF" -eq 1 ]; then
         summarize+=(--perf-csv "$perf_csv")
     fi
@@ -603,6 +767,15 @@ execute_case() {
         local iperf_json="$RAW_DIR/${impl}__${test}__run${run}.json"
         local perf_csv="$RAW_DIR/${impl}__${test}__run${run}.perf.csv"
         local stderr_log="$LOG_DIR/${impl}__${test}__run${run}.stderr"
+        local status_before1="$RAW_DIR/${impl}__${test}__run${run}__ns1_before.json"
+        local status_before2="$RAW_DIR/${impl}__${test}__run${run}__ns2_before.json"
+        local status_after1="$RAW_DIR/${impl}__${test}__run${run}__ns1_after.json"
+        local status_after2="$RAW_DIR/${impl}__${test}__run${run}__ns2_after.json"
+        local -a direct_fields=()
+        if [ "$impl" = "fuckipv6" ]; then
+            capture_fuckipv6_status "$NS1" "$status_before1"
+            capture_fuckipv6_status "$NS2" "$status_before2"
+        fi
         local cpu_before cpu_after cpu_seconds
         cpu_before="$(awk '/^cpu / { total=0; for (i=2; i<=9; i++) total+=$i; print total, $5+$6 }' /proc/stat)"
         local cmd=(ip netns exec "$NS1" "${CLIENT_AFFINITY[@]}" iperf3 -6 -J -c "$VIRTUAL_IP2" \
@@ -627,6 +800,26 @@ execute_case() {
             fi
         fi
         cpu_after="$(awk '/^cpu / { total=0; for (i=2; i<=9; i++) total+=$i; print total, $5+$6 }' /proc/stat)"
+        if [ "$impl" = "fuckipv6" ]; then
+            capture_fuckipv6_status "$NS1" "$status_after1"
+            capture_fuckipv6_status "$NS2" "$status_after2"
+            local direct_validation="$RAW_DIR/${impl}__${test}__run${run}__direct_path.txt"
+            if ! validate_direct_status "$status_before1" "$status_before2" \
+                "$status_after1" "$status_after2" \
+                "$VIRTUAL_IP2" "$VIRTUAL_IP1" "$NS2_IP" "$NS1_IP" \
+                >"$direct_validation"; then
+                fail "direct P2P path validation failed for $impl/$test/run $run"
+            fi
+            mapfile -t direct_fields < "$direct_validation"
+            direct_fields+=(
+                "status_before_ns1=$status_before1"
+                "status_after_ns1=$status_after1"
+                "status_before_ns2=$status_before2"
+                "status_after_ns2=$status_after2"
+            )
+        else
+            direct_fields=("direct_path=not_applicable")
+        fi
         cpu_seconds="$(awk -v before="$cpu_before" -v after="$cpu_after" \
             -v hz="$(getconf CLK_TCK)" 'BEGIN {
                 split(before, b, " "); split(after, a, " ");
@@ -635,7 +828,7 @@ execute_case() {
                 printf "%.9f", (total - idle) / hz;
             }')"
         record_result "$impl" "$test" "$run" "$streams" "$payload_bytes" \
-            "$workload" "$offered_rate" "$cpu_seconds"
+            "$workload" "$offered_rate" "$cpu_seconds" "${direct_fields[@]}"
     done
 }
 
@@ -651,12 +844,12 @@ run_impl() {
 
     execute_case "$impl" tcp_1flow 1 0 unlimited unlimited -P 1
     execute_case "$impl" tcp_8flow 8 0 unlimited unlimited -P 8
-    execute_case "$impl" udp_1420_saturated 1 1420 saturated unlimited \
-        -u -b 0 -l 1420
+    execute_case "$impl" udp_1420_saturated 1 "$UDP_1420_PAYLOAD" saturated unlimited \
+        -u -b 0 -l "$UDP_1420_PAYLOAD"
     execute_case "$impl" udp_64_saturated 1 64 saturated unlimited \
         -u -b 0 -l 64
-    execute_case "$impl" udp_1420_controlled 1 1420 controlled "$UDP_1420_RATE" \
-        -u -b "$UDP_1420_RATE" -l 1420
+    execute_case "$impl" udp_1420_controlled 1 "$UDP_1420_PAYLOAD" controlled "$UDP_1420_RATE" \
+        -u -b "$UDP_1420_RATE" -l "$UDP_1420_PAYLOAD"
     execute_case "$impl" udp_64_controlled 1 64 controlled "$UDP_64_RATE" \
         -u -b "$UDP_64_RATE" -l 64
 

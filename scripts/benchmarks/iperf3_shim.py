@@ -43,7 +43,9 @@ def classify_iperf_args(args: list[str]) -> str:
     payload = int(float(_option(args, "-l", "0") or "0"))
     rate = (_option(args, "-b", "") or "").strip().lower()
     saturated = rate in {"0", "0m", "0g", "unlimited"}
-    if payload == 1420:
+    # The 1420-byte model is an IPv6 packet on the TUN wire. iperf3 -l only
+    # counts the application payload, excluding IPv6 and UDP headers.
+    if payload == 1372:
         return "udp_1420_saturated" if saturated else "udp_1420_controlled"
     if payload == 64:
         return "udp_64_saturated" if saturated else "udp_64_controlled"

@@ -41,8 +41,12 @@ class ParserTests(unittest.TestCase):
             "tcp_8flow",
         )
         self.assertEqual(
-            iperf3_shim.classify_iperf_args(["-u", "-b", "0", "-l", "1420"]),
+            iperf3_shim.classify_iperf_args(["-u", "-b", "0", "-l", "1372"]),
             "udp_1420_saturated",
+        )
+        self.assertEqual(
+            iperf3_shim.classify_iperf_args(["-u", "-b", "0", "-l", "1420"]),
+            "unknown",
         )
         self.assertEqual(
             iperf3_shim.classify_iperf_args(["-u", "-b", "5M", "-l", "64"]),

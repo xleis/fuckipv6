@@ -1045,7 +1045,7 @@ fn open_with_driver_core(
         }
     }
 
-    let epoch = DataHeader::decode(&packet)
+    let epoch = DataHeader::decode(packet)
         .map_err(DriverError::Data)?
         .epoch;
     let retired = state

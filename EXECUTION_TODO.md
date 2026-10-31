@@ -137,7 +137,7 @@
   - 工作：补齐 Linux network namespace 自动化，并为 Windows/macOS 实现等价转发/NAT 能力或明确能力探测与禁用原因。
   - 依赖：NX-04、NX-05。
   - 验收：Linux 覆盖启动、路由、NAT、清理和故障回滚；Windows/macOS 要么通过实机集成测试，要么 UI/CLI/API 明确报告不支持且禁用动作；任何平台都不得显示虚假的 Exit Node 成功状态。
-  - 进展（2026-10-31）：共享 `ExitNodeCapabilities` 契约已发布稳定 schema，区分平台、转发/NAT/清理能力与类型化禁用原因；非 Linux 的能力探测固定失败关闭，启用 Exit Node 的配置加载/保存会被拒绝。`NodeSnapshot` 暴露 capability 真值，旧快照缺少字段时重新探测；Exit Node 启用类命令在快照报告不支持时返回不可重试的 `unsupported`，HTTP 映射为 422，支持但运行时后端未接线时仍明确返回 `unavailable`。Linux 转发器改为可注入命令执行器，并以单元测试覆盖内核转发、过滤/NAT 链、客户端规则、回程路由、清理幂等和安装/客户端失败回滚。新增特权 Linux network namespace 验收脚本，已在当前主机真实通过启动、转发、NAT、授权撤销、清理和 POSTROUTING 故障回滚场景。剩余：受保护 CLI/WebUI adapter 与 GPUI 页面尚未消费能力字段禁用入口，Windows/macOS 无真实数据面且未做实机测试；NX-04 的运行中路由重配置已接通。
+  - 进展（2026-10-31）：共享 `ExitNodeCapabilities` 契约已发布稳定 schema，区分平台、转发/NAT/清理能力与类型化禁用原因；非 Linux 的能力探测固定失败关闭，启用 Exit Node 的配置加载/保存会被拒绝。`NodeSnapshot` 暴露 capability 真值，旧快照缺少字段时重新探测；Exit Node 启用类命令在快照报告不支持时返回不可重试的 `unsupported`，HTTP 映射为 422，支持但运行时后端未接线时仍明确返回 `unavailable`。Linux 转发器改为可注入命令执行器，并以单元测试覆盖内核转发、过滤/NAT 链、客户端规则、回程路由、清理幂等和安装/客户端失败回滚。新增特权 Linux network namespace 验收脚本，已在当前主机真实通过启动、转发、NAT、授权撤销、清理和 POSTROUTING 故障回滚场景。GPUI Exit Node 页面现已展示平台、转发/NAT/清理能力与类型化禁用原因；`set_exit_node_role` 在能力不支持时于命令提交前失败关闭，Relay 动作不受影响，并有平台无关的确定性投影/动作测试。剩余：受保护 CLI/WebUI adapter 尚未消费能力字段禁用入口，Windows/macOS 无真实数据面且未做实机测试；NX-04 的运行中路由重配置已接通。
 
 - [x] **NX-16 用户态 NAT 可行性原型（细化 EX-16）**
   - 工作：原型实现 TCP/UDP 连接跟踪、超时、端口复用、资源上限和失败关闭策略，评估作为无内核转发平台后备路径的可行性。

@@ -127,6 +127,7 @@ pub enum ActionBlockReason {
     NoOnlineNetwork,
     NoNetworkSelected,
     PermissionDenied,
+    ExitNodeUnsupported,
 }
 
 impl ActionBlockReason {
@@ -136,6 +137,7 @@ impl ActionBlockReason {
             Self::NoOnlineNetwork => "没有在线网络",
             Self::NoNetworkSelected => "请先选择网络",
             Self::PermissionDenied => "共享权限快照未授予此动作",
+            Self::ExitNodeUnsupported => "当前平台或主机不满足 Exit Node 能力要求",
         }
     }
 }
@@ -362,6 +364,10 @@ pub fn action_block_reason(
         .contains(&action.permission)
     {
         return Some(ActionBlockReason::PermissionDenied);
+    }
+
+    if action.id == "set_exit_node_role" && !snapshot.exit_node_capabilities.supported {
+        return Some(ActionBlockReason::ExitNodeUnsupported);
     }
 
     match action.availability {
@@ -951,6 +957,33 @@ fn project_routing(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMod
 }
 
 fn project_exit_node(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+    let capabilities = &snapshot.exit_node_capabilities;
+    let capability_rows = vec![row(
+        "平台能力",
+        format!(
+            "platform={} · supported={} · ipv4_forwarding={} · ipv6_forwarding={} · nat={} · cleanup={}",
+            exit_node_platform_label(capabilities.platform),
+            capabilities.supported,
+            capabilities.ipv4_forwarding,
+            capabilities.ipv6_forwarding,
+            capabilities.nat,
+            capabilities.cleanup
+        ),
+    )];
+    let unsupported_rows = (!capabilities.unsupported_reasons.is_empty())
+        .then(|| {
+            row(
+                "不受支持的原因",
+                capabilities
+                    .unsupported_reasons
+                    .iter()
+                    .map(|reason| format!("{reason:?}: {}", reason.message()))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
     let rows = snapshot
         .configuration
         .networks
@@ -981,10 +1014,27 @@ fn project_exit_node(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionM
             metric("Exit 角色", role_rows.len(), "NodeNetworkRole::ExitNode"),
         ],
         vec![
+            section("平台能力", "没有可用的 Exit Node 能力快照", capability_rows),
+            section(
+                "能力限制",
+                "当前主机满足全部 Exit Node 能力要求",
+                unsupported_rows,
+            ),
             section("Exit Node 配置", "没有 Exit Node 配置", rows),
             section("当前角色", "当前没有网络承担 Exit Node 角色", role_rows),
         ],
     )
+}
+
+fn exit_node_platform_label(platform: fuckipv6_common::ExitNodePlatform) -> &'static str {
+    use fuckipv6_common::ExitNodePlatform;
+
+    match platform {
+        ExitNodePlatform::Linux => "Linux",
+        ExitNodePlatform::Windows => "Windows",
+        ExitNodePlatform::Macos => "macOS",
+        ExitNodePlatform::Other => "Other",
+    }
 }
 
 fn project_relay(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
@@ -1359,6 +1409,87 @@ mod tests {
             build_command(&action, &HashMap::new()),
             Err(CommandBuildError::UnknownAction { .. })
         ));
+    }
+
+    #[test]
+    fn exit_node_capability_blocks_only_exit_role_actions() {
+        let manifest = node_ui_manifest();
+        let exit_page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "exit_node")
+            .expect("exit node page");
+        let exit_action = exit_page
+            .actions
+            .iter()
+            .find(|action| action.id == "set_exit_node_role")
+            .expect("exit role action")
+            .clone();
+        let relay_action = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "relay")
+            .expect("relay page")
+            .actions
+            .iter()
+            .find(|action| action.id == "set_relay_role")
+            .expect("relay role action")
+            .clone();
+
+        let mut unsupported = populated_snapshot();
+        unsupported.exit_node_capabilities = fuckipv6_common::ExitNodeCapabilities::for_platform(
+            fuckipv6_common::ExitNodePlatform::Windows,
+        );
+        assert_eq!(
+            action_block_reason(&exit_action, &unsupported, Some("home")),
+            Some(ActionBlockReason::ExitNodeUnsupported)
+        );
+        assert_eq!(
+            action_block_reason(&relay_action, &unsupported, Some("home")),
+            None
+        );
+
+        let mut supported = populated_snapshot();
+        supported.exit_node_capabilities = fuckipv6_common::ExitNodeCapabilities {
+            schema_version: fuckipv6_common::EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+            platform: fuckipv6_common::ExitNodePlatform::Linux,
+            supported: true,
+            ipv4_forwarding: true,
+            ipv6_forwarding: true,
+            nat: true,
+            cleanup: true,
+            unsupported_reasons: Vec::new(),
+        };
+        assert_eq!(
+            action_block_reason(&exit_action, &supported, Some("home")),
+            None
+        );
+    }
+
+    #[test]
+    fn exit_node_page_projects_platform_capability_and_typed_reasons() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "exit_node")
+            .expect("exit node page");
+        let mut snapshot = populated_snapshot();
+        snapshot.exit_node_capabilities = fuckipv6_common::ExitNodeCapabilities::for_platform(
+            fuckipv6_common::ExitNodePlatform::Windows,
+        );
+
+        let model = build_page_model_for_page(page, &snapshot).expect("exit node model");
+        assert!(model.sections[0].rows[0]
+            .detail
+            .contains("platform=Windows"));
+        assert!(model.sections[0].rows[0].detail.contains("supported=false"));
+        assert!(model.sections[1].rows[0]
+            .detail
+            .contains("PlatformNotLinux"));
+        assert!(model.sections[1].rows[0]
+            .detail
+            .contains("only supported on Linux"));
     }
 
     #[test]

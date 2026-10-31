@@ -21,10 +21,14 @@ use fuckipv6_secure_session::handshake::{
     ClassicResponder, Ed25519Identity, HandshakeError, Hello,
 };
 use fuckipv6_secure_session::wire::{
-    classic_endpoint_context, AcceptFrame, ClassicEndpointContextInput, ControlCodecError,
-    ControlMessage,
+    classic_endpoint_context, AcceptFrame, ClassicEndpointContextInput, ConfirmFrame,
+    ControlCodecError, ControlMessage,
 };
-use fuckipv6_secure_session::{DataHeader, AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DATA_PACKET_LEN};
+use fuckipv6_secure_session::{
+    DataHeader, SessionError, AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DATA_PACKET_LEN,
+    MAX_EPOCH_LIFETIME, MAX_RETIRED_RECEIVE_EPOCHS, RETIRED_EPOCH_GRACE,
+};
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -39,6 +43,11 @@ const P2P_NETWORK_CONTEXT: &[u8] = b"fuckipv6-p2p-v2";
 /// Replace an initiator HELLO this long before the responder freshness window
 /// rejects its timestamp. The retry task sends the same HELLO until this age.
 const HELLO_REFRESH_AFTER: Duration = Duration::from_secs(30);
+/// Start a replacement handshake this long before the active epoch expires.
+const REKEY_LEAD_TIME: Duration = Duration::from_secs(30);
+/// A completed initiator handshake waits for authenticated new-epoch traffic
+/// from the responder before its new send keys become active.
+const STAGED_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One frame that must be sent on the shared UDP socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,25 +92,58 @@ pub(crate) enum SecureRuntimeError {
     PayloadTooLarge { len: usize },
     #[error("system clock is before the Unix epoch")]
     InvalidSystemClock,
+    #[error("Secure Session v2 epoch space is exhausted")]
+    EpochExhausted,
+    #[error("Secure Session v2 rekey attempted to reuse or roll back an epoch")]
+    EpochRollback,
+    #[error("Secure Session v2 rekey would downgrade a negotiated data suite")]
+    SuiteDowngrade,
 }
 
 struct PendingInitiator {
     handshake: InitiatorHandshake,
     issued_at: u64,
+    epoch: u16,
+    expires_at: Instant,
     hello_frame: Vec<u8>,
 }
 
 struct PendingResponder {
     handshake: ResponderHandshake,
     hello: Hello,
+    epoch: u16,
     accept_frame: Vec<u8>,
     admission: HandshakeAdmissionPermit,
+    expires_at: Instant,
+}
+
+struct InitiatorConfirmation {
+    accept_frame: AcceptFrame,
+    confirm_frame: Vec<u8>,
+    destination: SocketAddr,
+    expires_at: Instant,
+}
+
+struct StagedInitiator {
+    driver: SessionDriver,
+    confirmation: InitiatorConfirmation,
+}
+
+struct RetiredGeneration {
+    driver: SessionDriver,
+    epoch: u16,
+    discard_at: Instant,
 }
 
 #[derive(Default)]
 struct SecureState {
     revoked: bool,
     driver: Option<SessionDriver>,
+    active_since: Option<Instant>,
+    active_confirm: Option<ConfirmFrame>,
+    initial_confirm: Option<InitiatorConfirmation>,
+    staged_initiator: Option<StagedInitiator>,
+    retired: VecDeque<RetiredGeneration>,
     authenticated_peer: Option<SocketAddr>,
     responder: Option<ClassicResponder>,
     pending_initiator: Option<PendingInitiator>,
@@ -272,6 +314,11 @@ impl SecurePeerState {
         }
         state.revoked = true;
         state.driver = None;
+        state.active_since = None;
+        state.active_confirm = None;
+        state.initial_confirm = None;
+        state.staged_initiator = None;
+        state.retired.clear();
         state.authenticated_peer = None;
         state.responder = None;
         state.pending_initiator = None;
@@ -296,6 +343,31 @@ impl SecurePeerState {
             .and_then(SessionDriver::session_id)
     }
 
+    /// Active data epoch for diagnostics and tests.
+    #[cfg(test)]
+    pub(crate) async fn epoch(&self) -> Option<u16> {
+        self.state
+            .lock()
+            .await
+            .driver
+            .as_ref()
+            .and_then(SessionDriver::epoch)
+    }
+
+    /// Move the active epoch close enough to expiry that the next initiator
+    /// polling cycle starts a replacement handshake. Test-only so production
+    /// time policy remains unchanged.
+    #[cfg(test)]
+    pub(crate) async fn force_rekey_due(&self) {
+        let mut state = self.state.lock().await;
+        if state.driver.is_some() {
+            let rekey_age = MAX_EPOCH_LIFETIME
+                .saturating_sub(REKEY_LEAD_TIME)
+                .saturating_add(Duration::from_millis(1));
+            state.active_since = Some(Instant::now() - rekey_age);
+        }
+    }
+
     /// Driver counters for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn stats(&self) -> Option<DriverStats> {
@@ -314,18 +386,27 @@ impl SecurePeerState {
     /// attempt is replaced after [`HELLO_REFRESH_AFTER`].
     pub(crate) async fn initiate_frame(&self) -> Result<Option<Vec<u8>>, SecureRuntimeError> {
         let mut state = self.state.lock().await;
+        let now = Instant::now();
+        prune_state(&mut state, now);
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
         if !self.initiator {
             return Ok(None);
         }
-        if state.driver.is_some() {
+        let needs_rekey = match state.driver.as_ref() {
+            Some(driver) => driver_rekey_due(driver, state.active_since, now),
+            None => true,
+        };
+        if !needs_rekey || state.staged_initiator.is_some() {
             return Ok(None);
         }
         let now = unix_timestamp()?;
+        let epoch = next_epoch(state.driver.as_ref())?;
         if let Some(pending) = state.pending_initiator.as_ref() {
-            if now.saturating_sub(pending.issued_at) < HELLO_REFRESH_AFTER.as_secs() {
+            if pending.epoch == epoch
+                && now.saturating_sub(pending.issued_at) < HELLO_REFRESH_AFTER.as_secs()
+            {
                 return Ok(Some(pending.hello_frame.clone()));
             }
         }
@@ -335,7 +416,7 @@ impl SecurePeerState {
             self.expected_peer,
             self.policy.preferred_suite().id(),
             self.endpoint_context,
-            1,
+            epoch,
             now,
             self.install_config,
             None,
@@ -350,9 +431,29 @@ impl SecurePeerState {
         state.pending_initiator = Some(PendingInitiator {
             handshake,
             issued_at: now,
+            epoch,
+            expires_at: Instant::now() + STAGED_GENERATION_TIMEOUT,
             hello_frame: hello_frame.clone(),
         });
         Ok(Some(hello_frame))
+    }
+
+    /// Retransmit the CONFIRM for an initiator rekey until authenticated
+    /// responder traffic proves that the responder installed the same epoch.
+    pub(crate) async fn retry_staged_confirm(
+        &self,
+    ) -> Result<Option<SecureControlAction>, SecureRuntimeError> {
+        let mut state = self.state.lock().await;
+        prune_state(&mut state, Instant::now());
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
+        let confirmation = state
+            .staged_initiator
+            .as_ref()
+            .map(|staged| &staged.confirmation)
+            .or(state.initial_confirm.as_ref());
+        Ok(confirmation.map(confirmation_action))
     }
 
     /// Process one authenticated or rejectable v2 control frame.
@@ -370,6 +471,7 @@ impl SecurePeerState {
             "收到 Secure Session v2 控制帧"
         );
         let mut state = self.state.lock().await;
+        prune_state(&mut state, Instant::now());
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -388,9 +490,32 @@ impl SecurePeerState {
                         expected: "HELLO or CONFIRM",
                     });
                 }
+                if let Some(confirmation) = state
+                    .staged_initiator
+                    .as_ref()
+                    .map(|staged| &staged.confirmation)
+                    .or(state.initial_confirm.as_ref())
+                {
+                    if confirmation.accept_frame == accept {
+                        return Ok(vec![confirmation_action(confirmation)]);
+                    }
+                }
                 let Some(pending) = state.pending_initiator.as_ref() else {
                     return Err(SecureRuntimeError::UnexpectedFrame { expected: "HELLO" });
                 };
+                let now = Instant::now();
+                if now >= pending.expires_at {
+                    state.pending_initiator = None;
+                    return Err(HandshakeAdmissionError::Expired.into());
+                }
+                if let Some(active) = state.driver.as_ref() {
+                    if active.epoch().is_some_and(|epoch| pending.epoch <= epoch) {
+                        return Err(SecureRuntimeError::EpochRollback);
+                    }
+                    if active.suite().map(|suite| suite.id()) != Some(accept.accept.suite_id) {
+                        return Err(SecureRuntimeError::SuiteDowngrade);
+                    }
+                }
                 pending
                     .handshake
                     .validate_accept_wire(&accept, pending.issued_at)?;
@@ -401,39 +526,67 @@ impl SecurePeerState {
                 let (driver, confirm) =
                     pending
                         .handshake
-                        .complete_wire(&accept, pending.issued_at, Instant::now())?;
-                let confirm_frame = confirm.encode();
-                state.driver = Some(driver);
-                state.authenticated_peer = Some(source);
-                Ok(vec![SecureControlAction {
+                        .complete_wire(&accept, pending.issued_at, now)?;
+                if driver.epoch() != Some(pending.epoch) {
+                    return Err(SecureRuntimeError::EpochRollback);
+                }
+                let confirmation = InitiatorConfirmation {
+                    accept_frame: accept,
+                    confirm_frame: confirm.encode(),
                     destination: source,
-                    frame: confirm_frame,
-                    kind: "CONFIRM",
-                }])
+                    expires_at: now + STAGED_GENERATION_TIMEOUT,
+                };
+                let action = confirmation_action(&confirmation);
+                if state.driver.is_some() {
+                    state.staged_initiator = Some(StagedInitiator {
+                        driver,
+                        confirmation,
+                    });
+                } else {
+                    install_active_generation(&mut state, driver, now)?;
+                    state.initial_confirm = Some(confirmation);
+                }
+                state.authenticated_peer = Some(source);
+                Ok(vec![action])
             }
             ControlMessage::Confirm(confirm) => {
                 if self.initiator {
                     return Err(SecureRuntimeError::UnexpectedFrame { expected: "ACCEPT" });
                 }
-                if state.authenticated_peer == Some(source) && state.driver.is_some() {
-                    // CONFIRM retransmissions are harmless after installation.
+                if state.active_confirm.as_ref() == Some(&confirm) {
+                    // A byte-exact retransmission of the CONFIRM that activated
+                    // this generation is idempotent. Any other frame, even one
+                    // carrying the public active session id, must be verified.
                     return Ok(Vec::new());
                 }
                 let Some(pending) = state.pending_responder.as_ref() else {
                     return Err(SecureRuntimeError::UnexpectedFrame { expected: "HELLO" });
                 };
-                if !pending.admission.is_active(Instant::now()) {
+                let now = Instant::now();
+                if now >= pending.expires_at || !pending.admission.is_active(now) {
                     state.pending_responder = None;
                     return Err(HandshakeAdmissionError::Expired.into());
+                }
+                if state
+                    .driver
+                    .as_ref()
+                    .and_then(SessionDriver::epoch)
+                    .is_some_and(|epoch| pending.epoch <= epoch)
+                {
+                    return Err(SecureRuntimeError::EpochRollback);
                 }
                 pending.handshake.validate_wire(&confirm)?;
                 let pending = state
                     .pending_responder
                     .take()
                     .expect("validated pending responder");
-                let (driver, _) = pending.handshake.complete_wire(&confirm, Instant::now())?;
-                state.driver = Some(driver);
+                let (driver, _) = pending.handshake.complete_wire(&confirm, now)?;
+                if driver.epoch() != Some(pending.epoch) {
+                    return Err(SecureRuntimeError::EpochRollback);
+                }
+                install_active_generation(&mut state, driver, now)?;
                 state.authenticated_peer = Some(source);
+                state.active_confirm = Some(confirm);
                 Ok(Vec::new())
             }
         }
@@ -445,11 +598,6 @@ impl SecurePeerState {
         source: SocketAddr,
         hello: Hello,
     ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
-        if state.driver.is_some() {
-            return Err(SecureRuntimeError::UnexpectedFrame {
-                expected: "CONFIRM",
-            });
-        }
         let now = Instant::now();
         if state
             .pending_responder
@@ -469,10 +617,24 @@ impl SecurePeerState {
         if state
             .pending_responder
             .as_ref()
-            .is_some_and(|pending| !pending.admission.is_active(now))
+            .is_some_and(|pending| now >= pending.expires_at || !pending.admission.is_active(now))
         {
             state.pending_responder = None;
         }
+
+        if !self.policy.supports(hello.suite_id) {
+            return Err(HandshakeError::UnsupportedSuite(hello.suite_id).into());
+        }
+        if state
+            .driver
+            .as_ref()
+            .and_then(SessionDriver::suite)
+            .is_some_and(|suite| suite.id() != hello.suite_id)
+        {
+            return Err(SecureRuntimeError::SuiteDowngrade);
+        }
+
+        let epoch = next_epoch(state.driver.as_ref())?;
 
         let admission =
             self.handshake_admission
@@ -486,7 +648,7 @@ impl SecurePeerState {
             responder,
             &hello,
             self.endpoint_context,
-            1,
+            epoch,
             issued_at,
             self.install_config,
             None,
@@ -499,8 +661,10 @@ impl SecurePeerState {
         state.pending_responder = Some(PendingResponder {
             handshake,
             hello,
+            epoch,
             accept_frame: accept_frame.clone(),
             admission,
+            expires_at: now + STAGED_GENERATION_TIMEOUT,
         });
         Ok(vec![SecureControlAction {
             destination: source,
@@ -544,7 +708,7 @@ impl SecurePeerState {
     pub(crate) async fn open(
         &self,
         source: SocketAddr,
-        mut packet: Vec<u8>,
+        packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
         let mut state = self.state.lock().await;
         if state.revoked {
@@ -559,11 +723,7 @@ impl SecurePeerState {
                 actual: source,
             });
         }
-        let driver = state
-            .driver
-            .as_mut()
-            .ok_or(SecureRuntimeError::NotEstablished)?;
-        Ok(driver.open_in_place(&mut packet, Instant::now())?.to_vec())
+        open_with_driver(&mut state, packet)
     }
 
     /// Authenticate and decrypt a v2 data datagram carried over a relay.
@@ -647,11 +807,164 @@ fn open_with_driver(
     if state.revoked {
         return Err(SecureRuntimeError::Revoked);
     }
-    let driver = state
+    let now = Instant::now();
+    let active = state
         .driver
         .as_mut()
-        .ok_or(SecureRuntimeError::NotEstablished)?;
-    Ok(driver.open_in_place(&mut packet, Instant::now())?.to_vec())
+        .ok_or(SecureRuntimeError::NotEstablished)?
+        .open_in_place(&mut packet, now)
+        .map(|plaintext| plaintext.to_vec());
+    match active {
+        Ok(plaintext) => {
+            // Authenticated traffic under the active generation proves that the
+            // peer accepted this endpoint's CONFIRM. Initial CONFIRM retries can
+            // now stop without weakening the established generation.
+            state.initial_confirm = None;
+            return Ok(plaintext);
+        }
+        Err(error) if is_unknown_epoch(&error) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    if let Some(staged) = state.staged_initiator.as_mut() {
+        let opened = staged
+            .driver
+            .open_in_place(&mut packet, now)
+            .map(|plaintext| plaintext.to_vec());
+        match opened {
+            Ok(plaintext) => {
+                // The responder sends first after installing a rekey. Receiving
+                // one authenticated packet for the staged epoch is the commit
+                // point that lets the initiator switch its send keys too.
+                let staged = state
+                    .staged_initiator
+                    .take()
+                    .expect("staged driver opened a packet");
+                install_active_generation(state, staged.driver, now)?;
+                return Ok(plaintext);
+            }
+            Err(error) if is_unknown_epoch(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let epoch = DataHeader::decode(&packet)
+        .map_err(DriverError::Data)?
+        .epoch;
+    let retired = state
+        .retired
+        .iter()
+        .position(|retired| retired.epoch == epoch);
+    if let Some(index) = retired {
+        let opened = state.retired[index]
+            .driver
+            .open_in_place(&mut packet, now)
+            .map(|plaintext| plaintext.to_vec());
+        return match opened {
+            Ok(plaintext) => Ok(plaintext),
+            Err(error) => Err(error.into()),
+        };
+    }
+
+    Err(DriverError::Data(SessionError::UnknownEpoch).into())
+}
+
+fn confirmation_action(confirmation: &InitiatorConfirmation) -> SecureControlAction {
+    SecureControlAction {
+        destination: confirmation.destination,
+        frame: confirmation.confirm_frame.clone(),
+        kind: "CONFIRM",
+    }
+}
+
+fn prune_state(state: &mut SecureState, now: Instant) {
+    if state
+        .pending_initiator
+        .as_ref()
+        .is_some_and(|pending| now >= pending.expires_at)
+    {
+        state.pending_initiator = None;
+    }
+    if state
+        .pending_responder
+        .as_ref()
+        .is_some_and(|pending| now >= pending.expires_at || !pending.admission.is_active(now))
+    {
+        state.pending_responder = None;
+    }
+    if state
+        .initial_confirm
+        .as_ref()
+        .is_some_and(|confirmation| now >= confirmation.expires_at)
+    {
+        state.initial_confirm = None;
+    }
+    if state
+        .staged_initiator
+        .as_ref()
+        .is_some_and(|staged| now >= staged.confirmation.expires_at)
+    {
+        state.staged_initiator = None;
+    }
+    state
+        .retired
+        .retain(|generation| now < generation.discard_at);
+}
+
+fn driver_rekey_due(driver: &SessionDriver, active_since: Option<Instant>, now: Instant) -> bool {
+    driver.rekey_required(now)
+        || active_since.is_some_and(|started| {
+            now.saturating_duration_since(started)
+                >= MAX_EPOCH_LIFETIME.saturating_sub(REKEY_LEAD_TIME)
+        })
+}
+
+fn next_epoch(active: Option<&SessionDriver>) -> Result<u16, SecureRuntimeError> {
+    let Some(active) = active else {
+        return Ok(1);
+    };
+    active
+        .epoch()
+        .ok_or(SecureRuntimeError::Driver(DriverError::Closed))?
+        .checked_add(1)
+        .filter(|epoch| *epoch != 0)
+        .ok_or(SecureRuntimeError::EpochExhausted)
+}
+
+fn install_active_generation(
+    state: &mut SecureState,
+    driver: SessionDriver,
+    now: Instant,
+) -> Result<(), SecureRuntimeError> {
+    let new_epoch = driver
+        .epoch()
+        .ok_or(SecureRuntimeError::Driver(DriverError::Closed))?;
+    if let Some(old) = state.driver.take() {
+        let old_epoch = old
+            .epoch()
+            .ok_or(SecureRuntimeError::Driver(DriverError::Closed))?;
+        if new_epoch <= old_epoch {
+            state.driver = Some(old);
+            return Err(SecureRuntimeError::EpochRollback);
+        }
+        state.retired.push_front(RetiredGeneration {
+            driver: old,
+            epoch: old_epoch,
+            discard_at: now + RETIRED_EPOCH_GRACE,
+        });
+        while state.retired.len() > MAX_RETIRED_RECEIVE_EPOCHS {
+            state.retired.pop_back();
+        }
+    }
+    state.driver = Some(driver);
+    state.active_since = Some(now);
+    state.active_confirm = None;
+    state.initial_confirm = None;
+    Ok(())
+}
+
+fn is_unknown_epoch(error: &DriverError) -> bool {
+    matches!(error, DriverError::Data(SessionError::UnknownEpoch))
 }
 
 fn derive_receiver_indices(initiator: &[u8; 32], responder: &[u8; 32]) -> (u32, u32) {
@@ -835,6 +1148,104 @@ mod tests {
             )
             .await
             .expect("complete responder");
+    }
+
+    #[tokio::test]
+    async fn online_rekey_stages_confirm_retries_and_switches_epochs() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+        assert_eq!(initiator.epoch().await, Some(1));
+        assert_eq!(responder.epoch().await, Some(1));
+
+        initiator.force_rekey_due().await;
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("schedule rekey")
+            .expect("rekey HELLO");
+        let accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode rekey HELLO"),
+            )
+            .await
+            .expect("accept rekey HELLO");
+        assert_eq!(accept.len(), 1);
+
+        let confirm = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                    .expect("decode rekey ACCEPT"),
+            )
+            .await
+            .expect("stage rekey generation");
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(
+            initiator.epoch().await,
+            Some(1),
+            "initiator must retain old send keys until responder traffic proves commit"
+        );
+        let retry = initiator
+            .retry_staged_confirm()
+            .await
+            .expect("retry staged CONFIRM")
+            .expect("CONFIRM action");
+        assert_eq!(retry.kind, "CONFIRM");
+        assert_eq!(retry.frame, confirm[0].frame);
+
+        responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&retry.frame)
+                    .expect("decode retried CONFIRM"),
+            )
+            .await
+            .expect("activate responder generation");
+        assert_eq!(responder.epoch().await, Some(2));
+
+        // Direct UDP can still deliver an old-epoch packet during the receive
+        // grace window even after the responder installed the replacement.
+        let (_, old_packet) = initiator.seal(b"old epoch grace").await.expect("seal old");
+        assert_eq!(
+            responder
+                .open(initiator_addr, old_packet)
+                .await
+                .expect("open retired epoch"),
+            b"old epoch grace"
+        );
+
+        // The responder's first authenticated new-epoch packet is the initiator's
+        // commit point and retires the old send generation.
+        let (_, new_packet) = responder
+            .seal(b"switch initiator")
+            .await
+            .expect("seal new epoch");
+        assert_eq!(
+            initiator
+                .open(responder_addr, new_packet)
+                .await
+                .expect("switch initiator"),
+            b"switch initiator"
+        );
+        assert_eq!(initiator.epoch().await, Some(2));
+        assert!(initiator
+            .retry_staged_confirm()
+            .await
+            .expect("CONFIRM retry state")
+            .is_none());
+
+        let (_, packet) = initiator
+            .seal(b"new epoch send")
+            .await
+            .expect("seal new send key");
+        assert_eq!(
+            responder
+                .open(initiator_addr, packet)
+                .await
+                .expect("open new epoch"),
+            b"new epoch send"
+        );
     }
 
     #[tokio::test]

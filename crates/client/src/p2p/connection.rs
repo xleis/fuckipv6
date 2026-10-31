@@ -839,10 +839,6 @@ fn spawn_secure_initiator(
                 connection.endpoints.clone()
             };
 
-            if secure.is_established().await {
-                return;
-            }
-
             let outbound = match secure.acquire_session_permission().await {
                 Ok(permission) => permission,
                 Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
@@ -868,13 +864,38 @@ fn spawn_secure_initiator(
                         }
                     }
                 }
-                Ok(None) => {
-                    drop(outbound);
-                    return;
-                }
+                Ok(None) => {}
                 Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
                 Err(error) => {
                     tracing::warn!("无法为节点 {} 启动 Secure Session v2: {error}", client_id);
+                }
+            }
+
+            match secure.retry_staged_confirm().await {
+                Ok(Some(action)) => {
+                    tracing::debug!(
+                        "重传 Secure Session v2 CONFIRM 到 {} (节点 {})",
+                        action.destination,
+                        client_id
+                    );
+                    if let Err(error) = socket
+                        .send_to(&action.frame, dual_stack_send_endpoint(action.destination))
+                        .await
+                    {
+                        tracing::debug!(
+                            "无法向节点 {} 重传 Secure Session v2 CONFIRM: {}",
+                            client_id,
+                            error
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
+                Err(error) => {
+                    tracing::debug!(
+                        "无法重传节点 {} 的 Secure Session v2 CONFIRM: {error}",
+                        client_id
+                    );
                 }
             }
             drop(outbound);
@@ -2028,6 +2049,131 @@ mod tests {
                 .is_empty(),
             "a delayed frame from the retired session must not repopulate the cache"
         );
+        Ok(())
+    }
+
+    async fn wait_for_epoch(engine: &P2pEngine, client_id: &str, epoch: u16) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let current = {
+                    let connections = engine.connections.read().await;
+                    connections
+                        .get(client_id)
+                        .map(|connection| connection.secure.clone())
+                };
+                if let Some(current) = current {
+                    if current.epoch().await == Some(epoch) {
+                        return;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn initiator_automatically_rekeys_established_udp_session() -> Result<()> {
+        let engine_a = P2pEngine::new(0).await?;
+        let engine_b = P2pEngine::new(0).await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 4);
+        let ip_b = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 5);
+
+        engine_a.set_identity(identity_a.clone()).await;
+        engine_b.set_identity(identity_b.clone()).await;
+        engine_a.set_local_ip(ip_a).await;
+        engine_b.set_local_ip(ip_b).await;
+
+        let endpoint_a = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_a.local_addr().port(),
+        );
+        let endpoint_b = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_b.local_addr().port(),
+        );
+        engine_a
+            .add_peer(PeerInfo::new(
+                "b".to_string(),
+                ip_b,
+                identity_b.public_key(),
+                vec![endpoint_b],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+        engine_b
+            .add_peer(PeerInfo::new(
+                "a".to_string(),
+                ip_a,
+                identity_a.public_key(),
+                vec![endpoint_a],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if engine_a
+                    .has_established_session_by_ip(IpAddr::V6(ip_b))
+                    .await
+                    && engine_b
+                        .has_established_session_by_ip(IpAddr::V6(ip_a))
+                        .await
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        let a_is_initiator = {
+            let connections = engine_a.connections.read().await;
+            connections.get("b").expect("peer b").secure.is_initiator()
+        };
+        let (initiator_engine, initiator_ip, responder_engine, responder_ip, responder_id) =
+            if a_is_initiator {
+                (&engine_a, ip_a, &engine_b, ip_b, "a")
+            } else {
+                (&engine_b, ip_b, &engine_a, ip_a, "b")
+            };
+        {
+            let connections = initiator_engine.connections.read().await;
+            let peer_id = if a_is_initiator { "b" } else { "a" };
+            connections
+                .get(peer_id)
+                .expect("initiator peer")
+                .secure
+                .force_rekey_due()
+                .await;
+        }
+
+        // The resident initiator task must send HELLO, install staged keys from
+        // ACCEPT, and retry CONFIRM until the responder advances to epoch 2.
+        wait_for_epoch(responder_engine, responder_id, 2).await?;
+
+        // Authenticated responder traffic is required for the initiator commit.
+        responder_engine
+            .send_to(initiator_ip, responder_ip, b"rekey commit")
+            .await?;
+        let initiator_id = if a_is_initiator { "b" } else { "a" };
+        wait_for_epoch(initiator_engine, initiator_id, 2).await?;
+
+        initiator_engine
+            .send_to(responder_ip, initiator_ip, b"post-rekey data")
+            .await?;
+        let (source, packet) =
+            tokio::time::timeout(Duration::from_secs(2), responder_engine.recv())
+                .await?
+                .context("post-rekey packet was not delivered")?;
+        assert_eq!(source, IpAddr::V6(initiator_ip));
+        let payload = responder_engine
+            .decrypt_from_peer(initiator_ip, &packet)
+            .await?;
+        assert_eq!(payload, b"post-rekey data");
         Ok(())
     }
 

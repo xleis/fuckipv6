@@ -31,7 +31,7 @@
   - [x] 实验性固定长度 `HELLO/ACCEPT`、TH1/TH2 固定向量、suite/profile/PSK 降级失败关闭、时间窗和有界重放缓存；6755 + 6635 字节 body 均在 16 KiB 单帧预算内。
   - [ ] 接入生产控制通道、Initiator `CONFIRM`、Cookie/限速、能力协商，以及 QUIC/relay/UDP/TUN 数据面；完成端到端容量、性能和独立安全审计。
 - [x] **QUIC 双向身份**：中继服务端已启用强制客户端证书认证；Register 签名绑定双 pin 与 TLS exporter，证书 SPKI 和 Register 应用公钥逐字节核对，错绑、篡改和缺失绑定均在 relay 状态变更前失败关闭；运行期黑名单在注册和双向转发路径失效关闭；TLS 客户端证书 allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。CA/CRL/OCSP、持久撤销列表、网络级最终授权与独立安全审计仍未完成。
-- [>] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie；共享握手准入守卫已接入 UDP HELLO 分配点和 QUIC 入站 accept 路径，提供每源/身份/全局配额、TTL、硬表上限与指标。无状态 cookie 仍需接入握手控制通道，指标尚未进入产品 API/UI，跨节点压测和独立 DoS 评审未完成。
+- [>] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie；共享握手准入守卫已接入 UDP HELLO 分配点和 QUIC 入站 accept 路径，提供每源/身份/全局配额、TTL、硬表上限与指标。经典 UDP 控制通道已接入 Cookie challenge/retry 和全局 HELLO 验证预算：不可信来源及 direct 预算耗尽时必须先通过 Cookie，`HELLO_WITH_COOKIE` 仍受同一签名/KEM 验证预算约束。剩余的生产指标 API/UI、负载自适应 Cookie、准入前 `O(N)` Peer 扫描消除、跨节点容量压测和独立 DoS 评审未完成。
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 

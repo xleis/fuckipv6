@@ -264,7 +264,7 @@ sudo ./target/release/fuckipv6 lxt-rescue client \
 
 - [x] Secure Session v2 classic（临时 X25519 + Ed25519、确认帧、计数 Nonce、重放窗口）已接入生产 `P2pEngine` 的 UDP/TUN 数据面；旧版静态密钥数据包失败关闭，QUIC 与 relay 只承载同一 v2 密文
 - [x] 在 UDP/TUN 数据面接入 v2 在线 REKEY：常驻 initiator 在会话建立后按时间/字节/包计数发起换钥，通过 staged/active/retired epoch 和 CONFIRM 重传完成切换，失败时保留旧会话并拒绝 suite 降级或 epoch 回滚
-- [ ] 将认证 REKEY 接入 QUIC/relay 控制通道，补齐无状态 Cookie、生产限速和跨真实网络切换测试，并完成独立密码学审计；当前 QUIC/relay 仍未完成在线换钥
+- [ ] 将认证 REKEY 接入 QUIC/relay 控制通道，补齐负载自适应 Cookie、生产指标/UI、跨真实网络切换测试和独立密码学审计；classic UDP 已接入无状态 Cookie 与全局 HELLO 验证预算，但准入前 Peer 扫描和跨节点 DoS 压测仍未完成，当前 QUIC/relay 也未完成在线换钥
 - [x] 实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性混合 `HELLO/ACCEPT/CONFIRM`，固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK、重放和非 contributory 输入失败关闭；严格 wire 层已通过 transport-independent `SessionDriver` 适配接入双向数据面
 - [ ] 将混合 profile 的严格 wire 层接入 SessionDriver 与生产控制通道、QUIC/relay 和 UDP/TUN 数据面，并完成互操作、容量与独立审计；当前生产路径仍不具备端到端后量子机密性或后量子身份认证
 - [x] QUIC 中继双向身份与通道绑定：强制客户端证书，TLS 层只接受当前已完成签名注册的节点公钥 allowlist，Register 签名绑定证书/应用身份与 TLS exporter，错绑在 relay 状态写入前失败关闭，生产配置禁用 0-RTT；运行期黑名单已在 relay 注册和双向转发路径强制执行（CA/CRL/OCSP、稳定节点身份与当前公钥解耦、多 Coordinator 即时同步、P2P QUIC Mesh 完整撤销/重连策略、授权 epoch/租约绑定与独立审计仍待完成；持久撤销目录和 Coordinator 撤销 API 已落地）

@@ -1,43 +1,30 @@
 [Unit]
-Description=fuckipv6 Node - IPv6 Virtual LAN P2P Mesh Network
-Documentation=https://github.com/yourusername/fuckipv6
+Description=fuckipv6 node and control service
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=30s
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=root
 Group=root
-
-# 工作目录（修改为实际路径）
-WorkingDirectory=/opt/fuckipv6
-
-# 可执行文件路径（修改为实际路径）
-ExecStart=/opt/fuckipv6/fuckipv6 --headless --webui-port 8080
-
-# 环境变量
+WorkingDirectory=/var/lib/fuckipv6
+ExecStart=/opt/fuckipv6/fuckipv6 __service --options-file /etc/fuckipv6/service.json --config-dir /etc/fuckipv6
+Environment="FUCKIPV6_RUNTIME_DIR=/run/fuckipv6"
 Environment="RUST_LOG=info"
-
-# 重启策略
+UMask=0077
 Restart=on-failure
 RestartSec=5s
-
-# 限制重启频率（10秒内最多3次）
-StartLimitInterval=10s
-StartLimitBurst=3
-
-# 安全加固
+KillMode=mixed
+TimeoutStopSec=75s
 NoNewPrivileges=false
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/fuckipv6
-
-# 允许创建TUN设备
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-
-# 日志
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/etc/fuckipv6 /var/lib/fuckipv6 /var/log/fuckipv6 /run/fuckipv6
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=fuckipv6

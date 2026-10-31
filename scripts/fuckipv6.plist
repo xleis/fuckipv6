@@ -9,32 +9,40 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/fuckipv6/fuckipv6</string>
-    <string>--headless</string>
-    <string>--webui-port</string>
-    <string>8080</string>
+    <string>__service</string>
+    <string>--options-file</string>
+    <string>/usr/local/etc/fuckipv6/service.json</string>
+    <string>--config-dir</string>
+    <string>/usr/local/etc/fuckipv6</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/usr/local/fuckipv6</string>
+  <string>/usr/local/var/lib/fuckipv6</string>
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>FUCKIPV6_RUNTIME_DIR</key>
+    <string>/usr/local/var/run/fuckipv6</string>
     <key>RUST_LOG</key>
     <string>info</string>
   </dict>
 
   <key>RunAtLoad</key>
-  <false/>
-
+  <true/>
   <key>KeepAlive</key>
   <dict>
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ExitTimeOut</key>
+  <integer>75</integer>
 
   <key>StandardOutPath</key>
   <string>/usr/local/var/log/fuckipv6/node.log</string>
-
   <key>StandardErrorPath</key>
   <string>/usr/local/var/log/fuckipv6/node.err.log</string>
 </dict>

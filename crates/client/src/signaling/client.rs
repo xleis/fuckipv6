@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use fuckipv6_common::{
     codec, validate_signaling_message_len, Identity, NatType, PeerInfo, RelayEndpoint,
     SignalingMessage, VirtualIps, MAX_SIGNALING_MESSAGE_SIZE,
@@ -642,9 +643,10 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         } => Some(SignalingEvent::RelayPacket {
             src_ip,
             dst_ip,
-            // Compatibility boundary: the protected CLI owner still consumes
-            // Vec here. Move this event to Bytes when that change lands.
-            payload: payload.to_vec(),
+            // Preserve the decode allocation's ownership through the event and
+            // CLI data-plane handoff. Cloning shares the immutable allocation;
+            // only a uniquely owned frame may later be converted in place for AEAD.
+            payload,
         }),
 
         SignalingMessage::ConnectInfo { peer } => Some(SignalingEvent::ConnectInfo { peer }),
@@ -685,7 +687,7 @@ pub enum SignalingEvent {
     RelayPacket {
         src_ip: IpAddr,
         dst_ip: IpAddr,
-        payload: Vec<u8>,
+        payload: Bytes,
     },
 
     /// 连接信息（用于建立P2P）
@@ -742,6 +744,28 @@ mod tests {
         assert!(Identity::verify(&public_key, &challenge, &signature));
         assert_eq!(nat_type, NatType::PortRestricted);
         Ok(())
+    }
+
+    #[test]
+    fn relay_packet_event_preserves_ciphertext_allocation() {
+        let payload = Bytes::from(vec![0x5a; 1420 + 64]);
+        let allocation = payload.as_ptr();
+        let event = signaling_message_to_event(SignalingMessage::RelayPacket {
+            src_ip: "fd00::1".parse().expect("source IP"),
+            dst_ip: "fd00::2".parse().expect("destination IP"),
+            payload: payload.clone(),
+        })
+        .expect("relay packet event");
+
+        let SignalingEvent::RelayPacket {
+            payload: event_payload,
+            ..
+        } = event
+        else {
+            panic!("expected relay packet event");
+        };
+        assert_eq!(event_payload.as_ptr(), allocation);
+        assert_eq!(event_payload, payload);
     }
 
     #[tokio::test]

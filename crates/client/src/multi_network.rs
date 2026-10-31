@@ -641,6 +641,7 @@ mod tests {
             nat_type: "port_restricted".into(),
             p2p_active: true,
             p2p_healthy: true,
+            active_endpoint: Some("[2001:db8::2]:9000".parse().expect("valid endpoint")),
             tx_packets: 10,
             tx_bytes: 1000,
             rx_packets: 20,
@@ -703,6 +704,7 @@ mod tests {
             uptime_secs: 30,
             peers: Vec::new(),
             global: sample_global_stats(),
+            dataplane: ipc::DataplaneMetricsSnapshot::default(),
         };
 
         update_network_from_runtime(&mut existing, &runtime);

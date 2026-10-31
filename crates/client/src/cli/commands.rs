@@ -1,19 +1,25 @@
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use fuckipv6_common::recent_error_log_lines;
 use fuckipv6_common::{
     decrypt_config_file, encrypt_config_file, is_encrypted_config_path, ClientConfig, Identity,
     NatType, PeerInfo, RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
 };
+use std::collections::HashMap;
+use std::future::Future;
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tokio::sync::mpsc;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::logging;
-use crate::p2p::connection::P2pEngine;
+use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
 use crate::p2p::punching;
 use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
@@ -27,10 +33,76 @@ use crate::routing::ExitNodeManager;
 use crate::signaling::client::{SignalingClient, SignalingEvent};
 use crate::stats::StatsCollector;
 use crate::tun::TunDevice;
+use fuckipv6_secure_session::{AEAD_TAG_LEN, DATA_HEADER_LEN};
 
 const TUN_PACKET_BUFFER_SIZE: usize = 65536;
+const TUN_BUFFER_ALLOCATION_SIZE: usize = TUN_PACKET_BUFFER_SIZE + DATA_HEADER_LEN + AEAD_TAG_LEN;
 const TUN_BUFFER_POOL_SIZE: usize = 64;
+const TUN_READ_BATCH_SIZE: usize = 32;
 const QUIC_RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+
+/// Owns a fixed-size TUN read buffer while carrying the number of valid bytes.
+///
+/// The allocation includes fixed Secure Session v2 header and authentication-tag
+/// space around the TUN payload for the entire pooled lifetime. Returning a
+/// packet to the pool resets only `len`, so small packets never clear or
+/// zero-fill 64 KiB in the hot path.
+#[derive(Debug)]
+pub(crate) struct TunPacket {
+    buffer: Vec<u8>,
+    len: usize,
+}
+
+impl TunPacket {
+    fn empty(buffer: Vec<u8>) -> Self {
+        debug_assert_eq!(buffer.len(), TUN_BUFFER_ALLOCATION_SIZE);
+        Self { buffer, len: 0 }
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + self.len]
+    }
+
+    fn buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer
+    }
+
+    fn recycle(mut self) -> Self {
+        self.len = 0;
+        self
+    }
+}
+
+/// Keeps a pooled TUN allocation alive while exposing only the sealed bytes.
+///
+/// `Bytes` may outlive the outbound worker when a fallback transport queued the
+/// frame. Dropping the final handle returns the original allocation to the TUN
+/// pool instead of freeing and reallocating a 64 KiB buffer.
+struct TunPacketBytesOwner {
+    packet: Option<TunPacket>,
+    encoded_len: usize,
+    recycle_tx: mpsc::UnboundedSender<TunPacket>,
+}
+
+impl AsRef<[u8]> for TunPacketBytesOwner {
+    fn as_ref(&self) -> &[u8] {
+        let packet = self
+            .packet
+            .as_ref()
+            .expect("TUN packet owner is present until drop");
+        debug_assert!(self.encoded_len <= packet.buffer.len());
+        &packet.buffer[..self.encoded_len]
+    }
+}
+
+impl Drop for TunPacketBytesOwner {
+    fn drop(&mut self) {
+        if let Some(packet) = self.packet.take() {
+            let _ = self.recycle_tx.send(packet.recycle());
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeOptions {
@@ -144,10 +216,10 @@ pub async fn start_with_config_and_options(
 }
 
 pub(crate) struct ClientRuntime {
-    pub(crate) signaling: SignalingClient,
+    pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
     pub(crate) identity: Identity,
-    pub(crate) relay: Option<QuicRelayClient>,
+    pub(crate) outbound: OutboundDispatcher,
     #[cfg(target_os = "linux")]
     pub(crate) route_manager: LinuxRouteManager,
     #[cfg(target_os = "linux")]
@@ -160,8 +232,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_engine: SmartRouteEngine,
     pub(crate) exit_node_manager: ExitNodeManager,
     pub(crate) configured_exit_node: Option<String>,
-    pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    pub(crate) tun_buffer_tx: mpsc::UnboundedSender<Vec<u8>>,
+    pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<TunPacket>,
+    pub(crate) tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
     pub(crate) config_path: String,
     pub(crate) config: ClientConfig,
@@ -208,13 +280,13 @@ pub(crate) async fn prepare_client_runtime_ext(
     let identity = load_identity(&config)?;
     let relay_identity = identity.clone();
 
-    let p2p = create_p2p_engine(&config).await?;
+    let (p2p, nat_report) = create_p2p_engine(&config).await?;
     p2p.set_identity(identity.clone()).await;
-    let signaling = connect_signaling(&config, identity, &p2p).await?;
+    let signaling = Arc::new(connect_signaling(&config, identity, &p2p, &nat_report).await?);
     let assigned_ips = wait_for_assigned_ips(&signaling).await?;
     let assigned_ip = assigned_ips.primary_ipv6();
     configure_local_ips(&p2p, &assigned_ips).await;
-    let relay = connect_quic_relay(&signaling, &relay_identity, assigned_ip).await;
+    let relay = connect_quic_relay(signaling.as_ref(), &relay_identity, assigned_ip).await;
     let tun = create_tun_device(&config, &assigned_ips).await?;
     #[cfg(target_os = "linux")]
     let mut tun = tun;
@@ -331,6 +403,19 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     // 创建性能统计收集器
     let stats = StatsCollector::new();
+    let relay_state = RelayState::default();
+    let outbound = OutboundDispatcher::new(
+        Arc::new(P2pOutboundTransport::new(
+            p2p.clone(),
+            signaling.clone(),
+            stats.clone(),
+            relay_state.clone(),
+        )),
+        relay_state,
+    );
+    if let Some(relay) = relay {
+        let _ = outbound.install_relay(relay).await;
+    }
     let (control_tx, control_rx) = mpsc::unbounded_channel();
 
     tracing::info!("性能监控已启用");
@@ -361,7 +446,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         signaling,
         p2p,
         identity: relay_identity,
-        relay,
+        outbound,
         #[cfg(target_os = "linux")]
         route_manager,
         #[cfg(target_os = "linux")]
@@ -454,8 +539,8 @@ async fn prepare_client_runtime(config_path: &str, config: ClientConfig) -> Resu
 }
 
 struct RuntimeTasks {
-    tun_packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    tun_buffer_tx: mpsc::UnboundedSender<Vec<u8>>,
+    tun_packet_rx: mpsc::UnboundedReceiver<TunPacket>,
+    tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
     ipc_task: JoinHandle<()>,
     config_reload_task: JoinHandle<()>,
     tun_reader_task: JoinHandle<()>,
@@ -468,41 +553,49 @@ fn load_identity(config: &ClientConfig) -> Result<Identity> {
     Ok(identity)
 }
 
-async fn create_p2p_engine(config: &ClientConfig) -> Result<P2pEngine> {
-    let p2p = match P2pEngine::new(config.p2p.listen_port).await {
-        Ok(engine) => engine,
+async fn create_p2p_engine(
+    config: &ClientConfig,
+) -> Result<(P2pEngine, punching::NatDetectionReport)> {
+    fuckipv6_secure_session::configure_crypto_workers(config.p2p.crypto_workers)
+        .map_err(anyhow::Error::msg)
+        .context("无法配置数据面加密 worker")?;
+    let (p2p, report) = match P2pEngine::new_with_nat_detection_and_limits(
+        &config.p2p.nat_detection,
+        config.p2p.listen_port,
+        config.p2p.inbound_queue_capacity,
+        config.p2p.udp_batch_size,
+    )
+    .await
+    {
+        Ok(result) => result,
         Err(err) if config.p2p.listen_port != 0 => {
             tracing::warn!(
                 "配置的 P2P 监听端口 {} 绑定失败，自动回退到随机可用端口: {err:#}",
                 config.p2p.listen_port
             );
-            P2pEngine::new(0)
-                .await
-                .context("无法创建 P2P 引擎 (随机端口)")?
+            P2pEngine::new_with_nat_detection_and_limits(
+                &config.p2p.nat_detection,
+                0,
+                config.p2p.inbound_queue_capacity,
+                config.p2p.udp_batch_size,
+            )
+            .await
+            .context("无法创建 P2P 引擎 (随机端口)")?
         }
         Err(err) => return Err(err).context("无法创建 P2P 引擎"),
     };
     p2p.set_fallback_threshold(config.p2p.fallback_threshold.clone())
         .await;
     tracing::info!("P2P 引擎监听地址: {}", p2p.local_addr());
-    Ok(p2p)
+    Ok((p2p, report))
 }
 
 async fn connect_signaling(
     config: &ClientConfig,
     identity: Identity,
     p2p: &P2pEngine,
+    report: &punching::NatDetectionReport,
 ) -> Result<SignalingClient> {
-    let report = punching::detect_nat_type_report(&config.p2p.nat_detection, p2p.local_addr())
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("NAT 类型检测失败，按 Unknown 处理: {err:#}");
-            punching::NatDetectionReport {
-                nat_type: NatType::Unknown,
-                mapped_addresses: Vec::new(),
-                filtering_allows_changed_addr: false,
-            }
-        });
     tracing::info!("NAT 类型检测结果: {}", report.nat_type.description());
 
     let candidates =
@@ -553,7 +646,12 @@ async fn wait_for_assigned_ip(signaling: &SignalingClient) -> Result<Ipv6Addr> {
 
 async fn configure_local_ips(p2p: &P2pEngine, assigned_ips: &VirtualIps) {
     tracing::info!("已分配虚拟 IP: {:?}", assigned_ips);
-    if let Some(ip) = assigned_ips.primary_ip() {
+    // PeerInfo::virtual_ip is always the IPv6 overlay address. Bind the same
+    // address family locally so both sides derive an identical v2 endpoint
+    // context instead of mixing 10.8.0.x with fd00::100x.
+    if assigned_ips.ipv6.is_some() {
+        p2p.set_local_ip(assigned_ips.primary_ipv6()).await;
+    } else if let Some(ip) = assigned_ips.primary_ip() {
         p2p.set_local_ip(ip).await;
     }
 }
@@ -601,11 +699,11 @@ fn spawn_runtime_tasks_ext(
         config.clone(),
         p2p.clone(),
     );
-    let (tun_packet_tx, tun_packet_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (tun_buffer_tx, tun_buffer_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tun_packet_tx, tun_packet_rx) = mpsc::unbounded_channel::<TunPacket>();
+    let (tun_buffer_tx, tun_buffer_rx) = mpsc::unbounded_channel::<TunPacket>();
 
     for _ in 0..TUN_BUFFER_POOL_SIZE {
-        let _ = tun_buffer_tx.send(Vec::with_capacity(TUN_PACKET_BUFFER_SIZE));
+        let _ = tun_buffer_tx.send(TunPacket::empty(vec![0u8; TUN_BUFFER_ALLOCATION_SIZE]));
     }
 
     let tun_reader_task = spawn_tun_reader(
@@ -720,13 +818,12 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
         tokio::select! {
             // 从TUN设备读取数据包
             Some(packet) = runtime.tun_packet_rx.recv() => {
-                handle_tun_reader_packet(runtime, &packet).await;
-                recycle_tun_buffer(runtime, packet);
+                handle_tun_reader_packet(runtime, packet).await;
             }
 
-            // 从P2P接收数据包
-            Some((src_ip, payload)) = runtime.p2p.recv() => {
-                handle_inbound_payload(runtime, src_ip, &payload, "P2P packet").await;
+            // 从P2P接收已认证明文；不会再次经过 replay window。
+            Some(packet) = runtime.p2p.recv() => {
+                handle_inbound_packet(runtime, packet, "P2P packet").await;
             }
 
             // 处理信令事件
@@ -742,24 +839,28 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
             }
 
             relay_res = async {
-                match runtime.relay.as_ref() {
-                    Some(relay) => relay.recv_packet().await,
-                    None => std::future::pending().await,
-                }
+                let Some(relay) = runtime.outbound.relay_handle().await else {
+                    return std::future::pending().await;
+                };
+                (relay.generation, relay.client.recv_packet().await)
             } => {
                 match relay_res {
-                    Some(packet) => {
-                        handle_inbound_payload(
+                    (_, Some(packet)) => {
+                        handle_inbound_packet(
                             runtime,
-                            std::net::IpAddr::V6(packet.src_ip),
-                            &packet.payload,
+                            InboundPacket::SealedCiphertext {
+                                src_ip: std::net::IpAddr::V6(packet.src_ip),
+                                payload: packet.payload,
+                            },
                             "QUIC relay packet",
                         )
                         .await;
                     }
-                    None => {
-                        tracing::warn!("QUIC 中继接收流已断开，重置中继等待自愈重连");
-                        runtime.relay = None;
+                    (generation, None) => {
+                        if let Some(relay) = runtime.outbound.clear_relay(generation).await {
+                            tracing::warn!("QUIC 中继接收流已断开，重置中继等待自愈重连");
+                            relay.client.close().await;
+                        }
                     }
                 }
             }
@@ -776,16 +877,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 if runtime.signaling.send_heartbeat().is_ok() {
                     runtime.stats.record_signaling_sent().await;
                 }
-                if runtime.relay.is_none() {
-                    if let Some(new_relay) = connect_quic_relay(
-                        &runtime.signaling,
-                        &runtime.identity,
-                        runtime.assigned_ip,
-                    )
-                    .await
-                    {
-                        runtime.relay = Some(new_relay);
-                    }
+                if runtime.outbound.relay_handle().await.is_none()
+                    && runtime.outbound.begin_relay_reconnect().await
+                {
+                    spawn_relay_reconnect(runtime);
                 }
             }
 
@@ -1017,50 +1112,70 @@ async fn apply_linux_routing_mode(
         .await
 }
 
-async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: &[u8]) {
+async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: TunPacket) {
+    let payload = packet.payload();
     if runtime.acl.is_enabled()
-        && runtime.acl.check_outbound(packet) == fuckipv6_common::AclAction::Deny
+        && runtime.acl.check_outbound(payload) == fuckipv6_common::AclAction::Deny
     {
-        tracing::debug!("ACL 规则丢弃出站 TUN 数据包 ({} 字节)", packet.len());
+        tracing::debug!("ACL 规则丢弃出站 TUN 数据包 ({} 字节)", payload.len());
+        recycle_tun_buffer(runtime, packet);
         return;
     }
-    runtime.stats.record_tun_rx(packet.len()).await;
-    let relay_failed = handle_tun_packet(
+    runtime.stats.record_tun_rx(payload.len()).await;
+
+    let Some((src_ip, dst_ip)) = route_tun_packet(
         &runtime.p2p,
-        &runtime.signaling,
-        runtime.relay.as_ref(),
-        &runtime.stats,
         &runtime.assigned_ips,
         &runtime.route_engine,
-        &runtime.exit_node_manager,
         runtime.configured_exit_node.as_deref(),
-        packet,
+        payload,
     )
-    .await;
+    .await
+    else {
+        recycle_tun_buffer(runtime, packet);
+        return;
+    };
+    let outbound = OutboundPacket::pooled(src_ip, dst_ip, packet, runtime.tun_buffer_tx.clone());
 
-    if relay_failed {
-        if let Some(relay) = runtime.relay.take() {
-            relay.close().await;
+    match runtime.outbound.submit(outbound) {
+        OutboundSubmitOutcome::Queued => {}
+        OutboundSubmitOutcome::QueueFull => {
+            runtime.stats.record_p2p_send_error().await;
+            tracing::warn!("节点发送队列已满，丢弃 TUN 数据包");
+        }
+        OutboundSubmitOutcome::WorkerUnavailable => {
+            runtime.stats.record_p2p_send_error().await;
+            tracing::warn!("节点发送 worker 不可用，丢弃 TUN 数据包");
         }
     }
 }
 
-fn recycle_tun_buffer(runtime: &ClientRuntime, mut packet: Vec<u8>) {
-    packet.clear();
-    let _ = runtime.tun_buffer_tx.send(packet);
+fn recycle_tun_buffer(runtime: &ClientRuntime, packet: TunPacket) {
+    let _ = runtime.tun_buffer_tx.send(packet.recycle());
 }
 
-async fn handle_inbound_payload(
-    runtime: &mut ClientRuntime,
-    src_ip: IpAddr,
-    payload: &[u8],
-    source: &str,
-) {
-    let plain_payload = match runtime.p2p.decrypt_from_peer(src_ip, payload).await {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::debug!("丢弃来自 {src_ip} 的未认证数据包: {error:#}");
-            return;
+async fn record_p2p_rx_for_peer(stats: &StatsCollector, peer: &PeerRouteInfo, bytes: usize) {
+    // Per-peer counters are keyed by the canonical overlay identity used by
+    // peer_snapshot(). Do not use the packet's inner source address here:
+    // dual-stack peers may have an IPv4 primary address, and routed/Exit
+    // traffic can carry a source address that belongs to a subnet behind the
+    // authenticated peer.
+    stats
+        .record_p2p_rx(IpAddr::V6(peer.virtual_ip), bytes)
+        .await;
+}
+
+async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
+    let (src_ip, plain_payload) = match packet {
+        InboundPacket::AuthenticatedPlaintext { src_ip, payload } => (src_ip, payload),
+        InboundPacket::SealedCiphertext { src_ip, payload } => {
+            match runtime.p2p.decrypt_bytes_from_peer(src_ip, payload).await {
+                Ok(payload) => (src_ip, payload),
+                Err(error) => {
+                    tracing::debug!("丢弃来自 {src_ip} 的未认证数据包: {error:#}");
+                    return;
+                }
+            }
         }
     };
     if runtime.acl.is_enabled()
@@ -1073,19 +1188,14 @@ async fn handle_inbound_payload(
         );
         return;
     }
-    runtime
-        .stats
-        .record_p2p_rx(src_ip, plain_payload.len())
-        .await;
-
-    let Some(peer) = runtime.p2p.peer_by_ip(src_ip).await else {
+    let Some(peer) = runtime.p2p.peer_route_by_ip(src_ip).await else {
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return;
     };
-    let peers = runtime.p2p.get_peers().await;
     let trusted_exit_peer = runtime
-        .exit_node_manager
-        .resolve_exit_node_from_slice(&peers, runtime.configured_exit_node.as_deref());
+        .p2p
+        .resolve_exit_peer(runtime.configured_exit_node.as_deref())
+        .await;
     let Some(packet_src) = authenticated_inbound_source(
         &plain_payload,
         &peer,
@@ -1119,7 +1229,10 @@ async fn handle_inbound_payload(
             tracing::debug!("Exit Node 策略拒绝目标地址 {target_dst}");
             return;
         }
-        if !runtime.exit_node_manager.is_client_allowed(&peer.client_id) {
+        if !runtime
+            .exit_node_manager
+            .is_client_allowed(peer.client_id.as_ref())
+        {
             tracing::warn!("Exit Node 拒绝未授权客户端 {}", peer.client_id);
             return;
         }
@@ -1135,7 +1248,7 @@ async fn handle_inbound_payload(
                 return;
             }
             if let Err(error) = forwarder
-                .allow_client(&peer.client_id, &peer.virtual_ips)
+                .allow_client(peer.client_id.as_ref(), &peer.virtual_ips)
                 .await
             {
                 tracing::warn!(
@@ -1161,6 +1274,7 @@ async fn handle_inbound_payload(
         );
     }
 
+    record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
     write_payload_to_tun(&mut runtime.tun, &runtime.stats, &plain_payload, source).await;
 }
 
@@ -1211,7 +1325,12 @@ async fn handle_runtime_signaling_event(
 
     match action {
         SignalingAction::RelayedPacket { src_ip, payload } => {
-            handle_inbound_payload(runtime, src_ip, &payload, "signaling relay packet").await;
+            handle_inbound_packet(
+                runtime,
+                InboundPacket::SealedCiphertext { src_ip, payload },
+                "signaling relay packet",
+            )
+            .await;
         }
         SignalingAction::Reconnected => {
             runtime.stats.record_signaling_reconnect().await;
@@ -1295,9 +1414,7 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) {
         tracing::warn!("关闭信令连接失败: {:?}", e);
     }
 
-    if let Some(relay) = runtime.relay.as_ref() {
-        relay.close().await;
-    }
+    runtime.outbound.close_relay().await;
 
     if let Err(e) = runtime.tun.delete().await {
         tracing::warn!("删除TUN设备失败: {:?}", e);
@@ -1310,35 +1427,69 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) {
 
 fn spawn_tun_reader(
     mut tun: TunDevice,
-    packet_tx: mpsc::UnboundedSender<Vec<u8>>,
-    mut buffer_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    buffer_tx: mpsc::UnboundedSender<Vec<u8>>,
+    packet_tx: mpsc::UnboundedSender<TunPacket>,
+    mut buffer_rx: mpsc::UnboundedReceiver<TunPacket>,
+    buffer_tx: mpsc::UnboundedSender<TunPacket>,
     stats: StatsCollector,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let mut buf = match buffer_rx.recv().await {
-                Some(buf) => buf,
+            let first = match buffer_rx.recv().await {
+                Some(packet) => packet,
                 None => break,
             };
-            buf.resize(TUN_PACKET_BUFFER_SIZE, 0);
-
-            match tun.read(&mut buf).await {
-                Ok(size) if size > 0 => {
-                    buf.truncate(size);
-                    if packet_tx.send(buf).is_err() {
-                        break;
-                    }
+            let mut packets = vec![first];
+            while packets.len() < TUN_READ_BATCH_SIZE {
+                match buffer_rx.try_recv() {
+                    Ok(packet) => packets.push(packet),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
                 }
-                Ok(_) => {
+            }
+
+            let mut buffer_slices: Vec<&mut [u8]> = packets
+                .iter_mut()
+                .map(|packet| {
+                    &mut packet.buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + TUN_PACKET_BUFFER_SIZE]
+                })
+                .collect();
+            let lengths = tun.read_batch(&mut buffer_slices).await;
+            drop(buffer_slices);
+
+            match lengths {
+                Ok(lengths) if !lengths.is_empty() && lengths[0] == 0 => {
                     tracing::warn!("TUN read EOF (0 bytes)，退出 reader 任务");
+                    for packet in packets {
+                        let _ = buffer_tx.send(packet.recycle());
+                    }
                     break;
                 }
-                Err(e) => {
-                    buf.clear();
-                    let _ = buffer_tx.send(buf);
+                Ok(lengths) => {
+                    for (index, packet) in packets.iter_mut().enumerate() {
+                        if let Some(size) = lengths.get(index).copied() {
+                            debug_assert!(size <= TUN_PACKET_BUFFER_SIZE);
+                            packet.len = size;
+                        }
+                    }
+                    let unread = packets.split_off(lengths.len().min(packets.len()));
+                    for packet in packets {
+                        if packet_tx.send(packet).is_err() {
+                            for packet in unread {
+                                let _ = buffer_tx.send(packet.recycle());
+                            }
+                            return;
+                        }
+                    }
+                    for packet in unread {
+                        let _ = buffer_tx.send(packet.recycle());
+                    }
+                }
+                Err(error) => {
+                    for packet in packets {
+                        let _ = buffer_tx.send(packet.recycle());
+                    }
                     stats.record_tun_read_error().await;
-                    tracing::error!("TUN read error: {:?}", e);
+                    tracing::error!("TUN read error: {:?}", error);
                     break;
                 }
             }
@@ -1384,26 +1535,16 @@ pub(crate) async fn shutdown_signal() {
 
 /// 处理从TUN设备读取的数据包
 #[allow(clippy::too_many_arguments)]
-async fn handle_tun_packet(
+async fn route_tun_packet(
     p2p: &P2pEngine,
-    signaling: &SignalingClient,
-    relay: Option<&QuicRelayClient>,
-    stats: &StatsCollector,
     assigned_ips: &VirtualIps,
     route_engine: &SmartRouteEngine,
-    exit_node_mgr: &ExitNodeManager,
     configured_exit_node: Option<&str>,
     packet: &[u8],
-) -> bool {
-    let Some(dst_ip) = tun_packet_destination(packet) else {
-        return false;
-    };
+) -> Option<(IpAddr, IpAddr)> {
+    let dst_ip = tun_packet_destination(packet)?;
 
-    let peers = p2p.get_peers().await;
-    let is_peer_ip = match dst_ip {
-        IpAddr::V6(v6) => peers.iter().any(|p| p.virtual_ip == v6),
-        IpAddr::V4(v4) => peers.iter().any(|p| p.virtual_ips.ipv4 == Some(v4)),
-    };
+    let is_peer_ip = p2p.contains_peer_ip(dst_ip).await;
 
     // 智能分流与出口网关决策
     let target_dst = if is_peer_ip {
@@ -1413,16 +1554,14 @@ async fn handle_tun_packet(
             RoutingAction::Mesh => dst_ip,
             RoutingAction::Direct => {
                 tracing::trace!("智能分流判定为 Direct 直连，跳过封装: {}", dst_ip);
-                return false;
+                return None;
             }
             RoutingAction::Reject => {
                 tracing::debug!("智能分流判定为 Reject 阻断: {}", dst_ip);
-                return false;
+                return None;
             }
             RoutingAction::Proxy => {
-                if let Some(target_v6) =
-                    exit_node_mgr.resolve_exit_node_from_slice(&peers, configured_exit_node)
-                {
+                if let Some(target_v6) = p2p.resolve_exit_peer(configured_exit_node).await {
                     tracing::debug!(
                         "智能分流判定为 Proxy，经由 Exit Node {} 转发流量至 {}",
                         target_v6,
@@ -1434,7 +1573,7 @@ async fn handle_tun_packet(
                         "智能分流判定为 Proxy 但未找到可用 Exit Node，丢弃数据包至 {}",
                         dst_ip
                     );
-                    return false;
+                    return None;
                 }
             }
         }
@@ -1442,7 +1581,7 @@ async fn handle_tun_packet(
 
     if !should_forward_tun_destination(target_dst) {
         tracing::trace!("忽略发往非对等节点的 TUN 数据包: {}", target_dst);
-        return false;
+        return None;
     }
 
     let src_ip = get_packet_src_ip(packet, assigned_ips);
@@ -1455,20 +1594,7 @@ async fn handle_tun_packet(
         packet.len()
     );
 
-    // 发送到对等节点 (P2P 会自动进行端到端加密)
-    if send_tun_packet_p2p(p2p, stats, src_ip, target_dst, packet).await {
-        return false;
-    }
-
-    let relay_failed =
-        match send_tun_packet_quic_relay(p2p, relay, stats, src_ip, target_dst, packet).await {
-            QuicRelaySendOutcome::Sent => return false,
-            QuicRelaySendOutcome::Failed => true,
-            QuicRelaySendOutcome::NotAttempted => false,
-        };
-
-    send_tun_packet_signaling(p2p, signaling, stats, src_ip, target_dst, packet).await;
-    relay_failed
+    Some((src_ip, target_dst))
 }
 
 fn tun_packet_destination(packet: &[u8]) -> Option<IpAddr> {
@@ -1496,7 +1622,7 @@ fn tun_packet_destination(packet: &[u8]) -> Option<IpAddr> {
 
 fn authenticated_inbound_source(
     packet: &[u8],
-    peer: &PeerInfo,
+    peer: &crate::p2p::connection::PeerRouteInfo,
     assigned_ips: &VirtualIps,
     trusted_exit_peer: Option<Ipv6Addr>,
 ) -> Option<IpAddr> {
@@ -1591,109 +1717,559 @@ fn get_packet_src_ip(packet: &[u8], assigned_ips: &VirtualIps) -> IpAddr {
         .unwrap_or_else(|| IpAddr::V6(assigned_ips.primary_ipv6()))
 }
 
-async fn send_tun_packet_p2p(
-    p2p: &P2pEngine,
-    stats: &StatsCollector,
+#[derive(Debug)]
+struct OutboundPacket {
     src_ip: IpAddr,
     dst_ip: IpAddr,
-    packet: &[u8],
-) -> bool {
-    match p2p.send_to(dst_ip, src_ip, packet).await {
-        Ok(_) => {
-            stats.record_p2p_tx(dst_ip, packet.len()).await;
-            true
+    payload: OutboundPacketPayload,
+}
+
+impl OutboundPacket {
+    #[cfg(test)]
+    fn owned(src_ip: IpAddr, dst_ip: IpAddr, payload: Vec<u8>) -> Self {
+        let mut buffer = vec![0u8; DATA_HEADER_LEN + payload.len() + AEAD_TAG_LEN];
+        buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + payload.len()].copy_from_slice(&payload);
+        Self {
+            src_ip,
+            dst_ip,
+            payload: OutboundPacketPayload::Owned(buffer),
         }
-        Err(e) => {
-            stats.record_p2p_send_error().await;
-            tracing::debug!(
-                "Failed to send packet to {} over P2P, using relay: {:?}",
-                dst_ip,
-                e
-            );
-            false
+    }
+
+    fn pooled(
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        packet: TunPacket,
+        recycle_tx: mpsc::UnboundedSender<TunPacket>,
+    ) -> Self {
+        Self {
+            src_ip,
+            dst_ip,
+            payload: OutboundPacketPayload::Pooled(PooledOutboundPacket {
+                packet: Some(packet),
+                recycle_tx: Some(recycle_tx),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn payload(&self) -> &[u8] {
+        match &self.payload {
+            #[cfg(test)]
+            OutboundPacketPayload::Owned(buffer) => {
+                &buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + self.plaintext_len()]
+            }
+            OutboundPacketPayload::Pooled(packet) => packet
+                .packet
+                .as_ref()
+                .expect("pooled outbound packet is present until drop")
+                .payload(),
+        }
+    }
+
+    fn plaintext_len(&self) -> usize {
+        match &self.payload {
+            #[cfg(test)]
+            OutboundPacketPayload::Owned(buffer) => buffer.len() - DATA_HEADER_LEN - AEAD_TAG_LEN,
+            OutboundPacketPayload::Pooled(packet) => {
+                packet
+                    .packet
+                    .as_ref()
+                    .expect("pooled outbound packet is present until drop")
+                    .len
+            }
+        }
+    }
+
+    fn buffer_mut(&mut self) -> &mut [u8] {
+        match &mut self.payload {
+            #[cfg(test)]
+            OutboundPacketPayload::Owned(buffer) => buffer,
+            OutboundPacketPayload::Pooled(packet) => packet
+                .packet
+                .as_mut()
+                .expect("pooled outbound packet is present until drop")
+                .buffer_mut(),
+        }
+    }
+
+    fn into_encrypted_bytes(self, encoded_len: usize) -> Bytes {
+        match self.payload {
+            #[cfg(test)]
+            OutboundPacketPayload::Owned(buffer) => Bytes::copy_from_slice(&buffer[..encoded_len]),
+            OutboundPacketPayload::Pooled(mut pooled) => {
+                let packet = pooled
+                    .packet
+                    .take()
+                    .expect("pooled outbound packet is present until conversion");
+                Bytes::from_owner(TunPacketBytesOwner {
+                    packet: Some(packet),
+                    encoded_len,
+                    recycle_tx: pooled
+                        .recycle_tx
+                        .take()
+                        .expect("pooled outbound recycle sender is present until conversion"),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum OutboundPacketPayload {
+    #[cfg(test)]
+    Owned(Vec<u8>),
+    Pooled(PooledOutboundPacket),
+}
+
+#[derive(Debug)]
+struct PooledOutboundPacket {
+    packet: Option<TunPacket>,
+    recycle_tx: Option<mpsc::UnboundedSender<TunPacket>>,
+}
+
+impl Drop for PooledOutboundPacket {
+    fn drop(&mut self) {
+        if let (Some(packet), Some(recycle_tx)) = (self.packet.take(), self.recycle_tx.take()) {
+            let _ = recycle_tx.send(packet.recycle());
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuicRelaySendOutcome {
-    Sent,
-    Failed,
-    NotAttempted,
+enum OutboundSubmitOutcome {
+    Queued,
+    QueueFull,
+    WorkerUnavailable,
 }
 
-async fn send_tun_packet_quic_relay(
-    p2p: &P2pEngine,
-    relay: Option<&QuicRelayClient>,
-    stats: &StatsCollector,
-    src_ip: IpAddr,
-    dst_ip: IpAddr,
-    packet: &[u8],
-) -> QuicRelaySendOutcome {
-    let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) = (src_ip, dst_ip) else {
-        return QuicRelaySendOutcome::NotAttempted;
-    };
-    let Some(relay) = relay else {
-        return QuicRelaySendOutcome::NotAttempted;
-    };
+trait OutboundTransport: Send + Sync {
+    fn send<'a>(&'a self, packet: OutboundPacket) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
-    let encrypted = match p2p.encrypt_for_peer(dst_ip, packet).await {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::warn!("无法为 QUIC relay 认证加密数据包: {error:#}");
-            return QuicRelaySendOutcome::Failed;
-        }
-    };
-    match tokio::time::timeout(
-        QUIC_RELAY_SEND_TIMEOUT,
-        relay.send_packet(0, src_v6, dst_v6, &encrypted),
-    )
-    .await
-    {
-        Ok(Ok(())) => {
-            stats.record_p2p_tx(dst_ip, packet.len()).await;
-            QuicRelaySendOutcome::Sent
-        }
-        Ok(Err(err)) => {
-            tracing::warn!("QUIC 中继转发 {} 失败，降级到信令中继: {err:#}", dst_ip);
-            QuicRelaySendOutcome::Failed
-        }
-        Err(_) => {
-            tracing::warn!(
-                "QUIC 中继转发 {} 超过 {:?} 未确认，降级到信令中继",
-                dst_ip,
-                QUIC_RELAY_SEND_TIMEOUT
-            );
-            QuicRelaySendOutcome::Failed
+    /// The default preserves ordered, one-at-a-time delivery for transports
+    /// that cannot batch. The production P2P transport overrides this to issue
+    /// one `sendmmsg` for a same-peer prefix.
+    fn send_batch<'a>(
+        &'a self,
+        packets: Vec<OutboundPacket>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            for packet in packets {
+                self.send(packet).await;
+            }
+        })
+    }
+
+    fn max_batch_size(&self) -> usize {
+        1
+    }
+}
+
+enum RelayForwardOutcome {
+    NoRelay,
+    Sent,
+    Failed(anyhow::Error),
+}
+
+/// Fallback transports consume the ciphertext returned by the direct path.
+/// They must never receive plaintext or seal it again.
+trait FallbackTransport: Send + Sync {
+    fn relay<'a>(
+        &'a self,
+        src_ip: Ipv6Addr,
+        dst_ip: Ipv6Addr,
+        encrypted: Bytes,
+    ) -> Pin<Box<dyn Future<Output = RelayForwardOutcome> + Send + 'a>>;
+
+    fn signaling(&self, src_ip: IpAddr, dst_ip: IpAddr, encrypted: Bytes) -> Result<()>;
+}
+
+struct RuntimeFallbackTransport {
+    signaling: Arc<SignalingClient>,
+    relay_state: RelayState,
+}
+
+impl RuntimeFallbackTransport {
+    fn new(signaling: Arc<SignalingClient>, relay_state: RelayState) -> Self {
+        Self {
+            signaling,
+            relay_state,
         }
     }
 }
 
-async fn send_tun_packet_signaling(
-    p2p: &P2pEngine,
-    signaling: &SignalingClient,
-    stats: &StatsCollector,
-    src_ip: IpAddr,
-    dst_ip: IpAddr,
-    packet: &[u8],
+impl FallbackTransport for RuntimeFallbackTransport {
+    fn relay<'a>(
+        &'a self,
+        src_ip: Ipv6Addr,
+        dst_ip: Ipv6Addr,
+        encrypted: Bytes,
+    ) -> Pin<Box<dyn Future<Output = RelayForwardOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(relay) = self.relay_state.relay_handle().await else {
+                return RelayForwardOutcome::NoRelay;
+            };
+
+            let result = tokio::time::timeout(
+                QUIC_RELAY_SEND_TIMEOUT,
+                relay.client.send_packet(0, src_ip, dst_ip, encrypted),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(())) => RelayForwardOutcome::Sent,
+                Ok(Err(error)) => {
+                    if let Some(failed) = self.relay_state.clear_relay(relay.generation).await {
+                        failed.client.close().await;
+                    }
+                    RelayForwardOutcome::Failed(error)
+                }
+                Err(_) => {
+                    if let Some(failed) = self.relay_state.clear_relay(relay.generation).await {
+                        failed.client.close().await;
+                    }
+                    RelayForwardOutcome::Failed(anyhow::anyhow!(
+                        "QUIC relay send exceeded {:?}",
+                        QUIC_RELAY_SEND_TIMEOUT
+                    ))
+                }
+            }
+        })
+    }
+
+    fn signaling(&self, src_ip: IpAddr, dst_ip: IpAddr, encrypted: Bytes) -> Result<()> {
+        fuckipv6_common::validate_signaling_relay_payload_len(encrypted.len())
+            .context("signaling fallback ciphertext exceeds the data packet limit")?;
+        self.signaling
+            .send(SignalingMessage::relay_packet(src_ip, dst_ip, encrypted))?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct RelayHandle {
+    generation: u64,
+    client: QuicRelayClient,
+}
+
+#[derive(Clone, Default)]
+struct RelayState {
+    slot: Arc<RwLock<Option<RelayHandle>>>,
+    next_generation: Arc<AtomicU64>,
+    reconnecting: Arc<AtomicBool>,
+}
+
+impl RelayState {
+    async fn relay_handle(&self) -> Option<RelayHandle> {
+        self.slot.read().await.clone()
+    }
+
+    async fn install_relay(&self, client: QuicRelayClient) -> Option<RelayHandle> {
+        let generation = self.next_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.slot
+            .write()
+            .await
+            .replace(RelayHandle { generation, client })
+    }
+
+    async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
+        let mut slot = self.slot.write().await;
+        if slot
+            .as_ref()
+            .is_some_and(|relay| relay.generation == generation)
+        {
+            slot.take()
+        } else {
+            None
+        }
+    }
+
+    async fn take_relay(&self) -> Option<RelayHandle> {
+        self.slot.write().await.take()
+    }
+
+    async fn begin_reconnect(&self) -> bool {
+        if self.slot.read().await.is_some() {
+            return false;
+        }
+        self.reconnecting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish_reconnect(&self) {
+        self.reconnecting.store(false, Ordering::Release);
+    }
+}
+
+/// Owns one bounded, ordered send queue per destination peer.
+///
+/// Submission is synchronous and does not perform crypto or network I/O, so the
+/// central client loop cannot be stalled by a slow relay. A worker processes
+/// one peer's packets in order; workers for different peers run independently.
+#[derive(Clone)]
+pub(crate) struct OutboundDispatcher {
+    transport: Arc<dyn OutboundTransport>,
+    relay_state: RelayState,
+    workers: Arc<Mutex<HashMap<IpAddr, mpsc::Sender<OutboundPacket>>>>,
+}
+
+impl OutboundDispatcher {
+    fn new(transport: Arc<dyn OutboundTransport>, relay_state: RelayState) -> Self {
+        Self {
+            transport,
+            relay_state,
+            workers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(transport: Arc<dyn OutboundTransport>) -> Self {
+        Self::new(transport, RelayState::default())
+    }
+
+    fn submit(&self, packet: OutboundPacket) -> OutboundSubmitOutcome {
+        let dst_ip = packet.dst_ip;
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = workers
+            .get(&dst_ip)
+            .cloned()
+            .unwrap_or_else(|| self.spawn_worker(&mut workers, dst_ip));
+
+        match sender.try_send(packet) {
+            Ok(()) => OutboundSubmitOutcome::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => OutboundSubmitOutcome::QueueFull,
+            Err(mpsc::error::TrySendError::Closed(packet)) => {
+                workers.remove(&dst_ip);
+                let replacement = self.spawn_worker(&mut workers, dst_ip);
+                match replacement.try_send(packet) {
+                    Ok(()) => OutboundSubmitOutcome::Queued,
+                    Err(mpsc::error::TrySendError::Full(_)) => OutboundSubmitOutcome::QueueFull,
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        workers.remove(&dst_ip);
+                        OutboundSubmitOutcome::WorkerUnavailable
+                    }
+                }
+            }
+        }
+    }
+
+    fn spawn_worker(
+        &self,
+        workers: &mut HashMap<IpAddr, mpsc::Sender<OutboundPacket>>,
+        dst_ip: IpAddr,
+    ) -> mpsc::Sender<OutboundPacket> {
+        let (sender, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+        let transport = self.transport.clone();
+        tokio::spawn(run_outbound_worker(dst_ip, receiver, transport));
+        workers.insert(dst_ip, sender.clone());
+        sender
+    }
+
+    async fn relay_handle(&self) -> Option<RelayHandle> {
+        self.relay_state.relay_handle().await
+    }
+
+    async fn install_relay(&self, relay: QuicRelayClient) -> Option<RelayHandle> {
+        self.relay_state.install_relay(relay).await
+    }
+
+    async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
+        self.relay_state.clear_relay(generation).await
+    }
+
+    async fn close_relay(&self) {
+        if let Some(relay) = self.relay_state.take_relay().await {
+            relay.client.close().await;
+        }
+    }
+
+    async fn begin_relay_reconnect(&self) -> bool {
+        self.relay_state.begin_reconnect().await
+    }
+
+    fn finish_relay_reconnect(&self) {
+        self.relay_state.finish_reconnect();
+    }
+}
+
+async fn run_outbound_worker(
+    _dst_ip: IpAddr,
+    mut receiver: mpsc::Receiver<OutboundPacket>,
+    transport: Arc<dyn OutboundTransport>,
 ) {
-    let encrypted = match p2p.encrypt_for_peer(dst_ip, packet).await {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::warn!("无法为信令中继认证加密数据包: {error:#}");
+    let max_batch_size = transport.max_batch_size().max(1);
+    while let Some(packet) = receiver.recv().await {
+        let mut packets = Vec::with_capacity(max_batch_size);
+        packets.push(packet);
+        while packets.len() < max_batch_size {
+            match receiver.try_recv() {
+                Ok(packet) => packets.push(packet),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        transport.send_batch(packets).await;
+    }
+}
+
+struct P2pOutboundTransport {
+    p2p: P2pEngine,
+    fallback: Arc<dyn FallbackTransport>,
+    stats: StatsCollector,
+}
+
+impl P2pOutboundTransport {
+    fn new(
+        p2p: P2pEngine,
+        signaling: Arc<SignalingClient>,
+        stats: StatsCollector,
+        relay_state: RelayState,
+    ) -> Self {
+        Self {
+            p2p,
+            fallback: Arc::new(RuntimeFallbackTransport::new(signaling, relay_state)),
+            stats,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_fallback(p2p: P2pEngine, fallback: Arc<dyn FallbackTransport>) -> Self {
+        Self {
+            p2p,
+            fallback,
+            stats: StatsCollector::new(),
+        }
+    }
+
+    async fn send_packet(&self, packet: OutboundPacket) {
+        self.send_packets(vec![packet]).await;
+    }
+
+    async fn send_packets(&self, mut packets: Vec<OutboundPacket>) {
+        if packets.is_empty() {
             return;
         }
-    };
-    let msg = SignalingMessage::relay_packet(src_ip, dst_ip, encrypted);
-
-    match signaling.send(msg) {
-        Ok(_) => {
-            stats.record_signaling_sent().await;
+        let destination = packets[0].dst_ip;
+        debug_assert!(packets.iter().all(|packet| packet.dst_ip == destination));
+        let plaintext_lens: Vec<usize> =
+            packets.iter().map(OutboundPacket::plaintext_len).collect();
+        let mut batch = Vec::with_capacity(packets.len());
+        for packet in packets.iter_mut() {
+            let plaintext_len = packet.plaintext_len();
+            batch.push((packet.buffer_mut(), plaintext_len));
         }
-        Err(e) => {
-            tracing::warn!("通过信令通道向 {} 转发数据包失败: {:?}", dst_ip, e);
+        let results = self
+            .p2p
+            .send_batch_to_or_fallback_in_place(destination, batch)
+            .await;
+
+        let results = match results {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::debug!(
+                    "Failed to start UDP batch for {} ({} packets): {error:#}",
+                    destination,
+                    packets.len()
+                );
+                for _ in packets {
+                    self.stats.record_p2p_send_error().await;
+                }
+                return;
+            }
+        };
+        debug_assert_eq!(results.len(), packets.len());
+
+        for ((packet, plaintext_len), outcome) in
+            packets.into_iter().zip(plaintext_lens).zip(results)
+        {
+            match outcome {
+                Ok(InPlaceSendOutcome::Sent) => {
+                    self.stats.record_p2p_tx(packet.dst_ip, plaintext_len).await;
+                }
+                Ok(InPlaceSendOutcome::SealedForFallback { encoded_len, error }) => {
+                    self.stats.record_p2p_send_error().await;
+                    tracing::debug!(
+                        "Failed to send packet to {} over P2P, using sealed fallback packet: {:?}",
+                        packet.dst_ip,
+                        error
+                    );
+                    self.send_fallback(packet, encoded_len).await;
+                }
+                Err(error) => {
+                    self.stats.record_p2p_send_error().await;
+                    tracing::debug!("Failed to seal packet for {}: {:?}", packet.dst_ip, error);
+                }
+            }
         }
     }
+
+    async fn send_fallback(&self, packet: OutboundPacket, encoded_len: usize) {
+        let plaintext_len = packet.plaintext_len();
+        let src_ip = packet.src_ip;
+        let dst_ip = packet.dst_ip;
+        let encrypted = packet.into_encrypted_bytes(encoded_len);
+        if let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) = (src_ip, dst_ip) {
+            match self.fallback.relay(src_v6, dst_v6, encrypted.clone()).await {
+                RelayForwardOutcome::Sent => {
+                    self.stats.record_p2p_tx(dst_ip, plaintext_len).await;
+                    return;
+                }
+                RelayForwardOutcome::Failed(error) => {
+                    tracing::warn!("QUIC 中继转发 {} 失败，降级到信令中继: {error:#}", dst_ip);
+                }
+                RelayForwardOutcome::NoRelay => {}
+            }
+        }
+
+        match self.fallback.signaling(src_ip, dst_ip, encrypted) {
+            Ok(()) => {
+                self.stats.record_signaling_sent().await;
+                self.stats.record_p2p_tx(dst_ip, plaintext_len).await;
+            }
+            Err(error) => {
+                self.stats.record_p2p_send_error().await;
+                tracing::warn!("通过信令通道向 {} 转发数据包失败: {:?}", dst_ip, error);
+            }
+        }
+    }
+}
+
+impl OutboundTransport for P2pOutboundTransport {
+    fn send<'a>(&'a self, packet: OutboundPacket) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.send_packet(packet))
+    }
+
+    fn send_batch<'a>(
+        &'a self,
+        packets: Vec<OutboundPacket>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.send_packets(packets))
+    }
+
+    fn max_batch_size(&self) -> usize {
+        self.p2p.udp_batch_size()
+    }
+}
+
+fn spawn_relay_reconnect(runtime: &ClientRuntime) {
+    let signaling = runtime.signaling.clone();
+    let identity = runtime.identity.clone();
+    let assigned_ip = runtime.assigned_ip;
+    let outbound = runtime.outbound.clone();
+
+    tokio::spawn(async move {
+        let relay = connect_quic_relay(signaling.as_ref(), &identity, assigned_ip).await;
+        if let Some(relay) = relay {
+            if let Some(previous) = outbound.install_relay(relay).await {
+                previous.client.close().await;
+            }
+        }
+        outbound.finish_relay_reconnect();
+    });
 }
 
 fn should_forward_tun_destination(dst_ip: IpAddr) -> bool {
@@ -1711,7 +2287,7 @@ enum SignalingAction {
     Reconnected,
     PeersUpsert(Vec<PeerInfo>),
     PeerRemoved(String),
-    RelayedPacket { src_ip: IpAddr, payload: Vec<u8> },
+    RelayedPacket { src_ip: IpAddr, payload: Bytes },
 }
 
 async fn handle_signaling_event(
@@ -1800,7 +2376,7 @@ async fn remove_offline_peer(p2p: &P2pEngine, stats: &StatsCollector, client_id:
     }
 }
 
-pub async fn status() -> Result<()> {
+pub async fn status(json: bool) -> Result<()> {
     let response = ipc::request(IpcRequest::Status).await?;
 
     let IpcResponse::Status(snapshot) = response else {
@@ -1809,6 +2385,11 @@ pub async fn status() -> Result<()> {
             _ => anyhow::bail!("Unexpected IPC response"),
         }
     };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(());
+    }
 
     if snapshot.networks.len() > 1 {
         println!(
@@ -1840,6 +2421,7 @@ pub async fn status() -> Result<()> {
                 net.global.p2p_tx_packets,
                 net.global.p2p_rx_bytes + net.global.p2p_tx_bytes
             );
+            print_dataplane_status(&net.dataplane, "   ");
             println!(
                 "──────────────────────────────────────────────────────────────────────────────"
             );
@@ -1895,7 +2477,72 @@ pub async fn status() -> Result<()> {
         "  P2P 发/收错误:   {} / {}",
         snapshot.global.p2p_send_errors, snapshot.global.p2p_recv_errors
     );
+    if let Some(ref dataplane) = snapshot.dataplane {
+        println!();
+        print_dataplane_status(dataplane, "  ");
+    }
     Ok(())
+}
+
+fn print_dataplane_status(dataplane: &ipc::DataplaneMetricsSnapshot, prefix: &str) {
+    let udp = dataplane.udp;
+    let recv_pps = if udp.recv_syscalls == 0 {
+        0.0
+    } else {
+        udp.recv_datagrams as f64 / udp.recv_syscalls as f64
+    };
+    let send_pps = if udp.send_syscalls == 0 {
+        0.0
+    } else {
+        udp.send_datagrams as f64 / udp.send_syscalls as f64
+    };
+    let pool = dataplane.buffer_pool;
+    let acquisitions = pool.hits + pool.allocations;
+    let pool_hit_rate = if acquisitions == 0 {
+        0.0
+    } else {
+        pool.hits as f64 / acquisitions as f64 * 100.0
+    };
+    let crypto = dataplane.crypto;
+    let queue = dataplane.inbound_queue;
+    println!("{prefix}数据面统计:");
+    println!(
+        "{prefix}  UDP 收:        {} 包 / {} syscall ({recv_pps:.2} 包/次), 最大批 {}",
+        udp.recv_datagrams, udp.recv_syscalls, udp.max_recv_batch
+    );
+    println!(
+        "{prefix}  UDP 发:        {} 包 / {} syscall ({send_pps:.2} 包/次), 最大批 {}, fallback {}",
+        udp.send_datagrams, udp.send_syscalls, udp.max_send_batch, udp.fallback_packets
+    );
+    println!(
+        "{prefix}  RX 缓冲池:     {pool_hit_rate:.1}% 命中, 分配 {}, 回收 {}, 满池丢弃 {}",
+        pool.allocations, pool.returns, pool.full_returns
+    );
+    println!(
+        "{prefix}  入站队列:      {}/{} 当前/上限, 峰值 {}, 满丢弃 {}, 等待 {}",
+        queue.depth, queue.capacity, queue.max_depth, queue.dropped_full, queue.consumer_waits
+    );
+    println!(
+        "{prefix}  Crypto worker: {} 线程, 并行 {} 批/{} 包, 串行 {}, 过载回退 {}",
+        crypto.worker_threads,
+        crypto.parallel_jobs,
+        crypto.parallel_packets,
+        crypto.serial_jobs,
+        crypto.overloaded_jobs
+    );
+    let lock = dataplane.secure_lock;
+    println!(
+        "{prefix}  会话锁:       {} 个 peer, 获取 {}, 竞争 {}, 等待均值/峰值 {}/{} ns",
+        lock.peers,
+        lock.acquisitions,
+        lock.contended_acquisitions,
+        lock.wait_ns_avg,
+        lock.wait_ns_max
+    );
+    println!(
+        "{prefix}  持锁时间:     均值/峰值 {}/{} ns, 总计 {} ns",
+        lock.hold_ns_avg, lock.hold_ns_max, lock.hold_ns_total
+    );
 }
 
 pub async fn peers() -> Result<()> {
@@ -2858,6 +3505,491 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::Notify;
+
+    struct RecordingTransport {
+        completed_tx: mpsc::UnboundedSender<(IpAddr, Vec<u8>)>,
+    }
+
+    impl OutboundTransport for RecordingTransport {
+        fn send<'a>(
+            &'a self,
+            packet: OutboundPacket,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                if packet.payload().first() == Some(&1) {
+                    sleep(Duration::from_millis(150)).await;
+                }
+                let _ = self
+                    .completed_tx
+                    .send((packet.dst_ip, packet.payload().to_vec()));
+            })
+        }
+    }
+
+    struct GatedTransport {
+        started_tx: mpsc::UnboundedSender<()>,
+        gate: Arc<Notify>,
+    }
+
+    impl OutboundTransport for GatedTransport {
+        fn send<'a>(
+            &'a self,
+            _packet: OutboundPacket,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                let _ = self.started_tx.send(());
+                self.gate.notified().await;
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RelayMode {
+        Success,
+        Failure,
+    }
+
+    struct MatrixFallbackTransport {
+        relay_mode: RelayMode,
+        relay_tx: mpsc::UnboundedSender<Bytes>,
+        signaling_tx: mpsc::UnboundedSender<Bytes>,
+    }
+
+    impl FallbackTransport for MatrixFallbackTransport {
+        fn relay<'a>(
+            &'a self,
+            _src_ip: Ipv6Addr,
+            _dst_ip: Ipv6Addr,
+            encrypted: Bytes,
+        ) -> Pin<Box<dyn Future<Output = RelayForwardOutcome> + Send + 'a>> {
+            Box::pin(async move {
+                let _ = self.relay_tx.send(encrypted);
+                match self.relay_mode {
+                    RelayMode::Success => RelayForwardOutcome::Sent,
+                    RelayMode::Failure => {
+                        RelayForwardOutcome::Failed(anyhow::anyhow!("injected relay failure"))
+                    }
+                }
+            })
+        }
+
+        fn signaling(&self, _src_ip: IpAddr, _dst_ip: IpAddr, encrypted: Bytes) -> Result<()> {
+            let _ = self.signaling_tx.send(encrypted);
+            Ok(())
+        }
+    }
+
+    fn outbound_packet(dst_ip: Ipv6Addr, marker: u8) -> OutboundPacket {
+        OutboundPacket::owned(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(dst_ip),
+            vec![marker],
+        )
+    }
+
+    async fn connected_test_engines() -> Result<(P2pEngine, P2pEngine, Ipv6Addr, Ipv6Addr)> {
+        let engine_a = P2pEngine::new(0).await?;
+        let engine_b = P2pEngine::new(0).await?;
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = "fd00::1".parse::<Ipv6Addr>()?;
+        let ip_b = "fd00::2".parse::<Ipv6Addr>()?;
+
+        engine_a.set_identity(identity_a.clone()).await;
+        engine_b.set_identity(identity_b.clone()).await;
+        engine_a.set_local_ip(ip_a).await;
+        engine_b.set_local_ip(ip_b).await;
+
+        let endpoint_a = std::net::SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_a.local_addr().port(),
+        );
+        let endpoint_b = std::net::SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            engine_b.local_addr().port(),
+        );
+        engine_a
+            .add_peer(PeerInfo::new(
+                "b".to_string(),
+                ip_b,
+                identity_b.public_key(),
+                vec![endpoint_b],
+                NatType::Open,
+            ))
+            .await?;
+        engine_b
+            .add_peer(PeerInfo::new(
+                "a".to_string(),
+                ip_a,
+                identity_a.public_key(),
+                vec![endpoint_a],
+                NatType::Open,
+            ))
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if engine_a
+                    .has_established_session_by_ip(IpAddr::V6(ip_b))
+                    .await
+                    && engine_b
+                        .has_established_session_by_ip(IpAddr::V6(ip_a))
+                        .await
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("test peers did not establish a secure session")?;
+
+        Ok((engine_a, engine_b, ip_a, ip_b))
+    }
+
+    async fn assert_production_udp_batch(
+        payload_len: usize,
+        expect_parallel_crypto: bool,
+    ) -> Result<()> {
+        let (engine_a, engine_b, ip_a, ip_b) = connected_test_engines().await?;
+        let (relay_tx, _relay_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, _signaling_rx) = mpsc::unbounded_channel();
+        let transport = P2pOutboundTransport::with_fallback(
+            engine_a.clone(),
+            Arc::new(MatrixFallbackTransport {
+                relay_mode: RelayMode::Success,
+                relay_tx,
+                signaling_tx,
+            }),
+        );
+
+        let payloads: Vec<Vec<u8>> = (0..8u8).map(|index| vec![index; payload_len]).collect();
+        let before = engine_a.udp_batch_metrics();
+        let crypto_before = fuckipv6_secure_session::crypto_batch_metrics();
+        transport
+            .send_packets(
+                payloads
+                    .iter()
+                    .cloned()
+                    .map(|payload| {
+                        OutboundPacket::owned(IpAddr::V6(ip_a), IpAddr::V6(ip_b), payload)
+                    })
+                    .collect(),
+            )
+            .await;
+
+        let after = engine_a.udp_batch_metrics();
+        assert_eq!(
+            after.send_syscalls - before.send_syscalls,
+            1,
+            "one same-peer sendmmsg must cover all 8 {payload_len}-byte packets"
+        );
+        assert_eq!(after.send_datagrams - before.send_datagrams, 8);
+        assert_eq!(after.max_send_batch, 8);
+        assert_eq!(after.fallback_packets, before.fallback_packets);
+        if expect_parallel_crypto {
+            let crypto_after = fuckipv6_secure_session::crypto_batch_metrics();
+            assert!(
+                crypto_after.parallel_jobs > crypto_before.parallel_jobs,
+                "the production batch path must dispatch AEAD work to the crypto pool"
+            );
+            assert!(
+                crypto_after.parallel_packets >= crypto_before.parallel_packets + 8,
+                "all eight production packets must be covered by parallel AEAD work"
+            );
+        }
+
+        for expected in payloads {
+            let inbound = tokio::time::timeout(Duration::from_secs(1), engine_b.recv())
+                .await?
+                .expect("receiver must deliver every batched packet");
+            let InboundPacket::AuthenticatedPlaintext { src_ip, payload } = inbound else {
+                panic!("direct UDP batch must deliver authenticated plaintext")
+            };
+            assert_eq!(src_ip, IpAddr::V6(ip_a));
+            assert_eq!(payload.as_slice(), expected);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn udp_batch_64_byte_payloads_use_one_send_syscall() -> Result<()> {
+        // 8 x 64 B is below the 4 KiB parallel-AEAD threshold. This case proves
+        // only that small packets sharing a peer are coalesced by sendmmsg.
+        assert_production_udp_batch(64, false).await
+    }
+
+    #[tokio::test]
+    async fn udp_batch_1420_byte_payloads_use_one_send_syscall() -> Result<()> {
+        assert_production_udp_batch(1420, true).await
+    }
+
+    #[tokio::test]
+    async fn fallback_matrix_reuses_one_ciphertext_for_relay_and_signaling() -> Result<()> {
+        let (engine_a, engine_b, ip_a, ip_b) = connected_test_engines().await?;
+
+        for (relay_mode, expected_signaling, payload) in [
+            (
+                RelayMode::Success,
+                false,
+                b"udp failed, quic relay succeeded".as_slice(),
+            ),
+            (
+                RelayMode::Failure,
+                true,
+                b"udp and quic failed, signaling succeeded".as_slice(),
+            ),
+        ] {
+            let (relay_tx, mut relay_rx) = mpsc::unbounded_channel();
+            let (signaling_tx, mut signaling_rx) = mpsc::unbounded_channel();
+            let transport = P2pOutboundTransport::with_fallback(
+                engine_a.clone(),
+                Arc::new(MatrixFallbackTransport {
+                    relay_mode,
+                    relay_tx,
+                    signaling_tx,
+                }),
+            );
+
+            engine_a.set_fail_direct_transport(true);
+            let seals_before = engine_a.direct_seal_count();
+            transport
+                .send_packet(OutboundPacket::owned(
+                    IpAddr::V6(ip_a),
+                    IpAddr::V6(ip_b),
+                    payload.to_vec(),
+                ))
+                .await;
+            engine_a.set_fail_direct_transport(false);
+
+            assert_eq!(
+                engine_a.direct_seal_count(),
+                seals_before + 1,
+                "the complete direct/relay/signaling chain must seal exactly once"
+            );
+            let relay_ciphertext = relay_rx
+                .try_recv()
+                .expect("the QUIC relay fallback must receive the sealed packet");
+            assert!(relay_rx.try_recv().is_err());
+
+            let signaling_ciphertext = if expected_signaling {
+                let ciphertext = signaling_rx
+                    .try_recv()
+                    .expect("signaling fallback must receive the sealed packet");
+                assert_eq!(
+                    ciphertext, relay_ciphertext,
+                    "signaling must reuse the QUIC relay ciphertext, not reseal plaintext"
+                );
+                assert_eq!(
+                    ciphertext.as_ptr(),
+                    relay_ciphertext.as_ptr(),
+                    "signaling and QUIC relay must share one ciphertext allocation"
+                );
+                assert!(signaling_rx.try_recv().is_err());
+                Some(ciphertext)
+            } else {
+                assert!(signaling_rx.try_recv().is_err());
+                None
+            };
+
+            assert_eq!(
+                engine_b.decrypt_from_peer(ip_a, &relay_ciphertext).await?,
+                payload,
+                "the fallback ciphertext must authenticate on the peer"
+            );
+            assert!(
+                engine_b
+                    .decrypt_from_peer(ip_a, &relay_ciphertext)
+                    .await
+                    .is_err(),
+                "submitting the same ciphertext through another transport must replay-fail"
+            );
+            if let Some(ciphertext) = signaling_ciphertext {
+                assert_eq!(ciphertext, relay_ciphertext);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_peer_worker_does_not_block_another_peer_or_deliver_out_of_order() {
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+        let dispatcher =
+            OutboundDispatcher::for_test(Arc::new(RecordingTransport { completed_tx }));
+        let slow_peer = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let fast_peer = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
+
+        assert_eq!(
+            dispatcher.submit(outbound_packet(slow_peer, 1)),
+            OutboundSubmitOutcome::Queued
+        );
+        assert_eq!(
+            dispatcher.submit(outbound_packet(slow_peer, 2)),
+            OutboundSubmitOutcome::Queued
+        );
+        assert_eq!(
+            dispatcher.submit(outbound_packet(fast_peer, 3)),
+            OutboundSubmitOutcome::Queued
+        );
+
+        let first = tokio::time::timeout(Duration::from_millis(100), completed_rx.recv())
+            .await
+            .expect("fast peer must not wait for the slow peer")
+            .expect("completion channel must stay open");
+        assert_eq!(first, (IpAddr::V6(fast_peer), vec![3]));
+
+        let first_slow = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+            .await
+            .expect("slow peer must eventually complete")
+            .expect("completion channel must stay open");
+        let second_slow = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+            .await
+            .expect("slow peer's queued packet must eventually complete")
+            .expect("completion channel must stay open");
+        assert_eq!(first_slow, (IpAddr::V6(slow_peer), vec![1]));
+        assert_eq!(second_slow, (IpAddr::V6(slow_peer), vec![2]));
+    }
+
+    #[tokio::test]
+    async fn slow_worker_does_not_block_heartbeat_or_control_events() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(Notify::new());
+        let dispatcher = OutboundDispatcher::for_test(Arc::new(GatedTransport {
+            started_tx,
+            gate: gate.clone(),
+        }));
+        let peer = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+
+        assert_eq!(
+            dispatcher.submit(outbound_packet(peer, 1)),
+            OutboundSubmitOutcome::Queued
+        );
+        tokio::time::timeout(Duration::from_millis(100), started_rx.recv())
+            .await
+            .expect("worker must start")
+            .expect("worker must remain connected");
+
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        control_tx
+            .send("control")
+            .expect("control receiver must remain connected");
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(5));
+        heartbeat.tick().await;
+
+        tokio::time::timeout(Duration::from_millis(50), async {
+            tokio::select! {
+                _ = heartbeat.tick() => {}
+                command = control_rx.recv() => {
+                    assert_eq!(command, Some("control"));
+                }
+                _ = sleep(Duration::from_millis(100)) => {
+                    panic!("slow worker blocked central heartbeat/control");
+                }
+            }
+        })
+        .await
+        .expect("central loop must remain responsive");
+
+        gate.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn stalled_outbound_worker_does_not_block_tun_or_inbound_progress() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(Notify::new());
+        let dispatcher = OutboundDispatcher::for_test(Arc::new(GatedTransport {
+            started_tx,
+            gate: gate.clone(),
+        }));
+        let peer = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+
+        assert_eq!(
+            dispatcher.submit(outbound_packet(peer, 1)),
+            OutboundSubmitOutcome::Queued
+        );
+        tokio::time::timeout(Duration::from_millis(100), started_rx.recv())
+            .await
+            .expect("worker must start")
+            .expect("worker must remain connected");
+
+        let (tun_tx, mut tun_rx) = mpsc::unbounded_channel();
+        let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        tun_tx
+            .send(b"tun packet".as_slice())
+            .expect("TUN receiver must remain connected");
+        inbound_tx
+            .send(b"authenticated inbound".as_slice())
+            .expect("inbound receiver must remain connected");
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(5)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            let mut tun_seen = false;
+            let mut inbound_seen = false;
+            let mut shutdown_seen = false;
+            while !(tun_seen && inbound_seen && shutdown_seen) {
+                tokio::select! {
+                    packet = tun_rx.recv(), if !tun_seen => {
+                        assert_eq!(packet, Some(b"tun packet".as_slice()));
+                        tun_seen = true;
+                    }
+                    packet = inbound_rx.recv(), if !inbound_seen => {
+                        assert_eq!(packet, Some(b"authenticated inbound".as_slice()));
+                        inbound_seen = true;
+                    }
+                    changed = shutdown_rx.changed(), if !shutdown_seen => {
+                        changed.expect("shutdown channel must remain connected");
+                        shutdown_seen = true;
+                    }
+                    _ = sleep(Duration::from_millis(150)) => {
+                        panic!("stalled outbound worker blocked TUN, inbound, or shutdown progress");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("data-plane events must remain responsive while fallback is stalled");
+
+        gate.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_is_bounded_under_a_stalled_peer() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(Notify::new());
+        let dispatcher = OutboundDispatcher::for_test(Arc::new(GatedTransport {
+            started_tx,
+            gate: gate.clone(),
+        }));
+        let peer = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+
+        assert_eq!(
+            dispatcher.submit(outbound_packet(peer, 0)),
+            OutboundSubmitOutcome::Queued
+        );
+        tokio::time::timeout(Duration::from_millis(100), started_rx.recv())
+            .await
+            .expect("worker must start")
+            .expect("worker must remain connected");
+
+        for marker in 1..=OUTBOUND_QUEUE_CAPACITY {
+            assert_eq!(
+                dispatcher.submit(outbound_packet(peer, marker as u8)),
+                OutboundSubmitOutcome::Queued
+            );
+        }
+        assert_eq!(
+            dispatcher.submit(outbound_packet(peer, 0)),
+            OutboundSubmitOutcome::QueueFull
+        );
+
+        gate.notify_waiters();
+    }
 
     struct TempPath(PathBuf);
 
@@ -3030,6 +4162,7 @@ mod tests {
             Vec::new(),
             NatType::FullCone,
         );
+        let peer = crate::p2p::connection::PeerRouteInfo::from(&peer);
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
         packet[12..16].copy_from_slice(&[10, 8, 0, 2]);
@@ -3061,18 +4194,15 @@ mod tests {
             Vec::new(),
             NatType::FullCone,
         );
+        let exit_peer_ip = exit_peer.virtual_ip;
+        let exit_peer = crate::p2p::connection::PeerRouteInfo::from(&exit_peer);
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
         packet[12..16].copy_from_slice(&[149, 154, 175, 55]);
         packet[16..20].copy_from_slice(&[10, 8, 0, 2]);
 
         assert_eq!(
-            authenticated_inbound_source(
-                &packet,
-                &exit_peer,
-                &local_ips,
-                Some(exit_peer.virtual_ip)
-            ),
+            authenticated_inbound_source(&packet, &exit_peer, &local_ips, Some(exit_peer_ip)),
             Some("149.154.175.55".parse().unwrap())
         );
         assert_eq!(
@@ -3083,12 +4213,7 @@ mod tests {
 
         packet[16..20].copy_from_slice(&[10, 8, 0, 3]);
         assert_eq!(
-            authenticated_inbound_source(
-                &packet,
-                &exit_peer,
-                &local_ips,
-                Some(exit_peer.virtual_ip)
-            ),
+            authenticated_inbound_source(&packet, &exit_peer, &local_ips, Some(exit_peer_ip)),
             None,
             "an Exit return must be destined to this client"
         );
@@ -3096,15 +4221,69 @@ mod tests {
         packet[16..20].copy_from_slice(&[10, 8, 0, 2]);
         packet[12..16].copy_from_slice(&[192, 168, 1, 1]);
         assert_eq!(
-            authenticated_inbound_source(
-                &packet,
-                &exit_peer,
-                &local_ips,
-                Some(exit_peer.virtual_ip)
-            ),
+            authenticated_inbound_source(&packet, &exit_peer, &local_ips, Some(exit_peer_ip)),
             None,
             "private return sources are outside the public Exit contract"
         );
+    }
+
+    #[test]
+    fn tun_packet_exposes_only_valid_bytes_and_recycles_in_place() {
+        let mut packet = TunPacket::empty(vec![0xa5; TUN_BUFFER_ALLOCATION_SIZE]);
+        let allocation = packet.buffer.as_ptr();
+
+        for len in [64, 1420, 64] {
+            packet.len = len;
+            packet.buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + len].fill(0x5a);
+            assert_eq!(packet.payload().len(), len);
+            assert!(packet.payload().iter().all(|byte| *byte == 0x5a));
+
+            packet = packet.recycle();
+            assert_eq!(packet.len, 0);
+            assert!(packet.payload().is_empty());
+            assert_eq!(packet.buffer.len(), TUN_BUFFER_ALLOCATION_SIZE);
+            assert_eq!(packet.buffer.as_ptr(), allocation);
+        }
+
+        assert_eq!(
+            packet.buffer[DATA_HEADER_LEN], 0x5a,
+            "recycling must not clear payload"
+        );
+        assert_eq!(
+            packet.buffer[DATA_HEADER_LEN + 1420],
+            0xa5,
+            "recycling must not resize or zero-fill the fixed buffer"
+        );
+    }
+
+    #[test]
+    fn pooled_outbound_packet_recycles_the_original_allocation() {
+        let mut packet = TunPacket::empty(vec![0xa5; TUN_BUFFER_ALLOCATION_SIZE]);
+        packet.len = 1420;
+        let allocation = packet.buffer.as_ptr();
+        let payload_allocation = unsafe { allocation.add(DATA_HEADER_LEN) };
+        let (recycle_tx, mut recycle_rx) = mpsc::unbounded_channel();
+
+        let outbound = OutboundPacket::pooled(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "fd00::2".parse().expect("valid destination"),
+            packet,
+            recycle_tx,
+        );
+        assert_eq!(outbound.payload().len(), 1420);
+        assert_eq!(
+            outbound.payload().as_ptr(),
+            payload_allocation,
+            "the outbound queue must borrow the pooled TUN payload allocation without copying"
+        );
+
+        drop(outbound);
+        let recycled = recycle_rx
+            .try_recv()
+            .expect("dropping an outbound packet must return its TUN buffer");
+        assert_eq!(recycled.buffer.as_ptr(), allocation);
+        assert_eq!(recycled.len, 0);
+        assert_eq!(recycled.buffer.len(), TUN_BUFFER_ALLOCATION_SIZE);
     }
 
     #[test]
@@ -3146,6 +4325,40 @@ mod tests {
             validate_registered_assignment(&current, Some(&changed), changed.primary_ipv6())
                 .expect_err("changed assignment must fail closed");
         assert!(error.to_string().contains("虚拟地址已变化"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_inbound_stats_use_peer_identity_not_ipv4_primary() -> anyhow::Result<()>
+    {
+        let virtual_ip: Ipv6Addr = "fd00::1002".parse()?;
+        let peer = PeerInfo::new_with_ips(
+            "peer-b".to_string(),
+            VirtualIps::dual_stack("10.8.0.2".parse()?, virtual_ip),
+            vec![1, 2, 3],
+            Vec::new(),
+            NatType::Open,
+        );
+        assert_eq!(peer.virtual_ips.primary_ip(), Some("10.8.0.2".parse()?));
+
+        let route = PeerRouteInfo::from(&peer);
+        let stats = StatsCollector::new();
+        record_p2p_rx_for_peer(&stats, &route, 1420).await;
+
+        let snapshot = stats
+            .get_peer_stat(virtual_ip)
+            .await
+            .expect("canonical overlay peer statistics must exist");
+        assert_eq!(snapshot.rx_packets, 1);
+        assert_eq!(snapshot.rx_bytes, 1420);
+        assert!(
+            stats
+                .get_peer_stat("10.8.0.2".parse::<IpAddr>()?)
+                .await
+                .is_none(),
+            "authenticated inbound traffic must not be attributed to the IPv4 primary"
+        );
+        assert_eq!(stats.get_global_stats().await.p2p_rx_packets, 1);
         Ok(())
     }
 

@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use fuckipv6_common::{recent_error_log_lines, PeerInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -92,6 +92,7 @@ pub struct NetworkSessionSnapshot {
     pub uptime_secs: u64,
     pub peers: Vec<PeerSnapshot>,
     pub global: GlobalStatsSnapshot,
+    pub dataplane: DataplaneMetricsSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +108,87 @@ pub struct StatusSnapshot {
     pub tun_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub networks: Vec<NetworkSessionSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataplane: Option<DataplaneMetricsSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataplaneMetricsSnapshot {
+    pub udp: UdpDataplaneMetricsSnapshot,
+    pub buffer_pool: BufferPoolMetricsSnapshot,
+    pub inbound_queue: InboundQueueSnapshot,
+    pub crypto: CryptoBatchSnapshot,
+    pub secure_lock: SecureLockSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecureLockSnapshot {
+    pub peers: u64,
+    pub acquisitions: u64,
+    pub contended_acquisitions: u64,
+    pub wait_ns_total: u64,
+    pub wait_ns_max: u64,
+    pub wait_ns_avg: u64,
+    pub hold_ns_total: u64,
+    pub hold_ns_max: u64,
+    pub hold_ns_avg: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpDataplaneMetricsSnapshot {
+    pub recv_syscalls: u64,
+    pub send_syscalls: u64,
+    pub recv_datagrams: u64,
+    pub send_datagrams: u64,
+    pub recv_batches: u64,
+    pub send_batches: u64,
+    pub max_recv_batch: u64,
+    pub max_send_batch: u64,
+    pub fallback_packets: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferPoolMetricsSnapshot {
+    pub hits: u64,
+    pub allocations: u64,
+    pub returns: u64,
+    pub full_returns: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundQueueSnapshot {
+    pub capacity: u64,
+    #[serde(default)]
+    pub max_bytes: u64,
+    pub depth: u64,
+    pub max_depth: u64,
+    #[serde(default)]
+    pub depth_bytes: u64,
+    #[serde(default)]
+    pub max_depth_bytes: u64,
+    pub enqueued: u64,
+    #[serde(default)]
+    pub enqueued_bytes: u64,
+    pub dequeued: u64,
+    #[serde(default)]
+    pub dequeued_bytes: u64,
+    pub dropped_full: u64,
+    #[serde(default)]
+    pub dropped_byte_full: u64,
+    pub rejected_closed: u64,
+    pub control_frames_bypassed: u64,
+    pub consumer_waits: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CryptoBatchSnapshot {
+    pub worker_threads: u64,
+    pub max_in_flight_jobs: u64,
+    pub parallel_jobs: u64,
+    pub parallel_packets: u64,
+    pub serial_jobs: u64,
+    pub overloaded_jobs: u64,
+    pub failed_worker_initializations: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +220,8 @@ pub struct PeerSnapshot {
     pub nat_type: String,
     pub p2p_active: bool,
     pub p2p_healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_endpoint: Option<SocketAddr>,
     pub tx_packets: u64,
     pub tx_bytes: u64,
     pub rx_packets: u64,
@@ -628,6 +712,7 @@ pub(crate) async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> St
             network_name: None,
             tun_name: None,
             networks: Vec::new(),
+            dataplane: None,
         };
     }
 
@@ -691,6 +776,9 @@ pub(crate) async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> St
             uptime_secs: snap.uptime_secs,
             peers: peers.clone(),
             global: snap.global,
+            dataplane: snap
+                .dataplane
+                .expect("network status always includes dataplane metrics"),
         });
 
         all_peers.extend(peers);
@@ -707,6 +795,7 @@ pub(crate) async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> St
         None
     };
 
+    let dataplane = (net_snapshots.len() == 1).then(|| net_snapshots[0].dataplane);
     StatusSnapshot {
         assigned_ip: primary_assigned_ip,
         p2p_listen_addr: primary_p2p_addr,
@@ -716,6 +805,7 @@ pub(crate) async fn multi_status_snapshot(registry: &MultiNetworkRegistry) -> St
         network_name: single_net,
         tun_name: single_tun,
         networks: net_snapshots,
+        dataplane,
     }
 }
 
@@ -765,6 +855,71 @@ async fn status_snapshot(
         network_name: None,
         tun_name: None,
         networks: Vec::new(),
+        dataplane: Some(dataplane_metrics(p2p).await),
+    }
+}
+
+async fn dataplane_metrics(p2p: &P2pEngine) -> DataplaneMetricsSnapshot {
+    let udp = p2p.udp_batch_metrics();
+    let buffer_pool = p2p.udp_buffer_pool_metrics();
+    let inbound_queue = p2p.inbound_queue_metrics();
+    let crypto = fuckipv6_secure_session::crypto_batch_metrics();
+    let (secure_lock, secure_peers) = p2p.secure_lock_metrics().await;
+    DataplaneMetricsSnapshot {
+        udp: UdpDataplaneMetricsSnapshot {
+            recv_syscalls: udp.recv_syscalls,
+            send_syscalls: udp.send_syscalls,
+            recv_datagrams: udp.recv_datagrams,
+            send_datagrams: udp.send_datagrams,
+            recv_batches: udp.recv_batches,
+            send_batches: udp.send_batches,
+            max_recv_batch: udp.max_recv_batch,
+            max_send_batch: udp.max_send_batch,
+            fallback_packets: udp.fallback_packets,
+        },
+        buffer_pool: BufferPoolMetricsSnapshot {
+            hits: buffer_pool.hits,
+            allocations: buffer_pool.allocations,
+            returns: buffer_pool.returns,
+            full_returns: buffer_pool.full_returns,
+        },
+        inbound_queue: InboundQueueSnapshot {
+            capacity: inbound_queue.capacity as u64,
+            max_bytes: inbound_queue.max_bytes,
+            depth: inbound_queue.depth,
+            max_depth: inbound_queue.max_depth,
+            depth_bytes: inbound_queue.depth_bytes,
+            max_depth_bytes: inbound_queue.max_depth_bytes,
+            enqueued: inbound_queue.enqueued,
+            enqueued_bytes: inbound_queue.enqueued_bytes,
+            dequeued: inbound_queue.dequeued,
+            dequeued_bytes: inbound_queue.dequeued_bytes,
+            dropped_full: inbound_queue.dropped_full,
+            dropped_byte_full: inbound_queue.dropped_byte_full,
+            rejected_closed: inbound_queue.rejected_closed,
+            control_frames_bypassed: inbound_queue.control_frames_bypassed,
+            consumer_waits: inbound_queue.consumer_waits,
+        },
+        crypto: CryptoBatchSnapshot {
+            worker_threads: crypto.worker_threads as u64,
+            max_in_flight_jobs: crypto.max_in_flight_jobs as u64,
+            parallel_jobs: crypto.parallel_jobs,
+            parallel_packets: crypto.parallel_packets,
+            serial_jobs: crypto.serial_jobs,
+            overloaded_jobs: crypto.overloaded_jobs,
+            failed_worker_initializations: crypto.failed_worker_initializations,
+        },
+        secure_lock: SecureLockSnapshot {
+            peers: secure_peers,
+            acquisitions: secure_lock.acquisitions,
+            contended_acquisitions: secure_lock.contended_acquisitions,
+            wait_ns_total: secure_lock.wait_ns_total,
+            wait_ns_max: secure_lock.wait_ns_max,
+            wait_ns_avg: secure_lock.average_wait_ns(),
+            hold_ns_total: secure_lock.hold_ns_total,
+            hold_ns_max: secure_lock.hold_ns_max,
+            hold_ns_avg: secure_lock.average_hold_ns(),
+        },
     }
 }
 
@@ -796,6 +951,7 @@ async fn peer_snapshot(stats: &StatsCollector, p2p: &P2pEngine, peer: PeerInfo) 
             .as_ref()
             .map(|health| health.healthy)
             .unwrap_or(false),
+        active_endpoint: p2p.active_endpoint_by_ip(IpAddr::V6(peer.virtual_ip)).await,
         tx_packets: stat.as_ref().map(|s| s.tx_packets).unwrap_or(0),
         tx_bytes: stat.as_ref().map(|s| s.tx_bytes).unwrap_or(0),
         rx_packets: stat.as_ref().map(|s| s.rx_packets).unwrap_or(0),

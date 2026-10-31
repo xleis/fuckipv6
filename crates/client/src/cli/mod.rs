@@ -79,9 +79,9 @@ pub enum Commands {
         #[arg(long)]
         external_host: Option<String>,
 
-        /// 协调服务启动后本机自动作为客户端加入
-        #[arg(short, long, default_value_t = true)]
-        auto_connect: bool,
+        /// 协调服务启动后本机自动作为客户端加入（可写 --auto-connect=false）
+        #[arg(short, long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        auto_connect: Option<bool>,
 
         /// 路由模式: mesh-only, bypass-mainland, global-proxy
         #[arg(long)]
@@ -298,7 +298,11 @@ pub enum Commands {
     },
 
     /// 查看运行状态
-    Status,
+    Status {
+        /// 输出机器可读的完整 JSON 快照
+        #[arg(long)]
+        json: bool,
+    },
 
     /// 查看连接的对等节点
     Peers,
@@ -712,7 +716,7 @@ async fn run_command(command: Commands) -> Result<()> {
         | Commands::Leave { .. }
         | Commands::Default { .. }) => run_network_command(command).await?,
         command @ (Commands::Start { .. }
-        | Commands::Status
+        | Commands::Status { .. }
         | Commands::Peers
         | Commands::Ping { .. }
         | Commands::Stats
@@ -760,7 +764,7 @@ async fn run_network_command(command: Commands) -> Result<()> {
                 port,
                 relay_port,
                 external_host,
-                auto_connect,
+                auto_connect.unwrap_or(true),
                 options,
             )
             .await?
@@ -875,9 +879,9 @@ async fn run_runtime_command(command: Commands) -> Result<()> {
             )?;
             start_from_config_path(&config, options).await?
         }
-        Commands::Status => {
+        Commands::Status { json } => {
             logging::init_default()?;
-            commands::status().await?;
+            commands::status(json).await?;
         }
         Commands::Peers => {
             logging::init_default()?;
@@ -1044,6 +1048,28 @@ mod tests {
             Some(Commands::Host { is_exit_node, .. }) => {
                 assert_eq!(is_exit_node, Some(true));
             }
+            _ => panic!("expected host command"),
+        }
+    }
+
+    #[test]
+    fn parses_auto_connect_boolean_flag_on_host_command() {
+        let implicit = Cli::try_parse_from(["fuckipv6", "host", "--name", "benchmark"]).unwrap();
+        match implicit.command {
+            Some(Commands::Host { auto_connect, .. }) => assert_eq!(auto_connect, None),
+            _ => panic!("expected host command"),
+        }
+
+        let disabled = Cli::try_parse_from([
+            "fuckipv6",
+            "host",
+            "--name",
+            "benchmark",
+            "--auto-connect=false",
+        ])
+        .unwrap();
+        match disabled.command {
+            Some(Commands::Host { auto_connect, .. }) => assert_eq!(auto_connect, Some(false)),
             _ => panic!("expected host command"),
         }
     }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 
 use fuckipv6_common::{
     codec, derive_relay_key, peel_onion_layer, ChunkAssembler, DhtContact, DhtMessage,
@@ -11,7 +11,7 @@ use fuckipv6_common::{
     P2pDatagram, P2pDirectMessage, TransferMessage, K_BUCKET_SIZE,
 };
 
-type IncomingPacket = (IpAddr, Vec<u8>);
+use super::inbound_queue::InboundQueueSender;
 
 /// P2P 覆盖网络统一管理器 (集成了 3-Hop 洋葱多跳中继、Kademlia DHT 路由表与存储、Blake3 分块传输及端到端加密消息)
 #[allow(clippy::type_complexity)]
@@ -102,12 +102,12 @@ impl P2pOverlay {
     }
 
     /// 处理收到的洋葱协议信元
-    pub async fn handle_onion_cell(
+    pub(crate) async fn handle_onion_cell(
         &self,
         cell: OnionCell,
         src_addr: SocketAddr,
         socket: &UdpSocket,
-        _incoming_tx: &mpsc::UnboundedSender<IncomingPacket>,
+        _incoming_tx: &InboundQueueSender,
     ) {
         match cell {
             OnionCell::RelayData {
@@ -562,6 +562,8 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_onion_deliver_is_discarded() {
+        use super::super::inbound_queue;
+
         let identity = Identity::generate().unwrap();
         let overlay = P2pOverlay::from_identity(&identity);
         let circuit_id = 42;
@@ -579,16 +581,13 @@ mod tests {
             onion_payload,
         };
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
+        let (incoming_tx, _incoming_rx, stats) = inbound_queue::channel(1);
 
         overlay
             .handle_onion_cell(cell, "127.0.0.1:9".parse().unwrap(), &socket, &incoming_tx)
             .await;
 
-        assert!(matches!(
-            incoming_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        assert_eq!(stats.metrics().enqueued, 0);
     }
 
     #[tokio::test]

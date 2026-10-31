@@ -1113,6 +1113,7 @@ mod tests {
             nat_type: "Full Cone".to_string(),
             p2p_active: true,
             p2p_healthy: true,
+            active_endpoint: Some("127.0.0.1:41000".parse().unwrap()),
             tx_packets: 12,
             tx_bytes: 1_200,
             rx_packets: 10,
@@ -1162,7 +1163,9 @@ mod tests {
                 uptime_secs: 90,
                 peers: vec![peer],
                 global,
+                dataplane: Default::default(),
             }],
+            dataplane: Some(Default::default()),
         }
     }
 
@@ -1214,6 +1217,7 @@ mod tests {
             network_name: None,
             tun_name: None,
             networks: Vec::new(),
+            dataplane: None,
         };
 
         apply_runtime_status(&mut state, &status);

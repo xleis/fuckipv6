@@ -1160,6 +1160,10 @@ impl SecurePeerState {
 
     /// Authenticate one direct UDP data packet and bind the peer's new source
     /// endpoint only after AEAD and replay validation have succeeded.
+    #[allow(
+        dead_code,
+        reason = "retained for secure-session rebind regression coverage; production uses the in-place batch path"
+    )]
     pub(crate) async fn open_from_source(
         &self,
         source: SocketAddr,
@@ -1307,8 +1311,12 @@ impl SecurePeerState {
     }
 
     /// Return whether an encrypted frame targets this endpoint's receiver
-    /// index. This is only a routing hint; `open_from_source` authenticates the
-    /// complete packet before callers may trust it or change its endpoint.
+    /// index. This is only a routing hint; the production receiver never trusts
+    /// it before AEAD and replay validation succeed.
+    #[allow(
+        dead_code,
+        reason = "kept as a direct receiver-index regression oracle"
+    )]
     pub(crate) fn handles_data_packet(&self, packet: &[u8]) -> bool {
         DataHeader::decode(packet)
             .is_ok_and(|header| header.receiver_index == self.local_receiver_index)

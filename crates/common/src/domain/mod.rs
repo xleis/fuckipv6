@@ -8,6 +8,7 @@ pub mod audit;
 pub mod capability;
 pub mod coordinator;
 pub mod event;
+pub mod file_share;
 pub mod foundation;
 pub mod identity;
 pub mod ids;

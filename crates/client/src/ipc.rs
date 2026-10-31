@@ -490,6 +490,41 @@ fn spawn_multi_server_inner(
     })
 }
 
+#[cfg(test)]
+fn spawn_server_on_listener(
+    listener: TcpListener,
+    stats: StatsCollector,
+    p2p: P2pEngine,
+    assigned_ip: Ipv6Addr,
+) -> JoinHandle<()> {
+    let handle = NetworkSessionHandle {
+        network_name: "default".to_string(),
+        tun_name: "fuckipv6".to_string(),
+        assigned_ip,
+        assigned_ipv4: None,
+        p2p,
+        stats,
+    };
+    spawn_multi_server_with_commands_on_listener(
+        listener,
+        MultiNetworkRegistry::new_with_session(handle),
+        None,
+    )
+}
+
+#[cfg(test)]
+fn spawn_multi_server_with_commands_on_listener(
+    listener: TcpListener,
+    registry: MultiNetworkRegistry,
+    commands: Option<NodeCommandBus>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(e) = serve_on_listener(listener, registry, commands).await {
+            tracing::warn!("本地 IPC 服务已停止: {:?}", e);
+        }
+    })
+}
+
 fn spawn_multi_server_with_control_at(
     addr: String,
     registry: MultiNetworkRegistry,
@@ -545,6 +580,18 @@ async fn serve(
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("无法监听本地控制接口 {addr}"))?;
+
+    serve_on_listener(listener, registry, commands).await
+}
+
+async fn serve_on_listener(
+    listener: TcpListener,
+    registry: MultiNetworkRegistry,
+    commands: Option<NodeCommandBus>,
+) -> Result<()> {
+    let addr = listener
+        .local_addr()
+        .context("读取本地控制接口监听地址失败")?;
 
     tracing::info!(
         listen = %addr,
@@ -1056,7 +1103,6 @@ mod tests {
     use super::*;
     use fuckipv6_common::{NatType, PeerInfo};
     use std::net::IpAddr;
-    use tokio::time::{sleep, Duration};
 
     #[test]
     fn default_ipc_bind_is_loopback() {
@@ -1127,13 +1173,10 @@ mod tests {
         .await?;
         stats.record_p2p_tx(peer_ip, 128).await;
 
-        let addr = "127.0.0.1:0";
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?.to_string();
-        drop(listener);
 
-        let task = spawn_server_at(local_addr.clone(), stats, p2p, assigned_ip);
-        sleep(Duration::from_millis(50)).await;
+        let task = spawn_server_on_listener(listener, stats, p2p, assigned_ip);
 
         let status = request_at(&local_addr, IpcRequest::Status).await?;
         match status {
@@ -1170,10 +1213,8 @@ mod tests {
 
     #[tokio::test]
     async fn ipc_executes_shared_node_commands_and_returns_typed_results() -> anyhow::Result<()> {
-        let addr = "127.0.0.1:0";
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?.to_string();
-        drop(listener);
 
         let registry = MultiNetworkRegistry::new();
         let commands = crate::node::spawn_command_bus(
@@ -1181,8 +1222,7 @@ mod tests {
             registry.clone(),
             crate::node::NodeEventBus::default(),
         );
-        let task = spawn_multi_server_with_commands_at(local_addr.clone(), registry, commands);
-        sleep(Duration::from_millis(50)).await;
+        let task = spawn_multi_server_with_commands_on_listener(listener, registry, Some(commands));
 
         let response = request_at(
             &local_addr,

@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传；QUIC/relay 认证 REKEY 通道仍未接线。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的 wire 层尚未接入 `SessionDriver`、生产控制通道或数据面；Cookie 校验、生产限速、Capacity/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。classic 共享 UDP 握手现要求初次 `HELLO` 先取得无状态 Cookie challenge，只有验证通过的 retry 才进入 admission、签名和 responder crypto；生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传。Cookie key rotation、负载触发 Cookie 的自适应策略、产品指标/UI、跨节点压测和独立 DoS 审计，以及 QUIC/relay 认证 REKEY 通道仍未完成。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的 wire 层尚未接入 `SessionDriver`、生产控制通道或数据面；混合 profile 的生产 Cookie/限速、容量/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -79,7 +79,7 @@ IdentityId = BLAKE3("fuckipv6-v2 identity" || len(EdPk) || EdPk || len(PqPk) || 
 仍未包括：
 
 - 生产控制通道、QUIC/relay 或 UDP/TUN 数据面接入。
-- 混合 Initiator `CONFIRM` 线格式、生产 Cookie 校验和限速。
+- 混合 Initiator `CONFIRM` 线格式、混合 profile 的生产 Cookie/限速接入。
 - 完整能力协商、端到端容量测试、跨平台运行证据和独立密码学审计。
 
 两个上游 crate 均明确声明尚未经过独立安全审计。SS-13 的测试通过只证明适配和标准向量一致，不构成安全认证；在完成组合协议评审、依赖审计、跨平台验证和端到端基准前，不得宣称后量子安全或性能超越 WireGuard。
@@ -117,7 +117,7 @@ u8  payload[payload_length]
 
 ## 4. 握手流程
 
-采用三消息 signed-KEM 流程，并在负载条件下插入无状态 cookie 挑战。握手成功需要 1.5 RTT；正常路径不额外增加 cookie RTT。
+后量子 profile 设计采用三消息 signed-KEM 流程，并允许在负载条件下插入无状态 cookie 挑战；其成功路径按无 cookie 的正常情况计为 1.5 RTT。当前 classic 生产共享 UDP 路径不同：Responder 对每个初次 `HELLO` 都先返回 challenge，只有 `HELLO_WITH_COOKIE` 才进入昂贵验证，因此不能把“正常路径不增加 cookie RTT”套用于当前 classic 接入。
 
 ### 4.1 符号
 
@@ -219,7 +219,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 - Responder 只接受与本地可信时钟相差不超过 60 秒的 `HELLO`，并保留最多 4096 个已认证 `HELLO` digest 直到时间窗结束；重复 `HELLO` 和缓存耗尽均失败关闭。进程重启后的持久重放状态尚未实现。
 - all-zero 临时公钥、非 contributory X25519 结果、全零 nonce/SID、错误身份、错误签名、错误 endpoint context、错误 epoch 和错误套件均失败关闭。
 - SS-07 负向测试额外覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、单比特签名字段篡改，以及失败握手不污染 responder 重放状态。
-- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation，以及 SS-08 的认证数据 epoch 桥接。canonical `ACCEPT` 携带 Responder confirmation，`CONFIRM` 携带 Initiator confirmation；只有验证对端方向 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index。SS-10 使桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。生产 `P2pEngine` 已使用共享 UDP socket 完成该握手、按认证 endpoint 路由数据并在 TUN/ACL 前认证解密；SS-09 的在线重协商、无状态 Cookie 与限速仍未接入生产控制通道。
+- 该 profile 已实现 SS-05 的 HKDF-SHA-512 会话密钥派生、SS-06 的双向 HMAC-SHA-256 key confirmation，以及 SS-08 的认证数据 epoch 桥接。canonical `ACCEPT` 携带 Responder confirmation，`CONFIRM` 携带 Initiator confirmation；只有验证对端方向 confirmation 后才安装双向 AEAD 状态，并绑定 SID、epoch 和 receiver index。SS-10 使桥接按已认证 transcript 中的 suite ID 选择 AES-256-GCM 或 ChaCha20-Poly1305，并拒绝混合 suite 的收发 pair。生产 `P2pEngine` 已使用共享 UDP socket 完成该握手、按认证 endpoint 路由数据并在 TUN/ACL 前认证解密；SS-09 的在线重协商已在该路径接入，classic 无状态 Cookie challenge/retry 也已接入，Cookie key rotation、产品指标/UI 和独立 DoS 审计仍未完成。
 
 #### 4.3.2 实验性 hybrid profile
 
@@ -251,21 +251,27 @@ Responder 验证 `TH2_hash` 和确认值后才允许该 epoch 接收 Initiator �
 
 ### 4.5 Cookie/Retry
 
-Responder 在全局或每源握手速率超过阈值时，可以不验证昂贵的双签名和 KEM，而返回无状态 cookie challenge。实现使用以下固定编码：
+classic 生产共享 UDP 路径当前对每个初次 `HELLO` 都返回无状态 Cookie challenge，而不是等待全局或每源速率超过阈值后再挑战；负载触发 Cookie 的自适应策略尚未实现。Responder 只在验证 Cookie 后执行 admission、签名验证与 KEM；初次 `HELLO` 不分配 admission、不创建 pending responder，也不执行 responder crypto。线上使用独立的 `FKV2` 控制帧，而不是旧版 43 字节 standalone `CHALLENGE`：
 
 ```text
-CHALLENGE {
-  kind: u8 = 0x21,
-  protocol_version: u8 = 2,
-  cookie: {
-    version: u8 = 1,
-    issued_at: u64be,
-    mac: HMAC-SHA-256[32]
-  }
+COOKIE_CHALLENGE body {
+  responder_identity: [u8; 32],
+  cookie: [u8; 41]
 }
 ```
 
-`CHALLENGE` 固定为 43 字节，其中 cookie 固定为 41 字节。Initiator 必须在重发的 `HELLO.cookie_or_zero` 中携带该 41 字节 cookie；不能只回送 challenge 头部。
+`COOKIE_CHALLENGE` 的 body 固定为 73 字节，加上 12 字节 `FKV2` 控制头后总长为 **85** 字节。Initiator 的重试使用独立 `HELLO_WITH_COOKIE` 帧，其 body 为原 classic `HELLO` body 后追加 41 字节 cookie：
+
+```text
+HELLO_WITH_COOKIE body {
+  hello: canonical classic HELLO body [236],
+  cookie: [u8; 41]
+}
+```
+
+该 body 固定为 277 字节，控制帧总长为 **289** 字节。固定向量覆盖 challenge 和 retry 编码；Initiator 不能只回送 challenge 头部或 `HELLO.cookie_or_zero` 形式的数据。
+
+Initiator 只接受来自该 peer 已注册端点或当前已认证端点的 `COOKIE_CHALLENGE`。由于 challenge 本身未认证，其他来源不得替换 pending retry，也不得把 Initiator 的后续较大 retry 引导到攻击地址；真实 NAT 端点迁移必须由后续可认证控制帧或数据帧完成。
 
 MAC 输入使用独立域 `L("fuckipv6-v2 stateless cookie mac")`，随后按顺序写入以下每个字段，字段均编码为 `L(x)`，其中 `L(x) = len(x):u16be || x`：
 
@@ -279,11 +285,12 @@ sha256_ephemeral_public_key, issued_at
 - `sha256_ephemeral_public_key = SHA-256(L("fuckipv6-v2 ephemeral key hash") || L(EPK_I))`。哈希接口接受变长公钥字节，以便未来接入 X-Wing 公钥，不自行解释密钥组编码。
 - 默认 cookie 有效期为 30 秒，允许 2 秒未来时钟偏差；可配置有效期上限为 300 秒，未来偏差不得超过有效期。边界语义为 `issued_at <= now + skew` 且 `now - issued_at <= lifetime`。
 - 验证端必须先以常量时间校验完整 MAC，再检查时间窗口；截断、尾随字节、版本错误、时间无效、跨源、跨身份或跨 `EPK_I` 均失败关闭。
-- cookie 不创建会话、不进入全局会话表。challenge 响应不得大于触发它的完整请求；小于 43 字节的触发包不得产生响应，以防止反射放大。
-- Initiator 重发 `HELLO` 时，Responder 必须重新验证 cookie 和全部握手字段。符合速率预算的首次握手仍可直接进入验证，但受全局 CPU、内存和半开状态上限约束。
+- cookie 不创建 responder 会话，也不进入全局会话表；初次 `HELLO` 的 challenge 路径不消耗 admission。`COOKIE_CHALLENGE` 总长小于触发它的完整初次 `HELLO`，防止反射放大。
+- Initiator 发送 `HELLO_WITH_COOKIE` 时，Responder 必须重新验证 cookie 和全部握手字段；只有成功后才分配 admission、创建 pending responder 并执行签名验证和 KEM。相同 retry 必须幂等，不能重复分配 admission。
+- endpoint 迁移和 health 入站记录只允许由成功处理的认证控制帧触发；初次未认证 `HELLO`、未受信 `COOKIE_CHALLENGE` 和失败 Cookie 校验不得改变 peer endpoint。
 - cookie 只证明源地址可达性，不认证 peer。精确的 `HELLO` 重放在 cookie 生命周期内仍可能被转发，必须由签名验证后的有界握手重放缓存拒绝；调用方仍须执行每源/每身份速率限制。
 
-当前 `fuckipv6-secure-session` 已实现上述 cookie、challenge 编解码和负向测试；控制通道 `HELLO/retry` 的实际接入、cookie key 轮换和真实 UDP 发包路径仍待完成，不能把这些原语等同于已经部署的 DoS 防护。
+当前 classic 共享 UDP 路径已实现上述 challenge/retry、真实发包和失败关闭测试；`P2pEngine` 每个实例生成一次 256-bit `CookieKey` 并注入该实例的所有 peer，密钥不进入 DTO、UI 或日志。Cookie key rotation、负载触发 Cookie 的自适应策略、指标 API/UI、准入前 Peer 扫描消除、统一身份目录、跨节点压力测试和独立 DoS 审计仍未完成，不能把当前接入等同于全量 DoS 防护或独立安全验收。
 
 规则：
 

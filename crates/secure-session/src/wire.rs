@@ -7,6 +7,7 @@
 //! truncation, and trailing data.
 
 use crate::confirmation::{ConfirmationTag, CONFIRMATION_LEN};
+use crate::cookie::{Cookie, CookieError, COOKIE_WIRE_LEN};
 use crate::handshake::{
     Accept, Hello, ED25519_PUBLIC_KEY_LEN, ED25519_SIGNATURE_LEN, HANDSHAKE_NONCE_LEN,
     X25519_PUBLIC_KEY_LEN,
@@ -49,12 +50,18 @@ pub const ACCEPT_BODY_LEN: usize = 1
     + CONFIRMATION_LEN;
 /// Canonical encoded initiator confirmation body length.
 pub const CONFIRM_BODY_LEN: usize = SESSION_ID_LEN + TRANSCRIPT_HASH_LEN + CONFIRMATION_LEN;
+/// Canonical cookie challenge body length.
+pub const COOKIE_CHALLENGE_BODY_LEN: usize = IDENTITY_ID_LEN + COOKIE_WIRE_LEN;
+/// Canonical cookie retry HELLO body length.
+pub const HELLO_WITH_COOKIE_BODY_LEN: usize = HELLO_BODY_LEN + COOKIE_WIRE_LEN;
 /// Largest accepted handshake control frame.
 pub const MAX_CONTROL_FRAME_LEN: usize = CONTROL_HEADER_LEN + ACCEPT_BODY_LEN;
 
 const HELLO_KIND: u8 = 0x01;
 const ACCEPT_KIND: u8 = 0x02;
 const CONFIRM_KIND: u8 = 0x03;
+const COOKIE_CHALLENGE_KIND: u8 = 0x04;
+const HELLO_WITH_COOKIE_KIND: u8 = 0x05;
 
 /// Recognized handshake control-frame kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +69,8 @@ pub enum ControlKind {
     Hello,
     Accept,
     Confirm,
+    CookieChallenge,
+    HelloWithCookie,
 }
 
 impl ControlKind {
@@ -70,6 +79,8 @@ impl ControlKind {
             Self::Hello => HELLO_KIND,
             Self::Accept => ACCEPT_KIND,
             Self::Confirm => CONFIRM_KIND,
+            Self::CookieChallenge => COOKIE_CHALLENGE_KIND,
+            Self::HelloWithCookie => HELLO_WITH_COOKIE_KIND,
         }
     }
 
@@ -78,6 +89,8 @@ impl ControlKind {
             Self::Hello => HELLO_BODY_LEN,
             Self::Accept => ACCEPT_BODY_LEN,
             Self::Confirm => CONFIRM_BODY_LEN,
+            Self::CookieChallenge => COOKIE_CHALLENGE_BODY_LEN,
+            Self::HelloWithCookie => HELLO_WITH_COOKIE_BODY_LEN,
         }
     }
 
@@ -86,6 +99,8 @@ impl ControlKind {
             HELLO_KIND => Ok(Self::Hello),
             ACCEPT_KIND => Ok(Self::Accept),
             CONFIRM_KIND => Ok(Self::Confirm),
+            COOKIE_CHALLENGE_KIND => Ok(Self::CookieChallenge),
+            HELLO_WITH_COOKIE_KIND => Ok(Self::HelloWithCookie),
             other => Err(ControlCodecError::UnknownKind(other)),
         }
     }
@@ -97,6 +112,61 @@ pub enum ControlMessage {
     Hello(Hello),
     Accept(AcceptFrame),
     Confirm(ConfirmFrame),
+    CookieChallenge(CookieChallengeFrame),
+    HelloWithCookie(HelloWithCookieFrame),
+}
+
+/// Stateless cookie challenge bound to the responder identity for routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CookieChallengeFrame {
+    pub responder_identity: [u8; IDENTITY_ID_LEN],
+    pub cookie: Cookie,
+}
+
+impl CookieChallengeFrame {
+    /// Encode this challenge as a canonical `FKV2` control frame.
+    pub fn encode(self) -> Vec<u8> {
+        let mut out = new_frame(ControlKind::CookieChallenge);
+        out.extend_from_slice(&self.responder_identity);
+        out.extend_from_slice(&self.cookie.encode());
+        out
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, ControlCodecError> {
+        let mut cursor = Cursor::new(body);
+        let responder_identity = cursor.array::<IDENTITY_ID_LEN>();
+        let cookie = Cookie::decode(cursor.bytes(COOKIE_WIRE_LEN))?;
+        debug_assert!(cursor.is_finished());
+        Ok(Self {
+            responder_identity,
+            cookie,
+        })
+    }
+}
+
+/// Authenticated HELLO retried with a stateless source-reachability cookie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelloWithCookieFrame {
+    pub hello: Hello,
+    pub cookie: Cookie,
+}
+
+impl HelloWithCookieFrame {
+    /// Encode this cookie-bound HELLO as a canonical `FKV2` control frame.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = new_frame(ControlKind::HelloWithCookie);
+        out.extend_from_slice(&self.hello.encode_body());
+        out.extend_from_slice(&self.cookie.encode());
+        out
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, ControlCodecError> {
+        let (hello_body, cookie_body) = body.split_at(HELLO_BODY_LEN);
+        Ok(Self {
+            hello: Hello::decode_body(hello_body)?,
+            cookie: Cookie::decode(cookie_body)?,
+        })
+    }
 }
 
 /// Signed responder acceptance plus the responder's key-confirmation tag.
@@ -133,6 +203,8 @@ pub enum ControlCodecError {
     InvalidBodyLength { declared: usize, expected: usize },
     #[error("handshake control frame has {trailing} trailing byte(s)")]
     TrailingBytes { trailing: usize },
+    #[error("invalid handshake cookie: {0}")]
+    Cookie(#[from] CookieError),
     #[error("handshake public key must be exactly {expected} bytes")]
     InvalidPublicKeyLength { expected: usize },
     #[error("endpoint context network ID must not be empty")]
@@ -147,6 +219,17 @@ impl Hello {
     /// Encode this `HELLO` into a canonical handshake control frame.
     pub fn encode_control(&self) -> Vec<u8> {
         let mut out = new_frame(ControlKind::Hello);
+        out.extend_from_slice(&self.encode_body());
+        out
+    }
+
+    /// Decode an exact canonical handshake control frame as `HELLO`.
+    pub fn decode_control(bytes: &[u8]) -> Result<Self, ControlCodecError> {
+        Self::decode_body(frame_body(bytes, ControlKind::Hello)?)
+    }
+
+    fn encode_body(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HELLO_BODY_LEN);
         out.push(self.version);
         out.push(self.profile);
         out.extend_from_slice(&self.suite_id.to_be_bytes());
@@ -160,9 +243,7 @@ impl Hello {
         out
     }
 
-    /// Decode an exact canonical handshake control frame as `HELLO`.
-    pub fn decode_control(bytes: &[u8]) -> Result<Self, ControlCodecError> {
-        let body = frame_body(bytes, ControlKind::Hello)?;
+    fn decode_body(body: &[u8]) -> Result<Self, ControlCodecError> {
         let mut cursor = Cursor::new(body);
         let version = cursor.u8();
         let profile = cursor.u8();
@@ -294,6 +375,18 @@ pub fn decode_control(bytes: &[u8]) -> Result<ControlMessage, ControlCodecError>
         ControlKind::Confirm => {
             let body = frame_body(bytes, ControlKind::Confirm)?;
             Ok(ControlMessage::Confirm(ConfirmFrame::decode(body)))
+        }
+        ControlKind::CookieChallenge => {
+            let body = frame_body(bytes, ControlKind::CookieChallenge)?;
+            Ok(ControlMessage::CookieChallenge(
+                CookieChallengeFrame::decode(body)?,
+            ))
+        }
+        ControlKind::HelloWithCookie => {
+            let body = frame_body(bytes, ControlKind::HelloWithCookie)?;
+            Ok(ControlMessage::HelloWithCookie(
+                HelloWithCookieFrame::decode(body)?,
+            ))
         }
     }
 }
@@ -583,6 +676,26 @@ mod tests {
         }
     }
 
+    fn cookie() -> Cookie {
+        let mut encoded = [0x33; COOKIE_WIRE_LEN];
+        encoded[0] = crate::cookie::COOKIE_VERSION;
+        Cookie::decode(&encoded).expect("canonical cookie")
+    }
+
+    fn cookie_challenge() -> CookieChallengeFrame {
+        CookieChallengeFrame {
+            responder_identity: [0x22; IDENTITY_ID_LEN],
+            cookie: cookie(),
+        }
+    }
+
+    fn hello_with_cookie() -> HelloWithCookieFrame {
+        HelloWithCookieFrame {
+            hello: hello(),
+            cookie: cookie(),
+        }
+    }
+
     #[test]
     fn canonical_control_frames_round_trip() {
         let hello = hello();
@@ -607,6 +720,26 @@ mod tests {
             decode_control(&confirm_bytes),
             Ok(ControlMessage::Confirm(confirm()))
         );
+
+        let challenge_bytes = cookie_challenge().encode();
+        assert_eq!(
+            challenge_bytes.len(),
+            CONTROL_HEADER_LEN + COOKIE_CHALLENGE_BODY_LEN
+        );
+        assert_eq!(
+            decode_control(&challenge_bytes),
+            Ok(ControlMessage::CookieChallenge(cookie_challenge()))
+        );
+
+        let retry_bytes = hello_with_cookie().encode();
+        assert_eq!(
+            retry_bytes.len(),
+            CONTROL_HEADER_LEN + HELLO_WITH_COOKIE_BODY_LEN
+        );
+        assert_eq!(
+            decode_control(&retry_bytes),
+            Ok(ControlMessage::HelloWithCookie(hello_with_cookie()))
+        );
     }
 
     #[test]
@@ -615,6 +748,8 @@ mod tests {
             hello().encode_control(),
             accept().encode(),
             confirm().encode(),
+            cookie_challenge().encode(),
+            hello_with_cookie().encode(),
         ] {
             assert_eq!(
                 decode_control(&valid[..valid.len() - 1]),
@@ -702,6 +837,8 @@ mod tests {
         assert_eq!(hello().encode_control().len(), 248);
         assert_eq!(accept().encode().len(), 370);
         assert_eq!(confirm().encode().len(), 124);
+        assert_eq!(cookie_challenge().encode().len(), 85);
+        assert_eq!(hello_with_cookie().encode().len(), 289);
 
         for (frame, expected) in [
             (
@@ -715,6 +852,14 @@ mod tests {
             (
                 confirm().encode(),
                 "8c02b61faf32ac3f7181e9d68b25596f77a9586828d7e7a63bf62468a6226e10",
+            ),
+            (
+                cookie_challenge().encode(),
+                "282e5e8b5c4c94a8522e3d817afaf16c362fc70c21b471f60c95664981a896c4",
+            ),
+            (
+                hello_with_cookie().encode(),
+                "cb10360428e4318dbd3ec58f7cd82c8fc0ccb3602722eaafeae7f4c21f914bed",
             ),
         ] {
             let digest = Sha256::digest(&frame);

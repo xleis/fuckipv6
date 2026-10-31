@@ -12,6 +12,7 @@
 
 use ed25519_dalek::VerifyingKey;
 use fuckipv6_common::PeerInfo;
+use fuckipv6_secure_session::cookie::{CookieBinding, CookieError, CookieKey};
 #[cfg(test)]
 use fuckipv6_secure_session::driver::DriverStats;
 use fuckipv6_secure_session::driver::{
@@ -22,11 +23,11 @@ use fuckipv6_secure_session::handshake::{
 };
 use fuckipv6_secure_session::wire::{
     classic_endpoint_context, AcceptFrame, ClassicEndpointContextInput, ConfirmFrame,
-    ControlCodecError, ControlMessage,
+    ControlCodecError, ControlMessage, CookieChallengeFrame, HelloWithCookieFrame,
 };
 use fuckipv6_secure_session::{
     DataHeader, SessionError, AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DATA_PACKET_LEN,
-    MAX_EPOCH_LIFETIME, MAX_RETIRED_RECEIVE_EPOCHS, RETIRED_EPOCH_GRACE,
+    MAX_EPOCH_LIFETIME, MAX_RETIRED_RECEIVE_EPOCHS, PROTOCOL_VERSION, RETIRED_EPOCH_GRACE,
 };
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
@@ -66,6 +67,8 @@ pub(crate) enum SecureRuntimeError {
     Handshake(#[from] HandshakeError),
     #[error("Secure Session v2 handshake codec failed: {0}")]
     ControlCodec(#[from] ControlCodecError),
+    #[error("Secure Session v2 cookie failed: {0}")]
+    Cookie(#[from] CookieError),
     #[error("Secure Session v2 driver failed: {0}")]
     Driver(#[from] DriverError),
     #[error("handshake admission rejected: {0}")]
@@ -78,6 +81,8 @@ pub(crate) enum SecureRuntimeError {
     InvalidRole,
     #[error("peer has no registered UDP endpoint")]
     EmptyEndpointSet,
+    #[error("Secure Session v2 control frame arrived from untrusted peer endpoint {actual}")]
+    UntrustedControlSource { actual: SocketAddr },
     #[cfg(test)]
     #[error(
         "datagram source {actual} does not match the authenticated session endpoint {expected}"
@@ -102,6 +107,7 @@ pub(crate) enum SecureRuntimeError {
 
 struct PendingInitiator {
     handshake: InitiatorHandshake,
+    hello: Hello,
     issued_at: u64,
     epoch: u16,
     expires_at: Instant,
@@ -158,6 +164,8 @@ pub(crate) struct SecurePeerState {
     policy: SessionPolicy,
     install_config: SessionInstallConfig,
     handshake_admission: Arc<HandshakeAdmission>,
+    cookie_key: Arc<CookieKey>,
+    trusted_endpoints: Vec<SocketAddr>,
     initiator: bool,
     local_receiver_index: u32,
     lifecycle_gate: RwLock<()>,
@@ -172,6 +180,7 @@ impl SecurePeerState {
         local_virtual_ip: IpAddr,
         peer: &PeerInfo,
         handshake_admission: Arc<HandshakeAdmission>,
+        cookie_key: Arc<CookieKey>,
     ) -> Result<Arc<Self>, SecureRuntimeError> {
         let peer_public: [u8; 32] = peer
             .public_key
@@ -260,6 +269,8 @@ impl SecurePeerState {
             policy: SessionPolicy::default(),
             install_config,
             handshake_admission,
+            cookie_key,
+            trusted_endpoints: registered_endpoints.clone(),
             initiator,
             local_receiver_index: install_config.local_receiver_index,
             lifecycle_gate: RwLock::new(()),
@@ -430,6 +441,7 @@ impl SecurePeerState {
         );
         state.pending_initiator = Some(PendingInitiator {
             handshake,
+            hello,
             issued_at: now,
             epoch,
             expires_at: Instant::now() + STAGED_GENERATION_TIMEOUT,
@@ -478,10 +490,26 @@ impl SecurePeerState {
         match message {
             ControlMessage::Hello(hello) => {
                 if !self.initiator {
-                    return self.accept_hello(&mut state, source, hello);
+                    return self.challenge_hello(source, hello);
                 }
                 Err(SecureRuntimeError::UnexpectedFrame {
-                    expected: "ACCEPT or CONFIRM",
+                    expected: "COOKIE_CHALLENGE, ACCEPT or CONFIRM",
+                })
+            }
+            ControlMessage::CookieChallenge(challenge) => {
+                if self.initiator {
+                    return self.accept_cookie_challenge(&mut state, source, challenge);
+                }
+                Err(SecureRuntimeError::UnexpectedFrame {
+                    expected: "HELLO or CONFIRM",
+                })
+            }
+            ControlMessage::HelloWithCookie(retry) => {
+                if !self.initiator {
+                    return self.accept_hello_with_cookie(&mut state, source, retry);
+                }
+                Err(SecureRuntimeError::UnexpectedFrame {
+                    expected: "COOKIE_CHALLENGE, ACCEPT or CONFIRM",
                 })
             }
             ControlMessage::Accept(accept) => {
@@ -592,7 +620,101 @@ impl SecurePeerState {
         }
     }
 
-    fn accept_hello(
+    fn challenge_hello(
+        &self,
+        source: SocketAddr,
+        hello: Hello,
+    ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
+        if self.initiator {
+            return Err(SecureRuntimeError::InvalidRole);
+        }
+        if hello.version != PROTOCOL_VERSION {
+            return Err(HandshakeError::UnsupportedVersion(hello.version).into());
+        }
+        if hello.profile != fuckipv6_secure_session::handshake::CLASSIC_PROFILE_ID {
+            return Err(HandshakeError::UnsupportedProfile(hello.profile).into());
+        }
+        if !self.policy.supports(hello.suite_id) {
+            return Err(HandshakeError::UnsupportedSuite(hello.suite_id).into());
+        }
+        let now = unix_timestamp()?;
+        if now.abs_diff(hello.issued_at)
+            > fuckipv6_secure_session::handshake::HANDSHAKE_TIMESTAMP_WINDOW_SECS
+        {
+            return Err(HandshakeError::TimestampOutsideWindow.into());
+        }
+        let binding = CookieBinding::from_hello(source, &hello)?;
+        let cookie = self.cookie_key.issue(&binding, now);
+        let frame = CookieChallengeFrame {
+            responder_identity: self.local_identity.identity_id(),
+            cookie,
+        }
+        .encode();
+        Ok(vec![SecureControlAction {
+            destination: source,
+            frame,
+            kind: "COOKIE_CHALLENGE",
+        }])
+    }
+
+    fn accept_cookie_challenge(
+        &self,
+        state: &mut SecureState,
+        source: SocketAddr,
+        challenge: CookieChallengeFrame,
+    ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
+        let peer_identity = fuckipv6_secure_session::handshake::identity_id(&self.expected_peer);
+        if challenge.responder_identity != peer_identity {
+            return Err(SecureRuntimeError::UnexpectedFrame {
+                expected: "COOKIE_CHALLENGE for the configured peer",
+            });
+        }
+        if !self.is_trusted_control_source(state, source) {
+            return Err(SecureRuntimeError::UntrustedControlSource { actual: source });
+        }
+        let now = Instant::now();
+        let Some(pending) = state.pending_initiator.as_mut() else {
+            return Err(SecureRuntimeError::UnexpectedFrame { expected: "HELLO" });
+        };
+        if now >= pending.expires_at {
+            state.pending_initiator = None;
+            return Err(HandshakeAdmissionError::Expired.into());
+        }
+        let frame = HelloWithCookieFrame {
+            hello: pending.hello.clone(),
+            cookie: challenge.cookie,
+        }
+        .encode();
+        pending.hello_frame = frame.clone();
+        Ok(vec![SecureControlAction {
+            destination: source,
+            frame,
+            kind: "HELLO_WITH_COOKIE",
+        }])
+    }
+
+    fn is_trusted_control_source(&self, state: &SecureState, source: SocketAddr) -> bool {
+        let source = canonical_endpoint(source);
+        state.authenticated_peer == Some(source) || self.trusted_endpoints.contains(&source)
+    }
+
+    fn accept_hello_with_cookie(
+        &self,
+        state: &mut SecureState,
+        source: SocketAddr,
+        retry: HelloWithCookieFrame,
+    ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
+        if self.initiator {
+            return Err(SecureRuntimeError::InvalidRole);
+        }
+        let now = unix_timestamp()?;
+        let binding = CookieBinding::from_hello(source, &retry.hello)?;
+        self.cookie_key
+            .verify(&binding, &retry.cookie.encode(), now)?;
+        self.accept_authenticated_hello(state, source, retry.hello)
+    }
+
+    fn accept_authenticated_hello(
         &self,
         state: &mut SecureState,
         source: SocketAddr,
@@ -635,7 +757,6 @@ impl SecurePeerState {
         }
 
         let epoch = next_epoch(state.driver.as_ref())?;
-
         let admission =
             self.handshake_admission
                 .try_reserve(source.ip(), hello.initiator_identity, now)?;
@@ -768,6 +889,14 @@ impl SecurePeerState {
                 !self.initiator
                     && hello.initiator_identity == peer_identity
                     && hello.responder_identity == local_identity
+            }
+            ControlMessage::HelloWithCookie(retry) => {
+                !self.initiator
+                    && retry.hello.initiator_identity == peer_identity
+                    && retry.hello.responder_identity == local_identity
+            }
+            ControlMessage::CookieChallenge(challenge) => {
+                self.initiator && challenge.responder_identity == peer_identity
             }
             ControlMessage::Accept(accept) => {
                 self.initiator
@@ -1019,6 +1148,8 @@ fn control_variant(message: &ControlMessage) -> &'static str {
         ControlMessage::Hello(_) => "HELLO",
         ControlMessage::Accept(_) => "ACCEPT",
         ControlMessage::Confirm(_) => "CONFIRM",
+        ControlMessage::CookieChallenge(_) => "COOKIE_CHALLENGE",
+        ControlMessage::HelloWithCookie(_) => "HELLO_WITH_COOKIE",
     }
 }
 
@@ -1058,6 +1189,13 @@ mod tests {
         HandshakeAdmission::shared_default()
     }
 
+    fn cookie_key() -> Arc<CookieKey> {
+        Arc::new(
+            CookieKey::from_bytes([0x55; fuckipv6_secure_session::cookie::COOKIE_KEY_LEN])
+                .expect("valid cookie key"),
+        )
+    }
+
     fn pair() -> (
         Arc<SecurePeerState>,
         Arc<SecurePeerState>,
@@ -1081,6 +1219,7 @@ mod tests {
         let responder_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41002);
         let initiator_ip: IpAddr = "fd00::2".parse().expect("initiator IP");
         let responder_ip: IpAddr = "fd00::1".parse().expect("responder IP");
+        let cookie_key = cookie_key();
         let state_a = SecurePeerState::new(
             initiator_identity.clone(),
             initiator_ip,
@@ -1091,6 +1230,7 @@ mod tests {
                 responder_addr,
             ),
             admission.clone(),
+            cookie_key.clone(),
         )
         .expect("state A");
         let state_b = SecurePeerState::new(
@@ -1103,6 +1243,7 @@ mod tests {
                 initiator_addr,
             ),
             admission,
+            cookie_key,
         )
         .expect("state B");
         if state_a.is_initiator() {
@@ -1118,19 +1259,7 @@ mod tests {
         initiator_addr: SocketAddr,
         responder_addr: SocketAddr,
     ) {
-        let hello = initiator
-            .initiate_frame()
-            .await
-            .expect("create hello")
-            .expect("initiator");
-        let accept = responder
-            .handle_control(
-                initiator_addr,
-                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
-            )
-            .await
-            .expect("accept hello");
-        assert_eq!(accept.len(), 1);
+        let accept = accept_with_cookie(initiator, responder, initiator_addr, responder_addr).await;
         let confirm = initiator
             .handle_control(
                 responder_addr,
@@ -1150,6 +1279,50 @@ mod tests {
             .expect("complete responder");
     }
 
+    async fn accept_with_cookie(
+        initiator: &SecurePeerState,
+        responder: &SecurePeerState,
+        initiator_addr: SocketAddr,
+        responder_addr: SocketAddr,
+    ) -> Vec<SecureControlAction> {
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let challenge = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("challenge hello");
+        assert_eq!(challenge.len(), 1);
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer cookie challenge");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].kind, "HELLO_WITH_COOKIE");
+        assert_eq!(retry[0].destination, responder_addr);
+        let accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&retry[0].frame)
+                    .expect("decode cookie retry"),
+            )
+            .await
+            .expect("accept authenticated hello");
+        assert_eq!(accept.len(), 1);
+        assert_eq!(accept[0].kind, "ACCEPT");
+        accept
+    }
+
     #[tokio::test]
     async fn online_rekey_stages_confirm_retries_and_switches_epochs() {
         let (initiator, responder, initiator_addr, responder_addr) = pair();
@@ -1158,19 +1331,8 @@ mod tests {
         assert_eq!(responder.epoch().await, Some(1));
 
         initiator.force_rekey_due().await;
-        let hello = initiator
-            .initiate_frame()
-            .await
-            .expect("schedule rekey")
-            .expect("rekey HELLO");
-        let accept = responder
-            .handle_control(
-                initiator_addr,
-                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode rekey HELLO"),
-            )
-            .await
-            .expect("accept rekey HELLO");
-        assert_eq!(accept.len(), 1);
+        let accept =
+            accept_with_cookie(&initiator, &responder, initiator_addr, responder_addr).await;
 
         let confirm = initiator
             .handle_control(
@@ -1261,14 +1423,31 @@ mod tests {
         let hello_message =
             fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
 
-        let accept = responder
+        let challenge = responder
             .handle_control(initiator_addr, hello_message.clone())
             .await
-            .expect("first hello");
-        responder
-            .handle_control(initiator_addr, hello_message)
+            .expect("challenge first hello");
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
             .await
-            .expect("retransmitted hello");
+            .expect("answer challenge");
+        let retry_message =
+            fuckipv6_secure_session::wire::decode_control(&retry[0].frame).expect("decode retry");
+
+        let accept = responder
+            .handle_control(initiator_addr, retry_message.clone())
+            .await
+            .expect("authenticated hello");
+        responder
+            .handle_control(initiator_addr, retry_message)
+            .await
+            .expect("retransmitted authenticated hello");
         let metrics = admission.metrics(Instant::now());
         assert_eq!(metrics.admitted, 1);
         assert_eq!(metrics.active_reservations, 1);
@@ -1311,7 +1490,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("occupy global slot");
-        let (initiator, responder, initiator_addr, _responder_addr) =
+        let (initiator, responder, initiator_addr, responder_addr) =
             pair_with_admission(admission.clone());
         let hello = initiator
             .initiate_frame()
@@ -1320,10 +1499,32 @@ mod tests {
             .expect("initiator");
         let hello_message =
             fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+        let before_challenge = admission.metrics(Instant::now());
+
+        let challenge = responder
+            .handle_control(initiator_addr, hello_message)
+            .await
+            .expect("challenge hello");
+        let after_challenge = admission.metrics(Instant::now());
+        assert_eq!(
+            after_challenge.active_reservations,
+            before_challenge.active_reservations
+        );
+        assert_eq!(after_challenge.admitted, before_challenge.admitted);
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer challenge");
+        let retry_message =
+            fuckipv6_secure_session::wire::decode_control(&retry[0].frame).expect("decode retry");
 
         assert!(matches!(
             responder
-                .handle_control(initiator_addr, hello_message.clone())
+                .handle_control(initiator_addr, retry_message.clone())
                 .await,
             Err(SecureRuntimeError::Admission(
                 HandshakeAdmissionError::GlobalLimit
@@ -1334,7 +1535,7 @@ mod tests {
 
         drop(occupier);
         responder
-            .handle_control(initiator_addr, hello_message)
+            .handle_control(initiator_addr, retry_message)
             .await
             .expect("valid hello progresses once pressure subsides");
         assert_eq!(admission.metrics(Instant::now()).active_reservations, 1);
@@ -1370,16 +1571,23 @@ mod tests {
             NatType::Open,
         );
         let admission = admission();
+        let cookie_key = cookie_key();
         let state_a = SecurePeerState::new(
             initiator_identity,
             initiator_ip,
             &initiator_peer,
             admission.clone(),
+            cookie_key.clone(),
         )
         .expect("initiator state");
-        let state_b =
-            SecurePeerState::new(responder_identity, responder_ip, &responder_peer, admission)
-                .expect("responder state");
+        let state_b = SecurePeerState::new(
+            responder_identity,
+            responder_ip,
+            &responder_peer,
+            admission,
+            cookie_key,
+        )
+        .expect("responder state");
         let (initiator, responder, initiator_addr, responder_addr) = if state_a.is_initiator() {
             (state_a, state_b, initiator_addr, responder_addr)
         } else {
@@ -1432,11 +1640,10 @@ mod tests {
     #[tokio::test]
     async fn control_frames_follow_authenticated_source_rebinding() {
         let (initiator, responder, registered_initiator_addr, registered_responder_addr) = pair();
-        let hello_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42001);
         let accept_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42002);
         let confirm_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42003);
-        assert_ne!(hello_addr, registered_initiator_addr);
         assert_ne!(accept_addr, registered_responder_addr);
+        assert_ne!(confirm_addr, registered_initiator_addr);
 
         let hello = initiator
             .initiate_frame()
@@ -1446,12 +1653,39 @@ mod tests {
         let hello_message =
             fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
         assert!(responder.matches_control(&hello_message).await);
-        let accept = responder
-            .handle_control(hello_addr, hello_message)
+        let challenge = responder
+            .handle_control(registered_initiator_addr, hello_message)
             .await
-            .expect("accept rebound hello");
+            .expect("challenge registered hello");
+        assert_eq!(challenge.len(), 1);
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        assert_eq!(challenge[0].destination, registered_initiator_addr);
+        assert_eq!(initiator.authenticated_peer().await, None);
+        assert_eq!(responder.authenticated_peer().await, None);
+
+        let challenge_message = fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+            .expect("decode challenge");
+        assert!(initiator.matches_control(&challenge_message).await);
+        let retry = initiator
+            .handle_control(registered_responder_addr, challenge_message)
+            .await
+            .expect("answer registered challenge");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].kind, "HELLO_WITH_COOKIE");
+        assert_eq!(retry[0].destination, registered_responder_addr);
+        assert_eq!(initiator.authenticated_peer().await, None);
+
+        let accept = responder
+            .handle_control(
+                registered_initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&retry[0].frame)
+                    .expect("decode retry"),
+            )
+            .await
+            .expect("accept registered cookie retry");
         assert_eq!(accept.len(), 1);
-        assert_eq!(accept[0].destination, hello_addr);
+        assert_eq!(accept[0].destination, registered_initiator_addr);
+        assert_eq!(responder.authenticated_peer().await, None);
 
         let accept_message =
             fuckipv6_secure_session::wire::decode_control(&accept[0].frame).expect("decode accept");
@@ -1473,6 +1707,268 @@ mod tests {
             .expect("accept rebound confirm");
         assert!(responder.is_established().await);
         assert_eq!(responder.authenticated_peer().await, Some(confirm_addr));
+    }
+
+    #[tokio::test]
+    async fn initial_hello_gets_a_cheap_stateless_challenge() {
+        let admission = admission();
+        let (initiator, responder, initiator_addr, responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let before = admission.metrics(Instant::now());
+
+        let challenge = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("challenge hello");
+        assert_eq!(challenge.len(), 1);
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        assert_eq!(challenge[0].destination, initiator_addr);
+
+        let after = admission.metrics(Instant::now());
+        assert_eq!(after.admitted, before.admitted);
+        assert_eq!(after.active_reservations, before.active_reservations);
+        let state = responder.state.lock().await;
+        assert!(state.pending_responder.is_none());
+        assert!(state.authenticated_peer.is_none());
+        drop(state);
+
+        let ControlMessage::CookieChallenge(mut wrong_peer) =
+            fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                .expect("decode challenge")
+        else {
+            panic!("expected cookie challenge");
+        };
+        wrong_peer.responder_identity[0] ^= 1;
+        let wrong_peer = ControlMessage::CookieChallenge(wrong_peer);
+        assert!(!initiator.matches_control(&wrong_peer).await);
+        assert!(matches!(
+            initiator.handle_control(responder_addr, wrong_peer).await,
+            Err(SecureRuntimeError::UnexpectedFrame { .. })
+        ));
+        assert!(initiator.state.lock().await.pending_initiator.is_some());
+    }
+
+    #[tokio::test]
+    async fn cookie_challenge_from_untrusted_source_is_rejected_without_rebinding() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let challenge = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("challenge hello");
+        let attacker_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 44001);
+        assert_ne!(attacker_addr, responder_addr);
+
+        assert!(matches!(
+            initiator
+                .handle_control(
+                    attacker_addr,
+                    fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                        .expect("decode challenge"),
+                )
+                .await,
+            Err(SecureRuntimeError::UntrustedControlSource { actual }) if actual == attacker_addr
+        ));
+        let pending = initiator.state.lock().await;
+        assert_eq!(
+            pending
+                .pending_initiator
+                .as_ref()
+                .expect("pending initiator")
+                .hello_frame,
+            hello
+        );
+        drop(pending);
+
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("accept challenge from registered endpoint");
+        assert_eq!(retry[0].kind, "HELLO_WITH_COOKIE");
+        assert_eq!(retry[0].destination, responder_addr);
+    }
+
+    #[tokio::test]
+    async fn cookie_retry_rejects_source_identity_ephemeral_and_mac_changes() {
+        let admission = admission();
+        let (initiator, responder, initiator_addr, responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let challenge = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("challenge hello");
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer challenge");
+        let valid_frame = retry[0].frame.clone();
+        let changed_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41999);
+
+        assert!(matches!(
+            responder
+                .handle_control(
+                    changed_source,
+                    fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                        .expect("decode retry"),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::InvalidMac))
+        ));
+
+        let mut tampered = valid_frame.clone();
+        *tampered.last_mut().expect("cookie MAC") ^= 1;
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    fuckipv6_secure_session::wire::decode_control(&tampered)
+                        .expect("decode tampered retry"),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::InvalidMac))
+        ));
+
+        let ControlMessage::HelloWithCookie(mut changed_initiator) =
+            fuckipv6_secure_session::wire::decode_control(&valid_frame).expect("decode retry")
+        else {
+            panic!("expected hello-with-cookie");
+        };
+        changed_initiator.hello.initiator_identity[0] ^= 1;
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    ControlMessage::HelloWithCookie(changed_initiator),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::InvalidMac))
+        ));
+
+        let ControlMessage::HelloWithCookie(mut changed_responder) =
+            fuckipv6_secure_session::wire::decode_control(&valid_frame).expect("decode retry")
+        else {
+            panic!("expected hello-with-cookie");
+        };
+        changed_responder.hello.responder_identity[0] ^= 1;
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    ControlMessage::HelloWithCookie(changed_responder),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::InvalidMac))
+        ));
+
+        let ControlMessage::HelloWithCookie(mut changed_ephemeral) =
+            fuckipv6_secure_session::wire::decode_control(&valid_frame).expect("decode retry")
+        else {
+            panic!("expected hello-with-cookie");
+        };
+        changed_ephemeral.hello.initiator_ephemeral_public[0] ^= 1;
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    ControlMessage::HelloWithCookie(changed_ephemeral),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::InvalidMac))
+        ));
+
+        assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
+        assert!(responder.state.lock().await.pending_responder.is_none());
+
+        let first_accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                    .expect("decode valid retry"),
+            )
+            .await
+            .expect("valid retry after rejected variants");
+        let replay_accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                    .expect("decode replayed retry"),
+            )
+            .await
+            .expect("byte-identical retry is idempotent while pending");
+        assert_eq!(replay_accept, first_accept);
+        let metrics = admission.metrics(Instant::now());
+        assert_eq!(metrics.admitted, 1);
+        assert_eq!(metrics.active_reservations, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_cookie_is_rejected_before_responder_crypto_and_admission() {
+        let admission = admission();
+        let (initiator, responder, initiator_addr, _responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let ControlMessage::Hello(hello) =
+            fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello")
+        else {
+            panic!("expected hello");
+        };
+        let binding = CookieBinding::from_hello(initiator_addr, &hello).expect("cookie binding");
+        let issued_at = unix_timestamp()
+            .expect("system time")
+            .saturating_sub(fuckipv6_secure_session::cookie::COOKIE_LIFETIME_SECS + 1);
+        let frame = HelloWithCookieFrame {
+            hello,
+            cookie: responder.cookie_key.issue(&binding, issued_at),
+        }
+        .encode();
+
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    fuckipv6_secure_session::wire::decode_control(&frame)
+                        .expect("decode expired retry"),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::Expired))
+        ));
+        assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
+        assert!(responder.state.lock().await.pending_responder.is_none());
     }
 
     #[tokio::test]
@@ -1513,18 +2009,8 @@ mod tests {
     #[tokio::test]
     async fn forged_accept_and_confirm_do_not_consume_pending_handshakes() {
         let (initiator, responder, initiator_addr, responder_addr) = pair();
-        let hello = initiator
-            .initiate_frame()
-            .await
-            .expect("create hello")
-            .expect("initiator");
-        let accepted = responder
-            .handle_control(
-                initiator_addr,
-                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
-            )
-            .await
-            .expect("accept hello");
+        let accepted =
+            accept_with_cookie(&initiator, &responder, initiator_addr, responder_addr).await;
         assert_eq!(accepted.len(), 1);
 
         let valid_accept = fuckipv6_secure_session::wire::decode_control(&accepted[0].frame)
@@ -1584,7 +2070,7 @@ mod tests {
 
     #[tokio::test]
     async fn routing_hint_does_not_accept_forged_hello() {
-        let (initiator, responder, initiator_addr, _responder_addr) = pair();
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
         let hello = initiator
             .initiate_frame()
             .await
@@ -1598,8 +2084,27 @@ mod tests {
         };
         hello.signature[0] ^= 1;
         assert!(responder.matches_control(&hello_message).await);
-        assert!(responder
+        let challenge = responder
             .handle_control(initiator_addr, hello_message)
+            .await
+            .expect("unauthenticated hello receives a cheap challenge");
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer challenge");
+        let mut retry_message =
+            fuckipv6_secure_session::wire::decode_control(&retry[0].frame).expect("decode retry");
+        let ControlMessage::HelloWithCookie(ref mut retry) = retry_message else {
+            panic!("expected hello-with-cookie");
+        };
+        retry.hello.signature[0] ^= 1;
+        assert!(responder
+            .handle_control(initiator_addr, retry_message)
             .await
             .is_err());
         assert_eq!(responder.authenticated_peer().await, None);
@@ -1613,30 +2118,30 @@ mod tests {
             .await
             .expect("create hello")
             .expect("initiator");
-        let accept = responder
+        let challenge = responder
             .handle_control(
                 initiator_addr,
                 fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
             )
             .await
-            .expect("accept hello");
-        let confirm = initiator
+            .expect("challenge hello");
+        let retry = initiator
             .handle_control(
                 responder_addr,
-                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
-                    .expect("decode accept"),
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
             )
             .await
-            .expect("accept response");
+            .expect("answer challenge");
 
         assert!(responder.revoke().await);
         assert!(!responder.revoke().await);
-        let confirm_message = fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
-            .expect("decode confirm");
-        assert!(!responder.matches_control(&confirm_message).await);
+        let retry_message =
+            fuckipv6_secure_session::wire::decode_control(&retry[0].frame).expect("decode retry");
+        assert!(!responder.matches_control(&retry_message).await);
         assert!(matches!(
             responder
-                .handle_control(initiator_addr, confirm_message)
+                .handle_control(initiator_addr, retry_message)
                 .await,
             Err(SecureRuntimeError::Revoked)
         ));
@@ -1649,13 +2154,29 @@ mod tests {
             .await
             .expect("create hello")
             .expect("initiator");
-        let accept = responder
+        let challenge = responder
             .handle_control(
                 initiator_addr,
                 fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
             )
             .await
-            .expect("accept hello");
+            .expect("challenge hello");
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer challenge");
+        let accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&retry[0].frame)
+                    .expect("decode retry"),
+            )
+            .await
+            .expect("accept authenticated hello");
 
         assert!(initiator.revoke().await);
         assert!(matches!(

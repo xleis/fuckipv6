@@ -4,6 +4,7 @@ use fuckipv6_common::{
     codec, ControlMessage, DataPacket, FallbackThreshold, NatDetectionConfig, NatType, P2pDatagram,
     PeerInfo,
 };
+use fuckipv6_secure_session::cookie::CookieKey;
 use fuckipv6_secure_session::wire::{decode_control, is_data_packet, CONTROL_MAGIC};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -139,6 +140,7 @@ pub struct P2pEngine {
     local_identity: Arc<RwLock<Option<Identity>>>,
     authenticated_inbound: Arc<RwLock<AuthenticatedInboundCache>>,
     handshake_admission: Arc<HandshakeAdmission>,
+    cookie_key: Arc<CookieKey>,
     fallback_threshold: Arc<RwLock<FallbackThreshold>>,
     quic_mesh: Arc<RwLock<Option<super::quic::QuicP2pMesh>>>,
     #[cfg(test)]
@@ -189,6 +191,8 @@ impl P2pEngine {
         let local_identity = Arc::new(RwLock::new(None));
         let authenticated_inbound = Arc::new(RwLock::new(AuthenticatedInboundCache::default()));
         let handshake_admission = HandshakeAdmission::shared_default();
+        let cookie_key =
+            Arc::new(CookieKey::generate().context("无法生成 Secure Session v2 cookie 密钥")?);
         let overlay = Arc::new(super::overlay::P2pOverlay::new(
             fuckipv6_common::NodeId::default(),
         ));
@@ -214,6 +218,7 @@ impl P2pEngine {
             local_identity,
             authenticated_inbound,
             handshake_admission,
+            cookie_key,
             fallback_threshold: Arc::new(RwLock::new(FallbackThreshold::default())),
             quic_mesh: Arc::new(RwLock::new(None)),
             #[cfg(test)]
@@ -319,6 +324,7 @@ impl P2pEngine {
             local_ip,
             &peer_info,
             self.handshake_admission.clone(),
+            self.cookie_key.clone(),
         )
         .with_context(|| format!("无法初始化与节点 {client_id} 的 Secure Session v2"))?;
 
@@ -1110,6 +1116,12 @@ async fn dispatch_secure_control(
         return;
     }
     let (client_id, secure) = matches.pop().expect("one matching peer");
+    let endpoint_authenticated = matches!(
+        &message,
+        fuckipv6_secure_session::wire::ControlMessage::Accept(_)
+            | fuckipv6_secure_session::wire::ControlMessage::Confirm(_)
+            | fuckipv6_secure_session::wire::ControlMessage::HelloWithCookie(_)
+    );
     let _session = match secure.acquire_session_permission().await {
         Ok(permission) => permission,
         Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
@@ -1121,8 +1133,10 @@ async fn dispatch_secure_control(
 
     match secure.handle_control(addr, message).await {
         Ok(actions) => {
-            update_peer_endpoint(connections, &client_id, addr).await;
-            record_peer_inbound(connections, &client_id).await;
+            if endpoint_authenticated {
+                update_peer_endpoint(connections, &client_id, addr).await;
+                record_peer_inbound(connections, &client_id).await;
+            }
             for action in actions {
                 tracing::debug!(
                     "发送 Secure Session v2 {} 到 {} (节点 {})",

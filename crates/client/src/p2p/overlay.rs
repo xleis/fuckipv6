@@ -107,7 +107,7 @@ impl P2pOverlay {
         cell: OnionCell,
         src_addr: SocketAddr,
         socket: &UdpSocket,
-        incoming_tx: &mpsc::UnboundedSender<IncomingPacket>,
+        _incoming_tx: &mpsc::UnboundedSender<IncomingPacket>,
     ) {
         match cell {
             OnionCell::RelayData {
@@ -155,12 +155,18 @@ impl P2pOverlay {
                         destination_ip,
                         payload,
                     }) => {
-                        tracing::info!(
-                            "洋葱出口节点: 成功解封最终应用层载荷 ({} 字节)，交付至目标虚拟 IP: {}",
-                            payload.len(),
-                            destination_ip
+                        // The circuit key authenticates only the path from the
+                        // exit relay to this hop; it does not bind the circuit
+                        // owner to a peer or virtual IP. Never turn the
+                        // attacker-controlled destination into a trusted
+                        // inbound source. Final delivery stays disabled until
+                        // circuit setup carries an authenticated origin.
+                        tracing::warn!(
+                            circuit_id,
+                            destination_ip = %destination_ip,
+                            payload_len = payload.len(),
+                            "丢弃无可信来源绑定的洋葱 Deliver"
                         );
-                        let _ = incoming_tx.send((destination_ip, payload));
                     }
                     Err(e) => {
                         tracing::warn!("洋葱中继解密剥离失败 (密文被篡改或私钥不匹配): {:#}", e);
@@ -552,6 +558,37 @@ mod tests {
             storage.store(key, val.clone(), 60);
             assert_eq!(storage.get(&key), Some(val.as_slice()));
         }
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_onion_deliver_is_discarded() {
+        let identity = Identity::generate().unwrap();
+        let overlay = P2pOverlay::from_identity(&identity);
+        let circuit_id = 42;
+        let key = [7u8; 32];
+        overlay.register_onion_circuit(circuit_id, key).await;
+
+        let malicious_delivery = OnionNextHop::Deliver {
+            destination_ip: "fd00::1234".parse().unwrap(),
+            payload: b"forged inner packet".to_vec(),
+        };
+        let plaintext = codec::encode(&malicious_delivery).unwrap();
+        let onion_payload = fuckipv6_common::crypto::encrypt_payload(&key, &plaintext).unwrap();
+        let cell = OnionCell::RelayData {
+            circuit_id,
+            onion_payload,
+        };
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
+
+        overlay
+            .handle_onion_cell(cell, "127.0.0.1:9".parse().unwrap(), &socket, &incoming_tx)
+            .await;
+
+        assert!(matches!(
+            incoming_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

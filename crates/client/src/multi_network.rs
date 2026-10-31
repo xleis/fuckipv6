@@ -236,7 +236,10 @@ impl MultiNetworkSupervisor {
 
         let webui_port = self.options.webui_port;
         if webui_port > 0 {
-            let app_ctrl = Arc::new(crate::webui::AppController::new());
+            let app_ctrl = Arc::new(crate::webui::AppController::from_node_parts(
+                self.state.clone(),
+                self.commands.clone(),
+            ));
             let node_http = crate::node::NodeHttpAdapter::new(
                 self.commands.clone(),
                 self.state.clone(),

@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。classic 共享 UDP 握手现要求初次 `HELLO` 先取得无状态 Cookie challenge，只有验证通过的 retry 才进入 admission、签名和 responder crypto；生产 Cookie 密钥使用 256-bit CSPRNG root secret，按 60 秒 epoch 派生 HMAC-SHA-256 密钥，只保留当前与前一代，旧代在两个轮换周期后于 admission、签名和 responder crypto 前拒绝。生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传。负载触发 Cookie 的自适应策略、产品指标/UI、跨节点压测和独立 DoS 审计，以及 QUIC/relay 认证 REKEY 通道仍未完成。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的 wire 层尚未接入 `SessionDriver`、生产控制通道或数据面；混合 profile 的生产 Cookie/限速、容量/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。classic 共享 UDP 握手现要求初次 `HELLO` 先取得无状态 Cookie challenge，只有验证通过的 retry 才进入 admission、签名和 responder crypto；生产 Cookie 密钥使用 256-bit CSPRNG root secret，按 60 秒 epoch 派生 HMAC-SHA-256 密钥，只保留当前与前一代，旧代在两个轮换周期后于 admission、签名和 responder crypto 前拒绝。生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传。负载触发 Cookie 的自适应策略、产品指标/UI、跨节点压测和独立 DoS 审计，以及 QUIC/relay 认证 REKEY 通道仍未完成。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的严格 wire 层、CONFIRM 全绑定校验和 `SessionDriver` 适配已实现，并通过双向数据、篡改/重放、suite 降级与陈旧确认拒绝测试；但它尚未接入生产控制通道/P2PEngine 或数据面，混合 profile 的生产 Cookie/限速、能力协商、容量/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
 
 ## 1. 设计目标
 
@@ -211,7 +211,7 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 
 #### 4.3.1 实验性 classic profile
 
-`crates/secure-session/src/handshake.rs` 实现 `CLASSIC_PROFILE_ID = 1`，并已由 `P2pEngine` 接入生产 UDP/TUN 路径。它是当前可运行的迁移 profile，但不是本文最终混合后量子候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
+`crates/secure-session/src/handshake.rs` 实现 `CLASSIC_PROFILE_ID = 3`，并已由 `P2pEngine` 接入生产 UDP/TUN 路径。profile 3 将 receiver index 从“本端静态公钥前缀”改为按有序双方公钥和角色做域分离 BLAKE3 派生，使同一节点的每个 peer pair 获得独立路由标签；profile 1 的旧映射不再兼容。它是当前可运行的迁移 profile，但不是本文最终混合后量子候选套件的替代品，也不得在能力声明中表示已经具备后量子安全：
 
 - `HELLO` 使用 Ed25519 长期身份签名，包含双方 `IdentityId`、X25519 临时公钥、256-bit `NI`、Unix 时间、endpoint context hash、协议版本、profile 和候选数据套件；`ACCEPT` 包含 SID、epoch、双方临时公钥、`NI/NR`、时间和 Responder 签名。
 - `IdentityId = SHA-512(L("fuckipv6-v2 classic ed25519 identity") || L(Ed25519PublicKey))[0..32]`。验证方必须同时校验公钥对应的 IdentityId 与消息字段。
@@ -223,14 +223,15 @@ Initiator 验证 Responder 的两个签名、身份目录绑定、`SID` 唯一�
 
 #### 4.3.2 实验性 hybrid profile
 
-`crates/secure-session/src/hybrid/handshake.rs` 实现 `HYBRID_PROFILE_ID = 2`，覆盖 suite `0x0201`/`0x0202`。它是 crate 内的两消息 `HELLO -> ACCEPT` 原语，不是已接入生产控制通道的协议实现：
+`crates/secure-session/src/hybrid/handshake.rs` 和 `crates/secure-session/src/hybrid/driver.rs` 实现 `HYBRID_PROFILE_ID = 2`，覆盖 suite `0x0201`/`0x0202`。它提供实验性 `HELLO -> ACCEPT -> CONFIRM` 流程及 `SessionDriver` 适配，但不是已接入生产控制通道的协议实现：
 
 - canonical `HELLO` body 为 6755 字节，canonical `ACCEPT` body 为 6635 字节；两者合计 13390 字节，低于 16 KiB 控制帧 payload 上限。由于单个消息远大于安全 UDP MTU，生产接入必须先提供可靠、有序、限长的已认证控制通道。
 - `HELLO` 固定绑定 `version`、`profile`、`suite_id`、双方 `IdentityId`、Initiator 复合公钥的 Ed25519/ML-DSA-65 分量、X-Wing 临时公钥、32 字节 nonce、时间、endpoint context hash、`psk_mode` 和 41 字节 cookie。`TH1` 使用域分离的 SHA-512 覆盖这些未签名字段，复合身份必须同时提供有效 Ed25519 和 ML-DSA-65 签名。
 - `TH2_input` 使用域分离的 SHA-512 覆盖 `TH1`、`HELLO` 双签名的两个分量、`SID`、`epoch`、Responder/Initiator `IdentityId`、Responder 复合公钥的两个分量、X-Wing 密文、Responder nonce 和时间。最终 `TH2` 再绑定 Responder 的两个签名分量。`suite`、`profile`、endpoint context 和 `psk_mode` 通过 `TH1` 间接绑定；双方还必须显式核对 `ACCEPT.profile`/`suite_id` 与 `HELLO` 一致。
 - `ACCEPT` 当前不含未经认证的额外字段：`responder_confirmation` 是由 `TH2` 和派生密钥计算的 HMAC-SHA-256 确认值。`PSK mode 0/1` 必须与双方本地配置一致，经典-only 身份、缺失任一后量子签名、有效签名下的 suite/profile 降级、非 contributory X-Wing 结果和篡改均失败关闭。
 - Responder 在完成身份、时间窗、endpoint、签名、KEM 和确认验证后才把 `TH1` 插入最多 4096 项的有界 replay cache；重复 `HELLO`、缓存耗尽或过期项重新出现均失败关闭。当前缓存只在进程内，尚未实现持久化重放状态。
-- 固定向量覆盖 X-Wing draft-11、复合身份、TH1、TH2_input、TH2 和消息容量。生产缺口仍包括 Initiator hybrid `CONFIRM`、cookie 校验/生产限速、能力协商、控制通道与 relay/UDP/TUN 接入，以及端到端容量和独立安全审计。
+- `hybrid::driver` 在 Initiator 端验证 Responder 签名、KEM 共享秘密、key schedule 和 confirmation 后才安装数据 epoch，并使用已认证 transcript 生成 canonical Initiator `CONFIRM`；Responder 端在安装任何数据密钥前校验 version/profile/suite/SID/TH2 与常量时间 HMAC，且待激活状态只能被消费一次。非消费式 `validate_confirm`、精确 profile wire 解码和 PSK mode 本地一致性均失败关闭。
+- 固定向量覆盖 X-Wing draft-11、复合身份、TH1、TH2_input、TH2 和消息容量。生产缺口仍包括 hybrid Cookie 校验/生产限速、能力协商、生产控制通道与 relay/UDP/TUN 接入，以及互操作、端到端容量和独立安全审计。
 
 ### 4.4 `CONFIRM`（Initiator -> Responder）
 
@@ -248,6 +249,15 @@ initiator_confirm = HMAC-SHA-256(K_confirm_i, TH2)
 ```
 
 Responder 验证 `TH2_hash` 和确认值后才允许该 epoch 接收 Initiator 数据。Initiator 在验证 `ACCEPT` 后可以发送数据，但必须保留重传能力，直到收到控制通道确认。
+
+实验性 hybrid profile 使用独立 canonical `CONFIRM` body：
+
+```text
+version, profile, suite_id, SID, TH2_hash,
+initiator_confirm
+```
+
+其 body 固定为 116 字节；Responder 必须先核对 version/profile/suite/SID/TH2，再执行常量时间 `initiator_confirm` 校验，只有全部通过后才能把 pending hybrid handshake 转为 `SessionDriver`。精确 profile 解码会在 body 解析和 KEM 工作前拒绝另一已知 hybrid suite。
 
 ### 4.5 Cookie/Retry
 

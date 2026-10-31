@@ -4,9 +4,11 @@
 //! bounded epoch lifecycle, allocation-free AEAD packet operations, and the
 //! online `REKEY_INIT`/`REKEY_ACCEPT`/`REKEY_CONFIRM` state machine. With the
 //! optional `pq` feature, it also provides X-Wing draft-11, composite
-//! Ed25519 + ML-DSA-65 identities, and an experimental hybrid `HELLO/ACCEPT`
-//! handshake primitive. That hybrid profile is not connected to the production
-//! control channel or `P2pEngine`, and its upstream PQ crates are not audited.
+//! Ed25519 + ML-DSA-65 identities, and an experimental hybrid
+//! `HELLO/ACCEPT/CONFIRM` handshake with a transport-independent
+//! [`driver::SessionDriver`] adapter. That hybrid profile is not connected to
+//! the production control channel or `P2pEngine`, and its upstream PQ crates
+//! are not audited.
 
 pub mod confirmation;
 pub mod cookie;

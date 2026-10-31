@@ -6,12 +6,14 @@
 //! not been independently audited, so this module must not be presented as a
 //! production post-quantum security claim.
 
+pub mod driver;
 pub mod handshake;
 pub mod identity;
 pub mod profile;
 pub mod wire;
 pub mod xwing;
 
+pub use driver::{HybridDriverError, HybridInitiatorHandshake, HybridResponderHandshake};
 pub use handshake::{
     HybridAccept, HybridAcceptTranscript, HybridAccepted, HybridFinished, HybridHandshakeError,
     HybridHello, HybridInitiator, HybridResponder, HYBRID_ACCEPT_LEN, HYBRID_COOKIE_LEN,

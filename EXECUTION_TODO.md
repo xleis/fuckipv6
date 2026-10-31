@@ -125,7 +125,7 @@
   - 工作：把已选定的混合后量子 profile 接入能力协商、CONFIRM、握手 transcript、数据面密钥派生、版本/算法绑定和容量预算；禁止静默降级。
   - 依赖：NX-11；密码学原语已有测试但尚未完成生产接线。
   - 验收：双方支持时协商 PQ profile，不支持或确认失败时按策略拒绝而非弱降级；profile/算法版本进入 transcript 与审计事件；固定向量、篡改、降级和互操作测试通过；明确性能与流量开销；独立审计前不得宣称“后量子安全”或“超越 WireGuard”。
-  - 进展（2026-10-31）：新增不可拆分的 X-Wing draft-11 / ML-KEM-768 / Ed25519+ML-DSA-65 / HKDF-SHA-512 / AES-256-GCM 或 ChaCha20-Poly1305 profile 绑定，HELLO/ACCEPT 和 responder policy 对版本、profile、suite 精确匹配并失败关闭。进一步加入严格 `HELLO/ACCEPT/CONFIRM` 实验 wire 编解码：固定 magic/kind/长度、16 KiB 上限，拒绝截断、尾部数据、非零 flags/reserved、版本/kind 别名和 body 解析前的 profile/suite 降级；CONFIRM 绑定 version/profile/suite/SID/TH2 后执行常量时间 HMAC 校验。启用 PQ 后 146 项单元测试、12 项集成测试及 clippy 通过。wire 层尚未接入 SessionDriver 或生产 UDP/QUIC/relay 控制通道，互操作、容量预算与独立审计仍未完成，禁止宣称已具备生产后量子安全。
+  - 进展（2026-10-31）：新增不可拆分的 X-Wing draft-11 / ML-KEM-768 / Ed25519+ML-DSA-65 / HKDF-SHA-512 / AES-256-GCM 或 ChaCha20-Poly1305 profile 绑定，HELLO/ACCEPT 和 responder policy 对版本、profile、suite 精确匹配并失败关闭。进一步加入严格 `HELLO/ACCEPT/CONFIRM` 实验 wire 编解码：固定 magic/kind/长度、16 KiB 上限，拒绝截断、尾部数据、非零 flags/reserved、版本/kind 别名和 body 解析前的 profile/suite 降级；CONFIRM 绑定 version/profile/suite/SID/TH2 后执行常量时间 HMAC 校验。启用 PQ 后 146 项单元测试、12 项集成测试及 clippy 通过。新增 hybrid Handshake 到 SessionDriver 的 transport-independent 适配：Initiator 在签名、KEM、密钥派生和 Responder confirmation 验证后安装 epoch 并生成 canonical CONFIRM；Responder 在安装密钥前校验 version/profile/suite/SID/TH2/HMAC，非消费式校验失败不会丢弃 pending 状态。集成测试覆盖 strict wire 双向数据、篡改/重放、CONFIRM 全绑定、已知 suite 降级、陈旧确认和两类数据套件；全 feature 测试与 clippy 通过。尚未接入生产 UDP/QUIC/relay/P2PEngine 控制通道，hybrid Cookie/限速、能力协商、互操作、容量预算与独立审计仍未完成，禁止宣称已具备生产后量子安全。
 
 - [>] **NX-14 身份授权与撤销生命周期（细化 EX-16）**
   - 工作：建立网络级最终授权、持久撤销目录和一致的身份查找，使控制面、relay、P2P QUIC 和重连路径使用同一授权结论。

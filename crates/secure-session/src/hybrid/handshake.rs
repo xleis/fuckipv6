@@ -642,6 +642,11 @@ impl HybridResponder {
         })
     }
 
+    /// Exact hybrid profile required by this responder's policy.
+    pub const fn required_profile(&self) -> NegotiatedHybridProfile {
+        self.policy.required()
+    }
+
     /// Validate and consume one `HELLO`, then return a signed `ACCEPT` and the
     /// responder-side derived keys.
     pub fn accept(

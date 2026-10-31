@@ -342,6 +342,12 @@ pub enum Commands {
         service: String,
     },
 
+    /// Linux：通过认证 UDP 转发真实 SYN-ACK，救援被阻断的 TCP 握手
+    LxtRescue {
+        #[command(subcommand)]
+        command: LxtRescueCommands,
+    },
+
     /// 生成配置文件
     InitConfig {
         /// 输出配置文件路径
@@ -391,6 +397,63 @@ pub enum Commands {
         /// 注册超时秒数
         #[arg(long, default_value = "5")]
         timeout_secs: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LxtRescueCommands {
+    /// 在服务端捕获本机出站 SYN-ACK，并通过 UDP 发给已认证客户端
+    Server {
+        /// Linux 抓包网卡
+        #[arg(long)]
+        interface: String,
+
+        /// TCP 服务监听端口
+        #[arg(long, default_value = "39090")]
+        tcp_port: u16,
+
+        /// UDP 救援监听地址
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: std::net::Ipv4Addr,
+
+        /// UDP 救援监听端口
+        #[arg(long, default_value = "39091")]
+        udp_port: u16,
+
+        /// 共享十六进制密钥文件（至少 32 字节，权限 0600）
+        #[arg(long, default_value = "/etc/fuckipv6/lxt-rescue.key")]
+        key_file: std::path::PathBuf,
+    },
+
+    /// 在客户端捕获出站 SYN，并把认证 UDP 收到的 SYN-ACK 注入独立 TUN
+    Client {
+        /// Linux 抓包网卡
+        #[arg(long)]
+        interface: String,
+
+        /// 救援服务端单播 IPv4 地址
+        #[arg(long)]
+        server: std::net::Ipv4Addr,
+
+        /// TCP 服务监听端口
+        #[arg(long, default_value = "39090")]
+        tcp_port: u16,
+
+        /// UDP 救援服务端端口
+        #[arg(long, default_value = "39091")]
+        udp_port: u16,
+
+        /// HELLO 保活间隔（毫秒）
+        #[arg(long, default_value = "1500")]
+        hello_interval_ms: u64,
+
+        /// 仅用于握手救援的独立 TUN 名称
+        #[arg(long, default_value = "lxtrescue0")]
+        tun: String,
+
+        /// 共享十六进制密钥文件（至少 32 字节，权限 0600）
+        #[arg(long, default_value = "/etc/fuckipv6/lxt-rescue.key")]
+        key_file: std::path::PathBuf,
     },
 }
 
@@ -657,6 +720,7 @@ async fn run_command(command: Commands) -> Result<()> {
         | Commands::Logs { .. }
         | Commands::QuicInfo
         | Commands::RegisterCheck { .. }) => run_runtime_command(command).await?,
+        command @ Commands::LxtRescue { .. } => run_lxt_rescue_command(command).await?,
         command @ (Commands::InitConfig { .. }
         | Commands::EncryptConfig { .. }
         | Commands::DecryptConfig { .. }
@@ -858,6 +922,63 @@ async fn run_runtime_command(command: Commands) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+async fn run_lxt_rescue_command(command: Commands) -> Result<()> {
+    logging::init_default()?;
+    match command {
+        Commands::LxtRescue {
+            command:
+                LxtRescueCommands::Server {
+                    interface,
+                    tcp_port,
+                    bind,
+                    udp_port,
+                    key_file,
+                },
+        } => {
+            crate::lxt_rescue::run_server(crate::lxt_rescue::ServerConfig {
+                interface,
+                bind,
+                tcp_port,
+                udp_port,
+                key_file,
+            })
+            .await?;
+        }
+        Commands::LxtRescue {
+            command:
+                LxtRescueCommands::Client {
+                    interface,
+                    server,
+                    tcp_port,
+                    udp_port,
+                    hello_interval_ms,
+                    tun,
+                    key_file,
+                },
+        } => {
+            crate::lxt_rescue::run_client(crate::lxt_rescue::ClientConfig {
+                interface,
+                server,
+                tcp_port,
+                udp_port,
+                hello_interval: std::time::Duration::from_millis(hello_interval_ms),
+                tun_name: tun,
+                key_file,
+            })
+            .await?;
+        }
+        _ => unreachable!("run_lxt_rescue_command received non-LXT command"),
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_lxt_rescue_command(_command: Commands) -> Result<()> {
+    logging::init_default()?;
+    anyhow::bail!("LXT TCP 握手救援当前只支持 Linux")
+}
+
 fn run_config_command(command: Commands) -> Result<()> {
     logging::init_default()?;
     match command {
@@ -986,5 +1107,77 @@ mod tests {
         assert!(!options.headless);
         assert!(options.gui);
         assert_eq!(options.webui_port, 8080);
+    }
+
+    #[test]
+    fn parses_lxt_rescue_server_command() {
+        let cli = Cli::try_parse_from([
+            "fuckipv6",
+            "lxt-rescue",
+            "server",
+            "--interface",
+            "eth0",
+            "--tcp-port",
+            "443",
+            "--udp-port",
+            "39091",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::LxtRescue {
+                command:
+                    LxtRescueCommands::Server {
+                        interface,
+                        tcp_port,
+                        bind,
+                        udp_port,
+                        key_file,
+                    },
+            }) => {
+                assert_eq!(interface, "eth0");
+                assert_eq!(tcp_port, 443);
+                assert_eq!(bind, std::net::Ipv4Addr::UNSPECIFIED);
+                assert_eq!(udp_port, 39091);
+                assert_eq!(
+                    key_file,
+                    std::path::PathBuf::from("/etc/fuckipv6/lxt-rescue.key")
+                );
+            }
+            _ => panic!("expected LXT rescue server command"),
+        }
+    }
+
+    #[test]
+    fn parses_lxt_rescue_client_command() {
+        let cli = Cli::try_parse_from([
+            "fuckipv6",
+            "lxt-rescue",
+            "client",
+            "--interface",
+            "eth0",
+            "--server",
+            "198.51.100.10",
+            "--hello-interval-ms",
+            "750",
+            "--tun",
+            "lxt0",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::LxtRescue {
+                command:
+                    LxtRescueCommands::Client {
+                        server,
+                        hello_interval_ms,
+                        tun,
+                        ..
+                    },
+            }) => {
+                assert_eq!(server, std::net::Ipv4Addr::new(198, 51, 100, 10));
+                assert_eq!(hello_interval_ms, 750);
+                assert_eq!(tun, "lxt0");
+            }
+            _ => panic!("expected LXT rescue client command"),
+        }
     }
 }

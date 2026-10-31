@@ -84,7 +84,26 @@ V4 的证据主要内嵌在 `reports/LXT_V4_PUBLIC_TEST_REPORT.md`；V5–V8 的
 | `code/lxt_v5_bulk_test/lxt_bulk_probe.py` | 18 MiB 双向随机分块 + SHA-256；`server` / `client` |
 | `code/lxt_v6_google_proxy/lxt_http_proxy.py` | 最小 HTTP CONNECT 代理；线程/连接；双向隧道 |
 
-常用命令：
+正式入口（主工程 Rust 实现；服务端仍需单独运行目标 TCP 服务）：
+
+```bash
+# 两台主机使用同一个 0600 十六进制密钥文件
+sudo install -d -m 0700 /etc/fuckipv6
+sudo sh -c 'umask 077 && openssl rand -hex 32 > /etc/fuckipv6/lxt-rescue.key'
+sudo chmod 600 /etc/fuckipv6/lxt-rescue.key
+
+# 服务端；需要 root 或 CAP_NET_RAW
+sudo ./target/release/fuckipv6 lxt-rescue server --interface eth0 \
+  --tcp-port 39090 --bind 0.0.0.0 --udp-port 39091 \
+  --key-file /etc/fuckipv6/lxt-rescue.key
+
+# 客户端；需要 root 或 CAP_NET_RAW + CAP_NET_ADMIN
+sudo ./target/release/fuckipv6 lxt-rescue client --interface eth0 \
+  --server 198.51.100.10 --tcp-port 39090 --udp-port 39091 \
+  --tun lxtrescue0 --key-file /etc/fuckipv6/lxt-rescue.key
+```
+
+历史 Python 复现命令（仅用于对照实验，不是主工程运行时）：
 
 ```bash
 # 服务端 echo（每 2 条关闭，用于重连测试）
@@ -151,7 +170,7 @@ python3 lxt_bulk_probe.py client --server 198.51.100.10 --port 39090 \
 
 ## 7. 安全与边界
 
-- 本目录不包含任何真实预共享密钥（PSK）。所有命令使用 `LXT_LAB_KEY` 环境变量占位；测试密钥应使用 `openssl rand -hex 32` 生成，且不要提交 Git/写入公开日志。
+- 本目录不包含任何真实预共享密钥（PSK）。正式 Rust 子命令从 `0600` 密钥文件读取共享密钥；历史 Python 命令使用 `LXT_LAB_KEY` 环境变量占位。测试密钥应使用 `openssl rand -hex 32` 生成，且不要提交 Git/写入公开日志或命令行。
 - 阻断规则只应在**客户端实验机**上临时创建，必须带 TTL/trap 自动清理；不要对朋友的服务器改 SSH、默认路由、iptables/firewalld 或既有业务。
 - 仅 IPv4；sidecar 需要 root/RAW/TUN；peer map 目前只按源 IP；MSS 仍建议做路径 clamp；代理无认证/ACL/限流。
-- 本目录是实验归档，不是生产代码；实验 Python 快照未接入 `fuckipv6` 的 Rust 构建、CLI 或数据面，主工程运行时代码不依赖本目录。
+- 本目录是实验归档，不是主工程运行时代码。正式 Rust 实现位于 `crates/client/src/lxt_rescue/`，通过 `fuckipv6 lxt-rescue server|client` 暴露；这里的 Python 快照用于复现、对照和保留证据，Rust 构建不依赖本目录。

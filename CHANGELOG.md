@@ -17,6 +17,7 @@ All notable changes are documented here. The project follows semantic versioning
 - **本地控制面认证加固**: 节点 WebUI/API 默认只监听 `127.0.0.1`，并支持显式选择 `::1`；任何非回环监听都必须同时设置 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 和非空管理员密码，否则拒绝启动。受保护 REST API 使用 Bearer JWT，浏览器 WebSocket 可仅在 `/ws` 使用查询参数 Token；认证失败统一返回 401、`WWW-Authenticate` 和 JSON 错误。`/api/auth/login` 现在按源 IP+用户名执行原子失败计数、指数退避和 `Retry-After` 响应，成功登录清除失败状态；状态表具有 4096 项容量上限和 15 分钟 TTL，且不会淘汰仍处于退避期的记录。认证开启时显式 JWT secret 至少需要 32 字节且估计熵不低于 128 bit，未配置时继续使用进程级随机密钥。密码、JWT secret 和 Token 均不会进入认证类型的 Debug 输出。本地 IPC 默认监听 `127.0.0.1:6668`，支持 `[::1]:6668`，因尚无认证协议而始终拒绝远程监听。WebUI 仍无内置 TLS，远程使用必须置于 TLS 反向代理或受控管理网之后。
 
 ### Added
+- **LXT Linux 握手救援接入正式二进制**: 新增 `fuckipv6 lxt-rescue server|client` Linux 子命令，将实验 `LXTPUB4` 链路实现为 Rust AF_PACKET/UDP/TUN 运行时。服务端捕获目标端口产生的真实 SYN-ACK 并发送给 8 秒内通过 HMAC-SHA256 认证的客户端，客户端按 `ack == ISN + 1` 匹配待救援 SYN，重写 IPv4/TCP 端点及校验和后注入独立 TUN。共享密钥仅从权限不宽于 `0600` 的十六进制文件读取；固定向量覆盖与 Python 协议兼容性，测试覆盖认证截断、重放、时间窗、VLAN、分片拒绝和 checksum 改写。该路径仅支持 Linux/IPv4/单个 TCP 端口，不代理后续 TCP 数据，不能视为 FakeTCP、生产级代理或通用穿透保证。
 - **发布门禁上游结果校验**: 聚合门禁现在要求 `docs`、`supply-chain`、`gpui-smoke`、`linux`、`windows`、`macos` 六个上游 job 均明确成功；缺失、失败、重复、格式错误或未知结果都会失败关闭，并修复解析错误时 `status=failed` 但 `release_ready=true` 的不一致。真实 GitHub Actions 三平台矩阵仍需最终执行。
 - **NX-05 Exit Node 角色热更新**: `NodeCommandBus::SetNetworkRole` 已接入运行中的 `NetworkRuntimeManager` actor；Exit Node 角色可在不重启网络、不清 Peer 的情况下热启用/停用，并在网络重启后从持久化配置恢复。运行态、磁盘配置和共享快照在同一控制队列中串行更新，成功路径只在全部阶段完成后发布类型化 `RoleChanged`；非法 Member 禁用、运行态拒绝、持久化失败和快照发布失败均有明确错误与完整回滚测试，停止网络会释放对应运行会话和内嵌服务。Member 是节点网络内的基线能力，Discovery/Relay 的独立热启停仍明确返回 `Unavailable`，不宣称完成；manifest 仅将 Exit Node 动作标为 `Implemented`。启用 Exit Node 前仍受平台能力快照 fail-closed 约束。
 - **NX-04 路由热更新后端**: `NodeCommandBus::UpdateRouting` 现已接入运行中的多网络 actor，通过现有事件循环原子更新 Smart Route、Exit Node 运行配置和持久化文件，再发布统一共享快照与 `RoutingChanged` 事件。更新按网络串行执行，不重启网络且保留 Peer；运行时拒绝、响应超时、响应通道关闭和快照发布失败都会重新应用旧配置，超时补偿与后续更新共用同一控制队列。新增命令总线成功、失败回滚、晚到超时补偿、并发串行和快照失败回滚测试；该条目完成时 `SetNetworkRole` 仍为 `Unavailable`，此边界现由 NX-05 的 Exit Node 路径部分取代。
@@ -91,7 +92,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
-- 归档 LXT UDP 辅助 TCP 握手救援实验 V4–V8，共记录 8 个测试科目、Python 实验代码、5 份报告和原始日志/抓包证据；入口见 `experimental/README.md`。实验验证了在可控 SYN-ACK 阻断和部分真实公网路径上的握手救援，但也确认 PREROUTING/conntrack 前丢弃、严格 invalid 过滤、UDP 不可达及真实第三方中间盒仍是关键边界。该实现未接入 Rust 构建、CLI、发布物或生产数据面，不能视为生产级传输或通用穿透方案。
+- 归档 LXT UDP 辅助 TCP 握手救援实验 V4–V8，共记录 8 个测试科目、Python 实验代码、5 份报告和原始日志/抓包证据；入口见 `experimental/README.md`。实验验证了在可控 SYN-ACK 阻断和部分真实公网路径上的握手救援，但也确认 PREROUTING/conntrack 前丢弃、严格 invalid 过滤、UDP 不可达及真实第三方中间盒仍是关键边界。正式 Rust 实现现已由 `fuckipv6 lxt-rescue server|client` 接入，但仍是 Linux 可选实验路径，不能视为生产级传输或通用穿透方案。
 - 对齐 README、快速开始、部署、迁移清单与变更记录中的统一节点模型：产品层只有节点，`host`/`join` 是同一程序创建或加入网络的操作；明确 NX-08 已交付真实 GPUI 原生外壳，但 11 个业务页面、GPUI/WebUI 语义对等测试和跨平台实机验证仍未完成，不能把目标状态描述为已交付。
 - 固化统一节点目标架构：唯一产品身份为节点，协调/信令/中继/Exit Node 都是按网络承担的服务角色；明确 GPUI/WebUI 必须共享命令层、状态契约与能力清单，并列出独立协调二进制、浏览器伪桌面和重复 UI 业务逻辑的迁移/删除边界。
 - 发布 2026-10-30 数据面对照基线：当前项目在单流 TCP、受控 UDP 和小包路径上均落后内核 WireGuard，尚不能宣称性能超越；原始数据见 `benchmarks/data/2026-10-30-dataplane-baseline/`。

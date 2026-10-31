@@ -287,18 +287,22 @@ W6-W16
 `crates/client/src/node/contract.rs`、`scripts/check-contracts.sh`，以及 CI 的
 `contracts` 作业。Rust、TypeScript、Java 均包含未知值或版本不匹配的失败关闭测试。
 
-### W1-12 契约门禁 `[~]`
+### W1-12 契约门禁 `[x]`
 
 - [x] 每个可见 UI 动作在后端有处理；manifest 动作集合与 canonical `ACTIONS`
   完全一致，生产 handler 对 `NodeCommand` 做无通配符穷尽分派；
-- [ ] 每个后端动作有权限、状态和审计声明；权限与状态已声明，审计声明尚未完成；
-- [ ] 每个能力在模型中有未知/不支持语义；四种能力的统一注册表尚未完成；
-- [ ] 每个状态有唯一主状态映射；
+- [x] 每个后端动作有权限、状态和审计声明；
+- [x] 每个能力在模型中有未知/不支持语义，并投影到 Coordinator/Relay/Exit/File
+  四能力统一注册表；
+- [x] 每个状态有唯一主状态映射；
 - [x] `cargo fmt --check`；
 - [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`；
 - [x] `cargo test --workspace`。
 
-W1-12 在权限/审计、能力注册表和状态映射完成前保持进行中，不能因契约生成通过而标记完成。
+证据：`NodeUiAudit` 与 `audit_for_command()` 统一声明动作审计；`NodeSnapshot` 的
+`capabilities` 由 `NodeStateStore::update()` 从权威运行时字段重算；`primary_status()`
+是 GPUI/WebUI 共用的唯一用户主状态映射。Rust、生成 Schema/TypeScript/Java 绑定和
+WebUI 内嵌 manifest 一致性测试均通过。
 
 ## 5. W2：运行时拆分与生命周期
 

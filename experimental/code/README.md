@@ -1,6 +1,6 @@
 # 实验代码说明
 
-本目录是 LXT UDP 辅助 TCP 握手实验的代码快照，不是 `fuckipv6` 主工程的运行时代码。所有实验只在受控 Linux 实验机上进行。
+本目录是 LXT UDP 辅助 TCP 握手实验的 Python 归档参考，不是 `fuckipv6` 主工程的运行时代码。正式实现已位于 `crates/client/src/lxt_rescue/`，通过 `fuckipv6 lxt-rescue server|client` 提供；本目录用于复现和对照实验，Rust 构建不依赖它。所有实验只在受控 Linux 实验机上进行。
 
 ```text
 code/

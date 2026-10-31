@@ -21,7 +21,7 @@
 | **可直接使用** | 单一 `fuckipv6` 节点程序、节点级稳定身份、双栈 TUN 组网、UDP/QUIC P2P、QUIC/信令中继 fallback、智能分流、Linux Exit Node 内核转发/NAT、节点 CLI/WebUI、`host`/`join` 与多网络配置；Linux 桌面可启动 GPUI 原生界面并提交共享命令 |
 | **基础设施已接入（待产品化）** | GPUI 的 11 个页面、真实快照投影和 10 个 manifest 动作映射已形成垂直切片，但 WebUI manifest 迁移、GPUI/WebUI 自动语义对等、正式 IME/无障碍和跨平台实机仍待完成；路由/角色动作已接线，后端仍明确返回 `Unavailable`；统一节点动态运行时命令（启动、创建、加入、按网络停止）已接通后端处理器，但 CLI/WebUI 尚未全部迁移；多中继连接时择优、3-Hop 洋葱电路、Kademlia DHT、Blake3 分块传输已有引擎接入与单元测试，但缺少完整 UI 用户流程 |
 | **尚未产品化** | GPUI/WebUI 完整语义对等与端到端交互测试、正式 IME/无障碍、跨平台 GPUI 实机验证、路由/角色后端闭环、用户态 NAT、洋葱/DHT/分块传输的端到端产品体验，以及 Windows/macOS Exit Node 与 Linux 同等级验证 |
-| **实验归档（非生产）** | `experimental/` 记录 LXT UDP 辅助 TCP 握手救援 V4–V8 的代码、报告与证据；已验证受控阻断和真实公网路径，但未接入 `fuckipv6` Rust 运行时，真实第三方中间盒、生产可靠性和安全审计仍未完成 |
+| **Linux 握手救援（实验性）** | `fuckipv6 lxt-rescue server|client` 已在正式 Rust 二进制内提供 Linux 可选子命令；它只转送真实 SYN-ACK 完成 TCP 握手，不代理后续 TCP 数据。`experimental/` 继续保存 V4–V8 的 Python 参考实现、报告与证据；真实第三方中间盒、生产可靠性和独立安全审计仍未完成 |
 
 ## 📖 快速开始
 
@@ -154,9 +154,45 @@ fuckipv6/
     └── QUICKSTART.md    # 快速开始指南
 ```
 
-## 🧪 实验归档：LXT UDP 辅助 TCP 握手
+## 🧪 Linux 握手救援（实验性，已接入正式程序）
 
-[`experimental/`](experimental/README.md) 收录 LingXiTunnel（LXT）的 UDP 辅助 TCP 握手救援实验。当客户端正常路径收不到 SYN-ACK 时，服务端 sidecar 捕获内核产生的真实 SYN-ACK，经 HMAC 认证的 UDP 通道送达客户端并注入 TUN；握手完成后，业务数据仍走原生 TCP。这不是 FakeTCP，也不是把 TCP 数据封装进 UDP。
+LingXiTunnel（LXT）UDP 辅助 TCP 握手救援已作为可选 Linux 子命令接入正式 `fuckipv6` Rust 二进制。服务端仍需单独运行目标 TCP 服务；该子命令只捕获其 SYN-ACK。当客户端正常路径收不到 SYN-ACK 时，服务端捕获内核产生的真实 SYN-ACK，经 HMAC-SHA256 认证的 UDP 通道送达客户端，再注入独立 TUN。握手完成后，业务数据仍走原生 TCP；这不是 FakeTCP，也不是把 TCP 数据封装进 UDP，更不是通用代理或穿透保证。
+
+### 准备共享密钥
+
+服务端和客户端必须使用同一个密钥文件；密钥只从 `0600` 文件读取，不通过命令行传入：
+
+```bash
+sudo install -d -m 0700 /etc/fuckipv6
+sudo sh -c 'umask 077 && openssl rand -hex 32 > /etc/fuckipv6/lxt-rescue.key'
+sudo chmod 600 /etc/fuckipv6/lxt-rescue.key
+```
+
+### 启动服务端和客户端
+
+```bash
+# 服务端：捕获目标 TCP 端口产生的真实 SYN-ACK
+sudo ./target/release/fuckipv6 lxt-rescue server \
+  --interface eth0 \
+  --tcp-port 39090 \
+  --bind 0.0.0.0 \
+  --udp-port 39091 \
+  --key-file /etc/fuckipv6/lxt-rescue.key
+
+# 客户端：记录发往服务端的 SYN，并把认证 UDP 收到的 SYN-ACK 注入 TUN
+sudo ./target/release/fuckipv6 lxt-rescue client \
+  --interface eth0 \
+  --server 198.51.100.10 \
+  --tcp-port 39090 \
+  --udp-port 39091 \
+  --hello-interval-ms 1500 \
+  --tun lxtrescue0 \
+  --key-file /etc/fuckipv6/lxt-rescue.key
+```
+
+服务端需要 root 或 `CAP_NET_RAW`；客户端需要 root，或 `CAP_NET_RAW` + `CAP_NET_ADMIN`，并需要可用的 `/dev/net/tun` 与 `ip` 命令。客户端还依赖 UDP 可达以及 NAT/conntrack 保留后续 TCP 状态。
+
+### 实验验证与边界
 
 | 版本 | 验证内容 | 结果 |
 |---|---|---|
@@ -166,7 +202,7 @@ fuckipv6/
 | V7 | netns 模拟中间路由器的两种 SYN-ACK 丢弃位置 | FORWARD 丢弃 PASS；PREROUTING raw 丢弃因 NAT/conntrack 状态缺失 FAIL |
 | V8 | 无 NAT 三 netns 验证 invalid 流量处理 | 默认放行 invalid PASS；严格 `ct state invalid drop` FAIL |
 
-实验结论是：LXT 可作为 **TCP 握手救援/bootstrap 模块**，但不能保证穿透真实第三方中间设备，也不是通用传输层或生产级代理。实验代码是 Python 快照，需要 root/RAW/TUN；未接入 `fuckipv6` 的 Rust 构建、CLI 或数据面。真实运营商/防火墙测试、MSS 处理、限速、认证扩展和独立安全评审仍属于后续工作。
+当前正式接入范围是 Linux、IPv4、单个 TCP 端口和单客户端场景。它不能保证穿透真实第三方中间设备，也不处理已建立 TCP 流的 UDP 代理、限速、ACL 或跨平台运行；MSS 处理、真实运营商/防火墙测试、生产可靠性和独立安全评审仍属于后续工作。历史 Python 参考实现、报告和证据见 [`experimental/`](experimental/README.md)。
 
 ## 🎯 开发状态
 

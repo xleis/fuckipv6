@@ -21,6 +21,8 @@ pub mod gpui;
 pub mod gpui_shell;
 pub mod ipc;
 pub mod logging;
+#[cfg(target_os = "linux")]
+pub(crate) mod lxt_rescue;
 pub mod multi_network;
 pub mod node;
 pub mod p2p;

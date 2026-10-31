@@ -2452,12 +2452,14 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "gpui",
+ "hmac",
  "ipnet",
  "libc",
  "quinn",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "socket2",
  "thiserror 1.0.69",
  "tokio",
@@ -2467,6 +2469,7 @@ dependencies = [
  "tun",
  "windows-sys 0.59.0",
  "wintun 0.5.1",
+ "zeroize",
 ]
 
 [[package]]

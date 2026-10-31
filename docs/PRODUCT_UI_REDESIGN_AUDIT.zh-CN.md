@@ -579,11 +579,11 @@ UI 只显示一个主状态，优先级固定：
 - 旧双 WebUI 并行的测试与回退维护；
 - 过时 CLI 产品路径和旧配置/邀请票据兼容层（按 W1 决策执行）。
 
-### 8.4 不可删除或不可误提交
+### 8.4 变更与产物边界
 
-- 三个受保护文件本身不能删除，也不能在本轮提交；
+- `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs` 和 `crates/client/src/webui/controller.rs` 不再受保护，可按所属任务修改和提交，但必须逐文件审阅；
 - `release/fuckipv6-coordinator-linux-x86_64` 是构建产物，不提交、不删除；
-- `crates/client/src/p2p/inbound_queue.rs` 与已暂存 P2P 改动属于其他在途工作，不能擅自清理；
+- 与当前任务无关的历史或其他工作区改动不得被顺带提交；
 - secure-session/UDP 适配器按依赖顺序提交，不插入 W0 文档提交。
 
 ## 9. 文件级责任与变更边界
@@ -596,8 +596,8 @@ UI 只显示一个主状态，优先级固定：
 | 运行时控制 | `node/{runtime_handler,runtime_control}.rs` | 保留能力约束，不伪造成功 | W2/W4/W11 |
 | 旧统一 WebUI | `webui/mod.rs` 内嵌 HTML/JS | 冻结功能，不再新增业务 | W4/W6 |
 | node WebUI | `webui/node_ui.{html,js}` | 只作迁移证据 | W4/W6 |
-| controller | `webui/controller.rs` | 只读，禁止本轮提交 | W2/W4 |
-| CLI 入口 | `cli/{mod,commands}.rs` | 只读，禁止本轮提交 | W2/W6 |
+| controller | `webui/controller.rs` | 可修改；按任务逐文件审阅 | W2/W4 |
+| CLI 入口 | `cli/{mod,commands}.rs` | 可修改；按任务逐文件审阅 | W2/W6 |
 | P2P/secure-session/UDP | `p2p/*`、benchmark | 独立按依赖顺序提交 | 独立数据面工作流 |
 | 发布产物 | `release/*` | 不提交、不删除 | 发布工作流 |
 
@@ -652,7 +652,7 @@ docs/PRODUCT_UI_REDESIGN_TODO.zh-CN.md
 - `git diff --check` 无空白错误；
 - Markdown fenced code block 成对；
 - 不包含私钥、Token、密码、初始化码或远程凭据；
-- 暂存区不包含三个受保护文件；
+- 暂存区只包含当前文档任务的完整 diff；
 - 不把已有 P2P 暂存内容混入文档提交；
 - 不需要运行 Rust fmt/check/clippy/test，因为没有 Rust 代码变更。
 

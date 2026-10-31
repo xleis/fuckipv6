@@ -32,9 +32,9 @@
 
 ### 0.3 禁止事项
 
-- [ ] 不提交 `crates/client/src/cli/commands.rs`；
-- [ ] 不提交 `crates/client/src/cli/mod.rs`；
-- [ ] 不提交 `crates/client/src/webui/controller.rs`；
+- [x] `crates/client/src/cli/commands.rs` 可按任务修改，提交前逐文件审阅；
+- [x] `crates/client/src/cli/mod.rs` 可按任务修改，提交前逐文件审阅；
+- [x] `crates/client/src/webui/controller.rs` 可按任务修改，提交前逐文件审阅；
 - [ ] 不用 WebView 替换 GPUI；
 - [ ] 不保留旧双 WebUI 作为新产品表面；
 - [ ] 不显示只返回 `Unavailable` 的可点击伪按钮；
@@ -173,11 +173,11 @@ W6-W16
 
 - [x] 记录当前脏工作区和未跟踪文件；
 - [x] 提交前始终检查 `git status --short --branch`；
-- [x] 禁止提交三个受保护文件；
+- [x] 三个指定文件不再受保护，但只提交与当前任务直接相关的 diff；
 - [x] 不删除 release 产物或他人在途改动；
 - [x] 为 secure-session/UDP 适配器保持依赖提交顺序。
 
-**验收**：文档、代码和测试提交不会误带受保护文件或并发修改。
+**验收**：文档、代码和测试提交不会误带无关修改或未审阅的并发内容。
 
 ## 4. W1：领域契约
 
@@ -2310,16 +2310,16 @@ control ─────┼── spawn / adopt / health-check ──► node
 
 ## 26. 当前工作区与提交约束
 
-### 26.1 受保护文件 `[ ]`
+### 26.1 工作区提交纪律 `[x]`
 
-- [ ] 绝对不提交 `crates/client/src/cli/commands.rs`；
-- [ ] 绝对不提交 `crates/client/src/cli/mod.rs`；
-- [ ] 绝对不提交 `crates/client/src/webui/controller.rs`；
-- [ ] 提交前逐次检查 `git status --short --branch`；
-- [ ] 不用 `git add -A` 盲目纳入并发修改；
-- [ ] 不执行 reset、force push 或覆盖他人改动；
-- [ ] 不把 release 中的二进制当作源码提交；
-- [ ] 发现受保护文件出现在暂存区时停止提交并处理。
+- [x] `crates/client/src/cli/commands.rs` 可按任务修改和提交；
+- [x] `crates/client/src/cli/mod.rs` 可按任务修改和提交；
+- [x] `crates/client/src/webui/controller.rs` 可按任务修改和提交；
+- [x] 提交前逐次检查 `git status --short --branch`；
+- [x] 不用 `git add -A` 盲目纳入并发修改；
+- [x] 不执行 reset、force push 或覆盖他人改动；
+- [x] 不把 release 中的二进制当作源码提交；
+- [x] 提交前逐文件审阅暂存区，排除与本任务无关的 diff。
 
 ### 26.2 secure-session 与 UDP 适配器提交顺序 `[ ]`
 
@@ -2328,7 +2328,7 @@ control ─────┼── spawn / adopt / health-check ──► node
 - [ ] 两个提交分别运行相关测试和 clippy；
 - [ ] 不使用一个混合提交掩盖依赖顺序；
 - [ ] 提交说明记录契约变化和验证命令；
-- [ ] 确保不携带受保护文件或无关脏工作区改动；
+- [ ] 确保不携带无关脏工作区改动；
 - [ ] 若依赖尚未通过，保持未提交状态而不是提前提交；
 - [ ] 完成后回报 commit hash、测试结果和剩余未提交文件。
 

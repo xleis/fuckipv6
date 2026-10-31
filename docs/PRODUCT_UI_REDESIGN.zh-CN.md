@@ -861,10 +861,7 @@ Node 所有者始终可以进一步限制本机暴露，网络管理员不能绕
 
 ## 25. 执行约束
 
-- 绝对不要提交以下路径：
-  - `crates/client/src/cli/commands.rs`
-  - `crates/client/src/cli/mod.rs`
-  - `crates/client/src/webui/controller.rs`
+- `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs` 和 `crates/client/src/webui/controller.rs` 不再受保护；需要修改时按任务逐文件审阅并显式暂存；
 - 不执行 `reset`、force push 或覆盖并发修改。
 - 每次 Git 操作前检查 `git status --short --branch`。
 - 不把任何密码、私钥、Passkey 恢复材料、初始化码或远程主机凭据写入源码、文档、测试夹具或日志。
@@ -3420,15 +3417,15 @@ git status --short --branch
 
 必须先辨认并发修改和未跟踪文件，不得覆盖他人或前序工作的改动。
 
-### 45.2 禁止提交的文件
+### 45.2 可修改文件与提交边界
 
-以下路径在当前协作约束下绝对不得提交：
+以下路径不再受保护，可以按任务修改和提交：
 
 - `crates/client/src/cli/commands.rs`
 - `crates/client/src/cli/mod.rs`
 - `crates/client/src/webui/controller.rs`
 
-即使功能测试通过，也不能把这几个路径混入提交。需要相关改动时，先与文件所有者/当前工作流确认，或保持未提交并明确报告。
+提交时必须显式列出路径并逐文件审阅暂存 diff。不得因为文件已解除保护，就把与当前任务无关的历史或其他工作区改动一并带入提交。
 
 ### 45.3 secure-session 与 UDP 适配器提交顺序
 

@@ -1,6 +1,6 @@
 # fuckipv6 Secure Session Protocol v2
 
-状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性两消息混合 `HELLO/ACCEPT` profile，并用固定向量覆盖 transcript、降级、PSK 模式和重放失败关闭。该混合 profile 尚未接入生产控制通道、QUIC/relay 或 `P2pEngine`，尚无混合 Initiator `CONFIRM` 线格式、Cookie 校验和生产限速；在线重协商控制通道、Capacity/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
+状态：SP-01 设计草案。固定数据帧、AAD、AES-256-GCM/ChaCha20-Poly1305 运行时数据套件、重放窗口、本地 epoch 生命周期、在线重协商协调状态机、原子重协商桥接和实验性 X25519 + Ed25519 classic 握手 profile 已实现并有单元测试；`HELLO/ACCEPT/CONFIRM` 与“确认成功后安装 `EpochSession`”的桥接已接入生产 UDP/TUN 与 relay 数据路径。生产 UDP initiator 会在会话建立后按时间/字节/包计数发起在线 REKEY，使用 staged/active/retired epoch 和接收 grace 完成切换，并实际执行 CONFIRM 重传；QUIC/relay 认证 REKEY 通道仍未接线。可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份以及实验性混合 `HELLO/ACCEPT/CONFIRM` profile，严格 wire 层用固定向量覆盖 transcript、截断/超长、版本与 kind 别名、降级、PSK 模式、重放和保留字段失败关闭。该混合 profile 的 wire 层尚未接入 `SessionDriver`、生产控制通道或数据面；Cookie 校验、生产限速、Capacity/端到端性能验证和独立密码学评审也未完成。本文不是生产协议规范。
 
 ## 1. 设计目标
 

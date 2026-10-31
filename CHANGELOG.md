@@ -67,8 +67,8 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 无状态源可达性 cookie 原语：41 字节 cookie 使用 HMAC-SHA-256 绑定协议版本、源 IP/端口、地址族、双方身份、ephemeral 公钥哈希和签发时间；43 字节 challenge 使用独立控制帧类型，拒绝截断、尾随、错误版本、篡改、过期/未来时间、跨源和跨身份使用，并在响应前阻止反射放大。默认有效期 30 秒、未来偏差 2 秒、可配置上限 300 秒；cookie 仅证明源可达，仍须签名验证、有界重放缓存和限速。当前尚未接入生产握手控制通道；生产 v2 数据帧路径已按后续条目接入。
 - 增加 Secure Session v2 连续 stride 缓冲批量 seal/open 快路径：调用方预分配整批数据、明文切片表和包长度表，布局在写入/解密前完整校验；批量 send counter 与 epoch 字节预算一次性检查，receive 采用 fail-fast 且只提交成功前缀的 replay 状态，热路径不逐包分配。新增 32 包 1280/1420 字节 Criterion 对照基线；该项是内存原语基准；生产 v2 固定帧已接入真实 UDP/TUN 路径，但批量 I/O 与快路径优化仍未完成。
 - 增加 Secure Session v2 运行时数据密码套件抽象：AES-256-GCM（`0x0201`）与 ChaCha20-Poly1305（`0x0202`）共用固定 16 字节头、方向 Nonce、长度绑定 AAD、16 字节标签和 4096 包重放窗口；握手安装数据 epoch 时只使用已认证 transcript 中的 suite ID，数据包不能自行改选算法。新增双套件往返、跨套件拒绝、pair suite 不一致、AAD/tag 篡改、方向反射和失败不消费重放计数测试；该 classic profile 已由后续条目接入真实 UDP/TUN 数据面，但仍不属于后量子 profile。
-- 增加 Secure Session v2 原子在线重协商桥接：`RekeySession` 独占组合 `RekeyStateMachine` 与 `EpochSession`，校验新密钥的 SID、epoch、方向和单调性；Responder 在 `REKEY_ACCEPT` 阶段仅暂存密钥，验证 `REKEY_CONFIRM` 后才安装，Initiator 在认证 ACCEPT 后安装。切换同时替换双向密钥，并通过 `EpochSession::rotate` 保留旧接收 epoch 的有界在途宽限；错误确认/材料、超时和重复消息均有回归测试。当前仍未接入生产控制通道；初始 UDP/TUN 数据面已由后续条目使用同一 v2 认证帧接入。
-- 增加 Secure Session v2 握手到数据 epoch 的认证桥接：双方验证对端方向的 HMAC-SHA-256 confirmation 后，才将 HKDF-SHA-512 派生密钥、SID、epoch 和本地/对端 receiver index 装入 `EpochSession`；错误角色、交换方向、单比特篡改和其他 transcript 的确认均拒绝安装，并验证初始化双方可完成双向往返数据收发。`HELLO/ACCEPT` wire 字段和初始数据面已由后续条目接入；生产在线原子重协商仍未接入。
+- 增加 Secure Session v2 原子在线重协商桥接：`RekeySession` 独占组合 `RekeyStateMachine` 与 `EpochSession`，校验新密钥的 SID、epoch、方向和单调性；Responder 在 `REKEY_ACCEPT` 阶段仅暂存密钥，验证 `REKEY_CONFIRM` 后才安装，Initiator 在认证 ACCEPT 后安装。切换同时替换双向密钥，并通过 `EpochSession::rotate` 保留旧接收 epoch 的有界在途宽限；错误确认/材料、超时和重复消息均有回归测试。后续已在 UDP/TUN 常驻在线重协商中接入；QUIC/relay 认证 REKEY 通道仍未接线。
+- 增加 Secure Session v2 握手到数据 epoch 的认证桥接：双方验证对端方向的 HMAC-SHA-256 confirmation 后，才将 HKDF-SHA-512 派生密钥、SID、epoch 和本地/对端 receiver index 装入 `EpochSession`；错误角色、交换方向、单比特篡改和其他 transcript 的确认均拒绝安装，并验证初始化双方可完成双向往返数据收发。`HELLO/ACCEPT` wire 字段和初始数据面已由后续条目接入，UDP/TUN 在线原子重协商后续已接线；QUIC/relay 仍待完成。
 - 增加 Secure Session v2 HKDF-SHA-512 会话密钥派生：从完整签名握手绑定生成独立的双向数据密钥和双向确认密钥，支持可选 32-byte PSK，并只使用固定标签和长度前缀上下文；共享秘密、PSK、IKM、PRK 和输出密钥均纳入清零生命周期。
 - 增加 Secure Session v2 双向 HMAC-SHA-256 key confirmation：Initiator/Responder 使用独立派生密钥确认同一 transcript，固定 32-byte 编码并使用常量时间验证；错误角色、交换方向、不同密钥调度、错误 transcript、截断/超长和单比特篡改均失败关闭。该原语后续已接入 wire 握手和数据面激活。
 - 增加 Secure Session v2 classic 握手负向回归：覆盖跨会话 `ACCEPT` 重放/乱序、双向临时密钥 MITM 替换、有效签名下的套件降级/版本/profile 篡改、错误 epoch、零 SID、单比特签名字段篡改和失败后 responder 状态恢复；所有路径均在数据密钥激活前失败关闭。
@@ -76,7 +76,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 增加 Secure Session v2 canonical handshake transcript 构造器：使用独立协议域、两字节长度前缀和固定角色顺序绑定套件、双方身份/临时公钥、SID、epoch 及 endpoint context；未知套件、空字段、重复身份和超限输入在 SHA-512 前拒绝。
 - 增加 Secure Session v2 `REKEY_INIT/ACCEPT/CONFIRM` 有界、版本化控制帧编解码与固定字节向量；解析失败关闭截断、超长、尾随字节、非法长度、未知版本/类型和非零保留字段。帧本身仍需由已认证控制通道保护。
 - 增加 Secure Session v2 数据面 Criterion 基准，覆盖 64/512/1280/1420 字节的 seal/open、重放拒绝及 `EpochSession` 包装开销；发布 2026-10-30 开发基线并明确其结果不构成发布性能门禁。
-- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭；初始 v2 握手与数据面此后已接入生产路径，但在线重协商仍等待接入真实控制通道。X-Wing、复合身份和实验性 HELLO/ACCEPT 此后已实现，但仍未接入生产控制通道或数据面。
+- 增加 Secure Session Protocol v2 的固定 16 字节数据头、方向分离 Nonce、长度绑定 AAD、原地 ChaCha20-Poly1305 封装、4096 包重放窗口、发送/接收索引分离、带时间/字节上限和旧密钥宽限的 epoch 生命周期状态机，以及 `REKEY_INIT/ACCEPT/CONFIRM` 每会话在线轮换协调状态机；后者覆盖 5 秒超时、重复消息幂等、半开事务上限、SID 防复用和确认失败关闭；初始 v2 握手与数据面此后已接入生产路径，UDP/TUN 在线重协商也已在后续提交接入。X-Wing、复合身份和实验性 HELLO/ACCEPT/CONFIRM 此后已实现严格 wire 层，但仍未接入 SessionDriver、生产控制通道或数据面。
 - 客户端重连时通过 v2 签名请求恢复原虚拟 IPv4/IPv6 租约；协调端内存分配器重启后，只要地址仍空闲即可恢复。
 - WebUI 静态资源路由与 `text/css` 响应，新增浏览器页签图标与移动端布局适配。
 

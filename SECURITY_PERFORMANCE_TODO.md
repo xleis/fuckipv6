@@ -7,12 +7,12 @@
 
 威胁、代码控制、测试证据和生产缺口的逐项映射见 [`SECURITY_TRACEABILITY.md`](SECURITY_TRACEABILITY.md)。
 
-## 当前基线（2026-10-30，基于 `55b53c5` 及后续文档对齐）
+## 当前基线（2026-10-31，基于 `193b77b` 及后续文档对齐）
 
 ### 已有能力
 
 - Ed25519 长期身份、注册消息签名验证和公钥指纹。
-- Secure Session v2 classic 已接入生产 `P2pEngine`：临时 X25519 + Ed25519 握手、双向 key confirmation、按长期公钥确定性选角色、认证 endpoint 绑定、计数 Nonce、4096 包重放窗口及 AEAD 失败关闭；该接入尚未完成独立密码学审计。
+- Secure Session v2 classic 已接入生产 `P2pEngine`：临时 X25519 + Ed25519 握手、双向 key confirmation、按长期公钥确定性选角色、认证 endpoint 绑定、计数 Nonce、4096 包重放窗口及 AEAD 失败关闭；UDP/TUN 数据面已接入常驻在线 REKEY，通过 staged/active/retired epoch 和 CONFIRM 重传完成切换。该接入尚未完成独立密码学审计。
 - QUIC Mesh、QUIC relay 与信令 relay 只运输同一 v2 密文；静态 X25519 与 legacy data 帧不会进入生产接收队列。
 - HKDF-SHA-512 会话密钥派生、HMAC-SHA-256 confirmation，以及 ChaCha20-Poly1305 / AES-256-GCM 数据套件。
 - QUIC/TLS 1.3 通道、服务端 SPKI pin、强制 Ed25519 客户端证书、证书/应用身份/TLS exporter 绑定；生产中继禁用 0-RTT，并已验证恢复会话回退到 1-RTT；Coordinator 运行期黑名单在 relay 注册和双向转发路径强制执行。
@@ -22,7 +22,8 @@
 
 - [x] **前向保密**：生产 UDP/TUN 路径已使用每次会话独立的临时 X25519 握手；长期 Ed25519 私钥泄漏不再直接解密历史会话。该结论仍需独立协议与密码学审计。
 - [x] **重放保护**：生产 v2 数据帧使用方向分离的计数 Nonce 和 4096 包重放窗口，未认证或重复数据在进入 TUN/ACL 前失败关闭；真实 UDP 双引擎测试覆盖重放与篡改。
-- [ ] **密钥生命周期**：初始 epoch 已有 120 秒/2^60 字节硬上限、回滚拒绝和过期擦除，达到上限后失败关闭；在线 `REKEY_INIT/ACCEPT/CONFIRM` 尚未接入生产控制通道，因此持续流量达到时限后不能无缝换钥。
+- [x] **密钥生命周期（UDP/TUN）**：初始 epoch 具有 120 秒/2^60 字节硬上限、回滚拒绝和过期擦除；生产 UDP initiator 会在到达限制前发起 `REKEY_INIT/ACCEPT/CONFIRM`，切换使用 staged/active/retired epoch 和接收 grace，失败时保留旧会话，并实际执行 CONFIRM 重传。端到端测试覆盖成功切换、降级/回滚拒绝与重传路径。
+- [ ] **密钥生命周期（QUIC/relay）**：认证在线 REKEY 尚未接入 QUIC/relay 控制通道，跨真实网络的持续流量换钥、乱序/丢包压力和独立审计仍未完成。
 - [x] **握手认证**：生产 UDP 路径已使用绑定双方身份、临时公钥、算法套件、SID、epoch 和 endpoint context 的签名 transcript 与双向 key confirmation；不安全或未完成的会话无法发送数据。
 - [ ] **端到端抗量子握手与身份**：生产数据面仍只使用 X25519 和 Ed25519，因此尚不具备生产后量子机密性或后量子身份认证。可选 `pq` feature 的本地进展分项记录如下：
   - [x] X-Wing draft-11 固定向量、封装/解封装、严格长度和非 contributory 失败关闭。
@@ -30,11 +31,11 @@
   - [x] 实验性固定长度 `HELLO/ACCEPT`、TH1/TH2 固定向量、suite/profile/PSK 降级失败关闭、时间窗和有界重放缓存；6755 + 6635 字节 body 均在 16 KiB 单帧预算内。
   - [ ] 接入生产控制通道、Initiator `CONFIRM`、Cookie/限速、能力协商，以及 QUIC/relay/UDP/TUN 数据面；完成端到端容量、性能和独立安全审计。
 - [x] **QUIC 双向身份**：中继服务端已启用强制客户端证书认证；Register 签名绑定双 pin 与 TLS exporter，证书 SPKI 和 Register 应用公钥逐字节核对，错绑、篡改和缺失绑定均在 relay 状态变更前失败关闭；运行期黑名单在注册和双向转发路径失效关闭；TLS 客户端证书 allowlist 随会话注册、换钥、注销和按节点 ID 封禁动态更新，空名单默认拒绝。CA/CRL/OCSP、持久撤销列表、网络级最终授权与独立安全审计仍未完成。
-- [ ] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie，但尚未接入握手控制通道；生产路径仍缺少握手速率控制和无效包成本上限。
+- [>] **抗 DoS**：v2 已实现绑定源地址、身份、ephemeral 公钥和时间窗的无状态 cookie；共享握手准入守卫已接入 UDP HELLO 分配点和 QUIC 入站 accept 路径，提供每源/身份/全局配额、TTL、硬表上限与指标。无状态 cookie 仍需接入握手控制通道，指标尚未进入产品 API/UI，跨节点压测和独立 DoS 评审未完成。
 - [ ] **数据面效率**：每包执行异步锁、哈希查找、序列化、随机 Nonce 和新 `Vec` 分配，不可能稳定超过内核 WireGuard。
 - [ ] **可验证性能**：已有 v2 crypto/batch Criterion 基准、同机基线回归比较器和高负载端到端初测；只有显式提供匹配硬件基线时才执行相对回退门禁。尚无空闲机 CPU pinning 复测、自动维护的三平台性能基线或达到 WireGuard 对等的结果。
 
-已接入生产 `P2pEngine` 的 Secure Session v2 能力包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口，以及共享 UDP socket 上的握手/控制/数据多路复用。`send_to`、QUIC Mesh、QUIC relay 与信令 relay 调用同一 v2 seal/open 路径；未握手、未认证、legacy data 和静态 X25519 输入均失败关闭。双引擎真实 UDP 测试覆盖建链、双向数据、篡改、重放和未建链拒绝。批量快路径、无状态 cookie、`REKEY_INIT/ACCEPT/CONFIRM` 编解码与原子 epoch 轮换仍主要是 crate 内原语，尚未全部接入生产控制通道。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 适配、X-Wing draft-11、复合身份和实验性混合 `HELLO/ACCEPT`；固定向量和失败关闭测试已通过，但该 profile 尚未参与生产控制通道或数据面，上游实现也未经独立安全审计。
+已接入生产 `P2pEngine` 的 Secure Session v2 能力包括：临时 X25519 + Ed25519 的 HELLO/ACCEPT 握手、绑定 SID 与完整 transcript 的 CONFIRM 帧、SHA-512 transcript、HKDF-SHA-512 双向密钥派生、双向 HMAC-SHA-256 key confirmation、AES-256-GCM/ChaCha20-Poly1305 数据套件、固定 16 字节头、方向分离 Nonce、长度绑定 AAD、32-bit 包计数器、认证成功后才推进的 4096 包重放窗口，以及共享 UDP socket 上的握手/控制/数据多路复用。UDP/TUN 常驻在线重协商已通过 staged/active/retired epoch 与 CONFIRM 重传接入真实 UDP 双引擎路径。`send_to`、QUIC Mesh、QUIC relay 与信令 relay 调用同一 v2 seal/open 路径；未握手、未认证、legacy data 和静态 X25519 输入均失败关闭。双引擎真实 UDP 测试覆盖建链、双向数据、篡改、重放、在线换钥和未建链拒绝。QUIC/relay 认证 REKEY、批量快路径和无状态 cookie 生产接线仍未全部完成。可选 `pq` feature 已提供 ML-KEM-768/ML-DSA-65 适配、X-Wing draft-11、复合身份和实验性混合 `HELLO/ACCEPT/CONFIRM` 严格线格式；固定向量与失败关闭测试已通过，但该 profile 尚未接入 SessionDriver、生产控制通道或数据面，上游实现也未经独立安全审计。
 
 ### 快速数据面基线（非发布结论）
 

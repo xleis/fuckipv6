@@ -79,41 +79,47 @@ target/release/fuckipv6
 sudo ./scripts/install-node.sh
 ```
 
-安装内容包括：
+脚本只调用统一二进制的 `service install`，由它原子安装二进制、创建默认配置并生成
+systemd unit。安装内容包括：
 
 - 唯一二进制 `/opt/fuckipv6/fuckipv6`；
 - 命令入口 `/usr/local/bin/fuckipv6`；
-- 系统服务 `fuckipv6.service`。
+- 系统服务 `fuckipv6.service`；
+- 配置 `/etc/fuckipv6/service.json`。
 
 安装后检查：
 
 ```bash
 fuckipv6 --version
-systemctl cat fuckipv6
+sudo fuckipv6 service status
 ```
 
-### 手动安装
-
-```bash
-sudo install -d /opt/fuckipv6 /etc/fuckipv6 /var/lib/fuckipv6 /var/log/fuckipv6
-sudo install -m 0755 target/release/fuckipv6 /opt/fuckipv6/fuckipv6
-sudo ln -sf /opt/fuckipv6/fuckipv6 /usr/local/bin/fuckipv6
-```
-
-身份私钥和运行状态应保存在 `/var/lib/fuckipv6`，配置应保存在 `/etc/fuckipv6`。不要将私钥、节点配置或构建产物提交到 Git。
+升级时从新版本包运行 `sudo ./bin/fuckipv6 service upgrade`，不要用已安装的旧二进制原地
+覆盖。卸载使用 `sudo /opt/fuckipv6/fuckipv6 service uninstall`；卸载会保留配置、身份和
+状态数据。
 
 ### macOS 安装脚本
 
 ```bash
 sudo ./scripts/install-macos-node.sh
-sudo launchctl kickstart -k system/cc.xlei.fuckipv6
+sudo fuckipv6 service status
 ```
 
-launchd 标签为 `cc.xlei.fuckipv6`，二进制、配置、日志和 WebUI 端口均使用同一节点安装布局。
+launchd 标签为 `cc.xlei.fuckipv6`，由 `service install --scope system` 生成。安装脚本不再
+直接复制旧 plist，因此 stop/start、升级和卸载共享同一套服务生命周期语义。
 
 ### Windows
 
-使用 release 包中的 `setup_windows.ps1`，或在管理员终端直接运行 `fuckipv6.exe`。Windows 上的 GPUI 原生外壳尚待目标平台构建和实机验证；未验证的桌面路径应显式使用 WebUI。
+在管理员终端运行：
+
+```powershell
+fuckipv6.exe service install --scope system --webui-port 8080
+fuckipv6.exe service status
+```
+
+服务进程会连接 Windows SCM 并上报 running/stopping/stopped 状态，Stop/Shutdown 控制会
+触发与 Unix SIGTERM 相同的优雅关闭路径。当前只有交叉编译与单元测试证据，仍需在
+Windows 实机完成安装、停止、崩溃恢复和 TUN 权限验证；不能把交叉编译等同于实机通过。
 
 ---
 
@@ -162,7 +168,8 @@ sudo fuckipv6 \
   --external-host 2001:db8::10
 ```
 
-这条路径适合 systemd 持久运行，但同样受当前自动加入语义影响。
+这只是前台交互入口。需要持久运行时先保存配置，再使用 `fuckipv6 service install`；
+不要把 `--headless` 命令塞进服务 unit，否则会绕过 control 监督和 SCM/launchd 生命周期。
 
 ---
 
@@ -245,38 +252,31 @@ export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
 
 ## systemd 持久运行
 
-安装脚本提供基础服务文件：
+推荐通过统一管理命令操作服务：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now fuckipv6
-sudo systemctl status fuckipv6
+sudo fuckipv6 service install --scope system --webui-port 8080
+sudo fuckipv6 service status
+sudo fuckipv6 service restart
+sudo fuckipv6 service stop
+sudo fuckipv6 service start
 sudo journalctl -u fuckipv6 -f
 ```
 
-默认服务以 headless 模式启动 WebUI。要让同一服务持久承担网络服务角色，可使用 drop-in 替换 `ExecStart`：
+生成的 unit 执行：
 
-```ini
-# sudo systemctl edit fuckipv6
-[Service]
-ExecStart=
-ExecStart=/opt/fuckipv6/fuckipv6 --headless --webui-port 8080 --host --host-name home --host-port 6666 --host-relay-port 6667 --external-host 2001:db8::10
+```text
+/opt/fuckipv6/fuckipv6 __service   --options-file /etc/fuckipv6/service.json   --config-dir /etc/fuckipv6
 ```
 
-成员节点可替换为：
+`__service` 持有 control 锁，监督 node 和 WebUI；不要改成 `--headless`、`host` 或其他
+交互式子命令。网络创建、加入和默认连接应先用 CLI 写入配置，再重启服务。
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/opt/fuckipv6/fuckipv6 connect home --headless --webui-port 8080
-```
-
-应用修改：
+用户级服务使用：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl restart fuckipv6
-sudo journalctl -u fuckipv6 -n 100 --no-pager
+fuckipv6 service install --scope user --webui-port 8080
+fuckipv6 service status --scope user
 ```
 
 服务名只有 `fuckipv6.service`。旧 `fuckipv6-client.service` 和 `fuckipv6-coordinator.service` 已不再随发布物提供。
@@ -445,7 +445,15 @@ ss -tlnp | grep 8080
 curl -v http://127.0.0.1:8080/api/status
 ```
 
-确认节点以 `--headless` 启动、端口未被占用，并检查监听地址和反向代理设置。
+检查服务状态和生成的 service.json：
+
+```bash
+sudo fuckipv6 service status
+sudo sed -n '1,80p' /etc/fuckipv6/service.json
+sudo journalctl -u fuckipv6 -n 100 --no-pager
+```
+
+再确认端口未被占用，并检查监听地址和反向代理设置。
 
 ### 旧安装残留
 
@@ -470,13 +478,15 @@ sudo systemctl daemon-reload
 1. 备份 `/etc/fuckipv6` 与 `/var/lib/fuckipv6`；
 2. 阅读 `CHANGELOG.md` 的兼容性说明；
 3. 在非生产网络验证票据、配置和身份保持可用；
-4. 替换唯一二进制并重启 `fuckipv6.service`。
+4. 从新版本二进制执行带二进制备份和失败回滚的升级；
+5. 检查服务状态、WebUI 和节点数据面。
 
 ```bash
-sudo install -m 0755 target/release/fuckipv6 /opt/fuckipv6/fuckipv6
-sudo systemctl restart fuckipv6
-sudo systemctl status fuckipv6
+sudo ./target/release/fuckipv6 service upgrade --webui-port 8080
+sudo fuckipv6 service status
 ```
+
+`service upgrade` 不覆盖已有 `service.json`，并会保持升级前的运行/停止状态。
 
 发布门禁：
 

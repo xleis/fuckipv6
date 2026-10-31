@@ -213,21 +213,32 @@ Linux release 包和源码仓库提供统一的节点安装脚本：
 
 ```bash
 sudo ./scripts/install-node.sh
-sudo systemctl start fuckipv6
-sudo systemctl status fuckipv6
+sudo fuckipv6 service status
 sudo journalctl -u fuckipv6 -f
 ```
 
-服务名只有 `fuckipv6.service`。网络创建、加入或默认连接配置好以后，同一个服务会以 headless 模式提供 WebUI 和节点运行时。
+脚本调用 `fuckipv6 service install --scope system`。生成的 `fuckipv6.service` 执行
+`__service --options-file /etc/fuckipv6/service.json --config-dir /etc/fuckipv6`，
+由同一进程持有 control 锁并监督 node 和 WebUI。网络创建、加入或默认连接配置好以后，
+重启服务即可沿用已保存配置。
 
 macOS 使用：
 
 ```bash
 sudo ./scripts/install-macos-node.sh
-sudo launchctl kickstart -k system/cc.xlei.fuckipv6
+sudo fuckipv6 service status
 ```
 
-Windows 请使用 release 包中的 `setup_windows.ps1`，或在管理员终端运行同一个 `fuckipv6.exe`。
+Windows 在管理员终端运行同一个二进制：
+
+```powershell
+fuckipv6.exe service install --scope system --webui-port 8080
+fuckipv6.exe service status
+```
+
+Windows 已接入 SCM 控制处理器，但当前只有交叉编译与单元测试证据，仍需实机验证；
+macOS 同样需要目标平台实机证据。服务名只有 `fuckipv6.service` 或 launchd 标签
+`cc.xlei.fuckipv6`。
 
 ## 常见问题
 

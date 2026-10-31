@@ -354,14 +354,14 @@ control ─────┼── spawn / adopt / health-check ──► node
 - [x] 添加冒用、权限和重连测试：覆盖同用户/异用户授权、真实第二 UID、目录/socket 权限、版本错误、断线快照恢复、请求 ID、订阅顺序、事件缺口，以及 control/node 生产进程接线 E2E；Windows token 与 macOS 实机证据由 W17 负责；
 - [x] 将服务循环接入实际 control/node 进程并完成启动、崩溃、停止和服务监督联调。
 
-### W2-03 UI 与 node 生命周期解耦 `[~]`
+### W2-03 UI 与 node 生命周期解耦 `[x]`
 
 - [x] GPUI 窗口关闭不调用 node shutdown；
-- [ ] WebUI 标签关闭不影响 control/node；
+- [x] WebUI 标签关闭不影响 control/node；
 - [x] node 运行时间不随 UI 启动重置；
 - [x] UI 重开后从权威快照恢复；
-- [ ] 删除 UI 进程持有 supervisor 的设计：GPUI 已删除；WebUI 仍待迁移；
-- [x] 添加 UI 退出不断网 E2E。
+- [x] 删除 UI 进程持有 supervisor 的设计：GPUI 与 WebUI 均通过 `RemoteNodeSession` 连接 control/node；
+- [x] 添加 UI 退出不断网 E2E：`closing_headless_webui_does_not_stop_the_node` 在 `ab18b8e` 验证关闭 WebUI 进程后 node PID 不变且 IPC 仍可查询。
 
 ### W2-04 start/stop/restart 语义 `[ ]`
 

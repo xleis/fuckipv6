@@ -163,6 +163,23 @@ impl RekeySession {
         self.session.seal(plaintext, packet, now)
     }
 
+    /// Encrypt a packet whose plaintext already occupies the payload region.
+    ///
+    /// The caller must reserve the fixed data header before the plaintext and
+    /// authentication tag space after it. This path does not copy plaintext or
+    /// allocate a ciphertext buffer.
+    pub fn seal_in_place(
+        &mut self,
+        packet: &mut [u8],
+        plaintext_len: usize,
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        if self.poisoned {
+            return Err(SessionError::InvalidEpochState);
+        }
+        self.session.seal_in_place(packet, plaintext_len, now)
+    }
+
     /// Authenticate and decrypt a packet under the active or retained epoch.
     pub fn open_in_place<'a>(
         &mut self,
@@ -410,6 +427,21 @@ mod tests {
         let responder =
             RekeySession::new(EpochSession::new(send, receive, now).expect("responder epoch"));
         (initiator, responder)
+    }
+
+    #[test]
+    fn poisoned_session_rejects_reserved_buffer_seal_without_touching_packet() {
+        let now = Instant::now();
+        let (mut session, _) = sessions(now);
+        session.poisoned = true;
+        let mut packet = [0x5a; 128];
+        let before = packet;
+
+        assert_eq!(
+            session.seal_in_place(&mut packet, 7, now),
+            Err(SessionError::InvalidEpochState)
+        );
+        assert_eq!(packet, before);
     }
 
     fn confirm_initiator(

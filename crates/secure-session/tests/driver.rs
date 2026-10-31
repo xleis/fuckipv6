@@ -9,8 +9,8 @@ use fuckipv6_secure_session::rekey::{RekeyCompletion, RekeyPhase};
 use fuckipv6_secure_session::rekey_session::{RekeyAcceptOffer, RekeySessionError};
 use fuckipv6_secure_session::transcript::{ENDPOINT_CONTEXT_HASH_LEN, SUITE_CHACHA20_POLY1305};
 use fuckipv6_secure_session::{
-    DataCipherSuite, Direction, ReceiveCipher, SendCipher, SessionError, MAX_EPOCH_LIFETIME,
-    RETIRED_EPOCH_GRACE, SESSION_ID_LEN,
+    DataCipherSuite, Direction, ReceiveCipher, SendCipher, SessionError, AEAD_TAG_LEN,
+    DATA_HEADER_LEN, MAX_EPOCH_LIFETIME, RETIRED_EPOCH_GRACE, SESSION_ID_LEN,
 };
 use std::time::{Duration, Instant};
 
@@ -175,6 +175,58 @@ fn confirmed_handshake_drives_bidirectional_data() {
     assert_eq!(
         initiator_stats.plaintext_bytes_received,
         b"authenticated response".len() as u64
+    );
+}
+
+#[test]
+fn driver_seals_a_reserved_packet_buffer_in_place() {
+    let now = Instant::now();
+    let (mut initiator, mut responder, _) = install_pair(now);
+    let plaintext = b"reserved packet payload";
+    let packet_len = DATA_HEADER_LEN + plaintext.len() + AEAD_TAG_LEN;
+    let mut packet = [0u8; 256];
+    packet[DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext.len()].copy_from_slice(plaintext);
+
+    let encoded_len = initiator
+        .seal_in_place(&mut packet[..packet_len], plaintext.len(), now)
+        .expect("seal reserved packet in place");
+    assert_eq!(encoded_len, packet_len);
+    assert_eq!(
+        responder
+            .open_in_place(&mut packet[..encoded_len], now)
+            .expect("open in-place packet"),
+        plaintext
+    );
+    assert_eq!(initiator.stats().packets_sent, 1);
+    assert_eq!(
+        initiator.stats().plaintext_bytes_sent,
+        plaintext.len() as u64
+    );
+}
+
+#[test]
+fn driver_rejects_short_reserved_buffer_without_charging_stats_or_counter() {
+    let now = Instant::now();
+    let (mut initiator, mut responder, _) = install_pair(now);
+    let mut short = [0u8; DATA_HEADER_LEN + AEAD_TAG_LEN];
+
+    assert_eq!(
+        initiator.seal_in_place(&mut short, 1, now),
+        Err(DriverError::Data(SessionError::BufferTooSmall))
+    );
+    assert_eq!(initiator.stats().packets_sent, 0);
+    assert_eq!(initiator.stats().plaintext_bytes_sent, 0);
+
+    let mut packet = [0u8; DATA_HEADER_LEN + 1 + AEAD_TAG_LEN];
+    packet[DATA_HEADER_LEN] = b'x';
+    let encoded_len = initiator
+        .seal_in_place(&mut packet, 1, now)
+        .expect("the failed attempt must not consume the first counter");
+    assert_eq!(
+        responder
+            .open_in_place(&mut packet[..encoded_len], now)
+            .expect("open packet after rejected short buffer"),
+        b"x"
     );
 }
 

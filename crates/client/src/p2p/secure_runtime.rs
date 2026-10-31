@@ -99,6 +99,10 @@ pub(crate) enum SecureRuntimeError {
     UnexpectedFrame { expected: &'static str },
     #[error("plaintext is too large for one Secure Session v2 UDP packet: {len} bytes")]
     PayloadTooLarge { len: usize },
+    #[error(
+        "Secure Session v2 packet buffer is too small: need {required} bytes, have {actual} bytes"
+    )]
+    PacketBufferTooSmall { required: usize, actual: usize },
     #[error("system clock is before the Unix epoch")]
     InvalidSystemClock,
     #[error("Secure Session v2 epoch space is exhausted")]
@@ -832,6 +836,38 @@ impl SecurePeerState {
         &self,
         plaintext: &[u8],
     ) -> Result<(SocketAddr, Vec<u8>), SecureRuntimeError> {
+        let packet_len = plaintext
+            .len()
+            .checked_add(DATA_HEADER_LEN + AEAD_TAG_LEN)
+            .filter(|len| *len <= MAX_DATA_PACKET_LEN)
+            .ok_or(SecureRuntimeError::PayloadTooLarge {
+                len: plaintext.len(),
+            })?;
+        let mut packet = vec![0u8; packet_len];
+        packet[DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext.len()].copy_from_slice(plaintext);
+        let (destination, encoded_len) = self.seal_in_place(&mut packet, plaintext.len()).await?;
+        packet.truncate(encoded_len);
+        Ok((destination, packet))
+    }
+
+    /// Seal a plaintext already stored at `packet[DATA_HEADER_LEN..]` without
+    /// allocating or copying into a second ciphertext buffer.
+    pub(crate) async fn seal_in_place(
+        &self,
+        packet: &mut [u8],
+        plaintext_len: usize,
+    ) -> Result<(SocketAddr, usize), SecureRuntimeError> {
+        let packet_len = plaintext_len
+            .checked_add(DATA_HEADER_LEN + AEAD_TAG_LEN)
+            .filter(|len| *len <= MAX_DATA_PACKET_LEN)
+            .ok_or(SecureRuntimeError::PayloadTooLarge { len: plaintext_len })?;
+        if packet.len() < packet_len {
+            return Err(SecureRuntimeError::PacketBufferTooSmall {
+                required: packet_len,
+                actual: packet.len(),
+            });
+        }
+
         let mut state = self.state.lock().await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
@@ -843,17 +879,9 @@ impl SecurePeerState {
             .driver
             .as_mut()
             .ok_or(SecureRuntimeError::NotEstablished)?;
-        let packet_len = plaintext
-            .len()
-            .checked_add(DATA_HEADER_LEN + AEAD_TAG_LEN)
-            .filter(|len| *len <= MAX_DATA_PACKET_LEN)
-            .ok_or(SecureRuntimeError::PayloadTooLarge {
-                len: plaintext.len(),
-            })?;
-        let mut packet = vec![0u8; packet_len];
-        let encoded_len = driver.seal(plaintext, &mut packet, Instant::now())?;
-        packet.truncate(encoded_len);
-        Ok((destination, packet))
+        let encoded_len =
+            driver.seal_in_place(&mut packet[..packet_len], plaintext_len, Instant::now())?;
+        Ok((destination, encoded_len))
     }
 
     /// Authenticate and decrypt one v2 data datagram from the session endpoint.
@@ -965,6 +993,14 @@ fn open_with_driver(
     state: &mut SecureState,
     mut packet: Vec<u8>,
 ) -> Result<Vec<u8>, SecureRuntimeError> {
+    let plaintext_len = open_with_driver_core(state, &mut packet)?;
+    Ok(extract_opened_plaintext(packet, plaintext_len))
+}
+
+fn open_with_driver_core(
+    state: &mut SecureState,
+    packet: &mut [u8],
+) -> Result<usize, SecureRuntimeError> {
     if state.revoked {
         return Err(SecureRuntimeError::Revoked);
     }
@@ -973,15 +1009,15 @@ fn open_with_driver(
         .driver
         .as_mut()
         .ok_or(SecureRuntimeError::NotEstablished)?
-        .open_in_place(&mut packet, now)
-        .map(|plaintext| plaintext.to_vec());
+        .open_in_place(packet, now)
+        .map(|plaintext| plaintext.len());
     match active {
-        Ok(plaintext) => {
+        Ok(plaintext_len) => {
             // Authenticated traffic under the active generation proves that the
             // peer accepted this endpoint's CONFIRM. Initial CONFIRM retries can
             // now stop without weakening the established generation.
             state.initial_confirm = None;
-            return Ok(plaintext);
+            return Ok(plaintext_len);
         }
         Err(error) if is_unknown_epoch(&error) => {}
         Err(error) => return Err(error.into()),
@@ -990,10 +1026,10 @@ fn open_with_driver(
     if let Some(staged) = state.staged_initiator.as_mut() {
         let opened = staged
             .driver
-            .open_in_place(&mut packet, now)
-            .map(|plaintext| plaintext.to_vec());
+            .open_in_place(packet, now)
+            .map(|plaintext| plaintext.len());
         match opened {
-            Ok(plaintext) => {
+            Ok(plaintext_len) => {
                 // The responder sends first after installing a rekey. Receiving
                 // one authenticated packet for the staged epoch is the commit
                 // point that lets the initiator switch its send keys too.
@@ -1002,7 +1038,7 @@ fn open_with_driver(
                     .take()
                     .expect("staged driver opened a packet");
                 install_active_generation(state, staged.driver, now)?;
-                return Ok(plaintext);
+                return Ok(plaintext_len);
             }
             Err(error) if is_unknown_epoch(&error) => {}
             Err(error) => return Err(error.into()),
@@ -1019,15 +1055,30 @@ fn open_with_driver(
     if let Some(index) = retired {
         let opened = state.retired[index]
             .driver
-            .open_in_place(&mut packet, now)
-            .map(|plaintext| plaintext.to_vec());
+            .open_in_place(packet, now)
+            .map(|plaintext| plaintext.len());
         return match opened {
-            Ok(plaintext) => Ok(plaintext),
+            Ok(plaintext_len) => Ok(plaintext_len),
             Err(error) => Err(error.into()),
         };
     }
 
     Err(DriverError::Data(SessionError::UnknownEpoch).into())
+}
+
+/// Reuse the authenticated receive allocation as the plaintext result. The
+/// plaintext starts immediately after the data header, so moving it to the
+/// front avoids allocating and copying into a second `Vec`.
+fn extract_opened_plaintext(mut packet: Vec<u8>, plaintext_len: usize) -> Vec<u8> {
+    move_plaintext_to_front(&mut packet, plaintext_len);
+    packet.truncate(plaintext_len);
+    packet
+}
+
+fn move_plaintext_to_front(packet: &mut [u8], plaintext_len: usize) -> usize {
+    debug_assert!(plaintext_len <= packet.len().saturating_sub(DATA_HEADER_LEN));
+    packet.copy_within(DATA_HEADER_LEN..DATA_HEADER_LEN + plaintext_len, 0);
+    plaintext_len
 }
 
 fn confirmation_action(confirmation: &InitiatorConfirmation) -> SecureControlAction {
@@ -2617,6 +2668,48 @@ mod tests {
                 .expect("stats")
                 .authentication_failures,
             1
+        );
+    }
+
+    #[test]
+    fn opened_plaintext_reuses_the_receive_allocation() {
+        let mut packet = vec![0u8; DATA_HEADER_LEN + 7 + AEAD_TAG_LEN];
+        packet[DATA_HEADER_LEN..DATA_HEADER_LEN + 7].copy_from_slice(b"payload");
+        let allocation = packet.as_ptr();
+
+        let plaintext = extract_opened_plaintext(packet, 7);
+
+        assert_eq!(plaintext, b"payload");
+        assert_eq!(
+            plaintext.as_ptr(),
+            allocation,
+            "authentication must not allocate a second plaintext Vec"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_reserved_outbound_buffer_does_not_consume_session_state() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+
+        let mut short = [0u8; DATA_HEADER_LEN + AEAD_TAG_LEN];
+        assert!(matches!(
+            initiator.seal_in_place(&mut short, 1).await,
+            Err(SecureRuntimeError::PacketBufferTooSmall {
+                required,
+                actual
+            }) if required == DATA_HEADER_LEN + 1 + AEAD_TAG_LEN
+                && actual == short.len()
+        ));
+        assert_eq!(initiator.stats().await.expect("stats").packets_sent, 0);
+
+        let (_, packet) = initiator.seal(b"x").await.expect("seal after failure");
+        assert_eq!(
+            responder
+                .open_from_source(initiator_addr, packet)
+                .await
+                .expect("open packet after failed reserve"),
+            b"x"
         );
     }
 }

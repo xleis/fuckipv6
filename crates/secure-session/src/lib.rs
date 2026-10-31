@@ -673,6 +673,30 @@ impl EpochSession {
         Ok(packet_len)
     }
 
+    /// Encrypt a plaintext already stored at `packet[DATA_HEADER_LEN..]` under
+    /// the active epoch.
+    ///
+    /// This is the zero-copy outbound counterpart to [`Self::seal`]. The caller
+    /// must reserve `DATA_HEADER_LEN` bytes before the plaintext and enough
+    /// space for the authentication tag. The epoch byte and time limits are
+    /// charged before the packet is modified.
+    pub fn seal_in_place(
+        &mut self,
+        packet: &mut [u8],
+        plaintext_len: usize,
+        now: Instant,
+    ) -> Result<usize, SessionError> {
+        self.prune_retired_receive(now);
+        self.ensure_active_epoch_usable(plaintext_len, now)?;
+        let packet_len = data_packet_len(plaintext_len)?;
+        self.active_send.seal_in_place(packet, plaintext_len)?;
+        self.sent_bytes = self
+            .sent_bytes
+            .checked_add(plaintext_len as u64)
+            .ok_or(SessionError::RekeyRequired)?;
+        Ok(packet_len)
+    }
+
     /// Seal multiple packets into one preallocated contiguous buffer.
     ///
     /// All plaintext lengths are charged to the active epoch before any packet
@@ -1783,6 +1807,42 @@ mod tests {
                 .expect("open response"),
             b"response"
         );
+    }
+
+    #[test]
+    fn epoch_session_seals_a_reserved_packet_buffer_in_place() {
+        let now = Instant::now();
+        let mut initiator = initiator_epoch(1, 0, now);
+        let mut responder = responder_epoch(1, 0, now);
+        let mut packet = [0u8; 128];
+        packet[DATA_HEADER_LEN..DATA_HEADER_LEN + 7].copy_from_slice(b"request");
+        let allocation = packet.as_ptr();
+
+        let packet_len = initiator
+            .seal_in_place(&mut packet, 7, now)
+            .expect("seal reserved request buffer");
+
+        assert_eq!(packet.as_ptr(), allocation);
+        assert_eq!(initiator.sent_bytes, 7);
+        assert_eq!(
+            DataHeader::decode(&packet[..packet_len])
+                .expect("decode reserved packet")
+                .counter,
+            0
+        );
+        assert_eq!(
+            responder
+                .open_in_place(&mut packet[..packet_len], now)
+                .expect("open in-place request"),
+            b"request"
+        );
+
+        let mut short = [0u8; DATA_HEADER_LEN + 6 + AEAD_TAG_LEN];
+        assert_eq!(
+            initiator.seal_in_place(&mut short, 7, now),
+            Err(SessionError::BufferTooSmall)
+        );
+        assert_eq!(initiator.sent_bytes, 7);
     }
 
     #[test]

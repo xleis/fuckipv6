@@ -202,6 +202,25 @@ impl SessionDriver {
         Ok(packet_len)
     }
 
+    /// Encrypt one plaintext already stored at `packet[DATA_HEADER_LEN..]`
+    /// without copying it into a second ciphertext buffer.
+    ///
+    /// The caller must reserve the fixed header and authentication tag space.
+    pub fn seal_in_place(
+        &mut self,
+        packet: &mut [u8],
+        plaintext_len: usize,
+        now: Instant,
+    ) -> Result<usize, DriverError> {
+        let session = self.session.as_mut().ok_or(DriverError::Closed)?;
+        let packet_len = session
+            .seal_in_place(packet, plaintext_len, now)
+            .map_err(DriverError::Data)?;
+        self.stats.packets_sent += 1;
+        self.stats.plaintext_bytes_sent += plaintext_len as u64;
+        Ok(packet_len)
+    }
+
     /// Authenticate and decrypt one packet under the active or retired epoch.
     pub fn open_in_place<'a>(
         &mut self,

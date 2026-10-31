@@ -30,6 +30,37 @@ DEFAULT_LINUX_CROSS_TARGETS = (
     "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-gnu",
 )
+COMMON_REQUIRED_CHECKS = (
+    "format",
+    "helper-tests",
+    "single-binary",
+    "docs",
+    "check",
+    "test",
+    "clippy",
+    "release-build",
+    "stable-source",
+    "clean-worktree",
+)
+PLATFORM_REQUIRED_CHECKS = {
+    "linux": (
+        "cross-check-x86_64-unknown-linux-musl",
+        "cross-check-x86_64-pc-windows-gnu",
+    ),
+    "macos": (
+        "cross-check-x86_64-apple-darwin",
+        "cross-check-aarch64-apple-darwin",
+    ),
+    "windows": (),
+}
+UPSTREAM_JOBS = (
+    "docs",
+    "supply-chain",
+    "gpui-smoke",
+    "linux",
+    "windows",
+    "macos",
+)
 SECURITY_RELEASE_BLOCKERS = (
     "Secure Session v2 has not been integrated into the production UDP/TUN data plane.",
     "The planned hybrid X-Wing and composite Ed25519 + ML-DSA handshake is not implemented.",
@@ -282,6 +313,31 @@ def default_cross_targets(platform_label: str) -> list[str]:
     return []
 
 
+def required_check_names(platform_label: str) -> list[str]:
+    """Return the checks a platform report must contain to be release-ready."""
+    return [
+        *COMMON_REQUIRED_CHECKS,
+        *PLATFORM_REQUIRED_CHECKS.get(platform_label, ()),
+    ]
+
+
+def helper_test_arguments() -> list[str]:
+    """Keep the plan and executable gate on one helper-test inventory."""
+    return [
+        sys.executable,
+        "-m",
+        "unittest",
+        "scripts/test_bench_compare.py",
+        "scripts/test_bench_summarize.py",
+        "scripts/test_criterion_compare.py",
+        "scripts/test_release_gate.py",
+        "scripts/test_release_material.py",
+        "scripts/test_check_single_binary.py",
+        "scripts/test_check_docs.py",
+        "-v",
+    ]
+
+
 def apply_run_defaults(args: argparse.Namespace) -> None:
     if args.platform is None:
         args.platform = detect_platform_label()
@@ -313,16 +369,19 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         {"name": "format", "arguments": ["fmt", "--all", "--", "--check"]},
         {
             "name": "helper-tests",
+            "arguments": helper_test_arguments(),
+        },
+        {
+            "name": "single-binary",
+            "arguments": [sys.executable, "scripts/check-single-binary.py"],
+        },
+        {
+            "name": "docs",
             "arguments": [
                 sys.executable,
-                "-m",
-                "unittest",
-                "scripts/test_bench_compare.py",
-                "scripts/test_bench_summarize.py",
-                "scripts/test_criterion_compare.py",
-                "scripts/test_release_gate.py",
-                "scripts/test_release_material.py",
-                "-v",
+                "scripts/check-docs.py",
+                "--report",
+                "<artifact-dir>/docs-consistency.json",
             ],
         },
         {
@@ -491,18 +550,29 @@ def run_gate(args: argparse.Namespace) -> int:
     checks.append(
         run_logged(
             "helper-tests",
+            helper_test_arguments(),
+            artifact_root / "helper-tests.log",
+            env=env,
+        )
+    )
+    checks.append(
+        run_logged(
+            "single-binary",
+            (sys.executable, "scripts/check-single-binary.py"),
+            artifact_root / "single-binary.log",
+            env=env,
+        )
+    )
+    checks.append(
+        run_logged(
+            "docs",
             (
                 sys.executable,
-                "-m",
-                "unittest",
-                "scripts/test_bench_compare.py",
-                "scripts/test_bench_summarize.py",
-                "scripts/test_criterion_compare.py",
-                "scripts/test_release_gate.py",
-                "scripts/test_release_material.py",
-                "-v",
+                "scripts/check-docs.py",
+                "--report",
+                str(artifact_root / "docs-consistency.json"),
             ),
-            artifact_root / "helper-tests.log",
+            artifact_root / "docs.log",
             env=env,
         )
     )
@@ -690,6 +760,15 @@ def run_gate(args: argparse.Namespace) -> int:
     if benchmark["status"] == "failed":
         failed_checks.append("benchmark")
     overall_passed = not failed_checks
+    check_statuses = {
+        str(check.get("name")): check.get("status")
+        for check in checks
+        if isinstance(check, dict)
+    }
+    required_checks = required_check_names(args.platform)
+    required_checks_not_passed = [
+        name for name in required_checks if check_statuses.get(name) != "passed"
+    ]
     report = {
         "schema": EXPECTED_SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -713,12 +792,18 @@ def run_gate(args: argparse.Namespace) -> int:
             "status": "passed" if overall_passed else "failed",
             "commands_passed": overall_passed,
             "worktree_clean": not dirty,
-            "release_ready": overall_passed and not dirty,
+            "required_checks": required_checks,
+            "required_checks_not_passed": required_checks_not_passed,
+            "release_ready": overall_passed
+            and not dirty
+            and not required_checks_not_passed,
             "failed_checks": failed_checks,
             "check_count": len(checks),
         },
         "release_policy": {
-            "engineering_gate_qualified": overall_passed and not dirty,
+            "engineering_gate_qualified": overall_passed
+            and not dirty
+            and not required_checks_not_passed,
             "security_release_qualified": False,
             "independent_security_audit_required": True,
             "blockers": list(SECURITY_RELEASE_BLOCKERS),
@@ -740,11 +825,45 @@ def load_report(path: Path) -> dict[str, Any]:
     return document
 
 
+def parse_upstream_results(values: Iterable[str]) -> tuple[dict[str, str], list[str]]:
+    """Parse repeated ``JOB=RESULT`` arguments supplied by the CI aggregator."""
+    results: dict[str, str] = {}
+    errors: list[str] = []
+    for value in values:
+        name, separator, result = value.partition("=")
+        if not separator or not name or not result:
+            errors.append(f"invalid upstream result {value!r}; expected JOB=RESULT")
+            continue
+        if name in results:
+            errors.append(f"duplicate upstream result for {name}")
+            continue
+        results[name] = result
+    return results, errors
+
+
+def validate_upstream_results(results: dict[str, str]) -> list[str]:
+    """Require every workflow prerequisite to finish successfully."""
+    errors: list[str] = []
+    for name in UPSTREAM_JOBS:
+        result = results.get(name)
+        if result is None:
+            errors.append(f"missing upstream job result: {name}")
+        elif result != "success":
+            errors.append(f"upstream job {name} did not succeed: {result}")
+    unknown = sorted(set(results) - set(UPSTREAM_JOBS))
+    if unknown:
+        errors.append("unknown upstream job results: " + ", ".join(unknown))
+    return errors
+
+
 def aggregate_documents(
     reports: Iterable[tuple[Path, dict[str, Any]]],
     expected_platforms: Sequence[str],
+    upstream_results: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
+    upstream = upstream_results or {}
+    errors.extend(validate_upstream_results(upstream))
     platform_reports: dict[str, dict[str, Any]] = {}
     commits: set[str] = set()
     for path, report in reports:
@@ -778,6 +897,16 @@ def aggregate_documents(
         if not isinstance(checks, list) or not checks:
             errors.append(f"{path}: report contains no checks")
         else:
+            check_statuses = {
+                str(check.get("name")): check.get("status")
+                for check in checks
+                if isinstance(check, dict)
+            }
+            for required in required_check_names(label):
+                if check_statuses.get(required) != "passed":
+                    errors.append(
+                        f"{path}: required check {required} is missing or did not pass"
+                    )
             for check in checks:
                 if not isinstance(check, dict) or check.get("status") != "passed":
                     name = check.get("name") if isinstance(check, dict) else None
@@ -817,6 +946,13 @@ def aggregate_documents(
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "expected_platforms": list(expected_platforms),
+        "upstream_jobs": {
+            name: {
+                "result": upstream.get(name),
+                "passed": upstream.get(name) == "success",
+            }
+            for name in UPSTREAM_JOBS
+        },
         "platforms": {
             label: {
                 "summary": report.get("summary"),
@@ -861,19 +997,23 @@ def aggregate_documents(
 
 def aggregate_gate(args: argparse.Namespace) -> int:
     loaded: list[tuple[Path, dict[str, Any]]] = []
-    errors: list[str] = []
+    upstream_results, errors = parse_upstream_results(args.upstream_result)
     for value in args.reports:
         path = Path(value)
         try:
             loaded.append((path, load_report(path)))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             errors.append(str(exc))
-    aggregate, aggregate_errors = aggregate_documents(loaded, args.require_platform)
-    aggregate["summary"]["errors"] = [*errors, *aggregate_errors]
-    aggregate["summary"]["status"] = "failed" if aggregate["summary"]["errors"] else "passed"
-    aggregate["release_policy"]["engineering_gate_qualified"] = not aggregate["summary"][
-        "errors"
-    ]
+    aggregate, aggregate_errors = aggregate_documents(
+        loaded,
+        args.require_platform,
+        upstream_results,
+    )
+    all_errors = [*errors, *aggregate_errors]
+    aggregate["summary"]["errors"] = all_errors
+    aggregate["summary"]["status"] = "failed" if all_errors else "passed"
+    aggregate["summary"]["release_ready"] = not all_errors
+    aggregate["release_policy"]["engineering_gate_qualified"] = not all_errors
     output = Path(args.output).resolve()
     write_json(output, aggregate)
     print(f"[gate] aggregate report: {output}", flush=True)
@@ -964,6 +1104,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate_parser.add_argument("--reports", nargs="+", required=True)
     aggregate_parser.add_argument("--output", required=True)
+    aggregate_parser.add_argument(
+        "--upstream-result",
+        action="append",
+        required=True,
+        metavar="JOB=RESULT",
+        help=(
+            "GitHub Actions job result; required for docs, supply-chain, "
+            "gpui-smoke, linux, windows, and macos"
+        ),
+    )
     aggregate_parser.add_argument(
         "--require-platform",
         action="append",

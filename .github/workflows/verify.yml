@@ -212,10 +212,17 @@ jobs:
 
       - name: Aggregate reports
         shell: bash
-        run: >-
-          python3 scripts/release-gate.py aggregate
-          --reports target/release-gate/*.json
-          --output target/release-gate/aggregate.json
+        run: |
+          set -euo pipefail
+          python3 scripts/release-gate.py aggregate \
+            --reports target/release-gate/*.json \
+            --output target/release-gate/aggregate.json \
+            --upstream-result "docs=${{ needs.docs.result }}" \
+            --upstream-result "supply-chain=${{ needs.supply-chain.result }}" \
+            --upstream-result "gpui-smoke=${{ needs.gpui-smoke.result }}" \
+            --upstream-result "linux=${{ needs.linux.result }}" \
+            --upstream-result "windows=${{ needs.windows.result }}" \
+            --upstream-result "macos=${{ needs.macos.result }}"
 
       - name: Upload aggregate report
         if: always()

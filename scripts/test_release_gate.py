@@ -19,6 +19,8 @@ assert SPEC is not None and SPEC.loader is not None
 GATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GATE)
 
+COMPLETE_UPSTREAM_RESULTS = {name: "success" for name in GATE.UPSTREAM_JOBS}
+
 
 def report(
     platform: str,
@@ -29,13 +31,9 @@ def report(
     benchmark: bool = True,
 ) -> dict:
     checks = [
-        {
-            "name": "cross-check-x86_64-apple-darwin" if platform == "macos" else "check",
-            "status": "passed",
-        }
+        {"name": name, "status": "passed"}
+        for name in GATE.required_check_names(platform)
     ]
-    if platform == "macos":
-        checks.append({"name": "cross-check-aarch64-apple-darwin", "status": "passed"})
     return {
         "schema": GATE.EXPECTED_SCHEMA,
         "schema_version": GATE.SCHEMA_VERSION,
@@ -76,18 +74,135 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos")),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertEqual(errors, [])
         self.assertEqual(aggregate["summary"]["status"], "passed")
         self.assertEqual(aggregate["benchmarked_platforms"], ["linux", "macos", "windows"])
+        self.assertTrue(all(job["passed"] for job in aggregate["upstream_jobs"].values()))
         self.assertFalse(aggregate["release_policy"]["security_release_qualified"])
         self.assertTrue(aggregate["release_policy"]["independent_security_audit_required"])
+
+    def test_aggregate_rejects_missing_required_platform_check(self) -> None:
+        linux = report("linux")
+        linux["checks"] = [
+            check
+            for check in linux["checks"]
+            if check["name"] != "cross-check-x86_64-unknown-linux-musl"
+        ]
+
+        _, errors = GATE.aggregate_documents(
+            loaded(
+                ("linux", linux),
+                ("windows", report("windows")),
+                ("macos", report("macos")),
+            ),
+            GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
+        )
+
+        self.assertIn(
+            "/reports/linux.json: required check "
+            "cross-check-x86_64-unknown-linux-musl is missing or did not pass",
+            errors,
+        )
+
+    def test_aggregate_rejects_failed_upstream_job(self) -> None:
+        results = COMPLETE_UPSTREAM_RESULTS.copy()
+        results["gpui-smoke"] = "failure"
+
+        _, errors = GATE.aggregate_documents(
+            loaded(
+                ("linux", report("linux")),
+                ("windows", report("windows")),
+                ("macos", report("macos")),
+            ),
+            GATE.DEFAULT_PLATFORMS,
+            results,
+        )
+
+        self.assertIn("upstream job gpui-smoke did not succeed: failure", errors)
+
+    def test_aggregate_rejects_missing_upstream_job(self) -> None:
+        results = COMPLETE_UPSTREAM_RESULTS.copy()
+        del results["docs"]
+
+        _, errors = GATE.aggregate_documents(
+            loaded(
+                ("linux", report("linux")),
+                ("windows", report("windows")),
+                ("macos", report("macos")),
+            ),
+            GATE.DEFAULT_PLATFORMS,
+            results,
+        )
+
+        self.assertIn("missing upstream job result: docs", errors)
+
+    def test_upstream_result_parser_rejects_malformed_and_duplicate_values(self) -> None:
+        results, errors = GATE.parse_upstream_results(
+            ["docs=success", "docs=failure", "broken"]
+        )
+
+        self.assertEqual(results, {"docs": "success"})
+        self.assertIn("duplicate upstream result for docs", errors)
+        self.assertTrue(any("expected JOB=RESULT" in error for error in errors))
+
+    def test_aggregate_gate_fails_cleanly_for_duplicate_upstream_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_paths = []
+            for platform_name in GATE.DEFAULT_PLATFORMS:
+                path = root / f"{platform_name}.json"
+                GATE.write_json(path, report(platform_name))
+                report_paths.append(path)
+            output = root / "aggregate.json"
+            arguments = [
+                "aggregate",
+                "--reports",
+                *(str(path) for path in report_paths),
+                "--output",
+                str(output),
+            ]
+            for name, result in COMPLETE_UPSTREAM_RESULTS.items():
+                arguments.extend(("--upstream-result", f"{name}={result}"))
+                if name == "docs":
+                    arguments.extend(("--upstream-result", "docs=failure"))
+            for platform_name in GATE.DEFAULT_PLATFORMS:
+                arguments.extend(("--require-platform", platform_name))
+
+            args = GATE.build_parser().parse_args(arguments)
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                exit_code = GATE.aggregate_gate(args)
+
+            aggregate = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(aggregate["summary"]["status"], "failed")
+            self.assertFalse(aggregate["summary"]["release_ready"])
+            self.assertFalse(
+                aggregate["release_policy"]["engineering_gate_qualified"]
+            )
+            self.assertIn(
+                "duplicate upstream result for docs",
+                aggregate["summary"]["errors"],
+            )
+
+    def test_upstream_result_validation_rejects_unknown_jobs(self) -> None:
+        results = {**COMPLETE_UPSTREAM_RESULTS, "unexpected": "success"}
+
+        errors = GATE.validate_upstream_results(results)
+
+        self.assertIn("unknown upstream job results: unexpected", errors)
 
     def test_aggregate_rejects_missing_platform(self) -> None:
         aggregate, errors = GATE.aggregate_documents(
             loaded(("linux", report("linux")), ("windows", report("windows"))),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertEqual(aggregate["summary"]["status"], "failed")
@@ -101,6 +216,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos")),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertIn("platform reports were generated from different or unknown commits", errors)
@@ -116,6 +232,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos")),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertIn(
@@ -130,6 +247,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos", benchmark=False)),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertIn("no platform contains a successful machine-readable benchmark", errors)
@@ -146,6 +264,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos", benchmark=False)),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertIn("no platform contains a successful machine-readable benchmark", errors)
@@ -160,6 +279,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", macos),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertIn(
@@ -175,6 +295,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos")),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertTrue(any("duplicate platform report for linux" in error for error in errors))
@@ -189,6 +310,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", report("macos")),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertIn("/reports/linux.json: check clippy did not pass", errors)
@@ -209,6 +331,7 @@ class ReleaseGateTests(unittest.TestCase):
                 ("macos", macos),
             ),
             GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
         )
 
         self.assertTrue(any("report contains no checks" in error for error in errors))
@@ -397,6 +520,18 @@ class ReleaseGateTests(unittest.TestCase):
         names = {command["name"] for command in plan["commands"]}
         self.assertIn("cross-check-x86_64-unknown-linux-musl", names)
         self.assertIn("cross-check-x86_64-pc-windows-gnu", names)
+
+    def test_plan_runs_single_binary_and_documentation_checks(self) -> None:
+        parser = GATE.build_parser()
+        args = parser.parse_args(["run", "--platform", "linux"])
+        GATE.apply_run_defaults(args)
+        plan = GATE.build_run_plan(args)
+
+        commands = {command["name"]: command["arguments"] for command in plan["commands"]}
+        self.assertIn("scripts/check-single-binary.py", commands["single-binary"])
+        self.assertIn("scripts/check-docs.py", commands["docs"])
+        self.assertIn("scripts/test_check_single_binary.py", commands["helper-tests"])
+        self.assertIn("scripts/test_check_docs.py", commands["helper-tests"])
 
     def test_cross_targets_can_be_disabled_for_host_only_diagnostics(self) -> None:
         parser = GATE.build_parser()

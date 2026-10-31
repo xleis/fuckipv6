@@ -50,6 +50,19 @@
           "properties": {
             "command": {
               "type": "string",
+              "const": "get_node_diagnostics"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "description": "Query live runtime residue and cleanup state from the actor that owns\nnetwork sessions, embedded services and retained resource owners."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
               "const": "start_networks"
             },
             "payload": {
@@ -249,6 +262,38 @@
             "command"
           ],
           "description": "Reload every persisted network and replace the complete data plane under\none single-flight lifecycle operation."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "cleanup_node_residuals"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "networks": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "networks",
+                "all"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "description": "Retry cleanup for runtime resources whose previous owner reported a\ndeferred or failed shutdown."
         },
         {
           "type": "object",

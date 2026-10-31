@@ -101,6 +101,19 @@
           "properties": {
             "command": {
               "type": "string",
+              "const": "get_node_diagnostics"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "description": "Query live runtime residue and cleanup state from the actor that owns\nnetwork sessions, embedded services and retained resource owners."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
               "const": "start_networks"
             },
             "payload": {
@@ -300,6 +313,38 @@
             "command"
           ],
           "description": "Reload every persisted network and replace the complete data plane under\none single-flight lifecycle operation."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "cleanup_node_residuals"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "networks": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "networks",
+                "all"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "description": "Retry cleanup for runtime resources whose previous owner reported a\ndeferred or failed shutdown."
         },
         {
           "type": "object",
@@ -550,6 +595,38 @@
             },
             "data": {
               "$ref": "#/$defs/NodeUiManifest"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "diagnostics"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeDiagnosticsSnapshot"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "cleanup"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeResidualCleanupResult"
             }
           },
           "required": [
@@ -1634,6 +1711,7 @@
           "type": "string",
           "enum": [
             "get_snapshot",
+            "get_node_diagnostics",
             "start_networks",
             "stop_networks",
             "restart_networks",
@@ -1645,6 +1723,7 @@
             "start_node",
             "stop_node",
             "restart_node",
+            "cleanup_node_residuals",
             "shutdown"
           ]
         },
@@ -1810,6 +1889,180 @@
         "title_key",
         "consequence_key",
         "destructive"
+      ]
+    },
+    "NodeDiagnosticsSnapshot": {
+      "type": "object",
+      "properties": {
+        "lifecycle": {
+          "$ref": "#/$defs/NodeLifecycleSnapshot"
+        },
+        "retained_owner_networks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cleanup_candidate_networks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "residue": {
+          "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
+        }
+      },
+      "required": [
+        "lifecycle",
+        "retained_owner_networks",
+        "cleanup_candidate_networks",
+        "residue"
+      ],
+      "description": "Live actor-owned diagnostics. Counts describe observed runtime ownership,\nnot merely configuration or UI snapshot projections."
+    },
+    "NodeRuntimeResidueSnapshot": {
+      "type": "object",
+      "properties": {
+        "sessions_remaining": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "listeners_remaining": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "peers_remaining": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "embedded_services_remaining": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "configuration_retained": {
+          "type": "boolean"
+        },
+        "residual_networks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cleanup_steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeCleanupStepSnapshot"
+          }
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "sessions_remaining",
+        "listeners_remaining",
+        "peers_remaining",
+        "embedded_services_remaining",
+        "configuration_retained",
+        "residual_networks",
+        "cleanup_steps",
+        "issues"
+      ],
+      "description": "Transport-neutral residue report shared by diagnostics and explicit cleanup."
+    },
+    "NodeCleanupStepSnapshot": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeCleanupStepStatus"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "network_name",
+        "resource",
+        "status"
+      ],
+      "description": "One sanitized runtime cleanup step. Host paths and raw operating-system\nerrors are intentionally excluded from this public contract."
+    },
+    "NodeCleanupStepStatus": {
+      "type": "string",
+      "enum": [
+        "removed",
+        "not_owned",
+        "deferred",
+        "failed",
+        "unknown"
+      ]
+    },
+    "NodeResidualCleanupResult": {
+      "type": "object",
+      "properties": {
+        "cleaned_networks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failed_networks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeCleanupFailureSnapshot"
+          }
+        },
+        "residue": {
+          "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
+        }
+      },
+      "required": [
+        "cleaned_networks",
+        "failed_networks",
+        "residue"
+      ],
+      "description": "Partial-success aware result for explicit residual cleanup."
+    },
+    "NodeCleanupFailureSnapshot": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/NodeCleanupFailureReason"
+        }
+      },
+      "required": [
+        "network_name",
+        "reason"
+      ]
+    },
+    "NodeCleanupFailureReason": {
+      "type": "string",
+      "enum": [
+        "still_running",
+        "owner_unavailable",
+        "timed_out",
+        "incomplete",
+        "unknown"
       ]
     },
     "NodePeerProbeSnapshot": {

@@ -1,7 +1,11 @@
 package cc.xlei.fuckipv6.contract;
 
+import java.util.Collections;
+
 import cc.xlei.fuckipv6.contract.NodeContractV1.CommandEnvelope;
 import cc.xlei.fuckipv6.contract.NodeContractV1.CapabilityState;
+import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupFailureReason;
+import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
 
@@ -34,7 +38,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 42,
+                NodeContractV1.DTO_CLASS_NAMES.length == 47,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -62,6 +66,14 @@ public final class NodeContractV1Test {
                 NodeCommandKind.GET_SNAPSHOT,
                 NodeCommandKind.fromWireName("get_snapshot"),
                 "known command");
+        assertSame(
+                NodeCommandKind.GET_NODE_DIAGNOSTICS,
+                NodeCommandKind.fromWireName("get_node_diagnostics"),
+                "runtime diagnostics command");
+        assertSame(
+                NodeCommandKind.CLEANUP_NODE_RESIDUALS,
+                NodeCommandKind.fromWireName("cleanup_node_residuals"),
+                "runtime cleanup command");
         expectIllegalArgument(
                 () -> NodeCommandKind.fromWireName("not_a_command"),
                 "unknown command");
@@ -74,6 +86,14 @@ public final class NodeContractV1Test {
                 NodeProblemCode.UNSUPPORTED,
                 NodeProblemCode.fromWireName("unsupported"),
                 "platform-unsupported problem code");
+        assertSame(
+                NodeCleanupFailureReason.OWNER_UNAVAILABLE,
+                NodeCleanupFailureReason.fromWireName("owner_unavailable"),
+                "runtime cleanup failure reason");
+        assertSame(
+                NodeCleanupStepStatus.DEFERRED,
+                NodeCleanupStepStatus.fromWireName("deferred"),
+                "runtime cleanup step status");
         expectIllegalArgument(
                 () -> CapabilityState.fromWireName("invented"),
                 "unknown capability state");
@@ -87,10 +107,24 @@ public final class NodeContractV1Test {
         assertTrue(
                 !NodeContractV1.isManifestAction(NodeCommandKind.GET_UI_MANIFEST),
                 "get_ui_manifest must remain bootstrap-only");
+        assertTrue(
+                NodeContractV1.isManifestAction(NodeCommandKind.GET_NODE_DIAGNOSTICS),
+                "get_node_diagnostics must be a visible action");
+        assertTrue(
+                NodeContractV1.isManifestAction(NodeCommandKind.CLEANUP_NODE_RESIDUALS),
+                "cleanup_node_residuals must be a visible action");
 
         CommandEnvelope envelope = NodeContractV1.commandEnvelope(1, 7, "get_snapshot");
         assertTrue(envelope.requestId == 7, "request id must be preserved");
         assertSame(NodeCommandKind.GET_SNAPSHOT, envelope.command, "command identity");
+        assertSame(
+                NodeCommandKind.GET_NODE_DIAGNOSTICS,
+                NodeContractV1.commandEnvelope(1, 8, "get_node_diagnostics").command,
+                "runtime diagnostics envelope");
+        assertSame(
+                NodeCommandKind.CLEANUP_NODE_RESIDUALS,
+                NodeContractV1.commandEnvelope(1, 9, "cleanup_node_residuals").command,
+                "runtime cleanup envelope");
 
         expectIllegalArgument(
                 () -> NodeContractV1.commandEnvelope(2, 1, "get_snapshot"),
@@ -118,6 +152,20 @@ public final class NodeContractV1Test {
                 NodeCommandKind.GET_SNAPSHOT,
                 getSnapshot.command,
                 "get_snapshot command DTO");
+        NodeContractV1.NodeCommand.GetNodeDiagnostics getDiagnostics =
+                new NodeContractV1.NodeCommand.GetNodeDiagnostics();
+        assertSame(
+                NodeCommandKind.GET_NODE_DIAGNOSTICS,
+                getDiagnostics.command,
+                "get_node_diagnostics command DTO");
+        NodeContractV1.NodeCommand.CleanupNodeResiduals cleanup =
+                new NodeContractV1.NodeCommand.CleanupNodeResiduals(
+                        new NodeContractV1.NodeCommand.CleanupNodeResiduals.CleanupNodeResidualsPayload(
+                                Collections.emptyList(), false));
+        assertSame(
+                NodeCommandKind.CLEANUP_NODE_RESIDUALS,
+                cleanup.command,
+                "cleanup_node_residuals command DTO");
         NodeContractV1.NodeCreateNetworkCommand createNetwork =
                 new NodeContractV1.NodeCreateNetworkCommand("lab", 41000, 41001, null, true);
         NodeContractV1.NodeCommand.CreateNetwork createCommand =
@@ -136,6 +184,8 @@ public final class NodeContractV1Test {
 
         new NodeContractV1.NodeCommandOutcome.Snapshot(null);
         new NodeContractV1.NodeCommandOutcome.UiManifest(null);
+        new NodeContractV1.NodeCommandOutcome.Diagnostics(null);
+        new NodeContractV1.NodeCommandOutcome.Cleanup(null);
         new NodeContractV1.NodeCommandOutcome.Probe(null);
         new NodeContractV1.NodeCommandOutcome.Accepted(null);
         new NodeContractV1.NodeCommandOutcome.Rejected(null);

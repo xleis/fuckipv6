@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ExitNodeCapabilities", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ExitNodeCapabilities", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -219,8 +219,64 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NodeCleanupFailureReason {
+        STILL_RUNNING("still_running"),
+        OWNER_UNAVAILABLE("owner_unavailable"),
+        TIMED_OUT("timed_out"),
+        INCOMPLETE("incomplete"),
+        UNKNOWN("unknown");
+
+        private final String wireName;
+
+        NodeCleanupFailureReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeCleanupFailureReason fromWireName(String value) {
+            for (NodeCleanupFailureReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeCleanupFailureReason wire value: " + value);
+        }
+    }
+
+    public enum NodeCleanupStepStatus {
+        REMOVED("removed"),
+        NOT_OWNED("not_owned"),
+        DEFERRED("deferred"),
+        FAILED("failed"),
+        UNKNOWN("unknown");
+
+        private final String wireName;
+
+        NodeCleanupStepStatus(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeCleanupStepStatus fromWireName(String value) {
+            for (NodeCleanupStepStatus candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeCleanupStepStatus wire value: " + value);
+        }
+    }
+
     public enum NodeCommandKind {
+        CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
         CREATE_NETWORK("create_network"),
+        GET_NODE_DIAGNOSTICS("get_node_diagnostics"),
         GET_SNAPSHOT("get_snapshot"),
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
@@ -781,6 +837,32 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeCleanupFailureSnapshot. */
+    public static final class NodeCleanupFailureSnapshot {
+        public final String network_name;
+        public final NodeCleanupFailureReason reason;
+
+        public NodeCleanupFailureSnapshot(String network_name, NodeCleanupFailureReason reason) {
+            this.network_name = network_name;
+            this.reason = reason;
+        }
+    }
+
+    /** DTO for NodeCleanupStepSnapshot. */
+    public static final class NodeCleanupStepSnapshot {
+        public final String network_name;
+        public final String resource;
+        public final NodeCleanupStepStatus status;
+        public final String detail;
+
+        public NodeCleanupStepSnapshot(String network_name, String resource, NodeCleanupStepStatus status, String detail) {
+            this.network_name = network_name;
+            this.resource = resource;
+            this.status = status;
+            this.detail = detail;
+        }
+    }
+
     /** DTO for NodeCommandHttpRequest. */
     public static final class NodeCommandHttpRequest {
         public final Integer schema_version;
@@ -848,6 +930,21 @@ public final class NodeContractV1 {
             this.relay_port = relay_port;
             this.external_host = external_host;
             this.auto_connect = auto_connect;
+        }
+    }
+
+    /** DTO for NodeDiagnosticsSnapshot. */
+    public static final class NodeDiagnosticsSnapshot {
+        public final NodeLifecycleSnapshot lifecycle;
+        public final List<String> retained_owner_networks;
+        public final List<String> cleanup_candidate_networks;
+        public final NodeRuntimeResidueSnapshot residue;
+
+        public NodeDiagnosticsSnapshot(NodeLifecycleSnapshot lifecycle, List<String> retained_owner_networks, List<String> cleanup_candidate_networks, NodeRuntimeResidueSnapshot residue) {
+            this.lifecycle = lifecycle;
+            this.retained_owner_networks = retained_owner_networks;
+            this.cleanup_candidate_networks = cleanup_candidate_networks;
+            this.residue = residue;
         }
     }
 
@@ -1153,6 +1250,42 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeResidualCleanupResult. */
+    public static final class NodeResidualCleanupResult {
+        public final List<String> cleaned_networks;
+        public final List<NodeCleanupFailureSnapshot> failed_networks;
+        public final NodeRuntimeResidueSnapshot residue;
+
+        public NodeResidualCleanupResult(List<String> cleaned_networks, List<NodeCleanupFailureSnapshot> failed_networks, NodeRuntimeResidueSnapshot residue) {
+            this.cleaned_networks = cleaned_networks;
+            this.failed_networks = failed_networks;
+            this.residue = residue;
+        }
+    }
+
+    /** DTO for NodeRuntimeResidueSnapshot. */
+    public static final class NodeRuntimeResidueSnapshot {
+        public final Long sessions_remaining;
+        public final Long listeners_remaining;
+        public final Long peers_remaining;
+        public final Long embedded_services_remaining;
+        public final Boolean configuration_retained;
+        public final List<String> residual_networks;
+        public final List<NodeCleanupStepSnapshot> cleanup_steps;
+        public final List<String> issues;
+
+        public NodeRuntimeResidueSnapshot(Long sessions_remaining, Long listeners_remaining, Long peers_remaining, Long embedded_services_remaining, Boolean configuration_retained, List<String> residual_networks, List<NodeCleanupStepSnapshot> cleanup_steps, List<String> issues) {
+            this.sessions_remaining = sessions_remaining;
+            this.listeners_remaining = listeners_remaining;
+            this.peers_remaining = peers_remaining;
+            this.embedded_services_remaining = embedded_services_remaining;
+            this.configuration_retained = configuration_retained;
+            this.residual_networks = residual_networks;
+            this.cleanup_steps = cleanup_steps;
+            this.issues = issues;
+        }
+    }
+
     /** DTO for NodeSetNetworkRoleCommand. */
     public static final class NodeSetNetworkRoleCommand {
         public final String network_name;
@@ -1379,6 +1512,12 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class GetNodeDiagnostics extends NodeCommand {
+            public GetNodeDiagnostics() {
+                super(NodeCommandKind.GET_NODE_DIAGNOSTICS);
+            }
+        }
+
         public static final class StartNetworks extends NodeCommand {
             public final StartNetworksPayload payload;
 
@@ -1497,6 +1636,25 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class CleanupNodeResiduals extends NodeCommand {
+            public final CleanupNodeResidualsPayload payload;
+
+            public CleanupNodeResiduals(CleanupNodeResidualsPayload payload) {
+                super(NodeCommandKind.CLEANUP_NODE_RESIDUALS);
+                this.payload = payload;
+            }
+            /** DTO for CleanupNodeResidualsPayload. */
+            public static final class CleanupNodeResidualsPayload {
+                public final List<String> networks;
+                public final Boolean all;
+
+                public CleanupNodeResidualsPayload(List<String> networks, Boolean all) {
+                    this.networks = networks;
+                    this.all = all;
+                }
+            }
+        }
+
         public static final class Shutdown extends NodeCommand {
             public Shutdown() {
                 super(NodeCommandKind.SHUTDOWN);
@@ -1526,6 +1684,24 @@ public final class NodeContractV1 {
 
             public UiManifest(NodeUiManifest data) {
                 super("ui_manifest");
+                this.data = data;
+            }
+        }
+
+        public static final class Diagnostics extends NodeCommandOutcome {
+            public final NodeDiagnosticsSnapshot data;
+
+            public Diagnostics(NodeDiagnosticsSnapshot data) {
+                super("diagnostics");
+                this.data = data;
+            }
+        }
+
+        public static final class Cleanup extends NodeCommandOutcome {
+            public final NodeResidualCleanupResult data;
+
+            public Cleanup(NodeResidualCleanupResult data) {
+                super("cleanup");
                 this.data = data;
             }
         }
@@ -1854,7 +2030,9 @@ public final class NodeContractV1 {
     }
 
     public static boolean isManifestAction(NodeCommandKind command) {
-        return             command == NodeCommandKind.CREATE_NETWORK ||
+        return             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
+            command == NodeCommandKind.CREATE_NETWORK ||
+            command == NodeCommandKind.GET_NODE_DIAGNOSTICS ||
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.PROBE_PEER ||

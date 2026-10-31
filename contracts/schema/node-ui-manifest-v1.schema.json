@@ -61,6 +61,7 @@
           "type": "string",
           "enum": [
             "get_snapshot",
+            "get_node_diagnostics",
             "start_networks",
             "stop_networks",
             "restart_networks",
@@ -72,6 +73,7 @@
             "start_node",
             "stop_node",
             "restart_node",
+            "cleanup_node_residuals",
             "shutdown"
           ]
         },

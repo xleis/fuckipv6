@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["create_network", "get_snapshot", "get_ui_manifest", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
+export const NODE_COMMAND_KINDS = ["cleanup_node_residuals", "create_network", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["create_network", "get_snapshot", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["cleanup_node_residuals", "create_network", "get_node_diagnostics", "get_snapshot", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -44,10 +44,28 @@ export type NodeCapabilitySnapshot = {
   "state": CapabilityState;
 };
 
+export type NodeCleanupFailureReason = "still_running" | "owner_unavailable" | "timed_out" | "incomplete" | "unknown";
+
+export type NodeCleanupFailureSnapshot = {
+  "network_name": string;
+  "reason": NodeCleanupFailureReason;
+};
+
+export type NodeCleanupStepSnapshot = {
+  "network_name": string;
+  "resource": string;
+  "status": NodeCleanupStepStatus;
+  "detail"?: string | null;
+};
+
+export type NodeCleanupStepStatus = "removed" | "not_owned" | "deferred" | "failed" | "unknown";
+
 export type NodeCommand = {
   "command": "get_snapshot";
 } | {
   "command": "get_ui_manifest";
+} | {
+  "command": "get_node_diagnostics";
 } | {
   "command": "start_networks";
   "payload": {
@@ -87,6 +105,12 @@ export type NodeCommand = {
 } | {
   "command": "restart_node";
 } | {
+  "command": "cleanup_node_residuals";
+  "payload": {
+  "networks": Array<string>;
+  "all": boolean;
+};
+} | {
   "command": "shutdown";
 };
 
@@ -106,6 +130,12 @@ export type NodeCommandOutcome = {
 } | {
   "status": "ui_manifest";
   "data": NodeUiManifest;
+} | {
+  "status": "diagnostics";
+  "data": NodeDiagnosticsSnapshot;
+} | {
+  "status": "cleanup";
+  "data": NodeResidualCleanupResult;
 } | {
   "status": "probe";
   "data": NodePeerProbeSnapshot;
@@ -146,6 +176,13 @@ export type NodeCreateNetworkCommand = {
   "relay_port": number;
   "external_host"?: string | null;
   "auto_connect": boolean;
+};
+
+export type NodeDiagnosticsSnapshot = {
+  "lifecycle": NodeLifecycleSnapshot;
+  "retained_owner_networks": Array<string>;
+  "cleanup_candidate_networks": Array<string>;
+  "residue": NodeRuntimeResidueSnapshot;
 };
 
 export type NodeEmbeddedServiceSnapshot = {
@@ -358,7 +395,24 @@ export type NodeProblem = {
 
 export type NodeProblemCode = "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "internal" | "unsupported";
 
+export type NodeResidualCleanupResult = {
+  "cleaned_networks": Array<string>;
+  "failed_networks": Array<NodeCleanupFailureSnapshot>;
+  "residue": NodeRuntimeResidueSnapshot;
+};
+
 export type NodeRoutingMode = "mesh_only" | "bypass_mainland" | "global_proxy";
+
+export type NodeRuntimeResidueSnapshot = {
+  "sessions_remaining": number;
+  "listeners_remaining": number;
+  "peers_remaining": number;
+  "embedded_services_remaining": number;
+  "configuration_retained": boolean;
+  "residual_networks": Array<string>;
+  "cleanup_steps": Array<NodeCleanupStepSnapshot>;
+  "issues": Array<string>;
+};
 
 export type NodeSetNetworkRoleCommand = {
   "network_name": string;
@@ -403,7 +457,7 @@ export type NodeTrafficSnapshot = {
 export type NodeUiAction = {
   "id": string;
   "label_key": string;
-  "command": "get_snapshot" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "shutdown";
   "backend_status": NodeUiBackendStatus;
   "permission": NodePermission;
   "audit": NodeUiAudit;

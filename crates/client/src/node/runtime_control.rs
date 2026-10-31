@@ -14,7 +14,7 @@ use super::{
     NodeEventKind, NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle,
     NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
     NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeRuntimePlan,
-    NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
+    NodeSetNetworkRoleCommand, NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
@@ -48,6 +48,8 @@ pub(crate) enum RuntimeControlError {
     Conflict(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    Unavailable(String),
     #[error("{0}")]
     Persistence(String),
     #[error("{0}")]
@@ -110,6 +112,14 @@ pub(crate) struct JoinResult {
     pub coordinator_url: String,
     pub config_saved: bool,
     pub started: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleUpdateResult {
+    pub network_name: String,
+    pub role: NodeNetworkRole,
+    pub enabled: bool,
+    pub roles: Vec<NodeNetworkRole>,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +273,10 @@ enum RuntimeControlCommand {
         command: NodeUpdateRoutingCommand,
         reply: oneshot::Sender<Result<ipc::RoutingUpdateResult, RuntimeControlError>>,
     },
+    SetNetworkRole {
+        command: NodeSetNetworkRoleCommand,
+        reply: oneshot::Sender<Result<RoleUpdateResult, RuntimeControlError>>,
+    },
     Stop {
         networks: Vec<String>,
         all: bool,
@@ -410,6 +424,18 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn set_network_role(
+        &self,
+        command: NodeSetNetworkRoleCommand,
+    ) -> Result<RoleUpdateResult, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::SetNetworkRole { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn stop(
         &self,
         networks: Vec<String>,
@@ -467,6 +493,10 @@ async fn run_actor(
             }
             RuntimeControlCommand::UpdateRouting { command, reply } => {
                 let result = actor.update_routing(command).await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::SetNetworkRole { command, reply } => {
+                let result = actor.set_network_role(command).await;
                 let _ = reply.send(result);
             }
             RuntimeControlCommand::Stop {
@@ -556,6 +586,7 @@ impl NetworkRuntimeActor {
         )?;
 
         let config_snapshot = runtime_metadata::network_config_snapshot(&spec.name, &spec.config);
+        let initial_roles = roles_from_config(&spec.config);
         self.record_network_config(config_snapshot).await;
         self.record_network(NodeNetworkSnapshot {
             name: spec.name.clone(),
@@ -568,7 +599,7 @@ impl NetworkRuntimeActor {
             assigned_ipv4: None,
             p2p_listen_addr: None,
             uptime_secs: 0,
-            roles: vec![NodeNetworkRole::Member],
+            roles: initial_roles.clone(),
             peer_count: 0,
             traffic: NodeTrafficSnapshot::default(),
         })
@@ -600,7 +631,7 @@ impl NetworkRuntimeActor {
             assigned_ipv4: started.assigned_ipv4,
             p2p_listen_addr: Some(started.p2p_listen_addr),
             uptime_secs: 0,
-            roles: vec![NodeNetworkRole::Member],
+            roles: initial_roles,
             peer_count: 0,
             traffic: NodeTrafficSnapshot::default(),
         })
@@ -814,6 +845,20 @@ impl NetworkRuntimeActor {
                     "网络 [{network_name}] 的共享配置快照缺失，未应用路由更新"
                 ))
             })?;
+        let previous_roles = self
+            .state
+            .snapshot()
+            .await
+            .networks
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .map(|network| network.roles)
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享运行快照缺失，未应用路由更新"
+                ))
+            })?;
+        ensure_member_role(&network_name, &previous_roles)?;
 
         let result = match request_runtime_routing_update(
             &routing_control,
@@ -852,14 +897,24 @@ impl NetworkRuntimeActor {
         updated.exit_node = command.exit_node.clone();
         updated.exit_node_enabled = command.is_exit_node;
 
-        if !self.publish_existing_network_config(updated).await {
+        let mut updated_roles = previous_roles.clone();
+        set_role_enabled(
+            &mut updated_roles,
+            NodeNetworkRole::ExitNode,
+            command.is_exit_node,
+        );
+
+        if !self
+            .publish_role_projection(updated, updated_roles.clone())
+            .await
+        {
             let rollback =
                 rollback_runtime_routing(&routing_control, &previous, self.routing_update_timeout)
                     .await;
             // The failed publish did not replace an existing entry. Restore the
             // previous projection if a concurrent state transition removed it
             // while the runtime update was in flight.
-            self.restore_network_config(previous).await;
+            self.restore_role_projection(previous, previous_roles).await;
             return Err(match rollback {
                 Ok(()) => RuntimeControlError::Persistence(format!(
                     "网络 [{network_name}] 的共享快照发布失败，运行态、持久化配置和共享快照已回滚"
@@ -876,8 +931,148 @@ impl NetworkRuntimeActor {
             exit_node: command.exit_node,
             is_exit_node: command.is_exit_node,
         });
+        if updated_roles != previous_roles {
+            self.events.publish(NodeEventKind::RoleChanged {
+                network_name: command.network_name,
+                role: NodeNetworkRole::ExitNode,
+                enabled: command.is_exit_node,
+                roles: updated_roles,
+            });
+        }
 
         Ok(result)
+    }
+
+    async fn set_network_role(
+        &mut self,
+        command: NodeSetNetworkRoleCommand,
+    ) -> Result<RoleUpdateResult, RuntimeControlError> {
+        self.prune_finished_sessions();
+
+        match command.role {
+            NodeNetworkRole::Member => {
+                return Err(RuntimeControlError::Conflict(
+                    "成员角色是节点网络内的基线能力，不能单独启用或禁用".into(),
+                ));
+            }
+            NodeNetworkRole::Discovery | NodeNetworkRole::Relay => {
+                return Err(RuntimeControlError::Unavailable(format!(
+                    "{:?} 角色目前只能随内嵌 Discovery+Relay 服务整体创建/停止；尚未提供不重启网络即可独立切换该能力的后端，未修改任何状态",
+                    command.role
+                )));
+            }
+            NodeNetworkRole::ExitNode => {}
+        }
+
+        let network_name = command.network_name.clone();
+        let routing_control = self
+            .sessions
+            .get(&network_name)
+            .map(|session| session.routing_control.clone())
+            .ok_or_else(|| RuntimeControlError::NotFound(format!("网络未运行: {network_name}")))?;
+
+        let before = self.state.snapshot().await;
+        let previous_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == network_name)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享配置快照缺失，未应用角色更新"
+                ))
+            })?;
+        let previous_roles = before
+            .networks
+            .iter()
+            .find(|network| network.name == network_name)
+            .map(|network| network.roles.clone())
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享运行快照缺失，未应用角色更新"
+                ))
+            })?;
+        ensure_member_role(&network_name, &previous_roles)?;
+
+        let mut desired_roles = previous_roles.clone();
+        set_role_enabled(&mut desired_roles, command.role, command.enabled);
+        let routing_command = NodeUpdateRoutingCommand {
+            network_name: network_name.clone(),
+            mode: previous_config.routing_mode,
+            exit_node: previous_config.exit_node.clone(),
+            is_exit_node: desired_roles.contains(&NodeNetworkRole::ExitNode),
+        };
+
+        match request_runtime_routing_update(
+            &routing_control,
+            &routing_command,
+            self.routing_update_timeout,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(RuntimeRoutingRequestError::ControlClosed) => {
+                return Err(RuntimeControlError::NotFound(format!(
+                    "网络 [{network_name}] 的运行时控制通道已关闭"
+                )));
+            }
+            Err(failure) => {
+                let failure_message = describe_routing_request_failure(&failure);
+                let rollback = rollback_runtime_routing(
+                    &routing_control,
+                    &previous_config,
+                    self.routing_update_timeout,
+                )
+                .await;
+                return Err(match rollback {
+                    Ok(()) => RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 角色运行态更新失败: {failure_message}；已重新应用旧配置，运行态与持久化配置已回滚"
+                    )),
+                    Err(rollback_error) => RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 角色运行态更新失败: {failure_message}；旧配置回滚未能确认: {rollback_error}"
+                    )),
+                });
+            }
+        }
+
+        let mut updated_config = previous_config.clone();
+        updated_config.exit_node_enabled = desired_roles.contains(&NodeNetworkRole::ExitNode);
+        if !self
+            .publish_role_projection(updated_config, desired_roles.clone())
+            .await
+        {
+            let rollback = rollback_runtime_routing(
+                &routing_control,
+                &previous_config,
+                self.routing_update_timeout,
+            )
+            .await;
+            self.restore_role_projection(previous_config, previous_roles.clone())
+                .await;
+            return Err(match rollback {
+                Ok(()) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的角色共享快照发布失败，运行态、持久化配置和共享快照已回滚"
+                )),
+                Err(rollback_error) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的角色共享快照发布失败，且运行态回滚失败: {rollback_error}"
+                )),
+            });
+        }
+
+        self.events.publish(NodeEventKind::RoleChanged {
+            network_name: network_name.clone(),
+            role: command.role,
+            enabled: command.enabled,
+            roles: desired_roles.clone(),
+        });
+
+        Ok(RoleUpdateResult {
+            network_name,
+            role: command.role,
+            enabled: command.enabled,
+            roles: desired_roles,
+        })
     }
 
     async fn stop(
@@ -1121,36 +1316,72 @@ impl NetworkRuntimeActor {
             .await;
     }
 
-    async fn publish_existing_network_config(&self, config: NodeNetworkConfigSnapshot) -> bool {
+    async fn publish_role_projection(
+        &self,
+        config: NodeNetworkConfigSnapshot,
+        roles: Vec<NodeNetworkRole>,
+    ) -> bool {
         let mut published = false;
         self.state
             .update(|snapshot| {
+                let has_config = snapshot
+                    .configuration
+                    .networks
+                    .iter()
+                    .any(|network| network.network_name == config.network_name);
+                let has_runtime = snapshot
+                    .networks
+                    .iter()
+                    .any(|network| network.name == config.network_name);
+                if !has_config || !has_runtime {
+                    return;
+                }
+
                 if let Some(existing) = snapshot
                     .configuration
                     .networks
                     .iter_mut()
-                    .find(|existing| existing.network_name == config.network_name)
+                    .find(|network| network.network_name == config.network_name)
                 {
-                    *existing = config;
-                    published = true;
+                    *existing = config.clone();
                 }
+                if let Some(existing) = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == config.network_name)
+                {
+                    existing.roles = roles.clone();
+                }
+                published = true;
             })
             .await;
         published
     }
 
-    async fn restore_network_config(&self, config: NodeNetworkConfigSnapshot) {
+    async fn restore_role_projection(
+        &self,
+        config: NodeNetworkConfigSnapshot,
+        roles: Vec<NodeNetworkRole>,
+    ) {
+        let network_name = config.network_name.clone();
         self.state
             .update(|snapshot| {
                 if let Some(existing) = snapshot
                     .configuration
                     .networks
                     .iter_mut()
-                    .find(|existing| existing.network_name == config.network_name)
+                    .find(|network| network.network_name == network_name)
                 {
                     *existing = config;
                 } else {
                     snapshot.configuration.networks.push(config);
+                }
+                if let Some(existing) = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == network_name)
+                {
+                    existing.roles = roles;
                 }
             })
             .await;
@@ -1341,11 +1572,45 @@ fn runtime_routing_mode_name(mode: NodeRoutingMode) -> &'static str {
     }
 }
 
+fn roles_from_config(config: &ClientConfig) -> Vec<NodeNetworkRole> {
+    let mut roles = vec![NodeNetworkRole::Member];
+    if config.exit_node.enabled {
+        roles.push(NodeNetworkRole::ExitNode);
+    }
+    roles
+}
+
+fn ensure_member_role(
+    network_name: &str,
+    roles: &[NodeNetworkRole],
+) -> Result<(), RuntimeControlError> {
+    if roles.contains(&NodeNetworkRole::Member) {
+        return Ok(());
+    }
+    Err(RuntimeControlError::Persistence(format!(
+        "网络 [{network_name}] 的共享运行快照缺少基线 Member 角色，未应用角色更新"
+    )))
+}
+
+fn set_role_enabled(roles: &mut Vec<NodeNetworkRole>, role: NodeNetworkRole, enabled: bool) {
+    roles.retain(|existing| *existing != role);
+    if enabled {
+        roles.push(role);
+    }
+    roles.sort_by_key(|role| match role {
+        NodeNetworkRole::Member => 0,
+        NodeNetworkRole::Discovery => 1,
+        NodeNetworkRole::Relay => 2,
+        NodeNetworkRole::ExitNode => 3,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::node::{
-        NodeCommand, NodeCommandOutcome, NodeCommandRequest, NodeEvent, NodePeerSnapshot,
+        NodeCommand, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeEvent,
+        NodePeerSnapshot,
     };
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -1370,6 +1635,9 @@ mod tests {
         shutdowns: Arc<AtomicUsize>,
         routing_calls: Arc<Mutex<Vec<RoutingCall>>>,
         routing_failures: Arc<Mutex<HashSet<String>>>,
+        next_routing_failures: Arc<Mutex<HashSet<String>>>,
+        next_routing_persistence_failures: Arc<Mutex<HashSet<String>>>,
+        runtime_exit_nodes: Arc<Mutex<HashMap<String, bool>>>,
         routing_delay_ms: Arc<AtomicU64>,
         routing_in_flight: Arc<AtomicUsize>,
         routing_max_in_flight: Arc<AtomicUsize>,
@@ -1405,6 +1673,20 @@ mod tests {
                 .insert(network_name.to_string());
         }
 
+        fn fail_next_routing(&self, network_name: &str) {
+            self.next_routing_failures
+                .lock()
+                .expect("next routing failure lock poisoned")
+                .insert(network_name.to_string());
+        }
+
+        fn fail_next_routing_persistence(&self, network_name: &str) {
+            self.next_routing_persistence_failures
+                .lock()
+                .expect("next routing persistence failure lock poisoned")
+                .insert(network_name.to_string());
+        }
+
         fn set_routing_delay(&self, delay: Duration) {
             self.routing_delay_ms
                 .store(delay.as_millis() as u64, Ordering::SeqCst);
@@ -1420,6 +1702,14 @@ mod tests {
         fn max_routing_concurrency(&self) -> usize {
             self.routing_max_in_flight.load(Ordering::SeqCst)
         }
+
+        fn runtime_exit_node(&self, network_name: &str) -> Option<bool> {
+            self.runtime_exit_nodes
+                .lock()
+                .expect("runtime exit node lock poisoned")
+                .get(network_name)
+                .copied()
+        }
     }
 
     impl NetworkRuntimeLauncher for FakeLauncher {
@@ -1429,6 +1719,9 @@ mod tests {
             let shutdowns = self.shutdowns.clone();
             let routing_calls = self.routing_calls.clone();
             let routing_failures = self.routing_failures.clone();
+            let next_routing_failures = self.next_routing_failures.clone();
+            let next_routing_persistence_failures = self.next_routing_persistence_failures.clone();
+            let runtime_exit_nodes = self.runtime_exit_nodes.clone();
             let routing_delay_ms = self.routing_delay_ms.clone();
             let routing_in_flight = self.routing_in_flight.clone();
             let routing_max_in_flight = self.routing_max_in_flight.clone();
@@ -1504,14 +1797,20 @@ mod tests {
                                             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                                         }
 
-                                        let failed = routing_failures
+                                        let persistent_failure = routing_failures
                                             .lock()
                                             .expect("routing failure lock poisoned")
                                             .contains(&routing_network_name);
+                                        let one_shot_failure = next_routing_failures
+                                            .lock()
+                                            .expect("next routing failure lock poisoned")
+                                            .remove(&routing_network_name);
+                                        let failed = persistent_failure || one_shot_failure;
                                         let result = if failed {
                                             Err("测试运行时拒绝路由热更新".to_string())
                                         } else {
-                                            current_config.routing.mode = match node_mode {
+                                            let mut updated_config = current_config.clone();
+                                            updated_config.routing.mode = match node_mode {
                                                 NodeRoutingMode::MeshOnly => {
                                                     fuckipv6_common::RoutingMode::MeshOnly
                                                 }
@@ -1522,16 +1821,32 @@ mod tests {
                                                     fuckipv6_common::RoutingMode::GlobalProxy
                                                 }
                                             };
-                                            current_config.routing.exit_node = exit_node.clone();
-                                            current_config.exit_node.enabled = is_exit_node;
-                                            current_config
-                                                .save_to_file(&config_path)
-                                                .map(|_| ipc::RoutingUpdateResult {
+                                            updated_config.routing.exit_node = exit_node.clone();
+                                            updated_config.exit_node.enabled = is_exit_node;
+                                            let persistence_failed = next_routing_persistence_failures
+                                                .lock()
+                                                .expect("routing persistence failure lock poisoned")
+                                                .remove(&routing_network_name);
+                                            let persisted = if persistence_failed {
+                                                Err("测试运行时注入持久化失败".to_string())
+                                            } else {
+                                                updated_config
+                                                    .save_to_file(&config_path)
+                                                    .map_err(|error| format!("测试持久化失败: {error:#}"))
+                                            };
+                                            persisted
+                                                .map(|_| {
+                                                    current_config = updated_config;
+                                                    runtime_exit_nodes
+                                                        .lock()
+                                                        .expect("runtime exit node lock poisoned")
+                                                        .insert(routing_network_name.clone(), is_exit_node);
+                                                    ipc::RoutingUpdateResult {
                                                     mode: format!("{node_mode:?}"),
                                                     exit_node,
                                                     is_exit_node,
+                                                    }
                                                 })
-                                                .map_err(|error| format!("测试持久化失败: {error:#}"))
                                         };
                                         routing_in_flight.fetch_sub(1, Ordering::SeqCst);
                                         let _ = reply.send(result);
@@ -1670,6 +1985,18 @@ mod tests {
         }
     }
 
+    fn role_command(
+        network_name: &str,
+        role: NodeNetworkRole,
+        enabled: bool,
+    ) -> NodeSetNetworkRoleCommand {
+        NodeSetNetworkRoleCommand {
+            network_name: network_name.into(),
+            role,
+            enabled,
+        }
+    }
+
     async fn start_fake_network(harness: &TestHarness, network_name: &str) {
         harness
             .configs
@@ -1714,6 +2041,24 @@ mod tests {
             } = event.kind
             {
                 changes.push((network_name, mode, exit_node, is_exit_node));
+            }
+        }
+        changes
+    }
+
+    fn role_changed_events(
+        receiver: &mut broadcast::Receiver<NodeEvent>,
+    ) -> Vec<(String, NodeNetworkRole, bool, Vec<NodeNetworkRole>)> {
+        let mut changes = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let NodeEventKind::RoleChanged {
+                network_name,
+                role,
+                enabled,
+                roles,
+            } = event.kind
+            {
+                changes.push((network_name, role, enabled, roles));
             }
         }
         changes
@@ -1853,6 +2198,608 @@ mod tests {
         );
         assert_eq!(harness.fake.launches(), vec!["routing-success"]);
         assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn command_bus_hot_updates_exit_node_role_without_restarting_or_dropping_peers() {
+        let harness = TestHarness::new("role-success").await;
+        start_fake_network(&harness, "role-success").await;
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = fuckipv6_common::ExitNodeCapabilities {
+                    schema_version: fuckipv6_common::EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                    platform: fuckipv6_common::ExitNodePlatform::Linux,
+                    supported: true,
+                    ipv4_forwarding: true,
+                    ipv6_forwarding: true,
+                    nat: true,
+                    cleanup: true,
+                    unsupported_reasons: Vec::new(),
+                };
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "role-success")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("role-success"));
+            })
+            .await;
+        let mut events = harness.events.subscribe();
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            MultiNetworkRegistry::new(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+        );
+
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                700,
+                NodeCommand::SetNetworkRole(role_command(
+                    "role-success",
+                    NodeNetworkRole::ExitNode,
+                    true,
+                )),
+            ))
+            .await
+            .expect("role command result");
+        assert!(result.is_success());
+        match result.outcome {
+            NodeCommandOutcome::Completed { message } => {
+                assert!(message.contains("ExitNode"));
+                assert!(message.contains("enabled=true"));
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        assert_eq!(
+            harness.fake.routing_calls(),
+            vec![RoutingCall {
+                network_name: "role-success".into(),
+                mode: NodeRoutingMode::MeshOnly,
+                exit_node: None,
+                is_exit_node: true,
+            }]
+        );
+        assert_eq!(harness.fake.runtime_exit_node("role-success"), Some(true));
+        let config_path = harness
+            .configs
+            .get_network_config("role-success")
+            .expect("network config path");
+        let persisted = ClientConfig::from_file(config_path).expect("persisted role config");
+        assert!(persisted.exit_node.enabled);
+
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "role-success")
+            .expect("running network");
+        assert_eq!(
+            network.roles,
+            vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
+        );
+        let configuration = snapshot
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "role-success")
+            .expect("shared role config");
+        assert!(configuration.exit_node_enabled);
+        assert_eq!(snapshot.peers, vec![peer_snapshot("role-success")]);
+        assert_eq!(
+            role_changed_events(&mut events),
+            vec![(
+                "role-success".into(),
+                NodeNetworkRole::ExitNode,
+                true,
+                vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode],
+            )]
+        );
+        assert_eq!(harness.fake.launches(), vec!["role-success"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn persisted_exit_node_role_is_restored_when_the_network_restarts() {
+        let harness = TestHarness::new("role-restart").await;
+        start_fake_network(&harness, "role-restart").await;
+        harness
+            .runtime
+            .set_network_role(role_command(
+                "role-restart",
+                NodeNetworkRole::ExitNode,
+                true,
+            ))
+            .await
+            .expect("enable persisted exit role");
+
+        let config_path = harness
+            .configs
+            .get_network_config("role-restart")
+            .expect("network config path");
+        assert!(
+            ClientConfig::from_file(config_path)
+                .expect("persisted role config")
+                .exit_node
+                .enabled
+        );
+
+        harness
+            .runtime
+            .stop(vec!["role-restart".into()], false)
+            .await
+            .expect("stop network before restart");
+        assert_eq!(harness.fake.launches(), vec!["role-restart"]);
+        assert_eq!(harness.fake.shutdown_count(), 1);
+
+        let plan = NodeRuntimePlan::load(
+            &harness.configs,
+            NodeNetworkSelection::Named(vec!["role-restart".into()]),
+        )
+        .expect("reload persisted network plan");
+        let summary = harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("restart network from persisted config");
+        assert_eq!(summary.started, vec!["role-restart"]);
+        assert_eq!(
+            harness.fake.launches(),
+            vec!["role-restart", "role-restart"]
+        );
+        assert_eq!(harness.fake.shutdown_count(), 1);
+
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == "role-restart")
+                .expect("restarted network")
+                .roles,
+            vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
+        );
+        assert!(
+            snapshot
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "role-restart")
+                .expect("restored role config")
+                .exit_node_enabled
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_and_unavailable_role_changes_have_no_side_effects() {
+        let harness = TestHarness::new("role-rejections").await;
+        start_fake_network(&harness, "role-rejections").await;
+        let mut events = harness.events.subscribe();
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            MultiNetworkRegistry::new(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+        );
+        let invalid = bus
+            .execute(NodeCommandRequest::new(
+                710,
+                NodeCommand::SetNetworkRole(role_command(
+                    "role-rejections",
+                    NodeNetworkRole::Member,
+                    false,
+                )),
+            ))
+            .await
+            .expect_err("disabling the baseline Member role must fail validation");
+        match invalid {
+            NodeCommandBusError::Invalid(problem) => {
+                assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+                assert!(!problem.retryable);
+                assert_eq!(problem.network_name.as_deref(), Some("role-rejections"));
+            }
+            error => panic!("unexpected command bus error: {error:?}"),
+        }
+
+        let cases = [
+            (
+                role_command("role-rejections", NodeNetworkRole::Member, true),
+                NodeProblemCode::Conflict,
+                false,
+            ),
+            (
+                role_command("role-rejections", NodeNetworkRole::Discovery, true),
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                role_command("role-rejections", NodeNetworkRole::Relay, true),
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+        ];
+        for (offset, (command, expected_code, expected_retryable)) in cases.into_iter().enumerate()
+        {
+            let result = bus
+                .execute(NodeCommandRequest::new(
+                    711 + offset as u64,
+                    NodeCommand::SetNetworkRole(command),
+                ))
+                .await
+                .expect("role rejection result");
+            match result.outcome {
+                NodeCommandOutcome::Rejected(problem) => {
+                    assert_eq!(problem.code, expected_code);
+                    assert_eq!(problem.retryable, expected_retryable);
+                    assert_eq!(problem.network_name.as_deref(), Some("role-rejections"));
+                }
+                outcome => panic!("unexpected outcome: {outcome:?}"),
+            }
+        }
+
+        assert!(harness.fake.routing_calls().is_empty());
+        assert_eq!(harness.fake.launches(), vec!["role-rejections"]);
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == "role-rejections")
+                .expect("running network")
+                .roles,
+            vec![NodeNetworkRole::Member]
+        );
+        let config_path = harness
+            .configs
+            .get_network_config("role-rejections")
+            .expect("network config path");
+        assert!(
+            !ClientConfig::from_file(config_path)
+                .expect("unchanged role config")
+                .exit_node
+                .enabled
+        );
+        assert!(role_changed_events(&mut events).is_empty());
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_role_updates_are_serialized_and_last_write_wins() {
+        let harness = TestHarness::new("role-concurrent").await;
+        start_fake_network(&harness, "role-concurrent").await;
+        harness.fake.set_routing_delay(Duration::from_millis(80));
+
+        let first_runtime = harness.runtime.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .set_network_role(role_command(
+                    "role-concurrent",
+                    NodeNetworkRole::ExitNode,
+                    true,
+                ))
+                .await
+        });
+        wait_for_routing_calls(&harness.fake, 1).await;
+
+        harness
+            .runtime
+            .set_network_role(role_command(
+                "role-concurrent",
+                NodeNetworkRole::ExitNode,
+                false,
+            ))
+            .await
+            .expect("second role update");
+        first
+            .await
+            .expect("first role task")
+            .expect("first role update");
+
+        assert_eq!(harness.fake.max_routing_concurrency(), 1);
+        assert_eq!(
+            harness
+                .fake
+                .routing_calls()
+                .into_iter()
+                .map(|call| call.is_exit_node)
+                .collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == "role-concurrent")
+                .expect("running network")
+                .roles,
+            vec![NodeNetworkRole::Member]
+        );
+        assert!(
+            !snapshot
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "role-concurrent")
+                .expect("final role config")
+                .exit_node_enabled
+        );
+        assert_eq!(harness.fake.launches(), vec!["role-concurrent"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn role_runtime_failure_rolls_back_runtime_file_and_snapshot() {
+        let harness = TestHarness::new("role-runtime-rollback").await;
+        start_fake_network(&harness, "role-runtime").await;
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "role-runtime")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("role-runtime"));
+            })
+            .await;
+        let before = harness.state.snapshot().await;
+        let config_path = harness
+            .configs
+            .get_network_config("role-runtime")
+            .expect("network config path");
+        harness.fake.fail_next_routing("role-runtime");
+        let mut events = harness.events.subscribe();
+
+        let error = harness
+            .runtime
+            .set_network_role(role_command(
+                "role-runtime",
+                NodeNetworkRole::ExitNode,
+                true,
+            ))
+            .await
+            .expect_err("runtime rejection must propagate");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Persistence(ref message)
+                if message.contains("运行态与持久化配置已回滚")
+        ));
+
+        let after = harness.state.snapshot().await;
+        assert_eq!(after.peers, before.peers);
+        assert_eq!(
+            after
+                .networks
+                .iter()
+                .find(|network| network.name == "role-runtime")
+                .expect("running network")
+                .roles,
+            vec![NodeNetworkRole::Member]
+        );
+        assert_eq!(harness.fake.runtime_exit_node("role-runtime"), Some(false));
+        assert!(
+            !ClientConfig::from_file(config_path)
+                .expect("rolled back role config")
+                .exit_node
+                .enabled
+        );
+        assert!(role_changed_events(&mut events).is_empty());
+        assert_eq!(harness.fake.launches(), vec!["role-runtime"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn role_persistence_failure_rolls_back_runtime_and_snapshot() {
+        let harness = TestHarness::new("role-persistence-rollback").await;
+        start_fake_network(&harness, "role-persistence").await;
+        let before = harness.state.snapshot().await;
+        let config_path = harness
+            .configs
+            .get_network_config("role-persistence")
+            .expect("network config path");
+        harness
+            .fake
+            .fail_next_routing_persistence("role-persistence");
+        let mut events = harness.events.subscribe();
+
+        let error = harness
+            .runtime
+            .set_network_role(role_command(
+                "role-persistence",
+                NodeNetworkRole::ExitNode,
+                true,
+            ))
+            .await
+            .expect_err("persistence rejection must propagate");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Persistence(ref message)
+                if message.contains("运行态与持久化配置已回滚")
+        ));
+
+        let after = harness.state.snapshot().await;
+        assert_eq!(after.peers, before.peers);
+        assert!(
+            !after
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "role-persistence")
+                .expect("shared role config")
+                .exit_node_enabled
+        );
+        assert_eq!(
+            after
+                .networks
+                .iter()
+                .find(|network| network.name == "role-persistence")
+                .expect("running network")
+                .roles,
+            vec![NodeNetworkRole::Member]
+        );
+        assert_eq!(
+            harness.fake.runtime_exit_node("role-persistence"),
+            Some(false)
+        );
+        assert!(
+            !ClientConfig::from_file(config_path)
+                .expect("unchanged role config")
+                .exit_node
+                .enabled
+        );
+        assert!(role_changed_events(&mut events).is_empty());
+        assert_eq!(harness.fake.launches(), vec!["role-persistence"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn role_snapshot_failure_rolls_back_runtime_file_and_shared_state() {
+        let harness = TestHarness::new("role-snapshot-rollback").await;
+        start_fake_network(&harness, "role-snapshot").await;
+        harness
+            .state
+            .update(|snapshot| {
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "role-snapshot")
+                    .expect("running network");
+                network.peer_count = 1;
+                snapshot.peers.push(peer_snapshot("role-snapshot"));
+            })
+            .await;
+        let before = harness.state.snapshot().await;
+        let before_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == "role-snapshot")
+            .expect("initial role config")
+            .clone();
+        let config_path = harness
+            .configs
+            .get_network_config("role-snapshot")
+            .expect("network config path");
+        harness.fake.set_routing_delay(Duration::from_millis(80));
+        let mut events = harness.events.subscribe();
+        let update_runtime = harness.runtime.clone();
+        let update = tokio::spawn(async move {
+            update_runtime
+                .set_network_role(role_command(
+                    "role-snapshot",
+                    NodeNetworkRole::ExitNode,
+                    true,
+                ))
+                .await
+        });
+        wait_for_routing_calls(&harness.fake, 1).await;
+
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot
+                    .configuration
+                    .networks
+                    .retain(|network| network.network_name != "role-snapshot");
+            })
+            .await;
+        let error = update
+            .await
+            .expect("role task")
+            .expect_err("snapshot publish failure must reject the role update");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Persistence(ref message)
+                if message.contains("角色共享快照发布失败")
+        ));
+
+        assert_eq!(harness.fake.runtime_exit_node("role-snapshot"), Some(false));
+        assert!(
+            !ClientConfig::from_file(config_path)
+                .expect("rolled back role config")
+                .exit_node
+                .enabled
+        );
+        let after = harness.state.snapshot().await;
+        assert_eq!(
+            after
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == "role-snapshot")
+                .expect("restored role config"),
+            &before_config
+        );
+        assert_eq!(
+            after
+                .networks
+                .iter()
+                .find(|network| network.name == "role-snapshot")
+                .expect("running network")
+                .roles,
+            vec![NodeNetworkRole::Member]
+        );
+        assert_eq!(after.peers, before.peers);
+        assert!(role_changed_events(&mut events).is_empty());
+        assert_eq!(harness.fake.launches(), vec!["role-snapshot"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stopping_network_after_role_update_releases_embedded_service() {
+        let harness = TestHarness::new("role-stop-service").await;
+        start_fake_network(&harness, "role-stop").await;
+        harness
+            .services
+            .start(
+                EmbeddedServiceStartRequest::new("role-stop", 0, 0).with_external_host("127.0.0.1"),
+            )
+            .await
+            .expect("start role-owned embedded service");
+        harness
+            .runtime
+            .set_network_role(role_command("role-stop", NodeNetworkRole::ExitNode, true))
+            .await
+            .expect("enable exit role");
+
+        let stopped = harness
+            .runtime
+            .stop(vec!["role-stop".into()], false)
+            .await
+            .expect("stop network and role-owned service");
+        assert_eq!(stopped.stopped, vec!["role-stop"]);
+        assert!(harness
+            .services
+            .list()
+            .await
+            .expect("list embedded services")
+            .iter()
+            .all(|service| service.network_name != "role-stop"));
+        assert_eq!(harness.fake.shutdown_count(), 1);
+        assert_eq!(harness.fake.launches(), vec!["role-stop"]);
 
         harness.shutdown().await;
     }

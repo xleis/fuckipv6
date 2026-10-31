@@ -140,39 +140,34 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                         }
                     }
                 }
-                super::NodeCommand::SetNetworkRole(command)
-                    if command.role == super::NodeNetworkRole::ExitNode && command.enabled =>
-                {
-                    reject_unsupported_exit_node_or(&state, request_id, || {
-                        "网络角色变更尚未接入持久化与运行时重配置".to_string()
-                    })
-                    .await
-                }
-                super::NodeCommand::SetNetworkRole(_) => {
-                    unavailable(request_id, "网络角色变更尚未接入持久化与运行时重配置")
+                super::NodeCommand::SetNetworkRole(command) => {
+                    let capabilities = state.snapshot().await.exit_node_capabilities;
+                    if command.role == super::NodeNetworkRole::ExitNode
+                        && command.enabled
+                        && !capabilities.supported
+                    {
+                        NodeCommandResult::rejected(
+                            request_id,
+                            NodeProblem::new(
+                                NodeProblemCode::Unsupported,
+                                capabilities.unsupported_explanation(),
+                            ),
+                        )
+                    } else {
+                        match runtime {
+                            Some(runtime) => {
+                                set_runtime_network_role(&runtime, request_id, command).await
+                            }
+                            None => unavailable(
+                                request_id,
+                                "网络角色热更新需要运行中的多网络监督器控制通道",
+                            ),
+                        }
+                    }
                 }
             }
         })
     }
-}
-
-async fn reject_unsupported_exit_node_or(
-    state: &NodeStateStore,
-    request_id: u64,
-    unavailable_message: impl FnOnce() -> String,
-) -> NodeCommandResult {
-    let capabilities = state.snapshot().await.exit_node_capabilities;
-    if capabilities.supported {
-        return unavailable(request_id, unavailable_message());
-    }
-
-    NodeCommandResult::rejected(
-        request_id,
-        NodeProblem::new(
-            NodeProblemCode::Unsupported,
-            capabilities.unsupported_explanation(),
-        ),
-    )
 }
 
 async fn start_runtime_networks(
@@ -300,6 +295,28 @@ async fn update_runtime_routing(
     }
 }
 
+async fn set_runtime_network_role(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeSetNetworkRoleCommand,
+) -> NodeCommandResult {
+    let network_name = command.network_name.clone();
+    let role = command.role;
+    let enabled = command.enabled;
+    match runtime.set_network_role(command).await {
+        Ok(result) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: format!(
+                    "网络 [{network_name}] 角色已热更新: {role:?} enabled={enabled}; 当前角色={:?}",
+                    result.roles
+                ),
+            },
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, &network_name),
+    }
+}
+
 fn completed_summary(request_id: u64, summary: StartSummary, action: &str) -> NodeCommandResult {
     NodeCommandResult::completed(
         request_id,
@@ -310,19 +327,37 @@ fn completed_summary(request_id: u64, summary: StartSummary, action: &str) -> No
 }
 
 fn runtime_rejection(request_id: u64, error: RuntimeControlError) -> NodeCommandResult {
+    runtime_rejection_scoped(request_id, error, None)
+}
+
+fn runtime_rejection_for_network(
+    request_id: u64,
+    error: RuntimeControlError,
+    network_name: impl Into<String>,
+) -> NodeCommandResult {
+    runtime_rejection_scoped(request_id, error, Some(network_name.into()))
+}
+
+fn runtime_rejection_scoped(
+    request_id: u64,
+    error: RuntimeControlError,
+    network_name: Option<String>,
+) -> NodeCommandResult {
     let code = match &error {
         RuntimeControlError::Invalid(_) => NodeProblemCode::InvalidRequest,
         RuntimeControlError::Conflict(_) => NodeProblemCode::Conflict,
         RuntimeControlError::NotFound(_) => NodeProblemCode::NotFound,
         RuntimeControlError::ActorClosed
+        | RuntimeControlError::Unavailable(_)
         | RuntimeControlError::Persistence(_)
         | RuntimeControlError::Launch(_) => NodeProblemCode::Unavailable,
     };
-    NodeCommandResult::rejected(
-        request_id,
-        NodeProblem::new(code, error.to_string())
-            .retryable(matches!(code, NodeProblemCode::Unavailable)),
-    )
+    let mut problem = NodeProblem::new(code, error.to_string())
+        .retryable(matches!(code, NodeProblemCode::Unavailable));
+    if let Some(network_name) = network_name {
+        problem = problem.for_network(network_name);
+    }
+    NodeCommandResult::rejected(request_id, problem)
 }
 
 async fn stop_networks(
@@ -822,6 +857,11 @@ mod tests {
             ),
             (
                 RuntimeControlError::ActorClosed,
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                RuntimeControlError::Unavailable("unavailable".into()),
                 NodeProblemCode::Unavailable,
                 true,
             ),

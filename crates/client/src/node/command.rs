@@ -166,7 +166,12 @@ pub struct NodeSetNetworkRoleCommand {
 
 impl NodeSetNetworkRoleCommand {
     fn validate(&self) -> Result<(), NodeProblem> {
-        validate_network_name(&self.network_name)
+        validate_network_name(&self.network_name)?;
+        if self.role == NodeNetworkRole::Member && !self.enabled {
+            return Err(invalid("成员角色是节点网络内的基线能力，不能禁用")
+                .for_network(self.network_name.clone()));
+        }
+        Ok(())
     }
 }
 

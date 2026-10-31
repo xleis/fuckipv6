@@ -81,7 +81,11 @@ impl NodeUiManifest {
                 if let Some((backend_status, permission)) =
                     command_modes.insert(action.command, (action.backend_status, action.permission))
                 {
-                    if backend_status != action.backend_status {
+                    // SetNetworkRole is role-scoped: Exit Node is implemented,
+                    // while Discovery and Relay hot toggles remain unavailable.
+                    let backend_status_is_role_scoped =
+                        action.command == NodeUiCommandKind::SetNetworkRole;
+                    if !backend_status_is_role_scoped && backend_status != action.backend_status {
                         violations.push(format!(
                             "inconsistent_backend_status:{}:{context}",
                             command_wire_name(action.command)
@@ -519,7 +523,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "set_exit_node_role",
                     "action.set_exit_node_role",
                     NodeUiCommandKind::SetNetworkRole,
-                    NodeUiBackendStatus::Unavailable,
+                    NodeUiBackendStatus::Implemented,
                     NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
                     vec![
@@ -838,7 +842,10 @@ mod tests {
         );
         assert_eq!(
             status(NodeUiCommandKind::SetNetworkRole),
-            HashSet::from([NodeUiBackendStatus::Unavailable])
+            HashSet::from([
+                NodeUiBackendStatus::Implemented,
+                NodeUiBackendStatus::Unavailable,
+            ])
         );
     }
 

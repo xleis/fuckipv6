@@ -36,6 +36,12 @@ pub enum NodeEventKind {
         exit_node: Option<String>,
         is_exit_node: bool,
     },
+    RoleChanged {
+        network_name: String,
+        role: super::NodeNetworkRole,
+        enabled: bool,
+        roles: Vec<super::NodeNetworkRole>,
+    },
     CommandCompleted {
         request_id: u64,
         success: bool,

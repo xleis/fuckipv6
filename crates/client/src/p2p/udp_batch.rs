@@ -277,18 +277,15 @@ mod linux {
         for index in 0..count {
             let address = &mut scratch.addresses[index];
             let iovec = &mut scratch.iovecs[index];
-            scratch.messages[index] = libc::mmsghdr {
-                msg_hdr: libc::msghdr {
-                    msg_name: (address as *mut libc::sockaddr_storage).cast(),
-                    msg_namelen: size_of::<libc::sockaddr_storage>() as libc::socklen_t,
-                    msg_iov: iovec,
-                    msg_iovlen: 1,
-                    msg_control: std::ptr::null_mut(),
-                    msg_controllen: 0,
-                    msg_flags: 0,
-                },
-                msg_len: 0,
-            };
+            let message = &mut scratch.messages[index];
+            message.msg_hdr.msg_name = (address as *mut libc::sockaddr_storage).cast();
+            message.msg_hdr.msg_namelen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            message.msg_hdr.msg_iov = iovec;
+            message.msg_hdr.msg_iovlen = 1;
+            message.msg_hdr.msg_control = std::ptr::null_mut();
+            message.msg_hdr.msg_controllen = 0;
+            message.msg_hdr.msg_flags = 0;
+            message.msg_len = 0;
         }
 
         // SAFETY: `scratch.messages`, every iovec, and every sockaddr_storage
@@ -347,18 +344,15 @@ mod linux {
                 iov_base: packet.as_ptr().cast_mut().cast(),
                 iov_len: packet.len(),
             };
-            messages[index] = libc::mmsghdr {
-                msg_hdr: libc::msghdr {
-                    msg_name: target.as_ptr().cast_mut().cast(),
-                    msg_namelen: target.len(),
-                    msg_iov: &mut iovecs[index],
-                    msg_iovlen: 1,
-                    msg_control: std::ptr::null_mut(),
-                    msg_controllen: 0,
-                    msg_flags: 0,
-                },
-                msg_len: 0,
-            };
+            let message = &mut messages[index];
+            message.msg_hdr.msg_name = target.as_ptr().cast_mut().cast();
+            message.msg_hdr.msg_namelen = target.len();
+            message.msg_hdr.msg_iov = &mut iovecs[index];
+            message.msg_hdr.msg_iovlen = 1;
+            message.msg_hdr.msg_control = std::ptr::null_mut();
+            message.msg_hdr.msg_controllen = 0;
+            message.msg_hdr.msg_flags = 0;
+            message.msg_len = 0;
         }
 
         retry_interrupted(|| {

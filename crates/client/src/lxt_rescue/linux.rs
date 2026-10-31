@@ -474,7 +474,7 @@ impl RescueTun {
         request.union[..2].copy_from_slice(&(IFF_TUN | IFF_NO_PI).to_ne_bytes());
         // SAFETY: the request is at least as large as the kernel's ifreq and
         // remains valid for the duration of the ioctl.
-        let result = unsafe { libc::ioctl(raw_fd, TUNSETIFF, &mut request as *mut IfReq) };
+        let result = unsafe { libc::ioctl(raw_fd, TUNSETIFF as _, &mut request as *mut IfReq) };
         if result < 0 {
             let error = io::Error::last_os_error();
             // SAFETY: raw_fd was returned by open and has not been transferred.

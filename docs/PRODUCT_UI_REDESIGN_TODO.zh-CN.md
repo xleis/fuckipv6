@@ -48,7 +48,7 @@
 |---|---|---|---|---|
 | W0 现状冻结 | `[~]` | P0 | 无 | 映射表、代码清单、审计确认；`docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
-| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC 传输、认证与服务循环已落地；进程拆分、恢复和服务监督未完成 |
+| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI 远程接线、control 崩溃接管和 node 崩溃恢复已落地；WebUI 接线、stop/start 语义、服务管理器和完整资源看门狗未完成 |
 | W3 所有者安全 | `[ ]` | P0 | W2 | Passkey、HTTPS、初始化码、恢复 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
@@ -320,14 +320,28 @@ WebUI 内嵌 manifest 一致性测试均通过。
 
 目标：让 UI 成为控制台，而不是 node 的所有者。
 
-### W2-01 control/node 进程模型 `[ ]`
+证据（2026-10-31，`abda0d5`）：真实二进制进程测试覆盖 UI 断开后 node
+继续运行、control `SIGKILL` 后 replacement control 接管同一 node、node `SIGKILL`
+后自动恢复，以及 node 被 `SIGSTOP` 时 control 有界强杀并清理陈旧 socket。
 
-- [ ] 同一二进制支持 control 与 node 内部角色；
-- [ ] 明确启动参数、环境、IPC 地址和退出码；
-- [ ] control 不要求 TUN/路由特权；
-- [ ] node 不直接暴露公网 WebUI；
-- [ ] 禁止 UI 每次启动创建第二份 runtime；
-- [ ] 输出进程模型图。
+```text
+GPUI / WebUI (目标形态；WebUI 接线未完成)
+             │ owner-only authenticated local IPC
+             ▼
+control ─────┼── spawn / adopt / health-check ──► node
+   │         │                                      │
+   │         └── never owns TUN/routing ────────────┤
+   └── instance lock + bounded shutdown watchdog    └── TUN/P2P/relay/exit/File
+```
+
+### W2-01 control/node 进程模型 `[~]`
+
+- [x] 同一二进制支持 control 与 node 内部角色；
+- [x] 明确启动参数、环境、IPC 地址和退出码；
+- [x] control 不要求 TUN/路由特权；
+- [x] node 不直接暴露公网 WebUI；
+- [ ] 禁止 UI 每次启动创建第二份 runtime：GPUI 已改为远程 IPC；WebUI 仍待接线；
+- [x] 输出进程模型图。
 
 ### W2-02 IPC 契约与认证 `[~]`
 
@@ -338,16 +352,16 @@ WebUI 内嵌 manifest 一致性测试均通过。
 - [x] IPC 断线重连和快照同步：已实现断线后重新握手、以权威快照和原子事件边界重新订阅；事件序号断档或广播滞后返回可重试的 `event_gap`，由客户端重连取快照；
 - [x] 长期运行服务循环：已实现认证连接接受、并发握手、snapshot/execute/subscribe 分发、请求 ID 校验、命令超时、事件推送、关闭宽限和 socket 清理；
 - [~] 添加冒用、权限和重连测试：已有同用户/异用户授权、目录/socket 权限、版本错误、断线快照恢复、请求 ID、订阅顺序和事件缺口测试；尚无真实第二系统用户、Windows token 和生产进程接线 E2E；
-- [ ] 将服务循环接入实际 control/node 进程并完成启动、崩溃、停止和服务监督联调。
+- [x] 将服务循环接入实际 control/node 进程并完成启动、崩溃、停止和服务监督联调。
 
-### W2-03 UI 与 node 生命周期解耦 `[ ]`
+### W2-03 UI 与 node 生命周期解耦 `[~]`
 
-- [ ] GPUI 窗口关闭不调用 node shutdown；
+- [x] GPUI 窗口关闭不调用 node shutdown；
 - [ ] WebUI 标签关闭不影响 control/node；
-- [ ] node 运行时间不随 UI 启动重置；
-- [ ] UI 重开后从权威快照恢复；
-- [ ] 删除 UI 进程持有 supervisor 的设计；
-- [ ] 添加 UI 退出不断网 E2E。
+- [x] node 运行时间不随 UI 启动重置；
+- [x] UI 重开后从权威快照恢复；
+- [ ] 删除 UI 进程持有 supervisor 的设计：GPUI 已删除；WebUI 仍待迁移；
+- [x] 添加 UI 退出不断网 E2E。
 
 ### W2-04 start/stop/restart 语义 `[ ]`
 
@@ -358,23 +372,23 @@ WebUI 内嵌 manifest 一致性测试均通过。
 - [ ] 清理 TUN、路由、DNS、监听和子进程；
 - [ ] 添加停止后残留资源检查。
 
-### W2-05 control 崩溃恢复 `[ ]`
+### W2-05 control 崩溃恢复 `[~]`
 
-- [ ] control 崩溃时 node 按最后有效策略继续；
-- [ ] 服务管理器重启 control；
-- [ ] control 重新读取 node 真实状态；
-- [ ] 事件缺口触发快照重拉；
-- [ ] 不因 control 恢复重启数据面；
-- [ ] 添加 SIGKILL/硬重启测试。
+- [x] control 崩溃时 node 按最后有效策略继续；
+- [ ] 服务管理器重启 control：UI 启动路径可补拉 control，systemd/launchd/Windows Service 尚未落地；
+- [x] control 重新读取 node 真实状态；
+- [x] 事件缺口触发快照重拉；
+- [x] 不因 control 恢复重启数据面；
+- [x] 添加 SIGKILL/硬重启测试。
 
-### W2-06 node 故障处理 `[ ]`
+### W2-06 node 故障处理 `[~]`
 
-- [ ] node 异常退出时依赖动作失败关闭；
-- [ ] control 保持可用；
+- [x] node 异常退出时依赖动作失败关闭；
+- [x] control 保持可用；
 - [ ] UI 显示节点故障而非控制服务异常；
 - [ ] 提供重启、诊断和残留清理入口；
-- [ ] 不静默直连；
-- [ ] 添加 node crash 故障注入。
+- [x] 不静默直连；
+- [x] 添加 node crash 故障注入。
 
 ### W2-07 启动 UI 策略 `[ ]`
 
@@ -394,12 +408,12 @@ WebUI 内嵌 manifest 一致性测试均通过。
 - [ ] 安装、升级、重启和卸载行为；
 - [ ] 不依赖打开图形界面来维持网络。
 
-### W2-09 关闭与清理看门狗 `[ ]`
+### W2-09 关闭与清理看门狗 `[~]`
 
-- [ ] 每个启动/停止步骤有硬超时；
-- [ ] 失败后杀进程并可观察；
+- [ ] 每个启动/停止步骤有硬超时：node ready、优雅停止和 IPC 服务已有超时；全步骤尚未覆盖；
+- [x] 失败后杀进程并可观察；
 - [ ] 恢复 DNS/策略路由/路由表/TUN；
-- [ ] 用户不需要手工 kill；
+- [x] 用户不需要手工 kill；
 - [ ] 生成脱敏诊断；
 - [ ] 清理失败是发布阻断。
 

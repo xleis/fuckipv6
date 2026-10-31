@@ -1195,7 +1195,7 @@ fn unix_timestamp() -> Result<u64, SecureRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::admission::HandshakeAdmissionConfig;
+    use crate::p2p::admission::{HandshakeAdmissionConfig, HelloValidationConfig};
     use fuckipv6_common::{NatType, PeerInfo};
     use std::net::{Ipv4Addr, Ipv6Addr};
 

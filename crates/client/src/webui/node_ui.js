@@ -372,7 +372,7 @@
               "id": "set_exit_node_role",
               "label_key": "action.set_exit_node_role",
               "command": "set_network_role",
-              "backend_status": "unavailable",
+              "backend_status": "implemented",
               "permission": "manage_roles",
               "availability": "network_selected",
               "fields": [

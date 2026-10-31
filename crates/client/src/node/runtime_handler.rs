@@ -350,7 +350,8 @@ fn runtime_rejection_scoped(
         RuntimeControlError::ActorClosed
         | RuntimeControlError::Unavailable(_)
         | RuntimeControlError::Persistence(_)
-        | RuntimeControlError::Launch(_) => NodeProblemCode::Unavailable,
+        | RuntimeControlError::Launch(_)
+        | RuntimeControlError::Timeout(_) => NodeProblemCode::Unavailable,
     };
     let mut problem = NodeProblem::new(code, error.to_string())
         .retryable(matches!(code, NodeProblemCode::Unavailable));
@@ -872,6 +873,11 @@ mod tests {
             ),
             (
                 RuntimeControlError::Launch("launch".into()),
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                RuntimeControlError::Timeout("timeout".into()),
                 NodeProblemCode::Unavailable,
                 true,
             ),

@@ -1,13 +1,14 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use fuckipv6_common::{ClientConfig, NetworkTicket};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 
 use super::{
     NodeCreateNetworkCommand, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus,
@@ -26,7 +27,28 @@ use crate::symmetric::{
 };
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeTimeouts {
+    stop: Duration,
+    start: Duration,
+    restart: Duration,
+    routing_update: Duration,
+}
+
+impl Default for RuntimeTimeouts {
+    fn default() -> Self {
+        Self {
+            stop: STOP_TIMEOUT,
+            start: START_TIMEOUT,
+            restart: RESTART_TIMEOUT,
+            routing_update: ROUTING_UPDATE_TIMEOUT,
+        }
+    }
+}
 
 type RuntimeFuture<T> = Pin<Box<dyn Future<Output = Result<T, RuntimeControlError>> + Send>>;
 
@@ -54,6 +76,8 @@ pub(crate) enum RuntimeControlError {
     Persistence(String),
     #[error("{0}")]
     Launch(String),
+    #[error("{0}")]
+    Timeout(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +120,108 @@ impl StartSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StopSummary {
     pub stopped: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestartPhase {
+    PersistLoad,
+    Stop,
+    Cleanup,
+    Start,
+}
+
+impl RestartPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PersistLoad => "persist_load",
+            Self::Stop => "stop",
+            Self::Cleanup => "cleanup",
+            Self::Start => "start",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RestartFailure {
+    pub network_name: String,
+    pub phase: RestartPhase,
+    pub message: String,
+}
+
+/// Registry/state/service checks performed after an explicit stop. These counts
+/// do not claim that kernel TUN, route, policy-route or DNS state was audited.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeCleanupReport {
+    pub sessions_remaining: usize,
+    pub listeners_remaining: usize,
+    pub peers_remaining: usize,
+    pub embedded_services_remaining: usize,
+    pub configuration_retained: bool,
+    /// Networks with a session, listener or peer residue. Embedded services
+    /// are intentionally retained across a network restart and never appear
+    /// here.
+    pub residual_networks: Vec<String>,
+}
+
+impl RuntimeCleanupReport {
+    fn blocks_restart(&self, network_name: &str) -> bool {
+        self.residual_networks
+            .iter()
+            .any(|name| name == network_name)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RestartSummary {
+    pub requested: usize,
+    pub restarted: Vec<String>,
+    pub failed: Vec<RestartFailure>,
+    pub cleanup: RuntimeCleanupReport,
+}
+
+impl RestartSummary {
+    pub fn message(&self) -> String {
+        let mut parts = vec![format!(
+            "重启网络: 已重启 {} / {} 个网络",
+            self.restarted.len(),
+            self.requested
+        )];
+        if !self.failed.is_empty() {
+            let failures = self
+                .failed
+                .iter()
+                .map(|failure| {
+                    format!(
+                        "{} [{}]: {}",
+                        failure.network_name,
+                        failure.phase.as_str(),
+                        failure.message
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            parts.push(format!("{} 个网络重启失败 ({failures})", self.failed.len()));
+        }
+        let residue = if self.cleanup.residual_networks.is_empty() {
+            "none".to_string()
+        } else {
+            self.cleanup.residual_networks.join(", ")
+        };
+        parts.push(format!(
+            "清理检查: sessions={}, listeners={}, peers={}, embedded_services={}, residual_networks=[{}]; 持久化配置{}",
+            self.cleanup.sessions_remaining,
+            self.cleanup.listeners_remaining,
+            self.cleanup.peers_remaining,
+            self.cleanup.embedded_services_remaining,
+            residue,
+            if self.cleanup.configuration_retained {
+                "已保留"
+            } else {
+                "未完整保留"
+            }
+        ));
+        parts.join("；")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,21 +378,61 @@ struct NetworkRuntimeSession {
     handle: JoinHandle<()>,
 }
 
+/// A manager-wide single-flight gate for lifecycle operations. The permit is
+/// moved into the actor command, so cancellation of the caller cannot release
+/// it while the actor is still changing runtime state.
+struct OperationGate {
+    busy: AtomicBool,
+}
+
+struct OperationGuard {
+    gate: Arc<OperationGate>,
+}
+
+impl OperationGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            busy: AtomicBool::new(false),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Result<OperationGuard, RuntimeControlError> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| OperationGuard { gate: self.clone() })
+            .map_err(|_| {
+                RuntimeControlError::Conflict(
+                    "已有网络启动、创建、加入、停止或重启操作正在进行".into(),
+                )
+            })
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.gate.busy.store(false, Ordering::Release);
+    }
+}
+
 enum RuntimeControlCommand {
     StartPlan {
         plan: NodeRuntimePlan,
+        _operation: OperationGuard,
         reply: oneshot::Sender<Result<StartSummary, RuntimeControlError>>,
     },
     StartSelection {
         selection: NodeNetworkSelection,
+        _operation: OperationGuard,
         reply: oneshot::Sender<Result<StartSummary, RuntimeControlError>>,
     },
     Create {
         command: NodeCreateNetworkCommand,
+        _operation: OperationGuard,
         reply: oneshot::Sender<Result<CreateResult, RuntimeControlError>>,
     },
     Join {
         command: NodeJoinNetworkCommand,
+        _operation: OperationGuard,
         reply: oneshot::Sender<Result<JoinResult, RuntimeControlError>>,
     },
     UpdateRouting {
@@ -280,9 +446,17 @@ enum RuntimeControlCommand {
     Stop {
         networks: Vec<String>,
         all: bool,
+        _operation: OperationGuard,
         reply: oneshot::Sender<Result<StopSummary, RuntimeControlError>>,
     },
+    Restart {
+        networks: Vec<String>,
+        all: bool,
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<RestartSummary, RuntimeControlError>>,
+    },
     Shutdown {
+        _operation: OperationGuard,
         reply: oneshot::Sender<Result<StopSummary, RuntimeControlError>>,
     },
 }
@@ -291,6 +465,7 @@ enum RuntimeControlCommand {
 #[derive(Clone)]
 pub(crate) struct NetworkRuntimeManager {
     sender: mpsc::Sender<RuntimeControlCommand>,
+    operation_gate: Arc<OperationGate>,
 }
 
 impl NetworkRuntimeManager {
@@ -309,7 +484,7 @@ impl NetworkRuntimeManager {
             registry: registry.clone(),
         });
         Self::spawn_with_launcher(
-            configs, options, state, events, lifecycle, services, launcher,
+            configs, options, state, events, lifecycle, registry, services, launcher,
         )
     }
 
@@ -320,6 +495,7 @@ impl NetworkRuntimeManager {
         state: NodeStateStore,
         events: NodeEventBus,
         lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
         launcher: Arc<dyn NetworkRuntimeLauncher>,
     ) -> Self {
@@ -329,6 +505,7 @@ impl NetworkRuntimeManager {
             state,
             events,
             lifecycle,
+            registry,
             services,
             launcher,
             ROUTING_UPDATE_TIMEOUT,
@@ -342,9 +519,38 @@ impl NetworkRuntimeManager {
         state: NodeStateStore,
         events: NodeEventBus,
         lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
         launcher: Arc<dyn NetworkRuntimeLauncher>,
         routing_update_timeout: Duration,
+    ) -> Self {
+        Self::spawn_with_launcher_and_timeouts(
+            configs,
+            options,
+            state,
+            events,
+            lifecycle,
+            registry,
+            services,
+            launcher,
+            RuntimeTimeouts {
+                routing_update: routing_update_timeout,
+                ..RuntimeTimeouts::default()
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_launcher_and_timeouts(
+        configs: ConfigManager,
+        options: RuntimeOptions,
+        state: NodeStateStore,
+        events: NodeEventBus,
+        lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
+        services: EmbeddedServiceManager,
+        launcher: Arc<dyn NetworkRuntimeLauncher>,
+        timeouts: RuntimeTimeouts,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
         tokio::spawn(run_actor(
@@ -355,22 +561,31 @@ impl NetworkRuntimeManager {
                 state,
                 events,
                 lifecycle,
+                registry,
                 services,
                 launcher,
                 sessions: HashMap::new(),
-                routing_update_timeout,
+                timeouts,
             },
         ));
-        Self { sender }
+        Self {
+            sender,
+            operation_gate: OperationGate::new(),
+        }
     }
 
     pub async fn start_plan(
         &self,
         plan: NodeRuntimePlan,
     ) -> Result<StartSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
-        self.send(RuntimeControlCommand::StartPlan { plan, reply })
-            .await?;
+        self.send(RuntimeControlCommand::StartPlan {
+            plan,
+            _operation: operation,
+            reply,
+        })
+        .await?;
         response
             .await
             .map_err(|_| RuntimeControlError::ActorClosed)?
@@ -380,9 +595,14 @@ impl NetworkRuntimeManager {
         &self,
         selection: NodeNetworkSelection,
     ) -> Result<StartSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
-        self.send(RuntimeControlCommand::StartSelection { selection, reply })
-            .await?;
+        self.send(RuntimeControlCommand::StartSelection {
+            selection,
+            _operation: operation,
+            reply,
+        })
+        .await?;
         response
             .await
             .map_err(|_| RuntimeControlError::ActorClosed)?
@@ -392,9 +612,14 @@ impl NetworkRuntimeManager {
         &self,
         command: NodeCreateNetworkCommand,
     ) -> Result<CreateResult, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
-        self.send(RuntimeControlCommand::Create { command, reply })
-            .await?;
+        self.send(RuntimeControlCommand::Create {
+            command,
+            _operation: operation,
+            reply,
+        })
+        .await?;
         response
             .await
             .map_err(|_| RuntimeControlError::ActorClosed)?
@@ -404,9 +629,14 @@ impl NetworkRuntimeManager {
         &self,
         command: NodeJoinNetworkCommand,
     ) -> Result<JoinResult, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
-        self.send(RuntimeControlCommand::Join { command, reply })
-            .await?;
+        self.send(RuntimeControlCommand::Join {
+            command,
+            _operation: operation,
+            reply,
+        })
+        .await?;
         response
             .await
             .map_err(|_| RuntimeControlError::ActorClosed)?
@@ -441,10 +671,31 @@ impl NetworkRuntimeManager {
         networks: Vec<String>,
         all: bool,
     ) -> Result<StopSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
         self.send(RuntimeControlCommand::Stop {
             networks,
             all,
+            _operation: operation,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    pub async fn restart(
+        &self,
+        networks: Vec<String>,
+        all: bool,
+    ) -> Result<RestartSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::Restart {
+            networks,
+            all,
+            _operation: operation,
             reply,
         })
         .await?;
@@ -454,8 +705,13 @@ impl NetworkRuntimeManager {
     }
 
     pub async fn shutdown(&self) -> Result<StopSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
-        self.send(RuntimeControlCommand::Shutdown { reply }).await?;
+        self.send(RuntimeControlCommand::Shutdown {
+            _operation: operation,
+            reply,
+        })
+        .await?;
         response
             .await
             .map_err(|_| RuntimeControlError::ActorClosed)?
@@ -475,19 +731,35 @@ async fn run_actor(
 ) {
     while let Some(command) = receiver.recv().await {
         match command {
-            RuntimeControlCommand::StartPlan { plan, reply } => {
+            RuntimeControlCommand::StartPlan {
+                plan,
+                _operation,
+                reply,
+            } => {
                 let result = actor.start_plan(plan).await;
                 let _ = reply.send(result);
             }
-            RuntimeControlCommand::StartSelection { selection, reply } => {
+            RuntimeControlCommand::StartSelection {
+                selection,
+                _operation,
+                reply,
+            } => {
                 let result = actor.start_selection(selection).await;
                 let _ = reply.send(result);
             }
-            RuntimeControlCommand::Create { command, reply } => {
+            RuntimeControlCommand::Create {
+                command,
+                _operation,
+                reply,
+            } => {
                 let result = actor.create(command).await;
                 let _ = reply.send(result);
             }
-            RuntimeControlCommand::Join { command, reply } => {
+            RuntimeControlCommand::Join {
+                command,
+                _operation,
+                reply,
+            } => {
                 let result = actor.join(command).await;
                 let _ = reply.send(result);
             }
@@ -502,12 +774,22 @@ async fn run_actor(
             RuntimeControlCommand::Stop {
                 networks,
                 all,
+                _operation,
                 reply,
             } => {
                 let result = actor.stop(networks, all).await;
                 let _ = reply.send(result);
             }
-            RuntimeControlCommand::Shutdown { reply } => {
+            RuntimeControlCommand::Restart {
+                networks,
+                all,
+                _operation,
+                reply,
+            } => {
+                let result = actor.restart(networks, all).await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::Shutdown { _operation, reply } => {
                 let result = actor.shutdown().await;
                 let _ = reply.send(result);
                 break;
@@ -522,10 +804,11 @@ struct NetworkRuntimeActor {
     state: NodeStateStore,
     events: NodeEventBus,
     lifecycle: NodeLifecycle,
+    registry: MultiNetworkRegistry,
     services: EmbeddedServiceManager,
     launcher: Arc<dyn NetworkRuntimeLauncher>,
     sessions: HashMap<String, NetworkRuntimeSession>,
-    routing_update_timeout: Duration,
+    timeouts: RuntimeTimeouts,
 }
 
 impl NetworkRuntimeActor {
@@ -543,6 +826,15 @@ impl NetworkRuntimeActor {
         &mut self,
         plan: NodeRuntimePlan,
     ) -> Result<StartSummary, RuntimeControlError> {
+        let deadline = Instant::now() + self.timeouts.start;
+        self.start_plan_until(plan, deadline).await
+    }
+
+    async fn start_plan_until(
+        &mut self,
+        plan: NodeRuntimePlan,
+        deadline: Instant,
+    ) -> Result<StartSummary, RuntimeControlError> {
         self.prune_finished_sessions();
         let requested = plan.len();
         let mut summary = StartSummary {
@@ -557,7 +849,7 @@ impl NetworkRuntimeActor {
             }
 
             let network_name = spec.name.clone();
-            match self.start_spec(spec).await {
+            match self.start_spec_until(spec, deadline).await {
                 Ok(()) => summary.started.push(network_name),
                 Err(error) => {
                     summary.failed.push(StartFailure {
@@ -574,8 +866,24 @@ impl NetworkRuntimeActor {
 
     async fn start_spec(
         &mut self,
-        mut spec: super::NodeNetworkSpec,
+        spec: super::NodeNetworkSpec,
     ) -> Result<(), RuntimeControlError> {
+        self.start_spec_until(spec, Instant::now() + self.timeouts.start)
+            .await
+    }
+
+    async fn start_spec_until(
+        &mut self,
+        mut spec: super::NodeNetworkSpec,
+        deadline: Instant,
+    ) -> Result<(), RuntimeControlError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(RuntimeControlError::Timeout(format!(
+                "start/timeout: 网络 [{}] 未在启动期限内开始",
+                spec.name
+            )));
+        }
         commands::apply_runtime_options_to_config(&mut spec.config, &self.options).map_err(
             |error| {
                 RuntimeControlError::Invalid(format!(
@@ -606,14 +914,21 @@ impl NetworkRuntimeActor {
         .await;
 
         let network_name = spec.name.clone();
-        let started = self
-            .launcher
-            .launch(NetworkLaunchRequest {
-                network_name: network_name.clone(),
-                config_path: spec.config_path.to_string_lossy().into_owned(),
-                config: spec.config,
-            })
-            .await;
+        let launch = self.launcher.launch(NetworkLaunchRequest {
+            network_name: network_name.clone(),
+            config_path: spec.config_path.to_string_lossy().into_owned(),
+            config: spec.config,
+        });
+        let started = match timeout(remaining.min(self.timeouts.start), launch).await {
+            Ok(started) => started,
+            Err(_) => {
+                let error = RuntimeControlError::Timeout(format!(
+                    "start/timeout: 网络 [{network_name}] 未在启动期限内完成"
+                ));
+                self.record_launch_failure(&network_name, &error).await;
+                return Err(error);
+            }
+        };
         let started = match started {
             Ok(started) => started,
             Err(error) => {
@@ -863,7 +1178,7 @@ impl NetworkRuntimeActor {
         let result = match request_runtime_routing_update(
             &routing_control,
             &command,
-            self.routing_update_timeout,
+            self.timeouts.routing_update,
         )
         .await
         {
@@ -878,7 +1193,7 @@ impl NetworkRuntimeActor {
                 let rollback = rollback_runtime_routing(
                     &routing_control,
                     &previous,
-                    self.routing_update_timeout,
+                    self.timeouts.routing_update,
                 )
                 .await;
                 return Err(match rollback {
@@ -909,7 +1224,7 @@ impl NetworkRuntimeActor {
             .await
         {
             let rollback =
-                rollback_runtime_routing(&routing_control, &previous, self.routing_update_timeout)
+                rollback_runtime_routing(&routing_control, &previous, self.timeouts.routing_update)
                     .await;
             // The failed publish did not replace an existing entry. Restore the
             // previous projection if a concurrent state transition removed it
@@ -1007,7 +1322,7 @@ impl NetworkRuntimeActor {
         match request_runtime_routing_update(
             &routing_control,
             &routing_command,
-            self.routing_update_timeout,
+            self.timeouts.routing_update,
         )
         .await
         {
@@ -1022,7 +1337,7 @@ impl NetworkRuntimeActor {
                 let rollback = rollback_runtime_routing(
                     &routing_control,
                     &previous_config,
-                    self.routing_update_timeout,
+                    self.timeouts.routing_update,
                 )
                 .await;
                 return Err(match rollback {
@@ -1045,7 +1360,7 @@ impl NetworkRuntimeActor {
             let rollback = rollback_runtime_routing(
                 &routing_control,
                 &previous_config,
-                self.routing_update_timeout,
+                self.timeouts.routing_update,
             )
             .await;
             self.restore_role_projection(previous_config, previous_roles.clone())
@@ -1118,33 +1433,30 @@ impl NetworkRuntimeActor {
                 self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Stopping)
                     .await;
             }
-            if let Some(mut session) = self.sessions.remove(&name) {
-                self.mark_network_status(Some(&name), NodeNetworkStatus::Stopping)
-                    .await;
-                let _ = session.shutdown.send(true);
-                if tokio::time::timeout(STOP_TIMEOUT, &mut session.handle)
-                    .await
-                    .is_err()
-                {
-                    session.handle.abort();
-                    let _ = session.handle.await;
-                }
-                self.mark_network_status(Some(&name), NodeNetworkStatus::Offline)
-                    .await;
+            if self.sessions.contains_key(&name) {
+                let _ = self.stop_session(&name, self.timeouts.stop).await?;
             }
             if has_embedded_service {
-                match self.services.stop(&name).await {
-                    Ok(_) | Err(EmbeddedServiceError::NotFound(_)) => {
+                match timeout(self.timeouts.stop, self.services.stop(&name)).await {
+                    Ok(Ok(_)) | Ok(Err(EmbeddedServiceError::NotFound(_))) => {
                         self.mark_embedded_service_status(
                             &name,
                             NodeEmbeddedServiceStatus::Stopped,
                         )
                         .await;
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Failed)
                             .await;
                         return Err(map_service_error(error));
+                    }
+                    Err(_) => {
+                        self.mark_embedded_service_status(&name, NodeEmbeddedServiceStatus::Failed)
+                            .await;
+                        return Err(RuntimeControlError::Timeout(format!(
+                            "stop/timeout: 内嵌服务 [{name}] 未在 {} 秒内停止",
+                            self.timeouts.stop.as_secs()
+                        )));
                     }
                 }
             }
@@ -1153,6 +1465,215 @@ impl NetworkRuntimeActor {
 
         self.publish_dynamic_lifecycle().await;
         Ok(StopSummary { stopped })
+    }
+
+    async fn restart(
+        &mut self,
+        networks: Vec<String>,
+        all: bool,
+    ) -> Result<RestartSummary, RuntimeControlError> {
+        self.prune_finished_sessions();
+        let deadline = Instant::now() + self.timeouts.restart;
+        let targets = if all {
+            self.sessions.keys().cloned().collect::<BTreeSet<_>>()
+        } else {
+            let requested = networks.into_iter().collect::<BTreeSet<_>>();
+            let missing = requested
+                .iter()
+                .filter(|name| !self.sessions.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(RuntimeControlError::NotFound(format!(
+                    "网络未运行，无法重启: {}",
+                    missing.join(", ")
+                )));
+            }
+            requested
+        };
+
+        if targets.is_empty() {
+            return Ok(RestartSummary::default());
+        }
+        let names = targets.into_iter().collect::<Vec<_>>();
+
+        // Load and validate every target before changing the live runtime. A
+        // malformed persisted file therefore leaves the old sessions untouched.
+        let plan = NodeRuntimePlan::load(&self.configs, NodeNetworkSelection::Named(names.clone()))
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!(
+                    "restart/persist_load: 加载重启配置失败，现有运行态未改变: {error:#}"
+                ))
+            })?;
+        if Instant::now() >= deadline {
+            return Err(RuntimeControlError::Timeout(
+                "restart/timeout: 在 persist_load 阶段超过期限".into(),
+            ));
+        }
+
+        let mut summary = RestartSummary {
+            requested: names.len(),
+            ..RestartSummary::default()
+        };
+        let mut stopped = BTreeSet::new();
+        for name in &names {
+            match self
+                .stop_session(name, deadline.saturating_duration_since(Instant::now()))
+                .await
+            {
+                Ok(()) => {
+                    stopped.insert(name.clone());
+                }
+                Err(error) => summary.failed.push(RestartFailure {
+                    network_name: name.clone(),
+                    phase: RestartPhase::Stop,
+                    message: error.to_string(),
+                }),
+            }
+        }
+
+        summary.cleanup = self.inspect_cleanup(&names).await?;
+        for name in &names {
+            if !stopped.contains(name) {
+                continue;
+            }
+            if summary.cleanup.blocks_restart(name) {
+                summary.failed.push(RestartFailure {
+                    network_name: name.clone(),
+                    phase: RestartPhase::Cleanup,
+                    message: "停止后仍检测到 session、listener 或 peer 残留".into(),
+                });
+                stopped.remove(name);
+            }
+        }
+
+        for spec in plan.into_networks() {
+            let network_name = spec.name.clone();
+            if !stopped.contains(&network_name) {
+                continue;
+            }
+            match self.start_spec_until(spec, deadline).await {
+                Ok(()) => summary.restarted.push(network_name),
+                Err(error) => summary.failed.push(RestartFailure {
+                    network_name,
+                    phase: RestartPhase::Start,
+                    message: error.to_string(),
+                }),
+            }
+        }
+
+        self.publish_dynamic_lifecycle().await;
+        Ok(summary)
+    }
+
+    async fn stop_session(
+        &mut self,
+        network_name: &str,
+        limit: Duration,
+    ) -> Result<(), RuntimeControlError> {
+        let Some(mut session) = self.sessions.remove(network_name) else {
+            return Err(RuntimeControlError::NotFound(format!(
+                "网络未运行: {network_name}"
+            )));
+        };
+
+        self.mark_network_status(Some(network_name), NodeNetworkStatus::Stopping)
+            .await;
+        let accepted = session.shutdown.send(true).is_ok();
+        let stopped =
+            accepted && !limit.is_zero() && timeout(limit, &mut session.handle).await.is_ok();
+        if !stopped {
+            session.handle.abort();
+            let _ = timeout(Duration::from_secs(1), &mut session.handle).await;
+        }
+
+        // Even a timed-out actor is removed from every shared registry before a
+        // restart is allowed to create a replacement session.
+        self.registry.unregister(network_name).await;
+        self.state
+            .update(|snapshot| {
+                if let Some(network) = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == network_name)
+                {
+                    network.status = NodeNetworkStatus::Offline;
+                    network.assigned_ipv6 = None;
+                    network.assigned_ipv4 = None;
+                    network.p2p_listen_addr = None;
+                    network.uptime_secs = 0;
+                    network.peer_count = 0;
+                }
+                snapshot
+                    .peers
+                    .retain(|peer| peer.network_name != network_name);
+            })
+            .await;
+
+        if !accepted {
+            return Err(RuntimeControlError::Unavailable(format!(
+                "stop/channel_closed: 网络 [{network_name}] 的关闭通道已断开；已强制清理共享状态"
+            )));
+        }
+        if !stopped {
+            return Err(RuntimeControlError::Timeout(format!(
+                "stop/timeout: 网络 [{network_name}] 未在期限内退出；已中止并清理共享状态"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn inspect_cleanup(
+        &self,
+        names: &[String],
+    ) -> Result<RuntimeCleanupReport, RuntimeControlError> {
+        let name_set = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let listener_names = self
+            .registry
+            .get_all()
+            .await
+            .iter()
+            .filter(|session| name_set.contains(session.network_name.as_str()))
+            .map(|session| session.network_name.clone())
+            .collect::<BTreeSet<_>>();
+        let peer_names = self
+            .state
+            .snapshot()
+            .await
+            .peers
+            .iter()
+            .filter(|peer| name_set.contains(peer.network_name.as_str()))
+            .map(|peer| peer.network_name.clone())
+            .collect::<BTreeSet<_>>();
+        let session_names = names
+            .iter()
+            .filter(|name| self.sessions.contains_key(*name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let embedded_services = self
+            .services
+            .list()
+            .await
+            .map_err(map_service_error)?
+            .iter()
+            .filter(|service| name_set.contains(service.network_name.as_str()))
+            .count();
+        let residual_networks = session_names
+            .iter()
+            .chain(listener_names.iter())
+            .chain(peer_names.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(RuntimeCleanupReport {
+            sessions_remaining: session_names.len(),
+            listeners_remaining: listener_names.len(),
+            peers_remaining: peer_names.len(),
+            embedded_services_remaining: embedded_services,
+            configuration_retained: names.iter().all(|name| self.configs.network_exists(name)),
+            residual_networks,
+        })
     }
 
     async fn shutdown(&mut self) -> Result<StopSummary, RuntimeControlError> {
@@ -1641,6 +2162,10 @@ mod tests {
         routing_delay_ms: Arc<AtomicU64>,
         routing_in_flight: Arc<AtomicUsize>,
         routing_max_in_flight: Arc<AtomicUsize>,
+        launch_delay_ms: Arc<AtomicU64>,
+        launch_attempts: Arc<AtomicUsize>,
+        shutdown_delay_ms: Arc<AtomicU64>,
+        launched_tun_names: Arc<Mutex<Vec<(String, String)>>>,
     }
 
     impl FakeLauncher {
@@ -1710,6 +2235,27 @@ mod tests {
                 .get(network_name)
                 .copied()
         }
+
+        fn set_launch_delay(&self, delay: Duration) {
+            self.launch_delay_ms
+                .store(delay.as_millis() as u64, Ordering::SeqCst);
+        }
+
+        fn launch_attempts(&self) -> usize {
+            self.launch_attempts.load(Ordering::SeqCst)
+        }
+
+        fn set_shutdown_delay(&self, delay: Duration) {
+            self.shutdown_delay_ms
+                .store(delay.as_millis() as u64, Ordering::SeqCst);
+        }
+
+        fn launched_tun_names(&self) -> Vec<(String, String)> {
+            self.launched_tun_names
+                .lock()
+                .expect("launched tun names lock poisoned")
+                .clone()
+        }
     }
 
     impl NetworkRuntimeLauncher for FakeLauncher {
@@ -1725,8 +2271,17 @@ mod tests {
             let routing_delay_ms = self.routing_delay_ms.clone();
             let routing_in_flight = self.routing_in_flight.clone();
             let routing_max_in_flight = self.routing_max_in_flight.clone();
+            let launch_delay_ms = self.launch_delay_ms.clone();
+            let launch_attempts = self.launch_attempts.clone();
+            let shutdown_delay_ms = self.shutdown_delay_ms.clone();
+            let launched_tun_names = self.launched_tun_names.clone();
 
             Box::pin(async move {
+                launch_attempts.fetch_add(1, Ordering::SeqCst);
+                let launch_delay = launch_delay_ms.load(Ordering::SeqCst);
+                if launch_delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(launch_delay)).await;
+                }
                 if failures
                     .lock()
                     .expect("failure lock poisoned")
@@ -1746,6 +2301,13 @@ mod tests {
                     Some(&request.network_name),
                     &request.config.tun.name,
                 );
+                launched_tun_names
+                    .lock()
+                    .expect("launched tun names lock poisoned")
+                    .push((
+                        request.network_name.clone(),
+                        request.config.tun.name.clone(),
+                    ));
                 let network_name = request.network_name.clone();
                 let routing_network_name = network_name.clone();
                 let config_path = PathBuf::from(request.config_path);
@@ -1757,6 +2319,10 @@ mod tests {
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
                                 if changed.is_err() || *shutdown_rx.borrow() {
+                                    let shutdown_delay = shutdown_delay_ms.load(Ordering::SeqCst);
+                                    if shutdown_delay > 0 {
+                                        tokio::time::sleep(Duration::from_millis(shutdown_delay)).await;
+                                    }
                                     break;
                                 }
                             }
@@ -1888,6 +2454,7 @@ mod tests {
         state: NodeStateStore,
         events: NodeEventBus,
         lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
         runtime: NetworkRuntimeManager,
         fake: FakeLauncher,
@@ -1900,6 +2467,17 @@ mod tests {
         }
 
         async fn new_with_routing_timeout(label: &str, routing_update_timeout: Duration) -> Self {
+            Self::new_with_timeouts(
+                label,
+                RuntimeTimeouts {
+                    routing_update: routing_update_timeout,
+                    ..RuntimeTimeouts::default()
+                },
+            )
+            .await
+        }
+
+        async fn new_with_timeouts(label: &str, timeouts: RuntimeTimeouts) -> Self {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             let config_dir = std::env::temp_dir().join(format!(
@@ -1915,16 +2493,18 @@ mod tests {
             let running = lifecycle.running(0, Vec::new()).await;
             state.set_lifecycle(running).await;
             let services = EmbeddedServiceManager::spawn(4);
+            let registry = MultiNetworkRegistry::new();
             let fake = FakeLauncher::default();
-            let runtime = NetworkRuntimeManager::spawn_with_launcher_and_timeout(
+            let runtime = NetworkRuntimeManager::spawn_with_launcher_and_timeouts(
                 configs.clone(),
                 RuntimeOptions::default(),
                 state.clone(),
                 events.clone(),
                 lifecycle.clone(),
+                registry.clone(),
                 services.clone(),
                 Arc::new(fake.clone()),
-                routing_update_timeout,
+                timeouts,
             );
 
             Self {
@@ -1932,6 +2512,7 @@ mod tests {
                 state,
                 events,
                 lifecycle,
+                registry,
                 services,
                 runtime,
                 fake,
@@ -2026,6 +2607,19 @@ mod tests {
         })
         .await
         .expect("routing update did not reach the fake runtime");
+    }
+
+    async fn wait_for_launch_attempts(fake: &FakeLauncher, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if fake.launch_attempts() >= expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("runtime launch was not attempted");
     }
 
     fn routing_changed_events(
@@ -3495,6 +4089,311 @@ mod tests {
             .expect("persisted network config");
         let config = ClientConfig::from_file(config_path).expect("load persisted config");
         assert_eq!(config.coordinator_url, "ws://127.0.0.1:6666");
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restart_reloads_persisted_config_before_relaunch() {
+        let harness = TestHarness::new("restart-reload").await;
+        harness
+            .configs
+            .create_network("reload", "ws://127.0.0.1:6666", true)
+            .expect("create test config");
+        let selection = NodeNetworkSelection::Named(vec!["reload".into()]);
+        harness
+            .runtime
+            .start_selection(selection.clone())
+            .await
+            .expect("start original runtime");
+
+        let config_path = harness
+            .configs
+            .get_network_config("reload")
+            .expect("persisted network config");
+        let mut config = ClientConfig::from_file(&config_path).expect("load config");
+        let original_tun_name = config.tun.name.clone();
+        config.tun.name = "restart-reloaded".into();
+        config.save_to_file(&config_path).expect("rewrite config");
+
+        let summary = harness
+            .runtime
+            .restart(vec!["reload".into()], false)
+            .await
+            .expect("restart network");
+        assert_eq!(summary.requested, 1);
+        assert_eq!(summary.restarted, vec!["reload"]);
+        assert!(summary.failed.is_empty());
+        assert!(summary.cleanup.residual_networks.is_empty());
+        assert!(summary.cleanup.configuration_retained);
+        assert_eq!(
+            harness.fake.launched_tun_names(),
+            vec![
+                ("reload".into(), original_tun_name),
+                ("reload".into(), "restart-reloaded".into()),
+            ]
+        );
+        assert_eq!(harness.fake.shutdown_count(), 1);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_conflicts_cover_start_stop_restart_create_and_join() {
+        let harness = TestHarness::new("lifecycle-conflict").await;
+        harness
+            .configs
+            .create_network("inflight", "ws://127.0.0.1:6666", true)
+            .expect("create test config");
+        let selection = NodeNetworkSelection::Named(vec!["inflight".into()]);
+        let plan = NodeRuntimePlan::load(&harness.configs, selection.clone()).expect("load plan");
+        harness.fake.set_launch_delay(Duration::from_millis(250));
+        let runtime = harness.runtime.clone();
+        let start = tokio::spawn(async move { runtime.start_plan(plan).await });
+        wait_for_launch_attempts(&harness.fake, 1).await;
+
+        assert!(matches!(
+            harness.runtime.stop(vec!["inflight".into()], false).await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        assert!(matches!(
+            harness.runtime.restart(Vec::new(), true).await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        assert!(matches!(
+            harness
+                .runtime
+                .create(create_command("blocked-create", false))
+                .await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        let ticket = NetworkTicket::new([9u8; 32], "127.0.0.1:6666", "blocked-join").encode();
+        assert!(matches!(
+            harness
+                .runtime
+                .join(NodeJoinNetworkCommand {
+                    target: ticket,
+                    network_name: None,
+                    start: false,
+                })
+                .await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+
+        let summary = timeout(Duration::from_secs(2), start)
+            .await
+            .expect("start operation completed")
+            .expect("start task")
+            .expect("start plan");
+        assert_eq!(summary.started, vec!["inflight"]);
+        assert!(!harness.configs.network_exists("blocked-create"));
+        assert!(!harness.configs.network_exists("blocked-join"));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stop_timeout_force_cleans_shared_runtime_state() {
+        let harness = TestHarness::new_with_timeouts(
+            "stop-timeout",
+            RuntimeTimeouts {
+                stop: Duration::from_millis(20),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        start_fake_network(&harness, "slow-stop").await;
+        harness.fake.set_shutdown_delay(Duration::from_millis(250));
+
+        let error = harness
+            .runtime
+            .stop(vec!["slow-stop".into()], false)
+            .await
+            .expect_err("slow stop must time out");
+        assert!(matches!(
+            error,
+            RuntimeControlError::Timeout(ref message)
+                if message.contains("stop/timeout") && message.contains("已中止并清理共享状态")
+        ));
+        assert!(harness.registry.get_all().await.is_empty());
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "slow-stop")
+            .expect("offline network state");
+        assert_eq!(network.status, NodeNetworkStatus::Offline);
+        assert_eq!(network.peer_count, 0);
+        assert!(snapshot.peers.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn start_timeout_records_failed_network_and_error() {
+        let harness = TestHarness::new_with_timeouts(
+            "start-timeout",
+            RuntimeTimeouts {
+                start: Duration::from_millis(20),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        harness
+            .configs
+            .create_network("slow-start", "ws://127.0.0.1:6666", true)
+            .expect("create test config");
+        harness.fake.set_launch_delay(Duration::from_millis(250));
+
+        let summary = harness
+            .runtime
+            .start_selection(NodeNetworkSelection::Named(vec!["slow-start".into()]))
+            .await
+            .expect("start returns a per-network summary");
+        assert!(summary.started.is_empty());
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].network_name, "slow-start");
+        assert!(summary.failed[0].message.contains("start/timeout"));
+
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "slow-start")
+            .expect("failed network state");
+        assert_eq!(network.status, NodeNetworkStatus::Failed);
+        let problem = snapshot.last_error.as_ref().expect("start failure problem");
+        assert_eq!(problem.network_name.as_deref(), Some("slow-start"));
+        assert!(problem.message.contains("start/timeout"));
+        assert!(harness.registry.get_all().await.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restart_launch_failure_is_reported_in_start_phase() {
+        let harness = TestHarness::new("restart-launch-failure").await;
+        start_fake_network(&harness, "restart-failure").await;
+        harness.fake.fail("restart-failure");
+
+        let summary = harness
+            .runtime
+            .restart(vec!["restart-failure".into()], false)
+            .await
+            .expect("restart returns a per-network summary");
+        assert!(summary.restarted.is_empty());
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].network_name, "restart-failure");
+        assert_eq!(summary.failed[0].phase, RestartPhase::Start);
+        assert!(summary.failed[0].message.contains("测试启动失败"));
+        assert!(summary.cleanup.residual_networks.is_empty());
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == "restart-failure")
+                .expect("failed network state")
+                .status,
+            NodeNetworkStatus::Failed
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[test]
+    fn cleanup_residue_blocks_only_the_affected_network() {
+        let report = RuntimeCleanupReport {
+            residual_networks: vec!["alpha".into()],
+            ..RuntimeCleanupReport::default()
+        };
+        assert!(report.blocks_restart("alpha"));
+        assert!(!report.blocks_restart("beta"));
+    }
+
+    #[tokio::test]
+    async fn restart_retains_running_embedded_services_without_blocking() {
+        let harness = TestHarness::new("restart-service").await;
+        harness
+            .runtime
+            .create(create_command("service-network", true))
+            .await
+            .expect("create connected network with embedded service");
+        let before = harness.services.list().await.expect("list services");
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            harness.state.snapshot().await.embedded_services[0].status,
+            NodeEmbeddedServiceStatus::Running
+        );
+
+        let summary = harness
+            .runtime
+            .restart(vec!["service-network".into()], false)
+            .await
+            .expect("restart connected network");
+        assert_eq!(summary.restarted, vec!["service-network"]);
+        assert!(summary.failed.is_empty());
+        assert_eq!(summary.cleanup.embedded_services_remaining, 1);
+        assert!(summary.cleanup.residual_networks.is_empty());
+        let after = harness.services.list().await.expect("list services");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].signaling_addr, before[0].signaling_addr);
+        assert_eq!(after[0].relay_addr, before[0].relay_addr);
+        assert_eq!(after[0].ticket, before[0].ticket);
+        assert_eq!(
+            harness.state.snapshot().await.embedded_services[0].status,
+            NodeEmbeddedServiceStatus::Running
+        );
+        assert_eq!(harness.fake.shutdown_count(), 1);
+        assert_eq!(harness.fake.launches().len(), 2);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_start_caller_keeps_operation_gate_until_actor_finishes() {
+        let harness = TestHarness::new_with_timeouts(
+            "start-cancellation",
+            RuntimeTimeouts {
+                start: Duration::from_secs(1),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        harness
+            .configs
+            .create_network("cancelled", "ws://127.0.0.1:6666", true)
+            .expect("create test config");
+        let selection = NodeNetworkSelection::Named(vec!["cancelled".into()]);
+        let plan = NodeRuntimePlan::load(&harness.configs, selection.clone()).expect("load plan");
+        harness.fake.set_launch_delay(Duration::from_millis(200));
+        let runtime = harness.runtime.clone();
+        let caller = tokio::spawn(async move { runtime.start_plan(plan).await });
+        wait_for_launch_attempts(&harness.fake, 1).await;
+        caller.abort();
+        let _ = caller.await;
+
+        assert!(matches!(
+            harness.runtime.start_selection(selection.clone()).await,
+            Err(RuntimeControlError::Conflict(_))
+        ));
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match harness.runtime.start_selection(selection.clone()).await {
+                    Ok(summary) => {
+                        assert_eq!(summary.already_running, vec!["cancelled"]);
+                        assert!(summary.started.is_empty());
+                        break;
+                    }
+                    Err(RuntimeControlError::Conflict(_)) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("unexpected start error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("actor did not release the cancelled start operation");
 
         harness.shutdown().await;
     }

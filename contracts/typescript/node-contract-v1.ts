@@ -132,6 +132,8 @@ export type NodeConfigurationSnapshot = {
   "networks": Array<NodeNetworkConfigSnapshot>;
 };
 
+export type NodeControlHealth = "unknown" | "available" | "unavailable";
+
 export type NodeCreateNetworkCommand = {
   "name": string;
   "signaling_port": number;
@@ -361,6 +363,7 @@ export type NodeSetNetworkRoleCommand = {
 export type NodeSnapshot = {
   "revision": number;
   "lifecycle": NodeLifecycleSnapshot;
+  "control_health"?: NodeControlHealth;
   "identity"?: NodeIdentitySnapshot | null;
   "configuration"?: NodeConfigurationSnapshot;
   "exit_node_capabilities"?: ExitNodeCapabilities;

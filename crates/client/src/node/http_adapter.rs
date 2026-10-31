@@ -23,8 +23,8 @@ use tokio::sync::broadcast;
 
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeEvent, NodeEventBus, NodeEventKind, NodeProblem, NodeProblemCode,
-    NodeSnapshot, NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeCommandResult, NodeControlHealth, NodeEvent, NodeEventBus, NodeEventKind, NodeProblem,
+    NodeProblemCode, NodeSnapshot, NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };
 
 /// Version of the HTTP/WebSocket envelope contract used by desktop and
@@ -224,7 +224,7 @@ impl NodeWsSession {
         reason: NodeWsResyncReason,
         minimum_revision: Option<u64>,
     ) -> Result<NodeWsMessage, NodeWsSessionError> {
-        let snapshot = self.state.snapshot().await;
+        let snapshot = snapshot_for_control_client(self.state.snapshot().await);
         let required_revision = minimum_revision.unwrap_or(self.last_revision);
         if snapshot.revision < required_revision {
             return Err(NodeWsSessionError {
@@ -416,6 +416,7 @@ async fn handle_command(
 
     match adapter.execute(payload.request).await {
         Ok(result) => {
+            let result = result_for_control_client(result);
             let status = status_for_command_result(&result);
             (
                 status,
@@ -435,7 +436,8 @@ async fn handle_snapshot(
     Query(query): Query<NodeHttpQuery>,
 ) -> Result<Json<NodeSnapshotResponse>, HttpAdapterError> {
     require_schema_version(&query)?;
-    let snapshot = adapter.snapshot().await.map_err(HttpAdapterError::from)?;
+    let snapshot =
+        snapshot_for_control_client(adapter.snapshot().await.map_err(HttpAdapterError::from)?);
     Ok(Json(NodeSnapshotResponse {
         schema_version: NODE_HTTP_SCHEMA_VERSION,
         snapshot,
@@ -472,7 +474,7 @@ async fn run_event_socket(mut socket: WebSocket, adapter: NodeHttpAdapter) {
     // Subscribe before fetching the snapshot so no event is lost in the gap.
     let receiver = adapter.events.subscribe();
     let snapshot = match adapter.snapshot().await {
-        Ok(snapshot) => snapshot,
+        Ok(snapshot) => snapshot_for_control_client(snapshot),
         Err(error) => {
             let message = NodeWsMessage::Error {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
@@ -528,6 +530,21 @@ async fn run_event_socket(mut socket: WebSocket, adapter: NodeHttpAdapter) {
             }
         }
     }
+}
+
+/// A successful HTTP/WebSocket response is proof that this adapter can reach
+/// the authoritative node state. The observation is applied only to the
+/// outbound projection and never mutates the canonical store or revision.
+fn snapshot_for_control_client(mut snapshot: NodeSnapshot) -> NodeSnapshot {
+    snapshot.control_health = NodeControlHealth::Available;
+    snapshot
+}
+
+fn result_for_control_client(mut result: NodeCommandResult) -> NodeCommandResult {
+    if let NodeCommandOutcome::Snapshot(snapshot) = &mut result.outcome {
+        snapshot.control_health = NodeControlHealth::Available;
+    }
+    result
 }
 
 async fn send_ws_message(socket: &mut WebSocket, message: &NodeWsMessage) -> bool {
@@ -743,6 +760,14 @@ mod tests {
         let snapshot: NodeSnapshotResponse = json_body(snapshot_response).await;
         assert_eq!(snapshot.schema_version, NODE_HTTP_SCHEMA_VERSION);
         assert_eq!(snapshot.snapshot.revision, 7);
+        assert_eq!(
+            snapshot.snapshot.control_health,
+            NodeControlHealth::Available
+        );
+        assert_eq!(
+            state.snapshot().await.control_health,
+            NodeControlHealth::Unknown
+        );
 
         let manifest_response = adapter
             .router()
@@ -947,7 +972,12 @@ mod tests {
         let initial: NodeWsMessage =
             serde_json::from_str(initial.as_str()).expect("decode initial snapshot");
         assert_eq!(initial.schema_version(), NODE_HTTP_SCHEMA_VERSION);
-        assert!(matches!(initial, NodeWsMessage::Snapshot { .. }));
+        match initial {
+            NodeWsMessage::Snapshot { snapshot, .. } => {
+                assert_eq!(snapshot.control_health, NodeControlHealth::Available);
+            }
+            other => panic!("expected initial snapshot, got {other:?}"),
+        }
 
         state.update(|_| {}).await;
 

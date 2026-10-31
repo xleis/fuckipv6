@@ -17,7 +17,8 @@ use crate::local_ipc::{
 };
 use crate::node::{
     NodeCommandBus, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeEventBus, NodeEventKind, NodeProblem, NodeProblemCode, NodeStateStore,
+    NodeCommandResult, NodeControlHealth, NodeEventBus, NodeEventKind, NodeProblem,
+    NodeProblemCode, NodeStateStore,
 };
 use crate::runtime_process;
 
@@ -208,8 +209,18 @@ async fn sync_node_state(
         }
         match sync_subscription(&endpoint, role.clone(), &state, &mut cancel).await {
             Ok(()) if *cancel.borrow() => return,
-            Ok(()) => {}
+            Ok(()) => {
+                state
+                    .set_control_health(NodeControlHealth::Unavailable)
+                    .await;
+            }
             Err(error) => {
+                // This is a local adapter observation. The authoritative node
+                // revision stays untouched, and a later snapshot proves the
+                // control connection has recovered.
+                state
+                    .set_control_health(NodeControlHealth::Unavailable)
+                    .await;
                 tracing::debug!(%error, "节点事件订阅断开，将从权威快照重同步");
             }
         }

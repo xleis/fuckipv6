@@ -9,6 +9,11 @@
     "lifecycle": {
       "$ref": "#/$defs/NodeLifecycleSnapshot"
     },
+    "control_health": {
+      "$ref": "#/$defs/NodeControlHealth",
+      "description": "Health of the UI adapter's control connection. This is local transport\nobservation, not authoritative node state, so changing it must not\nmanufacture a new node revision.",
+      "default": "unknown"
+    },
     "identity": {
       "anyOf": [
         {
@@ -172,6 +177,15 @@
         "failed"
       ],
       "description": "Node-global lifecycle. Network sessions may come and go while the node\nremains in one of these phases."
+    },
+    "NodeControlHealth": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "available",
+        "unavailable"
+      ],
+      "description": "Whether the adapter can currently reach the node control plane."
     },
     "NodeIdentitySnapshot": {
       "type": "object",

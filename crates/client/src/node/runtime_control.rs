@@ -1434,7 +1434,7 @@ impl NetworkRuntimeActor {
                     .await;
             }
             if self.sessions.contains_key(&name) {
-                let _ = self.stop_session(&name, self.timeouts.stop).await?;
+                self.stop_session(&name, self.timeouts.stop).await?;
             }
             if has_embedded_service {
                 match timeout(self.timeouts.stop, self.services.stop(&name)).await {

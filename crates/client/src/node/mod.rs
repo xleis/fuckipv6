@@ -30,11 +30,12 @@ pub(crate) use runtime_handler::spawn_command_bus_with_runtime;
 pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{
     NodeAccessModel, NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot,
-    NodeConfigurationSnapshot, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus,
-    NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel, NodeNetworkConfigSnapshot, NodeNetworkRole,
-    NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodePermission,
-    NodePermission as NodeUiPermission, NodePermissionSnapshot, NodePrimaryStatus, NodeProblem,
-    NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
+    NodeConfigurationSnapshot, NodeControlHealth, NodeEmbeddedServiceSnapshot,
+    NodeEmbeddedServiceStatus, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
+    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
+    NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission, NodePermissionSnapshot,
+    NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore,
+    NodeTrafficSnapshot,
 };
 pub use ui_manifest::{
     audit_for_command, node_ui_manifest, NodeUiAction, NodeUiAudit, NodeUiAuditPolicy,

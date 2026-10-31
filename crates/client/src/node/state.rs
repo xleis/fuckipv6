@@ -16,6 +16,11 @@ use crate::ui::UiModeResolution;
 pub struct NodeSnapshot {
     pub revision: u64,
     pub lifecycle: NodeLifecycleSnapshot,
+    /// Health of the UI adapter's control connection. This is local transport
+    /// observation, not authoritative node state, so changing it must not
+    /// manufacture a new node revision.
+    #[serde(default)]
+    pub control_health: NodeControlHealth,
     pub identity: Option<NodeIdentitySnapshot>,
     #[serde(default)]
     pub configuration: NodeConfigurationSnapshot,
@@ -48,13 +53,18 @@ impl NodeSnapshot {
     }
 
     /// Return the single user-facing status for this snapshot. Transitions win
-    /// over failures, failures over degradation, and control-plane health is
-    /// deliberately not inferred when no control snapshot is available.
+    /// over failures, failures over degradation, and unavailable control is
+    /// shown only after node-local problems have been ruled out.
     pub fn primary_status(&self) -> NodePrimaryStatus {
         match self.lifecycle.phase {
             NodePhase::Starting => NodePrimaryStatus::Starting,
             NodePhase::Stopping => NodePrimaryStatus::Stopping,
             NodePhase::Failed => NodePrimaryStatus::Failed,
+            NodePhase::Running if self.is_degraded() => NodePrimaryStatus::Degraded,
+            NodePhase::Running if self.control_health == NodeControlHealth::Unavailable => {
+                NodePrimaryStatus::ControlUnavailable
+            }
+            NodePhase::Running => NodePrimaryStatus::Running,
             NodePhase::Stopped => {
                 if self.identity.is_none()
                     && self.configuration.networks.is_empty()
@@ -66,8 +76,6 @@ impl NodeSnapshot {
                     NodePrimaryStatus::Stopped
                 }
             }
-            NodePhase::Running if self.is_degraded() => NodePrimaryStatus::Degraded,
-            NodePhase::Running => NodePrimaryStatus::Running,
         }
     }
 
@@ -167,6 +175,16 @@ impl NodeSnapshot {
     }
 }
 
+/// Whether the adapter can currently reach the node control plane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeControlHealth {
+    #[default]
+    Unknown,
+    Available,
+    Unavailable,
+}
+
 /// The one status a user should see, independent of how many subsystem states
 /// contribute to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -179,6 +197,72 @@ pub enum NodePrimaryStatus {
     Running,
     Degraded,
     Failed,
+    ControlUnavailable,
+}
+
+impl NodePrimaryStatus {
+    pub const ALL: [Self; 8] = [
+        Self::Uninitialized,
+        Self::Stopped,
+        Self::Starting,
+        Self::Stopping,
+        Self::Running,
+        Self::Degraded,
+        Self::Failed,
+        Self::ControlUnavailable,
+    ];
+
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::Uninitialized => "status.primary.uninitialized",
+            Self::Stopped => "status.primary.stopped",
+            Self::Starting => "status.primary.starting",
+            Self::Stopping => "status.primary.stopping",
+            Self::Running => "status.primary.running",
+            Self::Degraded => "status.primary.degraded",
+            Self::Failed => "status.primary.failed",
+            Self::ControlUnavailable => "status.primary.control_unavailable",
+        }
+    }
+
+    pub const fn label_zh(self) -> &'static str {
+        match self {
+            Self::Uninitialized => "未初始化",
+            Self::Stopped => "已停止",
+            Self::Starting => "正在启动",
+            Self::Stopping => "正在停止",
+            Self::Running => "运行正常",
+            Self::Degraded => "运行降级",
+            Self::Failed => "节点故障",
+            Self::ControlUnavailable => "控制服务异常",
+        }
+    }
+
+    pub const fn detail_key(self) -> &'static str {
+        match self {
+            Self::Uninitialized => "status.primary.uninitialized.detail",
+            Self::Stopped => "status.primary.stopped.detail",
+            Self::Starting => "status.primary.starting.detail",
+            Self::Stopping => "status.primary.stopping.detail",
+            Self::Running => "status.primary.running.detail",
+            Self::Degraded => "status.primary.degraded.detail",
+            Self::Failed => "status.primary.failed.detail",
+            Self::ControlUnavailable => "status.primary.control_unavailable.detail",
+        }
+    }
+
+    pub const fn detail_zh(self) -> &'static str {
+        match self {
+            Self::Uninitialized => "完成节点初始化后创建或加入网络。",
+            Self::Stopped => "启动节点以恢复网络连接。",
+            Self::Starting => "正在启动节点，请稍候。",
+            Self::Stopping => "正在停止节点，请稍候。",
+            Self::Running => "节点和已配置网络运行正常。",
+            Self::Degraded => "检查最近问题并重试受影响网络。",
+            Self::Failed => "打开诊断并重启节点。",
+            Self::ControlUnavailable => "节点控制服务暂时不可达；数据面不会被自动停止，正在重连。",
+        }
+    }
 }
 
 /// Stable projection of the fixed first-version capability set. Unknown
@@ -641,6 +725,17 @@ impl NodeStateStore {
         self.update(|snapshot| snapshot.lifecycle = lifecycle).await
     }
 
+    /// Update local control-plane reachability without changing the
+    /// authoritative node revision or emitting a node state-change event.
+    pub async fn set_control_health(&self, health: NodeControlHealth) {
+        let mut current = self.snapshot.write().await;
+        if current.control_health == health {
+            return;
+        }
+        current.control_health = health;
+        self.updates.send_replace(current.clone());
+    }
+
     /// Replace the local projection with a snapshot produced by the authoritative
     /// node process.
     ///
@@ -649,6 +744,9 @@ impl NodeStateStore {
     /// notification still wakes all local renderers.
     pub async fn replace_authoritative(&self, mut snapshot: NodeSnapshot) {
         snapshot.refresh_capability_states();
+        // Control health belongs to this adapter. A successfully received
+        // authoritative snapshot proves the control connection is available.
+        snapshot.control_health = NodeControlHealth::Available;
         let mut current = self.snapshot.write().await;
         *current = snapshot.clone();
         self.updates.send_replace(snapshot);
@@ -1064,5 +1162,104 @@ mod tests {
         snapshot.embedded_services = vec![embedded_service("home")];
         snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Failed;
         assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Degraded);
+    }
+
+    #[test]
+    fn primary_status_applies_transition_failure_degraded_then_control_priority() {
+        let mut snapshot = NodeSnapshot {
+            lifecycle: NodeLifecycleSnapshot {
+                phase: NodePhase::Running,
+                ..NodeLifecycleSnapshot::default()
+            },
+            control_health: NodeControlHealth::Unavailable,
+            ..NodeSnapshot::default()
+        };
+        assert_eq!(
+            snapshot.primary_status(),
+            NodePrimaryStatus::ControlUnavailable
+        );
+
+        snapshot.networks = vec![network("home", NodeNetworkStatus::Degraded)];
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Degraded);
+
+        snapshot.last_error = Some(NodeProblem::new(
+            NodeProblemCode::Internal,
+            "fixture failure",
+        ));
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Degraded);
+
+        snapshot.lifecycle.phase = NodePhase::Starting;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Starting);
+
+        snapshot.lifecycle.phase = NodePhase::Stopping;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Stopping);
+
+        snapshot.lifecycle.phase = NodePhase::Failed;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Failed);
+
+        snapshot.lifecycle.phase = NodePhase::Stopped;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Stopped);
+        snapshot.networks.clear();
+        snapshot.last_error = None;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Uninitialized);
+        snapshot.identity = Some(NodeIdentitySnapshot {
+            node_id: "node-1".into(),
+            display_name: None,
+            public_key_fingerprint: "fixture".into(),
+        });
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Stopped);
+    }
+
+    #[test]
+    fn every_primary_status_has_stable_label_and_action_copy() {
+        for status in NodePrimaryStatus::ALL {
+            assert!(status.label_key().starts_with("status.primary."));
+            assert!(!status.label_zh().is_empty());
+            assert!(status.detail_key().ends_with(".detail"));
+            assert!(!status.detail_zh().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn control_health_observation_does_not_change_revision_or_emit_node_event() {
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let updates = state.subscribe();
+        let mut event_receiver = events.subscribe();
+        let before = state.snapshot().await;
+
+        state
+            .set_control_health(NodeControlHealth::Unavailable)
+            .await;
+
+        let after = state.snapshot().await;
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.control_health, NodeControlHealth::Unavailable);
+        assert!(updates.has_changed().expect("watch remains open"));
+        assert!(event_receiver.try_recv().is_err());
+
+        state.set_control_health(NodeControlHealth::Available).await;
+        let restored = state.snapshot().await;
+        assert_eq!(restored.revision, before.revision);
+        assert_eq!(restored.control_health, NodeControlHealth::Available);
+        assert!(event_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn authoritative_snapshot_marks_the_control_channel_available() {
+        let state = NodeStateStore::new();
+        state
+            .set_control_health(NodeControlHealth::Unavailable)
+            .await;
+        let authoritative = NodeSnapshot {
+            revision: 42,
+            ..NodeSnapshot::default()
+        };
+
+        state.replace_authoritative(authoritative).await;
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.revision, 42);
+        assert_eq!(snapshot.control_health, NodeControlHealth::Available);
     }
 }

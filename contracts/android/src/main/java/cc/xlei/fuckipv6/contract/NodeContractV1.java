@@ -252,6 +252,31 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NodeControlHealth {
+        UNKNOWN("unknown"),
+        AVAILABLE("available"),
+        UNAVAILABLE("unavailable");
+
+        private final String wireName;
+
+        NodeControlHealth(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeControlHealth fromWireName(String value) {
+            for (NodeControlHealth candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeControlHealth wire value: " + value);
+        }
+    }
+
     public enum NodeEmbeddedServiceStatus {
         STARTING("starting"),
         RUNNING("running"),
@@ -1142,6 +1167,7 @@ public final class NodeContractV1 {
     public static final class NodeSnapshot {
         public final Long revision;
         public final NodeLifecycleSnapshot lifecycle;
+        public final NodeControlHealth control_health;
         public final NodeIdentitySnapshot identity;
         public final NodeConfigurationSnapshot configuration;
         public final ExitNodeCapabilities exit_node_capabilities;
@@ -1154,9 +1180,10 @@ public final class NodeContractV1 {
         public final List<NodeLogEntry> logs;
         public final NodeProblem last_error;
 
-        public NodeSnapshot(Long revision, NodeLifecycleSnapshot lifecycle, NodeIdentitySnapshot identity, NodeConfigurationSnapshot configuration, ExitNodeCapabilities exit_node_capabilities, NodeCapabilityRegistrySnapshot capabilities, NodePermissionSnapshot permissions, List<NodeEmbeddedServiceSnapshot> embedded_services, UiModeResolution ui_mode, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, List<NodeLogEntry> logs, NodeProblem last_error) {
+        public NodeSnapshot(Long revision, NodeLifecycleSnapshot lifecycle, NodeControlHealth control_health, NodeIdentitySnapshot identity, NodeConfigurationSnapshot configuration, ExitNodeCapabilities exit_node_capabilities, NodeCapabilityRegistrySnapshot capabilities, NodePermissionSnapshot permissions, List<NodeEmbeddedServiceSnapshot> embedded_services, UiModeResolution ui_mode, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, List<NodeLogEntry> logs, NodeProblem last_error) {
             this.revision = revision;
             this.lifecycle = lifecycle;
+            this.control_health = control_health;
             this.identity = identity;
             this.configuration = configuration;
             this.exit_node_capabilities = exit_node_capabilities;

@@ -29,15 +29,15 @@ pub(crate) use runtime_control::{NetworkRuntimeManager, RuntimeControlError, Sta
 pub(crate) use runtime_handler::spawn_command_bus_with_runtime;
 pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{
-    NodeAccessModel, NodeConfigurationSnapshot, NodeEmbeddedServiceSnapshot,
-    NodeEmbeddedServiceStatus, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
-    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
-    NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission, NodePermissionSnapshot,
-    NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore,
-    NodeTrafficSnapshot,
+    NodeAccessModel, NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot,
+    NodeConfigurationSnapshot, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus,
+    NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel, NodeNetworkConfigSnapshot, NodeNetworkRole,
+    NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodePermission,
+    NodePermission as NodeUiPermission, NodePermissionSnapshot, NodePrimaryStatus, NodeProblem,
+    NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
 };
 pub use ui_manifest::{
-    node_ui_manifest, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiConfirmation,
-    NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiValidation,
-    NODE_UI_MANIFEST_SCHEMA_VERSION,
+    audit_for_command, node_ui_manifest, NodeUiAction, NodeUiAudit, NodeUiAuditPolicy,
+    NodeUiAvailability, NodeUiBackendStatus, NodeUiConfirmation, NodeUiField, NodeUiInputKind,
+    NodeUiManifest, NodeUiPage, NodeUiValidation, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };

@@ -177,6 +177,30 @@
             ]
           }
         },
+        "capabilities": {
+          "$ref": "#/$defs/NodeCapabilityRegistrySnapshot",
+          "description": "Unified four-capability projection shared by every UI adapter. Missing\nentries deserialize as `Unknown`; they are never inferred as enabled.",
+          "default": {
+            "capabilities": [
+              {
+                "kind": "coordinator",
+                "state": "unknown"
+              },
+              {
+                "kind": "relay",
+                "state": "unknown"
+              },
+              {
+                "kind": "exit",
+                "state": "unknown"
+              },
+              {
+                "kind": "file",
+                "state": "unknown"
+              }
+            ]
+          }
+        },
         "permissions": {
           "$ref": "#/$defs/NodePermissionSnapshot",
           "default": {
@@ -568,6 +592,66 @@
         "ipv4_forwarding_unavailable"
       ],
       "description": "Machine-readable reasons that make an Exit Node action unavailable.\n\nAdapters must render these reasons instead of treating an enabled config\nflag as proof that kernel forwarding and NAT were installed."
+    },
+    "NodeCapabilityRegistrySnapshot": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeCapabilitySnapshot"
+          }
+        }
+      },
+      "required": [
+        "capabilities"
+      ],
+      "description": "Stable projection of the fixed first-version capability set. Unknown\nentries fail closed and unsupported capabilities remain visible so the UI\ncan explain why an action is unavailable."
+    },
+    "NodeCapabilitySnapshot": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/CapabilityKind"
+        },
+        "state": {
+          "$ref": "#/$defs/CapabilityState"
+        }
+      },
+      "required": [
+        "kind",
+        "state"
+      ]
+    },
+    "CapabilityKind": {
+      "type": "string",
+      "enum": [
+        "coordinator",
+        "relay",
+        "exit",
+        "file"
+      ],
+      "description": "The fixed first-version capability set. Unknown wire values fail closed at\ndeserialization and are never inferred from a free-form label."
+    },
+    "CapabilityState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "starting",
+            "enabled",
+            "degraded",
+            "unavailable",
+            "unsupported"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "unknown",
+          "description": "A migrated record may preserve an unreadable state without making the\ncapability usable. New writes may not create this state."
+        }
+      ]
     },
     "NodePermissionSnapshot": {
       "type": "object",
@@ -1064,6 +1148,10 @@
         "permission": {
           "$ref": "#/$defs/NodePermission"
         },
+        "audit": {
+          "$ref": "#/$defs/NodeUiAudit",
+          "description": "Stable audit requirement for this command. Reads that are too noisy to\nrecord still carry an explicit `none` declaration instead of leaving\nadapters to guess."
+        },
         "availability": {
           "$ref": "#/$defs/NodeUiAvailability"
         },
@@ -1090,6 +1178,7 @@
         "command",
         "backend_status",
         "permission",
+        "audit",
         "availability",
         "fields"
       ]
@@ -1106,6 +1195,31 @@
           "const": "unavailable",
           "description": "The shared command exists, but the runtime backend rejects it as unavailable."
         }
+      ]
+    },
+    "NodeUiAudit": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/NodeUiAuditPolicy"
+        },
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Stable action name written to the append-only audit log."
+        }
+      },
+      "required": [
+        "policy"
+      ]
+    },
+    "NodeUiAuditPolicy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "record_outcome"
       ]
     },
     "NodeUiAvailability": {

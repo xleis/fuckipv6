@@ -83,9 +83,14 @@ impl NodeUiManifest {
                     violations.push(format!("bootstrap_command_exposed_as_action:{}", action.id));
                 }
 
-                if let Some((backend_status, permission)) =
-                    command_modes.insert(action.command, (action.backend_status, action.permission))
-                {
+                if let Some((backend_status, permission, audit)) = command_modes.insert(
+                    action.command,
+                    (
+                        action.backend_status,
+                        action.permission,
+                        action.audit.clone(),
+                    ),
+                ) {
                     // SetNetworkRole is role-scoped: Exit Node is implemented,
                     // while Discovery and Relay hot toggles remain unavailable.
                     let backend_status_is_role_scoped =
@@ -102,6 +107,36 @@ impl NodeUiManifest {
                             action.command.as_str()
                         ));
                     }
+                    if audit != action.audit {
+                        violations.push(format!(
+                            "inconsistent_audit:{}:{context}",
+                            action.command.as_str()
+                        ));
+                    }
+                }
+
+                match (&action.audit.policy, &action.audit.action) {
+                    (NodeUiAuditPolicy::None, Some(_)) => violations.push(format!(
+                        "non_audited_action_has_event:{context}:{}",
+                        action.command.as_str()
+                    )),
+                    (NodeUiAuditPolicy::RecordOutcome, Some(event)) if event.is_empty() => {
+                        violations.push(format!(
+                            "audited_action_has_empty_event:{context}:{}",
+                            action.command.as_str()
+                        ));
+                    }
+                    (NodeUiAuditPolicy::RecordOutcome, None) => violations.push(format!(
+                        "audited_action_has_no_event:{context}:{}",
+                        action.command.as_str()
+                    )),
+                    _ => {}
+                }
+                if action.audit != audit_for_command(action.command) {
+                    violations.push(format!(
+                        "audit_declaration_mismatch:{}:{context}",
+                        action.command.as_str()
+                    ));
                 }
 
                 if let Some(confirmation) = &action.confirmation {
@@ -172,6 +207,10 @@ pub struct NodeUiAction {
     pub command: NodeCommandKind,
     pub backend_status: NodeUiBackendStatus,
     pub permission: NodePermission,
+    /// Stable audit requirement for this command. Reads that are too noisy to
+    /// record still carry an explicit `none` declaration instead of leaving
+    /// adapters to guess.
+    pub audit: NodeUiAudit,
     pub availability: NodeUiAvailability,
     pub fields: Vec<NodeUiField>,
     pub confirmation: Option<NodeUiConfirmation>,
@@ -201,6 +240,53 @@ pub struct NodeUiConfirmation {
     pub title_key: String,
     pub consequence_key: String,
     pub destructive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeUiAudit {
+    pub policy: NodeUiAuditPolicy,
+    /// Stable action name written to the append-only audit log.
+    pub action: Option<String>,
+}
+
+impl NodeUiAudit {
+    fn none() -> Self {
+        Self {
+            policy: NodeUiAuditPolicy::None,
+            action: None,
+        }
+    }
+
+    fn record(action: &str) -> Self {
+        Self {
+            policy: NodeUiAuditPolicy::RecordOutcome,
+            action: Some(action.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiAuditPolicy {
+    None,
+    RecordOutcome,
+}
+
+/// Canonical audit declaration for a backend command. Keeping this mapping in
+/// the command contract prevents WebUI and GPUI from auditing different names
+/// for the same operation.
+pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
+    match command {
+        NodeCommandKind::GetSnapshot | NodeCommandKind::GetUiManifest => NodeUiAudit::none(),
+        NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
+        NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
+        NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
+        NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),
+        NodeCommandKind::UpdateRouting => NodeUiAudit::record("routing.update"),
+        NodeCommandKind::SetNetworkRole => NodeUiAudit::record("network.role.set"),
+        NodeCommandKind::ProbePeer => NodeUiAudit::record("peer.probe"),
+        NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
@@ -619,6 +705,7 @@ fn action(
         command,
         backend_status,
         permission,
+        audit: audit_for_command(command),
         availability,
         fields,
         confirmation,
@@ -715,6 +802,51 @@ mod tests {
         assert!(violations
             .iter()
             .any(|violation| violation.starts_with("inconsistent_permission:set_network_role:")));
+    }
+
+    #[test]
+    fn every_action_declares_the_canonical_audit_policy() {
+        let manifest = node_ui_manifest();
+        for action in manifest.pages.iter().flat_map(|page| &page.actions) {
+            assert_eq!(action.audit, audit_for_command(action.command));
+        }
+
+        let snapshot = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeCommandKind::GetSnapshot)
+            .expect("snapshot action");
+        assert_eq!(snapshot.audit.policy, NodeUiAuditPolicy::None);
+        assert!(snapshot.audit.action.is_none());
+
+        let shutdown = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeCommandKind::Shutdown)
+            .expect("shutdown action");
+        assert_eq!(shutdown.audit.policy, NodeUiAuditPolicy::RecordOutcome);
+        assert_eq!(shutdown.audit.action.as_deref(), Some("node.shutdown"));
+    }
+
+    #[test]
+    fn validation_rejects_actions_without_audit_declarations() {
+        let mut manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter_mut()
+            .flat_map(|page| &mut page.actions)
+            .find(|action| action.command == NodeCommandKind::CreateNetwork)
+            .expect("create action");
+        action.audit = NodeUiAudit::none();
+
+        let violations = manifest
+            .validate()
+            .expect_err("mutating actions must declare audit");
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("audit_declaration_mismatch:create_network:")));
     }
 
     #[test]

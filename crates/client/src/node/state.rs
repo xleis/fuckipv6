@@ -5,9 +5,10 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
+use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
 use fuckipv6_common::ExitNodeCapabilities;
 
-use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot};
+use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodePhase};
 use crate::ui::UiModeResolution;
 
 /// Stable, transport-neutral state rendered by every node UI adapter.
@@ -23,6 +24,10 @@ pub struct NodeSnapshot {
     /// of inferring success from configuration alone.
     #[serde(default)]
     pub exit_node_capabilities: ExitNodeCapabilities,
+    /// Unified four-capability projection shared by every UI adapter. Missing
+    /// entries deserialize as `Unknown`; they are never inferred as enabled.
+    #[serde(default)]
+    pub capabilities: NodeCapabilityRegistrySnapshot,
     #[serde(default)]
     pub permissions: NodePermissionSnapshot,
     #[serde(default)]
@@ -36,6 +41,58 @@ pub struct NodeSnapshot {
 }
 
 impl NodeSnapshot {
+    /// Recompute the capability registry from authoritative snapshot fields.
+    /// Derived state is never stored independently by adapters.
+    pub fn refresh_capability_states(&mut self) {
+        self.capabilities = NodeCapabilityRegistrySnapshot::from_snapshot(self);
+    }
+
+    /// Return the single user-facing status for this snapshot. Transitions win
+    /// over failures, failures over degradation, and control-plane health is
+    /// deliberately not inferred when no control snapshot is available.
+    pub fn primary_status(&self) -> NodePrimaryStatus {
+        match self.lifecycle.phase {
+            NodePhase::Starting => NodePrimaryStatus::Starting,
+            NodePhase::Stopping => NodePrimaryStatus::Stopping,
+            NodePhase::Failed => NodePrimaryStatus::Failed,
+            NodePhase::Stopped => {
+                if self.identity.is_none()
+                    && self.configuration.networks.is_empty()
+                    && self.networks.is_empty()
+                    && self.lifecycle.configured_networks == 0
+                {
+                    NodePrimaryStatus::Uninitialized
+                } else {
+                    NodePrimaryStatus::Stopped
+                }
+            }
+            NodePhase::Running if self.is_degraded() => NodePrimaryStatus::Degraded,
+            NodePhase::Running => NodePrimaryStatus::Running,
+        }
+    }
+
+    fn is_degraded(&self) -> bool {
+        self.last_error.is_some()
+            || !self.lifecycle.failed_networks.is_empty()
+            || self.networks.iter().any(|network| {
+                matches!(
+                    network.status,
+                    NodeNetworkStatus::Connecting
+                        | NodeNetworkStatus::Degraded
+                        | NodeNetworkStatus::Stopping
+                        | NodeNetworkStatus::Failed
+                )
+            })
+            || self.embedded_services.iter().any(|service| {
+                matches!(
+                    service.status,
+                    NodeEmbeddedServiceStatus::Starting
+                        | NodeEmbeddedServiceStatus::Stopping
+                        | NodeEmbeddedServiceStatus::Failed
+                )
+            })
+    }
+
     /// Returns machine-readable consistency violations for diagnostics and
     /// tests. UI adapters may surface these values, but must never repair state
     /// locally or derive a parallel state machine from them.
@@ -107,6 +164,143 @@ impl NodeSnapshot {
         }
 
         violations
+    }
+}
+
+/// The one status a user should see, independent of how many subsystem states
+/// contribute to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodePrimaryStatus {
+    Uninitialized,
+    Stopped,
+    Starting,
+    Stopping,
+    Running,
+    Degraded,
+    Failed,
+}
+
+/// Stable projection of the fixed first-version capability set. Unknown
+/// entries fail closed and unsupported capabilities remain visible so the UI
+/// can explain why an action is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCapabilityRegistrySnapshot {
+    pub capabilities: Vec<NodeCapabilitySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCapabilitySnapshot {
+    pub kind: CapabilityKind,
+    pub state: CapabilityState,
+}
+
+impl NodeCapabilityRegistrySnapshot {
+    pub fn state(&self, kind: CapabilityKind) -> CapabilityState {
+        self.capabilities
+            .iter()
+            .find(|capability| capability.kind == kind)
+            .map_or(CapabilityState::Unknown, |capability| capability.state)
+    }
+
+    fn from_snapshot(snapshot: &NodeSnapshot) -> Self {
+        let service_state = embedded_service_capability_state(&snapshot.embedded_services);
+        let exit_state = exit_node_capability_state(snapshot);
+        Self {
+            capabilities: vec![
+                NodeCapabilitySnapshot {
+                    kind: CapabilityKind::Coordinator,
+                    state: service_state,
+                },
+                NodeCapabilitySnapshot {
+                    kind: CapabilityKind::Relay,
+                    state: service_state,
+                },
+                NodeCapabilitySnapshot {
+                    kind: CapabilityKind::Exit,
+                    state: exit_state,
+                },
+                // File runtime is not wired in this build. Keeping the state
+                // explicit prevents an empty card from implying support.
+                NodeCapabilitySnapshot {
+                    kind: CapabilityKind::File,
+                    state: CapabilityState::Unsupported,
+                },
+            ],
+        }
+    }
+}
+
+impl Default for NodeCapabilityRegistrySnapshot {
+    fn default() -> Self {
+        Self {
+            capabilities: CapabilityKind::ALL
+                .into_iter()
+                .map(|kind| NodeCapabilitySnapshot {
+                    kind,
+                    state: CapabilityState::Unknown,
+                })
+                .collect(),
+        }
+    }
+}
+
+fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+    if services
+        .iter()
+        .any(|service| service.status == NodeEmbeddedServiceStatus::Running)
+    {
+        CapabilityState::Enabled
+    } else if services.iter().any(|service| {
+        matches!(
+            service.status,
+            NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
+        )
+    }) {
+        CapabilityState::Starting
+    } else if services
+        .iter()
+        .any(|service| service.status == NodeEmbeddedServiceStatus::Failed)
+    {
+        CapabilityState::Degraded
+    } else {
+        CapabilityState::Disabled
+    }
+}
+
+fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
+    if !snapshot.exit_node_capabilities.supported {
+        return CapabilityState::Unsupported;
+    }
+    let exit_networks = snapshot
+        .networks
+        .iter()
+        .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
+        .collect::<Vec<_>>();
+    if exit_networks.is_empty() {
+        return CapabilityState::Disabled;
+    }
+    if exit_networks
+        .iter()
+        .any(|network| network.status == NodeNetworkStatus::Failed)
+    {
+        CapabilityState::Degraded
+    } else if exit_networks.iter().any(|network| {
+        matches!(
+            network.status,
+            NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+        )
+    }) {
+        if exit_networks
+            .iter()
+            .any(|network| network.status == NodeNetworkStatus::Degraded)
+        {
+            CapabilityState::Degraded
+        } else {
+            CapabilityState::Enabled
+        }
+    } else {
+        CapabilityState::Starting
     }
 }
 
@@ -379,7 +573,8 @@ pub struct NodeStateStore {
 
 impl NodeStateStore {
     pub fn new() -> Self {
-        let snapshot = NodeSnapshot::default();
+        let mut snapshot = NodeSnapshot::default();
+        snapshot.refresh_capability_states();
         let (updates, _) = watch::channel(snapshot.clone());
         Self {
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -401,11 +596,12 @@ impl NodeStateStore {
         identity: Option<NodeIdentitySnapshot>,
         ui_mode: Option<UiModeResolution>,
     ) -> Self {
-        let snapshot = NodeSnapshot {
+        let mut snapshot = NodeSnapshot {
             identity,
             ui_mode,
             ..NodeSnapshot::default()
         };
+        snapshot.refresh_capability_states();
         let (updates, _) = watch::channel(snapshot.clone());
         Self {
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -429,6 +625,7 @@ impl NodeStateStore {
     {
         let mut snapshot = self.snapshot.write().await;
         update(&mut snapshot);
+        snapshot.refresh_capability_states();
         snapshot.revision = snapshot.revision.saturating_add(1);
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
@@ -727,10 +924,9 @@ mod tests {
     fn exit_node_capabilities_are_required_for_old_snapshots_to_fail_closed() {
         let snapshot = NodeSnapshot::default();
         let mut encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
-        encoded
-            .as_object_mut()
-            .expect("snapshot object")
-            .remove("exit_node_capabilities");
+        let object = encoded.as_object_mut().expect("snapshot object");
+        object.remove("exit_node_capabilities");
+        object.remove("capabilities");
 
         let decoded: NodeSnapshot =
             serde_json::from_value(encoded).expect("deserialize legacy snapshot");
@@ -738,5 +934,122 @@ mod tests {
             decoded.exit_node_capabilities,
             ExitNodeCapabilities::detect()
         );
+        for capability in CapabilityKind::ALL {
+            assert_eq!(
+                decoded.capabilities.state(capability),
+                CapabilityState::Unknown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_registry_is_complete_and_derived_from_authoritative_state() {
+        let state = NodeStateStore::new();
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.capabilities.capabilities.len(), 4);
+        assert_eq!(
+            snapshot
+                .capabilities
+                .capabilities
+                .iter()
+                .map(|capability| capability.kind)
+                .collect::<HashSet<_>>(),
+            CapabilityKind::ALL.into_iter().collect()
+        );
+        assert_eq!(
+            snapshot.capabilities.state(CapabilityKind::Coordinator),
+            CapabilityState::Disabled
+        );
+        assert_eq!(
+            snapshot.capabilities.state(CapabilityKind::Relay),
+            CapabilityState::Disabled
+        );
+        assert_eq!(
+            snapshot.capabilities.state(CapabilityKind::File),
+            CapabilityState::Unsupported
+        );
+
+        let exit_network = network("home", NodeNetworkStatus::Online);
+        let updated = state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = ExitNodeCapabilities {
+                    schema_version: fuckipv6_common::EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                    platform: fuckipv6_common::ExitNodePlatform::Linux,
+                    supported: true,
+                    ipv4_forwarding: true,
+                    ipv6_forwarding: true,
+                    nat: true,
+                    cleanup: true,
+                    unsupported_reasons: Vec::new(),
+                };
+                snapshot.networks = vec![exit_network];
+                snapshot.embedded_services = vec![embedded_service("home")];
+            })
+            .await;
+        assert_eq!(
+            updated.capabilities.state(CapabilityKind::Exit),
+            CapabilityState::Disabled
+        );
+
+        let updated = state
+            .update(|snapshot| {
+                snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Running;
+                snapshot.networks[0].roles = vec![NodeNetworkRole::ExitNode];
+            })
+            .await;
+        assert_eq!(
+            updated.capabilities.state(CapabilityKind::Coordinator),
+            CapabilityState::Enabled
+        );
+        assert_eq!(
+            updated.capabilities.state(CapabilityKind::Relay),
+            CapabilityState::Enabled
+        );
+        assert_eq!(
+            updated.capabilities.state(CapabilityKind::Exit),
+            CapabilityState::Enabled
+        );
+    }
+
+    #[test]
+    fn every_lifecycle_and_network_state_has_one_primary_status() {
+        let mut snapshot = NodeSnapshot::default();
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Uninitialized);
+
+        snapshot.identity = Some(NodeIdentitySnapshot {
+            node_id: "node-1".into(),
+            display_name: None,
+            public_key_fingerprint: "fixture".into(),
+        });
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Stopped);
+
+        for (phase, expected) in [
+            (NodePhase::Starting, NodePrimaryStatus::Starting),
+            (NodePhase::Stopping, NodePrimaryStatus::Stopping),
+            (NodePhase::Failed, NodePrimaryStatus::Failed),
+        ] {
+            snapshot.lifecycle.phase = phase;
+            assert_eq!(snapshot.primary_status(), expected);
+        }
+
+        snapshot.lifecycle.phase = NodePhase::Running;
+        snapshot.networks = vec![network("home", NodeNetworkStatus::Online)];
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Running);
+
+        for status in [
+            NodeNetworkStatus::Connecting,
+            NodeNetworkStatus::Degraded,
+            NodeNetworkStatus::Stopping,
+            NodeNetworkStatus::Failed,
+        ] {
+            snapshot.networks[0].status = status;
+            assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Degraded);
+        }
+
+        snapshot.networks[0].status = NodeNetworkStatus::Offline;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Running);
+        snapshot.embedded_services = vec![embedded_service("home")];
+        snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Failed;
+        assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Degraded);
     }
 }

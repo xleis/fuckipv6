@@ -30,6 +30,32 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum CapabilityKind {
+        COORDINATOR("coordinator"),
+        RELAY("relay"),
+        EXIT("exit"),
+        FILE("file");
+
+        private final String wireName;
+
+        CapabilityKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CapabilityKind fromWireName(String value) {
+            for (CapabilityKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CapabilityKind wire value: " + value);
+        }
+    }
+
     public enum DisplayEnvironment {
         LINUX_X11("linux_x11"),
         LINUX_WAYLAND("linux_wayland"),
@@ -403,6 +429,30 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeRoutingMode wire value: " + value);
+        }
+    }
+
+    public enum NodeUiAuditPolicy {
+        NONE("none"),
+        RECORD_OUTCOME("record_outcome");
+
+        private final String wireName;
+
+        NodeUiAuditPolicy(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeUiAuditPolicy fromWireName(String value) {
+            for (NodeUiAuditPolicy candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeUiAuditPolicy wire value: " + value);
         }
     }
 

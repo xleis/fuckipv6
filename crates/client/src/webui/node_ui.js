@@ -124,6 +124,10 @@
               "command": "get_snapshot",
               "backend_status": "implemented",
               "permission": "view_state",
+              "audit": {
+                "policy": "none",
+                "action": null
+              },
               "availability": "always",
               "fields": [],
               "confirmation": null
@@ -141,6 +145,10 @@
               "command": "create_network",
               "backend_status": "implemented",
               "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.create"
+              },
               "availability": "node_running",
               "fields": [
                 {
@@ -187,6 +195,10 @@
               "command": "join_network",
               "backend_status": "implemented",
               "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.join"
+              },
               "availability": "node_running",
               "fields": [
                 {
@@ -219,6 +231,10 @@
               "command": "start_networks",
               "backend_status": "implemented",
               "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.start"
+              },
               "availability": "node_running",
               "fields": [
                 {
@@ -237,6 +253,10 @@
               "command": "stop_networks",
               "backend_status": "implemented",
               "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.stop"
+              },
               "availability": "network_online",
               "fields": [
                 {
@@ -273,6 +293,10 @@
               "command": "probe_peer",
               "backend_status": "implemented",
               "permission": "probe_peers",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "peer.probe"
+              },
               "availability": "network_online",
               "fields": [
                 {
@@ -324,6 +348,10 @@
               "command": "update_routing",
               "backend_status": "implemented",
               "permission": "change_routing",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "routing.update"
+              },
               "availability": "network_selected",
               "fields": [
                 {
@@ -374,6 +402,10 @@
               "command": "set_network_role",
               "backend_status": "implemented",
               "permission": "manage_roles",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.role.set"
+              },
               "availability": "network_selected",
               "fields": [
                 {
@@ -417,6 +449,10 @@
               "command": "set_network_role",
               "backend_status": "unavailable",
               "permission": "manage_roles",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.role.set"
+              },
               "availability": "network_selected",
               "fields": [
                 {
@@ -472,6 +508,10 @@
               "command": "shutdown",
               "backend_status": "implemented",
               "permission": "stop_node",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "node.shutdown"
+              },
               "availability": "node_running",
               "fields": [],
               "confirmation": {

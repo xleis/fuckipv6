@@ -77,6 +77,10 @@
         "permission": {
           "$ref": "#/$defs/NodePermission"
         },
+        "audit": {
+          "$ref": "#/$defs/NodeUiAudit",
+          "description": "Stable audit requirement for this command. Reads that are too noisy to\nrecord still carry an explicit `none` declaration instead of leaving\nadapters to guess."
+        },
         "availability": {
           "$ref": "#/$defs/NodeUiAvailability"
         },
@@ -103,6 +107,7 @@
         "command",
         "backend_status",
         "permission",
+        "audit",
         "availability",
         "fields"
       ]
@@ -133,6 +138,31 @@
         "view_logs"
       ],
       "description": "Stable capability classes used by both the permission snapshot and UI actions."
+    },
+    "NodeUiAudit": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/NodeUiAuditPolicy"
+        },
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Stable action name written to the append-only audit log."
+        }
+      },
+      "required": [
+        "policy"
+      ]
+    },
+    "NodeUiAuditPolicy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "record_outcome"
+      ]
     },
     "NodeUiAvailability": {
       "type": "string",

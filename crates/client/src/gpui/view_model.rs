@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
+
 use crate::node::{
     NodeCommand, NodeCommandKind, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
     NodeNetworkRole, NodeNetworkSelection, NodePhase, NodeProbePeerCommand, NodeRoutingMode,
@@ -351,8 +353,13 @@ pub fn action_block_reason(
         return Some(ActionBlockReason::PermissionDenied);
     }
 
-    if action.id == "set_exit_node_role" && !snapshot.exit_node_capabilities.supported {
-        return Some(ActionBlockReason::ExitNodeUnsupported);
+    if action.id == "set_exit_node_role" {
+        let state = snapshot.capabilities.state(CapabilityKind::Exit);
+        if state == CapabilityState::Unsupported
+            || (state == CapabilityState::Unknown && !snapshot.exit_node_capabilities.supported)
+        {
+            return Some(ActionBlockReason::ExitNodeUnsupported);
+        }
     }
 
     match action.availability {

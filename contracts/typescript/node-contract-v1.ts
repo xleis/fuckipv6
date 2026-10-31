@@ -10,6 +10,10 @@ export type NodeManifestActionCommandKind =
 
 export type AclAction = "allow" | "deny";
 
+export type CapabilityKind = "coordinator" | "relay" | "exit" | "file";
+
+export type CapabilityState = "disabled" | "starting" | "enabled" | "degraded" | "unavailable" | "unsupported" | "unknown";
+
 export type DisplayEnvironment = "linux_x11" | "linux_wayland" | "windows_desktop" | "macos_desktop" | "headless";
 
 export type ExitNodeCapabilities = {
@@ -30,6 +34,15 @@ export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_requi
 export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
 
 export type NodeAccessModel = "trusted_control_plane";
+
+export type NodeCapabilityRegistrySnapshot = {
+  "capabilities": Array<NodeCapabilitySnapshot>;
+};
+
+export type NodeCapabilitySnapshot = {
+  "kind": CapabilityKind;
+  "state": CapabilityState;
+};
 
 export type NodeCommand = {
   "command": "get_snapshot";
@@ -345,6 +358,7 @@ export type NodeSnapshot = {
   "identity"?: NodeIdentitySnapshot | null;
   "configuration"?: NodeConfigurationSnapshot;
   "exit_node_capabilities"?: ExitNodeCapabilities;
+  "capabilities"?: NodeCapabilityRegistrySnapshot;
   "permissions"?: NodePermissionSnapshot;
   "embedded_services"?: Array<NodeEmbeddedServiceSnapshot>;
   "ui_mode"?: UiModeResolution | null;
@@ -377,10 +391,18 @@ export type NodeUiAction = {
   "command": "get_snapshot" | "start_networks" | "stop_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "probe_peer" | "shutdown";
   "backend_status": NodeUiBackendStatus;
   "permission": NodePermission;
+  "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
   "fields": Array<NodeUiField>;
   "confirmation"?: NodeUiConfirmation | null;
 };
+
+export type NodeUiAudit = {
+  "policy": NodeUiAuditPolicy;
+  "action"?: string | null;
+};
+
+export type NodeUiAuditPolicy = "none" | "record_outcome";
 
 export type NodeUiAvailability = "always" | "node_running" | "network_online" | "network_selected";
 

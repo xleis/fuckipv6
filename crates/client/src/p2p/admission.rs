@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -75,6 +75,38 @@ impl HandshakeAdmissionConfig {
     }
 }
 
+/// Limits for expensive HELLO signature verification and responder KEM work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HelloValidationConfig {
+    /// Maximum responder handshakes that may execute cryptographic validation
+    /// concurrently across all peer states sharing this guard.
+    pub max_in_flight: usize,
+    /// Whether a source already present in the peer's registered/authenticated
+    /// endpoint set may skip the stateless Cookie challenge while budget is
+    /// available. Unknown sources always require a Cookie.
+    pub allow_direct: bool,
+}
+
+impl Default for HelloValidationConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: 16,
+            allow_direct: true,
+        }
+    }
+}
+
+impl HelloValidationConfig {
+    fn validate(self) -> Result<Self, HandshakeAdmissionError> {
+        if self.max_in_flight == 0 {
+            return Err(HandshakeAdmissionError::InvalidConfig(
+                "HELLO validation budget must be greater than zero",
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// Fail-closed reason an incoming handshake was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum HandshakeAdmissionError {
@@ -110,6 +142,9 @@ pub struct HandshakeAdmissionMetrics {
     pub rejected_identity: u64,
     pub rejected_table_full: u64,
     pub rejected_unavailable: u64,
+    pub hello_validation_active: u64,
+    pub hello_validation_capacity: u64,
+    pub hello_validation_busy: u64,
 }
 
 impl HandshakeAdmissionMetrics {
@@ -135,6 +170,52 @@ struct Counters {
     rejected_unavailable: AtomicU64,
 }
 
+struct HelloValidationBudget {
+    config: HelloValidationConfig,
+    active: AtomicUsize,
+    busy: AtomicU64,
+}
+
+impl HelloValidationBudget {
+    fn new(config: HelloValidationConfig) -> Self {
+        Self {
+            config,
+            active: AtomicUsize::new(0),
+            busy: AtomicU64::new(0),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Result<HelloValidationPermit, HelloValidationError> {
+        let mut active = self.active.load(Ordering::Relaxed);
+        loop {
+            if active >= self.config.max_in_flight {
+                self.busy.fetch_add(1, Ordering::Relaxed);
+                return Err(HelloValidationError::Busy);
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(HelloValidationPermit {
+                        budget: Arc::clone(self),
+                    });
+                }
+                Err(current) => active = current,
+            }
+        }
+    }
+}
+
+/// Stable fail-closed reason expensive HELLO validation could not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(crate) enum HelloValidationError {
+    #[error("HELLO validation capacity is busy")]
+    Busy,
+}
+
 #[derive(Debug, Clone)]
 struct Reservation {
     source: IpAddr,
@@ -154,6 +235,7 @@ struct AdmissionState {
 /// Shared, bounded handshake admission guard.
 pub(crate) struct HandshakeAdmission {
     config: HandshakeAdmissionConfig,
+    hello_validation: Arc<HelloValidationBudget>,
     state: Mutex<AdmissionState>,
     counters: Counters,
 }
@@ -163,9 +245,19 @@ impl HandshakeAdmission {
     pub(crate) fn new(
         config: HandshakeAdmissionConfig,
     ) -> Result<Arc<Self>, HandshakeAdmissionError> {
+        Self::new_with_hello_validation(config, HelloValidationConfig::default())
+    }
+
+    /// Build a guard with explicit handshake and HELLO-validation limits.
+    pub(crate) fn new_with_hello_validation(
+        config: HandshakeAdmissionConfig,
+        hello_validation: HelloValidationConfig,
+    ) -> Result<Arc<Self>, HandshakeAdmissionError> {
         let config = config.validate()?;
+        let hello_validation = hello_validation.validate()?;
         Ok(Arc::new(Self {
             config,
+            hello_validation: Arc::new(HelloValidationBudget::new(hello_validation)),
             state: Mutex::new(AdmissionState::default()),
             counters: Counters::default(),
         }))
@@ -177,6 +269,22 @@ impl HandshakeAdmission {
             .expect("the built-in handshake admission configuration is valid")
     }
 
+    /// Acquire one global slot for expensive HELLO signature/KEM validation.
+    ///
+    /// The returned permit releases the slot synchronously on drop, covering
+    /// every success, error, cancellation, and panic-unwind path.
+    pub(crate) fn try_reserve_hello_validation(
+        self: &Arc<Self>,
+    ) -> Result<HelloValidationPermit, HelloValidationError> {
+        self.hello_validation.try_acquire()
+    }
+
+    /// Whether trusted sources may bypass the stateless Cookie challenge while
+    /// a validation slot is available.
+    pub(crate) fn allows_direct_hello(&self) -> bool {
+        self.hello_validation.config.allow_direct
+    }
+
     /// Reserve one handshake slot before allocating responder crypto state.
     pub(crate) fn try_reserve(
         self: &Arc<Self>,
@@ -184,7 +292,18 @@ impl HandshakeAdmission {
         identity: AdmissionIdentity,
         now: Instant,
     ) -> Result<HandshakeAdmissionPermit, HandshakeAdmissionError> {
-        self.try_reserve_optional_identity(source, Some(identity), now)
+        self.try_reserve_optional_identity(source, Some(identity), now, true)
+    }
+
+    /// Try a direct-path reservation without counting pressure as a terminal
+    /// admission rejection. The caller falls back to a stateless Cookie.
+    pub(crate) fn try_reserve_quiet(
+        self: &Arc<Self>,
+        source: IpAddr,
+        identity: AdmissionIdentity,
+        now: Instant,
+    ) -> Result<HandshakeAdmissionPermit, HandshakeAdmissionError> {
+        self.try_reserve_optional_identity(source, Some(identity), now, false)
     }
 
     /// Reserve a pre-authentication QUIC handshake by source only.
@@ -193,7 +312,7 @@ impl HandshakeAdmission {
         source: IpAddr,
         now: Instant,
     ) -> Result<HandshakeAdmissionPermit, HandshakeAdmissionError> {
-        self.try_reserve_optional_identity(source, None, now)
+        self.try_reserve_optional_identity(source, None, now, true)
     }
 
     fn try_reserve_optional_identity(
@@ -201,6 +320,7 @@ impl HandshakeAdmission {
         source: IpAddr,
         identity: Option<AdmissionIdentity>,
         now: Instant,
+        record_rejection: bool,
     ) -> Result<HandshakeAdmissionPermit, HandshakeAdmissionError> {
         let source = canonical_ip(source);
         let expires_at = now
@@ -210,9 +330,11 @@ impl HandshakeAdmission {
         self.prune_expired_locked(&mut state, now);
 
         if state.reservations.len() >= self.config.global {
-            self.counters
-                .rejected_global
-                .fetch_add(1, Ordering::Relaxed);
+            if record_rejection {
+                self.counters
+                    .rejected_global
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return Err(HandshakeAdmissionError::GlobalLimit);
         }
         if state
@@ -222,9 +344,11 @@ impl HandshakeAdmission {
             .unwrap_or_default()
             >= self.config.per_source
         {
-            self.counters
-                .rejected_source
-                .fetch_add(1, Ordering::Relaxed);
+            if record_rejection {
+                self.counters
+                    .rejected_source
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return Err(HandshakeAdmissionError::SourceLimit);
         }
         if let Some(identity) = identity {
@@ -235,16 +359,20 @@ impl HandshakeAdmission {
                 .unwrap_or_default()
                 >= self.config.per_identity
             {
-                self.counters
-                    .rejected_identity
-                    .fetch_add(1, Ordering::Relaxed);
+                if record_rejection {
+                    self.counters
+                        .rejected_identity
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 return Err(HandshakeAdmissionError::IdentityLimit);
             }
         }
         if state.reservations.len() >= self.config.max_entries {
-            self.counters
-                .rejected_table_full
-                .fetch_add(1, Ordering::Relaxed);
+            if record_rejection {
+                self.counters
+                    .rejected_table_full
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return Err(HandshakeAdmissionError::TableFull);
         }
 
@@ -284,6 +412,10 @@ impl HandshakeAdmission {
                         .counters
                         .rejected_unavailable
                         .load(Ordering::Relaxed),
+                    hello_validation_active: self.hello_validation.active.load(Ordering::Relaxed)
+                        as u64,
+                    hello_validation_capacity: self.hello_validation.config.max_in_flight as u64,
+                    hello_validation_busy: self.hello_validation.busy.load(Ordering::Relaxed),
                     ..HandshakeAdmissionMetrics::default()
                 };
             }
@@ -301,6 +433,9 @@ impl HandshakeAdmission {
             rejected_identity: self.counters.rejected_identity.load(Ordering::Relaxed),
             rejected_table_full: self.counters.rejected_table_full.load(Ordering::Relaxed),
             rejected_unavailable: self.counters.rejected_unavailable.load(Ordering::Relaxed),
+            hello_validation_active: self.hello_validation.active.load(Ordering::Relaxed) as u64,
+            hello_validation_capacity: self.hello_validation.config.max_in_flight as u64,
+            hello_validation_busy: self.hello_validation.busy.load(Ordering::Relaxed),
         }
     }
 
@@ -400,6 +535,18 @@ fn decrement_identity(counts: &mut HashMap<AdmissionIdentity, usize>, identity: 
         if *count == 0 {
             counts.remove(&identity);
         }
+    }
+}
+
+/// One global slot reserved for expensive responder validation.
+pub(crate) struct HelloValidationPermit {
+    budget: Arc<HelloValidationBudget>,
+}
+
+impl Drop for HelloValidationPermit {
+    fn drop(&mut self) {
+        let previous = self.budget.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "HELLO validation budget underflow");
     }
 }
 
@@ -518,6 +665,60 @@ mod tests {
             ttl,
         })
         .expect("valid admission limits")
+    }
+
+    fn guarded_with_hello_budget(
+        max_in_flight: usize,
+        allow_direct: bool,
+    ) -> Arc<HandshakeAdmission> {
+        HandshakeAdmission::new_with_hello_validation(
+            HandshakeAdmissionConfig::default(),
+            HelloValidationConfig {
+                max_in_flight,
+                allow_direct,
+            },
+        )
+        .expect("valid HELLO validation limits")
+    }
+
+    #[test]
+    fn hello_validation_budget_is_global_and_released_by_raii() {
+        let admission = guarded_with_hello_budget(1, true);
+        let permit = admission
+            .try_reserve_hello_validation()
+            .expect("first validation slot");
+        assert!(matches!(
+            admission.try_reserve_hello_validation(),
+            Err(HelloValidationError::Busy)
+        ));
+
+        let metrics = admission.metrics(Instant::now());
+        assert_eq!(metrics.hello_validation_active, 1);
+        assert_eq!(metrics.hello_validation_capacity, 1);
+        assert_eq!(metrics.hello_validation_busy, 1);
+        assert_eq!(metrics.rejected_total(), 0);
+
+        drop(permit);
+        let retry = admission
+            .try_reserve_hello_validation()
+            .expect("released validation slot");
+        assert_eq!(admission.metrics(Instant::now()).hello_validation_active, 1);
+        drop(retry);
+        assert_eq!(admission.metrics(Instant::now()).hello_validation_active, 0);
+    }
+
+    #[test]
+    fn hello_validation_budget_rejects_invalid_configuration() {
+        assert!(matches!(
+            HandshakeAdmission::new_with_hello_validation(
+                HandshakeAdmissionConfig::default(),
+                HelloValidationConfig {
+                    max_in_flight: 0,
+                    allow_direct: false,
+                },
+            ),
+            Err(HandshakeAdmissionError::InvalidConfig(_))
+        ));
     }
 
     #[test]

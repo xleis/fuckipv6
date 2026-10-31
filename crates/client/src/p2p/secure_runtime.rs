@@ -36,7 +36,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
-use super::admission::{HandshakeAdmission, HandshakeAdmissionError, HandshakeAdmissionPermit};
+use super::admission::{
+    HandshakeAdmission, HandshakeAdmissionError, HandshakeAdmissionPermit, HelloValidationError,
+};
 use super::secure_session::SessionPolicy;
 
 /// Network-separation domain bound into the v2 endpoint context.
@@ -73,6 +75,8 @@ pub(crate) enum SecureRuntimeError {
     Driver(#[from] DriverError),
     #[error("handshake admission rejected: {0}")]
     Admission(#[from] HandshakeAdmissionError),
+    #[error("HELLO validation rejected: {0}")]
+    HelloValidation(#[from] HelloValidationError),
     #[error("Secure Session v2 is not established for this peer")]
     NotEstablished,
     #[error("Secure Session v2 has been revoked for this peer")]
@@ -490,7 +494,12 @@ impl SecurePeerState {
         match message {
             ControlMessage::Hello(hello) => {
                 if !self.initiator {
-                    return self.challenge_hello(source, hello);
+                    if !self.handshake_admission.allows_direct_hello()
+                        || !self.is_trusted_control_source(&state, source)
+                    {
+                        return self.challenge_hello(source, hello);
+                    }
+                    return self.accept_initial_hello(&mut state, source, hello);
                 }
                 Err(SecureRuntimeError::UnexpectedFrame {
                     expected: "COOKIE_CHALLENGE, ACCEPT or CONFIRM",
@@ -711,7 +720,21 @@ impl SecurePeerState {
         let binding = CookieBinding::from_hello(source, &retry.hello)?;
         self.cookie_key
             .verify(&binding, &retry.cookie.encode(), now)?;
-        self.accept_authenticated_hello(state, source, retry.hello)
+        self.accept_authenticated_hello(state, source, retry.hello, true)
+    }
+
+    fn accept_initial_hello(
+        &self,
+        state: &mut SecureState,
+        source: SocketAddr,
+        hello: Hello,
+    ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
+        let retry_hello = hello.clone();
+        match self.accept_authenticated_hello(state, source, hello, false) {
+            Err(SecureRuntimeError::HelloValidation(HelloValidationError::Busy))
+            | Err(SecureRuntimeError::Admission(_)) => self.challenge_hello(source, retry_hello),
+            result => result,
+        }
     }
 
     fn accept_authenticated_hello(
@@ -719,6 +742,7 @@ impl SecurePeerState {
         state: &mut SecureState,
         source: SocketAddr,
         hello: Hello,
+        record_admission_rejection: bool,
     ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
         let now = Instant::now();
         if state
@@ -757,9 +781,17 @@ impl SecurePeerState {
         }
 
         let epoch = next_epoch(state.driver.as_ref())?;
-        let admission =
+        let _validation = self.handshake_admission.try_reserve_hello_validation()?;
+        let admission = if record_admission_rejection {
             self.handshake_admission
-                .try_reserve(source.ip(), hello.initiator_identity, now)?;
+                .try_reserve(source.ip(), hello.initiator_identity, now)?
+        } else {
+            self.handshake_admission.try_reserve_quiet(
+                source.ip(),
+                hello.initiator_identity,
+                now,
+            )?
+        };
         let responder = state
             .responder
             .as_mut()
@@ -1186,7 +1218,14 @@ mod tests {
     }
 
     fn admission() -> Arc<HandshakeAdmission> {
-        HandshakeAdmission::shared_default()
+        HandshakeAdmission::new_with_hello_validation(
+            HandshakeAdmissionConfig::default(),
+            HelloValidationConfig {
+                max_in_flight: 16,
+                allow_direct: false,
+            },
+        )
+        .expect("valid test admission config")
     }
 
     fn cookie_key() -> Arc<CookieKey> {
@@ -1754,6 +1793,214 @@ mod tests {
             Err(SecureRuntimeError::UnexpectedFrame { .. })
         ));
         assert!(initiator.state.lock().await.pending_initiator.is_some());
+    }
+
+    #[tokio::test]
+    async fn direct_hello_requires_registered_source_and_reuses_pending_accept() {
+        let admission = HandshakeAdmission::shared_default();
+        let (initiator, responder, initiator_addr, _responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let message = fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+        let attacker_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 44101);
+
+        let challenge = responder
+            .handle_control(attacker_addr, message.clone())
+            .await
+            .expect("unknown source is challenged");
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        let after_challenge = admission.metrics(Instant::now());
+        assert_eq!(after_challenge.admitted, 0);
+        assert_eq!(after_challenge.active_reservations, 0);
+        assert_eq!(after_challenge.hello_validation_active, 0);
+
+        let accept = responder
+            .handle_control(initiator_addr, message.clone())
+            .await
+            .expect("registered source uses available direct budget");
+        assert_eq!(accept[0].kind, "ACCEPT");
+        let after_accept = admission.metrics(Instant::now());
+        assert_eq!(after_accept.admitted, 1);
+        assert_eq!(after_accept.active_reservations, 1);
+        assert_eq!(after_accept.hello_validation_active, 0);
+
+        let replayed = responder
+            .handle_control(initiator_addr, message)
+            .await
+            .expect("identical direct HELLO reuses pending ACCEPT");
+        assert_eq!(replayed, accept);
+        let after_replay = admission.metrics(Instant::now());
+        assert_eq!(after_replay.admitted, 1);
+        assert_eq!(after_replay.active_reservations, 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_hello_budget_falls_back_to_cookie_and_recovers() {
+        let admission = HandshakeAdmission::new_with_hello_validation(
+            HandshakeAdmissionConfig::default(),
+            HelloValidationConfig {
+                max_in_flight: 1,
+                allow_direct: true,
+            },
+        )
+        .expect("valid admission config");
+        let (initiator, responder, initiator_addr, _responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let message = fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello");
+        let held = admission
+            .try_reserve_hello_validation()
+            .expect("hold validation budget");
+
+        let challenge = responder
+            .handle_control(initiator_addr, message.clone())
+            .await
+            .expect("exhausted budget falls back to challenge");
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+        let busy = admission.metrics(Instant::now());
+        assert_eq!(busy.admitted, 0);
+        assert_eq!(busy.active_reservations, 0);
+        assert_eq!(busy.hello_validation_busy, 1);
+        assert_eq!(busy.rejected_total(), 0);
+
+        drop(held);
+        let accept = responder
+            .handle_control(initiator_addr, message)
+            .await
+            .expect("valid direct retry succeeds after budget release");
+        assert_eq!(accept[0].kind, "ACCEPT");
+        assert_eq!(admission.metrics(Instant::now()).admitted, 1);
+    }
+
+    #[tokio::test]
+    async fn cookie_retry_checks_cookie_before_shared_validation_budget() {
+        let admission = HandshakeAdmission::new_with_hello_validation(
+            HandshakeAdmissionConfig::default(),
+            HelloValidationConfig {
+                max_in_flight: 1,
+                allow_direct: false,
+            },
+        )
+        .expect("valid admission config");
+        let (initiator, responder, initiator_addr, responder_addr) =
+            pair_with_admission(admission.clone());
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let challenge = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("challenge hello");
+        let retry = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer challenge");
+        let valid_frame = retry[0].frame.clone();
+
+        let mut invalid_cookie = valid_frame.clone();
+        *invalid_cookie.last_mut().expect("cookie MAC") ^= 1;
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    fuckipv6_secure_session::wire::decode_control(&invalid_cookie)
+                        .expect("decode invalid cookie"),
+                )
+                .await,
+            Err(SecureRuntimeError::Cookie(CookieError::InvalidMac))
+        ));
+        let after_invalid = admission.metrics(Instant::now());
+        assert_eq!(after_invalid.hello_validation_active, 0);
+        assert_eq!(after_invalid.hello_validation_busy, 0);
+        assert_eq!(after_invalid.admitted, 0);
+
+        let held = admission
+            .try_reserve_hello_validation()
+            .expect("hold validation budget");
+        assert!(matches!(
+            responder
+                .handle_control(
+                    initiator_addr,
+                    fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                        .expect("decode retry"),
+                )
+                .await,
+            Err(SecureRuntimeError::HelloValidation(
+                HelloValidationError::Busy
+            ))
+        ));
+        let busy = admission.metrics(Instant::now());
+        assert_eq!(busy.hello_validation_busy, 1);
+        assert_eq!(busy.admitted, 0);
+        assert_eq!(busy.active_reservations, 0);
+        drop(held);
+
+        let ControlMessage::HelloWithCookie(mut bad_signature) =
+            fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                .expect("decode valid frame")
+        else {
+            panic!("expected hello-with-cookie");
+        };
+        bad_signature.hello.signature[0] ^= 1;
+        let signature_result = responder
+            .handle_control(
+                initiator_addr,
+                ControlMessage::HelloWithCookie(bad_signature),
+            )
+            .await;
+        assert!(
+            matches!(
+                signature_result,
+                Err(SecureRuntimeError::Driver(DriverError::Handshake(
+                    HandshakeError::InvalidSignature("initiator")
+                )))
+            ),
+            "unexpected signature result: {signature_result:?}"
+        );
+        let after_signature_failure = admission.metrics(Instant::now());
+        assert_eq!(after_signature_failure.hello_validation_active, 0);
+        assert_eq!(after_signature_failure.active_reservations, 0);
+        assert_eq!(after_signature_failure.dropped, 1);
+        assert!(responder.state.lock().await.pending_responder.is_none());
+
+        let accept = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                    .expect("decode valid retry"),
+            )
+            .await
+            .expect("valid retry succeeds after failed validation releases capacity");
+        let replayed = responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&valid_frame)
+                    .expect("decode replayed retry"),
+            )
+            .await
+            .expect("idempotent retry reuses pending acceptance");
+        assert_eq!(replayed, accept);
+        let final_metrics = admission.metrics(Instant::now());
+        assert_eq!(final_metrics.admitted, 2);
+        assert_eq!(final_metrics.active_reservations, 1);
+        assert_eq!(final_metrics.hello_validation_active, 0);
     }
 
     #[tokio::test]

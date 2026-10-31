@@ -10,6 +10,7 @@
 //! lets both endpoints derive the same pair-scoped receiver indices without
 //! trusting an unauthenticated negotiated role field.
 
+use bytes::{Bytes, BytesMut};
 use ed25519_dalek::VerifyingKey;
 use fuckipv6_common::PeerInfo;
 use fuckipv6_secure_session::cookie::{CookieBinding, CookieError, CookieKey};
@@ -31,10 +32,12 @@ use fuckipv6_secure_session::{
 };
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 
 use super::admission::{
     HandshakeAdmission, HandshakeAdmissionError, HandshakeAdmissionPermit, HelloValidationError,
@@ -149,6 +152,130 @@ struct RetiredGeneration {
     discard_at: Instant,
 }
 
+/// Per-peer secure-state lock acquisition and hold-time counters.
+///
+/// The counters intentionally describe the current mutex boundary rather than
+/// claiming that the state has already been split. A snapshot makes contention
+/// and the cost of moving batch AEAD under the lock measurable before changing
+/// concurrency semantics.
+#[allow(
+    dead_code,
+    reason = "surfaced by the connection metrics in the next commit"
+)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SecureLockMetrics {
+    pub acquisitions: u64,
+    pub contended_acquisitions: u64,
+    pub wait_ns_total: u64,
+    pub wait_ns_max: u64,
+    pub hold_ns_total: u64,
+    pub hold_ns_max: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "surfaced by the connection metrics in the next commit"
+)]
+impl SecureLockMetrics {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.acquisitions = self.acquisitions.saturating_add(other.acquisitions);
+        self.contended_acquisitions = self
+            .contended_acquisitions
+            .saturating_add(other.contended_acquisitions);
+        self.wait_ns_total = self.wait_ns_total.saturating_add(other.wait_ns_total);
+        self.wait_ns_max = self.wait_ns_max.max(other.wait_ns_max);
+        self.hold_ns_total = self.hold_ns_total.saturating_add(other.hold_ns_total);
+        self.hold_ns_max = self.hold_ns_max.max(other.hold_ns_max);
+    }
+
+    pub(crate) fn average_wait_ns(self) -> u64 {
+        self.wait_ns_total
+            .checked_div(self.acquisitions)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn average_hold_ns(self) -> u64 {
+        self.hold_ns_total
+            .checked_div(self.acquisitions)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Default)]
+struct SecureLockCounters {
+    acquisitions: AtomicU64,
+    contended_acquisitions: AtomicU64,
+    wait_ns_total: AtomicU64,
+    wait_ns_max: AtomicU64,
+    hold_ns_total: AtomicU64,
+    hold_ns_max: AtomicU64,
+}
+
+impl SecureLockCounters {
+    #[allow(dead_code, reason = "called by SecurePeerState::lock_metrics")]
+    fn snapshot(&self) -> SecureLockMetrics {
+        SecureLockMetrics {
+            acquisitions: self.acquisitions.load(Ordering::Relaxed),
+            contended_acquisitions: self.contended_acquisitions.load(Ordering::Relaxed),
+            wait_ns_total: self.wait_ns_total.load(Ordering::Relaxed),
+            wait_ns_max: self.wait_ns_max.load(Ordering::Relaxed),
+            hold_ns_total: self.hold_ns_total.load(Ordering::Relaxed),
+            hold_ns_max: self.hold_ns_max.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct SecureLockGuard<'a> {
+    guard: Option<MutexGuard<'a, SecureState>>,
+    counters: &'a SecureLockCounters,
+    acquired_at: Instant,
+}
+
+impl Deref for SecureLockGuard<'_> {
+    type Target = SecureState;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .as_deref()
+            .expect("secure lock guard is present until drop")
+    }
+}
+
+impl DerefMut for SecureLockGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .as_deref_mut()
+            .expect("secure lock guard is present until drop")
+    }
+}
+
+impl Drop for SecureLockGuard<'_> {
+    fn drop(&mut self) {
+        let held = duration_ns(self.acquired_at.elapsed());
+        add_atomic(&self.counters.hold_ns_total, held);
+        update_atomic_max(&self.counters.hold_ns_max, held);
+        drop(self.guard.take());
+    }
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn add_atomic(target: &AtomicU64, value: u64) {
+    target.fetch_add(value, Ordering::Relaxed);
+}
+
+fn update_atomic_max(target: &AtomicU64, value: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    while value > current {
+        match target.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SecureState {
     revoked: bool,
@@ -178,6 +305,7 @@ pub(crate) struct SecurePeerState {
     local_receiver_index: u32,
     lifecycle_gate: RwLock<()>,
     state: Mutex<SecureState>,
+    state_lock_counters: SecureLockCounters,
 }
 
 impl SecurePeerState {
@@ -282,11 +410,46 @@ impl SecurePeerState {
             initiator,
             local_receiver_index: install_config.local_receiver_index,
             lifecycle_gate: RwLock::new(()),
+            state_lock_counters: SecureLockCounters::default(),
             state: Mutex::new(SecureState {
                 responder,
                 ..SecureState::default()
             }),
         }))
+    }
+
+    /// Acquire the per-peer state lock and account for wait and hold time.
+    async fn lock_state(&self) -> SecureLockGuard<'_> {
+        let started = Instant::now();
+        let guard = match self.state.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.state_lock_counters
+                    .contended_acquisitions
+                    .fetch_add(1, Ordering::Relaxed);
+                let guard = self.state.lock().await;
+                let waited = duration_ns(started.elapsed());
+                add_atomic(&self.state_lock_counters.wait_ns_total, waited);
+                update_atomic_max(&self.state_lock_counters.wait_ns_max, waited);
+                guard
+            }
+        };
+        self.state_lock_counters
+            .acquisitions
+            .fetch_add(1, Ordering::Relaxed);
+        SecureLockGuard {
+            guard: Some(guard),
+            counters: &self.state_lock_counters,
+            acquired_at: Instant::now(),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "surfaced by the connection metrics in the next commit"
+    )]
+    pub(crate) fn lock_metrics(&self) -> SecureLockMetrics {
+        self.state_lock_counters.snapshot()
     }
 
     /// Whether this endpoint is the deterministic initiator.
@@ -296,7 +459,7 @@ impl SecurePeerState {
 
     /// Whether an authenticated v2 driver is installed.
     pub(crate) async fn is_established(&self) -> bool {
-        let state = self.state.lock().await;
+        let state = self.lock_state().await;
         !state.revoked && state.driver.is_some()
     }
 
@@ -311,7 +474,7 @@ impl SecurePeerState {
         &self,
     ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, SecureRuntimeError> {
         let permission = self.lifecycle_gate.read().await;
-        if self.state.lock().await.revoked {
+        if self.lock_state().await.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
         Ok(permission)
@@ -327,7 +490,7 @@ impl SecurePeerState {
     /// is outside this session object's control.
     pub(crate) async fn revoke(&self) -> bool {
         let _lifecycle = self.lifecycle_gate.write().await;
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         if state.revoked {
             return false;
         }
@@ -348,14 +511,13 @@ impl SecurePeerState {
     /// Endpoint authenticated by the completed handshake.
     #[cfg(test)]
     pub(crate) async fn authenticated_peer(&self) -> Option<SocketAddr> {
-        self.state.lock().await.authenticated_peer
+        self.lock_state().await.authenticated_peer
     }
 
     /// Session identifier for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn session_id(&self) -> Option<[u8; fuckipv6_secure_session::SESSION_ID_LEN]> {
-        self.state
-            .lock()
+        self.lock_state()
             .await
             .driver
             .as_ref()
@@ -365,8 +527,7 @@ impl SecurePeerState {
     /// Active data epoch for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn epoch(&self) -> Option<u16> {
-        self.state
-            .lock()
+        self.lock_state()
             .await
             .driver
             .as_ref()
@@ -378,7 +539,7 @@ impl SecurePeerState {
     /// time policy remains unchanged.
     #[cfg(test)]
     pub(crate) async fn force_rekey_due(&self) {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         if state.driver.is_some() {
             let rekey_age = MAX_EPOCH_LIFETIME
                 .saturating_sub(REKEY_LEAD_TIME)
@@ -390,8 +551,7 @@ impl SecurePeerState {
     /// Driver counters for diagnostics and tests.
     #[cfg(test)]
     pub(crate) async fn stats(&self) -> Option<DriverStats> {
-        self.state
-            .lock()
+        self.lock_state()
             .await
             .driver
             .as_ref()
@@ -404,7 +564,7 @@ impl SecurePeerState {
     /// responder's replay cache can recognize retransmissions. An abandoned
     /// attempt is replaced after [`HELLO_REFRESH_AFTER`].
     pub(crate) async fn initiate_frame(&self) -> Result<Option<Vec<u8>>, SecureRuntimeError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         let now = Instant::now();
         prune_state(&mut state, now);
         if state.revoked {
@@ -463,7 +623,7 @@ impl SecurePeerState {
     pub(crate) async fn retry_staged_confirm(
         &self,
     ) -> Result<Option<SecureControlAction>, SecureRuntimeError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         prune_state(&mut state, Instant::now());
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
@@ -490,7 +650,7 @@ impl SecurePeerState {
             frame = control_variant(&message),
             "收到 Secure Session v2 控制帧"
         );
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         prune_state(&mut state, Instant::now());
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
@@ -868,7 +1028,7 @@ impl SecurePeerState {
             });
         }
 
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -884,6 +1044,59 @@ impl SecurePeerState {
         Ok((destination, encoded_len))
     }
 
+    /// Seal one same-peer batch while holding the session state lock once.
+    ///
+    /// The driver reserves the complete counter range before writing any
+    /// ciphertext. All packets therefore share one destination snapshot and
+    /// retain nonce order even when AEAD work runs on the crypto workers. The
+    /// outbound owner already holds the lifecycle admission for this call.
+    #[allow(
+        dead_code,
+        reason = "wired into the batched dataplane in the next commit"
+    )]
+    pub(crate) async fn seal_batch_in_place(
+        &self,
+        packets: &mut [&mut [u8]],
+        plaintext_lens: &[usize],
+    ) -> Result<SocketAddr, SecureRuntimeError> {
+        if packets.len() != plaintext_lens.len() {
+            return Err(SecureRuntimeError::PacketBufferTooSmall {
+                required: plaintext_lens.len(),
+                actual: packets.len(),
+            });
+        }
+        for (packet, plaintext_len) in packets.iter().zip(plaintext_lens) {
+            let packet_len = plaintext_len
+                .checked_add(DATA_HEADER_LEN + AEAD_TAG_LEN)
+                .filter(|len| *len <= MAX_DATA_PACKET_LEN)
+                .ok_or(SecureRuntimeError::PayloadTooLarge {
+                    len: *plaintext_len,
+                })?;
+            if packet.len() < packet_len {
+                return Err(SecureRuntimeError::PacketBufferTooSmall {
+                    required: packet_len,
+                    actual: packet.len(),
+                });
+            }
+        }
+
+        let mut state = self.lock_state().await;
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
+        let destination = state
+            .authenticated_peer
+            .ok_or(SecureRuntimeError::NotEstablished)?;
+        let driver = state
+            .driver
+            .as_mut()
+            .ok_or(SecureRuntimeError::NotEstablished)?;
+        run_cpu_bound_batch(|| {
+            driver.seal_batch_in_place(packets, plaintext_lens, Instant::now())
+        })?;
+        Ok(destination)
+    }
+
     /// Authenticate and decrypt one v2 data datagram from the session endpoint.
     #[cfg(test)]
     pub(crate) async fn open(
@@ -891,7 +1104,7 @@ impl SecurePeerState {
         source: SocketAddr,
         packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
@@ -917,8 +1130,32 @@ impl SecurePeerState {
         &self,
         packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         open_with_driver(&mut state, packet)
+    }
+
+    /// Authenticate relay ciphertext without forcing a `Bytes -> Vec` copy.
+    ///
+    /// A uniquely owned `Bytes` is converted to `BytesMut` in place. If the
+    /// frame is shared, the codec ownership graph requires one copy before AEAD
+    /// can decrypt in place; this fallback is explicit and does not happen for
+    /// the normal single-consumer receive path. The returned plaintext is a
+    /// zero-copy suffix of the authenticated receive allocation.
+    #[allow(
+        dead_code,
+        reason = "wired into the owned-buffer dataplane in the next commit"
+    )]
+    pub(crate) async fn open_from_session_bytes(
+        &self,
+        packet: Bytes,
+    ) -> Result<BytesMut, SecureRuntimeError> {
+        let mut state = self.lock_state().await;
+        let mut packet = match packet.try_into_mut() {
+            Ok(packet) => packet,
+            Err(packet) => BytesMut::from(packet.as_ref()),
+        };
+        let plaintext_len = open_with_driver_core(&mut state, &mut packet)?;
+        Ok(extract_opened_plaintext_bytes(packet, plaintext_len))
     }
 
     /// Authenticate one direct UDP data packet and bind the peer's new source
@@ -928,17 +1165,106 @@ impl SecurePeerState {
         source: SocketAddr,
         packet: Vec<u8>,
     ) -> Result<Vec<u8>, SecureRuntimeError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state().await;
         let plaintext = open_with_driver(&mut state, packet)?;
         state.authenticated_peer = Some(canonical_endpoint(source));
         Ok(plaintext)
+    }
+
+    /// Authenticate and decrypt one direct UDP frame in its existing allocation.
+    ///
+    /// On success the plaintext is moved to offset zero inside `packet`, but the
+    /// packet allocation and capacity are retained. The caller must truncate its
+    /// logical packet length to the returned plaintext length before delivery.
+    #[allow(
+        dead_code,
+        reason = "wired into the owned-buffer dataplane in the next commit"
+    )]
+    pub(crate) async fn open_from_source_in_place(
+        &self,
+        source: SocketAddr,
+        packet: &mut [u8],
+    ) -> Result<usize, SecureRuntimeError> {
+        let mut state = self.lock_state().await;
+        let plaintext_len = open_with_driver_core(&mut state, packet)?;
+        let plaintext_len = move_plaintext_to_front(packet, plaintext_len);
+        state.authenticated_peer = Some(canonical_endpoint(source));
+        Ok(plaintext_len)
+    }
+
+    /// Authenticate a direct UDP batch with one result per packet.
+    ///
+    /// The outer result covers state-level failures such as revocation or a
+    /// missing session. Each inner result covers exactly one input packet, in
+    /// input order. Active and retired epochs are attempted in one driver pass;
+    /// staged epochs are retried per packet. A later failure therefore never
+    /// rolls back or hides an earlier authenticated packet, including a packet
+    /// whose replay counter has already been consumed.
+    ///
+    /// The production UDP delivery loop consumes these results in input order
+    /// so one bad datagram cannot discard authenticated neighbors.
+    #[allow(
+        dead_code,
+        reason = "wired into the batched UDP receiver in the next commit"
+    )]
+    pub(crate) async fn open_from_source_batch_per_packet_in_place(
+        &self,
+        source: SocketAddr,
+        packets: &mut [&mut [u8]],
+    ) -> Result<Vec<Result<usize, SecureRuntimeError>>, SecureRuntimeError> {
+        if packets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut state = self.lock_state().await;
+        if state.revoked {
+            return Err(SecureRuntimeError::Revoked);
+        }
+        if state.driver.is_none() {
+            return Err(SecureRuntimeError::NotEstablished);
+        }
+
+        let now = Instant::now();
+        let active_results = {
+            let driver = state
+                .driver
+                .as_mut()
+                .expect("driver presence checked above");
+            run_cpu_bound_batch(|| driver.open_independent_batch_per_packet_in_place(packets, now))
+        }?;
+        let mut results = active_results
+            .into_iter()
+            .map(|result| {
+                result.map_err(|error| SecureRuntimeError::Driver(DriverError::Data(error)))
+            })
+            .collect::<Vec<_>>();
+
+        for (packet, result) in packets.iter_mut().zip(results.iter_mut()) {
+            let retry_staged = matches!(
+                result.as_ref(),
+                Err(SecureRuntimeError::Driver(DriverError::Data(
+                    SessionError::EpochMismatch | SessionError::UnknownEpoch
+                )))
+            );
+            if retry_staged {
+                *result = open_with_driver_core(&mut state, packet)
+                    .map(|plaintext_len| move_plaintext_to_front(packet, plaintext_len));
+            } else if let Ok(plaintext_len) = result {
+                *plaintext_len = move_plaintext_to_front(packet, *plaintext_len);
+            }
+        }
+
+        if results.iter().any(Result::is_ok) {
+            state.initial_confirm = None;
+            state.authenticated_peer = Some(canonical_endpoint(source));
+        }
+        Ok(results)
     }
 
     /// Return whether this state can own a control frame before its signature
     /// or key confirmation has been checked. The subsequent `handle_control`
     /// call remains responsible for all authentication.
     pub(crate) async fn matches_control(&self, message: &ControlMessage) -> bool {
-        let state = self.state.lock().await;
+        let state = self.lock_state().await;
         if state.revoked {
             return false;
         }
@@ -986,6 +1312,27 @@ impl SecurePeerState {
     pub(crate) fn handles_data_packet(&self, packet: &[u8]) -> bool {
         DataHeader::decode(packet)
             .is_ok_and(|header| header.receiver_index == self.local_receiver_index)
+    }
+
+    /// Receiver index used by the shared UDP receiver to select this session
+    /// before any packet authentication work. The index is only a routing hint;
+    /// `open_from_source` still authenticates the complete frame.
+    #[allow(dead_code, reason = "wired into the receiver index in the next commit")]
+    pub(crate) const fn local_receiver_index(&self) -> u32 {
+        self.local_receiver_index
+    }
+}
+
+/// Keep Rayon's synchronous worker wait off a multi-thread Tokio worker.
+///
+/// The client production and GPUI runtimes are multi-thread runtimes. A
+/// current-thread runtime cannot use `block_in_place`; it executes the batch
+/// directly and should keep batches small or move the caller to a blocking
+/// thread. No async mutex is held across an `await` in either branch.
+fn run_cpu_bound_batch<T>(job: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(job),
+        _ => job(),
     }
 }
 
@@ -1045,9 +1392,7 @@ fn open_with_driver_core(
         }
     }
 
-    let epoch = DataHeader::decode(packet)
-        .map_err(DriverError::Data)?
-        .epoch;
+    let epoch = DataHeader::decode(packet).map_err(DriverError::Data)?.epoch;
     let retired = state
         .retired
         .iter()
@@ -1073,6 +1418,15 @@ fn extract_opened_plaintext(mut packet: Vec<u8>, plaintext_len: usize) -> Vec<u8
     move_plaintext_to_front(&mut packet, plaintext_len);
     packet.truncate(plaintext_len);
     packet
+}
+
+/// Slice the authenticated plaintext out of the receive allocation instead of
+/// shifting it to offset zero and copying the remainder.
+fn extract_opened_plaintext_bytes(mut packet: BytesMut, plaintext_len: usize) -> BytesMut {
+    debug_assert!(plaintext_len <= packet.len().saturating_sub(DATA_HEADER_LEN));
+    let mut plaintext = packet.split_off(DATA_HEADER_LEN);
+    plaintext.truncate(plaintext_len);
+    plaintext
 }
 
 fn move_plaintext_to_front(packet: &mut [u8], plaintext_len: usize) -> usize {
@@ -1286,6 +1640,112 @@ mod tests {
         let (_, other_responder_index) = derive_receiver_indices(&other_peer, &initiator);
         assert_ne!(initiator_index, other_initiator_index);
         assert_ne!(responder_index, other_responder_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lock_state_metrics_record_real_contention_hold_time_and_averages() {
+        let (peer, _, _, _) = pair();
+        let holder = peer.lock_state().await;
+        let baseline = peer.lock_metrics();
+        assert_eq!(baseline.acquisitions, 1);
+        assert_eq!(baseline.contended_acquisitions, 0);
+
+        let (attempting_tx, attempting_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let contender_peer = peer.clone();
+        let contender = tokio::spawn(async move {
+            attempting_tx
+                .send(())
+                .expect("holder must wait for contender attempt");
+            let guard = contender_peer.lock_state().await;
+            acquired_tx
+                .send(())
+                .expect("holder must wait for contender acquisition");
+            release_rx.await.expect("holder must release contender");
+            drop(guard);
+        });
+
+        // On the current-thread test runtime, the contender sends this signal,
+        // observes the held mutex, records contention, and parks on the lock
+        // before yielding back to the holder.
+        attempting_rx.await.expect("contender started");
+        let while_held = peer.lock_metrics();
+        assert_eq!(while_held.acquisitions, baseline.acquisitions);
+        assert_eq!(
+            while_held.contended_acquisitions,
+            baseline.contended_acquisitions + 1
+        );
+        assert_eq!(while_held.wait_ns_total, baseline.wait_ns_total);
+
+        drop(holder);
+        acquired_rx.await.expect("contender acquired held lock");
+        let after_wait = peer.lock_metrics();
+        assert_eq!(after_wait.acquisitions, baseline.acquisitions + 1);
+        assert!(after_wait.wait_ns_total > baseline.wait_ns_total);
+        assert!(after_wait.wait_ns_max > baseline.wait_ns_max);
+        assert!(after_wait.hold_ns_total > baseline.hold_ns_total);
+        assert!(after_wait.hold_ns_max > baseline.hold_ns_max);
+
+        release_tx
+            .send(())
+            .expect("contender must still hold the lock");
+        contender.await.expect("contender completed");
+
+        let metrics = peer.lock_metrics();
+        assert_eq!(metrics.acquisitions, after_wait.acquisitions);
+        assert_eq!(
+            metrics.contended_acquisitions,
+            after_wait.contended_acquisitions
+        );
+        assert_eq!(metrics.wait_ns_total, after_wait.wait_ns_total);
+        assert_eq!(metrics.wait_ns_max, after_wait.wait_ns_max);
+        assert!(metrics.hold_ns_total > after_wait.hold_ns_total);
+        assert!(metrics.hold_ns_max >= after_wait.hold_ns_max);
+        assert_eq!(
+            metrics.average_wait_ns(),
+            metrics.wait_ns_total / metrics.acquisitions
+        );
+        assert_eq!(
+            metrics.average_hold_ns(),
+            metrics.hold_ns_total / metrics.acquisitions
+        );
+    }
+
+    #[test]
+    fn lock_metrics_merge_sums_counters_and_keeps_global_maxima() {
+        let mut aggregate = SecureLockMetrics {
+            acquisitions: 2,
+            contended_acquisitions: 1,
+            wait_ns_total: 10,
+            wait_ns_max: 10,
+            hold_ns_total: 30,
+            hold_ns_max: 20,
+        };
+        aggregate.merge(SecureLockMetrics {
+            acquisitions: 3,
+            contended_acquisitions: 2,
+            wait_ns_total: 25,
+            wait_ns_max: 15,
+            hold_ns_total: 40,
+            hold_ns_max: 25,
+        });
+
+        assert_eq!(
+            aggregate,
+            SecureLockMetrics {
+                acquisitions: 5,
+                contended_acquisitions: 3,
+                wait_ns_total: 35,
+                wait_ns_max: 15,
+                hold_ns_total: 70,
+                hold_ns_max: 25,
+            }
+        );
+        assert_eq!(aggregate.average_wait_ns(), 7);
+        assert_eq!(aggregate.average_hold_ns(), 14);
+        assert_eq!(SecureLockMetrics::default().average_wait_ns(), 0);
+        assert_eq!(SecureLockMetrics::default().average_hold_ns(), 0);
     }
 
     fn peer(
@@ -1536,6 +1996,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_packet_batch_preserves_mixed_generation_prefix_across_later_failure() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+
+        // Seal a valid old-epoch packet before rotating the responder.
+        let (_, old_packet) = responder
+            .seal(b"old-generation prefix")
+            .await
+            .expect("seal old generation");
+
+        initiator.force_rekey_due().await;
+        let accept =
+            accept_with_cookie(&initiator, &responder, initiator_addr, responder_addr).await;
+        let confirm = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                    .expect("decode rekey ACCEPT"),
+            )
+            .await
+            .expect("stage initiator generation");
+        responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+                    .expect("decode rekey CONFIRM"),
+            )
+            .await
+            .expect("activate responder generation");
+        assert_eq!(initiator.epoch().await, Some(1));
+        assert_eq!(responder.epoch().await, Some(2));
+
+        let (_, new_packet) = responder
+            .seal(b"staged generation")
+            .await
+            .expect("seal staged generation");
+        let (_, clean_failed_packet) = responder
+            .seal(b"retry failed packet")
+            .await
+            .expect("seal authentication-failure fixture");
+        let mut tampered_packet = clean_failed_packet.clone();
+        *tampered_packet.last_mut().expect("ciphertext tag") ^= 0x80;
+
+        let mut packets = [old_packet.clone(), new_packet.clone(), tampered_packet];
+        let mut refs = packets
+            .iter_mut()
+            .map(|packet| packet.as_mut_slice())
+            .collect::<Vec<_>>();
+        let results = initiator
+            .open_from_source_batch_per_packet_in_place(responder_addr, &mut refs)
+            .await
+            .expect("per-packet batch open");
+        drop(refs);
+        assert_eq!(results.len(), packets.len());
+        assert_eq!(
+            results[0].as_ref().ok().copied(),
+            Some(b"old-generation prefix".len())
+        );
+        assert_eq!(
+            results[1].as_ref().ok().copied(),
+            Some(b"staged generation".len())
+        );
+        assert!(matches!(
+            &results[2],
+            Err(SecureRuntimeError::Driver(DriverError::Data(
+                SessionError::AuthenticationFailed
+            )))
+        ));
+        assert_eq!(
+            &packets[0][..b"old-generation prefix".len()],
+            b"old-generation prefix"
+        );
+        assert_eq!(
+            &packets[1][..b"staged generation".len()],
+            b"staged generation"
+        );
+        assert_eq!(initiator.epoch().await, Some(2));
+
+        // Both successful mixed-generation prefixes committed replay state.
+        assert!(matches!(
+            initiator.open(responder_addr, old_packet).await,
+            Err(SecureRuntimeError::Driver(DriverError::Data(
+                SessionError::ReplayDetected
+            )))
+        ));
+        assert!(matches!(
+            initiator.open(responder_addr, new_packet).await,
+            Err(SecureRuntimeError::Driver(DriverError::Data(
+                SessionError::ReplayDetected
+            )))
+        ));
+        // The later authentication failure did not consume its replay counter,
+        // so the clean packet remains acceptable.
+        assert_eq!(
+            initiator
+                .open(responder_addr, clean_failed_packet)
+                .await
+                .expect("retry packet after per-slot authentication failure"),
+            b"retry failed packet"
+        );
+    }
+
+    #[tokio::test]
     async fn handshake_admission_reservation_follows_pending_responder_lifecycle() {
         let admission = admission();
         let (initiator, responder, initiator_addr, responder_addr) =
@@ -1725,6 +2288,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_bytes_reuses_unique_allocation_and_copies_shared() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+
+        let unique_plaintext = b"unique relay allocation";
+        let (_, packet) = initiator.seal(unique_plaintext).await.expect("seal unique");
+        let unique = Bytes::from(BytesMut::from(packet.as_slice()));
+        let unique_allocation = unique.as_ptr() as usize;
+        let opened = responder
+            .open_from_session_bytes(unique)
+            .await
+            .expect("open unique Bytes");
+        assert_eq!(
+            opened.as_ptr() as usize,
+            unique_allocation + DATA_HEADER_LEN,
+            "a uniquely owned relay Bytes must retain its allocation and decrypt in place"
+        );
+        assert_eq!(&opened[..], unique_plaintext);
+
+        let shared_plaintext = b"shared relay allocation";
+        let (_, packet) = initiator.seal(shared_plaintext).await.expect("seal shared");
+        let shared = Bytes::from(BytesMut::from(packet.as_slice()));
+        let shared_allocation = shared.as_ptr() as usize;
+        let shared_clone = shared.clone();
+        let opened = responder
+            .open_from_session_bytes(shared_clone)
+            .await
+            .expect("open shared Bytes fallback");
+        assert_ne!(
+            opened.as_ptr() as usize,
+            shared_allocation + DATA_HEADER_LEN,
+            "a shared Bytes must use the explicit copy fallback"
+        );
+        assert_eq!(&opened[..], shared_plaintext);
+        assert_eq!(
+            &shared[..],
+            packet.as_slice(),
+            "the shared sender must retain its original allocation"
+        );
+    }
+
+    #[tokio::test]
     async fn shared_state_establishes_and_exchanges_encrypted_data() {
         let (initiator, responder, initiator_addr, responder_addr) = pair();
         assert!(initiator.is_initiator());
@@ -1860,7 +2465,7 @@ mod tests {
         let after = admission.metrics(Instant::now());
         assert_eq!(after.admitted, before.admitted);
         assert_eq!(after.active_reservations, before.active_reservations);
-        let state = responder.state.lock().await;
+        let state = responder.lock_state().await;
         assert!(state.pending_responder.is_none());
         assert!(state.authenticated_peer.is_none());
         drop(state);
@@ -1878,7 +2483,7 @@ mod tests {
             initiator.handle_control(responder_addr, wrong_peer).await,
             Err(SecureRuntimeError::UnexpectedFrame { .. })
         ));
-        assert!(initiator.state.lock().await.pending_initiator.is_some());
+        assert!(initiator.lock_state().await.pending_initiator.is_some());
     }
 
     #[tokio::test]
@@ -2064,7 +2669,7 @@ mod tests {
         assert_eq!(after_signature_failure.hello_validation_active, 0);
         assert_eq!(after_signature_failure.active_reservations, 0);
         assert_eq!(after_signature_failure.dropped, 1);
-        assert!(responder.state.lock().await.pending_responder.is_none());
+        assert!(responder.lock_state().await.pending_responder.is_none());
 
         let accept = responder
             .handle_control(
@@ -2117,7 +2722,7 @@ mod tests {
                 .await,
             Err(SecureRuntimeError::UntrustedControlSource { actual }) if actual == attacker_addr
         ));
-        let pending = initiator.state.lock().await;
+        let pending = initiator.lock_state().await;
         assert_eq!(
             pending
                 .pending_initiator
@@ -2241,7 +2846,7 @@ mod tests {
         ));
 
         assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
-        assert!(responder.state.lock().await.pending_responder.is_none());
+        assert!(responder.lock_state().await.pending_responder.is_none());
 
         let first_accept = responder
             .handle_control(
@@ -2301,7 +2906,7 @@ mod tests {
             Err(SecureRuntimeError::Cookie(CookieError::Expired))
         ));
         assert_eq!(admission.metrics(Instant::now()).active_reservations, 0);
-        assert!(responder.state.lock().await.pending_responder.is_none());
+        assert!(responder.lock_state().await.pending_responder.is_none());
     }
 
     #[tokio::test]
@@ -2589,6 +3194,47 @@ mod tests {
             initiator.acquire_session_permission().await,
             Err(SecureRuntimeError::Revoked)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_seal_pressure_keeps_nonce_state_linearized() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        establish(&initiator, &responder, initiator_addr, responder_addr).await;
+
+        const TASKS: usize = 16;
+        let barrier = Arc::new(tokio::sync::Barrier::new(TASKS + 1));
+        let mut tasks = Vec::with_capacity(TASKS);
+        for index in 0..TASKS {
+            let initiator = initiator.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                initiator
+                    .seal(&vec![index as u8; 256])
+                    .await
+                    .map(|(_, packet)| (index, packet))
+            }));
+        }
+        barrier.wait().await;
+
+        let mut sealed = Vec::with_capacity(TASKS);
+        for task in tasks {
+            sealed.push(task.await.expect("seal task").expect("concurrent seal"));
+        }
+        for (_, packet) in sealed {
+            responder
+                .open(initiator_addr, packet)
+                .await
+                .expect("out-of-order authenticated packet");
+        }
+
+        let metrics = initiator.lock_metrics();
+        assert!(metrics.acquisitions >= TASKS as u64);
+        assert!(metrics.hold_ns_total > 0);
+        assert!(
+            initiator.stats().await.expect("driver stats").packets_sent >= TASKS as u64,
+            "all concurrent reservations must be reflected in the driver counters"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

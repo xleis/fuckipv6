@@ -379,8 +379,16 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 - [ ] 批量发送遵守每 peer nonce 顺序；batch 内单包失败不能破坏后续 nonce 或 replay 状态。
 - [ ] 用 syscall counter/`strace -c` 证明相同流量下 syscall/包下降；记录 64B 和 1420B 两组。
 
+**当前边界（2026-10-31）：**
+
+- Linux TUN 已有一条 readiness edge 后连续 drain 的 `read_batch`，但它仍是一包一次 `read(2)`；收益是减少唤醒和 task handoff，不能写成 syscall 批处理。
+- TUN 字符设备的一次 `write(2)` 对应一个 L3 packet；直接拼接多个 packet 的 `writev(2)` 会改变包边界，不能作为当前模型的 batch write。真正的多包写入需要 `io_uring` 多请求、multi-queue 或内核 ABI 层面验证。
+- UDP `recvmmsg`/`sendmmsg` 原语已提交；生产接线、nonce 顺序和短写 fallback 位于当前未完成的 P2P/CLI 联合改动中，受 CLI 边界合并阻塞，尚不能作为已提交的完整项。
+- 64B/1420B 的 `strace -c` syscall/包证据仍未归档，因此 PERF-4 不能标记完成。
+
 ### PERF-5 密码批处理接线与 worker 化
 
+- [x] **底层同 peer 原地批处理：** `4ea9c17` 提供 `seal_batch_in_place`、独立 buffer 的逐包 open 结果和 `Bytes` 原地 open；完整 nonce 在 AEAD 前预留。
 - [ ] 在 TUN/UDP batch 之上按 peer 构造连续 packet batch，明确 header/tag/stride 布局。
 - [ ] 串行预留 counter/nonce 后并行执行 AEAD，保持每 peer 发送顺序和失败关闭语义。
 - [ ] worker 数按可用 CPU 配置，队列有界，过载策略可观测。
@@ -401,6 +409,8 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-6 移除会话热路径 async mutex
 
+- [x] **锁等待/持锁指标：** `4ea9c17` 增加真实 `try_lock` 竞争计数、wait/hold 总时长与最大值，并覆盖并发 seal 的线性化测试。
+- [x] **同 peer 批量临界区：** `seal_batch_in_place` 一次持锁预留完整 nonce 范围并完成批量 AEAD；这是缩小锁获取次数，不是移除热路径锁。
 - [ ] 拆分 `SecurePeerState` 的 admission、session/epoch、driver 和统计状态，缩小临界区。
 - [ ] 采用每 peer actor、同步短锁或所有权转移，禁止在持锁期间执行网络 I/O 或 await。
 - [ ] 保持 revoke/rekey/transport handoff 的线性化和旧 session 拒绝语义。
@@ -425,6 +435,18 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 ## 本轮验证记录
 
 日期：2026-10-31
+
+### secure-runtime 独立提交 `4ea9c17`
+
+```text
+cargo fmt --all -- --check
+cargo clippy -p fuckipv6-client --all-targets -- -D warnings
+cargo test -p fuckipv6-client p2p::secure_runtime --lib -- --nocapture
+```
+
+结果：29 个 secure-runtime 测试通过，Clippy 无项目警告。独立树上保留旧连接 API 到 P2P 接线提交，并仅对新 API 标注临时 dead-code 原因；连接层切换后应删除这些兼容标记。
+
+### 数据面整合工作树
 
 ```text
 cargo fmt --all -- --check

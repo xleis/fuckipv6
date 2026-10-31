@@ -33,6 +33,7 @@ use fuckipv6_secure_session::{
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::{Deref, DerefMut};
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -170,6 +171,7 @@ enum SecureLockOperation {
 impl SecureLockOperation {
     const COUNT: usize = 5;
 
+    #[cfg(any(test, feature = "secure-lock-metrics"))]
     const fn index(self) -> usize {
         match self {
             Self::Outbound => 0,
@@ -251,6 +253,7 @@ impl SecureLockMetrics {
     }
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 #[derive(Default)]
 struct SecureLockOperationCounters {
     acquisitions: AtomicU64,
@@ -261,6 +264,7 @@ struct SecureLockOperationCounters {
     hold_ns_max: AtomicU64,
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 impl SecureLockOperationCounters {
     fn snapshot(&self) -> SecureLockOperationMetrics {
         SecureLockOperationMetrics {
@@ -274,12 +278,14 @@ impl SecureLockOperationCounters {
     }
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 #[derive(Default)]
 struct SecureLockCounters {
     total: SecureLockOperationCounters,
     by_operation: [SecureLockOperationCounters; SecureLockOperation::COUNT],
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 impl SecureLockCounters {
     fn operation(&self, operation: SecureLockOperation) -> &SecureLockOperationCounters {
         &self.by_operation[operation.index()]
@@ -302,8 +308,11 @@ impl SecureLockCounters {
 
 struct SecureLockGuard<'a> {
     guard: Option<MutexGuard<'a, SecureState>>,
+    #[cfg(any(test, feature = "secure-lock-metrics"))]
     total: &'a SecureLockOperationCounters,
+    #[cfg(any(test, feature = "secure-lock-metrics"))]
     operation: &'a SecureLockOperationCounters,
+    #[cfg(any(test, feature = "secure-lock-metrics"))]
     acquired_at: Instant,
 }
 
@@ -327,23 +336,29 @@ impl DerefMut for SecureLockGuard<'_> {
 
 impl Drop for SecureLockGuard<'_> {
     fn drop(&mut self) {
-        let held = duration_ns(self.acquired_at.elapsed());
-        for counters in [self.total, self.operation] {
-            add_atomic(&counters.hold_ns_total, held);
-            update_atomic_max(&counters.hold_ns_max, held);
+        #[cfg(any(test, feature = "secure-lock-metrics"))]
+        {
+            let held = duration_ns(self.acquired_at.elapsed());
+            for counters in [self.total, self.operation] {
+                add_atomic(&counters.hold_ns_total, held);
+                update_atomic_max(&counters.hold_ns_max, held);
+            }
         }
         drop(self.guard.take());
     }
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 fn add_atomic(target: &AtomicU64, value: u64) {
     target.fetch_add(value, Ordering::Relaxed);
 }
 
+#[cfg(any(test, feature = "secure-lock-metrics"))]
 fn update_atomic_max(target: &AtomicU64, value: u64) {
     let mut current = target.load(Ordering::Relaxed);
     while value > current {
@@ -383,6 +398,7 @@ pub(crate) struct SecurePeerState {
     local_receiver_index: u32,
     lifecycle_gate: RwLock<()>,
     state: Mutex<SecureState>,
+    #[cfg(any(test, feature = "secure-lock-metrics"))]
     state_lock_counters: SecureLockCounters,
 }
 
@@ -488,6 +504,7 @@ impl SecurePeerState {
             initiator,
             local_receiver_index: install_config.local_receiver_index,
             lifecycle_gate: RwLock::new(()),
+            #[cfg(any(test, feature = "secure-lock-metrics"))]
             state_lock_counters: SecureLockCounters::default(),
             state: Mutex::new(SecureState {
                 responder,
@@ -496,8 +513,27 @@ impl SecurePeerState {
         }))
     }
 
-    /// Acquire the per-peer state lock and account for wait and hold time.
+    /// Acquire the per-peer state lock.
+    ///
+    /// Instrumentation is a compile-time feature so the production fast path
+    /// has no clock reads or counter atomics. Unit tests and profile builds
+    /// enable it to attribute wait and hold time by operation.
     async fn lock_state(&self, operation: SecureLockOperation) -> SecureLockGuard<'_> {
+        #[cfg(any(test, feature = "secure-lock-metrics"))]
+        {
+            return self.lock_state_instrumented(operation).await;
+        }
+        #[cfg(not(any(test, feature = "secure-lock-metrics")))]
+        {
+            let _ = operation;
+            SecureLockGuard {
+                guard: Some(self.state.lock().await),
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "secure-lock-metrics"))]
+    async fn lock_state_instrumented(&self, operation: SecureLockOperation) -> SecureLockGuard<'_> {
         let started = Instant::now();
         let total = &self.state_lock_counters.total;
         let operation_counters = self.state_lock_counters.operation(operation);
@@ -534,7 +570,14 @@ impl SecurePeerState {
         reason = "surfaced by the connection metrics in the next commit"
     )]
     pub(crate) fn lock_metrics(&self) -> SecureLockMetrics {
-        self.state_lock_counters.snapshot()
+        #[cfg(any(test, feature = "secure-lock-metrics"))]
+        {
+            self.state_lock_counters.snapshot()
+        }
+        #[cfg(not(any(test, feature = "secure-lock-metrics")))]
+        {
+            SecureLockMetrics::default()
+        }
     }
 
     /// Whether this endpoint is the deterministic initiator.

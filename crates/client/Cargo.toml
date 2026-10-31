@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = ["gpui-shell"]
 gpui-shell = ["dep:gpui"]
+secure-lock-metrics = []
 userspace-nat-prototype = []
 
 [[bin]]

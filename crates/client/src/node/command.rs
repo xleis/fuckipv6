@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    NodeEventBus, NodeEventKind, NodeNetworkRole, NodeNetworkSelection, NodeProblem,
-    NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeUiManifest,
+    NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole, NodeNetworkSelection,
+    NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeUiManifest,
 };
 
 /// One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.
@@ -39,6 +39,8 @@ impl NodeCommandRequest {
 pub enum NodeCommandKind {
     GetSnapshot,
     GetUiManifest,
+    #[serde(rename = "get_node_diagnostics")]
+    GetDiagnostics,
     StartNetworks,
     StopNetworks,
     RestartNetworks,
@@ -50,13 +52,16 @@ pub enum NodeCommandKind {
     StartNode,
     StopNode,
     RestartNode,
+    #[serde(rename = "cleanup_node_residuals")]
+    CleanupResiduals,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
+        Self::GetDiagnostics,
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
@@ -68,13 +73,15 @@ impl NodeCommandKind {
         Self::StartNode,
         Self::StopNode,
         Self::RestartNode,
+        Self::CleanupResiduals,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 13] = [
+    pub const ACTIONS: [Self; 15] = [
         Self::GetSnapshot,
+        Self::GetDiagnostics,
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
@@ -86,6 +93,7 @@ impl NodeCommandKind {
         Self::StartNode,
         Self::StopNode,
         Self::RestartNode,
+        Self::CleanupResiduals,
         Self::Shutdown,
     ];
 
@@ -93,6 +101,7 @@ impl NodeCommandKind {
         match self {
             Self::GetSnapshot => "get_snapshot",
             Self::GetUiManifest => "get_ui_manifest",
+            Self::GetDiagnostics => "get_node_diagnostics",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
             Self::RestartNetworks => "restart_networks",
@@ -104,6 +113,7 @@ impl NodeCommandKind {
             Self::StartNode => "start_node",
             Self::StopNode => "stop_node",
             Self::RestartNode => "restart_node",
+            Self::CleanupResiduals => "cleanup_node_residuals",
             Self::Shutdown => "shutdown",
         }
     }
@@ -118,6 +128,10 @@ pub enum NodeCommand {
     /// Bootstrap query for the declarative UI contract. This is not rendered as
     /// a page action and should be called before an adapter builds its UI.
     GetUiManifest,
+    /// Query live runtime residue and cleanup state from the actor that owns
+    /// network sessions, embedded services and retained resource owners.
+    #[serde(rename = "get_node_diagnostics")]
+    GetDiagnostics,
     StartNetworks {
         selection: NodeNetworkSelection,
     },
@@ -143,6 +157,13 @@ pub enum NodeCommand {
     /// Reload every persisted network and replace the complete data plane under
     /// one single-flight lifecycle operation.
     RestartNode,
+    /// Retry cleanup for runtime resources whose previous owner reported a
+    /// deferred or failed shutdown.
+    #[serde(rename = "cleanup_node_residuals")]
+    CleanupResiduals {
+        networks: Vec<String>,
+        all: bool,
+    },
     Shutdown,
 }
 
@@ -151,6 +172,7 @@ impl NodeCommand {
         match self {
             Self::GetSnapshot => NodeCommandKind::GetSnapshot,
             Self::GetUiManifest => NodeCommandKind::GetUiManifest,
+            Self::GetDiagnostics => NodeCommandKind::GetDiagnostics,
             Self::StartNetworks { .. } => NodeCommandKind::StartNetworks,
             Self::StopNetworks { .. } => NodeCommandKind::StopNetworks,
             Self::RestartNetworks { .. } => NodeCommandKind::RestartNetworks,
@@ -162,6 +184,7 @@ impl NodeCommand {
             Self::StartNode => NodeCommandKind::StartNode,
             Self::StopNode => NodeCommandKind::StopNode,
             Self::RestartNode => NodeCommandKind::RestartNode,
+            Self::CleanupResiduals { .. } => NodeCommandKind::CleanupResiduals,
             Self::Shutdown => NodeCommandKind::Shutdown,
         }
     }
@@ -170,6 +193,7 @@ impl NodeCommand {
         match self {
             Self::GetSnapshot
             | Self::GetUiManifest
+            | Self::GetDiagnostics
             | Self::StartNode
             | Self::StopNode
             | Self::RestartNode
@@ -200,6 +224,20 @@ impl NodeCommand {
                 }
                 if networks.is_empty() {
                     return Err(invalid("重启网络时必须指定网络名称，或设置 all=true"));
+                }
+                validate_network_names(networks)
+            }
+            Self::CleanupResiduals { networks, all } => {
+                if *all {
+                    if !networks.is_empty() {
+                        return Err(invalid(
+                            "清理全部网络残留时不能同时指定网络名称，请只设置 all=true",
+                        ));
+                    }
+                    return Ok(());
+                }
+                if networks.is_empty() {
+                    return Err(invalid("清理网络残留时必须指定网络名称，或设置 all=true"));
                 }
                 validate_network_names(networks)
             }
@@ -420,11 +458,97 @@ pub struct NodePeerProbeSnapshot {
     pub timed_out: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCleanupStepStatus {
+    Removed,
+    NotOwned,
+    Deferred,
+    Failed,
+    Unknown,
+}
+
+impl NodeCleanupStepStatus {
+    pub const fn is_clean(self) -> bool {
+        matches!(self, Self::Removed | Self::NotOwned)
+    }
+}
+
+/// One sanitized runtime cleanup step. Host paths and raw operating-system
+/// errors are intentionally excluded from this public contract.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCleanupStepSnapshot {
+    pub network_name: String,
+    pub resource: String,
+    pub status: NodeCleanupStepStatus,
+    pub detail: Option<String>,
+}
+
+/// Transport-neutral residue report shared by diagnostics and explicit cleanup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRuntimeResidueSnapshot {
+    pub sessions_remaining: usize,
+    pub listeners_remaining: usize,
+    pub peers_remaining: usize,
+    pub embedded_services_remaining: usize,
+    pub configuration_retained: bool,
+    pub residual_networks: Vec<String>,
+    pub cleanup_steps: Vec<NodeCleanupStepSnapshot>,
+    pub issues: Vec<String>,
+}
+
+impl NodeRuntimeResidueSnapshot {
+    pub fn is_clean(&self) -> bool {
+        self.sessions_remaining == 0
+            && self.listeners_remaining == 0
+            && self.peers_remaining == 0
+            && self.embedded_services_remaining == 0
+            && self.residual_networks.is_empty()
+            && self.issues.is_empty()
+    }
+}
+
+/// Live actor-owned diagnostics. Counts describe observed runtime ownership,
+/// not merely configuration or UI snapshot projections.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeDiagnosticsSnapshot {
+    pub lifecycle: NodeLifecycleSnapshot,
+    pub retained_owner_networks: Vec<String>,
+    pub cleanup_candidate_networks: Vec<String>,
+    pub residue: NodeRuntimeResidueSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCleanupFailureReason {
+    StillRunning,
+    OwnerUnavailable,
+    TimedOut,
+    Incomplete,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCleanupFailureSnapshot {
+    pub network_name: String,
+    pub reason: NodeCleanupFailureReason,
+}
+
+/// Partial-success aware result for explicit residual cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeResidualCleanupResult {
+    pub cleaned_networks: Vec<String>,
+    pub failed_networks: Vec<NodeCleanupFailureSnapshot>,
+    pub residue: NodeRuntimeResidueSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
     Snapshot(Box<NodeSnapshot>),
     UiManifest(Box<NodeUiManifest>),
+    Diagnostics(NodeDiagnosticsSnapshot),
+    Cleanup(NodeResidualCleanupResult),
     Probe(NodePeerProbeSnapshot),
     Accepted { operation_id: String },
     Completed { message: String },
@@ -519,6 +643,7 @@ mod tests {
         vec![
             NodeCommand::GetSnapshot,
             NodeCommand::GetUiManifest,
+            NodeCommand::GetDiagnostics,
             NodeCommand::StartNetworks {
                 selection: NodeNetworkSelection::Named(vec!["home".into()]),
             },
@@ -558,6 +683,13 @@ mod tests {
                 target: "fd00::2".into(),
                 timeout_ms: 1_000,
             }),
+            NodeCommand::StartNode,
+            NodeCommand::StopNode,
+            NodeCommand::RestartNode,
+            NodeCommand::CleanupResiduals {
+                networks: vec!["home".into()],
+                all: false,
+            },
             NodeCommand::Shutdown,
         ]
     }
@@ -627,6 +759,27 @@ mod tests {
     }
 
     #[test]
+    fn serialized_command_names_match_the_canonical_wire_names() {
+        let mut expected = NodeCommandKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>();
+        let mut actual = valid_commands()
+            .into_iter()
+            .map(|command| {
+                let value = serde_json::to_value(command).expect("serialize command");
+                value["command"]
+                    .as_str()
+                    .expect("serialized command name")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn every_payload_command_rejects_invalid_input() {
         let commands = vec![
             NodeCommand::StartNetworks {
@@ -650,6 +803,18 @@ mod tests {
             NodeCommand::RestartNetworks {
                 networks: vec!["home".into()],
                 all: true,
+            },
+            NodeCommand::CleanupResiduals {
+                networks: Vec::new(),
+                all: false,
+            },
+            NodeCommand::CleanupResiduals {
+                networks: vec!["home".into()],
+                all: true,
+            },
+            NodeCommand::CleanupResiduals {
+                networks: vec!["home".into(), "home".into()],
+                all: false,
             },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),

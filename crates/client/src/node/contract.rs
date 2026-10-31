@@ -194,6 +194,7 @@ mod tests {
         vec![
             NodeCommand::GetSnapshot,
             NodeCommand::GetUiManifest,
+            NodeCommand::GetDiagnostics,
             NodeCommand::StartNetworks {
                 selection: NodeNetworkSelection::None,
             },
@@ -236,6 +237,10 @@ mod tests {
             NodeCommand::StartNode,
             NodeCommand::StopNode,
             NodeCommand::RestartNode,
+            NodeCommand::CleanupResiduals {
+                networks: vec!["home".into()],
+                all: false,
+            },
             NodeCommand::Shutdown,
         ]
     }

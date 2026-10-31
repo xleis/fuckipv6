@@ -331,6 +331,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         NodeCommandKind::StartNetworks
         | NodeCommandKind::StopNetworks
         | NodeCommandKind::RestartNetworks
+        | NodeCommandKind::CleanupResiduals
         | NodeCommandKind::CreateNetwork
         | NodeCommandKind::JoinNetwork
         | NodeCommandKind::StartNode
@@ -339,6 +340,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::Shutdown => lifecycle_timeout,
         NodeCommandKind::GetSnapshot
         | NodeCommandKind::GetUiManifest
+        | NodeCommandKind::GetDiagnostics
         | NodeCommandKind::UpdateRouting
         | NodeCommandKind::SetNetworkRole
         | NodeCommandKind::ProbePeer => COMMAND_TIMEOUT,

@@ -389,6 +389,8 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         NodeCommandOutcome::Accepted { .. } => StatusCode::ACCEPTED,
         NodeCommandOutcome::Snapshot(_)
         | NodeCommandOutcome::UiManifest(_)
+        | NodeCommandOutcome::Diagnostics(_)
+        | NodeCommandOutcome::Cleanup(_)
         | NodeCommandOutcome::Probe(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
     }

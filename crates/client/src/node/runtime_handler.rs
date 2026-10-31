@@ -74,6 +74,12 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 super::NodeCommand::GetUiManifest => {
                     NodeCommandResult::ui_manifest(request_id, super::node_ui_manifest())
                 }
+                super::NodeCommand::GetDiagnostics => match runtime {
+                    Some(runtime) => diagnostics_runtime(&runtime, request_id).await,
+                    None => {
+                        unavailable(request_id, "读取运行时诊断需要运行中的多网络监督器控制通道")
+                    }
+                },
                 super::NodeCommand::StopNetworks { networks, all } => match runtime {
                     Some(runtime) => {
                         stop_runtime_networks(&runtime, request_id, networks, all).await
@@ -129,6 +135,14 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 super::NodeCommand::RestartNode => match runtime {
                     Some(runtime) => restart_runtime_node(&runtime, request_id).await,
                     None => unavailable(request_id, "重启节点需要运行中的多网络监督器控制通道"),
+                },
+                super::NodeCommand::CleanupResiduals { networks, all } => match runtime {
+                    Some(runtime) => {
+                        cleanup_runtime_residuals(&runtime, request_id, networks, all).await
+                    }
+                    None => {
+                        unavailable(request_id, "清理运行时残留需要运行中的多网络监督器控制通道")
+                    }
                 },
                 super::NodeCommand::CreateNetwork(command) => match runtime {
                     Some(runtime) => create_runtime_network(&runtime, request_id, command).await,
@@ -268,6 +282,33 @@ async fn restart_runtime_node(
         Ok(summary) => NodeCommandResult::rejected(
             request_id,
             NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
+        ),
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn diagnostics_runtime(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+) -> NodeCommandResult {
+    match runtime.diagnostics().await {
+        Ok(diagnostics) => {
+            NodeCommandResult::completed(request_id, NodeCommandOutcome::Diagnostics(diagnostics))
+        }
+        Err(error) => runtime_rejection(request_id, error),
+    }
+}
+
+async fn cleanup_runtime_residuals(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    networks: Vec<String>,
+    all: bool,
+) -> NodeCommandResult {
+    match runtime.cleanup_residuals(networks, all).await {
+        Ok(summary) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Cleanup(summary.to_public_cleanup_result()),
         ),
         Err(error) => runtime_rejection(request_id, error),
     }

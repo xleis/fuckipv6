@@ -11,10 +11,13 @@ mod state;
 mod ui_manifest;
 
 pub use command::{
-    validate_network_name, NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandFuture,
-    NodeCommandHandler, NodeCommandKind, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
-    NodeCreateNetworkCommand, NodeJoinNetworkCommand, NodePeerProbeSnapshot, NodeProbePeerCommand,
-    NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
+    validate_network_name, NodeCleanupFailureReason, NodeCleanupFailureSnapshot,
+    NodeCleanupStepSnapshot, NodeCleanupStepStatus, NodeCommand, NodeCommandBus,
+    NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
+    NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeCreateNetworkCommand,
+    NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodePeerProbeSnapshot, NodeProbePeerCommand,
+    NodeResidualCleanupResult, NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand,
+    NodeUpdateRoutingCommand,
 };
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use http_adapter::{

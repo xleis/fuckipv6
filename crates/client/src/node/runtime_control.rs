@@ -12,11 +12,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
 
 use super::{
-    NodeCreateNetworkCommand, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus,
-    NodeEventKind, NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle,
-    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeRuntimePlan,
-    NodeSetNetworkRoleCommand, NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
+    NodeCleanupFailureReason, NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot,
+    NodeCleanupStepStatus, NodeCreateNetworkCommand, NodeDiagnosticsSnapshot,
+    NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus, NodeEventKind,
+    NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot,
+    NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase,
+    NodeProblem, NodeProblemCode, NodeResidualCleanupResult, NodeRoutingMode, NodeRuntimePlan,
+    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeStateStore, NodeTrafficSnapshot,
+    NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
 use crate::config_manager::{ConfigManager, NetworkConfig};
@@ -156,6 +159,35 @@ impl StopSummary {
         }
         parts.join("；")
     }
+
+    pub(crate) fn to_public_cleanup_result(&self) -> NodeResidualCleanupResult {
+        NodeResidualCleanupResult {
+            cleaned_networks: self.stopped.clone(),
+            failed_networks: self
+                .failed
+                .iter()
+                .map(|failure| NodeCleanupFailureSnapshot {
+                    network_name: failure.network_name.clone(),
+                    reason: cleanup_failure_reason(&failure.message),
+                })
+                .collect(),
+            residue: self.cleanup.to_public(),
+        }
+    }
+}
+
+fn cleanup_failure_reason(message: &str) -> NodeCleanupFailureReason {
+    if message.contains("运行会话尚未退出") {
+        NodeCleanupFailureReason::StillRunning
+    } else if message.contains("运行时资源所有者已丢失") {
+        NodeCleanupFailureReason::OwnerUnavailable
+    } else if message.contains("cleanup/timeout") {
+        NodeCleanupFailureReason::TimedOut
+    } else if message.contains("资源清理重试未完成") {
+        NodeCleanupFailureReason::Incomplete
+    } else {
+        NodeCleanupFailureReason::Unknown
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +286,90 @@ impl RuntimeCleanupReport {
                 (!issues.is_empty()).then(|| format!("{network}: {}", issues.join("; ")))
             })
             .collect()
+    }
+
+    fn to_public(&self) -> NodeRuntimeResidueSnapshot {
+        let cleanup_steps = self
+            .runtime_outcomes
+            .iter()
+            .flat_map(|(network_name, outcome)| {
+                if outcome.steps.is_empty() {
+                    return vec![NodeCleanupStepSnapshot {
+                        network_name: network_name.clone(),
+                        resource: "运行时清理".into(),
+                        status: NodeCleanupStepStatus::Unknown,
+                        detail: Some("运行时未返回清理结果".into()),
+                    }];
+                }
+                outcome
+                    .steps
+                    .iter()
+                    .map(|step| {
+                        let (status, detail) = match &step.status {
+                            CleanupStatus::Removed => (NodeCleanupStepStatus::Removed, None),
+                            CleanupStatus::NotOwned => (NodeCleanupStepStatus::NotOwned, None),
+                            CleanupStatus::Deferred(_) => {
+                                (NodeCleanupStepStatus::Deferred, Some("清理已延迟".into()))
+                            }
+                            CleanupStatus::Failed(_) => {
+                                (NodeCleanupStepStatus::Failed, Some("资源清理失败".into()))
+                            }
+                            CleanupStatus::Unknown(_) => {
+                                (NodeCleanupStepStatus::Unknown, Some("清理状态未知".into()))
+                            }
+                        };
+                        NodeCleanupStepSnapshot {
+                            network_name: network_name.clone(),
+                            resource: step.resource.into(),
+                            status,
+                            detail,
+                        }
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+
+        let mut issues = Vec::new();
+        if !self.residual_networks.is_empty() {
+            issues.push(format!("残留网络: {}", self.residual_networks.join(", ")));
+        }
+        if self.sessions_remaining > 0 {
+            issues.push(format!("运行时任务残留 {} 个", self.sessions_remaining));
+        }
+        if self.listeners_remaining > 0 {
+            issues.push(format!("监听器残留 {} 个", self.listeners_remaining));
+        }
+        if self.peers_remaining > 0 {
+            issues.push(format!("Peer 记录残留 {} 个", self.peers_remaining));
+        }
+        if self.embedded_services_remaining > 0 {
+            issues.push(format!(
+                "内嵌服务残留 {} 个",
+                self.embedded_services_remaining
+            ));
+        }
+        for step in &cleanup_steps {
+            let issue = match step.status {
+                NodeCleanupStepStatus::Removed | NodeCleanupStepStatus::NotOwned => continue,
+                NodeCleanupStepStatus::Deferred => "清理已延迟",
+                NodeCleanupStepStatus::Failed => "资源清理失败",
+                NodeCleanupStepStatus::Unknown => "清理状态未知",
+            };
+            issues.push(format!("{}: {} {issue}", step.network_name, step.resource));
+        }
+        issues.sort();
+        issues.dedup();
+
+        NodeRuntimeResidueSnapshot {
+            sessions_remaining: self.sessions_remaining,
+            listeners_remaining: self.listeners_remaining,
+            peers_remaining: self.peers_remaining,
+            embedded_services_remaining: self.embedded_services_remaining,
+            configuration_retained: self.configuration_retained,
+            residual_networks: self.residual_networks.clone(),
+            cleanup_steps,
+            issues,
+        }
     }
 }
 
@@ -620,6 +736,9 @@ impl Drop for OperationGuard {
 }
 
 enum RuntimeControlCommand {
+    Diagnostics {
+        reply: oneshot::Sender<Result<NodeDiagnosticsSnapshot, RuntimeControlError>>,
+    },
     StartPlan {
         plan: NodeRuntimePlan,
         _operation: OperationGuard,
@@ -993,6 +1112,15 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn diagnostics(&self) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::Diagnostics { reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn shutdown(&self) -> Result<StopSummary, RuntimeControlError> {
         let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
@@ -1020,6 +1148,10 @@ async fn run_actor(
 ) {
     while let Some(command) = receiver.recv().await {
         match command {
+            RuntimeControlCommand::Diagnostics { reply } => {
+                let result = actor.diagnostics().await;
+                let _ = reply.send(result);
+            }
             RuntimeControlCommand::StartPlan {
                 plan,
                 _operation,
@@ -2504,15 +2636,15 @@ impl NetworkRuntimeActor {
                 continue;
             }
 
-            let outcome = match timeout(remaining, owner.shutdown()).await {
-                Ok(outcome) => outcome,
+            let (outcome, timed_out) = match timeout(remaining, owner.shutdown()).await {
+                Ok(outcome) => (outcome, false),
                 Err(_) => {
                     let mut outcome = RuntimeCleanupOutcome::default();
                     outcome.record(
                         "运行时清理",
                         CleanupStatus::Deferred("重试在停止期限内未完成".into()),
                     );
-                    outcome
+                    (outcome, true)
                 }
             };
             runtime_outcomes.insert(network_name.clone(), outcome.clone());
@@ -2527,7 +2659,11 @@ impl NetworkRuntimeActor {
                 self.completed_cleanup.remove(&network_name);
                 failed.push(StopFailure {
                     network_name: network_name.clone(),
-                    message: format!("资源清理重试未完成: {}", outcome.summary()),
+                    message: if timed_out {
+                        format!("cleanup/timeout: 资源清理重试未完成: {}", outcome.summary())
+                    } else {
+                        format!("资源清理重试未完成: {}", outcome.summary())
+                    },
                 });
                 self.mark_network_status(Some(&network_name), NodeNetworkStatus::Failed)
                     .await;
@@ -2542,6 +2678,65 @@ impl NetworkRuntimeActor {
             stopped: cleaned.into_iter().collect(),
             failed,
             cleanup,
+        })
+    }
+
+    async fn diagnostics(&mut self) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        let lifecycle = self.lifecycle.snapshot().await;
+        let snapshot = self.state.snapshot().await;
+        let mut names = self
+            .sessions
+            .keys()
+            .chain(self.retained_owners.keys())
+            .chain(self.cleanup_failures.keys())
+            .chain(self.completed_cleanup.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        names.extend(
+            self.registry
+                .get_all()
+                .await
+                .into_iter()
+                .map(|session| session.network_name),
+        );
+        names.extend(snapshot.networks.iter().map(|network| network.name.clone()));
+        names.extend(
+            snapshot
+                .configuration
+                .networks
+                .iter()
+                .map(|network| network.network_name.clone()),
+        );
+        names.extend(snapshot.peers.iter().map(|peer| peer.network_name.clone()));
+        names.extend(
+            self.services
+                .list()
+                .await
+                .map_err(map_service_error)?
+                .into_iter()
+                .map(|service| service.network_name),
+        );
+        let names = names.into_iter().collect::<Vec<_>>();
+        let mut cleanup = self.inspect_cleanup(&names).await?;
+        let mut outcomes = self.completed_cleanup.clone();
+        outcomes.extend(self.cleanup_failures.clone());
+        cleanup.runtime_outcomes = outcomes;
+
+        let retained_owner_networks = self.retained_owners.keys().cloned().collect::<Vec<_>>();
+        let cleanup_candidate_networks = self
+            .retained_owners
+            .keys()
+            .chain(self.cleanup_failures.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(NodeDiagnosticsSnapshot {
+            lifecycle,
+            retained_owner_networks,
+            cleanup_candidate_networks,
+            residue: cleanup.to_public(),
         })
     }
 
@@ -3351,6 +3546,8 @@ mod tests {
         shutdown_delay_ms: Arc<AtomicU64>,
         shutdown_delays_ms: Arc<Mutex<HashMap<String, u64>>>,
         cleanup_failures: Arc<Mutex<HashSet<String>>>,
+        residual_cleanup_delays_ms: Arc<Mutex<HashMap<String, u64>>>,
+        lost_owners: Arc<Mutex<HashSet<String>>>,
         launched_tun_names: Arc<Mutex<Vec<(String, String)>>>,
     }
 
@@ -3359,6 +3556,7 @@ mod tests {
         p2p: P2pEngine,
         registry: Option<MultiNetworkRegistry>,
         cleanup_failures: Arc<Mutex<HashSet<String>>>,
+        cleanup_delays_ms: Arc<Mutex<HashMap<String, u64>>>,
         shutdowns: Arc<AtomicUsize>,
     }
 
@@ -3366,6 +3564,16 @@ mod tests {
         fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = RuntimeCleanupOutcome> + Send + '_>> {
             Box::pin(async move {
                 self.shutdowns.fetch_add(1, Ordering::SeqCst);
+                let delay = self
+                    .cleanup_delays_ms
+                    .lock()
+                    .expect("cleanup delays lock poisoned")
+                    .get(&self.network_name)
+                    .copied()
+                    .unwrap_or_default();
+                if delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
                 let mut cleanup = RuntimeCleanupOutcome::default();
                 let status = if self
                     .cleanup_failures
@@ -3496,6 +3704,27 @@ mod tests {
                 .insert(network_name.into());
         }
 
+        fn recover_cleanup(&self, network_name: &str) {
+            self.cleanup_failures
+                .lock()
+                .expect("cleanup failure lock poisoned")
+                .remove(network_name);
+        }
+
+        fn lose_owner(&self, network_name: &str) {
+            self.lost_owners
+                .lock()
+                .expect("lost owner lock poisoned")
+                .insert(network_name.into());
+        }
+
+        fn set_residual_cleanup_delay(&self, network_name: &str, delay: Duration) {
+            self.residual_cleanup_delays_ms
+                .lock()
+                .expect("residual cleanup delays lock poisoned")
+                .insert(network_name.into(), delay.as_millis() as u64);
+        }
+
         fn launched_tun_names(&self) -> Vec<(String, String)> {
             self.launched_tun_names
                 .lock()
@@ -3522,6 +3751,8 @@ mod tests {
             let shutdown_delay_ms = self.shutdown_delay_ms.clone();
             let shutdown_delays_ms = self.shutdown_delays_ms.clone();
             let cleanup_failures = self.cleanup_failures.clone();
+            let residual_cleanup_delays_ms = self.residual_cleanup_delays_ms.clone();
+            let lost_owners = self.lost_owners.clone();
             let launched_tun_names = self.launched_tun_names.clone();
             let registry = self.registry.clone();
 
@@ -3702,14 +3933,19 @@ mod tests {
                         }
                     }
                     let mut owner = FakeResidualRuntimeOwner {
-                        network_name: shutdown_network_name,
+                        network_name: shutdown_network_name.clone(),
                         p2p: cleanup_p2p,
                         registry: cleanup_registry,
                         cleanup_failures,
+                        cleanup_delays_ms: residual_cleanup_delays_ms,
                         shutdowns,
                     };
                     let cleanup = owner.shutdown().await;
-                    let retained_owner = if cleanup.is_clean() {
+                    let owner_lost = lost_owners
+                        .lock()
+                        .expect("lost owner lock poisoned")
+                        .contains(&shutdown_network_name);
+                    let retained_owner = if cleanup.is_clean() || owner_lost {
                         None
                     } else {
                         Some(Box::new(owner) as Box<dyn ResidualRuntimeOwner>)
@@ -5896,6 +6132,244 @@ mod tests {
         assert_eq!(harness.fake.launch_attempts(), launches_before_restart);
         assert_eq!(restart.cleanup.residual_networks, vec!["broken-cleanup"]);
         assert_eq!(harness.registry.get_all().await.len(), 1);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn diagnostics_track_retained_owner_and_successful_cleanup_retry() {
+        let harness = TestHarness::new("diagnostics-cleanup-retry").await;
+        start_fake_network(&harness, "diagnostics-retry").await;
+        harness.fake.fail_cleanup("diagnostics-retry");
+
+        let stopped = harness
+            .runtime
+            .stop(vec!["diagnostics-retry".into()], false)
+            .await
+            .expect("cleanup failure returns a stop summary");
+        assert_eq!(stopped.failed.len(), 1);
+
+        let diagnostics = harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read runtime diagnostics");
+        assert_eq!(
+            diagnostics.retained_owner_networks,
+            vec!["diagnostics-retry"]
+        );
+        assert_eq!(
+            diagnostics.cleanup_candidate_networks,
+            vec!["diagnostics-retry"]
+        );
+        assert_eq!(
+            diagnostics.residue.residual_networks,
+            vec!["diagnostics-retry"]
+        );
+        assert_eq!(diagnostics.residue.cleanup_steps.len(), 1);
+        assert_eq!(
+            diagnostics.residue.cleanup_steps[0].status,
+            NodeCleanupStepStatus::Failed
+        );
+        assert!(!diagnostics.residue.is_clean());
+
+        let shutdowns_before_retry = harness.fake.shutdown_count();
+        harness.fake.recover_cleanup("diagnostics-retry");
+        let cleanup = harness
+            .runtime
+            .cleanup_residuals(vec!["diagnostics-retry".into()], false)
+            .await
+            .expect("retry retained runtime cleanup");
+        assert_eq!(cleanup.stopped, vec!["diagnostics-retry"]);
+        assert!(cleanup.failed.is_empty());
+        assert!(cleanup.cleanup.is_clean_for_stop());
+        assert!(harness.registry.get_all().await.is_empty());
+        assert!(harness.fake.shutdown_count() > shutdowns_before_retry);
+
+        let diagnostics = harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read post-cleanup diagnostics");
+        assert!(diagnostics.retained_owner_networks.is_empty());
+        assert!(diagnostics.cleanup_candidate_networks.is_empty());
+        assert!(diagnostics.residue.is_clean());
+        assert_eq!(
+            diagnostics.residue.cleanup_steps[0].status,
+            NodeCleanupStepStatus::Removed
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_never_bypasses_a_running_session_owner() {
+        let harness = TestHarness::new("cleanup-running-session").await;
+        start_fake_network(&harness, "running-cleanup").await;
+        let shutdowns_before = harness.fake.shutdown_count();
+
+        let error = harness
+            .runtime
+            .cleanup_residuals(vec!["running-cleanup".into()], false)
+            .await
+            .expect_err("running sessions must not be cleaned behind their owner");
+        assert!(matches!(error, RuntimeControlError::Conflict(_)));
+        assert_eq!(harness.registry.get_all().await.len(), 1);
+        assert_eq!(harness.fake.shutdown_count(), shutdowns_before);
+        assert!(harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read running diagnostics")
+            .residue
+            .residual_networks
+            .contains(&"running-cleanup".into()));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_an_unavailable_owner_without_dropping_the_candidate() {
+        let harness = TestHarness::new("cleanup-owner-unavailable").await;
+        start_fake_network(&harness, "lost-owner").await;
+        harness.fake.fail_cleanup("lost-owner");
+        harness.fake.lose_owner("lost-owner");
+
+        harness
+            .runtime
+            .stop(vec!["lost-owner".into()], false)
+            .await
+            .expect("stop records failed cleanup");
+        let diagnostics = harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read lost-owner diagnostics");
+        assert!(diagnostics.retained_owner_networks.is_empty());
+        assert_eq!(diagnostics.cleanup_candidate_networks, vec!["lost-owner"]);
+
+        let cleanup = harness
+            .runtime
+            .cleanup_residuals(vec!["lost-owner".into()], false)
+            .await
+            .expect("owner loss is a partial cleanup failure");
+        assert!(cleanup.stopped.is_empty());
+        assert_eq!(cleanup.failed.len(), 1);
+        assert_eq!(
+            cleanup.to_public_cleanup_result().failed_networks[0].reason,
+            NodeCleanupFailureReason::OwnerUnavailable
+        );
+        assert!(harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read remaining diagnostics")
+            .cleanup_candidate_networks
+            .contains(&"lost-owner".into()));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_timeout_retains_the_owner_and_can_be_retried() {
+        let harness = TestHarness::new_with_timeouts(
+            "cleanup-timeout",
+            RuntimeTimeouts {
+                stop: Duration::from_millis(40),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        start_fake_network(&harness, "slow-cleanup").await;
+        harness.fake.fail_cleanup("slow-cleanup");
+        harness
+            .runtime
+            .stop(vec!["slow-cleanup".into()], false)
+            .await
+            .expect("initial stop records failed cleanup");
+
+        harness
+            .fake
+            .set_residual_cleanup_delay("slow-cleanup", Duration::from_millis(200));
+        let timed_out = harness
+            .runtime
+            .cleanup_residuals(vec!["slow-cleanup".into()], false)
+            .await
+            .expect("cleanup timeout is a partial failure");
+        assert!(timed_out.stopped.is_empty());
+        assert_eq!(timed_out.failed.len(), 1);
+        assert_eq!(
+            timed_out.to_public_cleanup_result().failed_networks[0].reason,
+            NodeCleanupFailureReason::TimedOut
+        );
+        let diagnostics = harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read timed-out diagnostics");
+        assert_eq!(diagnostics.retained_owner_networks, vec!["slow-cleanup"]);
+        assert!(diagnostics
+            .residue
+            .cleanup_steps
+            .iter()
+            .any(|step| step.status == NodeCleanupStepStatus::Deferred));
+
+        harness
+            .fake
+            .set_residual_cleanup_delay("slow-cleanup", Duration::ZERO);
+        harness.fake.recover_cleanup("slow-cleanup");
+        let retried = harness
+            .runtime
+            .cleanup_residuals(vec!["slow-cleanup".into()], false)
+            .await
+            .expect("retry cleanup after timeout");
+        assert_eq!(retried.stopped, vec!["slow-cleanup"]);
+        assert!(retried.failed.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_all_returns_partial_success_and_retains_failed_owners() {
+        let harness = TestHarness::new("cleanup-all-partial").await;
+        start_fake_network(&harness, "cleanup-alpha").await;
+        start_fake_network(&harness, "cleanup-beta").await;
+        harness.fake.fail_cleanup("cleanup-alpha");
+        harness.fake.fail_cleanup("cleanup-beta");
+        harness
+            .runtime
+            .stop(Vec::new(), true)
+            .await
+            .expect("initial stop leaves two retained owners");
+        harness.fake.recover_cleanup("cleanup-beta");
+
+        let cleanup = harness
+            .runtime
+            .cleanup_residuals(Vec::new(), true)
+            .await
+            .expect("cleanup all returns partial success");
+        assert_eq!(cleanup.stopped, vec!["cleanup-beta"]);
+        assert_eq!(cleanup.failed.len(), 1);
+        assert_eq!(cleanup.failed[0].network_name, "cleanup-alpha");
+        let public = cleanup.to_public_cleanup_result();
+        assert_eq!(public.cleaned_networks, vec!["cleanup-beta"]);
+        assert_eq!(public.failed_networks.len(), 1);
+        assert_eq!(
+            public.failed_networks[0].reason,
+            NodeCleanupFailureReason::Incomplete
+        );
+
+        let diagnostics = harness
+            .runtime
+            .diagnostics()
+            .await
+            .expect("read partial cleanup diagnostics");
+        assert_eq!(diagnostics.retained_owner_networks, vec!["cleanup-alpha"]);
+        assert_eq!(
+            diagnostics.cleanup_candidate_networks,
+            vec!["cleanup-alpha"]
+        );
+        assert_eq!(diagnostics.residue.residual_networks, vec!["cleanup-alpha"]);
 
         harness.shutdown().await;
     }

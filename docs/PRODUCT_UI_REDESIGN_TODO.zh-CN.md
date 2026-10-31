@@ -274,18 +274,20 @@ W6-W16
 - [ ] 明确第一版不做同步、实时镜像和系统挂载；
 - [ ] 添加路径安全和续传状态测试。
 
-### W1-11 Schema 与生成类型 `[~]`
+### W1-11 Schema 与生成类型 `[x]`
 
 - [x] 从 Rust 模型生成 JSON Schema draft 2020-12；
 - [x] 生成 TypeScript 类型和客户端；
-- [x] 生成并校验 Android 命令枚举与请求信封绑定；完整 Android DTO 尚未生成；
+- [x] 生成并校验 Android 命令枚举、请求信封和完整 DTO/联合类型绑定；
 - [x] 将生成漂移检查加入 CI；
 - [x] 冻结 schema version 和兼容策略；
 - [x] 禁止手写第二套命令枚举。
 
 证据：`contracts/schema/`、`contracts/typescript/`、`contracts/android/`、
 `crates/client/src/node/contract.rs`、`scripts/check-contracts.sh`，以及 CI 的
-`contracts` 作业。Rust、TypeScript、Java 均包含未知值或版本不匹配的失败关闭测试。
+`contracts` 作业。Android 生成器当前产出 42 个顶层 DTO/联合类型；Java 8 测试验证
+DTO 清单、`NodeSnapshot` 关键字段、命令/结果/事件/网络选择/WebSocket 构造，以及
+未知命令和枚举失败关闭。Rust、TypeScript、Java 均包含未知值或版本不匹配测试。
 
 ### W1-12 契约门禁 `[x]`
 

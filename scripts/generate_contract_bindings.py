@@ -151,13 +151,25 @@ def string_enum_values(schema: dict[str, Any]) -> tuple[str, ...]:
         return tuple(values)
     variants = schema.get("oneOf")
     if isinstance(variants, list):
-        constants = [
-            variant.get("const")
-            for variant in variants
-            if isinstance(variant, dict) and isinstance(variant.get("const"), str)
-        ]
-        if constants and len(constants) == len(variants):
-            return tuple(constants)
+        flattened: list[str] = []
+        for variant in variants:
+            if not isinstance(variant, dict):
+                return ()
+            enum_values = variant.get("enum")
+            if isinstance(enum_values, list) and enum_values and all(
+                isinstance(item, str) for item in enum_values
+            ):
+                flattened.extend(enum_values)
+                continue
+            constant = variant.get("const")
+            if isinstance(constant, str):
+                flattened.append(constant)
+                continue
+            return ()
+        if flattened:
+            # JSON Schema variants are alternatives; deduplicate defensively while
+            # preserving the schema's stable wire order.
+            return tuple(dict.fromkeys(flattened))
     return ()
 
 
@@ -279,17 +291,355 @@ def java_constant(value: str) -> str:
     return name
 
 
+JAVA_KEYWORDS = {
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "try",
+    "void",
+    "volatile",
+    "while",
+}
+
+
+def java_identifier(value: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9_$]", "_", value)
+    if not name:
+        raise ContractError(f"cannot derive Java identifier from {value!r}")
+    if name[0].isdigit():
+        name = "field_" + name
+    if name in JAVA_KEYWORDS:
+        name += "_"
+    return name
+
+
+def java_type_name(value: str) -> str:
+    parts = [part for part in re.split(r"[^A-Za-z0-9]+", value) if part]
+    if not parts:
+        raise ContractError(f"cannot derive Java type name from {value!r}")
+    name = "".join(part[:1].upper() + part[1:] for part in parts)
+    if name[0].isdigit():
+        name = "Value" + name
+    return name
+
+
+def java_value_type(schema: Any, definitions: dict[str, dict[str, Any]]) -> str:
+    if isinstance(schema, bool):
+        return "Object"
+    if not isinstance(schema, dict):
+        return "Object"
+
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        prefix = "#/$defs/"
+        if not reference.startswith(prefix):
+            raise ContractError(f"unsupported schema reference {reference}")
+        name = reference[len(prefix) :]
+        if name not in definitions:
+            raise ContractError(f"schema reference targets unknown definition {name}")
+        return name
+
+    if "const" in schema:
+        value = schema["const"]
+        if isinstance(value, bool):
+            return "Boolean"
+        if isinstance(value, int):
+            return "Long"
+        if isinstance(value, float):
+            return "Double"
+        return "String"
+
+    if isinstance(schema.get("enum"), list):
+        return "String"
+
+    for keyword in ("oneOf", "anyOf", "allOf"):
+        variants = schema.get(keyword)
+        if isinstance(variants, list):
+            non_null = [
+                variant
+                for variant in variants
+                if not (isinstance(variant, dict) and variant.get("type") == "null")
+            ]
+            rendered = {
+                java_value_type(variant, definitions) for variant in non_null
+            }
+            return rendered.pop() if len(rendered) == 1 else "Object"
+
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        non_null_types = [item for item in schema_type if item != "null"]
+        rendered = {
+            java_value_type({**schema, "type": item}, definitions)
+            for item in non_null_types
+        }
+        return rendered.pop() if len(rendered) == 1 else "Object"
+    if schema_type == "boolean":
+        return "Boolean"
+    if schema_type == "number":
+        return "Double"
+    if schema_type == "integer":
+        maximum = schema.get("maximum")
+        minimum = schema.get("minimum")
+        if (
+            isinstance(maximum, int)
+            and maximum <= 2_147_483_647
+            and (not isinstance(minimum, int) or minimum >= -2_147_483_648)
+        ):
+            return "Integer"
+        return "Long"
+    if schema_type == "string":
+        return "String"
+    if schema_type == "array":
+        item = java_value_type(schema.get("items", {}), definitions)
+        return f"List<{item}>"
+    if schema_type == "object":
+        return "Map<String, Object>"
+    return "Object"
+
+
+def render_java_object(
+    name: str, schema: dict[str, Any], definitions: dict[str, dict[str, Any]]
+) -> list[str]:
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        properties = {}
+    fields = [
+        (java_identifier(property_name), java_value_type(property_schema, definitions))
+        for property_name, property_schema in properties.items()
+    ]
+    lines = [f"    /** DTO for {name}. */", f"    public static final class {name} {{"]
+    for field_name, field_type in fields:
+        lines.append(f"        public final {field_type} {field_name};")
+    if fields:
+        lines.append("")
+        parameters = ", ".join(f"{field_type} {field_name}" for field_name, field_type in fields)
+        lines.append(f"        public {name}({parameters}) {{")
+        for field_name, _ in fields:
+            lines.append(f"            this.{field_name} = {field_name};")
+        lines.append("        }")
+    else:
+        lines.append("")
+        lines.append(f"        public {name}() {{}}")
+    lines.append("    }")
+    lines.append("")
+    return lines
+
+
+def union_discriminator(schema: dict[str, Any]) -> str | None:
+    variants = schema.get("oneOf", [])
+    object_variants = [
+        variant
+        for variant in variants
+        if isinstance(variant, dict) and variant.get("type") == "object"
+    ]
+    if not object_variants:
+        return None
+    candidates: list[str] = []
+    for variant in object_variants:
+        properties = variant.get("properties", {})
+        if isinstance(properties, dict):
+            for property_name, property_schema in properties.items():
+                if isinstance(property_schema, dict) and isinstance(
+                    property_schema.get("const"), str
+                ):
+                    candidates.append(property_name)
+    if not candidates:
+        return None
+    counts = {candidate: candidates.count(candidate) for candidate in set(candidates)}
+    complete = [
+        candidate for candidate, count in counts.items() if count == len(object_variants)
+    ]
+    for preferred in ("command", "status", "kind", "type"):
+        if preferred in complete:
+            return preferred
+    return complete[0] if complete else None
+
+
+def render_java_union(
+    name: str, schema: dict[str, Any], definitions: dict[str, dict[str, Any]]
+) -> list[str]:
+    variants = schema.get("oneOf", [])
+    discriminator = union_discriminator(schema)
+    discriminator_field = java_identifier(discriminator or "kind")
+    discriminator_type = "NodeCommandKind" if name == "NodeCommand" else "String"
+    lines = [
+        f"    /** Tagged union DTO for {name}. */",
+        f"    public abstract static class {name} {{",
+        f"        public final {discriminator_type} {discriminator_field};",
+        "",
+        f"        private {name}({discriminator_type} {discriminator_field}) {{",
+        f"            this.{discriminator_field} = {discriminator_field};",
+        "        }",
+    ]
+
+    variant_entries: list[tuple[str, dict[str, Any], str]] = []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            raise ContractError(f"{name}: unsupported non-object union variant")
+        if variant.get("type") == "object":
+            properties = variant.get("properties", {})
+            label = None
+            if discriminator and isinstance(properties, dict):
+                property_schema = properties.get(discriminator)
+                if isinstance(property_schema, dict):
+                    label = property_schema.get("const")
+            if not isinstance(label, str):
+                remaining = [key for key in properties if key != discriminator]
+                label = remaining[0] if remaining else "value"
+            labels = (label,)
+        elif variant.get("type") == "string":
+            enum_values = variant.get("enum")
+            if isinstance(enum_values, list) and enum_values:
+                if not all(isinstance(item, str) for item in enum_values):
+                    raise ContractError(f"{name}: union enum has a non-string value")
+                labels = tuple(enum_values)
+            else:
+                label = variant.get("const")
+                if not isinstance(label, str):
+                    raise ContractError(f"{name}: union variant has no stable string tag")
+                labels = (label,)
+        else:
+            raise ContractError(
+                f"{name}: unsupported union variant type {variant.get('type')!r}"
+            )
+        for label in labels:
+            class_name = java_type_name(label)
+            variant_entries.append((class_name, variant, label))
+
+    class_names = [entry[0] for entry in variant_entries]
+    if len(set(class_names)) != len(class_names):
+        raise ContractError(f"{name}: duplicate Java union variant names")
+
+    for class_name, variant, label in variant_entries:
+        lines.append("")
+        lines.append(f"        public static final class {class_name} extends {name} {{")
+        fields: list[tuple[str, str]] = []
+        inline_objects: list[tuple[str, str, dict[str, Any]]] = []
+        if variant.get("type") != "object":
+            lines.append(f"            public {class_name}() {{")
+        else:
+            properties = variant.get("properties", {})
+            for property_name, property_schema in properties.items():
+                if property_name == discriminator:
+                    continue
+                field_name = java_identifier(property_name)
+                if isinstance(property_schema, dict) and property_schema.get(
+                    "type"
+                ) == "object" and isinstance(property_schema.get("properties"), dict):
+                    payload_name = f"{class_name}{java_type_name(property_name)}"
+                    inline_objects.append((payload_name, field_name, property_schema))
+                    fields.append((field_name, payload_name))
+                else:
+                    fields.append(
+                        (field_name, java_value_type(property_schema, definitions))
+                    )
+            for field_name, field_type in fields:
+                lines.append(f"            public final {field_type} {field_name};")
+            if fields:
+                lines.append("")
+                parameters = ", ".join(
+                    f"{field_type} {field_name}" for field_name, field_type in fields
+                )
+                lines.append(f"            public {class_name}({parameters}) {{")
+            else:
+                lines.append(f"            public {class_name}() {{")
+
+        if name == "NodeCommand":
+            constructor_value = f"NodeCommandKind.{java_constant(label)}"
+        else:
+            constructor_value = json.dumps(label, ensure_ascii=False)
+        lines.append(f"                super({constructor_value});")
+        if variant.get("type") == "object":
+            for field_name, _ in fields:
+                lines.append(f"                this.{field_name} = {field_name};")
+        lines.append("            }")
+
+        for payload_name, _, payload_schema in inline_objects:
+            payload_lines = render_java_object(payload_name, payload_schema, definitions)
+            lines.extend(indent_block("\n".join(payload_lines), 8).splitlines())
+        lines.append("        }")
+
+    lines.extend(["    }", ""])
+    return lines
+
+
 def render_java(contract: Contract) -> str:
     enums: dict[str, tuple[str, ...]] = dict(contract.string_enums)
     enums["NodeCommandKind"] = contract.command_names
+    object_definitions = {
+        name: schema
+        for name, schema in contract.definitions.items()
+        if schema.get("type") == "object"
+    }
+    union_definitions = {
+        name: schema
+        for name, schema in contract.definitions.items()
+        if isinstance(schema.get("oneOf"), list)
+        and any(
+            isinstance(variant, dict) and variant.get("type") == "object"
+            for variant in schema["oneOf"]
+        )
+    }
     lines = [
         "// Generated from contracts/schema/*.schema.json. Do not edit by hand.",
         "// Regenerate with scripts/generate-contracts.sh.",
         "package cc.xlei.fuckipv6.contract;",
         "",
-        "/** Versioned Android-safe bindings for node wire enum values. */",
+        "import java.util.List;",
+        "import java.util.Map;",
+        "",
+        "/** Versioned Android-safe DTO and enum bindings for the node wire contract. */",
         "public final class NodeContractV1 {",
         "    public static final int SCHEMA_VERSION = 1;",
+        "    public static final String[] DTO_CLASS_NAMES = {",
+        "        " + ", ".join(
+            json.dumps(name)
+            for name in sorted(object_definitions) + sorted(union_definitions)
+        ),
+        "    };",
         "",
     ]
     for name in sorted(enums):
@@ -329,6 +679,11 @@ def render_java(contract: Contract) -> str:
                 "",
             ]
         )
+
+    for name in sorted(object_definitions):
+        lines.extend(render_java_object(name, object_definitions[name], contract.definitions))
+    for name in sorted(union_definitions):
+        lines.extend(render_java_union(name, union_definitions[name], contract.definitions))
 
     action_values = " ||\n".join(
         f'            command == NodeCommandKind.{java_constant(value)}'

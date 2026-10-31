@@ -1166,11 +1166,20 @@ async fn record_p2p_rx_for_peer(stats: &StatsCollector, peer: &PeerRouteInfo, by
 }
 
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
-    let (src_ip, plain_payload) = match packet {
-        InboundPacket::AuthenticatedPlaintext { src_ip, payload } => (src_ip, payload),
+    let (src_ip, plain_payload, peer) = match packet {
+        InboundPacket::AuthenticatedPlaintext {
+            src_ip,
+            peer,
+            payload,
+        } => (src_ip, payload, Some(peer)),
         InboundPacket::SealedCiphertext { src_ip, payload } => {
             match runtime.p2p.decrypt_bytes_from_peer(src_ip, payload).await {
-                Ok(payload) => (src_ip, payload),
+                Ok(payload) => {
+                    // Relay/signaling traffic is authenticated here rather than
+                    // by the receiver, so resolve its route once after opening.
+                    let peer = runtime.p2p.peer_route_by_ip(src_ip).await;
+                    (src_ip, payload, peer)
+                }
                 Err(error) => {
                     tracing::debug!("丢弃来自 {src_ip} 的未认证数据包: {error:#}");
                     return;
@@ -1188,7 +1197,7 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
         );
         return;
     }
-    let Some(peer) = runtime.p2p.peer_route_by_ip(src_ip).await else {
+    let Some(peer) = peer else {
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return;
     };
@@ -3718,7 +3727,10 @@ mod tests {
             let inbound = tokio::time::timeout(Duration::from_secs(1), engine_b.recv())
                 .await?
                 .expect("receiver must deliver every batched packet");
-            let InboundPacket::AuthenticatedPlaintext { src_ip, payload } = inbound else {
+            let InboundPacket::AuthenticatedPlaintext {
+                src_ip, payload, ..
+            } = inbound
+            else {
                 panic!("direct UDP batch must deliver authenticated plaintext")
             };
             assert_eq!(src_ip, IpAddr::V6(ip_a));

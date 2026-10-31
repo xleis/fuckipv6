@@ -279,7 +279,18 @@ fn channel_with_limits(
 mod tests {
     use super::*;
     use crate::p2p::buffer_pool::InboundPayload;
+    use crate::p2p::connection::PeerRouteInfo;
+    use fuckipv6_common::VirtualIps;
     use std::collections::{BTreeMap, HashSet};
+
+    fn test_route() -> PeerRouteInfo {
+        let ipv6 = "fd00::1".parse().expect("test IP");
+        PeerRouteInfo {
+            client_id: Arc::from("test-peer"),
+            virtual_ip: ipv6,
+            virtual_ips: VirtualIps::from_ipv6(ipv6),
+        }
+    }
 
     fn packet(marker: u8) -> InboundPacket {
         packet_with_len(marker, 1)
@@ -288,6 +299,7 @@ mod tests {
     fn packet_with_len(marker: u8, len: usize) -> InboundPacket {
         InboundPacket::AuthenticatedPlaintext {
             src_ip: "fd00::1".parse().expect("test IP"),
+            peer: test_route(),
             payload: InboundPayload::from(vec![marker; len]),
         }
     }
@@ -302,6 +314,7 @@ mod tests {
     fn indexed_packet(marker: usize, len: usize) -> InboundPacket {
         InboundPacket::AuthenticatedPlaintext {
             src_ip: "fd00::1".parse().expect("test IP"),
+            peer: test_route(),
             payload: InboundPayload::from(indexed_payload(marker, len)),
         }
     }
@@ -335,6 +348,7 @@ mod tests {
     fn tagged_packet(packet: TaggedPacket) -> InboundPacket {
         InboundPacket::AuthenticatedPlaintext {
             src_ip: "fd00::1".parse().expect("test IP"),
+            peer: test_route(),
             payload: InboundPayload::from(packet.payload()),
         }
     }
@@ -495,6 +509,7 @@ mod tests {
         let (tx, mut rx, stats) = channel_with_limits(4, retained as u64);
         assert!(tx.try_send(InboundPacket::AuthenticatedPlaintext {
             src_ip: "fd00::1".parse().expect("test IP"),
+            peer: test_route(),
             payload,
         }));
         assert!(!tx.try_send(packet(2)));

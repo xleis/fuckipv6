@@ -51,9 +51,10 @@ fn validate_inbound_queue_capacity(capacity: usize) -> Result<()> {
 /// second time; relay traffic remains sealed until the central handler verifies
 /// it against the registered peer session.
 #[derive(Debug)]
-pub enum InboundPacket {
+pub(crate) enum InboundPacket {
     AuthenticatedPlaintext {
         src_ip: IpAddr,
+        peer: PeerRouteInfo,
         payload: InboundPayload,
     },
     SealedCiphertext {
@@ -133,7 +134,7 @@ struct PeerConnection {
 /// pre-authentication demultiplexing hint; the packet still has to open against
 /// the pointed-to session before any endpoint or payload is trusted.
 struct ReceiverRoute {
-    client_id: Arc<str>,
+    peer: PeerRouteInfo,
     secure: Arc<SecurePeerState>,
     health: Arc<PeerHealth>,
     src_ip: IpAddr,
@@ -157,16 +158,16 @@ struct ReceiverIndex {
 impl ReceiverIndex {
     fn insert(
         &mut self,
-        client_id: Arc<str>,
+        peer: PeerRouteInfo,
         secure: Arc<SecurePeerState>,
         health: Arc<PeerHealth>,
         src_ip: IpAddr,
         endpoints: &[SocketAddr],
     ) {
-        self.remove_client(client_id.as_ref());
+        self.remove_client(peer.client_id.as_ref());
         let receiver_index = secure.local_receiver_index();
         let route = Arc::new(ReceiverRoute {
-            client_id,
+            peer,
             secure,
             health,
             src_ip,
@@ -176,7 +177,7 @@ impl ReceiverIndex {
             .or_default()
             .push(route.clone());
         self.by_client
-            .insert(route.client_id.to_string(), route.clone());
+            .insert(route.peer.client_id.to_string(), route.clone());
         for endpoint in endpoints {
             self.add_endpoint_key(&route, canonical_udp_endpoint(*endpoint));
         }
@@ -246,7 +247,7 @@ impl ReceiverIndex {
         let key = (route.secure.local_receiver_index(), endpoint);
         let keys = self
             .endpoint_keys
-            .entry(route.client_id.to_string())
+            .entry(route.peer.client_id.to_string())
             .or_default();
         if !keys.contains(&key) {
             keys.push(key);
@@ -297,7 +298,7 @@ impl ReceiverIndex {
 /// Immutable identity fields needed by data-plane source validation. Keeping
 /// this separate from `PeerInfo` avoids copying public keys and endpoint lists
 /// for every received packet.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PeerRouteInfo {
     pub client_id: Arc<str>,
     pub virtual_ip: Ipv6Addr,
@@ -706,7 +707,7 @@ impl P2pEngine {
             .primary_ip()
             .unwrap_or(IpAddr::V6(peer_info.virtual_ip));
         self.receiver_index.write().await.insert(
-            client_key,
+            PeerRouteInfo::from(&peer_info),
             secure.clone(),
             health,
             src_ip,
@@ -1221,7 +1222,7 @@ impl P2pEngine {
     }
 
     /// 接收数据包 (支持 IPv4 / IPv6)
-    pub async fn recv(&self) -> Option<InboundPacket> {
+    pub(crate) async fn recv(&self) -> Option<InboundPacket> {
         // The queue is single-consumer by protocol. The mutex is held only while
         // waiting for/removing the next packet, never across decryption or I/O.
         self.incoming_rx.lock().await.recv().await
@@ -1925,7 +1926,10 @@ async fn dispatch_udp_batch(
                 continue;
             }
             Err(error) => {
-                tracing::debug!("无法为节点 {} 获取入站批处理许可: {error}", route.client_id);
+                tracing::debug!(
+                    "无法为节点 {} 获取入站批处理许可: {error}",
+                    route.peer.client_id
+                );
                 index = end;
                 continue;
             }
@@ -1949,7 +1953,7 @@ async fn dispatch_udp_batch(
             Err(error) => {
                 tracing::debug!(
                     "节点 {} 未通过来自 {addr} 的 Secure Session v2 数据批认证，整组丢弃: {error}",
-                    route.client_id
+                    route.peer.client_id
                 );
                 index = end;
                 continue;
@@ -1965,8 +1969,13 @@ async fn dispatch_udp_batch(
             index = end;
             continue;
         }
-        if !update_authenticated_peer_endpoint(connections, route.client_id.as_ref(), &secure, addr)
-            .await
+        if !update_authenticated_peer_endpoint(
+            connections,
+            route.peer.client_id.as_ref(),
+            &secure,
+            addr,
+        )
+        .await
         {
             index = end;
             continue;
@@ -1975,10 +1984,10 @@ async fn dispatch_udp_batch(
             receiver_index
                 .read()
                 .await
-                .has_endpoint(route.client_id.as_ref(), &secure, addr);
+                .has_endpoint(route.peer.client_id.as_ref(), &secure, addr);
         if !endpoint_registered
             && !receiver_index.write().await.register_endpoint(
-                route.client_id.as_ref(),
+                route.peer.client_id.as_ref(),
                 &secure,
                 addr,
             )
@@ -1997,6 +2006,7 @@ async fn dispatch_udp_batch(
                     let payload_len = payload.len();
                     if incoming_tx.try_send(InboundPacket::AuthenticatedPlaintext {
                         src_ip: route.src_ip,
+                        peer: route.peer.clone(),
                         payload,
                     }) {
                         // A full queue is not successful inbound traffic.
@@ -2006,7 +2016,7 @@ async fn dispatch_udp_batch(
                 Err(error) => {
                     tracing::debug!(
                         "节点 {} 的批内数据包未通过 Secure Session v2 认证，仅丢弃该包: {error}",
-                        route.client_id
+                        route.peer.client_id
                     );
                 }
             }
@@ -2173,7 +2183,7 @@ async fn dispatch_secure_data(
     let candidate_count = 1 + rest.len();
     let mut packet_owner = Some(bytes);
     for (candidate_index, route) in std::iter::once(first).chain(rest).enumerate() {
-        let client_id = &route.client_id;
+        let client_id = &route.peer.client_id;
         let secure = &route.secure;
         let _session = match secure.acquire_session_permission().await {
             Ok(permission) => permission,
@@ -2235,6 +2245,7 @@ async fn dispatch_secure_data(
                 let payload_len = plaintext.len();
                 if incoming_tx.try_send(InboundPacket::AuthenticatedPlaintext {
                     src_ip: route.src_ip,
+                    peer: route.peer.clone(),
                     payload: plaintext,
                 }) {
                     route.health.record_payload(payload_len);
@@ -2599,6 +2610,14 @@ fn now_micros() -> u64 {
 mod tests {
     use super::*;
 
+    fn route_info(client_id: &str, ipv6: Ipv6Addr) -> PeerRouteInfo {
+        PeerRouteInfo {
+            client_id: Arc::from(client_id),
+            virtual_ip: ipv6,
+            virtual_ips: VirtualIps::from_ipv6(ipv6),
+        }
+    }
+
     async fn established_direct_peers() -> Result<(
         P2pEngine,
         P2pEngine,
@@ -2743,13 +2762,13 @@ mod tests {
         };
         let receiver_index = base_route.secure.local_receiver_index();
         let endpoint_route = Arc::new(ReceiverRoute {
-            client_id: Arc::from("endpoint-route"),
+            peer: route_info("endpoint-route", ip_a),
             secure: base_route.secure.clone(),
             health: base_route.health.clone(),
             src_ip: IpAddr::V6(ip_a),
         });
         let index_route = Arc::new(ReceiverRoute {
-            client_id: Arc::from("colliding-index-route"),
+            peer: route_info("colliding-index-route", ip_a),
             secure: base_route.secure.clone(),
             health: base_route.health.clone(),
             src_ip: IpAddr::V6(ip_a),
@@ -2831,7 +2850,10 @@ mod tests {
             let received = tokio::time::timeout(Duration::from_secs(1), incoming_rx.recv())
                 .await?
                 .context("batched packet was not delivered")?;
-            let InboundPacket::AuthenticatedPlaintext { src_ip, payload } = received else {
+            let InboundPacket::AuthenticatedPlaintext {
+                src_ip, payload, ..
+            } = received
+            else {
                 panic!("batched direct UDP data must be authenticated plaintext");
             };
             assert_eq!(src_ip, IpAddr::V6(ip_a));
@@ -2950,7 +2972,7 @@ mod tests {
             },
         );
         engine_b.receiver_index.write().await.insert(
-            Arc::from("collision"),
+            route_info("collision", ip_a),
             secure,
             health,
             IpAddr::V6(ip_a),
@@ -3027,13 +3049,13 @@ mod tests {
             (peer.secure.clone(), peer.health.clone())
         };
         let real_route = Arc::new(ReceiverRoute {
-            client_id: Arc::from("a"),
+            peer: route_info("a", ip_a),
             secure: real_secure.clone(),
             health: real_health,
             src_ip: IpAddr::V6(ip_a),
         });
         let decoy_route = Arc::new(ReceiverRoute {
-            client_id: Arc::from("decoy"),
+            peer: route_info("decoy", decoy_ip),
             secure: decoy_secure,
             health: decoy_health,
             src_ip: IpAddr::V6(decoy_ip),
@@ -3073,10 +3095,21 @@ mod tests {
         let received = tokio::time::timeout(Duration::from_secs(1), incoming_rx.recv())
             .await?
             .context("real second candidate was not delivered")?;
-        let InboundPacket::AuthenticatedPlaintext { src_ip, payload } = received else {
+        let InboundPacket::AuthenticatedPlaintext {
+            src_ip,
+            peer,
+            payload,
+        } = received
+        else {
             panic!("collision authentication must deliver plaintext");
         };
         assert_eq!(src_ip, IpAddr::V6(ip_a));
+        assert_eq!(
+            peer.client_id.as_ref(),
+            "a",
+            "the authenticated candidate's route must travel with the plaintext, not the endpoint hint's route"
+        );
+        assert_eq!(peer.virtual_ip, ip_a);
         assert_eq!(&payload, b"second candidate");
         Ok(())
     }
@@ -3257,14 +3290,14 @@ mod tests {
         let endpoint_a = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 41000);
         let endpoint_b = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 41001);
         index.insert(
-            Arc::from("peer-a"),
+            route_info("peer-a", "fd00::2".parse()?),
             secure.clone(),
             Arc::new(PeerHealth::new(HEALTH_WINDOW_SIZE)),
             "fd00::2".parse()?,
             &[endpoint_a],
         );
         index.insert(
-            Arc::from("peer-b"),
+            route_info("peer-b", "fd00::3".parse()?),
             secure,
             Arc::new(PeerHealth::new(HEALTH_WINDOW_SIZE)),
             "fd00::3".parse()?,
@@ -3282,7 +3315,10 @@ mod tests {
         assert_eq!(index.candidates_returned.load(Ordering::Relaxed), 2);
         index.remove_client("peer-a");
         assert_eq!(index.routes(receiver_index).len(), 1);
-        assert_eq!(index.routes(receiver_index)[0].client_id.as_ref(), "peer-b");
+        assert_eq!(
+            index.routes(receiver_index)[0].peer.client_id.as_ref(),
+            "peer-b"
+        );
         Ok(())
     }
 
@@ -3516,14 +3552,20 @@ mod tests {
         let received = tokio::time::timeout(Duration::from_secs(1), engine_b.recv())
             .await?
             .expect("engine B should receive P2P payload");
-        let (received_src, received_plaintext) = match received {
-            InboundPacket::AuthenticatedPlaintext { src_ip, payload } => (src_ip, payload),
+        let (received_src, received_peer, received_plaintext) = match received {
+            InboundPacket::AuthenticatedPlaintext {
+                src_ip,
+                peer,
+                payload,
+            } => (src_ip, peer, payload),
             InboundPacket::SealedCiphertext { .. } => {
                 panic!("direct UDP data must enter the client loop as authenticated plaintext")
             }
         };
 
         assert_eq!(received_src, IpAddr::V6(ip_a));
+        assert_eq!(received_peer.client_id.as_ref(), "a");
+        assert_eq!(received_peer.virtual_ip, ip_a);
         assert!(
             received_plaintext.is_pooled(),
             "direct UDP plaintext must retain the receiver allocation"
@@ -3622,7 +3664,9 @@ mod tests {
                 .await?
                 .expect("all authenticated plaintext packets must remain queued");
             let (source, payload) = match packet {
-                InboundPacket::AuthenticatedPlaintext { src_ip, payload } => (src_ip, payload),
+                InboundPacket::AuthenticatedPlaintext {
+                    src_ip, payload, ..
+                } => (src_ip, payload),
                 InboundPacket::SealedCiphertext { .. } => {
                     panic!("direct dispatch must never enqueue sealed ciphertext")
                 }
@@ -3764,7 +3808,9 @@ mod tests {
             .await?
             .expect("engine B should receive rebound plaintext");
         let (received_src, received_plaintext) = match received {
-            InboundPacket::AuthenticatedPlaintext { src_ip, payload } => (src_ip, payload),
+            InboundPacket::AuthenticatedPlaintext {
+                src_ip, payload, ..
+            } => (src_ip, payload),
             InboundPacket::SealedCiphertext { .. } => {
                 panic!("authenticated UDP rebound must not re-enter as ciphertext")
             }
@@ -4067,7 +4113,9 @@ mod tests {
             .await?
             .context("post-rekey packet was not delivered")?;
         let (source, payload) = match packet {
-            InboundPacket::AuthenticatedPlaintext { src_ip, payload } => (src_ip, payload),
+            InboundPacket::AuthenticatedPlaintext {
+                src_ip, payload, ..
+            } => (src_ip, payload),
             InboundPacket::SealedCiphertext { .. } => {
                 panic!("post-rekey direct traffic must enter as authenticated plaintext")
             }

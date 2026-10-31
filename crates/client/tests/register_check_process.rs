@@ -14,6 +14,7 @@ async fn register_check_command_registers_with_embedded_host() -> Result<()> {
         "register-check-test",
         signaling_addr.port(),
         0,
+        None,
         Some("127.0.0.1".to_string()),
         None,
     )

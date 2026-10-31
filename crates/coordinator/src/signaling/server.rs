@@ -46,6 +46,7 @@ pub struct SignalingServer {
     session_manager: Arc<SessionManager>,
     relay_endpoint: Option<RelayEndpoint>,
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
+    listener: Option<TcpListener>,
 }
 
 impl SignalingServer {
@@ -58,6 +59,7 @@ impl SignalingServer {
             session_manager,
             relay_endpoint: None,
             relay_endpoints: Arc::new(Vec::new()),
+            listener: None,
         })
     }
 
@@ -67,7 +69,27 @@ impl SignalingServer {
             session_manager,
             relay_endpoint: None,
             relay_endpoints: Arc::new(Vec::new()),
+            listener: None,
         }
+    }
+
+    /// Bind the listening socket immediately so callers can publish the actual
+    /// port before the server task starts. This is required when port `0` is
+    /// used to request an ephemeral port.
+    pub async fn bind(mut self) -> Result<Self> {
+        let listener = TcpListener::bind(&self.bind_addr)
+            .await
+            .with_context(|| format!("无法监听信令服务: {}", self.bind_addr))?;
+        self.listener = Some(listener);
+        Ok(self)
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.listener
+            .as_ref()
+            .context("信令服务尚未绑定监听地址")?
+            .local_addr()
+            .context("无法读取信令服务监听地址")
     }
 
     pub fn with_relay_endpoint(mut self, relay_endpoint: RelayEndpoint) -> Self {
@@ -86,10 +108,14 @@ impl SignalingServer {
 
     /// 启动服务器
     pub async fn run(self) -> Result<()> {
-        let listener = TcpListener::bind(&self.bind_addr)
-            .await
-            .with_context(|| format!("无法监听信令服务: {}", self.bind_addr))?;
-        tracing::info!("信令服务器正在监听: {}", self.bind_addr);
+        let listener = match self.listener {
+            Some(listener) => listener,
+            None => TcpListener::bind(&self.bind_addr)
+                .await
+                .with_context(|| format!("无法监听信令服务: {}", self.bind_addr))?,
+        };
+        let local_addr = listener.local_addr().context("无法读取信令服务监听地址")?;
+        tracing::info!("信令服务器正在监听: {local_addr}");
 
         loop {
             match listener.accept().await {

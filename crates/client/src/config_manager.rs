@@ -14,6 +14,21 @@ pub struct NetworkConfig {
     pub coordinator_url: String,
     pub created_at: String,
     pub last_used: String,
+    /// Whether this node owns and must restore the embedded signaling/relay
+    /// services for this network.
+    #[serde(default)]
+    pub owns_embedded_services: bool,
+    /// The concrete listening ports are persisted after the services bind so a
+    /// restart can restore the same invitation endpoint. `None` keeps old
+    /// network-list files readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signaling_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_pool: Option<String>,
 }
 
 /// 网络配置列表
@@ -159,8 +174,15 @@ impl ConfigManager {
     fn save_network_list(&self, list: &NetworkList) -> Result<()> {
         let networks_file = self.get_networks_file();
         let content = serde_json::to_string_pretty(list).context("无法序列化网络列表")?;
-        std::fs::write(&networks_file, content)
-            .with_context(|| format!("无法写入网络列表: {}", networks_file.display()))?;
+        let temporary_file =
+            networks_file.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&temporary_file, content)
+            .with_context(|| format!("无法写入临时网络列表: {}", temporary_file.display()))?;
+        if let Err(error) = std::fs::rename(&temporary_file, &networks_file) {
+            let _ = std::fs::remove_file(&temporary_file);
+            return Err(error)
+                .with_context(|| format!("无法替换网络列表: {}", networks_file.display()));
+        }
         Ok(())
     }
 
@@ -211,6 +233,11 @@ impl ConfigManager {
                 coordinator_url: coordinator_url.to_string(),
                 created_at: now.clone(),
                 last_used: now,
+                owns_embedded_services: false,
+                signaling_port: None,
+                relay_port: None,
+                external_host: None,
+                ip_pool: None,
             },
         );
 
@@ -221,6 +248,32 @@ impl ConfigManager {
         self.save_network_list(&list)?;
 
         Ok(config_file)
+    }
+
+    /// Record the concrete endpoints of embedded services owned by this node.
+    /// This must happen after the listeners bind because port `0` is resolved by
+    /// the operating system and the invitation ticket contains the actual port.
+    pub fn set_embedded_service_metadata(
+        &self,
+        network_name: &str,
+        signaling_port: u16,
+        relay_port: u16,
+        external_host: Option<String>,
+        ip_pool: Option<String>,
+    ) -> Result<()> {
+        Self::validate_network_name(network_name)?;
+        let mut list = self.load_network_list()?;
+        let network = list
+            .networks
+            .get_mut(network_name)
+            .with_context(|| format!("无法保存内嵌服务元数据：网络 [{network_name}] 不存在"))?;
+        network.owns_embedded_services = true;
+        network.signaling_port = Some(signaling_port);
+        network.relay_port = Some(relay_port);
+        network.external_host = external_host;
+        network.ip_pool = ip_pool;
+        self.save_network_list(&list)?;
+        Ok(())
     }
 
     /// 获取网络配置文件路径
@@ -406,6 +459,42 @@ mod tests {
         manager.delete_network("beta")?;
         assert_eq!(manager.get_default_network()?, None);
         assert!(!manager.network_exists("beta"));
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_legacy_network_list_without_new_optional_fields() -> anyhow::Result<()> {
+        let dir = temp_config_dir("legacy-network-list");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        std::fs::write(
+            dir.join("networks.json"),
+            r#"{
+                "networks": {
+                    "legacy": {
+                        "name": "legacy",
+                        "coordinator_url": "ws://legacy.example:6666",
+                        "created_at": "2025-01-01T00:00:00Z",
+                        "last_used": "2025-01-01T00:00:00Z"
+                    }
+                },
+                "default_network": "legacy"
+            }"#,
+        )?;
+
+        let networks = manager.list_networks()?;
+        let legacy = networks
+            .iter()
+            .find(|network| network.name == "legacy")
+            .expect("legacy network");
+        assert!(!legacy.owns_embedded_services);
+        assert_eq!(legacy.signaling_port, None);
+        assert_eq!(legacy.relay_port, None);
+        assert_eq!(legacy.external_host, None);
+        assert_eq!(legacy.ip_pool, None);
+        assert_eq!(manager.get_default_network()?, Some("legacy".into()));
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

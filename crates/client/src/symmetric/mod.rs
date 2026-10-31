@@ -36,6 +36,7 @@ impl EmbeddedCoordinator {
         network_name: &str,
         signaling_port: u16,
         relay_port: u16,
+        host_public_key: Option<[u8; 32]>,
         external_host: Option<String>,
         ip_pool: Option<&str>,
     ) -> Result<Self> {
@@ -74,7 +75,11 @@ impl EmbeddedCoordinator {
 
         let signaling_bind = format!("0.0.0.0:{signaling_port}");
         let signaling_server =
-            SignalingServer::new_with_manager(signaling_bind, session_manager.clone());
+            SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
+                .bind()
+                .await
+                .context("无法绑定内嵌信令服务")?;
+        let actual_signaling_addr = signaling_server.local_addr()?;
 
         let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), relay_port);
         let relay_server =
@@ -92,19 +97,25 @@ impl EmbeddedCoordinator {
         let signaling_server = signaling_server.with_relay_endpoint(relay_endpoint);
         signaling_server.spawn_timeout_cleanup(120);
 
-        let host_identity = Identity::generate()?;
-        let host_pubkey = host_identity.public_key_bytes();
+        // Runtime-owned services supply the node-wide persisted public key so
+        // recreating a service keeps the invitation identity stable. Direct
+        // embedders that omit it retain the old ephemeral-ticket behavior.
+        let host_pubkey = match host_public_key {
+            Some(public_key) => public_key,
+            None => Identity::generate()?.public_key_bytes(),
+        };
 
         // 确定票据暴露的接入地址
+        let actual_signaling_port = actual_signaling_addr.port();
         let ticket_endpoint = if let Some(host) = external_host {
             if host.contains(':') {
                 host
             } else {
-                format!("{host}:{signaling_port}")
+                format!("{host}:{actual_signaling_port}")
             }
         } else {
             // 本机探测默认地址
-            format!("127.0.0.1:{signaling_port}")
+            format!("127.0.0.1:{actual_signaling_port}")
         };
 
         let ticket = NetworkTicket::new(host_pubkey, ticket_endpoint, network_name)
@@ -115,7 +126,7 @@ impl EmbeddedCoordinator {
 
         let relay_task = tokio::spawn(async move { relay_server.run().await });
 
-        let signaling_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), signaling_port);
+        let signaling_addr = actual_signaling_addr;
 
         tracing::info!(
             "🚀 内嵌协调 Actor 启动成功: 信令={}, QUIC中继={}",
@@ -153,6 +164,7 @@ mod tests {
             "test-mesh",
             0, // random free port
             0,
+            None,
             Some("127.0.0.1".to_string()),
             Some("fd00::1000/120"),
         )
@@ -161,5 +173,7 @@ mod tests {
 
         assert_eq!(coordinator.ticket.network_name, "test-mesh");
         assert!(coordinator.ticket.to_string().starts_with("fk://"));
+        assert_ne!(coordinator.signaling_addr.port(), 0);
+        assert_ne!(coordinator.relay_addr.port(), 0);
     }
 }

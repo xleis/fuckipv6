@@ -697,6 +697,7 @@ impl AppController {
             &name,
             port,
             relay_port,
+            None,
             external_host,
             Some("fd00::1000/120"),
         )

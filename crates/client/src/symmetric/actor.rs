@@ -11,6 +11,7 @@ pub struct EmbeddedServiceStartRequest {
     pub network_name: String,
     pub signaling_port: u16,
     pub relay_port: u16,
+    pub host_public_key: Option<[u8; 32]>,
     pub external_host: Option<String>,
     pub ip_pool: Option<String>,
 }
@@ -21,9 +22,15 @@ impl EmbeddedServiceStartRequest {
             network_name: network_name.into(),
             signaling_port,
             relay_port,
+            host_public_key: None,
             external_host: None,
             ip_pool: None,
         }
+    }
+
+    pub fn with_host_public_key(mut self, host_public_key: [u8; 32]) -> Self {
+        self.host_public_key = Some(host_public_key);
+        self
     }
 
     pub fn with_external_host(mut self, external_host: impl Into<String>) -> Self {
@@ -260,6 +267,7 @@ async fn start_service(
         &request.network_name,
         request.signaling_port,
         request.relay_port,
+        request.host_public_key,
         request.external_host,
         request.ip_pool.as_deref(),
     )

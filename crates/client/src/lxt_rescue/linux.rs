@@ -27,7 +27,8 @@ const IF_NAMESIZE: usize = 16;
 const IFREQ_SIZE: usize = 40;
 const PEER_TTL: Duration = Duration::from_secs(8);
 const PENDING_SYN_TTL: Duration = Duration::from_secs(20);
-const RELAY_DEDUP_TTL: Duration = Duration::from_secs(2);
+// Keep this short: a SYN-ACK retransmitted after ~1s must not be suppressed.
+const RELAY_DEDUP_TTL: Duration = Duration::from_millis(250);
 const MAX_PENDING_SYNS: usize = 1024;
 const MAX_RELAY_DEDUP_ENTRIES: usize = 8192;
 

@@ -75,4 +75,82 @@ assert.equal(overview.rows[0].title, "运行状态");
 assert.match(overview.rows[0].detail, /控制服务异常/);
 assert.ok(!overview.rows.some((row) => row.title === "节点生命周期"));
 
+const diagnosticsAction = ui.ACTION_CONTRACT.get_node_diagnostics;
+assert.deepEqual(
+  ui.commandForAction(diagnosticsAction, {}),
+  { command: "get_node_diagnostics" },
+);
+
+const cleanupAction = ui.ACTION_CONTRACT.cleanup_node_residuals;
+assert.deepEqual(
+  ui.commandForAction(cleanupAction, { networks: "home, office", all: false }),
+  { command: "cleanup_node_residuals", payload: { networks: ["home", "office"], all: false } },
+);
+assert.deepEqual(
+  ui.commandForAction(cleanupAction, { networks: "ignored", all: true }),
+  { command: "cleanup_node_residuals", payload: { networks: [], all: true } },
+);
+assert.deepEqual(
+  ui.validateActionValues(cleanupAction, { networks: "", all: false }),
+  ["清理时必须指定网络名称，或勾选全部网络"],
+);
+assert.equal(ui.defaultFieldValue(cleanupAction, cleanupAction.fields[1], snapshot(), ""), true);
+
+const residue = {
+  sessions_remaining: 1,
+  listeners_remaining: 1,
+  peers_remaining: 2,
+  embedded_services_remaining: 0,
+  configuration_retained: true,
+  residual_networks: ["home"],
+  cleanup_steps: [{
+    network_name: "home",
+    resource: "TUN",
+    status: "deferred",
+    detail: "清理已延迟",
+  }],
+  issues: ["残留网络: home"],
+};
+const diagnosticsResponse = {
+  schema_version: 1,
+  result: {
+    request_id: 7,
+    outcome: {
+      status: "diagnostics",
+      data: {
+        lifecycle: snapshot().lifecycle,
+        retained_owner_networks: ["home"],
+        cleanup_candidate_networks: ["home"],
+        residue,
+      },
+    },
+  },
+};
+const diagnosticsOutcome = ui.validateCommandResponse(diagnosticsResponse, 7);
+assert.match(ui.outcomeSummary(diagnosticsOutcome), /可重试清理 1 个网络/);
+
+const cleanupResponse = {
+  schema_version: 1,
+  result: {
+    request_id: 8,
+    outcome: {
+      status: "cleanup",
+      data: {
+        cleaned_networks: [],
+        failed_networks: [{ network_name: "home", reason: "timed_out" }],
+        residue,
+      },
+    },
+  },
+};
+const cleanupOutcome = ui.validateCommandResponse(cleanupResponse, 8);
+assert.match(ui.outcomeSummary(cleanupOutcome), /成功 0 个 · 失败 1 个/);
+
+const invalidCleanupResponse = structuredClone(cleanupResponse);
+invalidCleanupResponse.result.outcome.data.failed_networks[0].reason = "mystery";
+assert.throws(
+  () => ui.validateCommandResponse(invalidCleanupResponse, 8),
+  /unknown cleanup failure reason/,
+);
+
 console.log("test_webui_node_ui: passed");

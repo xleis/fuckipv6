@@ -91,10 +91,26 @@
   const COMMAND_OUTCOMES = Object.freeze([
     "snapshot",
     "ui_manifest",
+    "diagnostics",
+    "cleanup",
     "probe",
     "accepted",
     "completed",
     "rejected",
+  ]);
+  const CLEANUP_STEP_STATUSES = Object.freeze([
+    "removed",
+    "not_owned",
+    "deferred",
+    "failed",
+    "unknown",
+  ]);
+  const CLEANUP_FAILURE_REASONS = Object.freeze([
+    "still_running",
+    "owner_unavailable",
+    "timed_out",
+    "incomplete",
+    "unknown",
   ]);
   const PROBLEM_CODES = Object.freeze([
     "invalid_request",
@@ -123,6 +139,20 @@
               "id": "refresh_snapshot",
               "label_key": "action.refresh_snapshot",
               "command": "get_snapshot",
+              "backend_status": "implemented",
+              "permission": "view_state",
+              "audit": {
+                "policy": "none",
+                "action": null
+              },
+              "availability": "always",
+              "fields": [],
+              "confirmation": null
+            },
+            {
+              "id": "get_node_diagnostics",
+              "label_key": "action.get_node_diagnostics",
+              "command": "get_node_diagnostics",
               "backend_status": "implemented",
               "permission": "view_state",
               "audit": {
@@ -178,6 +208,35 @@
                 "consequence_key": "confirm.restart_node.consequence",
                 "destructive": true
               }
+            },
+            {
+              "id": "cleanup_node_residuals",
+              "label_key": "action.cleanup_node_residuals",
+              "command": "cleanup_node_residuals",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "node.cleanup_residuals"
+              },
+              "availability": "always",
+              "fields": [
+                {
+                  "id": "networks",
+                  "label_key": "field.network_names",
+                  "input": "network_selection",
+                  "required": false,
+                  "validation": "network_selection"
+                },
+                {
+                  "id": "all",
+                  "label_key": "field.all_networks",
+                  "input": "boolean",
+                  "required": true,
+                  "validation": "none"
+                }
+              ],
+              "confirmation": null
             }
           ]
         },
@@ -638,6 +697,7 @@
       "page.identity": "节点身份",
       "page.settings": "权限与设置",
       "action.refresh_snapshot": "刷新快照",
+      "action.get_node_diagnostics": "查看运行时诊断",
       "action.create_network": "创建网络",
       "action.join_network": "加入网络",
       "action.start_networks": "启动网络",
@@ -650,6 +710,7 @@
       "action.start_node": "启动节点",
       "action.stop_node": "停止节点",
       "action.restart_node": "重启节点",
+      "action.cleanup_node_residuals": "清理运行时残留",
       "action.shutdown_node": "关闭节点",
       "field.network_name": "网络名称",
       "field.signaling_port": "信令端口",
@@ -659,6 +720,7 @@
       "field.ticket_or_url": "票据或 URL",
       "field.start_after_join": "加入后启动",
       "field.network_selection": "网络选择",
+      "field.network_names": "网络名称列表",
       "field.all_networks": "全部网络",
       "field.peer_target": "对等节点",
       "field.timeout_ms": "超时（毫秒）",
@@ -755,6 +817,53 @@
   function requireStringArray(value, message) {
     contractValue(Array.isArray(value), message);
     for (const item of value) requireString(item, message + " entry");
+  }
+
+  function validateLifecycleSnapshot(lifecycle, context) {
+    assertContract(isRecord(lifecycle), context + " lifecycle is missing");
+    requireEnum(lifecycle.phase, LIFECYCLE_PHASES, "unknown " + context + " lifecycle phase");
+    requireInteger(lifecycle.configured_networks, "invalid " + context + " configured_networks");
+    requireInteger(lifecycle.active_networks, "invalid " + context + " active_networks");
+    requireStringArray(lifecycle.failed_networks, context + " failed_networks must be an array");
+  }
+
+  function validateRuntimeResidue(residue, context) {
+    assertContract(isRecord(residue), context + " residue is missing");
+    requireInteger(residue.sessions_remaining, "invalid " + context + " sessions_remaining");
+    requireInteger(residue.listeners_remaining, "invalid " + context + " listeners_remaining");
+    requireInteger(residue.peers_remaining, "invalid " + context + " peers_remaining");
+    requireInteger(residue.embedded_services_remaining, "invalid " + context + " embedded_services_remaining");
+    requireBoolean(residue.configuration_retained, context + " configuration_retained is missing");
+    requireStringArray(residue.residual_networks, context + " residual_networks must be an array");
+    assertContract(Array.isArray(residue.cleanup_steps), context + " cleanup_steps must be an array");
+    for (const step of residue.cleanup_steps) {
+      assertContract(isRecord(step), context + " cleanup step must be an object");
+      requireString(step.network_name, context + " cleanup step network_name is missing", true);
+      requireString(step.resource, context + " cleanup step resource is missing", true);
+      requireEnum(step.status, CLEANUP_STEP_STATUSES, "unknown " + context + " cleanup step status");
+      assertContract(step.detail === null || typeof step.detail === "string", "invalid " + context + " cleanup step detail");
+    }
+    requireStringArray(residue.issues, context + " issues must be an array");
+  }
+
+  function validateDiagnosticsPayload(diagnostics) {
+    assertContract(isRecord(diagnostics), "diagnostics outcome is missing its data");
+    validateLifecycleSnapshot(diagnostics.lifecycle, "diagnostics");
+    requireStringArray(diagnostics.retained_owner_networks, "diagnostics retained_owner_networks must be an array");
+    requireStringArray(diagnostics.cleanup_candidate_networks, "diagnostics cleanup_candidate_networks must be an array");
+    validateRuntimeResidue(diagnostics.residue, "diagnostics");
+  }
+
+  function validateCleanupPayload(cleanup) {
+    assertContract(isRecord(cleanup), "cleanup outcome is missing its data");
+    requireStringArray(cleanup.cleaned_networks, "cleanup cleaned_networks must be an array");
+    assertContract(Array.isArray(cleanup.failed_networks), "cleanup failed_networks must be an array");
+    for (const failure of cleanup.failed_networks) {
+      assertContract(isRecord(failure), "cleanup failure must be an object");
+      requireString(failure.network_name, "cleanup failure network_name is missing", true);
+      requireEnum(failure.reason, CLEANUP_FAILURE_REASONS, "unknown cleanup failure reason");
+    }
+    validateRuntimeResidue(cleanup.residue, "cleanup");
   }
 
   const PRIMARY_STATUS_COPY = Object.freeze({
@@ -1169,7 +1278,8 @@
     if (field.id === "relay_port") return "6667";
     if (field.id === "timeout_ms") return "1500";
     if (field.id === "auto_connect" || field.id === "start" || field.id === "is_exit_node") return true;
-    if (field.id === "all" || field.id === "enabled") return field.id === "enabled";
+    if (field.id === "all") return action.id === "cleanup_node_residuals";
+    if (field.id === "enabled") return false;
     if (field.id === "network_name") return network;
     if (field.input === "network_selection") return network || "default";
     if (field.id === "mode") {
@@ -1285,9 +1395,14 @@
         errors.push("信令端口和中继端口不能相同");
       }
     }
-    if ((action.id === "stop_networks" || action.id === "restart_networks") &&
+    if ((action.id === "stop_networks" || action.id === "restart_networks" || action.id === "cleanup_node_residuals") &&
         !booleanValue(values.all) && !splitNames(values.networks).length) {
-      errors.push((action.id === "restart_networks" ? "重启" : "停止") + "网络时必须指定网络名称，或勾选全部网络");
+      const verb = action.id === "restart_networks"
+        ? "重启"
+        : action.id === "stop_networks"
+          ? "停止"
+          : "清理";
+      errors.push(verb + "时必须指定网络名称，或勾选全部网络");
     }
     return errors;
   }
@@ -1313,6 +1428,7 @@
     }
     switch (action.id) {
       case "refresh_snapshot":
+      case "get_node_diagnostics":
         return { command };
       case "create_network":
         return {
@@ -1348,6 +1464,13 @@
       }
       case "restart_networks": {
         const all = booleanValue(values.all);
+        return {
+          command,
+          payload: { networks: all ? [] : splitNames(values.networks), all },
+        };
+      }
+      case "cleanup_node_residuals": {
+        const all = booleanValue(required(values, "all"));
         return {
           command,
           payload: { networks: all ? [] : splitNames(values.networks), all },
@@ -1426,6 +1549,12 @@
       case "ui_manifest":
         validateManifestResponse({ schema_version: HTTP_SCHEMA_VERSION, manifest: outcome.data });
         break;
+      case "diagnostics":
+        validateDiagnosticsPayload(outcome.data);
+        break;
+      case "cleanup":
+        validateCleanupPayload(outcome.data);
+        break;
       case "rejected":
         assertContract(isRecord(outcome.data), "rejected outcome is missing its problem");
         requireEnum(outcome.data.code, PROBLEM_CODES, "unknown rejected problem code");
@@ -1469,6 +1598,30 @@
       return httpErrorText({ problem: outcome.data }, "节点命令被拒绝");
     }
     return "节点返回了未预期的结果";
+  }
+
+  function outcomeSummary(outcome) {
+    if (!outcome || typeof outcome !== "object") return "节点返回了空结果";
+    if (outcome.status === "diagnostics") {
+      const residue = outcome.data.residue;
+      const counts = "会话 " + residue.sessions_remaining +
+        " · 监听器 " + residue.listeners_remaining +
+        " · Peer " + residue.peers_remaining +
+        " · 内嵌服务 " + residue.embedded_services_remaining;
+      const candidates = outcome.data.cleanup_candidate_networks.length;
+      const issues = residue.issues.length ? "；" + residue.issues.join("；") : "；无残留问题";
+      return "诊断完成 · " + counts + " · 可重试清理 " + candidates + " 个网络" + issues;
+    }
+    if (outcome.status === "cleanup") {
+      const cleaned = outcome.data.cleaned_networks.length;
+      const failed = outcome.data.failed_networks.length;
+      const issues = outcome.data.residue.issues.length
+        ? "；" + outcome.data.residue.issues.join("；")
+        : "；无残留问题";
+      return "残留清理完成 · 成功 " + cleaned + " 个 · 失败 " + failed + " 个" + issues;
+    }
+    const message = outcome.data && outcome.data.message ? " · " + outcome.data.message : "";
+    return outcome.status + message;
   }
 
   function networkRows(snapshot) {
@@ -1649,6 +1802,7 @@
     validateCommandResponse,
     httpErrorText,
     outcomeErrorText,
+    outcomeSummary,
     projectPage,
   });
 });

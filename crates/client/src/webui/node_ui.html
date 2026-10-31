@@ -315,7 +315,7 @@
           state.snapshot = ui.validateSnapshotResponse({ schema_version: 1, snapshot: outcome.data });
           state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
         }
-        showToast(outcome.status + (outcome.data && outcome.data.message ? " · " + outcome.data.message : ""));
+        showToast(ui.outcomeSummary(outcome));
         await refreshSnapshot();
         return;
       }

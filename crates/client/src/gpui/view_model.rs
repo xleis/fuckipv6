@@ -82,6 +82,7 @@ impl PageKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionBinding {
     RefreshSnapshot,
+    GetDiagnostics,
     CreateNetwork,
     JoinNetwork,
     StartNetworks,
@@ -94,12 +95,14 @@ pub enum ActionBinding {
     StartNode,
     StopNode,
     RestartNode,
+    CleanupResiduals,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
         Self::RefreshSnapshot,
+        Self::GetDiagnostics,
         Self::CreateNetwork,
         Self::JoinNetwork,
         Self::StartNetworks,
@@ -112,12 +115,14 @@ impl ActionBinding {
         Self::StartNode,
         Self::StopNode,
         Self::RestartNode,
+        Self::CleanupResiduals,
         Self::ShutdownNode,
     ];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::RefreshSnapshot => "refresh_snapshot",
+            Self::GetDiagnostics => "get_node_diagnostics",
             Self::CreateNetwork => "create_network",
             Self::JoinNetwork => "join_network",
             Self::StartNetworks => "start_networks",
@@ -130,6 +135,7 @@ impl ActionBinding {
             Self::StartNode => "start_node",
             Self::StopNode => "stop_node",
             Self::RestartNode => "restart_node",
+            Self::CleanupResiduals => "cleanup_node_residuals",
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -322,6 +328,10 @@ pub fn build_page_model_for_page(
 pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
     let expected = match action.id.as_str() {
         "refresh_snapshot" => (ActionBinding::RefreshSnapshot, NodeCommandKind::GetSnapshot),
+        "get_node_diagnostics" => (
+            ActionBinding::GetDiagnostics,
+            NodeCommandKind::GetDiagnostics,
+        ),
         "create_network" => (ActionBinding::CreateNetwork, NodeCommandKind::CreateNetwork),
         "join_network" => (ActionBinding::JoinNetwork, NodeCommandKind::JoinNetwork),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
@@ -340,6 +350,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
         "start_node" => (ActionBinding::StartNode, NodeCommandKind::StartNode),
         "stop_node" => (ActionBinding::StopNode, NodeCommandKind::StopNode),
         "restart_node" => (ActionBinding::RestartNode, NodeCommandKind::RestartNode),
+        "cleanup_node_residuals" => (
+            ActionBinding::CleanupResiduals,
+            NodeCommandKind::CleanupResiduals,
+        ),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -420,6 +434,10 @@ pub fn default_form_values(
                 ("stop_networks", "all") => "false".into(),
                 ("restart_networks", "networks") => selected_network.unwrap_or_default().into(),
                 ("restart_networks", "all") => "false".into(),
+                ("cleanup_node_residuals", "networks") => {
+                    selected_network.unwrap_or_default().into()
+                }
+                ("cleanup_node_residuals", "all") => "false".into(),
                 ("update_routing", "mode") => "mesh_only".into(),
                 ("update_routing", "is_exit_node") => "false".into(),
                 ("set_exit_node_role", "role") => "exit_node".into(),
@@ -455,6 +473,7 @@ pub fn build_command(
 
     match bind_action(action) {
         Ok(ActionBinding::RefreshSnapshot) => Ok(NodeCommand::GetSnapshot),
+        Ok(ActionBinding::GetDiagnostics) => Ok(NodeCommand::GetDiagnostics),
         Ok(ActionBinding::CreateNetwork) => {
             Ok(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: field("name"),
@@ -507,6 +526,10 @@ pub fn build_command(
         Ok(ActionBinding::StartNode) => Ok(NodeCommand::StartNode),
         Ok(ActionBinding::StopNode) => Ok(NodeCommand::StopNode),
         Ok(ActionBinding::RestartNode) => Ok(NodeCommand::RestartNode),
+        Ok(ActionBinding::CleanupResiduals) => Ok(NodeCommand::CleanupResiduals {
+            networks: split_names(&field("networks")),
+            all: parse_bool(action, "all", &field("all"))?,
+        }),
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -522,6 +545,7 @@ pub fn build_command(
 pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
     let allowed = match action.id.as_str() {
         "refresh_snapshot" => HashSet::from([]),
+        "get_node_diagnostics" => HashSet::from([]),
         "create_network" => HashSet::from([
             "name",
             "signaling_port",
@@ -533,6 +557,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
         "restart_networks" => HashSet::from(["networks", "all"]),
+        "cleanup_node_residuals" => HashSet::from(["networks", "all"]),
         "probe_peer" => HashSet::from(["network_name", "target", "timeout_ms"]),
         "update_routing" => HashSet::from(["network_name", "mode", "exit_node", "is_exit_node"]),
         "set_exit_node_role" | "set_relay_role" => {

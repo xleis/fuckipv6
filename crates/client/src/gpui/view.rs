@@ -9,7 +9,7 @@ use gpui::{
 
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values,
-    validate_manifest_bindings, PageKind, RowModel, SectionModel,
+    validate_manifest_bindings, ActionBinding, PageKind, RowModel, SectionModel,
 };
 use crate::node::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
@@ -235,7 +235,10 @@ impl GpuiShell {
                 }
                 self.manifest = Some(manifest);
                 self.initialize_forms();
-                self.notice = Some("共享 UI manifest 与 10 个动作映射已加载".into());
+                self.notice = Some(format!(
+                    "共享 UI manifest 与 {} 个动作映射已加载",
+                    ActionBinding::ALL.len()
+                ));
             }
             NodeCommandOutcome::Rejected(problem) => {
                 let network = problem
@@ -252,6 +255,36 @@ impl GpuiShell {
                 self.notice = Some(format!(
                     "探测 {} 完成: rtt={:?}, timed_out={}, p2p={}",
                     probe.peer_id, probe.rtt_us, probe.timed_out, probe.p2p_active
+                ));
+            }
+            NodeCommandOutcome::Diagnostics(diagnostics) => {
+                let residue = &diagnostics.residue;
+                let summary = if residue.is_clean() {
+                    "运行时无残留".to_string()
+                } else {
+                    residue.issues.join("；")
+                };
+                self.notice = Some(format!(
+                    "诊断完成: 会话 {}，监听器 {}，Peer {}，内嵌服务 {}；可重试清理 {} 个网络；{}",
+                    residue.sessions_remaining,
+                    residue.listeners_remaining,
+                    residue.peers_remaining,
+                    residue.embedded_services_remaining,
+                    diagnostics.cleanup_candidate_networks.len(),
+                    summary
+                ));
+            }
+            NodeCommandOutcome::Cleanup(cleanup) => {
+                let summary = if cleanup.residue.issues.is_empty() {
+                    "未报告问题".to_string()
+                } else {
+                    cleanup.residue.issues.join("；")
+                };
+                self.notice = Some(format!(
+                    "残留清理完成: 成功 {} 个，失败 {} 个；{}",
+                    cleanup.cleaned_networks.len(),
+                    cleanup.failed_networks.len(),
+                    summary
                 ));
             }
             NodeCommandOutcome::Accepted { operation_id } => {
@@ -1148,6 +1181,7 @@ fn page_label(id: &str) -> &'static str {
 fn action_label(id: &str) -> &'static str {
     match id {
         "refresh_snapshot" => "刷新共享快照",
+        "get_node_diagnostics" => "查看运行时诊断",
         "create_network" => "创建网络",
         "join_network" => "加入网络",
         "start_networks" => "启动网络",
@@ -1160,6 +1194,7 @@ fn action_label(id: &str) -> &'static str {
         "start_node" => "启动节点",
         "stop_node" => "停止节点",
         "restart_node" => "重启节点",
+        "cleanup_node_residuals" => "清理运行时残留",
         "shutdown_node" => "关闭节点",
         _ => "未知动作",
     }
@@ -1175,6 +1210,7 @@ fn field_label(key: &str) -> &'static str {
         "field.ticket_or_url" => "票据或协调端 URL",
         "field.start_after_join" => "加入后启动",
         "field.network_selection" => "网络选择",
+        "field.network_names" => "网络名称列表",
         "field.all_networks" => "全部网络",
         "field.peer_target" => "Peer 目标",
         "field.timeout_ms" => "超时（毫秒）",
@@ -1195,8 +1231,10 @@ fn placeholder_for(input: &NodeUiInputKind, action_id: &str, field_id: &str) -> 
         NodeUiInputKind::PeerTarget => "peer-id 或 IPv6",
         NodeUiInputKind::Port => "1-65535",
         NodeUiInputKind::TimeoutMs => "1500",
-        _ if matches!(action_id, "stop_networks" | "restart_networks")
-            && field_id == "networks" =>
+        _ if matches!(
+            action_id,
+            "stop_networks" | "restart_networks" | "cleanup_node_residuals"
+        ) && field_id == "networks" =>
         {
             "home,office"
         }

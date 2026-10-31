@@ -277,7 +277,9 @@ pub enum NodeUiAuditPolicy {
 /// for the same operation.
 pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
     match command {
-        NodeCommandKind::GetSnapshot | NodeCommandKind::GetUiManifest => NodeUiAudit::none(),
+        NodeCommandKind::GetSnapshot
+        | NodeCommandKind::GetUiManifest
+        | NodeCommandKind::GetDiagnostics => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
@@ -289,6 +291,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::StartNode => NodeUiAudit::record("node.start"),
         NodeCommandKind::StopNode => NodeUiAudit::record("node.stop"),
         NodeCommandKind::RestartNode => NodeUiAudit::record("node.restart"),
+        NodeCommandKind::CleanupResiduals => NodeUiAudit::record("node.cleanup_residuals"),
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
 }
@@ -360,6 +363,16 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         None,
                     ),
                     action(
+                        "get_node_diagnostics",
+                        "action.get_node_diagnostics",
+                        NodeCommandKind::GetDiagnostics,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
                         "start_node",
                         "action.start_node",
                         NodeCommandKind::StartNode,
@@ -392,6 +405,31 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             "confirm.restart_node.consequence",
                             true,
                         )),
+                    ),
+                    action(
+                        "cleanup_node_residuals",
+                        "action.cleanup_node_residuals",
+                        NodeCommandKind::CleanupResiduals,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "networks",
+                                "field.network_names",
+                                NodeUiInputKind::NetworkSelection,
+                                false,
+                                NodeUiValidation::NetworkSelection,
+                            ),
+                            field(
+                                "all",
+                                "field.all_networks",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        None,
                     ),
                 ],
             ),

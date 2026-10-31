@@ -5,6 +5,7 @@ pub mod config;
 pub mod config_encryption;
 pub mod crypto;
 pub mod dht;
+pub mod domain;
 pub mod logging;
 pub mod onion;
 pub mod protocol;

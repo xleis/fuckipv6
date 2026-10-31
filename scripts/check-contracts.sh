@@ -7,6 +7,7 @@ python3 scripts/generate_contract_bindings.py --check
 npm run check --prefix contracts/typescript
 npm run build:test --prefix contracts/typescript
 node scripts/test_contract_bindings.mjs
+node scripts/test_webui_node_ui.mjs
 
 rm -rf target/contract-java
 mkdir -p target/contract-java

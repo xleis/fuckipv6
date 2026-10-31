@@ -692,6 +692,7 @@ fn row(title: impl Into<String>, detail: impl Into<String>) -> RowModel {
 }
 
 fn project_overview(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+    let primary_status = snapshot.primary_status();
     let identity = snapshot
         .identity
         .as_ref()
@@ -713,16 +714,16 @@ fn project_overview(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
         .unwrap_or_else(|| "无".into());
     (
         vec![
-            metric(
-                "节点阶段",
-                format!("{:?}", snapshot.lifecycle.phase),
-                "NodeSnapshot.lifecycle",
-            ),
             metric("网络", snapshot.networks.len(), "NodeSnapshot.networks"),
             metric("Peer", snapshot.peers.len(), "NodeSnapshot.peers"),
             metric("Revision", snapshot.revision, "NodeSnapshot.revision"),
         ],
         vec![
+            section(
+                "运行状态",
+                primary_status.detail_zh(),
+                vec![row(primary_status.label_zh(), primary_status.detail_zh())],
+            ),
             section(
                 "节点身份",
                 "尚未发布节点身份",
@@ -1339,6 +1340,30 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         assert_eq!(kinds, PageKind::ALL.into_iter().collect());
+    }
+
+    #[test]
+    fn overview_has_one_runtime_status_and_no_raw_phase_metric() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "overview")
+            .expect("overview page");
+        let snapshot = populated_snapshot();
+        let model = build_page_model_for_page(page, &snapshot).expect("overview model");
+
+        assert!(!model
+            .metrics
+            .iter()
+            .any(|metric| metric.label == "节点阶段"));
+        assert_eq!(model.sections[0].title, "运行状态");
+        assert_eq!(model.sections[0].rows.len(), 1);
+        assert_eq!(model.sections[0].rows[0].title, "运行正常");
+        assert_eq!(
+            model.sections[0].rows[0].detail,
+            snapshot.primary_status().detail_zh()
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub(super) const NODE_UI_JS: &str = include_str!("node_ui.js");
 #[cfg(test)]
 mod tests {
     use super::{NODE_MANIFEST_HTML, NODE_UI_JS};
-    use crate::node::{node_ui_manifest, NodeUiManifest};
+    use crate::node::{node_ui_manifest, NodePrimaryStatus, NodeUiManifest};
     use serde_json::Value;
     use std::collections::BTreeSet;
 
@@ -161,6 +161,28 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn browser_surface_uses_the_single_primary_status() {
+        assert!(NODE_MANIFEST_HTML.contains(r#"id="primary-status""#));
+        assert!(NODE_MANIFEST_HTML.contains(r#"id="primary-detail""#));
+        assert!(NODE_MANIFEST_HTML.contains("ui.primaryStatusFor(state.snapshot)"));
+        assert!(!NODE_MANIFEST_HTML.contains(r#"$("lifecycle")"#));
+        assert!(NODE_UI_JS.contains("function primaryStatusFor(snapshot)"));
+        assert!(NODE_UI_JS.contains("unknown control health"));
+        for status in NodePrimaryStatus::ALL {
+            assert!(
+                NODE_UI_JS.contains(status.label_zh()),
+                "missing primary status label: {}",
+                status.label_zh()
+            );
+            assert!(
+                NODE_UI_JS.contains(status.detail_zh()),
+                "missing primary status detail: {}",
+                status.detail_zh()
+            );
         }
     }
 

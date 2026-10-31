@@ -62,6 +62,7 @@
       "positive_timeout",
   ]);
   const LIFECYCLE_PHASES = Object.freeze(["stopped", "starting", "running", "stopping", "failed"]);
+  const CONTROL_HEALTH = Object.freeze(["unknown", "available", "unavailable"]);
   const NETWORK_STATUSES = Object.freeze(["offline", "connecting", "online", "degraded", "stopping", "failed"]);
   const NETWORK_ROLES = Object.freeze(["member", "discovery", "relay", "exit_node"]);
   const ROUTING_MODES = Object.freeze(["mesh_only", "bypass_mainland", "global_proxy"]);
@@ -705,6 +706,84 @@
     for (const item of value) requireString(item, message + " entry");
   }
 
+  const PRIMARY_STATUS_COPY = Object.freeze({
+    uninitialized: Object.freeze({
+      label: "未初始化",
+      detail: "完成节点初始化后创建或加入网络。",
+    }),
+    stopped: Object.freeze({
+      label: "已停止",
+      detail: "启动节点以恢复网络连接。",
+    }),
+    starting: Object.freeze({
+      label: "正在启动",
+      detail: "正在启动节点，请稍候。",
+    }),
+    stopping: Object.freeze({
+      label: "正在停止",
+      detail: "正在停止节点，请稍候。",
+    }),
+    running: Object.freeze({
+      label: "运行正常",
+      detail: "节点和已配置网络运行正常。",
+    }),
+    degraded: Object.freeze({
+      label: "运行降级",
+      detail: "检查最近问题并重试受影响网络。",
+    }),
+    failed: Object.freeze({
+      label: "节点故障",
+      detail: "打开诊断并重启节点。",
+    }),
+    control_unavailable: Object.freeze({
+      label: "控制服务异常",
+      detail: "节点控制服务暂时不可达；数据面不会被自动停止，正在重连。",
+    }),
+  });
+
+  // This mirrors NodeSnapshot::primary_status() in Rust. Control health is
+  // only considered after node-local degradation so the UI never reports a
+  // transport symptom while a more actionable node problem exists.
+  function primaryStatusFor(snapshot) {
+    assertContract(isRecord(snapshot), "snapshot payload is missing");
+    assertContract(isRecord(snapshot.lifecycle), "snapshot lifecycle is missing");
+    const phase = snapshot.lifecycle.phase;
+    const controlHealth = snapshot.control_health === undefined
+      ? "unknown"
+      : snapshot.control_health;
+    let status;
+
+    if (phase === "starting") {
+      status = "starting";
+    } else if (phase === "stopping") {
+      status = "stopping";
+    } else if (phase === "failed") {
+      status = "failed";
+    } else if (phase === "running") {
+      const degraded = snapshot.last_error != null ||
+        (snapshot.lifecycle.failed_networks || []).length > 0 ||
+        snapshot.networks.some((network) => ["connecting", "degraded", "stopping", "failed"].includes(network.status)) ||
+        snapshot.embedded_services.some((service) => ["starting", "stopping", "failed"].includes(service.status));
+      if (degraded) {
+        status = "degraded";
+      } else if (controlHealth === "unavailable") {
+        status = "control_unavailable";
+      } else {
+        status = "running";
+      }
+    } else if (phase === "stopped") {
+      const uninitialized = snapshot.identity == null &&
+        snapshot.configuration.networks.length === 0 &&
+        snapshot.networks.length === 0 &&
+        snapshot.lifecycle.configured_networks === 0;
+      status = uninitialized ? "uninitialized" : "stopped";
+    } else {
+      throw new Error("node-ui-contract: unknown lifecycle phase " + phase);
+    }
+
+    return Object.freeze(Object.assign({ id: status }, PRIMARY_STATUS_COPY[status]));
+  }
+
   function canonicalValue(value) {
     if (Array.isArray(value)) return value.map(canonicalValue);
     if (isRecord(value)) {
@@ -850,6 +929,9 @@
     requireInteger(snapshot.lifecycle.configured_networks, "invalid configured_networks");
     requireInteger(snapshot.lifecycle.active_networks, "invalid active_networks");
     requireStringArray(snapshot.lifecycle.failed_networks, "failed_networks must be an array");
+    if (snapshot.control_health !== undefined) {
+      requireEnum(snapshot.control_health, CONTROL_HEALTH, "unknown control health");
+    }
 
     validateConfiguration(snapshot.configuration);
     assertContract(isRecord(snapshot.exit_node_capabilities), "exit node capabilities are missing");
@@ -1398,13 +1480,15 @@
     let rows = [];
     let empty = "";
     switch (page.id) {
-      case "overview":
+      case "overview": {
+        const primary = primaryStatusFor(snapshot);
         rows = [
-          { title: "节点生命周期", detail: snapshot.lifecycle.phase + " · active=" + snapshot.lifecycle.active_networks + " · configured=" + snapshot.lifecycle.configured_networks },
+          { title: "运行状态", detail: primary.label + " · " + primary.detail },
           { title: "网络", detail: snapshot.networks.length + " 个 · Peers " + snapshot.peers.length },
           { title: "最近错误", detail: snapshot.last_error ? snapshot.last_error.code + " · " + snapshot.last_error.message : "无" },
         ];
         break;
+      }
       case "networks":
         rows = networkRows(snapshot);
         empty = "当前没有配置或运行的网络。";
@@ -1497,6 +1581,7 @@
     label,
     validateManifestResponse,
     validateSnapshotResponse,
+    primaryStatusFor,
     permissionGranted,
     availabilityReason,
     executionBlockReason,

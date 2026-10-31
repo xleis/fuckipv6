@@ -13,8 +13,8 @@ use super::view_model::{
 };
 use crate::node::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeNetworkStatus, NodeSnapshot, NodeStateStore, NodeUiAction,
-    NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
+    NodeCommandResult, NodeNetworkStatus, NodePrimaryStatus, NodeSnapshot, NodeStateStore,
+    NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
 };
 
 const WINDOW_WIDTH: f32 = 1180.0;
@@ -388,6 +388,8 @@ impl GpuiShell {
         } else {
             COLOR_ACCENT_DIM
         };
+        let primary_status = self.snapshot.primary_status();
+        let status_color = primary_status_color(primary_status);
 
         div()
             .flex()
@@ -410,6 +412,16 @@ impl GpuiShell {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(status_color))
+                            .text_color(rgb(COLOR_TEXT))
+                            .text_sm()
+                            .child(primary_status.label_zh()),
+                    )
                     .child(div().text_sm().text_color(rgb(COLOR_MUTED)).child(format!(
                         "{} · revision {}",
                         self.selected_network.as_deref().unwrap_or("未选择网络"),
@@ -1027,6 +1039,18 @@ fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
                 .text_color(rgb(COLOR_MUTED))
                 .child(source.to_string()),
         )
+}
+
+fn primary_status_color(status: NodePrimaryStatus) -> u32 {
+    match status {
+        NodePrimaryStatus::Running => COLOR_ACCENT_DIM,
+        NodePrimaryStatus::Degraded | NodePrimaryStatus::ControlUnavailable => COLOR_WARNING,
+        NodePrimaryStatus::Failed => COLOR_ERROR_BORDER,
+        NodePrimaryStatus::Uninitialized
+        | NodePrimaryStatus::Stopped
+        | NodePrimaryStatus::Starting
+        | NodePrimaryStatus::Stopping => COLOR_PANEL_RAISED,
+    }
 }
 
 fn section_card(section: &SectionModel) -> gpui::AnyElement {

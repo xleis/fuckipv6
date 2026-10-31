@@ -14,6 +14,7 @@
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}.card{background:linear-gradient(180deg,#0e202d,#0a1721);border:1px solid var(--line);border-radius:12px;padding:16px}.card h2{font-size:15px;margin:0 0 12px}.row{padding:10px 0;border-top:1px solid #173243}.row:first-child{border-top:0}.row-title{font-weight:700}.row-detail{color:var(--muted);font-size:12px;word-break:break-word}.empty{color:var(--muted);padding:14px 0}
     .action{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px;margin-bottom:12px}.action-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.action-title{font-weight:700}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:12px 0}.field{display:grid;gap:4px}.field label{color:var(--muted);font-size:11px}.field input,.field select{width:100%;padding:8px;border:1px solid var(--line);border-radius:7px;background:#07131d;color:var(--text)}.check{display:flex;align-items:center;gap:8px}.check input{width:auto}
     .submit{border:1px solid #2589b4;background:#0b3b53;color:#e8f9ff;padding:8px 14px;border-radius:8px;cursor:pointer}.submit:disabled{opacity:.45;cursor:not-allowed}.status{font-size:11px;border-radius:999px;padding:2px 7px;border:1px solid}.implemented{color:var(--ok);border-color:#27775e}.unavailable{color:var(--warn);border-color:#7b6420}
+    .primary{border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:11px;color:var(--text);background:var(--panel2)}.primary.running{color:#c9ffe9;border-color:#27775e;background:#0c3329}.primary.degraded,.primary.control_unavailable{color:#ffe8a3;border-color:#7b6420;background:#33280c}.primary.failed{color:#ffd7df;border-color:var(--bad);background:#3b1721}
     #alert{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid var(--bad);background:#3b1721;color:#ffd7df;white-space:pre-wrap}#toast{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid #27775e;background:#0c3329;color:#c9ffe9}
     #login{position:fixed;inset:0;background:#02070bd9;display:none;place-items:center;padding:20px}.login-card{width:min(380px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;display:grid;gap:11px}.login-card input{padding:9px;background:#07131d;border:1px solid var(--line);border-radius:8px;color:var(--text)}
     @media(max-width:760px){.shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:16px}}
@@ -25,7 +26,7 @@
     <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
     <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
     <nav id="nav" aria-label="节点页面"></nav>
-    <div style="margin-top:auto" class="muted"><span id="revision">revision --</span><br><span id="lifecycle">--</span></div>
+    <div style="margin-top:auto" class="muted"><span id="primary-status" class="primary">--</span><br><span id="primary-detail" style="display:inline-block;margin-top:7px">--</span><br><span id="revision">revision --</span></div>
   </aside>
   <main>
     <div class="top">
@@ -93,7 +94,9 @@
     $("network-picker").innerHTML = "";
     $("content").innerHTML = "";
     $("revision").textContent = "revision --";
-    $("lifecycle").textContent = "--";
+    $("primary-status").textContent = "--";
+    $("primary-status").className = "primary";
+    $("primary-detail").textContent = "--";
     $("page-title").textContent = "加载共享契约…";
     $("page-subtitle").textContent = "/api/node/manifest · /api/node/snapshot";
     showToast("");
@@ -223,7 +226,11 @@
   function render() {
     if (state.failedClosed || !state.manifest || !state.snapshot) return;
     $("revision").textContent = "revision " + state.snapshot.revision;
-    $("lifecycle").textContent = state.snapshot.lifecycle.phase + " · " + state.snapshot.networks.length + " networks";
+    const primary = ui.primaryStatusFor(state.snapshot);
+    const primaryStatus = $("primary-status");
+    primaryStatus.textContent = primary.label;
+    primaryStatus.className = "primary " + primary.id;
+    $("primary-detail").textContent = primary.detail;
     $("nav").innerHTML = state.manifest.pages.map((page) =>
       `<button class="nav-button ${page.id === state.pageId ? "active" : ""}" data-page="${escapeHtml(page.id)}">${escapeHtml(ui.label(page.nav_label_key))}</button>`
     ).join("");

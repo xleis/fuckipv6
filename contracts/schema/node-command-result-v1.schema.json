@@ -1154,6 +1154,9 @@
             "update_routing",
             "set_network_role",
             "probe_peer",
+            "start_node",
+            "stop_node",
+            "restart_node",
             "shutdown"
           ]
         },

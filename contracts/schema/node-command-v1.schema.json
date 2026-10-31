@@ -196,6 +196,45 @@
       "properties": {
         "command": {
           "type": "string",
+          "const": "start_node"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "Start all persistently configured networks while keeping this node IPC\nand the control/UI processes alive."
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "stop_node"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "Stop all data-plane sessions and owned embedded services while keeping\nthis node IPC and the control/UI processes alive."
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "restart_node"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "Reload every persisted network and replace the complete data plane under\none single-flight lifecycle operation."
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
           "const": "shutdown"
         }
       },

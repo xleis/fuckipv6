@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["create_network", "get_snapshot", "get_ui_manifest", "join_network", "probe_peer", "restart_networks", "set_network_role", "shutdown", "start_networks", "stop_networks", "update_routing"] as const;
+export const NODE_COMMAND_KINDS = ["create_network", "get_snapshot", "get_ui_manifest", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["create_network", "get_snapshot", "join_network", "probe_peer", "restart_networks", "set_network_role", "shutdown", "start_networks", "stop_networks", "update_routing"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["create_network", "get_snapshot", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -80,6 +80,12 @@ export type NodeCommand = {
 } | {
   "command": "probe_peer";
   "payload": NodeProbePeerCommand;
+} | {
+  "command": "start_node";
+} | {
+  "command": "stop_node";
+} | {
+  "command": "restart_node";
 } | {
   "command": "shutdown";
 };
@@ -397,7 +403,7 @@ export type NodeTrafficSnapshot = {
 export type NodeUiAction = {
   "id": string;
   "label_key": string;
-  "command": "get_snapshot" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "probe_peer" | "shutdown";
+  "command": "get_snapshot" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "shutdown";
   "backend_status": NodeUiBackendStatus;
   "permission": NodePermission;
   "audit": NodeUiAudit;

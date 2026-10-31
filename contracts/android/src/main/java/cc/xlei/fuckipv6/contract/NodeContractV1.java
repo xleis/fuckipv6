@@ -226,10 +226,13 @@ public final class NodeContractV1 {
         JOIN_NETWORK("join_network"),
         PROBE_PEER("probe_peer"),
         RESTART_NETWORKS("restart_networks"),
+        RESTART_NODE("restart_node"),
         SET_NETWORK_ROLE("set_network_role"),
         SHUTDOWN("shutdown"),
         START_NETWORKS("start_networks"),
+        START_NODE("start_node"),
         STOP_NETWORKS("stop_networks"),
+        STOP_NODE("stop_node"),
         UPDATE_ROUTING("update_routing");
 
         private final String wireName;
@@ -1476,6 +1479,24 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class StartNode extends NodeCommand {
+            public StartNode() {
+                super(NodeCommandKind.START_NODE);
+            }
+        }
+
+        public static final class StopNode extends NodeCommand {
+            public StopNode() {
+                super(NodeCommandKind.STOP_NODE);
+            }
+        }
+
+        public static final class RestartNode extends NodeCommand {
+            public RestartNode() {
+                super(NodeCommandKind.RESTART_NODE);
+            }
+        }
+
         public static final class Shutdown extends NodeCommand {
             public Shutdown() {
                 super(NodeCommandKind.SHUTDOWN);
@@ -1838,10 +1859,13 @@ public final class NodeContractV1 {
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.RESTART_NETWORKS ||
+            command == NodeCommandKind.RESTART_NODE ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SHUTDOWN ||
             command == NodeCommandKind.START_NETWORKS ||
+            command == NodeCommandKind.START_NODE ||
             command == NodeCommandKind.STOP_NETWORKS ||
+            command == NodeCommandKind.STOP_NODE ||
             command == NodeCommandKind.UPDATE_ROUTING;
     }
 }

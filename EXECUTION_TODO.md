@@ -42,19 +42,19 @@
 >
 > 产品模型固定为“只有节点”，不区分服务端与客户端。桌面环境使用原生 GPUI；无桌面环境使用 WebUI。两套 UI 必须共享 manifest、命令、快照、事件、权限、校验与错误语义，只允许渲染层不同。
 >
-> 工作区隔离：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 当前可能包含用户未提交的 Exit Node 持久化改动。实施相关任务时必须 rebase 到用户改动落地后的 HEAD；不得覆盖、回退或混入用户改动。禁止通过复制业务逻辑、重启网络、伪造成功或浏览器 `--app` 窗口绕过验收。
+> 工作区隔离：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 可按任务修改、暂存和提交。提交前必须逐文件审阅，不得覆盖无关改动、混入其他任务内容，或通过复制业务逻辑、重启网络、伪造成功及浏览器 `--app` 窗口绕过验收。
 
 ### P0-A：统一控制面与节点语义
 
 - [x] **NX-01 UI 模式真值契约（细化 EX-13）**
   - 工作：定义唯一的 `Gpui | WebUi | Headless` 运行模式及其检测来源，明确自动检测、显式参数、冲突参数和失败回退规则；状态快照必须报告实际生效模式。
-  - 依赖：EX-01、EX-05；CLI 参数接线涉及受保护的 `crates/client/src/cli/mod.rs`。
+  - 依赖：EX-01、EX-05；CLI 参数接线涉及 `crates/client/src/cli/mod.rs`，提交前必须逐文件审阅。
   - 验收：三种模式均有类型化和序列化测试；浏览器独立窗口只能标记为 WebUI，不能冒充 GPUI；冲突参数拒绝启动；自动检测结果可注入并覆盖 Wayland、X11、无显示和 Windows 服务场景。
   - 完成（2026-10-30）：共享模式/请求/显示环境模型、稳定 wire 值、冲突与无显示拒绝、GPUI 能力门禁和 `NodeSnapshot.ui_mode` 已落地；顶层及节点运行命令支持 `--headless`、`--webui`、`--gpui`，`--gui` 保留为 WebUI 可见别名，冲突参数由 Clap 拒绝，原生 GPUI 不可用时显式失败。
 
 - [x] **NX-02 本地控制面暴露面收紧（细化 EX-15）**
   - 工作：WebUI/API 和本地 IPC 默认只绑定回环地址；远程监听必须显式开启、产生醒目警告并要求已配置认证，禁止匿名公网暴露。
-  - 依赖：EX-03、EX-15；受保护 CLI 文件保持不修改，危险开关通过显式环境变量接入现有启动路径；合并时必须保留用户未提交改动。
+  - 依赖：EX-03、EX-15；涉及 CLI 启动文件，提交前必须逐文件审阅；危险开关通过显式环境变量接入现有启动路径。
   - 验收：默认 IPv4/IPv6 监听均为回环；`0.0.0.0`/`::` 仅能通过显式危险参数开启且缺少认证时启动失败；参数、日志、HTTP 响应和文档一致；覆盖拒绝启动、认证成功/失败和回环回归测试。
   - 完成（2026-10-30）：WebUI/API 默认 `127.0.0.1:8080`，支持 `FUCKIPV6_WEBUI_BIND=::1`；非回环必须 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 且配置密码，否则拒绝启动。REST 使用 Bearer JWT，WebSocket 查询 Token 仅限 `/ws`；401/`WWW-Authenticate`/日志/文档一致。IPC 默认 `127.0.0.1:6668`，支持 `[::1]:6668`，危险开关存在但因无认证协议仍拒绝远程监听。后续加固已为登录增加按源 IP+用户名的原子失败计数、指数退避与 429/`Retry-After`，成功登录清除状态，状态表有容量和 TTL 上限；显式 JWT secret 校验最小长度与估计熵，并锁定认证 DTO/配置的 Debug 脱敏。
 
@@ -79,12 +79,12 @@
 
 - [ ] **NX-06 CLI 统一命令迁移（细化 EX-08）**
   - 工作：CLI 的建网、加入、启停、探测、状态、路由、Exit Node 和关闭全部通过 `NodeCommandBus`，CLI 只负责参数解析、确认和结果渲染。
-  - 依赖：NX-01、NX-03、NX-04、NX-05；涉及 `crates/client/src/cli/commands.rs` 与 `crates/client/src/cli/mod.rs`，合并时必须保留用户未提交改动。
+  - 依赖：NX-01、NX-03、NX-04、NX-05；涉及 `crates/client/src/cli/commands.rs` 与 `crates/client/src/cli/mod.rs`，提交前必须逐文件审阅。
   - 验收：删除或封存 CLI 内独立运行时状态机和直接配置写入；帮助文本、退出码和错误输出消费统一 `NodeProblem`；无网络、运行网络、失败回滚和多网络场景有端到端测试；不改变节点唯一产品模型。
 
 - [ ] **NX-07 WebUI 统一命令迁移（细化 EX-09）**
   - 工作：WebUI 节点操作和状态读取只通过共享命令总线、状态存储和事件流；controller 只保留连接/展示适配，不直接改业务状态。
-  - 依赖：NX-03、NX-04、NX-05；涉及 `crates/client/src/webui/controller.rs`，合并时必须保留用户未提交改动。
+  - 依赖：NX-03、NX-04、NX-05；涉及 `crates/client/src/webui/controller.rs`，提交前必须逐文件审阅。
   - 验收：移除 controller 内重复的网络/路由/Exit Node 状态机及直接运行时写入；HTTP 层只做 DTO 和鉴权转换；所有失败透传错误码与可重试标记；无网络、双网络、断线重连和权限拒绝均有集成测试。
 
 ### P0-B：GPUI 与 UI 对等
@@ -137,7 +137,7 @@
   - 工作：补齐 Linux network namespace 自动化，并为 Windows/macOS 实现等价转发/NAT 能力或明确能力探测与禁用原因。
   - 依赖：NX-04、NX-05。
   - 验收：Linux 覆盖启动、路由、NAT、清理和故障回滚；Windows/macOS 要么通过实机集成测试，要么 UI/CLI/API 明确报告不支持且禁用动作；任何平台都不得显示虚假的 Exit Node 成功状态。
-  - 进展（2026-10-31）：共享 `ExitNodeCapabilities` 契约已发布稳定 schema，区分平台、转发/NAT/清理能力与类型化禁用原因；非 Linux 的能力探测固定失败关闭，启用 Exit Node 的配置加载/保存会被拒绝。`NodeSnapshot` 暴露 capability 真值，旧快照缺少字段时重新探测；Exit Node 启用类命令在快照报告不支持时返回不可重试的 `unsupported`，HTTP 映射为 422，支持但运行时后端未接线时仍明确返回 `unavailable`。Linux 转发器改为可注入命令执行器，并以单元测试覆盖内核转发、过滤/NAT 链、客户端规则、回程路由、清理幂等和安装/客户端失败回滚。新增特权 Linux network namespace 验收脚本，已在当前主机真实通过启动、转发、NAT、授权撤销、清理和 POSTROUTING 故障回滚场景。GPUI Exit Node 页面现已展示平台、转发/NAT/清理能力与类型化禁用原因；`set_exit_node_role` 在能力不支持时于命令提交前失败关闭，Relay 动作不受影响，并有平台无关的确定性投影/动作测试。剩余：受保护 CLI/WebUI adapter 尚未消费能力字段禁用入口，Windows/macOS 无真实数据面且未做实机测试；NX-04 的运行中路由重配置已接通。
+  - 进展（2026-10-31）：共享 `ExitNodeCapabilities` 契约已发布稳定 schema，区分平台、转发/NAT/清理能力与类型化禁用原因；非 Linux 的能力探测固定失败关闭，启用 Exit Node 的配置加载/保存会被拒绝。`NodeSnapshot` 暴露 capability 真值，旧快照缺少字段时重新探测；Exit Node 启用类命令在快照报告不支持时返回不可重试的 `unsupported`，HTTP 映射为 422，支持但运行时后端未接线时仍明确返回 `unavailable`。Linux 转发器改为可注入命令执行器，并以单元测试覆盖内核转发、过滤/NAT 链、客户端规则、回程路由、清理幂等和安装/客户端失败回滚。新增特权 Linux network namespace 验收脚本，已在当前主机真实通过启动、转发、NAT、授权撤销、清理和 POSTROUTING 故障回滚场景。GPUI Exit Node 页面现已展示平台、转发/NAT/清理能力与类型化禁用原因；`set_exit_node_role` 在能力不支持时于命令提交前失败关闭，Relay 动作不受影响，并有平台无关的确定性投影/动作测试。剩余：CLI/WebUI adapter 尚未消费能力字段禁用入口，Windows/macOS 无真实数据面且未做实机测试；NX-04 的运行中路由重配置已接通。
 
 - [x] **NX-16 用户态 NAT 可行性原型（细化 EX-16）**
   - 工作：原型实现 TCP/UDP 连接跟踪、超时、端口复用、资源上限和失败关闭策略，评估作为无内核转发平台后备路径的可行性。
@@ -160,7 +160,7 @@
 
 ### 推荐执行顺序
 
-1. **先稳定当前 P2P/路由/安全改动**：基于用户 Exit Node 持久化改动后的 HEAD 完成 NX-04、NX-05，再处理 NX-06、NX-07；不得把用户改动混入本任务提交。
+1. **先稳定当前 P2P/路由/安全改动**：完成 NX-04、NX-05，再处理 NX-06、NX-07；不得把其他任务改动混入本任务提交。
 2. **控制面与 UI 地基**：NX-01 → NX-03 → NX-02 → NX-08 → NX-09 → NX-10，CLI/WebUI/GPUI 始终消费同一 manifest、命令和快照。
 3. **安全生产化**：NX-11 → NX-12 → NX-14 → NX-13 → NX-15/NX-16，先保证会话切换和失败关闭，再扩大能力面。
 4. **证据驱动的性能与发布**：NX-17 达标后才执行 NX-18；每个任务独立提交，并在提交前运行格式、Clippy、测试和文档一致性检查。

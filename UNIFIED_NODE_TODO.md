@@ -4,7 +4,7 @@
 >
 > 当前状态：单二进制发布入口已完成，workspace 只产生用户程序 `fuckipv6`；节点生命周期、启动计划、多网络监督器、共享命令总线、真实运行时处理器与状态存储基座已落地。`NodeRuntimeHandler` 已接通 `GetSnapshot`、`StartNetworks`、`CreateNetwork`、`JoinNetwork`、按网络 `StopNetworks`、`ProbePeer` 与 `Shutdown`；`NetworkRuntimeManager` actor 负责初始计划、动态启动、创建、票据/URL 加入、按网络停止和全量关闭，创建失败会回滚配置、服务与状态，`auto_connect=false` 会保留内嵌服务直到显式停止，并同步网络状态、配置快照与事件。监督器从真实运行时填充公开身份、Peer、流量和有界 WARN/ERROR 日志。路由热更新和网络角色变更仍明确返回 `Unavailable`；CLI/WebUI 命令入口仍主要走旧路径；GPUI 真实原生外壳已实现并消费共享 manifest、状态与命令，但 11 个业务页面仍待 NX-09，WebUI 适配和双 UI 对等测试未完成。当前权限模型仍是 `TrustedControlPlane`、无逐主体鉴权，WebUI 仍监听全部网卡。
 >
-> 保护约束：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 当前属于用户正在处理的 Exit Node 持久化范围，未获确认前不得修改、暂存或提交。
+> 提交边界：`crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs` 不属于永久禁改文件。相关任务可以修改、暂存和提交，但必须逐文件审阅，不得混入与本任务无关的改动。
 
 ## 不可违反的验收不变量
 

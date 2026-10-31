@@ -2,7 +2,7 @@
 
 > 范围：中继 QUIC 的双向 TLS、应用身份绑定、运行期身份撤销和 0-RTT 策略。
 > 威胁模型：[`QUIC_IDENTITY_THREAT_MODEL.md`](QUIC_IDENTITY_THREAT_MODEL.md)。
-> 边界：本清单只涉及 `crates/common`、`crates/coordinator`、非受保护的 P2P QUIC/连接代码与文档。不得修改用户正在处理的 `crates/client/src/cli/commands.rs`、`crates/client/src/cli/mod.rs`、`crates/client/src/webui/controller.rs`。
+> 边界：本清单只涉及 `crates/common`、`crates/coordinator`、P2P QUIC/连接代码与文档。若任务确需触及 CLI/WebUI 适配文件，可以修改、暂存和提交，但必须逐文件审阅并排除无关改动。
 > 结论口径：代码和测试通过不等于独立安全审计；在该清单全部完成且独立复核前，不得宣称 QUIC 身份层或项目安全性超过 WireGuard。
 
 ## 执行清单

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>fuckipv6 · node contract</title>
+  <style>
+    :root{color-scheme:dark;--bg:#071018;--panel:#0d1b26;--panel2:#102635;--line:#1d4256;--text:#d8edf6;--muted:#7fa3b3;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#fb7185;--sidebar:250px}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 70% 0,#103247 0,var(--bg) 42%);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    button,input,select{font:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:var(--sidebar) 1fr}.sidebar{border-right:1px solid var(--line);background:#07131dcc;padding:18px;display:flex;flex-direction:column;gap:16px}
+    .brand{font-size:18px;font-weight:800;letter-spacing:.08em;color:var(--accent)}.contract{color:var(--muted);font-size:11px}.network-picker{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:9px;border-radius:8px;width:100%}
+    nav{display:grid;gap:5px}.nav-button{text-align:left;background:transparent;color:var(--muted);border:1px solid transparent;border-radius:8px;padding:9px 10px;cursor:pointer}.nav-button:hover{border-color:var(--line);color:var(--text)}.nav-button.active{background:#0d2a3b;border-color:#247092;color:#fff}
+    main{padding:26px;max-width:1400px;width:100%}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:18px}.top h1{margin:0;font-size:24px}.muted{color:var(--muted)}.pill{padding:3px 8px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}.card{background:linear-gradient(180deg,#0e202d,#0a1721);border:1px solid var(--line);border-radius:12px;padding:16px}.card h2{font-size:15px;margin:0 0 12px}.row{padding:10px 0;border-top:1px solid #173243}.row:first-child{border-top:0}.row-title{font-weight:700}.row-detail{color:var(--muted);font-size:12px;word-break:break-word}.empty{color:var(--muted);padding:14px 0}
+    .action{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px;margin-bottom:12px}.action-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.action-title{font-weight:700}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:12px 0}.field{display:grid;gap:4px}.field label{color:var(--muted);font-size:11px}.field input,.field select{width:100%;padding:8px;border:1px solid var(--line);border-radius:7px;background:#07131d;color:var(--text)}.check{display:flex;align-items:center;gap:8px}.check input{width:auto}
+    .submit{border:1px solid #2589b4;background:#0b3b53;color:#e8f9ff;padding:8px 14px;border-radius:8px;cursor:pointer}.submit:disabled{opacity:.45;cursor:not-allowed}.status{font-size:11px;border-radius:999px;padding:2px 7px;border:1px solid}.implemented{color:var(--ok);border-color:#27775e}.unavailable{color:var(--warn);border-color:#7b6420}
+    #alert{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid var(--bad);background:#3b1721;color:#ffd7df;white-space:pre-wrap}#toast{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid #27775e;background:#0c3329;color:#c9ffe9}
+    #login{position:fixed;inset:0;background:#02070bd9;display:none;place-items:center;padding:20px}.login-card{width:min(380px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;display:grid;gap:11px}.login-card input{padding:9px;background:#07131d;border:1px solid var(--line);border-radius:8px;color:var(--text)}
+    @media(max-width:760px){.shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:16px}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
+    <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
+    <nav id="nav" aria-label="节点页面"></nav>
+    <div style="margin-top:auto" class="muted"><span id="revision">revision --</span><br><span id="lifecycle">--</span></div>
+  </aside>
+  <main>
+    <div class="top">
+      <div><h1 id="page-title">加载共享契约…</h1><div class="muted" id="page-subtitle">/api/node/manifest · /api/node/snapshot</div></div>
+      <button class="submit" id="refresh">刷新快照</button>
+    </div>
+    <div id="alert" role="alert"></div>
+    <div id="toast" role="status"></div>
+    <section id="content" class="grid" aria-live="polite"></section>
+  </main>
+</div>
+<div id="login" role="dialog" aria-modal="true" aria-labelledby="login-title">
+  <form class="login-card" id="login-form">
+    <h2 id="login-title">WebUI 认证</h2>
+    <div class="muted">HTTP 契约要求 Bearer Token，页面不会静默降级为未认证访问。</div>
+    <input id="username" autocomplete="username" placeholder="用户名" required>
+    <input id="password" type="password" autocomplete="current-password" placeholder="密码" required>
+    <button class="submit" type="submit">登录并加载契约</button>
+    <div id="login-error" style="color:var(--bad)"></div>
+  </form>
+</div>
+<script src="/assets/node_ui.js"></script>
+<script>
+(() => {
+  "use strict";
+  const ui = window.FuckIPV6NodeUi;
+  const tokenKey = "fuckipv6_control_token";
+  const state = {
+    manifest: null,
+    snapshot: null,
+    selectedNetwork: "",
+    pageId: "overview",
+    requestId: Date.now(),
+    generation: 0,
+    failedClosed: false,
+  };
+  let eventSocket = null;
+  const $ = (id) => document.getElementById(id);
+
+  function token() { return localStorage.getItem(tokenKey) || ""; }
+  function authHeaders(extra) {
+    const headers = new Headers(extra || {});
+    if (token()) headers.set("Authorization", "Bearer " + token());
+    return headers;
+  }
+  function showAlert(message) {
+    $("alert").textContent = message;
+    $("alert").style.display = message ? "block" : "none";
+  }
+  function showToast(message) {
+    $("toast").textContent = message;
+    $("toast").style.display = message ? "block" : "none";
+    if (message) setTimeout(() => { $("toast").style.display = "none"; }, 3500);
+  }
+  function showLogin(message) {
+    $("login-error").textContent = message || "";
+    $("login").style.display = "grid";
+  }
+  class AuthenticationError extends Error {}
+  function isCurrent(generation) {
+    return !state.failedClosed && generation === state.generation;
+  }
+  function clearSurface() {
+    $("nav").innerHTML = "";
+    $("network-picker").innerHTML = "";
+    $("content").innerHTML = "";
+    $("revision").textContent = "revision --";
+    $("lifecycle").textContent = "--";
+    $("page-title").textContent = "加载共享契约…";
+    $("page-subtitle").textContent = "/api/node/manifest · /api/node/snapshot";
+    showToast("");
+  }
+  function closeEvents() {
+    if (!eventSocket) return;
+    const socket = eventSocket;
+    eventSocket = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    try { socket.close(); } catch (_) {}
+  }
+  function expireSession() {
+    state.generation += 1;
+    state.manifest = null;
+    state.snapshot = null;
+    state.selectedNetwork = "";
+    closeEvents();
+    clearSurface();
+    showAlert("");
+    $("refresh").disabled = false;
+    showLogin("控制面认证失败，请输入凭据。");
+  }
+  function failClosed(error) {
+    if (state.failedClosed) return;
+    state.failedClosed = true;
+    state.generation += 1;
+    state.manifest = null;
+    state.snapshot = null;
+    state.selectedNetwork = "";
+    closeEvents();
+    clearSurface();
+    $("refresh").disabled = true;
+    $("login").style.display = "none";
+    $("page-title").textContent = "契约不兼容";
+    $("page-subtitle").textContent = "manifest/snapshot 校验失败，已停止所有读取、事件流和命令写入";
+    showAlert("共享契约不兼容，已失败关闭：\n" + (error && error.message ? error.message : String(error || "未知错误")));
+  }
+  function requestError(message, payload) {
+    const error = new Error(message);
+    error.payload = payload;
+    return error;
+  }
+  function contractFailure(error) {
+    if (!error) return false;
+    const code = error.payload && error.payload.code;
+    return code === "contract_violation" ||
+      code === "schema_version_mismatch" ||
+      String(error.message || "").includes("node-ui-contract:") ||
+      String(error.message || "").includes("schema mismatch");
+  }
+  function escapeHtml(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  }
+  async function requestJson(path, options) {
+    const response = await fetch(path, Object.assign({}, options, { headers: authHeaders(options && options.headers) }));
+    let payload = null;
+    try { payload = await response.json(); } catch (_) {}
+    if (response.status === 401) {
+      throw new AuthenticationError("认证失败");
+    }
+    return { response, payload };
+  }
+  async function loadContract() {
+    if (state.failedClosed) return;
+    const generation = ++state.generation;
+    try {
+      const [manifestResult, snapshotResult] = await Promise.all([
+        requestJson("/api/node/manifest?schema_version=1", { cache: "no-store" }),
+        requestJson("/api/node/snapshot?schema_version=1", { cache: "no-store" }),
+      ]);
+      if (!isCurrent(generation)) return;
+      if (!manifestResult.response.ok) {
+        throw requestError(ui.httpErrorText(manifestResult.payload, "manifest 加载失败"), manifestResult.payload);
+      }
+      if (!snapshotResult.response.ok) {
+        throw requestError(ui.httpErrorText(snapshotResult.payload, "snapshot 加载失败"), snapshotResult.payload);
+      }
+      const manifest = ui.validateManifestResponse(manifestResult.payload);
+      const snapshot = ui.validateSnapshotResponse(snapshotResult.payload);
+      if (!isCurrent(generation)) return;
+      state.manifest = manifest;
+      state.snapshot = snapshot;
+      if (!state.manifest.pages.some((page) => page.id === state.pageId)) state.pageId = state.manifest.pages[0].id;
+      state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
+      $("login").style.display = "none";
+      showAlert("");
+      render();
+      connectEvents();
+    } catch (error) {
+      if (error instanceof AuthenticationError) {
+        if (generation === state.generation) expireSession();
+        return;
+      }
+      if (generation === state.generation && !state.failedClosed) failClosed(error);
+    }
+  }
+  async function refreshSnapshot() {
+    if (state.failedClosed || !state.manifest) return;
+    const generation = state.generation;
+    try {
+      const result = await requestJson("/api/node/snapshot?schema_version=1", { cache: "no-store" });
+      if (!isCurrent(generation)) return;
+      if (!result.response.ok) {
+        throw requestError(ui.httpErrorText(result.payload, "快照刷新失败"), result.payload);
+      }
+      const snapshot = ui.validateSnapshotResponse(result.payload);
+      if (!isCurrent(generation)) return;
+      state.snapshot = snapshot;
+      state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
+      $("login").style.display = "none";
+      showAlert("");
+      render();
+    } catch (error) {
+      if (error instanceof AuthenticationError) {
+        if (generation === state.generation) expireSession();
+        return;
+      }
+      if (generation !== state.generation || state.failedClosed) return;
+      if (contractFailure(error)) failClosed(error);
+      else showAlert("快照刷新失败：" + error.message);
+    }
+  }
+  function render() {
+    if (state.failedClosed || !state.manifest || !state.snapshot) return;
+    $("revision").textContent = "revision " + state.snapshot.revision;
+    $("lifecycle").textContent = state.snapshot.lifecycle.phase + " · " + state.snapshot.networks.length + " networks";
+    $("nav").innerHTML = state.manifest.pages.map((page) =>
+      `<button class="nav-button ${page.id === state.pageId ? "active" : ""}" data-page="${escapeHtml(page.id)}">${escapeHtml(ui.label(page.nav_label_key))}</button>`
+    ).join("");
+    for (const button of $("nav").querySelectorAll("[data-page]")) {
+      button.addEventListener("click", () => { state.pageId = button.dataset.page; render(); });
+    }
+    const picker = $("network-picker");
+    picker.innerHTML = state.snapshot.networks.length
+      ? state.snapshot.networks.map((network) => `<option value="${escapeHtml(network.name)}" ${network.name === state.selectedNetwork ? "selected" : ""}>${escapeHtml(network.name)} · ${escapeHtml(network.status)}</option>`).join("")
+      : '<option value="">无网络</option>';
+    picker.onchange = () => { state.selectedNetwork = picker.value; render(); };
+    const page = state.manifest.pages.find((entry) => entry.id === state.pageId);
+    const projection = ui.projectPage(page, state.snapshot, state.selectedNetwork || null);
+    $("page-title").textContent = projection.title;
+    $("page-subtitle").textContent = page.id + " · " + page.actions.length + " actions · manifest schema " + state.manifest.schema_version;
+    const dataCard = `<article class="card"><h2>节点快照</h2>${projection.rows.length ? projection.rows.map((row) =>
+      `<div class="row"><div class="row-title">${escapeHtml(row.title)}</div><div class="row-detail">${escapeHtml(row.detail)}</div></div>`
+    ).join("") : `<div class="empty">${escapeHtml(projection.empty || "没有数据")}</div>`}</article>`;
+    const actionCards = page.actions.map((action) => renderAction(action, projection)).join("");
+    $("content").innerHTML = dataCard + actionCards;
+    for (const form of $("content").querySelectorAll("form[data-action]")) {
+      form.addEventListener("submit", submitAction);
+    }
+  }
+  function fieldControl(action, field) {
+    const value = ui.defaultFieldValue(action, field, state.snapshot, state.selectedNetwork);
+    const id = `${action.id}-${field.id}`;
+    if (field.input === "boolean") {
+      return `<div class="field"><label class="check"><input id="${id}" name="${field.id}" type="checkbox" ${value ? "checked" : ""}>${escapeHtml(ui.label(field.label_key))}</label></div>`;
+    }
+    let control = `<input id="${id}" name="${field.id}" value="${escapeHtml(value)}" ${field.required ? "required" : ""}>`;
+    if (field.input === "role") {
+      control = `<select id="${id}" name="${field.id}">${["member","discovery","relay","exit_node"].map((role) => `<option value="${role}" ${role === value ? "selected" : ""}>${role}</option>`).join("")}</select>`;
+    } else if (field.input === "routing_mode") {
+      control = `<select id="${id}" name="${field.id}">${["mesh_only","bypass_mainland","global_proxy"].map((mode) => `<option value="${mode}" ${mode === value ? "selected" : ""}>${mode}</option>`).join("")}</select>`;
+    } else if (field.input === "port" || field.input === "timeout_ms") {
+      control = `<input id="${id}" name="${field.id}" type="number" min="1" value="${escapeHtml(value)}" ${field.required ? "required" : ""}>`;
+    }
+    return `<div class="field"><label for="${id}">${escapeHtml(ui.label(field.label_key))}${field.required ? " *" : ""}</label>${control}</div>`;
+  }
+  function renderAction(action) {
+    const blocked = ui.executionBlockReason(action, state.snapshot, state.selectedNetwork || null);
+    const statusClass = action.backend_status === "implemented" ? "implemented" : "unavailable";
+    return `<article class="card"><form data-action="${escapeHtml(action.id)}"><div class="action-head"><div><div class="action-title">${escapeHtml(ui.label(action.label_key))}</div><div class="muted">${escapeHtml(action.id)} · ${escapeHtml(action.permission)} · ${escapeHtml(action.availability)}</div></div><span class="status ${statusClass}">${escapeHtml(action.backend_status)}</span></div><div class="fields">${action.fields.map((field) => fieldControl(action, field)).join("")}</div>${blocked ? `<div class="muted">${escapeHtml(ui.blockReasonText(blocked))}</div>` : ""}<button class="submit" type="submit" ${blocked ? "disabled" : ""}>执行</button></form></article>`;
+  }
+  async function submitAction(event) {
+    event.preventDefault();
+    if (state.failedClosed) return;
+    const form = event.currentTarget;
+    const action = state.manifest.pages.flatMap((page) => page.actions).find((entry) => entry.id === form.dataset.action);
+    if (!action) return showAlert("manifest 中没有该动作，拒绝提交。");
+    const values = {};
+    for (const field of action.fields) {
+      const element = form.elements.namedItem(field.id);
+      values[field.id] = field.input === "boolean" ? !!element.checked : element.value;
+    }
+    const errors = ui.validateActionValues(action, values);
+    if (errors.length) return showAlert(errors.join("\n"));
+    if (action.confirmation) {
+      const text = ui.label(action.confirmation.title_key) + "\n\n" + ui.label(action.confirmation.consequence_key);
+      if (!window.confirm(text)) return;
+    }
+    showAlert("");
+    const generation = state.generation;
+    try {
+      const requestId = ++state.requestId;
+      const envelope = ui.commandEnvelope(requestId, action, values);
+      const result = await requestJson("/api/node/commands", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(envelope),
+      });
+      if (!isCurrent(generation)) return;
+      if (result.payload && result.payload.result) {
+        const outcome = ui.validateCommandResponse(result.payload, requestId);
+        if (!isCurrent(generation)) return;
+        if (outcome.status === "rejected") {
+          showAlert(ui.outcomeErrorText(outcome));
+          return;
+        }
+        if (outcome.status === "snapshot") {
+          state.snapshot = ui.validateSnapshotResponse({ schema_version: 1, snapshot: outcome.data });
+          state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
+        }
+        showToast(outcome.status + (outcome.data && outcome.data.message ? " · " + outcome.data.message : ""));
+        await refreshSnapshot();
+        return;
+      }
+      throw requestError(ui.httpErrorText(result.payload, "命令失败 HTTP " + result.response.status), result.payload);
+    } catch (error) {
+      if (error instanceof AuthenticationError) {
+        if (generation === state.generation) expireSession();
+        return;
+      }
+      if (generation !== state.generation || state.failedClosed) return;
+      if (contractFailure(error)) {
+        failClosed(error);
+      } else {
+        showAlert("命令失败，未报告成功：" + error.message);
+      }
+    }
+  }
+  function connectEvents() {
+    if (state.failedClosed || !state.manifest) return;
+    if (eventSocket && eventSocket.readyState <= 1) return;
+    const generation = state.generation;
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const query = "schema_version=1" + (token() ? "&token=" + encodeURIComponent(token()) : "");
+    const socket = new WebSocket(`${scheme}://${location.host}/api/node/events?${query}`);
+    eventSocket = socket;
+    socket.onmessage = (message) => {
+      if (!isCurrent(generation) || eventSocket !== socket) return;
+      try {
+        const payload = JSON.parse(message.data);
+        if (!payload || payload.schema_version !== 1) {
+          throw new Error("node-ui-contract: event schema mismatch");
+        }
+        if (payload.type === "snapshot" || payload.type === "resync") {
+          const snapshot = ui.validateSnapshotResponse({ schema_version: 1, snapshot: payload.snapshot });
+          if (!isCurrent(generation) || eventSocket !== socket) return;
+          state.snapshot = snapshot;
+          state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
+          render();
+        } else if (payload.type === "event") {
+          if (!payload.event || typeof payload.event !== "object") {
+            throw new Error("node-ui-contract: event payload is missing");
+          }
+          refreshSnapshot();
+        } else if (payload.type === "error") {
+          if (payload.code === "contract_violation" || payload.code === "schema_version_mismatch") {
+            throw new Error("node-ui-contract: " + ui.httpErrorText(payload, "事件流契约错误"));
+          }
+          showAlert(ui.httpErrorText(payload, "事件流错误"));
+        } else {
+          throw new Error("node-ui-contract: unknown event type " + payload.type);
+        }
+      } catch (error) {
+        if (isCurrent(generation) && eventSocket === socket) failClosed(error);
+      }
+    };
+    socket.onclose = () => {
+      if (eventSocket === socket) eventSocket = null;
+      if (!isCurrent(generation)) return;
+      setTimeout(() => {
+        if (isCurrent(generation) && !eventSocket) connectEvents();
+      }, 2000);
+    };
+  }
+  $("refresh").addEventListener("click", refreshSnapshot);
+  $("login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: $("username").value, password: $("password").value }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success || !payload.token) throw new Error(payload.error || "登录失败");
+      localStorage.setItem(tokenKey, payload.token);
+      $("login").style.display = "none";
+      await loadContract();
+    } catch (error) {
+      $("login-error").textContent = error.message;
+    }
+  });
+  loadContract();
+  setInterval(() => {
+    if (!state.failedClosed && state.snapshot && $("login").style.display !== "grid") refreshSnapshot();
+  }, 4000);
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,8 @@
 pub mod controller;
+mod node_surface;
 pub mod security;
 
+use crate::node::NodeHttpAdapter;
 use anyhow::{Context, Result};
 use axum::{
     extract::{
@@ -41,8 +43,33 @@ pub fn create_app_web_router(controller: Arc<AppController>) -> Result<Router> {
     ))
 }
 
+/// Build a WebUI router backed by the shared Node HTTP adapter.
+///
+/// This is the migration boundary for EX-10/NX-10: the browser surface fetches
+/// the canonical manifest/snapshot endpoints and submits typed commands through
+/// the same adapter used by native and programmatic clients.
+pub fn create_app_web_router_with_node(
+    controller: Arc<AppController>,
+    node_adapter: NodeHttpAdapter,
+) -> Result<Router> {
+    Ok(create_app_web_router_with_auth_and_node(
+        controller,
+        WebUiAuth::from_process_env()?,
+        Some(node_adapter),
+    ))
+}
+
 fn create_app_web_router_with_auth(controller: Arc<AppController>, auth: WebUiAuth) -> Router {
+    create_app_web_router_with_auth_and_node(controller, auth, None)
+}
+
+fn create_app_web_router_with_auth_and_node(
+    controller: Arc<AppController>,
+    auth: WebUiAuth,
+    node_adapter: Option<NodeHttpAdapter>,
+) -> Router {
     let auth = Arc::new(auth);
+    let node_manifest_surface = node_adapter.is_some();
     let protected = Router::new()
         .route("/api/status", get(handle_status))
         .route("/api/peers", get(handle_peers))
@@ -65,27 +92,57 @@ fn create_app_web_router_with_auth(controller: Arc<AppController>, auth: WebUiAu
         // 兼容接口
         .route("/api/coordinator/ban", post(handle_coordinator_ban))
         .route("/api/coordinator/unban", post(handle_coordinator_unban))
-        .route_layer(middleware::from_fn_with_state(
-            auth.clone(),
-            require_api_auth,
-        ));
+        .with_state(controller);
+    let protected = match node_adapter {
+        Some(adapter) => protected.merge(adapter.router()),
+        None => protected,
+    };
+    let protected = protected.route_layer(middleware::from_fn_with_state(
+        auth.clone(),
+        require_api_auth,
+    ));
 
     Router::new()
         .route("/", get(handle_index))
         .route("/assets/webui.css", get(handle_webui_css))
+        .route("/assets/node_ui.js", get(handle_node_ui_js))
         .route("/api/auth/login", post(handle_login))
         .merge(protected)
-        .with_state(controller)
         .layer(Extension(auth))
+        .layer(Extension(WebUiSurface {
+            node_manifest_surface,
+        }))
 }
 
 pub async fn start_app_webui(
     port: u16,
     controller: Arc<AppController>,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    start_app_webui_inner(port, controller, None).await
+}
+
+/// Start the WebUI with the manifest-driven node surface and protected shared
+/// HTTP/WebSocket node endpoints enabled.
+pub async fn start_app_webui_with_node(
+    port: u16,
+    controller: Arc<AppController>,
+    node_adapter: NodeHttpAdapter,
+) -> Result<tokio::task::JoinHandle<()>> {
+    start_app_webui_inner(port, controller, Some(node_adapter)).await
+}
+
+async fn start_app_webui_inner(
+    port: u16,
+    controller: Arc<AppController>,
+    node_adapter: Option<NodeHttpAdapter>,
+) -> Result<tokio::task::JoinHandle<()>> {
     let config = WebUiConfig::from_process_env(port)?;
     config.validate_runtime_exposure()?;
-    let app = create_app_web_router_with_auth(controller.clone(), config.auth().clone());
+    let app = create_app_web_router_with_auth_and_node(
+        controller.clone(),
+        config.auth().clone(),
+        node_adapter,
+    );
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -136,7 +193,7 @@ async fn require_api_auth(
     // query token only for the upgrade endpoint; regular HTTP APIs must use
     // Bearer authentication so credentials do not end up in access/proxy logs.
     let token = authorization_bearer_token(&request).or_else(|| {
-        (request.uri().path() == "/ws")
+        matches!(request.uri().path(), "/ws" | "/api/node/events")
             .then(|| request.uri().query())
             .flatten()
             .and_then(|query| {
@@ -178,8 +235,24 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-async fn handle_index() -> impl IntoResponse {
-    Html(UNIFIED_MASTER_HTML)
+#[derive(Clone, Copy)]
+struct WebUiSurface {
+    node_manifest_surface: bool,
+}
+
+async fn handle_index(Extension(surface): Extension<WebUiSurface>) -> impl IntoResponse {
+    if surface.node_manifest_surface {
+        Html(node_surface::NODE_MANIFEST_HTML)
+    } else {
+        Html(UNIFIED_MASTER_HTML)
+    }
+}
+
+async fn handle_node_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        node_surface::NODE_UI_JS,
+    )
 }
 
 async fn handle_webui_css() -> impl IntoResponse {
@@ -3397,12 +3470,67 @@ tun_name = "fuckipv6"`;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::{
+        node_ui_manifest, NodeCommand, NodeCommandBus, NodeCommandFuture, NodeCommandHandler,
+        NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeEventBus, NodeStateStore,
+        NodeUiManifest,
+    };
     use axum::body::{to_bytes, Body};
     use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
     use fuckipv6_common::CoordinatorAuthConfig;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct NodeRouteHandler {
+        state: NodeStateStore,
+        manifest: NodeUiManifest,
+        command_count: Arc<AtomicUsize>,
+    }
+
+    impl NodeCommandHandler for NodeRouteHandler {
+        fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            let state = self.state.clone();
+            let manifest = self.manifest.clone();
+            let command_count = self.command_count.clone();
+            Box::pin(async move {
+                command_count.fetch_add(1, Ordering::SeqCst);
+                let request_id = request.request_id;
+                match request.command {
+                    NodeCommand::GetSnapshot => {
+                        NodeCommandResult::snapshot(request_id, state.snapshot().await)
+                    }
+                    NodeCommand::GetUiManifest => {
+                        NodeCommandResult::ui_manifest(request_id, manifest)
+                    }
+                    _ => NodeCommandResult::completed(
+                        request_id,
+                        NodeCommandOutcome::Completed {
+                            message: "handled by shared command bus".into(),
+                        },
+                    ),
+                }
+            })
+        }
+    }
+
+    fn node_adapter_fixture(manifest: NodeUiManifest) -> (NodeHttpAdapter, Arc<AtomicUsize>) {
+        let events = NodeEventBus::new(32);
+        let state = NodeStateStore::with_events(events.clone());
+        let command_count = Arc::new(AtomicUsize::new(0));
+        let commands = NodeCommandBus::spawn(
+            Arc::new(NodeRouteHandler {
+                state: state.clone(),
+                manifest,
+                command_count: command_count.clone(),
+            }),
+            events.clone(),
+            8,
+        );
+        (NodeHttpAdapter::new(commands, state, events), command_count)
+    }
 
     fn test_auth() -> WebUiAuth {
         WebUiAuth::new_for_test(CoordinatorAuthConfig {
@@ -3424,6 +3552,23 @@ mod tests {
             .expect("JSON request")
     }
 
+    fn bearer_request(method: &str, uri: &str, token: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .expect("authorized request")
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body");
+        String::from_utf8(bytes.to_vec()).expect("UTF-8 response")
+    }
+
     fn login_request(body: &str, source_ip: IpAddr) -> Request<Body> {
         let mut request = json_request("POST", "/api/auth/login", body);
         request
@@ -3437,6 +3582,212 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&bytes).expect("JSON response")
+    }
+
+    #[tokio::test]
+    async fn node_adapter_selects_manifest_surface_and_serves_embedded_assets() {
+        let auth = WebUiAuth::disabled();
+        let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
+        let node_app = create_app_web_router_with_auth_and_node(
+            Arc::new(AppController::new()),
+            auth.clone(),
+            Some(adapter),
+        );
+        let response = node_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("node index request"),
+            )
+            .await
+            .expect("node index response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_text(response).await,
+            node_surface::NODE_MANIFEST_HTML
+        );
+
+        let response = node_app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/node_ui.js")
+                    .body(Body::empty())
+                    .expect("node UI script request"),
+            )
+            .await
+            .expect("node UI script response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/javascript; charset=utf-8")
+        );
+        assert_eq!(response_text(response).await, node_surface::NODE_UI_JS);
+
+        let legacy_app = create_app_web_router_with_auth(Arc::new(AppController::new()), auth);
+        let response = legacy_app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("legacy index request"),
+            )
+            .await
+            .expect("legacy index response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_text(response).await, UNIFIED_MASTER_HTML);
+    }
+
+    #[tokio::test]
+    async fn node_routes_require_bearer_and_only_events_accept_query_auth() {
+        let auth = test_auth();
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("login token");
+        let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
+        let app = create_app_web_router_with_auth_and_node(
+            Arc::new(AppController::new()),
+            auth,
+            Some(adapter),
+        );
+
+        for uri in [
+            "/api/node/manifest?schema_version=1",
+            "/api/node/snapshot?schema_version=1",
+            "/api/node/commands",
+        ] {
+            let request = if uri.ends_with("/commands") {
+                json_request(
+                    "POST",
+                    uri,
+                    r#"{"schema_version":1,"request":{"request_id":1,"command":"shutdown"}}"#,
+                )
+            } else {
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("unauthorized node request")
+            };
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("unauthorized node response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/node/snapshot?schema_version=1&token={token}"))
+                    .body(Body::empty())
+                    .expect("query token snapshot request"),
+            )
+            .await
+            .expect("query token snapshot response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for uri in [
+            "/api/node/manifest?schema_version=1",
+            "/api/node/snapshot?schema_version=1",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(bearer_request("GET", uri, &token, ""))
+                .await
+                .expect("authorized node read");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/node/events?schema_version=1&token={token}"))
+                    .body(Body::empty())
+                    .expect("event query token request"),
+            )
+            .await
+            .expect("event query token response");
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/node/events?schema_version=1")
+                    .body(Body::empty())
+                    .expect("anonymous event request"),
+            )
+            .await
+            .expect("anonymous event response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn node_commands_are_executed_through_the_shared_command_bus() {
+        let auth = test_auth();
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("login token");
+        let (adapter, command_count) = node_adapter_fixture(node_ui_manifest());
+        let app = create_app_web_router_with_auth_and_node(
+            Arc::new(AppController::new()),
+            auth,
+            Some(adapter),
+        );
+        let response = app
+            .oneshot(bearer_request(
+                "POST",
+                "/api/node/commands",
+                &token,
+                r#"{"schema_version":1,"request":{"request_id":9,"command":{"command":"shutdown"}}}"#,
+            ))
+            .await
+            .expect("command response");
+        if response.status() != StatusCode::OK {
+            panic!(
+                "unexpected command response: {}",
+                response_text(response).await
+            );
+        }
+        let payload = response_json(response).await;
+        assert_eq!(payload["result"]["request_id"], 9);
+        assert_eq!(payload["result"]["outcome"]["status"], "completed");
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn node_manifest_contract_violation_fails_closed_with_502() {
+        let auth = test_auth();
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("login token");
+        let mut manifest = node_ui_manifest();
+        manifest.pages.swap(0, 1);
+        let (adapter, _commands) = node_adapter_fixture(manifest);
+        let app = create_app_web_router_with_auth_and_node(
+            Arc::new(AppController::new()),
+            auth,
+            Some(adapter),
+        );
+        let response = app
+            .oneshot(bearer_request(
+                "GET",
+                "/api/node/manifest?schema_version=1",
+                &token,
+                "",
+            ))
+            .await
+            .expect("invalid manifest response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "contract_violation");
+        assert_eq!(payload["schema_version"], 1);
     }
 
     #[tokio::test]

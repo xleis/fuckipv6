@@ -237,7 +237,14 @@ impl MultiNetworkSupervisor {
         let webui_port = self.options.webui_port;
         if webui_port > 0 {
             let app_ctrl = Arc::new(crate::webui::AppController::new());
-            if let Err(error) = crate::webui::start_app_webui(webui_port, app_ctrl.clone()).await {
+            let node_http = crate::node::NodeHttpAdapter::new(
+                self.commands.clone(),
+                self.state.clone(),
+                self.events.clone(),
+            );
+            if let Err(error) =
+                crate::webui::start_app_webui_with_node(webui_port, app_ctrl, node_http).await
+            {
                 tracing::warn!("启动客户端 WebUI 失败: {error:#}");
             }
         }

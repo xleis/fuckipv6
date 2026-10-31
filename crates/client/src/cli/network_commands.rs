@@ -1,8 +1,11 @@
-use crate::cli::commands::RuntimeOptions;
+use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
+use crate::node::{
+    NodeCommand, NodeCommandOutcome, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
+    NodeNetworkSelection, NodeRoutingMode, NodeUpdateRoutingCommand,
+};
 use anyhow::Result;
 use fuckipv6_common::NetworkTicket;
-use std::path::Path;
 
 /// 一键创建网络并作为对等节点运行（生成邀请票据 fk://...）
 pub async fn host(
@@ -13,38 +16,27 @@ pub async fn host(
     auto_connect: bool,
     options: RuntimeOptions,
 ) -> Result<()> {
-    println!("🚀 正在启动对等网络协调服务...");
-    let coordinator = crate::symmetric::EmbeddedCoordinator::start(
-        network_name,
-        port,
-        relay_port,
-        external_host,
-        None,
+    ensure_options_can_apply(auto_connect, &options)?;
+    println!("🚀 正在通过节点控制面创建对等网络 [{network_name}]...");
+
+    let session = commands::cli_node_session().await?;
+    let outcome = commands::execute_cli_node_command(
+        &session,
+        NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+            name: network_name.to_string(),
+            signaling_port: port,
+            relay_port,
+            external_host,
+            auto_connect,
+        }),
     )
     .await?;
-
-    println!();
-    println!("══════════════════════════════════════════════════════════════════════════════");
-    println!("  🎉 对等网络已就绪！邀请凭证 (Ticket):");
-    println!("  {}", coordinator.ticket);
-    println!("══════════════════════════════════════════════════════════════════════════════");
-    println!("  其他节点加入命令:");
-    println!("    fuckipv6 join \"{}\"", coordinator.ticket);
-    println!();
-
+    let message = completed_message(outcome)?;
+    println!("{message}");
     if auto_connect {
-        println!("🔗 本地客户端正在自动加入网络...");
-        let config_manager = ConfigManager::new()?;
-        let local_url = format!("ws://127.0.0.1:{port}");
-        let config_file = config_manager.create_network(network_name, &local_url, true)?;
-        let config_path = path_to_string(&config_file);
-        super::commands::start_with_options(&config_path, options).await?;
-    } else {
-        println!("按 Ctrl+C 停止协调服务");
-        tokio::signal::ctrl_c().await?;
-        println!("协调服务已停止");
+        apply_route_options(&session, &[network_name.to_string()], &options).await?;
     }
-
+    session.shutdown();
     Ok(())
 }
 
@@ -55,101 +47,74 @@ pub async fn join(
     auto_start: bool,
     options: RuntimeOptions,
 ) -> Result<()> {
-    println!("🌐 加入网络");
-    println!("─────────────────────────────────────");
-    println!();
+    ensure_options_can_apply(auto_start, &options)?;
+    let network_name = resolve_join_network_name(server, name)?;
+    println!("🌐 通过网络控制面加入 [{network_name}]...");
+    println!("服务器地址: {server}");
 
-    let (coordinator_url, default_network_name) = if server.starts_with(NetworkTicket::URI_SCHEME) {
-        let ticket = NetworkTicket::parse(server)?;
-        println!("🎫 检测到网络邀请凭证 (Ticket):");
-        println!("  网络: {}", ticket.network_name);
-        println!("  端点: {}", ticket.endpoint);
-        (ticket.websocket_url(), ticket.network_name)
-    } else {
-        let url = normalize_server_url(server);
-        let net = ConfigManager::extract_network_name(&url);
-        (url, net)
-    };
-
-    println!("服务器地址: {}", coordinator_url);
-
-    // 确定网络名称
-    let config_manager = ConfigManager::new()?;
-    let network_name = name.map(|s| s.to_string()).unwrap_or(default_network_name);
-
-    println!("📝 网络名称: {}", network_name);
-
-    // 检查网络是否已存在
-    if config_manager.network_exists(&network_name) {
-        if auto_start {
-            println!(
-                "🚀 检测到网络 [{}] 已存在，正在直接启动连接...",
-                network_name
-            );
-            return up(vec![network_name], false, options).await;
-        }
-        println!();
-        println!("⚠️  网络配置已存在: {}", network_name);
-        println!();
-        println!("选项:");
-        println!(
-            "  1. 使用其他网络名称: fuckipv6 join \"{}\" --name <名称>",
-            server
-        );
-        println!("  2. 删除现有配置: fuckipv6 leave {}", network_name);
-        println!("  3. 直接连接: fuckipv6 connect {}", network_name);
-        anyhow::bail!("网络配置已存在");
-    }
-
-    // 创建网络配置
-    println!();
-    println!("📁 创建网络配置...");
-
-    let config_file = config_manager.create_network(&network_name, &coordinator_url, true)?;
-
-    println!("配置已保存: {}", config_file.display());
-    println!("已设置为默认网络");
-    println!();
-    println!("网络信息:");
-    println!("  名称: {}", network_name);
-    println!("  服务器: {}", coordinator_url);
-    println!("  配置: {}", config_file.display());
-    println!();
-
+    let session = commands::cli_node_session().await?;
+    let outcome = commands::execute_cli_node_command(
+        &session,
+        NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+            target: server.to_string(),
+            network_name: Some(network_name.clone()),
+            start: auto_start,
+        }),
+    )
+    .await?;
+    let message = completed_message(outcome)?;
+    println!("{message}");
     if auto_start {
-        println!("启动连接...");
-        println!();
-        let config_path = path_to_string(&config_file);
-        super::commands::start_with_options(&config_path, options).await?;
-    } else {
-        println!("下一步:");
-        println!("  连接到网络: fuckipv6 connect");
-        println!("  或者:       fuckipv6 connect {}", network_name);
+        apply_route_options(&session, &[network_name], &options).await?;
     }
-
+    session.shutdown();
     Ok(())
 }
 
 /// 启动一个或多个网络（支持多网并发共存）
 pub async fn up(networks: Vec<String>, all: bool, options: RuntimeOptions) -> Result<()> {
-    if all {
-        crate::multi_network::start_all_networks(options).await
-    } else if !networks.is_empty() {
-        crate::multi_network::start_multiple_networks(&networks, options).await
+    let selection = if all {
+        NodeNetworkSelection::All
+    } else if networks.is_empty() {
+        NodeNetworkSelection::Default
     } else {
-        let config_manager = ConfigManager::new()?;
-        let default_network = config_manager.get_default_network()?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "未设置默认网络。请指定网络名称 (fuckipv6 up <名称>) 或使用 --all 启动全部网络"
-            )
-        })?;
-        crate::multi_network::start_multiple_networks(&[default_network], options).await
+        NodeNetworkSelection::Named(networks.clone())
+    };
+
+    let session = commands::cli_node_session().await?;
+    let outcome = commands::execute_cli_node_command(
+        &session,
+        NodeCommand::StartNetworks {
+            selection: selection.clone(),
+        },
+    )
+    .await?;
+    let message = completed_message(outcome)?;
+    println!("{message}");
+
+    if has_route_options(&options) {
+        let selected_names = resolve_selection_names(&selection)?;
+        apply_route_options(&session, &selected_names, &options).await?;
     }
+    session.shutdown();
+    Ok(())
 }
 
 /// 停止一个或全部运行中的网络
 pub async fn down(networks: Vec<String>, all: bool) -> Result<()> {
-    crate::multi_network::stop_networks(&networks, all).await
+    let stop_all = all || networks.is_empty();
+    let session = commands::cli_node_session().await?;
+    let outcome = commands::execute_cli_node_command(
+        &session,
+        NodeCommand::StopNetworks {
+            networks: if stop_all { Vec::new() } else { networks },
+            all: stop_all,
+        },
+    )
+    .await?;
+    println!("{}", completed_message(outcome)?);
+    session.shutdown();
+    Ok(())
 }
 
 /// 连接到网络 (支持单网或多网络并发连接)
@@ -160,68 +125,138 @@ pub async fn connect(
     options: RuntimeOptions,
 ) -> Result<()> {
     if temp {
-        // 临时连接模式
-        let server = targets
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("临时连接需要指定服务器地址或邀请凭证"))?;
-
-        println!("🔗 临时连接到: {}", server);
-        println!("⚠️  配置不会被保存");
-        println!();
-
-        // 创建临时配置文件
-        let temp_dir = std::env::temp_dir().join("fuckipv6-temp");
-        std::fs::create_dir_all(&temp_dir)?;
-
-        let coordinator_url = if server.starts_with(NetworkTicket::URI_SCHEME) {
-            let ticket = NetworkTicket::parse(server)?;
-            ticket.websocket_url()
-        } else {
-            normalize_server_url(server)
-        };
-        let temp_config_file = temp_dir.join("temp-config.toml");
-
-        use fuckipv6_common::ClientConfig;
-        let config = ClientConfig {
-            client_id: None,
-            coordinator_url,
-            private_key_path: temp_dir.join("temp-identity.pem"),
-            network: Default::default(),
-            tun: Default::default(),
-            p2p: Default::default(),
-            log: Default::default(),
-            acl: Default::default(),
-            routing: Default::default(),
-            exit_node: Default::default(),
-        };
-
-        config.save_to_file(&temp_config_file)?;
-
-        let config_path = path_to_string(&temp_config_file);
-        super::commands::start_with_options(&config_path, options).await?;
-
-        // 清理临时文件
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    } else if all || targets.len() > 1 {
-        up(targets, all, options).await?;
-    } else if let Some(target) = targets.into_iter().next() {
-        let config_manager = ConfigManager::new()?;
-        if config_manager.network_exists(&target) {
-            up(vec![target], false, options).await?;
-        } else if target.starts_with(NetworkTicket::URI_SCHEME)
-            || target.contains(':')
-            || target.contains('.')
-        {
-            // 自动检测到邀请票据或服务器地址，执行加入并自动启动连接
-            join(&target, None, true, options).await?;
-        } else {
-            up(vec![target], false, options).await?;
-        }
-    } else {
-        up(Vec::new(), false, options).await?;
+        anyhow::bail!(
+            "临时连接尚未提供可原子清理的节点命令；请先使用 `connect <票据/网络>`，配置会持久保存"
+        );
     }
 
+    if all || targets.len() > 1 {
+        return up(targets, all, options).await;
+    }
+
+    let Some(target) = targets.into_iter().next() else {
+        return up(Vec::new(), false, options).await;
+    };
+
+    let config_manager = ConfigManager::new()?;
+    if config_manager.network_exists(&target) {
+        up(vec![target], false, options).await
+    } else if target.starts_with(NetworkTicket::URI_SCHEME)
+        || target.contains(':')
+        || target.contains('.')
+    {
+        join(&target, None, true, options).await
+    } else {
+        up(vec![target], false, options).await
+    }
+}
+
+fn completed_message(outcome: NodeCommandOutcome) -> Result<String> {
+    match outcome {
+        NodeCommandOutcome::Completed { message } => Ok(message),
+        other => anyhow::bail!("节点命令返回了意外结果: {other:?}"),
+    }
+}
+
+fn ensure_options_can_apply(started: bool, options: &RuntimeOptions) -> Result<()> {
+    if !started && has_route_options(options) {
+        anyhow::bail!("路由与 Exit Node 覆盖需要同时启动网络；请启用自动连接/start");
+    }
     Ok(())
+}
+
+fn has_route_options(options: &RuntimeOptions) -> bool {
+    options.routing_mode.is_some() || options.exit_node.is_some() || options.is_exit_node.is_some()
+}
+
+async fn apply_route_options(
+    session: &crate::remote_node::RemoteNodeSession,
+    networks: &[String],
+    options: &RuntimeOptions,
+) -> Result<()> {
+    if !has_route_options(options) {
+        return Ok(());
+    }
+    if networks.is_empty() {
+        anyhow::bail!("路由覆盖需要至少一个已启动网络");
+    }
+
+    let snapshot = session.state().snapshot().await;
+    for network_name in networks {
+        let configured = snapshot
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == *network_name);
+        let mode = match options.routing_mode.as_deref() {
+            Some(mode) => parse_node_routing_mode(mode)?,
+            None => configured
+                .map(|network| network.routing_mode)
+                .unwrap_or(NodeRoutingMode::MeshOnly),
+        };
+        let exit_node = options
+            .exit_node
+            .clone()
+            .or_else(|| configured.and_then(|network| network.exit_node.clone()));
+        let is_exit_node = options
+            .is_exit_node
+            .unwrap_or_else(|| configured.is_some_and(|network| network.exit_node_enabled));
+
+        let outcome = commands::execute_cli_node_command(
+            session,
+            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
+                network_name: network_name.clone(),
+                mode,
+                exit_node,
+                is_exit_node,
+            }),
+        )
+        .await?;
+        println!("{}", completed_message(outcome)?);
+    }
+    Ok(())
+}
+
+fn resolve_join_network_name(server: &str, configured_name: Option<&str>) -> Result<String> {
+    if let Some(name) = configured_name {
+        return Ok(name.to_string());
+    }
+    if server.starts_with(NetworkTicket::URI_SCHEME) {
+        return Ok(NetworkTicket::parse(server)?.network_name);
+    }
+    Ok(ConfigManager::extract_network_name(&normalize_server_url(
+        server,
+    )))
+}
+
+fn resolve_selection_names(selection: &NodeNetworkSelection) -> Result<Vec<String>> {
+    let manager = ConfigManager::new()?;
+    match selection {
+        NodeNetworkSelection::None => Ok(Vec::new()),
+        NodeNetworkSelection::Default => manager
+            .get_default_network()?
+            .map(|network| vec![network])
+            .ok_or_else(|| anyhow::anyhow!("未设置默认网络")),
+        NodeNetworkSelection::All => Ok(manager
+            .list_networks()?
+            .into_iter()
+            .map(|network| network.name)
+            .collect()),
+        NodeNetworkSelection::Named(names) => Ok(names.clone()),
+    }
+}
+
+fn parse_node_routing_mode(mode: &str) -> Result<NodeRoutingMode> {
+    match mode.to_lowercase().as_str() {
+        "meshonly" | "mesh-only" | "mesh_only" => Ok(NodeRoutingMode::MeshOnly),
+        "bypassmainland" | "bypass-mainland" | "bypass_mainland" => {
+            Ok(NodeRoutingMode::BypassMainland)
+        }
+        "globalproxy" | "global-proxy" | "global_proxy" => Ok(NodeRoutingMode::GlobalProxy),
+        other => {
+            anyhow::bail!("未知路由模式: {other} (可用值: MeshOnly, BypassMainland, GlobalProxy)")
+        }
+    }
 }
 
 /// 列出所有网络
@@ -349,8 +384,4 @@ fn format_time(rfc3339: &str) -> String {
     } else {
         rfc3339.to_string()
     }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }

@@ -54,29 +54,8 @@ impl RemoteNodeSession {
             .build()
             .context("无法创建 UI IPC 运行时")?;
 
-        let (state, commands, events, cancel, sync) = runtime.block_on(async {
-            timeout(
-                INITIAL_CONNECT_TIMEOUT,
-                runtime_process::ensure_control(&options),
-            )
-            .await
-            .context("连接节点控制面超时")??;
-
-            let endpoint = local_ipc::endpoint(EndpointRole::Node)?;
-            let snapshot = request_snapshot(&endpoint, role.clone()).await?;
-            let state = NodeStateStore::new();
-            state.replace_authoritative(snapshot).await;
-
-            let events = NodeEventBus::default();
-            let handler = Arc::new(RemoteNodeHandler {
-                endpoint: endpoint.clone(),
-                role: role.clone(),
-            });
-            let commands = NodeCommandBus::spawn(handler, events.clone(), 32);
-            let (cancel, cancel_rx) = watch::channel(false);
-            let sync = tokio::spawn(sync_node_state(endpoint, role, state.clone(), cancel_rx));
-            Ok::<_, anyhow::Error>((state, commands, events, cancel, sync))
-        })?;
+        let (state, commands, events, cancel, sync) =
+            runtime.block_on(Self::connect_parts(options, role))?;
 
         Ok(Self {
             runtime: Some(runtime),
@@ -86,6 +65,53 @@ impl RemoteNodeSession {
             cancel,
             sync: Some(sync),
         })
+    }
+
+    /// Connect from an existing Tokio runtime, as used by the async CLI/WebUI
+    /// entrypoint. This avoids constructing and blocking on a nested runtime.
+    pub async fn start_with_role_async(options: RuntimeOptions, role: IpcRole) -> Result<Self> {
+        let (state, commands, events, cancel, sync) = Self::connect_parts(options, role).await?;
+        Ok(Self {
+            runtime: None,
+            state,
+            commands,
+            events,
+            cancel,
+            sync: Some(sync),
+        })
+    }
+
+    async fn connect_parts(
+        options: RuntimeOptions,
+        role: IpcRole,
+    ) -> Result<(
+        NodeStateStore,
+        NodeCommandBus,
+        NodeEventBus,
+        watch::Sender<bool>,
+        JoinHandle<()>,
+    )> {
+        timeout(
+            INITIAL_CONNECT_TIMEOUT,
+            runtime_process::ensure_control(&options),
+        )
+        .await
+        .context("连接节点控制面超时")??;
+
+        let endpoint = local_ipc::endpoint(EndpointRole::Node)?;
+        let snapshot = request_snapshot(&endpoint, role.clone()).await?;
+        let state = NodeStateStore::new();
+        state.replace_authoritative(snapshot).await;
+
+        let events = NodeEventBus::default();
+        let handler = Arc::new(RemoteNodeHandler {
+            endpoint: endpoint.clone(),
+            role: role.clone(),
+        });
+        let commands = NodeCommandBus::spawn(handler, events.clone(), 32);
+        let (cancel, cancel_rx) = watch::channel(false);
+        let sync = tokio::spawn(sync_node_state(endpoint, role, state.clone(), cancel_rx));
+        Ok((state, commands, events, cancel, sync))
     }
 
     pub fn state(&self) -> NodeStateStore {
@@ -111,6 +137,9 @@ impl RemoteNodeSession {
     fn shutdown_inner(&mut self) {
         let _ = self.cancel.send(true);
         let Some(runtime) = self.runtime.take() else {
+            if let Some(sync) = self.sync.take() {
+                sync.abort();
+            }
             return;
         };
         if let Some(sync) = self.sync.take() {

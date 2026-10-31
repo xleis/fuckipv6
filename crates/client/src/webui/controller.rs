@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::{ClientConfig, NetworkTicket, RoutingMode};
+use fuckipv6_common::NetworkTicket;
 use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
 use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock};
 
-use crate::cli::commands::{self, RuntimeOptions};
 use crate::ipc::{GlobalStatsSnapshot, NetworkSessionSnapshot, StatusSnapshot};
 use crate::node::{
     NodeCommand, NodeCommandBus, NodeCommandOutcome, NodeCommandRequest, NodeCreateNetworkCommand,
@@ -253,8 +252,9 @@ pub struct AppController {
 }
 
 impl AppController {
-    /// Legacy in-process controller used by focused unit tests and migration
-    /// callers that have not yet supplied a node backend.
+    /// Legacy in-process controller used only by focused unit tests. Production
+    /// construction must attach the authoritative node state/command backend.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::from_parts(None)
     }
@@ -268,16 +268,6 @@ impl AppController {
             _session: Some(Arc::new(session)),
         };
         Self::from_parts(Some(backend))
-    }
-
-    /// Attach to a node running in the same process through the same canonical
-    /// state/command interfaces used by remote UI adapters.
-    pub(crate) fn from_node_parts(state: NodeStateStore, commands: NodeCommandBus) -> Self {
-        Self::from_parts(Some(NodeBackend {
-            state,
-            commands,
-            _session: None,
-        }))
     }
 
     fn from_parts(node: Option<NodeBackend>) -> Self {
@@ -484,157 +474,10 @@ impl AppController {
         routing_mode: Option<String>,
         exit_node: Option<String>,
     ) -> Result<()> {
-        if self.node.is_some() {
-            return self.connect_node(target, routing_mode, exit_node).await;
+        if self.node.is_none() {
+            anyhow::bail!("当前 WebUI 未连接节点控制面，无法启动网络");
         }
-
-        let target = target.trim().to_string();
-        if target.is_empty() {
-            anyhow::bail!("连接目标不能为空");
-        }
-
-        self.log(format!("发起网络连接 -> 目标: {target}")).await;
-
-        // 若当前有活动连接，先断开
-        self.disconnect().await?;
-
-        {
-            let mut st = self.state.write().await;
-            st.status = "connecting".to_string();
-            st.connected_target = Some(target.clone());
-            if let Some(ref m) = routing_mode {
-                st.routing_mode = m.clone();
-            }
-            if let Some(ref e) = exit_node {
-                st.exit_node = Some(e.clone());
-            }
-        }
-
-        // 解析目标：支持 fk:// 邀请票据
-        let (coordinator_url, network_name) = if target.starts_with(NetworkTicket::URI_SCHEME) {
-            let ticket = NetworkTicket::parse(&target).context("解析 fk:// 邀请票据失败")?;
-            self.log(format!(
-                "[票据] 成功解析网络邀请票据: 网络={}, 端点={}",
-                ticket.network_name, ticket.endpoint
-            ))
-            .await;
-            (ticket.websocket_url(), ticket.network_name)
-        } else {
-            let url = if target.starts_with("ws://") || target.starts_with("wss://") {
-                target.clone()
-            } else {
-                format!("ws://{target}")
-            };
-            (url, "default".to_string())
-        };
-
-        self.update_state(|st| {
-            st.network_name = Some(network_name.clone());
-        })
-        .await;
-
-        // 创建临时配置
-        let temp_dir = std::env::temp_dir().join("fuckipv6-ui-temp");
-        tokio::fs::create_dir_all(&temp_dir).await?;
-        let config_file = temp_dir.join(format!("{network_name}-config.toml"));
-        let key_file = temp_dir.join(format!("{network_name}-key.pem"));
-
-        let mode = match routing_mode
-            .as_deref()
-            .unwrap_or("MeshOnly")
-            .to_lowercase()
-            .as_str()
-        {
-            "bypassmainland" | "bypass-mainland" | "bypass_mainland" => RoutingMode::BypassMainland,
-            "globalproxy" | "global-proxy" | "global_proxy" => RoutingMode::GlobalProxy,
-            _ => RoutingMode::MeshOnly,
-        };
-
-        let is_exit_node = self.state.read().await.is_exit_node;
-        let config = ClientConfig {
-            client_id: None,
-            coordinator_url,
-            private_key_path: key_file,
-            network: Default::default(),
-            tun: Default::default(),
-            p2p: Default::default(),
-            log: Default::default(),
-            acl: Default::default(),
-            routing: fuckipv6_common::RoutingConfig {
-                mode,
-                exit_node: exit_node.clone(),
-                direct_cidrs: Vec::new(),
-                proxy_cidrs: Vec::new(),
-            },
-            exit_node: fuckipv6_common::ExitNodeConfig {
-                enabled: is_exit_node,
-                ..Default::default()
-            },
-        };
-
-        config.save_to_file(&config_file)?;
-
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
-        *self.cancel_tx.write().await = Some(cancel_tx);
-
-        let this = self.clone();
-        let config_path_str = config_file.display().to_string();
-
-        tokio::spawn(async move {
-            this.log("正在初始化虚拟网卡 TUN 与 P2P 加密隧道...").await;
-
-            let options = RuntimeOptions {
-                routing_mode,
-                exit_node,
-                is_exit_node: Some(is_exit_node),
-                headless: true,
-                gui: false,
-                webui_port: 0,
-            };
-
-            // 监听停止信号
-            tokio::select! {
-                res = commands::start_with_options(&config_path_str, options) => {
-                    if let Err(e) = res {
-                        this.log(format!("⚠️ 客户端运行时异常结束: {e:#}")).await;
-                    }
-                }
-                _ = cancel_rx.changed() => {
-                    this.log("收到断开连接指令，已平稳释放虚拟网卡与网络通道").await;
-                }
-            }
-
-            let mut st = this.state.write().await;
-            st.status = "offline".to_string();
-            st.virtual_ipv6 = None;
-            st.virtual_ipv4 = None;
-            st.connected_target = None;
-            st.peers.clear();
-        });
-
-        // 轮询等待虚拟 IP 分配更新
-        let this = self.clone();
-        tokio::spawn(async move {
-            for _ in 0..30 {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                // 从 IPC 或本地接口检查状态
-                if let Ok(crate::ipc::IpcResponse::Status(s)) =
-                    crate::ipc::request(crate::ipc::IpcRequest::Status).await
-                {
-                    let mut st = this.state.write().await;
-                    st.status = "online".to_string();
-                    st.virtual_ipv6 = Some(s.assigned_ip.to_string());
-                    this.log(format!(
-                        "[连接] 网络连接成功！分配虚拟 IPv6: {}",
-                        s.assigned_ip
-                    ))
-                    .await;
-                    break;
-                }
-            }
-        });
-
-        Ok(())
+        self.connect_node(target, routing_mode, exit_node).await
     }
 
     async fn connect_node(
@@ -649,8 +492,9 @@ impl AppController {
         }
 
         self.log(format!("发起网络连接 -> 目标: {target}")).await;
+        // Joining/starting one network is additive. Never stop unrelated
+        // networks merely because the user selected another target.
         let previous_snapshot = self.node_snapshot().await?;
-        self.disconnect().await?;
 
         let network_name = if target.starts_with(NetworkTicket::URI_SCHEME) {
             let ticket = NetworkTicket::parse(&target).context("解析 fk:// 邀请票据失败")?;
@@ -1711,6 +1555,7 @@ fn clear_runtime_status(state: &mut AppUiState) {
     state.peers.clear();
 }
 
+#[cfg(test)]
 impl Default for AppController {
     fn default() -> Self {
         Self::new()

@@ -114,34 +114,19 @@ fn create_app_web_router_with_auth_and_node(
         }))
 }
 
-pub async fn start_app_webui(
-    port: u16,
-    controller: Arc<AppController>,
-) -> Result<tokio::task::JoinHandle<()>> {
-    start_app_webui_inner(port, controller, None).await
-}
-
-/// Start the WebUI with the manifest-driven node surface and protected shared
-/// HTTP/WebSocket node endpoints enabled.
+/// Start the only production WebUI surface: a manifest-driven view backed by
+/// the authenticated node command/state/event adapters.
 pub async fn start_app_webui_with_node(
     port: u16,
     controller: Arc<AppController>,
     node_adapter: NodeHttpAdapter,
-) -> Result<tokio::task::JoinHandle<()>> {
-    start_app_webui_inner(port, controller, Some(node_adapter)).await
-}
-
-async fn start_app_webui_inner(
-    port: u16,
-    controller: Arc<AppController>,
-    node_adapter: Option<NodeHttpAdapter>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let config = WebUiConfig::from_process_env(port)?;
     config.validate_runtime_exposure()?;
     let app = create_app_web_router_with_auth_and_node(
         controller.clone(),
         config.auth().clone(),
-        node_adapter,
+        Some(node_adapter),
     );
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)

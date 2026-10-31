@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::cli::commands::{self, RuntimeOptions};
@@ -8,11 +7,10 @@ use crate::ipc::{self, MultiNetworkRegistry};
 use crate::node::runtime_metadata;
 use crate::node::{
     spawn_command_bus_with_runtime, NetworkRuntimeManager, NodeCommandBus, NodeEventBus,
-    NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot, NodeNetworkSelection, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodePeerSnapshot, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
+    NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot, NodeNetworkSnapshot, NodeNetworkStatus,
+    NodePeerSnapshot, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
 };
 use crate::symmetric::EmbeddedServiceManager;
-use crate::ui::UiModeResolution;
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
 /// Linux IFNAMSIZ 限制为 16 字节（包含空终止符 \0），最大有效长度为 15 字符。
@@ -64,14 +62,12 @@ pub fn sanitize_interface_name(name: &str) -> String {
 /// 多网络并发管理器
 pub struct MultiNetworkSupervisor {
     registry: MultiNetworkRegistry,
-    options: RuntimeOptions,
     lifecycle: NodeLifecycle,
     state: NodeStateStore,
     events: NodeEventBus,
     commands: NodeCommandBus,
     services: EmbeddedServiceManager,
     runtimes: NetworkRuntimeManager,
-    ui_mode: UiModeResolution,
 }
 
 impl MultiNetworkSupervisor {
@@ -115,14 +111,12 @@ impl MultiNetworkSupervisor {
         );
         Ok(Self {
             registry,
-            options,
             lifecycle,
             state,
             events,
             commands,
             services,
             runtimes,
-            ui_mode,
         })
     }
 
@@ -234,24 +228,6 @@ impl MultiNetworkSupervisor {
         let _ipc_task =
             ipc::spawn_multi_server_with_commands(self.registry.clone(), self.commands.clone());
 
-        let webui_port = self.options.webui_port;
-        if webui_port > 0 {
-            let app_ctrl = Arc::new(crate::webui::AppController::from_node_parts(
-                self.state.clone(),
-                self.commands.clone(),
-            ));
-            let node_http = crate::node::NodeHttpAdapter::new(
-                self.commands.clone(),
-                self.state.clone(),
-                self.events.clone(),
-            );
-            if let Err(error) =
-                crate::webui::start_app_webui_with_node(webui_port, app_ctrl, node_http).await
-            {
-                tracing::warn!("启动客户端 WebUI 失败: {error:#}");
-            }
-        }
-
         println!("══════════════════════════════════════════════════════════════════════════════");
         println!("🚀 正在初始化节点网络管理器 (共 {configured_networks} 个网络)");
         println!("══════════════════════════════════════════════════════════════════════════════");
@@ -309,10 +285,6 @@ impl MultiNetworkSupervisor {
         }
         println!("══════════════════════════════════════════════════════════════════════════════");
 
-        if self.ui_mode.effective.is_web_ui() && webui_port > 0 {
-            let _ = crate::ui::run_webui_window(webui_port).await;
-        }
-
         // Ctrl+C/SIGTERM and the legacy IPC shutdown command end the node.
         // Stopping all networks through the typed command deliberately leaves
         // the node control plane available for create/join operations.
@@ -368,81 +340,6 @@ impl MultiNetworkSupervisor {
         println!("👋 节点网络运行时已安全退出");
         Ok(())
     }
-}
-
-/// 启动指定的多个网络
-pub async fn start_multiple_networks(
-    network_names: &[String],
-    options: RuntimeOptions,
-) -> Result<()> {
-    let config_manager = ConfigManager::new()?;
-    let plan = NodeRuntimePlan::load(
-        &config_manager,
-        NodeNetworkSelection::Named(network_names.to_vec()),
-    )?;
-    let supervisor = MultiNetworkSupervisor::new(options)?;
-    supervisor.run_plan(plan).await
-}
-
-/// 启动所有已保存的网络
-pub async fn start_all_networks(options: RuntimeOptions) -> Result<()> {
-    let config_manager = ConfigManager::new()?;
-    let plan = NodeRuntimePlan::load(&config_manager, NodeNetworkSelection::All)?;
-    if plan.is_empty() {
-        anyhow::bail!(
-            "当前没有已保存的网络配置。请使用 'fuckipv6 join' 或 'fuckipv6 host' 添加网络。"
-        );
-    }
-
-    let names: Vec<_> = plan
-        .networks()
-        .iter()
-        .map(|network| network.name.as_str())
-        .collect();
-    println!("🚀 正在并发启动全部已保存的虚拟网络: {}", names.join(", "));
-    let supervisor = MultiNetworkSupervisor::new(options)?;
-    supervisor.run_plan(plan).await
-}
-
-/// 停止一个或全部运行中的网络
-pub async fn stop_networks(network_names: &[String], all: bool) -> Result<()> {
-    if all || network_names.is_empty() {
-        println!("正在向后台客户端下发停止全部虚拟网络指令...");
-        match ipc::request(ipc::IpcRequest::StopNetwork { name: None }).await {
-            Ok(ipc::IpcResponse::Success { message }) => {
-                println!("✓ {message}");
-            }
-            Ok(ipc::IpcResponse::Error { message }) => {
-                println!("⚠️  {message}");
-            }
-            Err(e) => {
-                println!("提示: 本地未连接到运行中的 fuckipv6 后台进程 ({e:#})");
-            }
-            _ => {}
-        }
-    } else {
-        for name in network_names {
-            println!("正在向后台客户端下发停止网络 [{name}] 指令...");
-            match ipc::request(ipc::IpcRequest::StopNetwork {
-                name: Some(name.clone()),
-            })
-            .await
-            {
-                Ok(ipc::IpcResponse::Success { message }) => {
-                    println!("✓ {message}");
-                }
-                Ok(ipc::IpcResponse::Error { message }) => {
-                    println!("⚠️  {message}");
-                }
-                Err(e) => {
-                    println!("提示: 本地未连接到运行中的 fuckipv6 后台进程 ({e:#})");
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Refresh telemetry from a live session without owning lifecycle transitions.

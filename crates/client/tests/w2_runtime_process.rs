@@ -104,6 +104,25 @@ fn spawn_control(directory: &Path) -> Result<ProcessGuard> {
     })
 }
 
+fn spawn_headless_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
+    Ok(ProcessGuard {
+        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+            .arg("--headless")
+            .arg("--webui-port")
+            .arg(port.to_string())
+            .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
+            .env("XDG_CONFIG_HOME", directory.join("config"))
+            .env("HOME", directory.join("home"))
+            .env("RUST_LOG", "error")
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("无法启动无头 WebUI 集成测试进程")?,
+    })
+}
+
 fn send_signal(pid: u32, signal: &str) -> Result<()> {
     let status = Command::new("kill")
         .arg(format!("-{signal}"))
@@ -143,6 +162,32 @@ async fn wait_for_new_pid(path: &Path, previous: u32) -> Result<u32> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     anyhow::bail!("进程锁 {} 未在期限内出现新 PID", path.display())
+}
+
+async fn wait_for_webui(port: u16) -> Result<()> {
+    for _ in 0..150 {
+        if tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("WebUI 未在期限内监听 127.0.0.1:{port}")
+}
+
+async fn wait_for_process_exit(pid: u32) -> Result<()> {
+    for _ in 0..150 {
+        if !process_alive(pid) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("进程 {pid} 未在期限内退出")
 }
 
 #[tokio::test]
@@ -213,6 +258,53 @@ async fn control_supervises_one_node_and_ui_disconnect_leaves_it_running() -> Re
     assert!(status.success(), "control exited with {status}: {output}");
     assert!(!endpoint_path(&node_endpoint).exists());
     assert!(!endpoint_path(&control_endpoint).exists());
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_headless_webui_does_not_stop_the_node() -> Result<()> {
+    let directory = temp_dir("webui-lifetime")?;
+    let runtime_dir = directory.join("runtime");
+    let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+
+    let mut ui = spawn_headless_ui(&directory, port)?;
+    let ui_pid = ui.child.id();
+    wait_until_ready(&node_endpoint).await?;
+    wait_for_webui(port).await?;
+
+    let control_pid = read_pid(&runtime_dir.join("control.lock"))?;
+    let node_pid = read_pid(&runtime_dir.join("node.lock"))?;
+    assert_ne!(ui_pid, node_pid, "WebUI must not own the node process");
+
+    send_signal(ui_pid, "TERM")?;
+    let status = wait_for_exit(&mut ui).await?;
+    assert!(status.success(), "headless WebUI exited with {status}");
+    assert!(process_alive(node_pid), "closing WebUI stopped the node");
+    assert_eq!(
+        read_pid(&runtime_dir.join("node.lock"))?,
+        node_pid,
+        "closing WebUI restarted the node"
+    );
+    assert!(matches!(
+        local_ipc::request(
+            &node_endpoint,
+            local_ipc::IpcRole::WebUi,
+            &LocalRequest {
+                request_id: 10,
+                command: LocalCommand::Snapshot,
+            },
+        )
+        .await?,
+        LocalResponse::Snapshot { .. }
+    ));
+
+    send_signal(control_pid, "TERM")?;
+    wait_for_process_exit(control_pid).await?;
+    wait_for_process_exit(node_pid).await?;
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
+#[cfg(test)]
+use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
 use fuckipv6_common::{
-    decrypt_config_file, encrypt_config_file, is_encrypted_config_path, ClientConfig, Identity,
-    NatType, PeerInfo, RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
+    decrypt_config_file, encrypt_config_file, ClientConfig, Identity, NatType, PeerInfo,
+    RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,7 +21,6 @@ use tokio::time::{sleep, Duration};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
-use crate::logging;
 use crate::node::{
     NodeCommand, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot, NodeNetworkStatus,
     NodeProbePeerCommand, NodeSnapshot,
@@ -121,20 +122,25 @@ pub struct RuntimeOptions {
     pub webui_port: u16,
 }
 
-pub async fn start(config_path: &str) -> Result<()> {
-    start_with_options(config_path, RuntimeOptions::default()).await
+/// Legacy config-file launch is intentionally no longer a separate runtime
+/// entrypoint. A node must be started once, and all clients attach through the
+/// authenticated local IPC boundary.
+const CONFIG_START_REPLACEMENT: &str =
+    "`start --config` 已停用：请使用 `join <票据/地址>` 或 `up [网络]` 启动网络；节点及其数据面会由后台控制进程统一管理";
+
+pub async fn start(_config_path: &str) -> Result<()> {
+    anyhow::bail!(CONFIG_START_REPLACEMENT)
 }
 
-pub async fn start_with_options(config_path: &str, options: RuntimeOptions) -> Result<()> {
-    let config = ClientConfig::from_file(config_path).context("无法加载配置文件")?;
-    logging::init_with_level(&config.log.level)?;
-    start_with_config_and_options(config_path, config, options).await
+pub async fn start_with_options(_config_path: &str, _options: RuntimeOptions) -> Result<()> {
+    anyhow::bail!(CONFIG_START_REPLACEMENT)
 }
 
-pub async fn start_with_config(config_path: &str, config: ClientConfig) -> Result<()> {
-    start_with_config_and_options(config_path, config, RuntimeOptions::default()).await
+pub async fn start_with_config(_config_path: &str, _config: ClientConfig) -> Result<()> {
+    anyhow::bail!(CONFIG_START_REPLACEMENT)
 }
 
+#[cfg(test)]
 fn persist_runtime_options(
     config_path: &str,
     config: &mut ClientConfig,
@@ -177,49 +183,11 @@ pub(crate) fn apply_runtime_options_to_config(
 }
 
 pub async fn start_with_config_and_options(
-    config_path: &str,
-    mut config: ClientConfig,
-    options: RuntimeOptions,
+    _config_path: &str,
+    _config: ClientConfig,
+    _options: RuntimeOptions,
 ) -> Result<()> {
-    tracing::info!("启动客户端: {}", config_path);
-
-    persist_runtime_options(config_path, &mut config, &options)?;
-
-    let ui_mode = crate::ui::detect_ui_mode(options.headless, options.gui);
-    let webui_port = options.webui_port;
-    tracing::info!("运行时界面环境: {:?}", ui_mode);
-
-    let mut runtime = prepare_client_runtime(config_path, config).await?;
-
-    if webui_port > 0 {
-        // 启动内嵌 Axum WebUI 服务
-        let ctrl = std::sync::Arc::new(crate::webui::AppController::new());
-        {
-            let assigned_ip = runtime.assigned_ip.to_string();
-            let assigned_ipv4 = runtime.assigned_ips.ipv4.map(|ip| ip.to_string());
-            let routing_mode = format!("{:?}", runtime.route_engine.routing_mode());
-            let exit_node = runtime.configured_exit_node.clone();
-            let is_exit_node = runtime.exit_node_manager.is_exit_node();
-            ctrl.update_state(|st| {
-                st.status = "online".to_string();
-                st.virtual_ipv6 = Some(assigned_ip);
-                st.virtual_ipv4 = assigned_ipv4;
-                st.routing_mode = routing_mode;
-                st.exit_node = exit_node;
-                st.is_exit_node = is_exit_node;
-            })
-            .await;
-        }
-        if let Err(err) = crate::webui::start_app_webui(webui_port, ctrl).await {
-            tracing::warn!("启动客户端 WebUI 失败: {err:#}");
-        }
-
-        if ui_mode.is_gui() {
-            let _ = crate::ui::run_desktop_gui(webui_port).await;
-        }
-    }
-
-    run_client_event_loop(&mut runtime).await
+    anyhow::bail!(CONFIG_START_REPLACEMENT)
 }
 
 pub(crate) struct ClientRuntime {
@@ -541,10 +509,6 @@ fn websocket_host_port(url: &str) -> Result<(String, u16)> {
     Ok((authority.to_string(), default_port))
 }
 
-async fn prepare_client_runtime(config_path: &str, config: ClientConfig) -> Result<ClientRuntime> {
-    prepare_client_runtime_ext(config_path, config, None, true).await
-}
-
 struct RuntimeTasks {
     tun_packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
     tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
@@ -806,15 +770,6 @@ async fn connect_quic_relay(
             None
         }
     }
-}
-
-async fn run_client_event_loop(runtime: &mut ClientRuntime) -> Result<()> {
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        let _ = shutdown_tx.send(true);
-    });
-    run_client_event_loop_with_shutdown(runtime, &mut shutdown_rx).await
 }
 
 pub(crate) async fn run_client_event_loop_with_shutdown(
@@ -2440,14 +2395,35 @@ async fn remove_offline_peer(p2p: &P2pEngine, stats: &StatsCollector, client_id:
     }
 }
 
-fn cli_node_session() -> Result<RemoteNodeSession> {
-    RemoteNodeSession::start_with_role(
+pub(crate) async fn cli_node_session() -> Result<RemoteNodeSession> {
+    RemoteNodeSession::start_with_role_async(
         RuntimeOptions {
             headless: true,
             ..RuntimeOptions::default()
         },
         IpcRole::Cli,
     )
+    .await
+}
+
+/// Submit one CLI operation through the authenticated node command bus.
+pub(crate) async fn execute_cli_node_command(
+    session: &RemoteNodeSession,
+    command: NodeCommand,
+) -> Result<NodeCommandOutcome> {
+    static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let result = session
+        .commands()
+        .execute(NodeCommandRequest::new(request_id, command))
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    match result.outcome {
+        NodeCommandOutcome::Rejected(problem) => {
+            anyhow::bail!("节点拒绝了命令 ({:?}): {}", problem.code, problem.message)
+        }
+        outcome => Ok(outcome),
+    }
 }
 
 fn node_network_status_label(status: NodeNetworkStatus) -> &'static str {
@@ -2477,7 +2453,7 @@ fn node_network_roles(network: &NodeNetworkSnapshot) -> String {
 
 /// Print the authoritative node snapshot through the shared node control plane.
 pub async fn node_status(json: bool) -> Result<()> {
-    let session = cli_node_session()?;
+    let session = cli_node_session().await?;
     let snapshot = session.state().snapshot().await;
 
     if json {
@@ -2586,7 +2562,7 @@ pub async fn node_status(json: bool) -> Result<()> {
 
 /// Print peers from the same canonical snapshot consumed by WebUI and GPUI.
 pub async fn node_peers() -> Result<()> {
-    let session = cli_node_session()?;
+    let session = cli_node_session().await?;
     let snapshot = session.state().snapshot().await;
     let peers = snapshot
         .peers
@@ -2698,7 +2674,7 @@ pub async fn node_ping(target: &str, count: u32) -> Result<()> {
         anyhow::bail!("探测目标不能为空");
     }
 
-    let session = cli_node_session()?;
+    let session = cli_node_session().await?;
     let snapshot = session.state().snapshot().await;
     let network = select_probe_network(&snapshot, target)?;
     let network_name = network.name.clone();
@@ -2767,7 +2743,7 @@ pub async fn node_ping(target: &str, count: u32) -> Result<()> {
 
 /// Print canonical runtime counters for every active network.
 pub async fn node_stats() -> Result<()> {
-    let session = cli_node_session()?;
+    let session = cli_node_session().await?;
     let snapshot = session.state().snapshot().await;
 
     println!("网络统计信息 (Node Runtime Statistics)");

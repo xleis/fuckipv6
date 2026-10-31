@@ -3,7 +3,6 @@ pub mod network_commands;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use fuckipv6_common::{decrypt_config_file, is_encrypted_config_path, ClientConfig};
 
 use crate::logging;
 use crate::ui::{resolve_ui_mode, UiCapabilities, UiMode, UiModeError, UiModeRequest};
@@ -642,7 +641,7 @@ pub async fn run_default_app(
         anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过 `fuckipv6 --gpui` 运行");
     }
 
-    let session = crate::remote_node::RemoteNodeSession::start_with_role(
+    let session = crate::remote_node::RemoteNodeSession::start_with_role_async(
         commands::RuntimeOptions {
             routing_mode: None,
             exit_node: None,
@@ -652,7 +651,8 @@ pub async fn run_default_app(
             webui_port: port,
         },
         crate::local_ipc::IpcRole::WebUi,
-    )?;
+    )
+    .await?;
     let node_http =
         crate::node::NodeHttpAdapter::new(session.commands(), session.state(), session.events());
     let controller = std::sync::Arc::new(crate::webui::AppController::from_node_session(session));
@@ -1007,27 +1007,10 @@ fn run_config_command(command: Commands) -> Result<()> {
     Ok(())
 }
 
-async fn start_from_config_path(config: &str, options: commands::RuntimeOptions) -> Result<()> {
-    let client_config = load_client_config(config)?;
-    logging::init_with_level(&client_config.log.level)?;
-    tracing::info!("使用配置文件启动: {}", config);
-    commands::start_with_config_and_options(config, client_config, options).await
-}
-
-fn load_client_config(path: &str) -> Result<ClientConfig> {
-    if !is_encrypted_config_path(path) {
-        return ClientConfig::from_file(path);
-    }
-
-    let passphrase = config_passphrase_from_env()?;
-    let plaintext = decrypt_config_file(path, &passphrase)?;
-    let content = String::from_utf8(plaintext)?;
-    ClientConfig::from_toml_str(&content)
-}
-
-fn config_passphrase_from_env() -> Result<String> {
-    std::env::var("FUCKIPV6_CONFIG_PASSPHRASE")
-        .map_err(|_| anyhow::anyhow!("加密配置需要设置环境变量 FUCKIPV6_CONFIG_PASSPHRASE"))
+async fn start_from_config_path(_config: &str, _options: commands::RuntimeOptions) -> Result<()> {
+    anyhow::bail!(
+        "`start --config` 已停用：请使用 `join <票据/地址>` 或 `up [网络]`；节点数据面由后台控制进程统一管理"
+    )
 }
 
 #[cfg(test)]

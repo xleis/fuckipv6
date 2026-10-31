@@ -19,6 +19,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::logging;
+use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
 use crate::p2p::punching;
 use crate::p2p::quic;
@@ -38,7 +39,7 @@ use fuckipv6_secure_session::{AEAD_TAG_LEN, DATA_HEADER_LEN};
 const TUN_PACKET_BUFFER_SIZE: usize = 65536;
 const TUN_BUFFER_ALLOCATION_SIZE: usize = TUN_PACKET_BUFFER_SIZE + DATA_HEADER_LEN + AEAD_TAG_LEN;
 const TUN_BUFFER_POOL_SIZE: usize = 64;
-const TUN_READ_BATCH_SIZE: usize = 32;
+const DATA_PLANE_BATCH_SIZE: usize = 32;
 const QUIC_RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 
@@ -232,7 +233,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_engine: SmartRouteEngine,
     pub(crate) exit_node_manager: ExitNodeManager,
     pub(crate) configured_exit_node: Option<String>,
-    pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<TunPacket>,
+    pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
     pub(crate) tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
     pub(crate) config_path: String,
@@ -539,7 +540,7 @@ async fn prepare_client_runtime(config_path: &str, config: ClientConfig) -> Resu
 }
 
 struct RuntimeTasks {
-    tun_packet_rx: mpsc::UnboundedReceiver<TunPacket>,
+    tun_packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
     tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
     ipc_task: JoinHandle<()>,
     config_reload_task: JoinHandle<()>,
@@ -699,7 +700,7 @@ fn spawn_runtime_tasks_ext(
         config.clone(),
         p2p.clone(),
     );
-    let (tun_packet_tx, tun_packet_rx) = mpsc::unbounded_channel::<TunPacket>();
+    let (tun_packet_tx, tun_packet_rx) = mpsc::unbounded_channel::<Vec<TunPacket>>();
     let (tun_buffer_tx, tun_buffer_rx) = mpsc::unbounded_channel::<TunPacket>();
 
     for _ in 0..TUN_BUFFER_POOL_SIZE {
@@ -817,13 +818,15 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     loop {
         tokio::select! {
             // 从TUN设备读取数据包
-            Some(packet) = runtime.tun_packet_rx.recv() => {
-                handle_tun_reader_packet(runtime, packet).await;
+            Some(packets) = runtime.tun_packet_rx.recv() => {
+                for packet in packets {
+                    handle_tun_reader_packet(runtime, packet).await;
+                }
             }
 
             // 从P2P接收已认证明文；不会再次经过 replay window。
-            Some(packet) = runtime.p2p.recv() => {
-                handle_inbound_packet(runtime, packet, "P2P packet").await;
+            Some(packets) = runtime.p2p.recv_batch(DATA_PLANE_BATCH_SIZE) => {
+                handle_inbound_packet_batch(runtime, packets, "P2P packet").await;
             }
 
             // 处理信令事件
@@ -1166,6 +1169,31 @@ async fn record_p2p_rx_for_peer(stats: &StatsCollector, peer: &PeerRouteInfo, by
 }
 
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
+    if let Some(payload) = admit_inbound_packet(runtime, packet).await {
+        write_payload_to_tun(&mut runtime.tun, &runtime.stats, &payload, source).await;
+    }
+}
+
+async fn handle_inbound_packet_batch(
+    runtime: &mut ClientRuntime,
+    packets: Vec<InboundPacket>,
+    source: &str,
+) {
+    let mut payloads = Vec::with_capacity(packets.len());
+    for packet in packets {
+        if let Some(payload) = admit_inbound_packet(runtime, packet).await {
+            payloads.push(payload);
+        }
+    }
+    write_payloads_to_tun(&mut runtime.tun, &runtime.stats, &payloads, source).await;
+}
+
+/// Authenticate, authorize, and classify one ingress packet without writing it
+/// to TUN. The returned owned payload remains valid until a batch write finishes.
+async fn admit_inbound_packet(
+    runtime: &mut ClientRuntime,
+    packet: InboundPacket,
+) -> Option<InboundPayload> {
     let (src_ip, plain_payload, peer) = match packet {
         InboundPacket::AuthenticatedPlaintext {
             src_ip,
@@ -1182,7 +1210,7 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
                 }
                 Err(error) => {
                     tracing::debug!("丢弃来自 {src_ip} 的未认证数据包: {error:#}");
-                    return;
+                    return None;
                 }
             }
         }
@@ -1195,11 +1223,11 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
             src_ip,
             plain_payload.len()
         );
-        return;
+        return None;
     }
     let Some(peer) = peer else {
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
-        return;
+        return None;
     };
     let trusted_exit_peer = runtime
         .p2p
@@ -1220,11 +1248,11 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
             ),
             None => tracing::debug!("丢弃来源 {src_ip} 的非 IP 入站载荷"),
         }
-        return;
+        return None;
     };
     let Some(target_dst) = tun_packet_destination(&plain_payload) else {
         tracing::debug!("丢弃来源 {src_ip} 的无目的地址入站载荷");
-        return;
+        return None;
     };
 
     // Virtual-network destinations remain ordinary Mesh traffic. Any other
@@ -1232,29 +1260,29 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
     if !runtime.route_engine.is_virtual_network(target_dst) {
         if !runtime.exit_node_manager.is_exit_node() {
             tracing::debug!("本机未启用 Exit Node，丢弃 {} -> {target_dst}", packet_src);
-            return;
+            return None;
         }
         if !runtime.exit_node_manager.should_forward_as_exit(target_dst) {
             tracing::debug!("Exit Node 策略拒绝目标地址 {target_dst}");
-            return;
+            return None;
         }
         if !runtime
             .exit_node_manager
             .is_client_allowed(peer.client_id.as_ref())
         {
             tracing::warn!("Exit Node 拒绝未授权客户端 {}", peer.client_id);
-            return;
+            return None;
         }
 
         #[cfg(target_os = "linux")]
         {
             let Some(forwarder) = runtime.exit_forwarder.as_mut() else {
                 tracing::warn!("Exit Node 已启用但转发器尚未安装，丢弃数据包");
-                return;
+                return None;
             };
             if !forwarder.supports(target_dst) {
                 tracing::debug!("Exit Node 没有目标地址族 {target_dst} 的出站路径");
-                return;
+                return None;
             }
             if let Err(error) = forwarder
                 .allow_client(peer.client_id.as_ref(), &peer.virtual_ips)
@@ -1264,14 +1292,14 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
                     "无法为客户端 {} 安装 Exit Node 转发规则: {error:#}",
                     peer.client_id
                 );
-                return;
+                return None;
             }
         }
 
         #[cfg(not(target_os = "linux"))]
         {
             tracing::warn!("当前平台不支持内核 Exit Node 转发，丢弃数据包");
-            return;
+            return None;
         }
 
         #[cfg(target_os = "linux")]
@@ -1284,7 +1312,7 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
     }
 
     record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
-    write_payload_to_tun(&mut runtime.tun, &runtime.stats, &plain_payload, source).await;
+    Some(plain_payload)
 }
 
 async fn handle_runtime_signaling_event(
@@ -1409,6 +1437,29 @@ async fn write_payload_to_tun(
     }
 }
 
+async fn write_payloads_to_tun(
+    tun: &mut TunDevice,
+    stats: &StatsCollector,
+    payloads: &[InboundPayload],
+    source: &str,
+) {
+    if payloads.is_empty() {
+        return;
+    }
+
+    let packet_refs: Vec<&[u8]> = payloads.iter().map(InboundPayload::as_slice).collect();
+    let results = tun.write_batch(&packet_refs).await;
+    for (payload, result) in payloads.iter().zip(results) {
+        match result {
+            Ok(()) => stats.record_tun_tx(payload.len()).await,
+            Err(error) => {
+                stats.record_tun_write_error().await;
+                tracing::error!("TUN 批量写入数据失败 (来源: {}): {:?}", source, error);
+            }
+        }
+    }
+}
+
 async fn shutdown_runtime(runtime: &mut ClientRuntime) {
     #[cfg(target_os = "linux")]
     {
@@ -1436,7 +1487,7 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) {
 
 fn spawn_tun_reader(
     mut tun: TunDevice,
-    packet_tx: mpsc::UnboundedSender<TunPacket>,
+    packet_tx: mpsc::UnboundedSender<Vec<TunPacket>>,
     mut buffer_rx: mpsc::UnboundedReceiver<TunPacket>,
     buffer_tx: mpsc::UnboundedSender<TunPacket>,
     stats: StatsCollector,
@@ -1448,7 +1499,7 @@ fn spawn_tun_reader(
                 None => break,
             };
             let mut packets = vec![first];
-            while packets.len() < TUN_READ_BATCH_SIZE {
+            while packets.len() < DATA_PLANE_BATCH_SIZE {
                 match buffer_rx.try_recv() {
                     Ok(packet) => packets.push(packet),
                     Err(mpsc::error::TryRecvError::Empty) => break,
@@ -1481,13 +1532,11 @@ fn spawn_tun_reader(
                         }
                     }
                     let unread = packets.split_off(lengths.len().min(packets.len()));
-                    for packet in packets {
-                        if packet_tx.send(packet).is_err() {
-                            for packet in unread {
-                                let _ = buffer_tx.send(packet.recycle());
-                            }
-                            return;
+                    if packet_tx.send(packets).is_err() {
+                        for packet in unread {
+                            let _ = buffer_tx.send(packet.recycle());
                         }
+                        return;
                     }
                     for packet in unread {
                         let _ = buffer_tx.send(packet.recycle());

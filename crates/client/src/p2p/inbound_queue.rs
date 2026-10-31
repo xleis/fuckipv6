@@ -239,6 +239,32 @@ impl InboundQueueReceiver {
         }
         packet
     }
+
+    /// Wait for one packet, then drain at most `max - 1` already-queued packets.
+    ///
+    /// Waiting only on the first packet keeps this cancellation-safe for the
+    /// central `select!`: a cancelled receive cannot consume a packet and then
+    /// abandon the rest of the batch.
+    pub(crate) async fn recv_batch(&mut self, max: usize) -> Option<Vec<InboundPacket>> {
+        if max == 0 {
+            return None;
+        }
+
+        let first = self.recv().await?;
+        let mut packets = Vec::with_capacity(max);
+        packets.push(first);
+        while packets.len() < max {
+            match self.rx.try_recv() {
+                Ok(packet) => {
+                    self.stats.record_dequeued(packet.retained_len() as u64);
+                    packets.push(packet);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        Some(packets)
+    }
 }
 
 pub(crate) fn channel(
@@ -463,6 +489,35 @@ mod tests {
         assert_eq!(payload.as_slice(), &[2]);
         assert_eq!(stats.metrics().depth, 0);
         assert_eq!(stats.metrics().dequeued, 2);
+    }
+
+    #[tokio::test]
+    async fn receive_batch_preserves_order_limit_and_accounting() {
+        let (tx, mut rx, stats) = channel(4);
+        for marker in 0..3 {
+            assert!(tx.try_send(packet(marker)));
+        }
+
+        let first = rx.recv_batch(2).await.expect("non-empty first batch");
+        assert_eq!(first.len(), 2);
+        for (marker, packet) in first.into_iter().enumerate() {
+            let InboundPacket::AuthenticatedPlaintext { payload, .. } = packet else {
+                panic!("expected authenticated plaintext");
+            };
+            assert_eq!(payload.as_slice(), &[marker as u8]);
+        }
+        assert_eq!(stats.metrics().depth, 1);
+        assert_eq!(stats.metrics().dequeued, 2);
+
+        let second = rx.recv_batch(2).await.expect("remaining packet");
+        assert_eq!(second.len(), 1);
+        let InboundPacket::AuthenticatedPlaintext { payload, .. } = &second[0] else {
+            panic!("expected authenticated plaintext");
+        };
+        assert_eq!(payload.as_slice(), &[2]);
+        assert_eq!(stats.metrics().depth, 0);
+        assert_eq!(stats.metrics().dequeued, 3);
+        assert_eq!(stats.metrics().consumer_waits, 0);
     }
 
     #[tokio::test]

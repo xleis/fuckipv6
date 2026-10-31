@@ -1222,10 +1222,16 @@ impl P2pEngine {
     }
 
     /// 接收数据包 (支持 IPv4 / IPv6)
+    #[cfg(test)]
     pub(crate) async fn recv(&self) -> Option<InboundPacket> {
         // The queue is single-consumer by protocol. The mutex is held only while
         // waiting for/removing the next packet, never across decryption or I/O.
         self.incoming_rx.lock().await.recv().await
+    }
+
+    /// Receive an ordered batch from the bounded ingress queue.
+    pub(crate) async fn recv_batch(&self, max: usize) -> Option<Vec<InboundPacket>> {
+        self.incoming_rx.lock().await.recv_batch(max).await
     }
 
     /// 移除对等节点（通过客户端ID）

@@ -113,6 +113,27 @@ impl TunDevice {
         self.inner.write(packet).await
     }
 
+    /// Write independent L3 packets while preserving TUN packet boundaries.
+    ///
+    /// Linux reuses one writable readiness edge for the whole batch but still
+    /// issues one `write(2)` per packet. Other platforms retain per-packet
+    /// behavior. A failure in one packet does not stop later packets in the
+    /// batch.
+    pub async fn write_batch(&mut self, packets: &[&[u8]]) -> Vec<Result<()>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.write_batch(packets).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut results = Vec::with_capacity(packets.len());
+            for packet in packets {
+                results.push(self.inner.write(packet).await);
+            }
+            results
+        }
+    }
+
     /// 删除TUN设备
     pub async fn delete(&mut self) -> Result<()> {
         self.inner.delete().await

@@ -240,6 +240,61 @@ impl LinuxTun {
         Ok(())
     }
 
+    /// Preserve L3 packet boundaries while reusing a writable readiness edge.
+    ///
+    /// A TUN character-device write maps to exactly one packet, so packets are
+    /// never concatenated into one syscall. Linux maintains a single writable
+    /// readiness registration for the batch; each successful `write(2)` can be
+    /// attempted immediately, and `WouldBlock` re-arms readiness for the current
+    /// packet. One packet's error does not prevent later packets from writing.
+    pub async fn write_batch(&mut self, packets: &[&[u8]]) -> Vec<Result<()>> {
+        let mut results = Vec::with_capacity(packets.len());
+        let mut ready = false;
+
+        for packet in packets {
+            loop {
+                if !ready {
+                    match self.writer.writable().await {
+                        Ok(guard) => {
+                            drop(guard);
+                            ready = true;
+                        }
+                        Err(error) => {
+                            results.push(Err(error).context("Failed to await TUN writable"));
+                            break;
+                        }
+                    }
+                }
+
+                match self.writer.try_io(Interest::WRITABLE, |writer| {
+                    write_fd(writer.as_raw_fd(), packet)
+                }) {
+                    Ok(written) if written == packet.len() => {
+                        results.push(Ok(()));
+                        break;
+                    }
+                    Ok(written) => {
+                        results.push(Err(anyhow::anyhow!(
+                            "TUN short write: wrote {} of {} bytes",
+                            written,
+                            packet.len()
+                        )));
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        ready = false;
+                    }
+                    Err(error) => {
+                        results.push(Err(error).context("Failed to write to TUN device"));
+                        break;
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     /// 请求删除 TUN 设备。
     ///
     /// 生命周期由所有 clone 共享。只要还有其他 handle 存活，本方法只记录

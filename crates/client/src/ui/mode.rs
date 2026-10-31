@@ -2,10 +2,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The actual rendering surface selected for this node process.
+/// The actual control surface selected for this node process.
 ///
-/// `WebUi` describes the browser-hosted control surface, even when the browser
-/// is launched in app-window mode. It must never be represented as `Gpui`.
+/// `WebUi` is the browser-hosted control plane. It remains available on
+/// headless hosts as a server-only surface; the display environment only
+/// decides whether a browser window can also be opened. `WebUi` must never be
+/// represented as the native `Gpui` surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiMode {
@@ -27,8 +29,8 @@ impl UiMode {
         matches!(self, Self::WebUi)
     }
 
-    /// Whether this mode owns a desktop window. This compatibility helper does
-    /// not claim that a WebUI window is a native GPUI surface.
+    /// Whether this mode can own a desktop window when a display is available.
+    /// A WebUI server without a display is still valid and useful.
     pub fn is_desktop_surface(self) -> bool {
         matches!(self, Self::Gpui | Self::WebUi)
     }
@@ -223,9 +225,6 @@ pub fn resolve_ui_mode(
 ) -> Result<UiModeResolution, UiModeError> {
     let effective = match requested {
         UiModeRequest::Headless => UiMode::Headless,
-        UiModeRequest::WebUi if !capabilities.display.has_desktop() => {
-            return Err(UiModeError::DisplayUnavailable);
-        }
         UiModeRequest::WebUi => UiMode::WebUi,
         UiModeRequest::Gpui if !capabilities.gpui_available => {
             return Err(UiModeError::GpuiUnavailable);
@@ -234,6 +233,8 @@ pub fn resolve_ui_mode(
             return Err(UiModeError::DisplayUnavailable);
         }
         UiModeRequest::Gpui => UiMode::Gpui,
+        // The top-level runtime serves WebUI in headless mode, but must not
+        // select a desktop surface or launch a browser without a display.
         UiModeRequest::Auto if !capabilities.display.has_desktop() => UiMode::Headless,
         UiModeRequest::Auto if capabilities.gpui_available => UiMode::Gpui,
         UiModeRequest::Auto => UiMode::WebUi,
@@ -350,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_selects_only_an_available_surface() {
+    fn auto_mode_selects_gpui_only_when_both_capabilities_are_available() {
         assert_eq!(
             resolve_ui_mode(UiModeRequest::Auto, DESKTOP)
                 .expect("desktop resolution")
@@ -373,21 +374,23 @@ mod tests {
                     gpui_available: true,
                 },
             )
-            .expect("headless auto always resolves")
+            .expect("headless auto resolves without a desktop surface")
             .effective,
             UiMode::Headless
         );
     }
 
     #[test]
-    fn desktop_requests_fail_without_a_display() {
+    fn webui_is_available_without_a_display_but_gpui_is_not() {
         let capabilities = UiCapabilities {
             display: DisplayEnvironment::Headless,
             gpui_available: false,
         };
         assert_eq!(
-            resolve_ui_mode(UiModeRequest::WebUi, capabilities),
-            Err(UiModeError::DisplayUnavailable)
+            resolve_ui_mode(UiModeRequest::WebUi, capabilities)
+                .expect("headless WebUI server should resolve")
+                .effective,
+            UiMode::WebUi
         );
         assert_eq!(
             resolve_ui_mode(

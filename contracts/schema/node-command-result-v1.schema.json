@@ -768,7 +768,7 @@
         "web_ui",
         "headless"
       ],
-      "description": "The actual rendering surface selected for this node process.\n\n`WebUi` describes the browser-hosted control surface, even when the browser\nis launched in app-window mode. It must never be represented as `Gpui`."
+      "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane. It remains available on\nheadless hosts as a server-only surface; the display environment only\ndecides whether a browser window can also be opened. `WebUi` must never be\nrepresented as the native `Gpui` surface."
     },
     "DisplayEnvironment": {
       "type": "string",

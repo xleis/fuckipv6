@@ -9,17 +9,34 @@ pub use mode::{
 /// 这不是原生 GPUI，运行时模式必须保持为 `UiMode::WebUi`。
 pub async fn run_webui_window(webui_port: u16) -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{webui_port}");
-    tracing::info!("🎨 桌面显示环境已检测，正在调起 WebUI 控制窗口: {url}");
+    let display = DisplayEnvironment::detect();
 
     println!("========================================================================");
-    println!("🚀 fuckipv6 WebUI 控制窗口已启动");
+    if should_launch_webui_window(display) {
+        println!("🚀 fuckipv6 WebUI 控制窗口已启动");
+    } else {
+        println!("🚀 fuckipv6 WebUI 控制服务已启动 (无桌面环境)");
+    }
     println!("------------------------------------------------------------------------");
     println!("图形控制台地址: {url}");
-    println!("如独立窗口未自动弹出，您可直接在浏览器打开上述地址进行交互。");
+    if should_launch_webui_window(display) {
+        println!("如独立窗口未自动弹出，您可直接在浏览器打开上述地址进行交互。");
+    } else {
+        println!("当前未检测到图形会话，不会尝试启动浏览器；可从其他设备访问上述地址。");
+    }
     println!("========================================================================");
 
-    launch_webui_window(&url);
+    if should_launch_webui_window(display) {
+        tracing::info!("🎨 桌面显示环境已检测，正在调起 WebUI 控制窗口: {url}");
+        launch_webui_window(&url);
+    } else {
+        tracing::info!("🖥️ 无桌面显示环境，WebUI 仅提供服务: {url}");
+    }
     Ok(())
+}
+
+fn should_launch_webui_window(display: DisplayEnvironment) -> bool {
+    display.has_desktop()
 }
 
 /// Compatibility wrapper for adapters that still use the historical name.
@@ -80,5 +97,21 @@ pub fn launch_webui_window(url: &str) {
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headless_webui_never_attempts_to_open_a_browser() {
+        assert!(!should_launch_webui_window(DisplayEnvironment::Headless));
+        assert!(should_launch_webui_window(DisplayEnvironment::LinuxWayland));
+        assert!(should_launch_webui_window(DisplayEnvironment::LinuxX11));
+        assert!(should_launch_webui_window(
+            DisplayEnvironment::WindowsDesktop
+        ));
+        assert!(should_launch_webui_window(DisplayEnvironment::MacosDesktop));
     }
 }

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use fuckipv6_common::{ClientConfig, Identity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 const NODE_IDENTITY_FILE: &str = "node_identity.pem";
@@ -74,13 +75,31 @@ impl ConfigManager {
 
     /// 获取配置目录
     fn get_config_dir() -> Result<PathBuf> {
+        Self::resolve_config_dir(
+            std::env::var_os("FUCKIPV6_CONFIG_DIR"),
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )
+    }
+
+    fn resolve_config_dir(
+        configured: Option<OsString>,
+        xdg_config: Option<OsString>,
+        home: Option<OsString>,
+    ) -> Result<PathBuf> {
+        // Service managers need a fixed, writable configuration root that is
+        // independent of the invoking user's desktop session.
+        if let Some(configured) = configured {
+            return Ok(PathBuf::from(configured));
+        }
+
         // 优先使用 $XDG_CONFIG_HOME/fuckipv6
-        if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
+        if let Some(xdg_config) = xdg_config {
             return Ok(PathBuf::from(xdg_config).join("fuckipv6"));
         }
 
         // 其次使用 $HOME/.config/fuckipv6
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = home {
             return Ok(PathBuf::from(home).join(".config").join("fuckipv6"));
         }
 
@@ -558,6 +577,17 @@ mod tests {
             ConfigManager::extract_network_name("ws://[2001:db8::1]:6666"),
             "2001-db8-1"
         );
+    }
+
+    #[test]
+    fn service_config_override_wins_over_desktop_environment() -> anyhow::Result<()> {
+        let resolved = ConfigManager::resolve_config_dir(
+            Some(OsString::from("/etc/fuckipv6")),
+            Some(OsString::from("/home/operator/.config")),
+            Some(OsString::from("/home/operator")),
+        )?;
+        assert_eq!(resolved, PathBuf::from("/etc/fuckipv6"));
+        Ok(())
     }
 
     #[test]

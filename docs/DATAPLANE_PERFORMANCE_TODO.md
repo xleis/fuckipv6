@@ -469,6 +469,25 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 **证据边界：** metadata 记录提交 `d38986d`、工作树 dirty、二进制 SHA256 `720d02cc...786c1c`；该二进制时间早于当前 HEAD，且只有 1 run/5s，不能作为正式排名、显著性结论或最终提交验收。受控 UDP 的 50/5 Mbit/s 是发送上限，不测峰值能力。
 
+### 2.1 当前工作树复核 smoke（2026-10-31）
+
+目录：`target/benchmarks/dataplane-smoke-current-20261031/`。参数仍为 1 run、5s、omit 0、`--no-perf`、MTU 1420；18/18 样本有效，6 个 fuckipv6 case 的 `direct_path=true` 且 `fallback_packets_delta=0`。吞吐单位 Gbit/s：
+
+| case | fuckipv6 | kernel WireGuard | wireguard-go |
+|---|---:|---:|---:|
+| TCP 1 flow | 0.666 | 1.507 | 3.242 |
+| TCP 8 flow | 0.626 | 1.457 | 3.258 |
+| UDP 1420 saturated | 0.711 | 1.972 | 0.911 |
+| UDP 64 saturated | 0.044 | 0.097 | 0.044 |
+| UDP 1420 controlled | 0.050 | 0.050 | 0.050 |
+| UDP 64 controlled | 0.005 | 0.005 | 0.005 |
+
+该二进制由当前 dirty 工作树重建，绑定提交 `13d83ee`、二进制 SHA256 `6574f1d3...cee60`、worktree snapshot SHA256 `ca06ad2a...54ff`，wireguard-go 固定为 `b3bc704`。
+
+**新增结论：** TCP 单流吞吐是 kernel WireGuard 的约 `0.44x`、wireguard-go 的约 `0.21x`；8 流没有改善，分别约 `0.43x` 和 `0.19x`。UDP 1420 已达到 wireguard-go 的约 `0.78x`，64B 饱和 UDP 与 wireguard-go 基本持平，但仍分别只有 kernel WireGuard 的 `0.36x` 和 `0.46x`。已接线的 UDP syscall 批处理没有单独消除 TCP 路径的数量级差距，也没有证明 TUN/事件循环/锁竞争已经追平；单 run 无法量化批处理本身的收益。
+
+**证据边界：** 仍是单 run、未绑核、`powersave` governor、无 CPU profile，且测试时宿主负载不满足正式 harness 门限。上述倍数只能用于定位方向，不能当作统计显著排名。
+
 ### 3. `strace -c` 与内建 batch counter
 
 正式采用的 clean 证据：

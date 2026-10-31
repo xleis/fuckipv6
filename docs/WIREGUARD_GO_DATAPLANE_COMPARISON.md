@@ -259,6 +259,8 @@ UDP shared bytes
 4. `SecurePeerState` 仍让 send/open 共用一把状态锁。已有 `try_lock` 等待/持锁指标和批量临界区只能说明锁竞争可观测、获取次数可下降，不能说明锁已拆分或热路径已无争用。
 5. UDP pool sharding 解决了同一批 acquire/recycle 的集中竞争，但不是 TUN、seal/open、fallback 共用的固定 buffer 池；没有 GSO/GRO 时，64B 小包路径仍受每包开销限制。
 
+**当前工作树 smoke（`13d83ee` + dirty，binary SHA256 `6574f1d3...cee60`）：** 18/18 样本有效，fuckipv6 六个 case 均为 direct-path 且 fallback delta 为 0。TCP 单流/8 流约为 kernel WireGuard 的 `0.44x/0.43x`、wireguard-go 的 `0.21x/0.19x`；UDP 1420 饱和约为二者的 `0.36x/0.78x`；64B 饱和 UDP 约为 `0.46x/1.00x`。这组数据与“UDP syscall 已批量、但 TCP 仍受 TUN 逐包、中央事件循环和会话锁等共同限制”的诊断一致，不支持已经追平 WireGuard 的结论；单 run 无法量化批处理收益。该组仍为 1 run、5s、未绑核、`powersave`、无 perf profile，只能作为方向性复核。
+
 **新采集的 syscall 证据：**
 
 - 目录：`target/benchmarks/syscall-evidence-20261031/udp1420-clean/`、`udp64-clean/`；direct-path=true，fallback=0。

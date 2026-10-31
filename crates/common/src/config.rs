@@ -165,6 +165,19 @@ pub struct P2pConfig {
     #[serde(default)]
     pub listen_port: u16,
 
+    /// 已认证入站数据队列容量。队列满时丢弃最新数据并计数。
+    #[serde(default = "default_inbound_queue_capacity")]
+    pub inbound_queue_capacity: usize,
+
+    /// Linux UDP `recvmmsg`/`sendmmsg` 单批最多处理的 datagram 数。
+    #[serde(default = "default_udp_batch_size")]
+    pub udp_batch_size: usize,
+
+    /// 进程级 AEAD worker 数。0 表示自动选择，上限 256；配置在进程启动后
+    /// 首次初始化 worker 前生效。
+    #[serde(default)]
+    pub crypto_workers: usize,
+
     /// 连接超时 (秒)
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout: u64,
@@ -186,6 +199,9 @@ impl Default for P2pConfig {
     fn default() -> Self {
         Self {
             listen_port: 0,
+            inbound_queue_capacity: default_inbound_queue_capacity(),
+            udp_batch_size: default_udp_batch_size(),
+            crypto_workers: 0,
             connect_timeout: default_connect_timeout(),
             heartbeat_interval: default_heartbeat_interval(),
             fallback_threshold: FallbackThreshold::default(),
@@ -650,6 +666,18 @@ fn validate_tun_config(config: &TunConfig) -> anyhow::Result<()> {
 }
 
 fn validate_p2p_config(config: &P2pConfig) -> anyhow::Result<()> {
+    if config.inbound_queue_capacity == 0 || config.inbound_queue_capacity > 65_536 {
+        anyhow::bail!("p2p.inbound_queue_capacity 必须在 1 到 65536 之间");
+    }
+
+    if config.udp_batch_size == 0 || config.udp_batch_size > 128 {
+        anyhow::bail!("p2p.udp_batch_size 必须在 1 到 128 之间");
+    }
+
+    if config.crypto_workers > 256 {
+        anyhow::bail!("p2p.crypto_workers 必须在 0 到 256 之间");
+    }
+
     if config.connect_timeout == 0 {
         anyhow::bail!("p2p.connect_timeout 必须大于 0");
     }
@@ -660,6 +688,14 @@ fn validate_p2p_config(config: &P2pConfig) -> anyhow::Result<()> {
 
     validate_fallback_threshold(&config.fallback_threshold)?;
     validate_nat_detection_config(&config.nat_detection)
+}
+
+fn default_inbound_queue_capacity() -> usize {
+    1024
+}
+
+fn default_udp_batch_size() -> usize {
+    32
 }
 
 fn validate_fallback_threshold(config: &FallbackThreshold) -> anyhow::Result<()> {
@@ -961,6 +997,44 @@ mod tests {
             .contains("max_loss_rate"));
 
         config.p2p.fallback_threshold.max_loss_rate = 0.05;
+        config.p2p.inbound_queue_capacity = 0;
+        assert!(config
+            .validate()
+            .expect_err("zero inbound queue capacity should be rejected")
+            .to_string()
+            .contains("inbound_queue_capacity"));
+
+        config.p2p.inbound_queue_capacity = 65_537;
+        assert!(config
+            .validate()
+            .expect_err("oversized inbound queue should be rejected")
+            .to_string()
+            .contains("inbound_queue_capacity"));
+
+        config.p2p.inbound_queue_capacity = 1024;
+        config.p2p.udp_batch_size = 0;
+        assert!(config
+            .validate()
+            .expect_err("zero UDP batch size should be rejected")
+            .to_string()
+            .contains("udp_batch_size"));
+
+        config.p2p.udp_batch_size = 129;
+        assert!(config
+            .validate()
+            .expect_err("oversized UDP batch should be rejected")
+            .to_string()
+            .contains("udp_batch_size"));
+
+        config.p2p.udp_batch_size = 32;
+        config.p2p.crypto_workers = 257;
+        assert!(config
+            .validate()
+            .expect_err("oversized crypto worker count should be rejected")
+            .to_string()
+            .contains("crypto_workers"));
+
+        config.p2p.crypto_workers = 0;
         config.log.level = "verbose".to_string();
         assert!(config
             .validate()

@@ -1,18 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use fuckipv6_common::NetworkTicket;
 use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
 use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::node::{
-    NodeCommand, NodeCommandBus, NodeCommandOutcome, NodeCommandRequest, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkRole, NodeNetworkStatus,
-    NodePeerProbeSnapshot, NodeProbePeerCommand, NodeRoutingMode, NodeSnapshot, NodeStateStore,
-    NodeUpdateRoutingCommand,
+    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
+    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkRole,
+    NodeNetworkStatus, NodePeerProbeSnapshot, NodeProbePeerCommand, NodeProblem, NodeProblemCode,
+    NodeRoutingMode, NodeSnapshot, NodeStateStore, NodeUpdateRoutingCommand,
 };
 #[cfg(test)]
 use crate::node::{NodeCommandFuture, NodeCommandHandler, NodeCommandResult};
@@ -240,6 +241,69 @@ impl NodeCommandHandler for TestNodeHandler {
     }
 }
 
+/// Typed controller failure that preserves the canonical node problem across
+/// the legacy WebUI HTTP boundary.
+#[derive(Debug, Clone)]
+pub struct AppControllerError {
+    problem: NodeProblem,
+}
+
+impl AppControllerError {
+    pub fn from_problem(problem: NodeProblem) -> Self {
+        Self { problem }
+    }
+
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::from_problem(NodeProblem::new(NodeProblemCode::InvalidRequest, message))
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::from_problem(NodeProblem::new(NodeProblemCode::NotFound, message))
+    }
+
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::from_problem(NodeProblem::new(NodeProblemCode::Unsupported, message))
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::from_problem(NodeProblem::new(NodeProblemCode::Internal, message))
+    }
+
+    pub fn problem(&self) -> &NodeProblem {
+        &self.problem
+    }
+}
+
+impl fmt::Display for AppControllerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.problem.message)
+    }
+}
+
+impl std::error::Error for AppControllerError {}
+
+impl From<NodeCommandBusError> for AppControllerError {
+    fn from(error: NodeCommandBusError) -> Self {
+        match error {
+            NodeCommandBusError::Invalid(problem) => Self::from_problem(problem),
+            NodeCommandBusError::Closed => Self::from_problem(
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    "节点命令总线已关闭，控制服务暂时不可用",
+                )
+                .retryable(true),
+            ),
+            NodeCommandBusError::ResponseDropped(request_id) => Self::from_problem(
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!("节点命令 {request_id} 的结果通道提前关闭，请重试"),
+                )
+                .retryable(true),
+            ),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppController {
     node: NodeBackend,
@@ -302,16 +366,18 @@ impl AppController {
         Ok(self.node.state.snapshot().await)
     }
 
-    async fn execute_node_command(&self, command: NodeCommand) -> Result<NodeCommandOutcome> {
+    async fn execute_node_command(
+        &self,
+        command: NodeCommand,
+    ) -> Result<NodeCommandOutcome, AppControllerError> {
         let request_id = self.request_id.fetch_add(1, Ordering::Relaxed);
         let result = self
             .node
             .commands
             .execute(NodeCommandRequest::new(request_id, command))
-            .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .await?;
         match result.outcome {
-            NodeCommandOutcome::Rejected(problem) => anyhow::bail!(problem.message),
+            NodeCommandOutcome::Rejected(problem) => Err(AppControllerError::from_problem(problem)),
             outcome => Ok(outcome),
         }
     }
@@ -346,7 +412,7 @@ impl AppController {
     ) -> Result<()> {
         let target = target.trim().to_string();
         if target.is_empty() {
-            anyhow::bail!("连接目标不能为空");
+            return Err(AppControllerError::invalid("连接目标不能为空").into());
         }
 
         self.log(format!("发起网络连接 -> 目标: {target}")).await;
@@ -355,7 +421,9 @@ impl AppController {
         let previous_snapshot = self.node_snapshot().await?;
 
         let network_name = if target.starts_with(NetworkTicket::URI_SCHEME) {
-            let ticket = NetworkTicket::parse(&target).context("解析 fk:// 邀请票据失败")?;
+            let ticket = NetworkTicket::parse(&target).map_err(|error| {
+                AppControllerError::invalid(format!("解析 fk:// 邀请票据失败: {error:#}"))
+            })?;
             self.log(format!(
                 "[票据] 成功解析网络邀请票据: 网络={}, 端点={}",
                 ticket.network_name, ticket.endpoint
@@ -423,10 +491,11 @@ impl AppController {
     /// 向运行中的 P2P 引擎发起真实探针。
     pub async fn probe_peer(&self, target: String, timeout_ms: u64) -> Result<PeerProbeOutcome> {
         if target.trim().is_empty() {
-            anyhow::bail!("探测目标不能为空");
+            return Err(AppControllerError::invalid("探测目标不能为空").into());
         }
         let snapshot = self.node_snapshot().await?;
-        let network_name = primary_network_name(&snapshot).context("当前没有可探测的网络")?;
+        let network_name = primary_network_name(&snapshot)
+            .ok_or_else(|| AppControllerError::not_found("当前没有可探测的网络"))?;
         let outcome = self
             .execute_node_command(NodeCommand::ProbePeer(NodeProbePeerCommand {
                 network_name,
@@ -450,7 +519,10 @@ impl AppController {
                 p2p_active,
                 timed_out,
             }),
-            other => anyhow::bail!("节点探针返回了意外结果: {other:?}"),
+            other => Err(AppControllerError::internal(format!(
+                "节点探针返回了意外结果: {other:?}"
+            ))
+            .into()),
         }
     }
 
@@ -477,7 +549,10 @@ impl AppController {
             }))
             .await?;
         let NodeCommandOutcome::NetworkCreated(created) = outcome else {
-            anyhow::bail!("创建网络返回了意外结果: {outcome:?}");
+            return Err(AppControllerError::internal(format!(
+                "创建网络返回了意外结果: {outcome:?}"
+            ))
+            .into());
         };
         *self.owner_ticket.write().await = Some(created.invitation_ticket.clone());
         self.log("[网络] 对等网络已创建成功；邀请票据仅保留在所有者控制面")
@@ -509,12 +584,18 @@ impl AppController {
 
     /// 协调中枢封禁客户端
     pub async fn ban_client(&self, client_id: String) -> Result<()> {
-        anyhow::bail!("当前节点命令协议尚未提供封禁操作，无法封禁客户端 {client_id}")
+        Err(AppControllerError::unsupported(format!(
+            "当前节点命令协议尚未提供封禁操作，无法封禁客户端 {client_id}"
+        ))
+        .into())
     }
 
     /// 协调中枢解封客户端
     pub async fn unban_client(&self, client_id: &str) -> Result<bool> {
-        anyhow::bail!("当前节点命令协议尚未提供解封操作，无法解封客户端 {client_id}")
+        Err(AppControllerError::unsupported(format!(
+            "当前节点命令协议尚未提供解封操作，无法解封客户端 {client_id}"
+        ))
+        .into())
     }
 
     /// 动态热更新路由分流与出口节点配置，并等待运行时确认。
@@ -525,7 +606,8 @@ impl AppController {
         is_exit_node: bool,
     ) -> Result<()> {
         let snapshot = self.node_snapshot().await?;
-        let network_name = primary_network_name(&snapshot).context("当前没有可更新路由的网络")?;
+        let network_name = primary_network_name(&snapshot)
+            .ok_or_else(|| AppControllerError::not_found("当前没有可更新路由的网络"))?;
         let mode = node_routing_mode(&mode)?;
         self.execute_node_command(NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
             network_name,
@@ -628,12 +710,11 @@ impl AppController {
         &self,
         req: UpdateNetworkConfigRequest,
     ) -> Result<NetworkConfigDto> {
-        anyhow::bail!(
+        Err(AppControllerError::unsupported(format!(
             "当前节点命令协议尚未提供地址池热更新，未应用请求: mode={:?}, IPv4={}, IPv6={}",
-            req.mode,
-            req.ipv4_pool,
-            req.ipv6_pool
-        );
+            req.mode, req.ipv4_pool, req.ipv6_pool
+        ))
+        .into())
     }
 
     /// 获取黑名单列表。
@@ -959,14 +1040,16 @@ fn node_peer_to_snapshot(peer: &crate::node::NodePeerSnapshot) -> PeerSnapshot {
     }
 }
 
-fn node_routing_mode(mode: &str) -> Result<NodeRoutingMode> {
+fn node_routing_mode(mode: &str) -> Result<NodeRoutingMode, AppControllerError> {
     match mode.to_lowercase().as_str() {
         "meshonly" | "mesh-only" | "mesh_only" => Ok(NodeRoutingMode::MeshOnly),
         "bypassmainland" | "bypass-mainland" | "bypass_mainland" => {
             Ok(NodeRoutingMode::BypassMainland)
         }
         "globalproxy" | "global-proxy" | "global_proxy" => Ok(NodeRoutingMode::GlobalProxy),
-        other => anyhow::bail!("不支持的路由模式: {other}"),
+        other => Err(AppControllerError::invalid(format!(
+            "不支持的路由模式: {other}"
+        ))),
     }
 }
 

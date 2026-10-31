@@ -2,7 +2,7 @@ pub mod controller;
 mod node_surface;
 pub mod security;
 
-use crate::node::NodeHttpAdapter;
+use crate::node::{NodeHttpAdapter, NodeProblem, NodeProblemCode};
 use anyhow::{Context, Result};
 use axum::{
     extract::{
@@ -16,7 +16,7 @@ use axum::{
     Router,
 };
 pub use controller::{
-    AppController, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
+    AppController, AppControllerError, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
     CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
     UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
@@ -215,6 +215,7 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
         [(header::WWW_AUTHENTICATE, "Bearer realm=\"fuckipv6-webui\"")],
         Json(ApiError {
             error: message.into(),
+            problem: None,
         }),
     )
         .into_response()
@@ -261,17 +262,64 @@ fn default_probe_timeout_ms() -> u64 {
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    problem: Option<NodeProblem>,
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    api_error_with_problem(status, message, None)
+}
+
+fn api_error_with_problem(
+    status: StatusCode,
+    message: impl Into<String>,
+    problem: Option<NodeProblem>,
+) -> (StatusCode, Json<ApiError>) {
     (
         status,
         Json(ApiError {
             error: message.into(),
+            problem,
         }),
     )
+}
+
+fn controller_problem(error: &anyhow::Error) -> Option<NodeProblem> {
+    error
+        .downcast_ref::<AppControllerError>()
+        .map(|error| error.problem().clone())
+}
+
+fn controller_error_status(error: &anyhow::Error) -> StatusCode {
+    controller_problem(error)
+        .map(|problem| status_for_node_problem(problem.code))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn api_error_from_controller(
+    message: impl Into<String>,
+    error: &anyhow::Error,
+) -> (StatusCode, Json<ApiError>) {
+    let problem = controller_problem(error);
+    let status = problem
+        .as_ref()
+        .map(|problem| status_for_node_problem(problem.code))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    api_error_with_problem(status, message, problem)
+}
+
+fn status_for_node_problem(code: NodeProblemCode) -> StatusCode {
+    match code {
+        NodeProblemCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        NodeProblemCode::NotFound => StatusCode::NOT_FOUND,
+        NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,
+        NodeProblemCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
+        NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
+        NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn handle_peer_probe(
@@ -282,12 +330,11 @@ async fn handle_peer_probe(
         .await
         .map(Json)
         .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ApiError {
-                    error: format!("{error:#}"),
-                }),
-            )
+            if controller_problem(&error).is_some() {
+                api_error_from_controller(format!("Peer 探测失败: {error:#}"), &error)
+            } else {
+                api_error(StatusCode::BAD_GATEWAY, format!("Peer 探测失败: {error:#}"))
+            }
         })
 }
 
@@ -356,7 +403,7 @@ async fn handle_post_config(
             }),
         ),
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            controller_error_status(&e),
             Json(NetworkConfigApiResponse {
                 success: false,
                 message: format!("更新网段失败: {e:#}"),
@@ -407,7 +454,7 @@ async fn handle_blacklist_ban(
         let message = format!("封禁失败，运行期状态未确认修改: {error:#}");
         ctrl.log(message.clone()).await;
         return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
+            controller_error_status(&error),
             blacklist_response(false, message, ctrl.get_blacklist().await),
         ));
     }
@@ -448,7 +495,7 @@ async fn handle_blacklist_unban(
         let message = format!("解封失败，运行期状态未确认修改: {error:#}");
         ctrl.log(message.clone()).await;
         return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
+            controller_error_status(&error),
             blacklist_response(false, message, ctrl.get_blacklist().await),
         ));
     }
@@ -636,7 +683,7 @@ async fn handle_connect(
         Err(e) => {
             let message = format!("连接网络失败: {e:#}");
             ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
+            Err(api_error_from_controller(message, &e))
         }
     }
 }
@@ -647,7 +694,7 @@ async fn handle_disconnect(State(ctrl): State<Arc<AppController>>) -> ApiResult<
         Err(e) => {
             let message = format!("断开网络失败: {e:#}");
             ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
+            Err(api_error_from_controller(message, &e))
         }
     }
 }
@@ -670,7 +717,7 @@ async fn handle_host(
         Err(e) => {
             let message = format!("自建网络失败: {e:#}");
             ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
+            Err(api_error_from_controller(message, &e))
         }
     }
 }
@@ -681,7 +728,7 @@ async fn handle_stop_host(State(ctrl): State<Arc<AppController>>) -> ApiResult<A
         Err(e) => {
             let message = format!("停止自建网络失败: {e:#}");
             ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
+            Err(api_error_from_controller(message, &e))
         }
     }
 }
@@ -694,7 +741,7 @@ async fn handle_coordinator_ban(
     if let Err(error) = ctrl.ban_client(client_id.clone()).await {
         let message = format!("封禁客户端失败: {error:#}");
         ctrl.log(message.clone()).await;
-        return Err(api_error(StatusCode::BAD_REQUEST, message));
+        return Err(api_error_from_controller(message, &error));
     }
 
     if !blacklist_contains(&ctrl.get_blacklist().await, &client_id) {
@@ -715,7 +762,7 @@ async fn handle_coordinator_unban(
     if let Err(error) = ctrl.unban_client(&client_id).await {
         let message = format!("解封客户端失败: {error:#}");
         ctrl.log(message.clone()).await;
-        return Err(api_error(StatusCode::BAD_REQUEST, message));
+        return Err(api_error_from_controller(message, &error));
     }
 
     let after = ctrl.get_blacklist().await;
@@ -740,7 +787,7 @@ async fn handle_routing(
         Err(e) => {
             let message = format!("路由分流策略更新失败: {e:#}");
             ctrl.log(message.clone()).await;
-            Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message))
+            Err(api_error_from_controller(message, &e))
         }
     }
 }
@@ -4168,6 +4215,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_controller_problem_preserves_code_and_retryability() {
+        let ctrl = AppController::new();
+        let error = ctrl
+            .ban_client("node-bad".to_string())
+            .await
+            .expect_err("unsupported blacklist command must fail closed");
+        let (status, Json(body)) = api_error_from_controller("封禁客户端失败", &error);
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let problem = body.problem.expect("typed node problem");
+        assert_eq!(problem.code, NodeProblemCode::Unsupported);
+        assert!(!problem.retryable);
+        assert!(problem.message.contains("尚未提供封禁操作"));
+        assert!(body.error.contains("封禁客户端失败"));
+    }
+
+    #[tokio::test]
     async fn blacklist_mutations_fail_closed_without_coordinator() {
         let ctrl = Arc::new(AppController::new());
 
@@ -4180,7 +4244,7 @@ mod tests {
         .await
         .expect_err("ban without an active coordinator must not report success");
         let (ban_status, Json(ban_body)) = ban_error;
-        assert_eq!(ban_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(ban_status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(!ban_body.success);
         assert!(ban_body.message.contains("节点命令协议尚未提供封禁操作"));
         assert!(ban_body.blacklist.is_empty());
@@ -4194,7 +4258,7 @@ mod tests {
         .await
         .expect_err("unban without an active coordinator must not report success");
         let (unban_status, Json(unban_body)) = unban_error;
-        assert_eq!(unban_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(unban_status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(!unban_body.success);
         assert!(unban_body.message.contains("节点命令协议尚未提供解封操作"));
         assert!(unban_body.blacklist.is_empty());

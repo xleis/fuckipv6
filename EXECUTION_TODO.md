@@ -87,7 +87,7 @@
   - 工作：WebUI 节点操作和状态读取只通过共享命令总线、状态存储和事件流；controller 只保留连接/展示适配，不直接改业务状态。
   - 依赖：NX-03、NX-04、NX-05；涉及 `crates/client/src/webui/controller.rs`，提交前必须逐文件审阅。
   - 验收：移除 controller 内重复的网络/路由/Exit Node 状态机及直接运行时写入；HTTP 层只做 DTO 和鉴权转换；所有失败透传错误码与可重试标记；无网络、双网络、断线重连和权限拒绝均有集成测试。
-  - 进展（2026-11-01）：`AppController` 生产与测试构造均强制持有权威 `NodeStateStore + NodeCommandBus`，删除内部 legacy `AppUiState` 写状态、TCP IPC 轮询、`EmbeddedCoordinator`、取消通道和第二套网络状态机；连接、断开、建网、停网、Peer 探测与路由更新只提交类型化节点命令，快照、Peer 与流量只投影共享状态。旧黑名单和地址池热更新回退已移除并明确失败关闭；建网票据仅保留在本地所有者投影，不进入共享快照、事件或日志。客户端 480 项单元测试、1 项注册检查、8 项运行时进程测试与 clippy 已通过。剩余：NodeCommand 尚未提供黑名单/地址池变更，所有者票据尚无重启后 owner-only 持久化/查询，HTTP 层错误仍不是完整类型化 `NodeProblem` 透传，且无网络/双网络/断线重连/权限拒绝的 WebUI 端到端矩阵尚未完成。
+  - 进展（2026-11-01）：`AppController` 生产与测试构造均强制持有权威 `NodeStateStore + NodeCommandBus`，删除内部 legacy `AppUiState` 写状态、TCP IPC 轮询、`EmbeddedCoordinator`、取消通道和第二套网络状态机；连接、断开、建网、停网、Peer 探测与路由更新只提交类型化节点命令，快照、Peer 与流量只投影共享状态。旧黑名单和地址池热更新回退已移除并明确失败关闭；建网票据仅保留在本地所有者投影，不进入共享快照、事件或日志。控制器现保留类型化 `AppControllerError`，旧 WebUI HTTP 端点按 `NodeProblemCode` 返回稳定的 400/403/404/409/422/503，并在错误体附带完整 `NodeProblem`。客户端 481 项单元测试、1 项注册检查、8 项运行时进程测试与 clippy 已通过。剩余：NodeCommand 尚未提供黑名单/地址池变更，所有者票据尚无重启后 owner-only 持久化/查询，且无网络/双网络/断线重连/权限拒绝的 WebUI 端到端矩阵尚未完成。
 
 ### P0-B：GPUI 与 UI 对等
 

@@ -86,10 +86,20 @@ end-to-end system metric, not a claim of exact per-process attribution.
 |---|---|---|
 | `tcp_1flow` | unlimited TCP, one flow | throughput, p99, CPU/byte |
 | `tcp_8flow` | unlimited TCP, eight flows | throughput, p99, CPU/byte |
-| `udp_1420_saturated` | unlimited 1420-byte UDP | throughput, CPU/packet |
-| `udp_64_saturated` | unlimited 64-byte UDP | throughput, CPU/packet |
-| `udp_1420_controlled` | 50 Mbit/s 1420-byte UDP | throughput, p99, CPU/packet, loss |
-| `udp_64_controlled` | 5 Mbit/s 64-byte UDP | throughput, p99, CPU/packet, loss |
+| `udp_1420_saturated` | unlimited UDP, 1372-byte iperf3 payload | throughput, CPU/packet |
+| `udp_64_saturated` | unlimited UDP, 64-byte iperf3 payload | throughput, CPU/packet |
+| `udp_1420_controlled` | 50 Mbit/s UDP, 1372-byte iperf3 payload | throughput, p99, CPU/packet, loss |
+| `udp_64_controlled` | 5 Mbit/s UDP, 64-byte iperf3 payload | throughput, p99, CPU/packet, loss |
+
+The `udp_1420_*` names refer to the inner tunnel packet size. With an MTU of
+1420, inner IPv6 and UDP headers consume 48 bytes, so the iperf3 payload is
+`1420 - 48 = 1372` bytes. Using a 1420-byte iperf3 payload creates a 1468-byte
+inner packet, fragments it, and invalidates receiver-side UDP measurements.
+
+UDP throughput is computed only from iperf3 `end.sum_received`. If the receiver
+reports zero bytes while the sender reports packets, the sample is marked
+`valid=false` with `invalid_reason=zero_received_payload`; the harness does not
+fall back to the sender summary and the benchmark fails.
 
 The default run uses five repetitions and 30-second iperf3 streams with the first
 two seconds omitted from iperf3 aggregation. Each iperf3 client run is wrapped by

@@ -236,6 +236,39 @@ UDP shared bytes
 
 本报告没有在固定快照上重新运行测试、吞吐或 profiler；历史测试计数和历史基准不能自动归因给 `39ca637`。可勾选的 `[x]` 只限于快照中可直接读到并已有对应单元测试的底层原语；生产接线、端到端安全和性能保持未验证。
 
+### 1.2 后续提交与工作树复核（新增结论）
+
+> 本节补充 2026-10-31 后续整改，不修改 1.1 对固定快照 `39ca637` 的历史结论。当前已提交 HEAD 为 `4360aac17a524d1ac02a5a78340d8896595399b4`；生产连接层整合仍有大量未提交修改，因此必须同时区分“已提交原语”“工作树已接线”“实测二进制”。
+
+| 数据面结论 | 固定快照 `39ca637` | 当前状态 |
+|---|---|---|
+| UDP RX ownership | `recv_from` 后 `to_vec()`，认证 cache/二次 open | 工作树已用 owned pooled buffer；认证后直接把 plaintext ownership 交主循环 |
+| signaling ciphertext | 有 `Bytes -> Vec` 边界 | 工作树 payload 已改为 `Bytes`，经 CLI `SignalingAction` 原样持有 |
+| 入站队列 | 无界通道，积压可过 replay/cache 悬崖 | 工作树为默认 1024 有界队列，drop-newest 与指标已测；真实密码认证组合压测未做 |
+| UDP syscall | 逐包 `send_to/recv_from` | 工作树生产 RX/TX 已接 Linux `recvmmsg/sendmmsg`，默认 32、上限 128 |
+| TUN syscall | 逐包 read/write | 仍是每次 readiness edge 后逐包 `read(2)`，write 仍一包一次；只是减少唤醒，不是 batch syscall |
+| 会话锁 | 单状态锁，batch 串行 | `SecurePeerState` 仍是单一 `Mutex<SecureState>`；已加 lock 指标和同 peer 批量原语，但未拆锁 |
+| buffer/offload | 逐包分配，无 GSO/GRO | UDP receive pool 已分片；全链路统一池、GSO/GRO、TUN offload 仍未实现 |
+| 基准路径证明 | direct/fallback 混入风险 | 已断言 direct 且 fallback=0；修正 UDP 1420 口径；当前只有 1 run smoke，正式结果未生成 |
+
+**新的源码级判断：**
+
+1. `wireguard-go` 的核心优势不只是“批量 syscall”，而是 TUN/UDP 批量、per-peer 顺序队列、crypto worker 和内存所有权的组合。当前 fuckipv6 只补齐了 UDP 消息批处理；TUN 每包一次 syscall 仍是明确差距，不能仅凭 UDP `sendmmsg` 就认为数据面路径已追平。
+2. `seal_batch_in_place` 的 4-worker 微基准有约 2.4x 加速，但生产数据面仍未把批量 seal、worker 和每 peer 顺序发送完整连起来；微基准不能外推为端到端吞吐。
+3. signaling `RelayPacket` 的 CLI `Bytes -> Vec` 复制已消除，这是本轮明确的复制优化；但 postcard/frame 编码和协调端 decode/re-encode 仍会物化 payload，不能宣称整个 relay 链路零复制。
+4. `SecurePeerState` 仍让 send/open 共用一把状态锁。已有 `try_lock` 等待/持锁指标和批量临界区只能说明锁竞争可观测、获取次数可下降，不能说明锁已拆分或热路径已无争用。
+5. UDP pool sharding 解决了同一批 acquire/recycle 的集中竞争，但不是 TUN、seal/open、fallback 共用的固定 buffer 池；没有 GSO/GRO 时，64B 小包路径仍受每包开销限制。
+
+**新采集的 syscall 证据：**
+
+- 目录：`target/benchmarks/syscall-evidence-20261031/udp1420-clean/`、`udp64-clean/`；direct-path=true，fallback=0。
+- 1372B iperf3 payload（1420B 隧道包）：成功 TX batch 约 31.65 包/次，RX 约 20.42 包/次。
+- 64B payload：成功 TX batch 约 31.83 包/次，RX 约 17.12 包/次。
+- 外部 `strace -c` 同时显示 TUN `read/write` 次数与包数近似 1:1，证明 TUN 仍逐包穿越内核。
+- metadata 中的 `ec234b3a...` 是只读 strace wrapper hash；被测 binary hash 是 `720d02cc...786c1c`。
+
+**当前性能结论边界：** 修正后的三实现 smoke 为 1 run、5s、`--no-perf`，只能证明路径、有效样本和方向性差异，不能作为最终排名。当前仍为 **0/8 大项完整验收**；近期能关闭的是 UDP batch 与 syscall 证据，不能关闭 TUN batch、锁拆分、GSO/GRO 或端到端 worker 优化。
+
 ## 2. 对比方法和适用边界
 
 ### 2.1 做了什么

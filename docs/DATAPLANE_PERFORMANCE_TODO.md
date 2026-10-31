@@ -9,14 +9,21 @@
 
 > 这 8 项是当前性能收口的执行顺序；总表按 PERF-1..PERF-8 记录。状态只有同时具备源码、测试和实测证据时才改为完成。
 
-- [ ] **1. PERF-1 UDP/TUN 入站零复制。** 已去掉 UDP `recv_from` 后 `to_vec()`；补齐 signaling/QUIC relay 的 owned ciphertext 路径，避免 `Bytes -> Vec` 强制复制，并验证 pooled allocation 所有权。
-- [ ] **2. PERF-2 signaling fallback 复制与边界。** 复用同一逻辑密文、padded/oversized frame、断开重连和复制边界均已验证；受保护 CLI `Vec` 边界仍阻塞全链路零复制。
-- [ ] **3. PERF-3 有界入站队列。** 补 1024 默认容量下 4097+ 突发 drop-newest 断言，以及 peer remove、重放、rekey 组合压力测试。
-- [ ] **4. PERF-4 TUN/UDP syscall 批处理。** 复核 Linux TUN read batch 与 UDP `recvmmsg`/`sendmmsg` 生产接线；补 TUN write batch 或明确不可批处理边界；用 64B/1420B 计数与 `strace -c` 证明 syscall/包。
-- [ ] **5. PERF-5 AEAD batch/worker。** 验证串行预留 nonce、并行 AEAD、按 peer 顺序发送、失败关闭与过载可观测；做 serial batch vs worker batch 同口径微基准。
-- [ ] **6. PERF-6 会话热路径锁。** 先采集锁等待/profile；缩小 `SecurePeerState` 临界区，禁止持锁网络 I/O；补并发 seal/open、rekey、revoke、endpoint migration、remove 压力测试。
-- [ ] **7. PERF-7 buffer pool 与 GSO/GRO。** 完成剩余固定 buffer 所有权，探测并接入 Linux UDP GSO/GRO/TUN offload，失败自动回退；补边界和非 Linux 测试。
-- [ ] **8. PERF-8 可证明路径基准。** 基准启动时断言 direct UDP 且 fallback=0；记录 commit/diff/SHA、CPU、包长、syscall/profile；对比 fuckipv6、wireguard-go、kernel WireGuard，异常路径单列。
+- [ ] **1. PERF-1 UDP/TUN 入站零复制。** UDP RX owned pooled buffer、单次 AEAD open 和 signaling owned ciphertext 已实现并有单测；仍缺绑定最终提交的 allocation 与端到端吞吐证据。
+- [ ] **2. PERF-2 signaling fallback 复制与边界。** relay 与 signaling 复用同一逻辑密文，`SignalingEvent::RelayPacket` 到 CLI 的 `Bytes` ownership 已接通；仍缺 allocation/CPU 对吞吐和尾延迟的实测。
+- [ ] **3. PERF-3 有界入站队列。** 1024 默认容量、8193 包突发 drop-newest、4097+ 积压和模型化 remove/replay/rekey 组合压力测试已完成；仍缺真实 `P2pEngine` + 密码认证组合压力测试。
+- [ ] **4. PERF-4 TUN/UDP syscall 批处理。** UDP `recvmmsg`/`sendmmsg` 已在生产数据面接线，并由内外计数证明批处理；TUN read 仍是 readiness-edge 后逐包 `read(2)`，write 仍逐包，因此本大项不完整。
+- [ ] **5. PERF-5 AEAD batch/worker。** 串行预留 nonce、原地批量 seal/open 和 4-worker 微基准已具备；生产批量 worker、过载策略和端到端收益仍未验收。
+- [ ] **6. PERF-6 会话热路径锁。** 已加入 `try_lock` 竞争/等待/持锁指标和同 peer 批量临界区；`SecurePeerState` 仍以单一 `Mutex<SecureState>` 保护 send/open 状态，锁拆分和 profile 尚未完成。
+- [ ] **7. PERF-7 buffer pool 与 GSO/GRO。** UDP receive pool 已分片并降低稳态分配；全链路统一池、Linux UDP GSO/GRO、TUN offload 和非 Linux 回退仍未实现。
+- [ ] **8. PERF-8 可证明路径基准。** direct UDP/fallback=0 断言、原始 JSON、metadata、syscall 证据和三实现 smoke 已完成；正式多 run、perf 归因和可绑定最终二进制的排名仍未完成。
+
+### 进度快照（2026-10-31）
+
+- **大项：0/8 完整验收。** 大项要求同时具备独立提交、回归/安全测试、实测证据和同口径性能结论，当前没有一项全部满足。
+- **PERF 明细：27/48 已勾选，21 项未完成。** 这是本文件 PERF-1..PERF-8 的验收条目计数，不代表代码质量或性能完成百分比。
+- **最近可关闭：** PERF-4 的 UDP batch 与 64B/1420B syscall 证据、PERF-8 的 direct-path 前置断言已经完成；TUN batch 和生产 worker 不属于近期可关闭项。
+- **尚未证明：** 锁拆分、GSO/GRO、全链路池、真实密码认证组合压力测试、正式多 run 三实现排名，以及任何“已追平/超过 WireGuard”的结论。
 
 ## 0. 工作约束
 
@@ -327,8 +334,8 @@ P2-3 干净基准与 profiler 归因
 | P1-1 receiver index 路由 | 功能完成，性能待验证 | pair-scoped index；100-peer 全唯一，已注册/未知 endpoint 均单候选；32-bit 碰撞桶仍在 |
 | P1-1B session-scoped index | 待开始（可选） | 当前不是静态共享桶阻塞项；用于追平 wireguard-go 的每握手唯一/轮换粒度 |
 | P1-2 统计/endpoint/health 锁隔离 | 功能完成，性能待验证 | payload 使用原子时间戳/31 个流量桶；probe/RTT 保留低频 mutex；无锁等待指标或吞吐基准 |
-| P1-3a/b | 部分完成，性能待验证 | TUN 池化 ownership、出站原地 seal、认证明文复用分配、runtime relay 去 clone 已完成；UDP RX 和 signaling owned frame 仍各有一次复制；兼容 `seal()` 仍分配 |
-| P1-3c/P2 | 待开始 | 真 batch、完整 buffer pool、worker、GSO/GRO、干净基准 |
+| P1-3a/b | 部分完成，性能待验证 | TUN 池化 ownership、出站原地 seal、UDP owned RX、signaling `Bytes` ownership、runtime relay 去 clone 已完成；全链路仍有 frame 编码和兼容分配 |
+| P1-3c/P2 | 部分完成 | UDP `sendmmsg/recvmmsg` 已接线并实测；TUN 仍逐包 syscall，完整 buffer pool、生产 crypto worker、GSO/GRO 和正式干净基准未完成 |
 
 ## 下一执行批次：8 项性能收口
 
@@ -349,9 +356,9 @@ P2-3 干净基准与 profiler 归因
 - [x] 1 MiB postcard/signaling frame 上限、64 KiB relay payload 上限，以及 trailing/padding 拒绝均有测试。
 - [x] signaling 断开后自动重连并重新注册、保留虚拟地址的测试通过。
 - [x] 对外 QUIC relay `send_packet(Bytes)` 零复制；`&[u8]`/`&Vec<u8>` 是显式兼容复制路径。
-- [x] 记录剩余复制边界：客户端 `Vec -> Bytes` 可转移 ownership；postcard 编码把 payload 写入 frame buffer；客户端解码后仍因受保护的 CLI 边界执行一次 `Bytes -> Vec`；协调端 decode/re-encode 各物化一份 payload；随后 `Vec -> BytesMut` 可原地认证。
-- [ ] **阻塞项：** 受保护的 `crates/client/src/cli/commands.rs` 仍把 `SignalingEvent::RelayPacket` 当作 `Vec<u8>` 消费；该边界合入前不能宣称 signaling 全链路零复制。
-- [ ] **待实测：** 记录 peaked allocation/CPU 对吞吐和尾延迟的影响；当前只有所有权与边界证据。
+- [x] 记录剩余复制边界：客户端 `Vec -> Bytes` 可转移 ownership；postcard 编码把 payload 写入 frame buffer；协调端 decode/re-encode 各物化一份 payload；随后 `BytesMut` 可原地认证。
+- [x] **CLI ownership（工作树）：** `SignalingEvent::RelayPacket.payload` 已改为 `Bytes`，`SignalingAction::RelayedPacket` 原样持有它并交给 `InboundPacket::SealedCiphertext`，不再在该 CLI 边界执行 `Bytes -> Vec`。
+- [ ] **待实测：** 记录 peaked allocation/CPU 对吞吐和尾延迟的影响；当前只有所有权、边界和回归测试证据。
 
 ### PERF-3 入站队列有界背压
 
@@ -374,17 +381,18 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-4 TUN/UDP syscall 批处理
 
-- [ ] Linux TUN 路径实现 batch read/write（优先 multi-buffer 或等价接口），非 Linux 保留逐包 fallback。
-- [ ] UDP 使用 `recvmmsg`/`sendmmsg` 或等价异步 batch API，batch 上限有界且可配置。
-- [ ] 批量发送遵守每 peer nonce 顺序；batch 内单包失败不能破坏后续 nonce 或 replay 状态。
-- [ ] 用 syscall counter/`strace -c` 证明相同流量下 syscall/包下降；记录 64B 和 1420B 两组。
+- [ ] Linux TUN 路径实现 batch read/write（优先 multi-buffer 或等价接口），非 Linux 保留逐包 fallback。当前只完成 readiness-edge drain，未实现多包 syscall。
+- [x] UDP 使用 Linux `recvmmsg`/`sendmmsg`，默认 batch 32、上限 128、非 Linux 逐包 fallback；生产 UDP receiver 与同 peer sender 已接线。
+- [x] 批量发送在 syscall 前完成整个 prefix 的 seal，保持每 peer nonce 顺序；短写只把未发送 suffix 交 fallback，不重新 seal。对应测试为 `short_sendmmsg_falls_back_only_unsent_suffix_without_resealing`。
+- [x] 用内建 counter 与外部 `strace -c` 证明成功包/批和真实 syscall 数，归档 1420B/1372B-payload 与 64B 两组。
 
 **当前边界（2026-10-31）：**
 
 - Linux TUN 已有一条 readiness edge 后连续 drain 的 `read_batch`，但它仍是一包一次 `read(2)`；收益是减少唤醒和 task handoff，不能写成 syscall 批处理。
 - TUN 字符设备的一次 `write(2)` 对应一个 L3 packet；直接拼接多个 packet 的 `writev(2)` 会改变包边界，不能作为当前模型的 batch write。真正的多包写入需要 `io_uring` 多请求、multi-queue 或内核 ABI 层面验证。
-- UDP `recvmmsg`/`sendmmsg` 原语已提交；生产接线、nonce 顺序和短写 fallback 位于当前未完成的 P2P/CLI 联合改动中，受 CLI 边界合并阻塞，尚不能作为已提交的完整项。
-- 64B/1420B 的 `strace -c` syscall/包证据仍未归档，因此 PERF-4 不能标记完成。
+- UDP `recvmmsg`/`sendmmsg` 已在工作树的生产 UDP receiver/sender 上线；`d38986d` 提交的是底层原语，当前连接层整合尚未独立提交，因此只能记为“工作树已接线并实测，未进入完整验收”。
+- 外部证据位于 `target/benchmarks/syscall-evidence-20261031/udp1420-clean` 与 `udp64-clean`。内建 counter 的成功包/次约 31.65 TX、20.42 RX（1420B），以及 31.83 TX、17.12 RX（64B）；`strace -c` 的真实调用还包含 readiness 探测/失败尝试，不能直接用成功 batch 数替代。
+- 同组 strace 中 TUN 约每包一次 `read(2)`/`write(2)`，证明不能把当前 read drain 宣传成 TUN 批处理。PERF-4 因 TUN 多包 syscall 未实现而保持不完整。
 
 ### PERF-5 密码批处理接线与 worker 化
 
@@ -418,6 +426,7 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-7 完整 buffer pool、CPU worker 与 GSO/GRO
 
+- [x] UDP receive buffer pool 已按 shard 分配/回收，生产 smoke 的 buffer-pool `full_returns=0`；这不是全链路零分配证明。
 - [ ] 统一 TUN RX/TX、UDP RX/TX、seal/open 和 fallback frame 的固定大小 buffer pool，稳态零逐包分配。
 - [ ] 接入 per-CPU crypto workers，并让每 peer 的 nonce 排序与 worker 完成顺序解耦。
 - [ ] Linux UDP GSO/GRO 和 TUN offload 按 capability 探测，失败时自动回退。
@@ -426,11 +435,72 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 
 ### PERF-8 可证明路径的干净基准
 
-- [ ] 基准启动后断言实际 transport/endpoint；每轮记录 direct UDP、QUIC relay、signaling relay 和 fallback 次数。
+- [x] 基准每轮采集 direct-path/endpoint 与 fallback counter；修正后的 smoke 18/18 样本有效且 `fallback_packets_delta=0`。这些 smoke 不构成正式排名。
 - [ ] 固定 commit/工作树 diff、二进制 SHA256、编译 profile、CPU governor、MTU、包长、流数、warmup 和时长。
 - [ ] 采集 iperf3 原始日志、CPU profile、syscall、allocation、队列深度、锁等待和丢包原因。
 - [ ] 对比 fuckipv6、wireguard-go 和内核 WireGuard；异常路径样本不得进入排名。
 - [ ] 输出机器可读汇总与 Markdown 报告；明确哪些收益有统计显著性，哪些只是功能完成。
+
+## 性能与 syscall 证据（2026-10-31）
+
+### 1. UDP 1420B 口径修正
+
+此前 benchmark 将 TUN MTU=1420 与 iperf3 UDP payload=1420 混用。内层 IPv6+UDP 头占 48B，实际隧道包为 1468B，触发分片并让 iperf3 receiver `sum_received.bytes=0`；summarizer 又回退到 sender `sum`，掩盖了接收端零有效载荷。
+
+现已修正：
+
+- `udp_1420_*` 的 iperf3 payload 为 `MTU - 48 = 1372B`，隧道内层 L3 packet 为 1420B；
+- UDP 吞吐只读取 `end.sum_received`，禁止回退到 sender `sum`；
+- receiver bytes 为 0 而 sender 有包时标记 `valid=false`、`invalid_reason=zero_received_payload`，并让 benchmark 失败；
+- 回归测试覆盖 zero-receive 异常；旧目录 `target/benchmarks/dataplane-smoke-peerfix-20261031/` 保留为反例。
+
+### 2. 三实现 smoke（只作阶段证据）
+
+目录：`target/benchmarks/dataplane-smoke-udpfix-20261031/`。参数为 1 run、5s、omit 0、`--no-perf`，18/18 样本有效，direct 校验全部通过。吞吐单位 Gbit/s：
+
+| case | fuckipv6 | kernel WireGuard | wireguard-go |
+|---|---:|---:|---:|
+| TCP 1 flow | 0.630 | 1.373 | 3.055 |
+| TCP 8 flow | 0.634 | 1.418 | 3.169 |
+| UDP 1420 saturated | 0.696 | 1.798 | 0.813 |
+| UDP 64 saturated | 0.041 | 0.082 | 0.035 |
+| UDP 1420 controlled | 0.050 | 0.050 | 0.050 |
+| UDP 64 controlled | 0.005 | 0.005 | 0.005 |
+
+**证据边界：** metadata 记录提交 `d38986d`、工作树 dirty、二进制 SHA256 `720d02cc...786c1c`；该二进制时间早于当前 HEAD，且只有 1 run/5s，不能作为正式排名、显著性结论或最终提交验收。受控 UDP 的 50/5 Mbit/s 是发送上限，不测峰值能力。
+
+### 3. `strace -c` 与内建 batch counter
+
+正式采用的 clean 证据：
+
+- `target/benchmarks/syscall-evidence-20261031/udp1420-clean/`
+- `target/benchmarks/syscall-evidence-20261031/udp64-clean/`
+
+两组的 direct-path 均为真且 `fallback_packets_delta=0`。实测 binary SHA256 为 `720d02cc1a286c625c0a3f4ce7a6b261f3dfcc1ffd1a57a8fb4e42b922786c1c`。metadata 中的 SHA256 `ec234b3a...71a30` 是只读 strace wrapper 的 hash，不是被测二进制 hash。
+
+| 流量 | 方向 | 成功 datagrams / batch syscall | 峰值 batch | 外建 strace（含失败尝试） |
+|---|---|---:|---:|---|
+| 1420B | TX | 35,795 / 1,131 = 31.65 | 32 | `sendmmsg=1131` |
+| 1420B | RX | 35,878 / 1,757 = 20.42 | 32 | `recvmmsg=2464, errors=696` |
+| 64B | TX | 63,439 / 1,993 = 31.83 | 32 | `sendmmsg=1993` |
+| 64B | RX | 63,523 / 3,710 = 17.12 | 32 | `recvmmsg=5718, errors=1996` |
+
+strace 的手工调用数高于内建“成功 batch syscall”数，因为 `async_io` readiness 探测、非消费返回和失败尝试也会形成系统调用；两组数字统计口径不同，不能混算。
+
+同一批 strace 还显示 TUN 约每包一次 syscall：
+
+- 1420B：发送端 `read=36037`、接收端 `write=35901`；
+- 64B：发送端 `read=63679`、接收端 `write=63534`。
+
+因此当前准确结论是：**应用层 UDP TX/RX 已批量；TUN 仍是逐包 `read(2)`/`write(2)`。** TUN reader 的 readiness-edge 后 drain 降低了唤醒次数，但不是 syscall batch；Linux TUN 当前 ABI 也没有可直接照搬的 multi-message read。
+
+### 4. 当前未闭环项
+
+- TUN 多包写入/读取仍无实现；`writev` 拼接会改变 L3 packet 边界，不能直接宣称可行。
+- `seal_batch_in_place` 仍是底层/工作树能力，生产 crypto worker、过载策略和端到端收益未验收。
+- `SecurePeerState` 仍只有一把 `Mutex<SecureState>`，send/open 共用；已有等待/持锁指标不等于完成锁拆分。
+- UDP GSO/GRO 和 TUN offload 尚未实现；buffer pool 只覆盖 UDP receive。
+- 尚缺真实 `P2pEngine` + 密码认证组合压力测试、正式多 run/perf 归因，以及与最终独立提交绑定的前后对比。
 
 ## 本轮验证记录
 
@@ -450,17 +520,20 @@ cargo test -p fuckipv6-client p2p::secure_runtime --lib -- --nocapture
 
 ```text
 cargo fmt --all -- --check
-git diff --check
-cargo test -p fuckipv6-secure-session --lib
 cargo clippy -p fuckipv6-client --all-targets -- -D warnings
-cargo test -p fuckipv6-client -- --nocapture
+cargo test --workspace
+python3 scripts/test_bench_summarize.py -v
+python3 scripts/benchmarks/test_harness.py -v
+git diff --check
 ```
 
-结果：secure-session 114 passed；client 335 passed、2 ignored；integration test 1/1
-通过；clippy 无项目警告。仅剩依赖 `proc-macro-error2 v2.0.1` 的
-future-incompatibility 提示。
+结果：`cargo test --workspace` 全部通过，其中 client 392 passed、2 ignored；
+client Clippy 无项目警告；Python 基准测试 28 passed；fmt 与 `git diff --check`
+通过。依赖 `proc-macro-error2 v2.0.1` 仍有 future-incompatibility 提示。
+本轮没有执行 workspace 全量 Clippy、musl/Windows 交叉编译、特权 netns、
+WireGuard 对照或性能基准，因此不能把这些结果表述为完整平台门禁或性能收益。
 
-注意：这些是功能/回归证据，不是吞吐收益证据。P0 与 P1 的已完成项仍需在独立提交后使用同一基准测量；出站 TUN 已消除第二份密文，但 UDP RX 和 signaling owned frame 复制、syscall、串行 batch、会话锁、worker/GSO/GRO 和入站背压仍在。receiver index 已消除静态共享桶并恢复未知 endpoint 单候选，但仍有 32-bit 碰撞桶，且没有吞吐/尾延迟数据。
+注意：这些是功能/回归证据，不是吞吐收益证据。P0 与 P1 的已完成项仍需在独立提交后使用同一基准测量；UDP owned RX、signaling `Bytes` ownership 和 `sendmmsg/recvmmsg` 仍在未提交工作树，TUN 仍逐包 syscall，生产 crypto worker、GSO/GRO、会话锁拆分和真实认证压力测试仍未完成。receiver index 已消除静态共享桶并恢复未知 endpoint 单候选，但仍有 32-bit 碰撞桶，且没有吞吐/尾延迟数据。
 
 ## 完成定义
 

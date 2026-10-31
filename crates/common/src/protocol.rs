@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
@@ -33,6 +34,33 @@ impl ErrorCode {
             Self::Overloaded => "Service overloaded",
         }
     }
+}
+
+/// Hard upper bound for one postcard-encoded WebSocket signaling message.
+///
+/// This leaves ample room for large peer snapshots while preventing a peer from
+/// making either side deserialize arbitrary multi-megabyte control frames.
+pub const MAX_SIGNALING_MESSAGE_SIZE: usize = 1024 * 1024;
+/// The secure data protocol uses a 16-bit UDP payload length, so relayed
+/// ciphertext larger than this can never be a valid packet.
+pub const MAX_SIGNALING_RELAY_PAYLOAD_SIZE: usize = u16::MAX as usize;
+
+/// Reject signaling frames before postcard decoding or forwarding.
+pub fn validate_signaling_message_len(len: usize) -> anyhow::Result<()> {
+    if len > MAX_SIGNALING_MESSAGE_SIZE {
+        anyhow::bail!("signaling message too large: {len} > {MAX_SIGNALING_MESSAGE_SIZE}");
+    }
+    Ok(())
+}
+
+/// Reject relay payloads that cannot fit the secure data packet format.
+pub fn validate_signaling_relay_payload_len(len: usize) -> anyhow::Result<()> {
+    if len > MAX_SIGNALING_RELAY_PAYLOAD_SIZE {
+        anyhow::bail!(
+            "signaling relay payload too large: {len} > {MAX_SIGNALING_RELAY_PAYLOAD_SIZE}"
+        );
+    }
+    Ok(())
 }
 
 /// 信令消息类型
@@ -89,8 +117,8 @@ pub enum SignalingMessage {
     RelayPacket {
         src_ip: IpAddr,
         dst_ip: IpAddr,
-        #[serde(with = "serde_bytes")]
-        payload: Vec<u8>,
+        #[serde(with = "serde_bytes_owned")]
+        payload: Bytes,
     },
 
     /// 心跳
@@ -259,12 +287,12 @@ impl SignalingMessage {
     pub fn relay_packet(
         src_ip: impl Into<IpAddr>,
         dst_ip: impl Into<IpAddr>,
-        payload: Vec<u8>,
+        payload: impl Into<Bytes>,
     ) -> Self {
         Self::RelayPacket {
             src_ip: src_ip.into(),
             dst_ip: dst_ip.into(),
-            payload,
+            payload: payload.into(),
         }
     }
 
@@ -447,6 +475,29 @@ pub(crate) mod serde_bytes {
     }
 }
 
+/// serde support for owned, cheaply cloneable packet payloads.
+///
+/// Postcard still materializes bytes during encode/decode. This module only
+/// prevents adapters and queue handoffs from copying the payload again.
+pub(crate) mod serde_bytes_owned {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(bytes.as_ref())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<u8>::deserialize(deserializer).map(Bytes::from)
+    }
+}
+
 /// 控制消息 (在QUIC数据报中发送，无序传递)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
@@ -610,6 +661,29 @@ mod tests {
         };
         assert_eq!(decoded_request, Some(requested_ips.clone()));
         assert_eq!(virtual_ip, requested_ips.ipv6);
+        Ok(())
+    }
+
+    #[test]
+    fn signaling_boundaries_reject_oversized_and_padded_relay_frames() -> anyhow::Result<()> {
+        validate_signaling_message_len(MAX_SIGNALING_MESSAGE_SIZE)?;
+        assert!(validate_signaling_message_len(MAX_SIGNALING_MESSAGE_SIZE + 1).is_err());
+        validate_signaling_relay_payload_len(MAX_SIGNALING_RELAY_PAYLOAD_SIZE)?;
+        assert!(
+            validate_signaling_relay_payload_len(MAX_SIGNALING_RELAY_PAYLOAD_SIZE + 1).is_err()
+        );
+
+        let message = SignalingMessage::relay_packet(
+            "fd00::1".parse::<Ipv6Addr>()?,
+            "fd00::2".parse::<Ipv6Addr>()?,
+            Bytes::from_static(b"authenticated ciphertext"),
+        );
+        let mut padded = crate::codec::encode(&message)?;
+        padded.push(0);
+        assert!(
+            crate::codec::decode::<SignalingMessage>(&padded).is_err(),
+            "postcard must reject trailing or padding bytes"
+        );
         Ok(())
     }
 

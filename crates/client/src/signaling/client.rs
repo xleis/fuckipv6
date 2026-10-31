@@ -1,16 +1,26 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::{
-    codec, Identity, NatType, PeerInfo, RelayEndpoint, SignalingMessage, VirtualIps,
+    codec, validate_signaling_message_len, Identity, NatType, PeerInfo, RelayEndpoint,
+    SignalingMessage, VirtualIps, MAX_SIGNALING_MESSAGE_SIZE,
 };
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+};
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+
+fn signaling_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_SIGNALING_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_SIGNALING_MESSAGE_SIZE))
+}
 
 /// 信令客户端
 pub struct SignalingClient {
@@ -254,7 +264,8 @@ async fn connection_manager(
         }
 
         tracing::info!("正在连接协调服务器: {}", config.url);
-        match connect_async(&config.url).await {
+        match connect_async_with_config(&config.url, Some(signaling_websocket_config()), true).await
+        {
             Ok((ws_stream, _)) => {
                 handle_connected_signaling(
                     ws_stream,
@@ -413,6 +424,8 @@ where
 {
     match ws_msg {
         Ok(Message::Binary(data)) => {
+            validate_signaling_message_len(data.len())
+                .context("signaling websocket frame exceeds the configured limit")?;
             let msg = codec::decode::<SignalingMessage>(&data)
                 .context("failed to deserialize signaling message")?;
             handle_incoming_message(msg, runtime.channels, assigned_ips)?;
@@ -460,6 +473,8 @@ where
     <S as futures::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
 {
     let data = codec::encode(&msg).context("failed to serialize signaling message")?;
+    validate_signaling_message_len(data.len())
+        .context("serialized signaling message exceeds the configured limit")?;
     ws_sender
         .send(Message::Binary(data.into()))
         .await
@@ -627,7 +642,9 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         } => Some(SignalingEvent::RelayPacket {
             src_ip,
             dst_ip,
-            payload,
+            // Compatibility boundary: the protected CLI owner still consumes
+            // Vec here. Move this event to Bytes when that change lands.
+            payload: payload.to_vec(),
         }),
 
         SignalingMessage::ConnectInfo { peer } => Some(SignalingEvent::ConnectInfo { peer }),

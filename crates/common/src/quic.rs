@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -718,8 +719,8 @@ pub enum RelayMessage {
     Packet {
         src_ip: Ipv6Addr,
         dst_ip: Ipv6Addr,
-        #[serde(with = "crate::protocol::serde_bytes")]
-        payload: Vec<u8>,
+        #[serde(with = "crate::protocol::serde_bytes_owned")]
+        payload: Bytes,
     },
     Error {
         code: u16,

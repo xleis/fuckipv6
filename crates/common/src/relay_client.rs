@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -24,7 +25,34 @@ pub struct QuicRelayClient {
 pub struct RelayPacket {
     pub src_ip: Ipv6Addr,
     pub dst_ip: Ipv6Addr,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
+}
+
+/// Payload accepted by [`QuicRelayClient::send_packet`].
+///
+/// An owned [`Bytes`] is forwarded without copying. Borrowed byte slices are a
+/// compatibility path for callers that only have transient buffers and pay one
+/// explicit copy at this boundary.
+pub trait IntoRelayPayload {
+    fn into_relay_payload(self) -> Bytes;
+}
+
+impl IntoRelayPayload for Bytes {
+    fn into_relay_payload(self) -> Bytes {
+        self
+    }
+}
+
+impl IntoRelayPayload for &[u8] {
+    fn into_relay_payload(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
+impl IntoRelayPayload for &Vec<u8> {
+    fn into_relay_payload(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
 }
 
 impl QuicRelayClient {
@@ -161,12 +189,12 @@ impl QuicRelayClient {
         stream_id: u64,
         src_ip: Ipv6Addr,
         dst_ip: Ipv6Addr,
-        payload: &[u8],
+        payload: impl IntoRelayPayload,
     ) -> Result<()> {
         let packet = RelayMessage::Packet {
             src_ip,
             dst_ip,
-            payload: payload.to_vec(),
+            payload: payload.into_relay_payload(),
         };
         let (mut send, mut recv) = self
             .connection

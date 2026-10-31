@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use fuckipv6_common::{
     codec, decode_relay_message, decrypt_payload, encode_relay_message, encrypt_payload,
@@ -15,7 +16,7 @@ fn bench_protocol_serialization(c: &mut Criterion) {
     let relay = SignalingMessage::RelayPacket {
         src_ip: std::net::IpAddr::V6(src_ip),
         dst_ip: std::net::IpAddr::V6(dst_ip),
-        payload: payload.clone(),
+        payload: Bytes::from(payload.clone()),
     };
 
     let mut group = c.benchmark_group("protocol_serialization");
@@ -55,7 +56,7 @@ fn bench_relay_wire_format(c: &mut Criterion) {
     let packet = RelayMessage::Packet {
         src_ip,
         dst_ip,
-        payload,
+        payload: Bytes::from(payload),
     };
     let encoded = encode_relay_message(&packet).expect("encode relay packet");
 

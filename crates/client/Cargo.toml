@@ -48,6 +48,7 @@ chrono = { workspace = true }
 getrandom = { workspace = true }
 
 anyhow = { workspace = true }
+bytes = { workspace = true }
 
 # GPUI is a native desktop dependency. Unsupported targets keep the capability
 # disabled instead of reporting a browser-hosted surface as GPUI.

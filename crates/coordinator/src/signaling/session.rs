@@ -1039,6 +1039,8 @@ impl SessionManager {
     pub async fn send_to_client(&self, client_id: &ClientId, msg: SignalingMessage) -> Result<()> {
         if let Some(session) = self.sessions.read().await.get(client_id) {
             let data = codec::encode(&msg).context("序列化定向信令消息失败")?;
+            fuckipv6_common::validate_signaling_message_len(data.len())
+                .context("定向信令消息超过大小上限")?;
             let bytes = data.len();
             session
                 .tx
@@ -1061,6 +1063,8 @@ impl SessionManager {
             .find(|session| session.peer_info.matches_ip(virtual_ip))
         {
             let data = codec::encode(&msg).context("序列化虚拟 IP 信令消息失败")?;
+            fuckipv6_common::validate_signaling_message_len(data.len())
+                .context("虚拟 IP 信令消息超过大小上限")?;
             let bytes = data.len();
             session
                 .tx
@@ -1084,6 +1088,8 @@ impl SessionManager {
         );
 
         let data = codec::encode(&msg).context("序列化广播信令消息失败")?;
+        fuckipv6_common::validate_signaling_message_len(data.len())
+            .context("广播信令消息超过大小上限")?;
         let bytes = data.len() as u64;
         let mut sent = 0u64;
 
@@ -1777,7 +1783,7 @@ mod tests {
                 SignalingMessage::RelayPacket {
                     src_ip: IpAddr::V6(ip_a),
                     dst_ip: IpAddr::V6(ip_b),
-                    payload: payload.clone(),
+                    payload: payload.clone().into(),
                 },
             )
             .await?;

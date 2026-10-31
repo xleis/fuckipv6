@@ -1,12 +1,19 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::{codec, ErrorCode, Identity, RelayEndpoint, SignalingMessage};
+use bytes::Bytes;
+use fuckipv6_common::{
+    codec, validate_signaling_message_len, validate_signaling_relay_payload_len, ErrorCode,
+    Identity, RelayEndpoint, SignalingMessage, MAX_SIGNALING_MESSAGE_SIZE,
+};
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{
+    accept_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+};
 
 use super::session::SessionManager;
 
@@ -131,6 +138,12 @@ impl SignalingServer {
     }
 }
 
+fn signaling_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_SIGNALING_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_SIGNALING_MESSAGE_SIZE))
+}
+
 /// 处理单个WebSocket连接
 async fn handle_connection(
     stream: TcpStream,
@@ -140,7 +153,7 @@ async fn handle_connection(
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
-    let ws_stream = accept_async(stream)
+    let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
         .await
         .with_context(|| format!("WebSocket 握手失败: {addr}"))?;
     tracing::info!("WebSocket 连接已建立: {}", addr);
@@ -203,7 +216,7 @@ async fn handle_connection_message(
     match msg {
         Ok(Message::Binary(data)) => {
             handle_binary_message(
-                data.to_vec(),
+                &data,
                 addr,
                 session_manager,
                 tx,
@@ -230,7 +243,7 @@ async fn handle_connection_message(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_binary_message(
-    data: Vec<u8>,
+    data: &[u8],
     addr: SocketAddr,
     session_manager: &Arc<SessionManager>,
     tx: &mpsc::UnboundedSender<Message>,
@@ -242,8 +255,12 @@ async fn handle_binary_message(
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
     tracing::trace!("数据前32字节: {:?}", &data[..data.len().min(32)]);
     session_manager.record_signaling_rx(data.len());
+    if let Err(error) = validate_signaling_message_len(data.len()) {
+        tracing::warn!("拒绝超限信令帧 (来自 {addr}): {error:#}");
+        return;
+    }
 
-    match codec::decode::<SignalingMessage>(&data) {
+    match codec::decode::<SignalingMessage>(data) {
         Ok(msg) => {
             tracing::trace!("消息解析成功: {:?}", msg);
             if let Err(e) = handle_signaling_message(
@@ -296,6 +313,7 @@ fn send_binary(
     msg: SignalingMessage,
 ) -> Result<()> {
     let data = codec::encode(&msg).context("无法序列化信令消息")?;
+    validate_signaling_message_len(data.len()).context("信令消息超过大小上限")?;
     let bytes = data.len();
     tx.send(Message::Binary(data.into()))
         .context("无法发送信令消息到连接任务")?;
@@ -533,7 +551,7 @@ async fn handle_heartbeat(
 async fn handle_relay_packet(
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
-    payload: Vec<u8>,
+    payload: Bytes,
     session_manager: &Arc<SessionManager>,
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
@@ -573,6 +591,7 @@ async fn handle_relay_packet(
         return Ok(());
     }
 
+    validate_signaling_relay_payload_len(payload.len())?;
     let payload_len = payload.len();
     let packet = SignalingMessage::RelayPacket {
         src_ip,

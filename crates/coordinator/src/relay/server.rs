@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use fuckipv6_common::{
     build_quic_server_config_with_client_certificate_authorizer, export_quic_relay_channel_binding,
     generate_self_signed_quic_certificate, recv_relay_message, send_relay_message,
@@ -60,7 +61,7 @@ struct RelayPacketRequest {
     stream_id: u64,
     src_ip: Ipv6Addr,
     dst_ip: Ipv6Addr,
-    payload: Vec<u8>,
+    payload: Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -1298,9 +1299,9 @@ mod tests {
         }
         assert_eq!(server.state.limits.read().await.len(), 2);
 
-        let payload = b"relay-through-quic".to_vec();
+        let payload = Bytes::from_static(b"relay-through-quic");
         let (sent, delivered) = tokio::join!(
-            client_a.send_packet(7, ip_a, ip_b, &payload),
+            client_a.send_packet(7, ip_a, ip_b, payload.clone()),
             client_b.recv_packet(),
         );
         sent?;
@@ -1373,7 +1374,7 @@ mod tests {
             .ban_client(revoked_fingerprint[..16].to_string())
             .await;
         let destination_error = client_a
-            .send_packet(1, ip_a, ip_b, b"revoked destination")
+            .send_packet(1, ip_a, ip_b, Bytes::from_static(b"revoked destination"))
             .await
             .expect_err("revoked destination must not receive relay packets")
             .to_string();
@@ -1383,7 +1384,7 @@ mod tests {
             .ban_client(identity_a.client_id().to_string())
             .await;
         let source_error = client_a
-            .send_packet(2, ip_a, ip_b, b"revoked source")
+            .send_packet(2, ip_a, ip_b, Bytes::from_static(b"revoked source"))
             .await
             .expect_err("revoked source must not send relay packets")
             .to_string();
@@ -1451,7 +1452,12 @@ mod tests {
             .try_revoke_node(identity_b.client_id(), &identity_b.public_key())
             .await?;
         let destination_error = client_a
-            .send_packet(1, ip_a, ip_b, b"persistently revoked destination")
+            .send_packet(
+                1,
+                ip_a,
+                ip_b,
+                Bytes::from_static(b"persistently revoked destination"),
+            )
             .await
             .expect_err("persistently revoked destination must not receive relay packets")
             .to_string();
@@ -1461,7 +1467,12 @@ mod tests {
             .try_revoke_node(identity_a.client_id(), &identity_a.public_key())
             .await?;
         let source_error = client_a
-            .send_packet(2, ip_a, ip_b, b"persistently revoked source")
+            .send_packet(
+                2,
+                ip_a,
+                ip_b,
+                Bytes::from_static(b"persistently revoked source"),
+            )
             .await
             .expect_err("persistently revoked source must not send relay packets")
             .to_string();
@@ -1528,7 +1539,7 @@ mod tests {
 
         store.set_fail_revocation_reads(true);
         let error = client_a
-            .send_packet(1, ip_a, ip_b, b"storage unavailable")
+            .send_packet(1, ip_a, ip_b, Bytes::from_static(b"storage unavailable"))
             .await
             .expect_err("authorization storage errors must fail packet forwarding closed")
             .to_string();
@@ -1576,7 +1587,12 @@ mod tests {
 
         let wrong_src = "fd00::ffff".parse()?;
         let response = client
-            .send_packet(1, wrong_src, "fd00::1002".parse()?, b"bad")
+            .send_packet(
+                1,
+                wrong_src,
+                "fd00::1002".parse()?,
+                Bytes::from_static(b"bad"),
+            )
             .await;
 
         let error = response.unwrap_err().to_string();
@@ -1622,7 +1638,12 @@ mod tests {
                 .await?;
 
         let result = client
-            .send_packet(1, ip, "fd00::1002".parse()?, b"overloaded")
+            .send_packet(
+                1,
+                ip,
+                "fd00::1002".parse()?,
+                Bytes::from_static(b"overloaded"),
+            )
             .await;
 
         let error = result.unwrap_err().to_string();

@@ -5,6 +5,7 @@
 //! verifies that the peer process token belongs to the current user.
 
 use std::fmt;
+#[cfg(unix)]
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -279,7 +280,24 @@ impl LocalServer {
             ListenerOptions::new().name(name).mode(0o600)
         };
         #[cfg(windows)]
-        let options = ListenerOptions::new().name(name);
+        let options = {
+            use interprocess::os::windows::local_socket::ListenerOptionsExt;
+            use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+            use widestring::U16CString;
+
+            // A protected DACL granting access only through the owner-rights SID
+            // closes the pre-authentication connection window. The live peer SID
+            // check in `accept_raw` remains as defense in depth.
+            let descriptor = U16CString::from_str("D:P(A;;GA;;;OW)")
+                .map_err(|error| anyhow::anyhow!("无法编码 Windows IPC DACL: {error}"))
+                .and_then(|sddl| {
+                    SecurityDescriptor::deserialize(sddl.as_ucstr())
+                        .context("无法解析 Windows IPC 安全描述符")
+                })?;
+            ListenerOptions::new()
+                .name(name)
+                .security_descriptor(descriptor)
+        };
 
         let listener = options.create_tokio().with_context(|| {
             format!(
@@ -645,7 +663,6 @@ fn peer_identity(stream: &LocalStream) -> Result<PeerIdentity> {
     let credentials = stream.peer_creds().context("无法读取本地 IPC 对端凭据")?;
     let pid = credentials
         .pid()
-        .and_then(|pid| u32::try_from(pid).ok())
         .context("Windows 本地 IPC 未提供对端 PID")?;
     if !same_windows_user(pid).context("无法校验 Windows 本地 IPC 对端用户")? {
         bail!("拒绝本地 IPC 连接：对端进程不属于当前 Windows 用户");
@@ -799,6 +816,7 @@ mod tests {
     use serde_json::json;
     use tokio::io::duplex;
 
+    #[cfg(unix)]
     fn test_directory(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "fuckipv6-local-ipc-{label}-{}-{}",
@@ -1019,6 +1037,206 @@ mod tests {
     fn server_cleanup(directory: &Path) -> Result<()> {
         std::fs::remove_dir_all(directory)?;
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    const SECOND_UID_TEST_NAME: &str = "local_ipc::tests::real_second_uid_peer_is_rejected";
+    #[cfg(target_os = "linux")]
+    const SECOND_UID_ROLE_ENV: &str = "FUCKIPV6_SECOND_UID_TEST_ROLE";
+    #[cfg(target_os = "linux")]
+    const SECOND_UID_ENDPOINT_ENV: &str = "FUCKIPV6_SECOND_UID_TEST_ENDPOINT";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_second_uid_peer_is_rejected() -> Result<()> {
+        let role = match std::env::var(SECOND_UID_ROLE_ENV) {
+            Ok(role) => role,
+            Err(std::env::VarError::NotPresent) => return bootstrap_second_uid_test(),
+            Err(error) => return Err(error.into()),
+        };
+        match role.as_str() {
+            "coordinator" => run_second_uid_coordinator(),
+            "peer" => run_second_uid_peer(),
+            other => bail!("未知第二 UID 测试角色: {other}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn bootstrap_second_uid_test() -> Result<()> {
+        use std::process::Command;
+
+        let uid = current_user_id();
+        // SAFETY: getegid has no preconditions.
+        let gid = unsafe { libc::getegid() };
+        let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
+        let Some(subuid) = subordinate_id_start("/etc/subuid", &user, uid) else {
+            eprintln!("跳过真实第二 UID 测试：未找到可用的 /etc/subuid 映射");
+            return Ok(());
+        };
+        let Some(subgid) = subordinate_id_start("/etc/subgid", &user, gid) else {
+            eprintln!("跳过真实第二 UID 测试：未找到可用的 /etc/subgid 映射");
+            return Ok(());
+        };
+
+        let executable = std::env::current_exe().context("无法定位本地 IPC 测试程序")?;
+        let socket_path = test_directory("second-uid").join("peer.sock");
+        let output = Command::new("unshare")
+            .arg(format!("--map-users=0:{uid}:1"))
+            .arg(format!("--map-users=1:{subuid}:1"))
+            .arg(format!("--map-groups=0:{gid}:1"))
+            .arg(format!("--map-groups=1:{subgid}:1"))
+            .arg(executable)
+            .arg(SECOND_UID_TEST_NAME)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(SECOND_UID_ROLE_ENV, "coordinator")
+            .env(SECOND_UID_ENDPOINT_ENV, socket_path)
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("跳过真实第二 UID 测试：系统缺少 unshare");
+                return Ok(());
+            }
+            Err(error) => return Err(error).context("无法启动第二 UID 测试命名空间"),
+        };
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Operation not permitted") || stderr.contains("Invalid argument") {
+            eprintln!("跳过真实第二 UID 测试：当前系统不允许非特权用户命名空间");
+            return Ok(());
+        }
+        bail!(
+            "真实第二 UID 测试失败（status={}）\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            stderr
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn subordinate_id_start(path: &str, user: &str, id: u32) -> Option<u32> {
+        let numeric = id.to_string();
+        std::fs::read_to_string(path)
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let fields: Vec<_> = line.split(':').collect();
+                if fields.len() < 3 || (fields[0] != user && fields[0] != numeric) {
+                    return None;
+                }
+                let count = fields[2].parse::<u32>().ok()?;
+                (count > 0).then(|| fields[1].parse::<u32>().ok()).flatten()
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_second_uid_coordinator() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let socket_path = PathBuf::from(
+            std::env::var_os(SECOND_UID_ENDPOINT_ENV).context("第二 UID 测试缺少 socket 路径")?,
+        );
+        let directory = socket_path
+            .parent()
+            .context("第二 UID 测试 socket 无父目录")?;
+        std::fs::create_dir_all(directory)?;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o777))?;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let listener = runtime.block_on(async {
+            use interprocess::os::unix::local_socket::ListenerOptionsExt;
+
+            let name = socket_path
+                .to_str()
+                .context("第二 UID 测试 socket 路径不是 UTF-8")?
+                .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                .context("无法编码第二 UID 测试 socket 路径")?;
+            ListenerOptions::new()
+                .name(name)
+                .mode(0o777)
+                .create_tokio()
+                .context("无法创建第二 UID 测试监听器")
+        })?;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777))?;
+
+        let executable = std::env::current_exe().context("无法定位第二 UID helper 程序")?;
+        let mut child = Command::new("setpriv")
+            .args(["--reuid=1", "--regid=1", "--clear-groups", "--"])
+            .arg(executable)
+            .arg(SECOND_UID_TEST_NAME)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(SECOND_UID_ROLE_ENV, "peer")
+            .env(SECOND_UID_ENDPOINT_ENV, &socket_path)
+            .spawn()
+            .context("无法启动第二 UID peer helper")?;
+
+        let peer_result = runtime.block_on(async {
+            let stream = timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .map_err(|_| anyhow::anyhow!("等待第二 UID peer 连接超时"))?
+                .context("接受第二 UID peer 连接失败")?;
+            peer_identity(&stream)
+        });
+        let child_status = wait_for_helper(&mut child)?;
+        let peer = peer_result?;
+        assert!(
+            child_status.success(),
+            "第二 UID peer helper 失败: {child_status}"
+        );
+        assert_eq!(peer.euid, 1, "必须从内核读取真实第二 UID");
+        assert!(peer.pid.is_some(), "Linux peer 凭据必须包含 PID");
+        let error =
+            authorize_peer(peer, current_user_id()).expect_err("真实第二 UID peer 必须被拒绝");
+        assert!(error.to_string().contains("拒绝"));
+
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir(directory);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_second_uid_peer() -> Result<()> {
+        let socket_path = PathBuf::from(
+            std::env::var_os(SECOND_UID_ENDPOINT_ENV).context("第二 UID peer 缺少 socket 路径")?,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let name = socket_path
+                .to_str()
+                .context("第二 UID peer socket 路径不是 UTF-8")?
+                .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                .context("无法编码第二 UID peer socket 路径")?;
+            timeout(Duration::from_secs(3), LocalStream::connect(name))
+                .await
+                .map_err(|_| anyhow::anyhow!("第二 UID peer 连接超时"))??;
+            Ok(())
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_helper(child: &mut std::process::Child) -> Result<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("第二 UID peer helper 未在期限内退出");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[cfg(unix)]

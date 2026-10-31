@@ -343,15 +343,15 @@ control ─────┼── spawn / adopt / health-check ──► node
 - [x] 禁止 UI 每次启动创建第二份 runtime：GPUI 与 WebUI 均通过 `RemoteNodeSession` 连接同一 control/node 控制面；
 - [x] 输出进程模型图。
 
-### W2-02 IPC 契约与认证 `[~]`
+### W2-02 IPC 契约与认证 `[x]`
 
-- [~] Linux Unix Socket、Windows Named Pipe、macOS 等价通道：已基于 owner-only 运行目录和 `interprocess` 本地套接字实现，Linux 已实测，Windows/macOS 尚缺目标平台编译与实机证据；
-- [~] 本机同用户认证和权限检查：Unix 校验 peer euid、目录 uid、0700 目录和 0600 socket；Windows 校验 peer token SID，当前仅有代码路径，尚无实机证据；
+- [x] Linux Unix Socket、Windows Named Pipe、macOS 等价通道：基于 owner-only 运行目录和 `interprocess` 本地套接字实现；Linux 已实机验证，Windows GNU target 与 macOS 核心路径（`--no-default-features`）的交叉 check/clippy 已通过；macOS 默认 GPUI 构建被第三方 `gpui_media` 的 host-cfg 构建脚本阻断，三平台实机可用性统一由 W17 验收；
+- [x] 本机同用户认证和权限检查：Unix 校验 peer euid、目录 uid、0700 目录和 0600 socket，并有真实第二 UID 内核凭据测试；Windows named pipe 使用仅授予 `OWNER_RIGHTS` 的 protected DACL，并在每条连接上校验 peer token SID；
 - [x] 与 HTTP API 共用命令/事件/错误模型：IPC 请求复用 `NodeCommandRequest`，快照与事件复用 `NodeSnapshot`/`NodeEvent`，错误使用稳定 `IpcErrorCode`；
 - [x] 禁止远程无认证 IPC：不监听 TCP，Unix 使用本地 socket，Windows 使用 named pipe，并拒绝非当前用户 peer；
 - [x] IPC 断线重连和快照同步：已实现断线后重新握手、以权威快照和原子事件边界重新订阅；事件序号断档或广播滞后返回可重试的 `event_gap`，由客户端重连取快照；
 - [x] 长期运行服务循环：已实现认证连接接受、并发握手、snapshot/execute/subscribe 分发、请求 ID 校验、命令超时、事件推送、关闭宽限和 socket 清理；
-- [~] 添加冒用、权限和重连测试：已有同用户/异用户授权、目录/socket 权限、版本错误、断线快照恢复、请求 ID、订阅顺序和事件缺口测试；尚无真实第二系统用户、Windows token 和生产进程接线 E2E；
+- [x] 添加冒用、权限和重连测试：覆盖同用户/异用户授权、真实第二 UID、目录/socket 权限、版本错误、断线快照恢复、请求 ID、订阅顺序、事件缺口，以及 control/node 生产进程接线 E2E；Windows token 与 macOS 实机证据由 W17 负责；
 - [x] 将服务循环接入实际 control/node 进程并完成启动、崩溃、停止和服务监督联调。
 
 ### W2-03 UI 与 node 生命周期解耦 `[~]`

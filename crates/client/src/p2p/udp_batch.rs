@@ -425,6 +425,7 @@ pub(crate) use linux::{receive_batch, send_batch};
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::p2p::buffer_pool::UdpBufferPool;
 
     #[cfg(target_os = "linux")]

@@ -2477,6 +2477,7 @@ dependencies = [
  "tower",
  "tracing",
  "tun",
+ "widestring",
  "windows-sys 0.59.0",
  "wintun 0.5.1",
  "zeroize",

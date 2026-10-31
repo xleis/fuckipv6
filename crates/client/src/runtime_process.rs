@@ -20,8 +20,7 @@ use tokio::time::{sleep, timeout, MissedTickBehavior};
 
 use crate::cli::commands::RuntimeOptions;
 use crate::local_ipc::{
-    self, EndpointRole, IpcRole, LocalCommand, LocalEndpoint, LocalRequest, LocalResponse,
-    LocalServer,
+    self, EndpointRole, IpcRole, LocalCommand, LocalRequest, LocalResponse, LocalServer,
 };
 use crate::local_service::serve_owned_node;
 use crate::logging;
@@ -471,7 +470,7 @@ async fn stop_managed_node(mut child: Option<Child>) {
 fn remove_stale_node_endpoint() {
     #[cfg(unix)]
     {
-        if let Ok(LocalEndpoint::Path(path)) = local_ipc::endpoint(EndpointRole::Node) {
+        if let Ok(local_ipc::LocalEndpoint::Path(path)) = local_ipc::endpoint(EndpointRole::Node) {
             match std::fs::remove_file(&path) {
                 Ok(()) => tracing::debug!(path = %path.display(), "已清理残留节点 IPC socket"),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

@@ -427,11 +427,11 @@ Windows SCM 定义，安装脚本只调用该入口；`__service` 负责监督 c
 可交叉编译。macOS/Windows 尚无实机服务验证，Android 前台服务尚未实现，因此整体保持
 `[~]`，相关实机验收仍由 W16/W17 跟踪。
 
-### W2-09 关闭与清理看门狗 `[~]`
+### W2-09 关闭与清理看门狗 `[x]`
 
 - [x] 每个启动/停止步骤有硬超时：node ready、IPC 绑定/启动、状态刷新、UI 会话/WebUI 启动、优雅停止、强制终止、任务取消和 IPC 服务均有硬超时；
 - [x] 失败后杀进程并可观察；
-- [ ] 恢复 DNS/策略路由/路由表/TUN；
+- [x] 恢复 DNS/策略路由/路由表/TUN；
 - [x] 用户不需要手工 kill；
 - [x] 生成脱敏诊断；
 - [x] 清理失败是发布阻断。
@@ -444,8 +444,12 @@ cleanup 候选、会话/监听器/Peer/内嵌服务计数，以及逐项 cleanup
 敏感配置值。GPUI/WebUI 使用共享诊断结果展示可恢复问题，WebUI 对未知 cleanup 状态和
 失败原因失败关闭。发布门禁在全部平台强制要求 `lifecycle-cleanup` 精确回归通过；
 Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit 规则清理回归通过。
-任一项缺失或失败都会使平台报告及聚合报告不可发布。该门禁目前只证明受控 fake-runner
-与临时文件路径下的清理语义，不替代 macOS/Windows 实机恢复验证。
+任一项缺失或失败都会使平台报告及聚合报告不可发布。Linux 清理语义同时由 fake-runner
+单测和 `scripts/test-lifecycle-cleanup-netns.sh` 的真实 private network/mount namespace
+验收覆盖：后者实际创建 TUN、安装策略规则/私有路由表、接管 DoH DNS，并分别注入一次
+规则删除失败和 TUN 删除失败，验证 owner 保留、DNS/路由表恢复、第二次清理及幂等性。
+该特权测试只修改命名空间内网络和临时挂载，不触碰宿主日常路由或 `/etc/resolv.conf`；
+它仍不替代 macOS/Windows 实机恢复验证。
 
 ## 6. W3：所有者认证与公网安全
 

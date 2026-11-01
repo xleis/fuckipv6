@@ -499,6 +499,17 @@ python3 scripts/release-gate.py run --platform linux --toolchain stable
 DoH DNS、TUN 和 Exit 规则的有界清理回归。缺少测试或任一清理回归失败都会阻断平台
 报告和跨平台聚合，不能通过修改摘要或文案绕过。
 
+Linux 变更涉及 TUN、策略路由或 DNS 接管时，还应在具备 `/dev/net/tun` 的主机执行特权
+命名空间验收：
+
+```bash
+sudo ./scripts/test-lifecycle-cleanup-netns.sh
+```
+
+脚本会先构建测试，再进入 private network/mount namespace。实际 TUN、规则、路由表和
+临时 `resolv.conf` 均只存在于该命名空间；退出后由内核自动销毁，不修改宿主网络配置。
+该验收需要 root 和 namespace 权限，不属于无特权发布门禁。
+
 门禁通过不替代独立密码学审计、真实跨公网/跨 NAT 验证、目标平台实机验证或 WireGuard 性能对等证明。
 
 ---

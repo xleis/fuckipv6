@@ -82,7 +82,9 @@ PLATFORM_REQUIRED_CHECKS = {
 }
 UPSTREAM_JOBS = (
     "docs",
+    "contracts",
     "supply-chain",
+    "api-security",
     "gpui-smoke",
     "linux",
     "windows",
@@ -1177,8 +1179,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="JOB=RESULT",
         help=(
-            "GitHub Actions job result; required for docs, supply-chain, "
-            "gpui-smoke, linux, windows, and macos"
+            "GitHub Actions job result; required for docs, contracts, "
+            "supply-chain, api-security, gpui-smoke, linux, windows, and macos"
         ),
     )
     aggregate_parser.add_argument(

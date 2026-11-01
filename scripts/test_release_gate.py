@@ -169,6 +169,24 @@ class ReleaseGateTests(unittest.TestCase):
 
         self.assertIn("missing upstream job result: docs", errors)
 
+    def test_aggregate_requires_contracts_and_api_security_jobs(self) -> None:
+        for job in ("contracts", "api-security"):
+            with self.subTest(job=job):
+                results = COMPLETE_UPSTREAM_RESULTS.copy()
+                del results[job]
+
+                _, errors = GATE.aggregate_documents(
+                    loaded(
+                        ("linux", report("linux")),
+                        ("windows", report("windows")),
+                        ("macos", report("macos")),
+                    ),
+                    GATE.DEFAULT_PLATFORMS,
+                    results,
+                )
+
+                self.assertIn(f"missing upstream job result: {job}", errors)
+
     def test_upstream_result_parser_rejects_malformed_and_duplicate_values(self) -> None:
         results, errors = GATE.parse_upstream_results(
             ["docs=success", "docs=failure", "broken"]

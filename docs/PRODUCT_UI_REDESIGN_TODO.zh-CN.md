@@ -50,7 +50,7 @@
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
 | W3 所有者安全 | `[x]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全、W3-07 认证管理 UI 已完成；自动化边界与未做的真实公网/硬件认证器实测见各分项证据 |
-| W4 控制 API | `[~]` | P0 | W1,W2 | W4-01 的 v1 路径、统一响应元数据、对象投影与基础 SSE，W4-02 的幂等 operation 注册、202 提交、阶段事件、终态和结构化失败，W4-03 的可恢复 SSE cursor、快照 revision 对齐、缺口重同步和安全 WebSocket 认证，以及 W4-04 的分类错误、稳定 key/参数、重试恢复建议和授权脱敏已完成；服务端权限校验与限额待后续项 |
+| W4 控制 API | `[x]` | P0 | W1,W2 | W4-01 至 W4-07 已完成；版本化 API、operation/SSE、稳定错误、服务端授权、生成客户端、限额与自动化攻击面门禁均有测试证据。未进行真实公网环境实机压测 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
 | W7 节点页 | `[ ]` | P1 | W2,W4,W5 | 启停、接口、身份、诊断 |
@@ -727,14 +727,14 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `./scripts/generate-contracts.sh` 后 `git diff --exit-code -- contracts` 通过，证明重新生成无漂移；
 - CI 的 `contracts` 作业执行 schema/绑定门禁、完整重新生成，并以 `git diff --exit-code -- contracts` 阻断漂移。
 
-### W4-07 API 安全与限额 `[ ]`
+### W4-07 API 安全与限额 `[x]`
 
 - [x] 请求大小限制；
 - [x] 并发限制；
 - [x] 登录/命令限流；
 - [x] 可信代理；
 - [x] 审计关联；
-- [ ] 公网攻击面测试。
+- [x] 公网攻击面测试。
 
 **已实现与测试证据（2026-11-01）**
 
@@ -744,6 +744,8 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - 旧版 `/api/node/commands` 与 v1 `/api/v1/commands` 在 JSON 反序列化前统一限制请求体为 256 KiB，超限返回 HTTP 413、稳定 `payload_too_large` / `error.payload_too_large` 和 `limit_bytes` 参数；回归测试同时覆盖两个入口，确保超限请求不会进入命令解析与分派。
 - 两个命令入口共享每个适配器 32 个并发执行槽，耗尽时立即返回 HTTP 429、`Retry-After: 1` 和稳定 `rate_limited` / `error.rate_limited` 契约，不排队也不进入命令总线；成功和拒绝路径都会释放 permit，超限响应包含实际的 `concurrency_limit` 参数。针对性测试覆盖双入口快速失败、总线隔离、可重试语义和 permit 回收。
 - HTTP 适配器创建写操作后，将服务端生成的 operation ID 附加到可信 `NodeCommandContext`，命令审计再写入 `AuditEntry.operation_id`；该关联不读取请求 JSON 中的不可信字段。测试覆盖命令总线关联以及 v1 HTTP 操作完成后的 request ID、operation ID、actor/source、role 和 outcome 一致性，并验证邀请票据秘密不会进入审计详情。
+- `scripts/test-public-api-attack-surface.sh` 汇总 18 个精确命名的 HTTP/WebSocket 边界回归，覆盖未认证/无效 Bearer、URL 查询参数泄密、登录与命令限流、匿名和所有者 Cookie 跨站写、伪造代理头/Host/Origin、直连 TLS 代理头、请求体超限、并发槽耗尽与回收、legacy/v1 schema 降级、未知命令失败关闭；每一例都要求实际执行且恰好 1 passed，避免测试被改名或过滤成 0 项后静默通过。
+- CI 新增独立 `api-security` 作业执行该门禁并上传逐项日志；`release-gate.py aggregate` 现强制要求 `contracts` 与 `api-security` 上游作业均成功，避免汇总时遗漏契约或攻击面门禁。这只证明自动化边界验收完成，不代表已在真实公网、真实反向代理或独立攻击机上完成实机压测。
 
 ## 8. W5：共享设计系统
 

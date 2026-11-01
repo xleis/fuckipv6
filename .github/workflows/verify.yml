@@ -103,6 +103,31 @@ jobs:
           path: target/supply-chain
           if-no-files-found: warn
 
+  api-security:
+    name: Public API attack surface
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test public API attack surface
+        run: ./scripts/test-public-api-attack-surface.sh
+
+      - name: Upload attack-surface reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-api-security-reports
+          path: target/public-api-security
+          if-no-files-found: warn
+
   gpui-smoke:
     name: Native GPUI smoke
     runs-on: ubuntu-latest
@@ -235,7 +260,7 @@ jobs:
   aggregate:
     name: Aggregate release decision
     if: always()
-    needs: [docs, contracts, supply-chain, gpui-smoke, linux, windows, macos]
+    needs: [docs, contracts, supply-chain, api-security, gpui-smoke, linux, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -259,6 +284,7 @@ jobs:
             --upstream-result "docs=${{ needs.docs.result }}" \
             --upstream-result "contracts=${{ needs.contracts.result }}" \
             --upstream-result "supply-chain=${{ needs.supply-chain.result }}" \
+            --upstream-result "api-security=${{ needs.api-security.result }}" \
             --upstream-result "gpui-smoke=${{ needs.gpui-smoke.result }}" \
             --upstream-result "linux=${{ needs.linux.result }}" \
             --upstream-result "windows=${{ needs.windows.result }}" \

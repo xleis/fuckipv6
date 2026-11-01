@@ -10,8 +10,8 @@ use fuckipv6_common::i18n::{
 use fuckipv6_common::ui_components::{Capability, SemanticState};
 use fuckipv6_common::ui_layout::{DetailPresentation, LayoutClass, PageSection};
 use gpui::{
-    div, prelude::*, px, rgba, size, App, Application, Bounds, Context, Div, FocusHandle,
-    KeyDownEvent, Render, SharedString, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, rgba, size, App, Bounds, Context, Div, FocusHandle, KeyDownEvent, Render,
+    SharedString, Window, WindowBounds, WindowOptions,
 };
 
 use super::components::{
@@ -611,8 +611,9 @@ impl GpuiShell {
                     ),
             )
             .child(
-                toolbar()
+                toolbar("header-toolbar")
                     .child(status_badge(
+                        "header-primary-status",
                         t(self.locale, primary_status.label_key()).to_string(),
                         primary_status_semantic(primary_status),
                     ))
@@ -743,7 +744,7 @@ impl GpuiShell {
                             .child(t(self.locale, "gpui.subtitle").to_string()),
                     ),
             )
-            .child(tabs().flex_1().children(nav))
+            .child(tabs("primary-navigation").flex_1().children(nav))
             .child(
                 div()
                     .mx_3()
@@ -780,7 +781,11 @@ impl GpuiShell {
                             .text_color(rgba(COLOR_MUTED))
                             .child(t(self.locale, "common.node_capabilities").to_string()),
                     )
-                    .child(div().mt_2().child(capability_ring(&capability_items))),
+                    .child(
+                        div()
+                            .mt_2()
+                            .child(capability_ring("node-capabilities", &capability_items)),
+                    ),
             )
             .child(
                 div()
@@ -797,10 +802,10 @@ impl GpuiShell {
     fn error_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let error = self.error.clone().unwrap_or_default();
         component_toast(
+            "dismiss-error",
             tr(self.locale, "common.operation_failed", &[("error", &error)]),
             SemanticState::Danger,
         )
-        .id("dismiss-error")
         .on_click(cx.listener(|shell, _, _, cx| {
             shell.error = None;
             cx.notify();
@@ -809,6 +814,7 @@ impl GpuiShell {
 
     fn notice_banner(&self) -> impl IntoElement {
         component_toast(
+            "operation-notice",
             self.notice.clone().unwrap_or_default(),
             SemanticState::Success,
         )
@@ -864,6 +870,7 @@ impl GpuiShell {
                 Ok(model) => model,
                 Err(error) => {
                     return component_error_state(
+                        "page-mapping-error",
                         t(self.locale, "common.page_mapping_failed"),
                         error.to_string(),
                     )
@@ -924,6 +931,7 @@ impl GpuiShell {
                         )
                         .children(if actions.is_empty() {
                             vec![component_empty_state(
+                                "no-shared-actions",
                                 t(self.locale, "common.no_shared_actions"),
                                 t(self.locale, "common.page_no_actions"),
                             )
@@ -1005,6 +1013,7 @@ impl GpuiShell {
                             ))),
                     )
                     .child(status_badge(
+                        SharedString::from(format!("action-status-{}", action.id)),
                         status,
                         if action.backend_status == NodeUiBackendStatus::Implemented {
                             SemanticState::Success
@@ -1121,22 +1130,17 @@ impl GpuiShell {
         let field_key_for_click = field_key.clone();
         let focused = self.focused_field.as_deref() == Some(field_key.as_str());
         let placeholder = placeholder_for(self.locale, &field.input, &action.id, &field.id);
-        let display = if value.is_empty() {
-            placeholder.to_string()
-        } else if focused {
-            format!("{value}│")
-        } else {
-            value.to_string()
-        };
+        let label = field_label(self.locale, &field.label_key);
         text_input(
             SharedString::from(format!("field-{field_key}")),
-            display,
-            value.is_empty(),
+            label,
+            value,
+            placeholder,
             focused,
         )
         .on_click(cx.listener(move |shell, _, window, cx| {
             shell.focused_field = Some(field_key_for_click.clone());
-            window.focus(&shell.focus_handle);
+            window.focus(&shell.focus_handle, cx);
             cx.notify();
         }))
         .into_any_element()
@@ -1233,6 +1237,7 @@ impl GpuiShell {
                             .child(t(self.locale, "common.primary_status").to_string()),
                     )
                     .child(status_badge(
+                        "detail-primary-status",
                         t(self.locale, status.label_key()).to_string(),
                         primary_status_semantic(status),
                     )),
@@ -1575,8 +1580,8 @@ pub fn run_window(
     let open_error = Arc::new(Mutex::new(None::<String>));
     let error_slot = open_error.clone();
 
-    Application::new().run(move |cx: &mut App| {
-        cx.on_window_closed(|cx| {
+    gpui_platform::application().run(move |cx: &mut App| {
+        cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

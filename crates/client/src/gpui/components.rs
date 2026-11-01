@@ -9,7 +9,7 @@ use fuckipv6_common::design_tokens::{
     Color, DARK_THEME, DIMENSIONS, RADII, SPACING_PX, TYPOGRAPHY,
 };
 use fuckipv6_common::ui_components::{Capability, SemanticState, UiComponent};
-use gpui::{div, prelude::*, px, rgba, Div, FontWeight, SharedString, Stateful};
+use gpui::{div, prelude::*, px, rgba, Div, FontWeight, Role, SharedString, Stateful, Toggled};
 
 /// Stable mapping between the shared component inventory and native adapter
 /// constructor names. The test suite asserts that this remains exhaustive.
@@ -164,8 +164,13 @@ pub fn button(
         }
     };
 
+    let label = label.into();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .focusable()
+        .tab_stop(!disabled)
         .flex()
         .items_center()
         .justify_center()
@@ -182,23 +187,34 @@ pub fn button(
             .round()))
         .font_weight(FontWeight(TYPOGRAPHY.medium_weight as f32))
         .opacity(if disabled { 0.62 } else { 1.0 })
-        .child(label.into())
+        .child(label)
 }
 
 pub fn text_input(
     id: SharedString,
+    aria_label: impl Into<SharedString>,
     value: impl Into<SharedString>,
-    empty: bool,
+    placeholder: impl Into<SharedString>,
     focused: bool,
 ) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
+    let value = value.into();
+    let placeholder = placeholder.into();
+    let empty = value.is_empty();
     div()
         .id(id)
+        .role(Role::TextInput)
+        .aria_label(aria_label)
+        .aria_value(value.clone())
+        .aria_placeholder(placeholder.clone())
+        .focusable()
+        .tab_stop(false)
         .flex()
         .items_center()
         .min_h(px(DIMENSIONS.control_md_px as f32))
         .px(px(SPACING_PX[3] as f32))
         .py(px(SPACING_PX[2] as f32))
+        .overflow_hidden()
         .rounded(px(RADII.md_px as f32))
         .bg(rgba(colors.input_background.rgba_hex()))
         .border_1()
@@ -222,7 +238,7 @@ pub fn text_input(
             }
             .rgba_hex(),
         ))
-        .child(value.into())
+        .child(if empty { placeholder } else { value })
 }
 
 pub fn choice_control(
@@ -230,9 +246,36 @@ pub fn choice_control(
     label: impl Into<SharedString>,
     selected: bool,
 ) -> Stateful<Div> {
+    choice_surface(id, label.into(), selected, Role::RadioButton)
+}
+
+pub fn tab_control(
+    id: SharedString,
+    label: impl Into<SharedString>,
+    selected: bool,
+) -> Stateful<Div> {
+    choice_surface(id, label.into(), selected, Role::Tab)
+}
+
+fn choice_surface(
+    id: SharedString,
+    label: SharedString,
+    selected: bool,
+    role: Role,
+) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
     div()
         .id(id)
+        .role(role)
+        .aria_label(label.clone())
+        .aria_selected(selected)
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .focusable()
+        .tab_stop(true)
         .flex()
         .items_center()
         .h(px(DIMENSIONS.control_sm_px as f32))
@@ -269,13 +312,19 @@ pub fn choice_control(
         } else {
             TYPOGRAPHY.regular_weight
         } as f32))
-        .child(label.into())
+        .child(label)
 }
 
 pub fn nav_tab(id: SharedString, label: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
+    let label = label.into();
     let mut tab = div()
         .id(id)
+        .role(Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(selected)
+        .focusable()
+        .tab_stop(true)
         .mx(px(SPACING_PX[3] as f32))
         .px(px(SPACING_PX[3] as f32))
         .py(px(SPACING_PX[2] as f32))
@@ -294,7 +343,7 @@ pub fn nav_tab(id: SharedString, label: impl Into<SharedString>, selected: bool)
             }
             .rgba_hex(),
         ))
-        .child(label.into());
+        .child(label);
     tab = if selected {
         tab.bg(rgba(colors.accent_soft.rgba_hex()))
             .border_l_2()
@@ -305,17 +354,35 @@ pub fn nav_tab(id: SharedString, label: impl Into<SharedString>, selected: bool)
     tab
 }
 
-pub fn tabs() -> Div {
-    div().flex().flex_col().gap(px(SPACING_PX[1] as f32))
-}
-
-pub fn toolbar() -> Div {
-    div().flex().items_center().gap(px(SPACING_PX[3] as f32))
-}
-
-pub fn badge(label: impl Into<SharedString>, state: SemanticState) -> Div {
-    let palette = semantic_palette(state);
+pub fn tabs(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     div()
+        .id(id)
+        .role(Role::TabList)
+        .flex()
+        .flex_col()
+        .gap(px(SPACING_PX[1] as f32))
+}
+
+pub fn toolbar(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Toolbar)
+        .flex()
+        .items_center()
+        .gap(px(SPACING_PX[3] as f32))
+}
+
+pub fn badge(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    state: SemanticState,
+) -> Stateful<Div> {
+    let palette = semantic_palette(state);
+    let label = label.into();
+    div()
+        .id(id)
+        .role(Role::Label)
+        .aria_label(label.clone())
         .px(px(SPACING_PX[2] as f32))
         .py(px(SPACING_PX[1] as f32))
         .rounded(px(RADII.full_px as f32))
@@ -325,18 +392,23 @@ pub fn badge(label: impl Into<SharedString>, state: SemanticState) -> Div {
         .text_color(rgba(palette.foreground.rgba_hex()))
         .text_size(px(TYPOGRAPHY.xs.size_px as f32))
         .font_weight(FontWeight(TYPOGRAPHY.medium_weight as f32))
-        .child(label.into())
+        .child(label)
 }
 
-pub fn status_badge(label: impl Into<SharedString>, state: SemanticState) -> Div {
-    badge(label, state)
+pub fn status_badge(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    state: SemanticState,
+) -> Stateful<Div> {
+    badge(id, label, state).role(Role::Status)
 }
 
 /// Native capability adapter. Segments are backed by the shared capability
 /// colors and every segment also has a visible text legend.
-pub fn capability_ring(items: &[CapabilityItem]) -> Div {
+pub fn capability_ring(id: impl Into<gpui::ElementId>, items: &[CapabilityItem]) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
-    let segments = items.iter().map(|item| {
+    let id = id.into();
+    let segments = items.iter().enumerate().map(|(index, item)| {
         let segment_color = match item.visual {
             CapabilityVisual::Active => capability_color(item.capability),
             CapabilityVisual::Degraded => colors.warning,
@@ -344,6 +416,9 @@ pub fn capability_ring(items: &[CapabilityItem]) -> Div {
             CapabilityVisual::Unsupported => colors.text_faint,
         };
         div()
+            .id(SharedString::from(format!("{id}-{index}")))
+            .role(Role::ListItem)
+            .aria_label(item.label.clone())
             .flex()
             .items_center()
             .gap(px(SPACING_PX[1] as f32))
@@ -364,6 +439,9 @@ pub fn capability_ring(items: &[CapabilityItem]) -> Div {
     });
 
     div()
+        .id(id.clone())
+        .role(Role::List)
+        .aria_label("Capabilities")
         .flex()
         .flex_wrap()
         .items_center()
@@ -372,12 +450,22 @@ pub fn capability_ring(items: &[CapabilityItem]) -> Div {
 }
 
 fn state_surface(
+    id: impl Into<gpui::ElementId>,
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
     state: SemanticState,
-) -> Div {
+) -> Stateful<Div> {
     let palette = semantic_palette(state);
+    let title = title.into();
+    let detail = detail.into();
     div()
+        .id(id)
+        .role(match state {
+            SemanticState::Danger | SemanticState::PermissionDenied => Role::Alert,
+            _ => Role::Status,
+        })
+        .aria_label(title.clone())
+        .aria_description(detail.clone())
         .flex()
         .flex_col()
         .gap(px(SPACING_PX[2] as f32))
@@ -391,38 +479,62 @@ fn state_surface(
                 .text_size(px(TYPOGRAPHY.xl.size_px as f32))
                 .font_weight(FontWeight(TYPOGRAPHY.semibold_weight as f32))
                 .text_color(rgba(palette.foreground.rgba_hex()))
-                .child(title.into()),
+                .child(title),
         )
         .child(
             div()
                 .text_size(px(TYPOGRAPHY.sm.size_px as f32))
                 .text_color(rgba(DARK_THEME.colors.text_muted.rgba_hex()))
-                .child(detail.into()),
+                .child(detail),
         )
 }
 
-pub fn empty_state(title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Div {
-    state_surface(title, detail, SemanticState::Neutral)
+pub fn empty_state(
+    id: impl Into<gpui::ElementId>,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Stateful<Div> {
+    state_surface(id, title, detail, SemanticState::Neutral)
 }
 
-pub fn error_state(title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Div {
-    state_surface(title, detail, SemanticState::Danger)
+pub fn error_state(
+    id: impl Into<gpui::ElementId>,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Stateful<Div> {
+    state_surface(id, title, detail, SemanticState::Danger)
 }
 
 pub fn permission_denied_state(
+    id: impl Into<gpui::ElementId>,
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
-) -> Div {
-    state_surface(title, detail, SemanticState::PermissionDenied)
+) -> Stateful<Div> {
+    state_surface(id, title, detail, SemanticState::PermissionDenied)
 }
 
-pub fn unsupported_state(title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Div {
-    state_surface(title, detail, SemanticState::Unsupported)
+pub fn unsupported_state(
+    id: impl Into<gpui::ElementId>,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Stateful<Div> {
+    state_surface(id, title, detail, SemanticState::Unsupported)
 }
 
-pub fn toast(message: impl Into<SharedString>, state: SemanticState) -> Div {
+pub fn toast(
+    id: impl Into<gpui::ElementId>,
+    message: impl Into<SharedString>,
+    state: SemanticState,
+) -> Stateful<Div> {
     let palette = semantic_palette(state);
+    let message = message.into();
     div()
+        .id(id)
+        .role(match state {
+            SemanticState::Danger | SemanticState::PermissionDenied => Role::Alert,
+            _ => Role::Status,
+        })
+        .aria_label(message.clone())
         .mx(px(SPACING_PX[6] as f32))
         .mt(px(SPACING_PX[4] as f32))
         .px(px(SPACING_PX[4] as f32))
@@ -433,7 +545,7 @@ pub fn toast(message: impl Into<SharedString>, state: SemanticState) -> Div {
         .border_color(rgba(palette.border.rgba_hex()))
         .text_color(rgba(palette.foreground.rgba_hex()))
         .text_size(px(TYPOGRAPHY.sm.size_px as f32))
-        .child(message.into())
+        .child(message)
 }
 
 #[cfg(test)]

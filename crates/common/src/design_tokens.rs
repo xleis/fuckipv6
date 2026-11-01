@@ -355,6 +355,8 @@ pub const RADII: RadiusTokens = RadiusTokens {
 pub struct DimensionTokens {
     pub sidebar_px: u16,
     pub topbar_px: u16,
+    pub action_panel_compact_px: u16,
+    pub action_panel_default_px: u16,
     pub detail_min_px: u16,
     pub detail_default_px: u16,
     pub detail_max_px: u16,
@@ -379,6 +381,8 @@ pub struct DimensionTokens {
 pub const DIMENSIONS: DimensionTokens = DimensionTokens {
     sidebar_px: 232,
     topbar_px: 56,
+    action_panel_compact_px: 300,
+    action_panel_default_px: 330,
     detail_min_px: 320,
     detail_default_px: 360,
     detail_max_px: 480,
@@ -609,6 +613,16 @@ pub fn webui_css() -> &'static str {
         }
         ThemeTokens::push_px(&mut css, "sidebar-w", DIMENSIONS.sidebar_px);
         ThemeTokens::push_px(&mut css, "topbar-h", DIMENSIONS.topbar_px);
+        ThemeTokens::push_px(
+            &mut css,
+            "action-panel-compact-w",
+            DIMENSIONS.action_panel_compact_px,
+        );
+        ThemeTokens::push_px(
+            &mut css,
+            "action-panel-w",
+            DIMENSIONS.action_panel_default_px,
+        );
         ThemeTokens::push_px(&mut css, "detail-min-w", DIMENSIONS.detail_min_px);
         ThemeTokens::push_px(&mut css, "detail-w", DIMENSIONS.detail_default_px);
         ThemeTokens::push_px(&mut css, "detail-max-w", DIMENSIONS.detail_max_px);

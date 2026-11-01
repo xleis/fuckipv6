@@ -1,9 +1,10 @@
 //! Shared responsive application-layout contract.
 //!
 //! The native and browser shells use this module for breakpoints, stable
-//! primary-navigation semantics, region order, detail-panel bounds, and loading
-//! behavior. Rendering remains platform-specific, but the structural decisions
-//! cannot drift between GPUI, WebUI, and the Android contract.
+//! primary-navigation semantics, region order, the persistent action-panel
+//! surface, object-detail presentation, and loading behavior. Rendering remains
+//! platform-specific, but structural decisions cannot drift between GPUI,
+//! WebUI, and the Android contract.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -19,11 +20,16 @@ pub enum AppRegion {
     Sidebar,
     Topbar,
     Content,
-    Detail,
+    ActionPanel,
 }
 
 impl AppRegion {
-    pub const ALL: [Self; 4] = [Self::Sidebar, Self::Topbar, Self::Content, Self::Detail];
+    pub const ALL: [Self; 4] = [
+        Self::Sidebar,
+        Self::Topbar,
+        Self::Content,
+        Self::ActionPanel,
+    ];
 
     /// Stable DOM attribute value shared with the browser runtime.
     pub const fn name(self) -> &'static str {
@@ -31,7 +37,7 @@ impl AppRegion {
             Self::Sidebar => "sidebar",
             Self::Topbar => "topbar",
             Self::Content => "content",
-            Self::Detail => "detail",
+            Self::ActionPanel => "action-panel",
         }
     }
 }
@@ -77,7 +83,6 @@ pub enum NavigationMode {
     BottomNavigation,
     MenuDrawer,
     Sidebar,
-    SidebarWithDetail,
 }
 
 impl NavigationMode {
@@ -85,8 +90,7 @@ impl NavigationMode {
         match layout {
             LayoutClass::Mobile => Self::BottomNavigation,
             LayoutClass::Compact => Self::MenuDrawer,
-            LayoutClass::Desktop => Self::Sidebar,
-            LayoutClass::Wide => Self::SidebarWithDetail,
+            LayoutClass::Desktop | LayoutClass::Wide => Self::Sidebar,
         }
     }
 
@@ -95,25 +99,72 @@ impl NavigationMode {
             Self::BottomNavigation => "bottom-navigation",
             Self::MenuDrawer => "menu-drawer",
             Self::Sidebar => "sidebar",
-            Self::SidebarWithDetail => "sidebar-with-detail",
         }
     }
 }
 
-/// How the context/detail panel is presented at a given width.
+/// How the current page's persistent action surface is presented.
+///
+/// It is always part of the page structure: stacked below the content on
+/// narrow layouts, narrower beside it in the desktop class, and at its full
+/// shared width from the wide breakpoint onward.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DetailPresentation {
-    Hidden,
-    Drawer,
-    Persistent,
+pub enum ActionPanelPresentation {
+    Stacked,
+    Compact,
+    Full,
 }
 
-impl DetailPresentation {
+impl ActionPanelPresentation {
+    pub const fn for_layout(layout: LayoutClass) -> Self {
+        match layout {
+            LayoutClass::Mobile | LayoutClass::Compact => Self::Stacked,
+            LayoutClass::Desktop => Self::Compact,
+            LayoutClass::Wide => Self::Full,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Stacked => "stacked",
+            Self::Compact => "compact",
+            Self::Full => "full",
+        }
+    }
+
+    /// Returns `None` when the panel occupies the full inline size below the
+    /// content rather than a separate desktop column.
+    pub const fn width_px(self) -> Option<u16> {
+        match self {
+            Self::Stacked => None,
+            Self::Compact => Some(DIMENSIONS.action_panel_compact_px),
+            Self::Full => Some(DIMENSIONS.action_panel_default_px),
+        }
+    }
+}
+
+/// Presentation for object inspection explicitly opened from content.
+///
+/// Object details never form a fourth desktop column. At desktop widths they
+/// replace the action-panel column; on narrow layouts they use a drawer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectDetailPresentation {
+    Drawer,
+    ActionPanelColumn,
+}
+
+impl ObjectDetailPresentation {
     pub const fn for_layout(layout: LayoutClass) -> Self {
         match layout {
             LayoutClass::Mobile | LayoutClass::Compact => Self::Drawer,
-            LayoutClass::Desktop => Self::Hidden,
-            LayoutClass::Wide => Self::Persistent,
+            LayoutClass::Desktop | LayoutClass::Wide => Self::ActionPanelColumn,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Drawer => "drawer",
+            Self::ActionPanelColumn => "action-panel-column",
         }
     }
 }
@@ -212,41 +263,15 @@ pub fn navigation_module(id: &str) -> Option<&'static NavigationModule> {
     navigation_modules().iter().find(|module| module.id == id)
 }
 
-/// Stable local tabs for manifest-driven pages. Data is shown first; actions
-/// remain reachable without changing the page or losing its selected network.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PageSection {
-    Data,
-    Actions,
-}
-
-impl PageSection {
-    pub const ALL: [Self; 2] = [Self::Data, Self::Actions];
-    pub const DEFAULT: Self = Self::Data;
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Data => "data",
-            Self::Actions => "actions",
-        }
-    }
-
-    pub const fn label_key(self) -> &'static str {
-        match self {
-            Self::Data => "page_tab.data",
-            Self::Actions => "page_tab.actions",
-        }
-    }
-}
-
 /// Loading behavior shared by both surfaces.
 pub const INITIAL_LOAD_USES_LAYOUT_MATCHING_SKELETON: bool = true;
 pub const REFRESH_KEEPS_EXISTING_CONTENT: bool = true;
-pub const DETAIL_LOAD_DOES_NOT_RESIZE_CONTENT: bool = true;
+pub const ACTION_PANEL_LOAD_DOES_NOT_RESIZE_CONTENT: bool = true;
+pub const OBJECT_DETAIL_DOES_NOT_CREATE_A_FOURTH_DESKTOP_COLUMN: bool = true;
 
-/// Returns every region that exists in the logical shell contract. Detail is
-/// represented as a drawer below the wide breakpoint rather than being removed
-/// from the information architecture.
+/// Returns every base region in accessibility and keyboard traversal order.
+/// ActionPanel is a first-class page region; object details are an alternate
+/// presentation of that column, not an additional base region.
 pub const fn app_regions() -> [AppRegion; 4] {
     AppRegion::ALL
 }
@@ -270,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_and_detail_modes_follow_the_contract() {
+    fn navigation_and_action_panel_modes_follow_the_contract() {
         assert_eq!(
             NavigationMode::for_layout(LayoutClass::Mobile),
             NavigationMode::BottomNavigation
@@ -285,15 +310,40 @@ mod tests {
         );
         assert_eq!(
             NavigationMode::for_layout(LayoutClass::Wide),
-            NavigationMode::SidebarWithDetail
+            NavigationMode::Sidebar
         );
         assert_eq!(
-            DetailPresentation::for_layout(LayoutClass::Desktop),
-            DetailPresentation::Hidden
+            ActionPanelPresentation::for_layout(LayoutClass::Mobile),
+            ActionPanelPresentation::Stacked
         );
         assert_eq!(
-            DetailPresentation::for_layout(LayoutClass::Wide),
-            DetailPresentation::Persistent
+            ActionPanelPresentation::for_layout(LayoutClass::Compact),
+            ActionPanelPresentation::Stacked
+        );
+        assert_eq!(
+            ActionPanelPresentation::for_layout(LayoutClass::Desktop),
+            ActionPanelPresentation::Compact
+        );
+        assert_eq!(
+            ActionPanelPresentation::for_layout(LayoutClass::Wide),
+            ActionPanelPresentation::Full
+        );
+        assert_eq!(ActionPanelPresentation::Stacked.width_px(), None);
+        assert_eq!(
+            ActionPanelPresentation::Compact.width_px(),
+            Some(DIMENSIONS.action_panel_compact_px)
+        );
+        assert_eq!(
+            ActionPanelPresentation::Full.width_px(),
+            Some(DIMENSIONS.action_panel_default_px)
+        );
+        assert_eq!(
+            ObjectDetailPresentation::for_layout(LayoutClass::Compact),
+            ObjectDetailPresentation::Drawer
+        );
+        assert_eq!(
+            ObjectDetailPresentation::for_layout(LayoutClass::Desktop),
+            ObjectDetailPresentation::ActionPanelColumn
         );
     }
 
@@ -301,7 +351,7 @@ mod tests {
     fn regions_have_one_stable_reading_order() {
         assert_eq!(
             app_regions().map(AppRegion::name),
-            ["sidebar", "topbar", "content", "detail"]
+            ["sidebar", "topbar", "content", "action-panel"]
         );
     }
 
@@ -361,17 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn page_sections_keep_a_stable_default() {
-        assert_eq!(PageSection::ALL.len(), 2);
-        assert_eq!(PageSection::DEFAULT, PageSection::Data);
-        assert_eq!(PageSection::Data.name(), "data");
-        assert_eq!(PageSection::Actions.label_key(), "page_tab.actions");
-    }
-
-    #[test]
     fn geometry_uses_the_product_design_values() {
         assert_eq!(DIMENSIONS.sidebar_px, 232);
         assert_eq!(DIMENSIONS.topbar_px, 56);
+        assert_eq!(DIMENSIONS.action_panel_compact_px, 300);
+        assert_eq!(DIMENSIONS.action_panel_default_px, 330);
         assert_eq!(DIMENSIONS.detail_default_px, 360);
         assert_eq!(DIMENSIONS.detail_min_px, 320);
         assert_eq!(DIMENSIONS.detail_max_px, 480);
@@ -406,6 +450,7 @@ mod tests {
         }
         assert!(css.contains(".ui-skeleton"));
         assert!(css.contains(".ui-bottom-nav"));
+        assert!(css.contains(".ui-action-panel"));
         assert!(css.contains(".ui-detail"));
         assert!(css.contains(".ui-local-tabs"));
     }

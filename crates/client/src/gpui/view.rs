@@ -9,8 +9,8 @@ use fuckipv6_common::i18n::{
 };
 use fuckipv6_common::ui_components::{Capability, SemanticState};
 use fuckipv6_common::ui_layout::{
-    navigation_module_for_page, navigation_modules, DetailPresentation, LayoutClass,
-    NavigationModule, PageSection,
+    navigation_module_for_page, navigation_modules, ActionPanelPresentation, LayoutClass,
+    NavigationModule,
 };
 use gpui::{
     actions, div, prelude::*, px, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle,
@@ -65,7 +65,6 @@ struct GpuiShell {
     snapshot: NodeSnapshot,
     manifest: Option<NodeUiManifest>,
     selected_page: String,
-    selected_section: PageSection,
     selected_network: Option<String>,
     pending_confirmation: Option<String>,
     form_values: HashMap<String, String>,
@@ -100,7 +99,6 @@ impl GpuiShell {
             snapshot,
             manifest: None,
             selected_page: "overview".into(),
-            selected_section: PageSection::DEFAULT,
             selected_network,
             pending_confirmation: None,
             form_values: HashMap::new(),
@@ -326,7 +324,6 @@ impl GpuiShell {
                 {
                     if let Some(page) = manifest.pages.first() {
                         self.selected_page = page.id.clone();
-                        self.selected_section = PageSection::DEFAULT;
                     }
                 }
                 self.manifest = Some(manifest);
@@ -720,7 +717,6 @@ impl GpuiShell {
                 )
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.selected_page = page_id.clone();
-                    shell.selected_section = PageSection::DEFAULT;
                     shell.pending_confirmation = None;
                     shell.error = None;
                     shell.notice = None;
@@ -879,25 +875,6 @@ impl GpuiShell {
     }
 
     fn local_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let action_count = self
-            .page()
-            .map(|page| page.actions.len())
-            .unwrap_or_default();
-        let tab = |section: PageSection, label: String| {
-            let selected = self.selected_section == section;
-            tab_control(
-                SharedString::from(format!("page-section-{}", section.name())),
-                label,
-                selected,
-            )
-            .on_click(cx.listener(move |shell, _, _, cx| {
-                shell.selected_section = section;
-                shell.pending_confirmation = None;
-                cx.notify();
-            }))
-            .into_any_element()
-        };
-
         let page_tabs = self
             .manifest
             .as_ref()
@@ -919,7 +896,6 @@ impl GpuiShell {
                             )
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 shell.selected_page = page_id.clone();
-                                shell.selected_section = PageSection::DEFAULT;
                                 shell.pending_confirmation = None;
                                 cx.notify();
                             }))
@@ -930,48 +906,26 @@ impl GpuiShell {
             })
             .unwrap_or_default();
 
-        let page_tab_list = div()
-            .id("module-page-tabs")
-            .role(A11Y_TAB_LIST_ROLE)
-            .aria_label(t(self.locale, "common.module_pages").to_string())
-            .flex()
-            .items_center()
-            .gap_2()
-            .children(page_tabs);
-
-        let section_tabs = div()
-            .id("page-sections")
-            .role(A11Y_TAB_LIST_ROLE)
-            .aria_label(t(self.locale, "common.page_sections").to_string())
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(tab(
-                PageSection::Data,
-                t(self.locale, "common.data").to_string(),
-            ))
-            .child(tab(
-                PageSection::Actions,
-                tr(
-                    self.locale,
-                    "gpui.section_action_count",
-                    &[("count", &action_count.to_string())],
-                ),
-            ));
-
         div()
             .id("local-toolbar")
             .flex()
             .items_center()
-            .justify_between()
             .gap_4()
             .px_6()
             .pt_4()
-            .child(page_tab_list)
-            .child(section_tabs)
+            .child(
+                div()
+                    .id("module-page-tabs")
+                    .role(A11Y_TAB_LIST_ROLE)
+                    .aria_label(t(self.locale, "common.module_pages").to_string())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(page_tabs),
+            )
     }
 
-    fn page_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn page_content(&self) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return loading_skeleton().into_any_element();
         };
@@ -987,17 +941,6 @@ impl GpuiShell {
                     .into_any_element();
                 }
             };
-        let actions = if self.selected_section == PageSection::Actions {
-            self.page()
-                .cloned()
-                .map(|page| page.actions)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|action| self.action_card(action, cx))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
 
         let mut content = div()
             .id("page-scroll")
@@ -1010,48 +953,23 @@ impl GpuiShell {
             .overflow_y_scroll()
             .flex_1();
 
-        match self.selected_section {
-            PageSection::Data => {
-                if !model.metrics.is_empty() {
-                    content = content.child(div().flex().flex_wrap().gap_3().children(
-                        model.metrics.iter().map(|metric| {
-                            metric_card(&metric.label, &metric.value, &metric.source)
-                        }),
-                    ));
-                }
-                content = content.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .children(model.sections.iter().map(section_card)),
-                );
-            }
-            PageSection::Actions => {
-                content = content.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_lg()
-                                .text_color(rgba(COLOR_TEXT))
-                                .child(t(self.locale, "common.shared_actions").to_string()),
-                        )
-                        .children(if actions.is_empty() {
-                            vec![component_empty_state(
-                                "no-shared-actions",
-                                t(self.locale, "common.no_shared_actions"),
-                                t(self.locale, "common.page_no_actions"),
-                            )
-                            .into_any_element()]
-                        } else {
-                            actions
-                        }),
-                );
-            }
+        if !model.metrics.is_empty() {
+            content = content.child(
+                div().flex().flex_wrap().gap_3().children(
+                    model
+                        .metrics
+                        .iter()
+                        .map(|metric| metric_card(&metric.label, &metric.value, &metric.source)),
+                ),
+            );
         }
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .children(model.sections.iter().map(section_card)),
+        );
 
         content.into_any_element()
     }
@@ -1284,81 +1202,94 @@ impl GpuiShell {
             .into_any_element()
     }
 
-    fn detail_panel(&self) -> impl IntoElement {
-        let status = self.snapshot.primary_status();
-        let selected_network = self
-            .selected_network
-            .as_deref()
-            .unwrap_or(t(self.locale, "common.not_selected"));
+    fn action_panel(&self, layout: LayoutClass, cx: &mut Context<Self>) -> impl IntoElement {
+        let presentation = ActionPanelPresentation::for_layout(layout);
+        let actions = self
+            .page()
+            .cloned()
+            .map(|page| page.actions)
+            .unwrap_or_default();
+        let action_cards = actions
+            .into_iter()
+            .map(|action| self.action_card(action, cx))
+            .collect::<Vec<_>>();
+        let body = if action_cards.is_empty() {
+            component_empty_state(
+                "no-shared-actions",
+                t(self.locale, "common.no_shared_actions"),
+                t(self.locale, "common.page_no_actions"),
+            )
+            .into_any_element()
+        } else {
+            div()
+                .id("action-panel-body")
+                .flex()
+                .flex_col()
+                .gap_3()
+                .overflow_y_scroll()
+                .children(action_cards)
+                .into_any_element()
+        };
 
-        div()
-            .id("wide-detail")
+        let mut panel = div()
+            .id("action-panel")
             .role(Role::Complementary)
-            .aria_label(t(self.locale, "common.current_context").to_string())
+            .aria_label(t(self.locale, "common.shared_actions").to_string())
             .flex()
             .flex_col()
-            .gap_4()
-            .w(px(DIMENSIONS.detail_default_px as f32))
-            .h_full()
-            .p_5()
+            .gap_3()
+            .p_4()
             .bg(rgba(COLOR_SIDEBAR))
-            .border_l_1()
             .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_lg()
-                            .text_color(rgba(COLOR_TEXT))
-                            .child(t(self.locale, "common.current_context").to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "gpui.context_hint").to_string()),
-                    ),
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "common.shared_actions").to_string()),
             )
-            .child(detail_row(
-                t(self.locale, "common.page"),
-                page_title(self.locale, &self.selected_page),
-            ))
-            .child(detail_row(
-                t(self.locale, "common.current_network"),
-                selected_network.to_string(),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "common.primary_status").to_string()),
-                    )
-                    .child(status_badge(
-                        "detail-primary-status",
-                        t(self.locale, status.label_key()).to_string(),
-                        primary_status_semantic(status),
-                    )),
-            )
-            .child(detail_row(
-                t(self.locale, "common.revision"),
-                self.snapshot.revision.to_string(),
-            ))
+            .child(body);
+
+        panel = match presentation {
+            ActionPanelPresentation::Stacked => panel.w_full().max_h(px(360.0)).border_t_1(),
+            ActionPanelPresentation::Compact | ActionPanelPresentation::Full => panel
+                .h_full()
+                .w(px(presentation.width_px().unwrap_or_default() as f32))
+                .border_l_1(),
+        };
+        panel
     }
 }
 
 impl Render for GpuiShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
-        let show_detail = DetailPresentation::for_layout(layout) == DetailPresentation::Persistent;
-        let content = self.page_content(cx);
+        let presentation = ActionPanelPresentation::for_layout(layout);
+        let content = self.page_content();
+        let action_panel = self.action_panel(layout, cx);
+        let workspace = if presentation == ActionPanelPresentation::Stacked {
+            div()
+                .id("page-workspace")
+                .role(A11Y_TAB_PANEL_ROLE)
+                .aria_label(t(self.locale, "common.module_pages").to_string())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(content)
+                .child(action_panel)
+        } else {
+            div()
+                .id("page-workspace")
+                .role(A11Y_TAB_PANEL_ROLE)
+                .aria_label(t(self.locale, "common.module_pages").to_string())
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .child(content)
+                .child(action_panel)
+        };
         let mut main = div()
             .id("main-content")
             .role(A11Y_MAIN_ROLE)
@@ -1376,37 +1307,9 @@ impl Render for GpuiShell {
             main = main.child(self.notice_banner());
         }
 
-        main = main
-            .child(self.local_tabs(cx))
-            .child(
-                div()
-                    .id("page-panel")
-                    .role(A11Y_TAB_PANEL_ROLE)
-                    .aria_label(tr(
-                        self.locale,
-                        "gpui.page_section_panel",
-                        &[
-                            ("page", &page_label(self.locale, &self.selected_page)),
-                            ("section", self.selected_section.name()),
-                        ],
-                    ))
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .child(content),
-            )
-            .child(
-                div()
-                    .px_6()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgba(COLOR_BORDER))
-                    .text_xs()
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(t(self.locale, "gpui.footer").to_string()),
-            );
+        main = main.child(self.local_tabs(cx)).child(workspace);
 
-        let mut root = div()
+        div()
             .id("gpui-root")
             .role(A11Y_ROOT_ROLE)
             .aria_label("fuckipv6")
@@ -1417,13 +1320,7 @@ impl Render for GpuiShell {
             .h_full()
             .bg(rgba(COLOR_BG))
             .child(self.sidebar(cx))
-            .child(main);
-
-        if show_detail {
-            root = root.child(self.detail_panel());
-        }
-
-        root
+            .child(main)
     }
 }
 
@@ -1466,25 +1363,6 @@ fn loading_skeleton() -> Div {
         )
         .child(block(180.0))
         .child(block(140.0))
-}
-
-fn detail_row(label: &str, value: String) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .rounded_md()
-        .bg(rgba(COLOR_PANEL))
-        .border_1()
-        .border_color(rgba(COLOR_BORDER))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgba(COLOR_MUTED))
-                .child(label.to_string()),
-        )
-        .child(div().text_sm().text_color(rgba(COLOR_TEXT)).child(value))
 }
 
 fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
@@ -1903,19 +1781,22 @@ mod tests {
     }
 
     #[test]
-    fn data_is_the_default_local_page_section() {
-        assert_eq!(PageSection::DEFAULT, PageSection::Data);
-    }
-
-    #[test]
-    fn wide_layout_persists_detail_at_the_shared_breakpoint() {
+    fn action_panel_follows_the_shared_desktop_width_contract() {
         assert_eq!(
-            DetailPresentation::for_layout(layout_for_window_width(1279.0)),
-            DetailPresentation::Hidden
+            ActionPanelPresentation::for_layout(layout_for_window_width(899.0)),
+            ActionPanelPresentation::Stacked
         );
         assert_eq!(
-            DetailPresentation::for_layout(layout_for_window_width(1280.0)),
-            DetailPresentation::Persistent
+            ActionPanelPresentation::for_layout(layout_for_window_width(900.0)),
+            ActionPanelPresentation::Compact
+        );
+        assert_eq!(
+            ActionPanelPresentation::for_layout(layout_for_window_width(1279.0)),
+            ActionPanelPresentation::Compact
+        );
+        assert_eq!(
+            ActionPanelPresentation::for_layout(layout_for_window_width(1280.0)),
+            ActionPanelPresentation::Full
         );
     }
 
@@ -2196,8 +2077,8 @@ mod tests {
             LayoutClass::Desktop
         );
         assert_eq!(
-            DetailPresentation::for_layout(layout_for_window_width(1280.0)),
-            DetailPresentation::Persistent
+            ActionPanelPresentation::for_layout(layout_for_window_width(1280.0)),
+            ActionPanelPresentation::Full
         );
     }
 }

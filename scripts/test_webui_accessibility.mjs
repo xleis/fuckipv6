@@ -9,8 +9,10 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sharedCss = readFileSync(path.join(root, "crates/common/assets/ui-components.css"), "utf8");
 const sharedJs = readFileSync(path.join(root, "crates/common/assets/ui-components.js"), "utf8");
-const nodeHtml = readFileSync(path.join(root, "crates/client/src/webui/node_ui.html"), "utf8");
-const nodeJs = readFileSync(path.join(root, "crates/client/src/webui/node_ui.js"), "utf8");
+const navigationContract = readFileSync(path.join(root, "crates/common/assets/ui-navigation.json"), "utf8");
+const reactStyles = readFileSync(path.join(root, "webui/src/styles.css"), "utf8");
+const reactActionPanel = readFileSync(path.join(root, "webui/src/components/action-panel.tsx"), "utf8");
+const reactPageContent = readFileSync(path.join(root, "webui/src/components/page-content.tsx"), "utf8");
 
 function findChrome() {
   const candidates = [
@@ -153,6 +155,7 @@ const fixture = `<!doctype html>
     <section data-ui-page-panel="actions" role="tabpanel" hidden>Actions panel</section>
   </section>
   <div id="capability-host"></div>
+  <script>window.FuckIPv6Navigation = Object.freeze(${navigationContract});</script>
   <script>${sharedJs}</script>
   <script>
     const ui = window.FuckIPv6UI;
@@ -370,15 +373,30 @@ async function main() {
     assert.equal(ring.svgHidden, "true");
     assert.ok(ring.states.every((state) => state.text.includes(state.active === "true" ? "Enabled" : "Disabled")));
 
-    assert.ok((nodeHtml.match(/data-ui-dialog/g) || []).length >= 3, "node surfaces must expose accessible dialog roots");
-    assert.match(nodeHtml, /button:focus-visible,input:focus-visible,select:focus-visible/);
-    assert.match(nodeHtml, /bindTopologyMenuRows/);
-    assert.match(nodeHtml, /ui\.bindContextMenu\(button, menu\)/);
-    assert.match(nodeHtml, /ui\.bindContextMenu\(rowElement, menu,/);
-    assert.match(nodeHtml, /topology\.more_actions/);
-    assert.match(nodeJs, /function topologyRows/);
-    assert.match(nodeJs, /topology\.peer_row/);
-    assert.match(nodeJs, /topology\.peer_capabilities_unavailable/);
+    const primaryNavigation = await evaluate(`window.FuckIPv6UI.primaryNavigation.map((module) => ({
+      id: module.id,
+      defaultPageId: module.pageId,
+      pageIds: module.pageIds,
+    }))`);
+    assert.deepEqual(primaryNavigation.map((module) => module.id), [
+      "overview", "nodes", "networks", "activity", "settings",
+    ]);
+    assert.deepEqual(primaryNavigation.flatMap((module) => module.pageIds), [
+      "overview", "peers", "routing", "identity", "networks", "topology",
+      "exit_node", "relay", "traffic", "logs", "settings",
+    ]);
+
+    assert.match(reactActionPanel, /@radix-ui\/react-dialog/);
+    assert.match(reactActionPanel, /<Dialog\.Root/);
+    assert.match(reactActionPanel, /<Dialog\.Title/);
+    assert.match(reactActionPanel, /<Dialog\.Description/);
+    assert.match(reactStyles, /:focus-visible/);
+    assert.match(reactPageContent, /@radix-ui\/react-context-menu/);
+    assert.match(reactPageContent, /<ContextMenu\.Root>/);
+    assert.match(reactPageContent, /<ContextMenu\.Trigger asChild>/);
+    assert.match(reactPageContent, /<ContextMenu\.Content/);
+    assert.match(reactPageContent, /className="topology-list"/);
+    assert.match(reactPageContent, /network\.peer_count/);
 
     console.log("test_webui_accessibility: passed");
   } finally {

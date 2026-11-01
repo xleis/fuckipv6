@@ -36,6 +36,7 @@ import {
 } from "./api/session";
 import { webAuthnIssue } from "./auth/webauthn";
 import { tr } from "./i18n";
+import { NAVIGATION_MODULES, navigationModuleForPage, type NavigationModuleContract } from "./navigation";
 import { ActionPanel } from "./components/action-panel";
 import { PageContent } from "./components/page-content";
 import {
@@ -47,22 +48,29 @@ import {
   type ActionValues,
 } from "./contract/invariants";
 
-type ModuleId = "overview" | "nodes" | "networks" | "activity" | "settings";
-
 type ModuleDefinition = {
-  id: ModuleId;
+  id: string;
   labelKey: string;
+  defaultPageId: string;
   pages: string[];
   icon: typeof Globe2;
 };
 
-const MODULES: ModuleDefinition[] = [
-  { id: "overview", labelKey: "nav.overview", pages: ["overview"], icon: Globe2 },
-  { id: "nodes", labelKey: "nav.nodes", pages: ["peers", "routing", "identity"], icon: ServerCog },
-  { id: "networks", labelKey: "nav.networks", pages: ["networks", "topology", "exit_node", "relay"], icon: NetworkIcon },
-  { id: "activity", labelKey: "nav.activity", pages: ["traffic", "logs"], icon: ActivityIcon },
-  { id: "settings", labelKey: "nav.settings", pages: ["settings"], icon: SettingsIcon },
-];
+const MODULE_ICONS: Record<string, typeof Globe2> = {
+  overview: Globe2,
+  nodes: ServerCog,
+  networks: NetworkIcon,
+  activity: ActivityIcon,
+  settings: SettingsIcon,
+};
+
+const MODULES: ModuleDefinition[] = NAVIGATION_MODULES.map((module: NavigationModuleContract) => ({
+  id: module.id,
+  labelKey: module.labelKey,
+  defaultPageId: module.defaultPageId,
+  pages: module.pageIds,
+  icon: MODULE_ICONS[module.id] ?? Globe2,
+}));
 
 const SESSION_QUERY_KEY = ["owner-session"] as const;
 const LANGUAGE_QUERY_KEY = ["language-preference"] as const;
@@ -74,7 +82,8 @@ function errorMessage(error: unknown): string {
 }
 
 function moduleForPage(pageId: string): ModuleDefinition {
-  return MODULES.find((module) => module.pages.includes(pageId)) ?? MODULES[0];
+  const contract = navigationModuleForPage(pageId);
+  return MODULES.find((module) => module.id === contract.id) ?? MODULES[0];
 }
 
 function resolveLocale(preference: LanguagePreference | undefined): Locale {
@@ -353,7 +362,10 @@ function AppShell({
   }
 
   function selectModule(module: ModuleDefinition): void {
-    const next = module.pages.find((id) => manifest.pages.some((page) => page.id === id));
+    const next =
+      module.pages.find(
+        (id) => id === module.defaultPageId && manifest.pages.some((page) => page.id === id),
+      ) ?? module.pages.find((id) => manifest.pages.some((page) => page.id === id));
     if (next) setPageId(next);
   }
 

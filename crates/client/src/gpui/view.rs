@@ -8,7 +8,10 @@ use fuckipv6_common::i18n::{
     detect_system_locale, resolve_language, t, tr, LanguagePreference, Locale,
 };
 use fuckipv6_common::ui_components::{Capability, SemanticState};
-use fuckipv6_common::ui_layout::{DetailPresentation, LayoutClass, PageSection};
+use fuckipv6_common::ui_layout::{
+    navigation_module_for_page, navigation_modules, DetailPresentation, LayoutClass,
+    NavigationModule, PageSection,
+};
 use gpui::{
     actions, div, prelude::*, px, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle,
     KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window, WindowBounds, WindowOptions,
@@ -576,6 +579,24 @@ impl GpuiShell {
             .find(|page| page.id == self.selected_page)
     }
 
+    fn module_landing_page(&self, module: &NavigationModule) -> String {
+        let Some(manifest) = self.manifest.as_ref() else {
+            return module.default_page_id.clone();
+        };
+        manifest
+            .pages
+            .iter()
+            .find(|page| page.id == module.default_page_id)
+            .or_else(|| {
+                manifest
+                    .pages
+                    .iter()
+                    .find(|page| module.page_ids.contains(&page.id))
+            })
+            .map(|page| page.id.clone())
+            .unwrap_or_else(|| module.default_page_id.clone())
+    }
+
     fn language_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -685,19 +706,16 @@ impl GpuiShell {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let pages = self
-            .manifest
-            .as_ref()
-            .map(|manifest| manifest.pages.clone())
-            .unwrap_or_default();
-        let nav = pages
-            .into_iter()
-            .map(|page| {
-                let page_id = page.id.clone();
-                let selected = page.id == self.selected_page;
+        let active_module_id =
+            navigation_module_for_page(&self.selected_page).map(|module| module.id.as_str());
+        let nav = navigation_modules()
+            .iter()
+            .map(|module| {
+                let page_id = self.module_landing_page(module);
+                let selected = active_module_id == Some(module.id.as_str());
                 nav_tab(
-                    SharedString::from(format!("nav-{}", page.id)),
-                    page_label(self.locale, &page.id),
+                    SharedString::from(format!("nav-module-{}", module.id)),
+                    t(self.locale, &module.label_key).to_string(),
                     selected,
                 )
                 .on_click(cx.listener(move |shell, _, _, cx| {
@@ -880,15 +898,54 @@ impl GpuiShell {
             .into_any_element()
         };
 
-        div()
+        let page_tabs = self
+            .manifest
+            .as_ref()
+            .and_then(|manifest| {
+                navigation_module_for_page(&self.selected_page).map(|module| {
+                    module
+                        .page_ids
+                        .iter()
+                        .filter_map(|page_id| {
+                            manifest.pages.iter().find(|page| &page.id == page_id)
+                        })
+                        .map(|page| {
+                            let page_id = page.id.clone();
+                            let selected = page.id == self.selected_page;
+                            tab_control(
+                                SharedString::from(format!("local-page-{}", page.id)),
+                                t(self.locale, &page.nav_label_key).to_string(),
+                                selected,
+                            )
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.selected_page = page_id.clone();
+                                shell.selected_section = PageSection::DEFAULT;
+                                shell.pending_confirmation = None;
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+
+        let page_tab_list = div()
+            .id("module-page-tabs")
+            .role(A11Y_TAB_LIST_ROLE)
+            .aria_label(t(self.locale, "common.module_pages").to_string())
+            .flex()
+            .items_center()
+            .gap_2()
+            .children(page_tabs);
+
+        let section_tabs = div()
             .id("page-sections")
             .role(A11Y_TAB_LIST_ROLE)
             .aria_label(t(self.locale, "common.page_sections").to_string())
             .flex()
             .items_center()
             .gap_2()
-            .px_6()
-            .pt_4()
             .child(tab(
                 PageSection::Data,
                 t(self.locale, "common.data").to_string(),
@@ -900,7 +957,18 @@ impl GpuiShell {
                     "gpui.section_action_count",
                     &[("count", &action_count.to_string())],
                 ),
-            ))
+            ));
+
+        div()
+            .id("local-toolbar")
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .px_6()
+            .pt_4()
+            .child(page_tab_list)
+            .child(section_tabs)
     }
 
     fn page_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {

@@ -44,13 +44,17 @@
     wide: Object.freeze({ minWidth: 1280, maxWidth: Infinity })
   });
 
-  const PRIMARY_NAVIGATION = Object.freeze([
-    Object.freeze({ id: "overview", labelKey: "nav.overview", pageId: "overview" }),
-    Object.freeze({ id: "nodes", labelKey: "nav.nodes", pageId: "peers" }),
-    Object.freeze({ id: "networks", labelKey: "nav.networks", pageId: "networks" }),
-    Object.freeze({ id: "activity", labelKey: "nav.activity", pageId: "logs" }),
-    Object.freeze({ id: "settings", labelKey: "nav.settings", pageId: "settings" })
-  ]);
+  const navigationContract = window.FuckIPv6Navigation;
+  const PRIMARY_NAVIGATION = Object.freeze(
+    (Array.isArray(navigationContract?.modules) ? navigationContract.modules : []).map(module =>
+      Object.freeze({
+        id: module.id,
+        labelKey: module.label_key,
+        pageId: module.default_page_id,
+        pageIds: Object.freeze([...(module.page_ids || [])])
+      })
+    )
+  );
 
   const COMPONENT_NAMES = new Set(Object.values(COMPONENTS));
   const TONES = new Set(["neutral", "info", "success", "warning", "danger"]);

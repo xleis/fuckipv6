@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {
+      "id": "overview",
+      "label_key": "nav.overview",
+      "default_page_id": "overview",
+      "page_ids": ["overview"]
+    },
+    {
+      "id": "nodes",
+      "label_key": "nav.nodes",
+      "default_page_id": "peers",
+      "page_ids": ["peers", "routing", "identity"]
+    },
+    {
+      "id": "networks",
+      "label_key": "nav.networks",
+      "default_page_id": "networks",
+      "page_ids": ["networks", "topology", "exit_node", "relay"]
+    },
+    {
+      "id": "activity",
+      "label_key": "nav.activity",
+      "default_page_id": "logs",
+      "page_ids": ["traffic", "logs"]
+    },
+    {
+      "id": "settings",
+      "label_key": "nav.settings",
+      "default_page_id": "settings",
+      "page_ids": ["settings"]
+    }
+  ]
+}

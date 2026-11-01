@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
 use fuckipv6_common::i18n::{t, tr, Locale};
+use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
@@ -220,6 +221,204 @@ pub struct PageModel {
     pub metrics: Vec<MetricModel>,
     pub sections: Vec<SectionModel>,
     pub actions: Vec<ActionModel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchResultKind {
+    Page,
+    Identity,
+    Network,
+    Peer,
+}
+
+impl SearchResultKind {
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::Page => "search.kind.page",
+            Self::Identity => "search.kind.identity",
+            Self::Network => "search.kind.network",
+            Self::Peer => "search.kind.peer",
+        }
+    }
+}
+
+/// One object or destination returned by the first-version global search. It is
+/// deliberately a navigation model, not a command palette action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub id: String,
+    pub kind: SearchResultKind,
+    pub title: String,
+    pub detail: String,
+    pub page_id: String,
+    pub network_name: Option<String>,
+}
+
+impl SearchResult {
+    /// Stable DOM/GPUI element identifier for the result row.
+    pub fn element_id(&self) -> String {
+        format!("search-result-{}", self.id)
+    }
+}
+
+/// Search manifest destinations and the user-visible objects in the current
+/// snapshot. Matching is local, deterministic, and never logs the query.
+pub fn search_node_snapshot(
+    manifest: &NodeUiManifest,
+    snapshot: &NodeSnapshot,
+    query: &str,
+    locale: Locale,
+) -> Vec<SearchResult> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    let mut push = |result: SearchResult, keywords: String| {
+        let haystack = format!(
+            "{} {} {} {}",
+            result.title, result.detail, result.id, keywords
+        )
+        .to_lowercase();
+        if let Some(rank) = search_match_rank(&haystack, &normalized) {
+            matches.push((rank, matches.len(), result));
+        }
+    };
+
+    for page in &manifest.pages {
+        let module = navigation_module_for_page(&page.id);
+        push(
+            SearchResult {
+                id: format!("page:{}", page.id),
+                kind: SearchResultKind::Page,
+                title: t(locale, &page.nav_label_key).to_string(),
+                detail: module
+                    .map(|module| t(locale, &module.label_key).to_string())
+                    .unwrap_or_else(|| t(locale, "common.unknown").to_string()),
+                page_id: page.id.clone(),
+                network_name: None,
+            },
+            module.map(|module| module.id.clone()).unwrap_or_default(),
+        );
+    }
+
+    if let Some(identity) = &snapshot.identity {
+        let title = identity
+            .display_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&identity.node_id)
+            .to_string();
+        push(
+            SearchResult {
+                id: format!("identity:{}", identity.node_id),
+                kind: SearchResultKind::Identity,
+                title,
+                detail: tr(
+                    locale,
+                    "search.identity_detail",
+                    &[
+                        ("node_id", &identity.node_id),
+                        ("fingerprint", &identity.public_key_fingerprint),
+                    ],
+                ),
+                page_id: "identity".into(),
+                network_name: None,
+            },
+            format!(
+                "{} {} {}",
+                identity.node_id, identity.public_key_fingerprint, "identity node"
+            ),
+        );
+    }
+
+    for network in &snapshot.networks {
+        let status = t(locale, network_status_key(network.status));
+        push(
+            SearchResult {
+                id: format!("network:{}", network.name),
+                kind: SearchResultKind::Network,
+                title: network.name.clone(),
+                detail: tr(
+                    locale,
+                    "search.network_detail",
+                    &[
+                        ("status", status),
+                        ("tun", &network.tun_name),
+                        ("peers", &network.peer_count.to_string()),
+                    ],
+                ),
+                page_id: "networks".into(),
+                network_name: Some(network.name.clone()),
+            },
+            format!(
+                "{} {} {} network",
+                network.name,
+                network
+                    .assigned_ipv4
+                    .map(|address| address.to_string())
+                    .unwrap_or_default(),
+                network
+                    .assigned_ipv6
+                    .map(|address| address.to_string())
+                    .unwrap_or_default(),
+            ),
+        );
+    }
+
+    for peer in &snapshot.peers {
+        push(
+            SearchResult {
+                id: format!("peer:{}:{}", peer.network_name, peer.peer_id),
+                kind: SearchResultKind::Peer,
+                title: peer.peer_id.clone(),
+                detail: tr(
+                    locale,
+                    "search.peer_detail",
+                    &[
+                        ("network", &peer.network_name),
+                        ("address", &peer.virtual_ipv6.to_string()),
+                    ],
+                ),
+                page_id: "peers".into(),
+                network_name: Some(peer.network_name.clone()),
+            },
+            format!(
+                "{} {} {} {} peer",
+                peer.peer_id,
+                peer.network_name,
+                peer.virtual_ipv6,
+                peer.virtual_ipv4
+                    .map(|address| address.to_string())
+                    .unwrap_or_default(),
+            ),
+        );
+    }
+
+    matches.sort_by_key(|(rank, index, _)| (*rank, *index));
+    matches
+        .into_iter()
+        .take(12)
+        .map(|(_, _, result)| result)
+        .collect()
+}
+
+fn search_match_rank(haystack: &str, query: &str) -> Option<u8> {
+    if haystack == query {
+        Some(0)
+    } else if haystack.starts_with(query) {
+        Some(1)
+    } else if haystack
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| word.starts_with(query))
+    {
+        Some(2)
+    } else if haystack.contains(query) {
+        Some(3)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1856,6 +2055,41 @@ mod tests {
                 identity_configured: true,
             });
         snapshot
+    }
+
+    #[test]
+    fn search_finds_pages_identity_networks_and_peers() {
+        let manifest = node_ui_manifest();
+        let snapshot = populated_snapshot();
+
+        let identity = search_node_snapshot(&manifest, &snapshot, "identity", Locale::En);
+        assert!(identity
+            .iter()
+            .any(|result| result.kind == SearchResultKind::Page && result.page_id == "identity"));
+        assert!(identity
+            .iter()
+            .any(|result| result.kind == SearchResultKind::Identity));
+
+        let home = search_node_snapshot(&manifest, &snapshot, "home", Locale::En);
+        assert!(home
+            .iter()
+            .any(|result| result.kind == SearchResultKind::Network
+                && result.network_name.as_deref() == Some("home")));
+        assert!(home
+            .iter()
+            .any(|result| result.kind == SearchResultKind::Peer
+                && result.network_name.as_deref() == Some("home")));
+    }
+
+    #[test]
+    fn search_is_local_and_ignores_blank_queries() {
+        let manifest = node_ui_manifest();
+        let snapshot = populated_snapshot();
+        assert!(search_node_snapshot(&manifest, &snapshot, "", Locale::En).is_empty());
+        assert!(search_node_snapshot(&manifest, &snapshot, "   ", Locale::En).is_empty());
+        assert!(
+            search_node_snapshot(&manifest, &snapshot, "no-such-object", Locale::En).is_empty()
+        );
     }
 
     #[test]

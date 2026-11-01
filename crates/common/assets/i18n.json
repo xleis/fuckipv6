@@ -174,6 +174,7 @@
       "common.current_context": "当前上下文",
       "common.navigation": "主导航",
       "common.page_sections": "页面分区",
+      "common.module_pages": "模块页面",
       "common.main_content": "主要内容",
       "common.node_capabilities": "节点能力",
       "common.primary_status": "首要状态",
@@ -654,7 +655,19 @@
       "choice.phase.failed": "故障",
       "choice.acl.allow": "允许",
       "choice.acl.deny": "拒绝",
-      "gpui.platform.other": "其他"
+      "gpui.platform.other": "其他",
+      "common.search_placeholder": "搜索页面、节点、网络或 Peer…",
+      "common.search": "全局搜索",
+      "common.search_results": "搜索结果",
+      "common.search_no_results": "没有匹配的页面或对象",
+      "common.search_clear": "清除搜索",
+      "search.kind.page": "页面",
+      "search.kind.identity": "本机身份",
+      "search.kind.network": "网络",
+      "search.kind.peer": "Peer",
+      "search.identity_detail": "节点 {node_id} · 指纹 {fingerprint}",
+      "search.network_detail": "{status} · {tun} · {peers} 个 Peer",
+      "search.peer_detail": "{network} · {address}"
     },
     "en": {
       "nav.overview": "Overview",
@@ -828,6 +841,7 @@
       "common.current_context": "Current context",
       "common.navigation": "Primary navigation",
       "common.page_sections": "Page sections",
+      "common.module_pages": "Module pages",
       "common.main_content": "Main content",
       "common.node_capabilities": "Node capabilities",
       "common.primary_status": "Primary status",
@@ -1308,7 +1322,19 @@
       "choice.phase.failed": "Failed",
       "choice.acl.allow": "Allow",
       "choice.acl.deny": "Deny",
-      "gpui.platform.other": "Other"
+      "gpui.platform.other": "Other",
+      "common.search_placeholder": "Search pages, nodes, networks, or peers…",
+      "common.search": "Global search",
+      "common.search_results": "Search results",
+      "common.search_no_results": "No matching page or object",
+      "common.search_clear": "Clear search",
+      "search.kind.page": "Page",
+      "search.kind.identity": "Local identity",
+      "search.kind.network": "Network",
+      "search.kind.peer": "Peer",
+      "search.identity_detail": "Node {node_id} · fingerprint {fingerprint}",
+      "search.network_detail": "{status} · {tun} · {peers} peers",
+      "search.peer_detail": "{network} · {address}"
     }
   }
 }

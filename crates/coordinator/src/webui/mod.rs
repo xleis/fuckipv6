@@ -169,6 +169,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/assets/webui.css", get(webui_css))
+        .route("/assets/ui-navigation.js", get(ui_navigation_js))
         .route("/assets/ui-components.js", get(ui_components_js))
         .route("/api/status", get(status))
         .route("/api/auth/login", post(login))
@@ -259,6 +260,19 @@ async fn ui_components_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store"),
         ],
         fuckipv6_common::ui_components::webui_component_js(),
+    )
+}
+
+async fn ui_navigation_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        format!(
+            "window.FuckIPv6Navigation = Object.freeze({});\n",
+            fuckipv6_common::ui_layout::navigation_contract_json()
+        ),
     )
 }
 
@@ -1310,6 +1324,7 @@ tun_name = "fuckipv6"</div>
 
   <div class="toast-box" id="toast-box"></div>
 
+  <script src="/assets/ui-navigation.js"></script>
   <script src="/assets/ui-components.js"></script>
   <script>
     let previousTraffic = null;
@@ -3521,6 +3536,7 @@ mod tests {
         assert!(INDEX_HTML.contains("cyber-context-menu"));
         assert!(INDEX_HTML.contains("showContextMenu"));
         assert!(INDEX_HTML.contains("log-level-filter"));
+        assert!(INDEX_HTML.contains("/assets/ui-navigation.js"));
     }
 
     #[tokio::test]

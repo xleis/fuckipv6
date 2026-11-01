@@ -169,6 +169,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/assets/webui.css", get(webui_css))
+        .route("/assets/ui-components.js", get(ui_components_js))
         .route("/api/status", get(status))
         .route("/api/auth/login", post(login))
         .route("/api/peers", get(peers))
@@ -247,7 +248,17 @@ async fn index() -> Html<&'static str> {
 async fn webui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        fuckipv6_common::design_tokens::webui_css(),
+        fuckipv6_common::ui_components::complete_webui_css(),
+    )
+}
+
+async fn ui_components_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        fuckipv6_common::ui_components::webui_component_js(),
     )
 }
 
@@ -1299,6 +1310,7 @@ tun_name = "fuckipv6"</div>
 
   <div class="toast-box" id="toast-box"></div>
 
+  <script src="/assets/ui-components.js"></script>
   <script>
     let previousTraffic = null;
     let previousTrafficAt = 0;
@@ -1306,7 +1318,11 @@ tun_name = "fuckipv6"</div>
     let rawLogLines = [];
     let isRealtimeConnected = false;
 
-    function showToast(message) {
+    function showToast(message, options = {}) {
+      if (window.FuckIPv6UI) {
+        window.FuckIPv6UI.toast(String(message), options);
+        return;
+      }
       const box = document.getElementById('toast-box');
       const toast = document.createElement('div');
       toast.className = 'toast';

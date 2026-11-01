@@ -762,14 +762,18 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 实现说明：`crates/common/src/design_tokens.rs` 是唯一语义来源；WebUI 的深浅主题与排版/间距/尺寸/动效 CSS 自定义属性在运行时由该模块生成，GPUI 颜色直接引用同一组 Rust 常量。基础样式表中的过渡和动画已消费动效令牌，`prefers-reduced-motion` 使用统一的减少动态效果时长。测试校验双主题、状态色、四种能力色唯一性、正文对比度、CSS 令牌完整性和基础样式表不重复声明主题令牌。
 
-### W5-02 基础组件 `[ ]`
+### W5-02 基础组件 `[x]`
 
-- [ ] Button、Input、Select、Checkbox、Radio；
-- [ ] Tabs、Breadcrumb、Toolbar；
-- [ ] Table/VirtualList；
-- [ ] Badge、StatusBadge、CapabilityRing；
-- [ ] Dialog、Menu、ContextMenu、Tooltip、Toast；
-- [ ] Empty/Error/PermissionDenied/Unsupported 状态组件。
+- [x] Button、Input、Select、Checkbox、Radio；
+- [x] Tabs、Breadcrumb、Toolbar；
+- [x] Table/VirtualList；
+- [x] Badge、StatusBadge、CapabilityRing；
+- [x] Dialog、Menu、ContextMenu、Tooltip、Toast；
+- [x] Empty/Error/PermissionDenied/Unsupported 状态组件。
+
+实现说明：`crates/common/src/ui_components.rs` 定义 22 个稳定 `data-component` 名称、根 CSS 类、无障碍契约、状态语义和四种能力语义；`assets/ui-components.js` 提供无框架浏览器构造器，用户文本只通过 `textContent`/文本节点写入，Dialog、Tabs、菜单、Tooltip、Toast、表和虚拟列表包含键盘/焦点行为；`assets/ui-components.css` 只消费 W5-01 令牌。客户端与 Coordinator WebUI 均加载同一 CSS/JS。GPUI 的 `gpui/components.rs` 提供同一清单的适配器映射，并让现有导航、输入、选择、工具栏、状态徽标、能力图例、Toast 与空/错/权限/不支持状态实际消费共享令牌和状态语义。
+
+边界：本项只冻结可复用组件契约和两端适配器，不代表 W5-03 页面布局、W5-05 完整无障碍、W5-06 GPUI IME/原生菜单或 W5-07 React 工程已经完成；GPUI 当前渲染的仍是 manifest 驱动的基础页面。
 
 ### W5-03 布局原语 `[ ]`
 

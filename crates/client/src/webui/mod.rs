@@ -179,6 +179,7 @@ fn create_app_web_router_with_mutation_limiter(
     let mut app = Router::new()
         .route("/", get(handle_index))
         .route("/assets/webui.css", get(handle_webui_css))
+        .route("/assets/ui-components.js", get(handle_ui_components_js))
         .route("/assets/node_ui.js", get(handle_node_ui_js))
         .route("/assets/owner_bootstrap.js", get(handle_owner_bootstrap_js))
         .route("/assets/owner_auth_copy.js", get(handle_owner_auth_copy_js))
@@ -888,7 +889,17 @@ async fn handle_owner_auth_copy_js() -> impl IntoResponse {
 async fn handle_webui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        fuckipv6_common::design_tokens::webui_css(),
+        fuckipv6_common::ui_components::complete_webui_css(),
+    )
+}
+
+async fn handle_ui_components_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        fuckipv6_common::ui_components::webui_component_js(),
     )
 }
 
@@ -2759,6 +2770,7 @@ tun_name = "fuckipv6"</div>
 
   <div class="toast-box" id="toast-box"></div>
 
+  <script src="/assets/ui-components.js"></script>
   <script>
     /* 100% SVG 矢量图标库，彻底杜绝任何 Emoji */
     const SVG_ICONS = {
@@ -2846,7 +2858,11 @@ tun_name = "fuckipv6"</div>
       return authPromptPending;
     }
 
-    function showToast(message) {
+    function showToast(message, options = {}) {
+      if (window.FuckIPv6UI) {
+        window.FuckIPv6UI.toast(String(message), options);
+        return;
+      }
       const box = document.getElementById('toast-box');
       const toast = document.createElement('div');
       toast.className = 'toast';
@@ -7022,12 +7038,13 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("panel-head"));
         assert!(UNIFIED_MASTER_HTML.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(UNIFIED_MASTER_HTML.contains("/assets/webui.css"));
+        assert!(UNIFIED_MASTER_HTML.contains("/assets/ui-components.js"));
         assert!(UNIFIED_MASTER_HTML.contains("fuckipv6_control_token"));
         assert!(UNIFIED_MASTER_HTML.contains("/api/auth/login"));
         assert!(UNIFIED_MASTER_HTML.contains("Bearer ${token}"));
         assert!(UNIFIED_MASTER_HTML.contains("fuckipv6.bearer.${token}"));
         assert!(!UNIFIED_MASTER_HTML.contains("?token="));
-        let css = fuckipv6_common::design_tokens::webui_css();
+        let css = fuckipv6_common::ui_components::complete_webui_css();
         assert!(css.contains("--sidebar-w"));
         assert!(css.contains("--panel"));
         assert!(css.contains(".modal-wrap.active"));

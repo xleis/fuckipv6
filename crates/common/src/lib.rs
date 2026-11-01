@@ -15,6 +15,7 @@ pub mod relay_client;
 pub mod routing;
 pub mod ticket;
 pub mod types;
+pub mod ui_components;
 
 pub use acl::*;
 pub use chunk::*;

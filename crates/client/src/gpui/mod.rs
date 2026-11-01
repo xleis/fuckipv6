@@ -1,3 +1,4 @@
+pub mod components;
 mod session;
 mod view;
 pub mod view_model;

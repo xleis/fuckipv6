@@ -3,11 +3,18 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
+use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
+use fuckipv6_common::ui_components::{Capability, SemanticState};
 use gpui::{
     div, prelude::*, px, rgba, size, App, Application, Bounds, Context, FocusHandle, KeyDownEvent,
     Render, SharedString, Window, WindowBounds, WindowOptions,
 };
 
+use super::components::{
+    button, capability_ring, choice_control, empty_state as component_empty_state,
+    error_state as component_error_state, nav_tab, status_badge, tabs, text_input,
+    toast as component_toast, toolbar, ButtonVariant, CapabilityItem, CapabilityVisual,
+};
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values,
     validate_manifest_bindings, ActionBinding, PageKind, RowModel, SectionModel,
@@ -30,11 +37,7 @@ const COLOR_BORDER: u32 = DARK_THEME.colors.border.rgba_hex();
 const COLOR_TEXT: u32 = DARK_THEME.colors.text.rgba_hex();
 const COLOR_MUTED: u32 = DARK_THEME.colors.text_muted.rgba_hex();
 const COLOR_ACCENT: u32 = DARK_THEME.colors.accent.rgba_hex();
-const COLOR_ACCENT_DIM: u32 = DARK_THEME.colors.accent_pressed.rgba_hex();
 const COLOR_WARNING: u32 = DARK_THEME.colors.warning.rgba_hex();
-const COLOR_ERROR_BG: u32 = DARK_THEME.colors.danger_soft.rgba_hex();
-const COLOR_ERROR_BORDER: u32 = DARK_THEME.colors.danger.rgba_hex();
-const COLOR_ERROR_TEXT: u32 = DARK_THEME.colors.danger_text.rgba_hex();
 
 struct GpuiShell {
     commands: NodeCommandBus,
@@ -444,13 +447,7 @@ impl GpuiShell {
             .map(|page| format!("{} · {} 个共享动作", page.id, page.actions.len()))
             .unwrap_or_else(|| "等待共享 manifest".into());
         let disabled = self.pending_commands > 0;
-        let refresh_color = if disabled {
-            COLOR_BORDER
-        } else {
-            COLOR_ACCENT_DIM
-        };
         let primary_status = self.snapshot.primary_status();
-        let status_color = primary_status_color(primary_status);
 
         div()
             .flex()
@@ -474,44 +471,32 @@ impl GpuiShell {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgba(status_color))
-                            .text_color(rgba(COLOR_TEXT))
-                            .text_sm()
-                            .child(primary_status.label_zh()),
-                    )
+                toolbar()
+                    .child(status_badge(
+                        primary_status.label_zh(),
+                        primary_status_semantic(primary_status),
+                    ))
                     .child(div().text_sm().text_color(rgba(COLOR_MUTED)).child(format!(
                         "{} · revision {}",
                         self.selected_network.as_deref().unwrap_or("未选择网络"),
                         self.snapshot.revision
                     )))
                     .child(
-                        div()
-                            .id("refresh-snapshot")
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgba(refresh_color))
-                            .text_color(rgba(COLOR_TEXT))
-                            .text_sm()
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                if shell.pending_commands == 0 {
-                                    shell.submit_raw(NodeCommand::GetSnapshot, cx);
-                                }
-                            }))
-                            .child(if disabled {
+                        button(
+                            SharedString::from("refresh-snapshot"),
+                            if disabled {
                                 "命令处理中…"
                             } else {
                                 "刷新快照"
-                            }),
+                            },
+                            ButtonVariant::Primary,
+                            disabled,
+                        )
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            if shell.pending_commands == 0 {
+                                shell.submit_raw(NodeCommand::GetSnapshot, cx);
+                            }
+                        })),
                     ),
             )
     }
@@ -527,30 +512,20 @@ impl GpuiShell {
             .map(|page| {
                 let page_id = page.id.clone();
                 let selected = page.id == self.selected_page;
-                let background = if selected {
-                    COLOR_ACCENT_DIM
-                } else {
-                    COLOR_SIDEBAR
-                };
-                div()
-                    .id(SharedString::from(format!("nav-{}", page.id)))
-                    .mx_3()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgba(background))
-                    .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
-                    .text_sm()
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.selected_page = page_id.clone();
-                        shell.focused_field = None;
-                        shell.pending_confirmation = None;
-                        shell.error = None;
-                        shell.notice = None;
-                        cx.notify();
-                    }))
-                    .child(page_label(&page.id))
-                    .into_any_element()
+                nav_tab(
+                    SharedString::from(format!("nav-{}", page.id)),
+                    page_label(&page.id),
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.selected_page = page_id.clone();
+                    shell.focused_field = None;
+                    shell.pending_confirmation = None;
+                    shell.error = None;
+                    shell.notice = None;
+                    cx.notify();
+                }))
+                .into_any_element()
             })
             .collect::<Vec<_>>();
 
@@ -561,25 +536,29 @@ impl GpuiShell {
             .map(|network| {
                 let network_name = network.name.clone();
                 let selected = self.selected_network.as_deref() == Some(network.name.as_str());
-                div()
-                    .id(SharedString::from(format!("network-{}", network.name)))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgba(if selected {
-                        COLOR_ACCENT_DIM
-                    } else {
-                        COLOR_PANEL
-                    }))
-                    .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
-                    .text_xs()
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.selected_network = Some(network_name.clone());
-                        shell.fill_empty_network_fields();
-                        cx.notify();
-                    }))
-                    .child(network.name.clone())
-                    .into_any_element()
+                choice_control(
+                    SharedString::from(format!("network-{}", network.name)),
+                    network.name.clone(),
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.selected_network = Some(network_name.clone());
+                    shell.fill_empty_network_fields();
+                    cx.notify();
+                }))
+                .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        let capability_items = self
+            .snapshot
+            .capabilities
+            .capabilities
+            .iter()
+            .map(|item| CapabilityItem {
+                capability: capability_contract(item.kind),
+                visual: capability_visual(item.state),
+                label: capability_label(item.kind, item.state),
             })
             .collect::<Vec<_>>();
 
@@ -619,7 +598,7 @@ impl GpuiShell {
                             .child("原生节点控制面 · manifest 驱动"),
                     ),
             )
-            .child(div().flex().flex_col().gap_1().flex_1().children(nav))
+            .child(tabs().flex_1().children(nav))
             .child(
                 div()
                     .mx_3()
@@ -646,6 +625,20 @@ impl GpuiShell {
             )
             .child(
                 div()
+                    .mx_3()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child("节点能力"),
+                    )
+                    .child(div().mt_2().child(capability_ring(&capability_items))),
+            )
+            .child(
+                div()
                     .m_3()
                     .p_3()
                     .rounded_md()
@@ -658,19 +651,8 @@ impl GpuiShell {
 
     fn error_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let error = self.error.clone().unwrap_or_default();
-        div()
+        component_toast(format!("操作失败: {error}"), SemanticState::Danger)
             .id("dismiss-error")
-            .mx_6()
-            .mt_4()
-            .px_4()
-            .py_3()
-            .rounded_md()
-            .bg(rgba(COLOR_ERROR_BG))
-            .border_1()
-            .border_color(rgba(COLOR_ERROR_BORDER))
-            .text_color(rgba(COLOR_ERROR_TEXT))
-            .text_sm()
-            .child(format!("操作失败: {error}"))
             .on_click(cx.listener(|shell, _, _, cx| {
                 shell.error = None;
                 cx.notify();
@@ -678,21 +660,15 @@ impl GpuiShell {
     }
 
     fn notice_banner(&self) -> impl IntoElement {
-        div()
-            .mx_6()
-            .mt_4()
-            .px_4()
-            .py_2()
-            .rounded_md()
-            .bg(rgba(COLOR_ACCENT_DIM))
-            .text_color(rgba(COLOR_TEXT))
-            .text_sm()
-            .child(self.notice.clone().unwrap_or_default())
+        component_toast(
+            self.notice.clone().unwrap_or_default(),
+            SemanticState::Success,
+        )
     }
 
     fn page_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
-            return empty_state(
+            return component_empty_state(
                 "等待共享 manifest",
                 "GPUI 只渲染 manifest 声明的页面；在 manifest 校验完成前不会构造页面或动作。",
             )
@@ -701,7 +677,7 @@ impl GpuiShell {
         let model = match build_page_model(manifest, &self.snapshot, &self.selected_page) {
             Ok(model) => model,
             Err(error) => {
-                return empty_state("页面映射失败", error.to_string()).into_any_element();
+                return component_error_state("页面映射失败", error.to_string()).into_any_element();
             }
         };
         let page = self.page().cloned();
@@ -752,14 +728,11 @@ impl GpuiShell {
                         .child("共享动作"),
                 )
                 .children(if actions.is_empty() {
-                    vec![div()
-                        .p_4()
-                        .rounded_lg()
-                        .bg(rgba(COLOR_PANEL))
-                        .text_sm()
-                        .text_color(rgba(COLOR_MUTED))
-                        .child("此页面在 manifest 中没有声明动作；当前仅展示真实快照字段。")
-                        .into_any_element()]
+                    vec![component_empty_state(
+                        "没有共享动作",
+                        "此页面在 manifest 中没有声明动作；当前仅展示真实快照字段。",
+                    )
+                    .into_any_element()]
                 } else {
                     actions
                 }),
@@ -774,12 +747,12 @@ impl GpuiShell {
             action_block_reason(&action, &self.snapshot, self.selected_network.as_deref());
         let confirmation_pending = self.pending_confirmation.as_deref() == Some(action.id.as_str());
         let disabled = self.pending_commands > 0 || block_reason.is_some();
-        let button_background = if disabled {
-            COLOR_BORDER
+        let button_variant = if confirmation_pending {
+            ButtonVariant::Danger
         } else if action.backend_status == NodeUiBackendStatus::Unavailable {
-            COLOR_WARNING
+            ButtonVariant::Secondary
         } else {
-            COLOR_ACCENT_DIM
+            ButtonVariant::Primary
         };
         let fields = action
             .fields
@@ -834,28 +807,14 @@ impl GpuiShell {
                                 action.id, action.command, permission, availability, status
                             ))),
                     )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(rgba(
-                                if action.backend_status == NodeUiBackendStatus::Implemented {
-                                    COLOR_ACCENT_DIM
-                                } else {
-                                    COLOR_PANEL_RAISED
-                                },
-                            ))
-                            .text_xs()
-                            .text_color(rgba(
-                                if action.backend_status == NodeUiBackendStatus::Implemented {
-                                    COLOR_TEXT
-                                } else {
-                                    COLOR_WARNING
-                                },
-                            ))
-                            .child(status),
-                    ),
+                    .child(status_badge(
+                        status,
+                        if action.backend_status == NodeUiBackendStatus::Implemented {
+                            SemanticState::Success
+                        } else {
+                            SemanticState::Unsupported
+                        },
+                    )),
             )
             .children(fields)
             .children(block_reason.map(|reason| {
@@ -866,20 +825,17 @@ impl GpuiShell {
                     .into_any_element()
             }))
             .child(
-                div()
-                    .id(SharedString::from(format!("action-{}", action.id)))
-                    .px_4()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgba(button_background))
-                    .text_color(rgba(COLOR_TEXT))
-                    .text_sm()
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        if shell.pending_commands == 0 && block_reason.is_none() {
-                            shell.submit_manifest_action(&action_id, cx);
-                        }
-                    }))
-                    .child(button_label),
+                button(
+                    SharedString::from(format!("action-{}", action.id)),
+                    button_label,
+                    button_variant,
+                    disabled,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    if shell.pending_commands == 0 && block_reason.is_none() {
+                        shell.submit_manifest_action(&action_id, cx);
+                    }
+                })),
             )
             .into_any_element()
     }
@@ -964,28 +920,18 @@ impl GpuiShell {
         } else {
             value.to_string()
         };
-        div()
-            .id(SharedString::from(format!("field-{field_key}")))
-            .min_h(px(34.0))
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .bg(rgba(COLOR_PANEL_RAISED))
-            .border_1()
-            .border_color(rgba(if focused { COLOR_ACCENT } else { COLOR_BORDER }))
-            .text_sm()
-            .text_color(rgba(if value.is_empty() {
-                COLOR_MUTED
-            } else {
-                COLOR_TEXT
-            }))
-            .on_click(cx.listener(move |shell, _, window, cx| {
-                shell.focused_field = Some(field_key_for_click.clone());
-                window.focus(&shell.focus_handle);
-                cx.notify();
-            }))
-            .child(display)
-            .into_any_element()
+        text_input(
+            SharedString::from(format!("field-{field_key}")),
+            display,
+            value.is_empty(),
+            focused,
+        )
+        .on_click(cx.listener(move |shell, _, window, cx| {
+            shell.focused_field = Some(field_key_for_click.clone());
+            window.focus(&shell.focus_handle);
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn choice_field(
@@ -1009,26 +955,16 @@ impl GpuiShell {
                 let choice_value = (*choice_value).to_string();
                 let label = (*label).to_string();
                 let selected = current == choice_value;
-                div()
-                    .id(SharedString::from(format!(
-                        "choice-{action_id}-{field_id}-{choice_value}"
-                    )))
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgba(if selected {
-                        COLOR_ACCENT_DIM
-                    } else {
-                        COLOR_PANEL_RAISED
-                    }))
-                    .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
-                    .text_xs()
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.set_field_value(&action_id, &field_id, choice_value.clone());
-                        cx.notify();
-                    }))
-                    .child(label)
-                    .into_any_element()
+                choice_control(
+                    SharedString::from(format!("choice-{action_id}-{field_id}-{choice_value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.set_field_value(&action_id, &field_id, choice_value.clone());
+                    cx.notify();
+                }))
+                .into_any_element()
             }))
             .into_any_element()
     }
@@ -1107,15 +1043,60 @@ fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
         )
 }
 
-fn primary_status_color(status: NodePrimaryStatus) -> u32 {
+fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
     match status {
-        NodePrimaryStatus::Running => COLOR_ACCENT_DIM,
-        NodePrimaryStatus::Degraded | NodePrimaryStatus::ControlUnavailable => COLOR_WARNING,
-        NodePrimaryStatus::Failed => COLOR_ERROR_BORDER,
-        NodePrimaryStatus::Uninitialized
-        | NodePrimaryStatus::Stopped
-        | NodePrimaryStatus::Starting
-        | NodePrimaryStatus::Stopping => COLOR_PANEL_RAISED,
+        NodePrimaryStatus::Running => SemanticState::Success,
+        NodePrimaryStatus::Degraded | NodePrimaryStatus::ControlUnavailable => {
+            SemanticState::Warning
+        }
+        NodePrimaryStatus::Failed => SemanticState::Danger,
+        NodePrimaryStatus::Starting | NodePrimaryStatus::Stopping => SemanticState::Info,
+        NodePrimaryStatus::Uninitialized | NodePrimaryStatus::Stopped => SemanticState::Neutral,
+    }
+}
+
+fn capability_contract(kind: CapabilityKind) -> Capability {
+    match kind {
+        CapabilityKind::Coordinator => Capability::Coordinator,
+        CapabilityKind::Relay => Capability::Relay,
+        CapabilityKind::Exit => Capability::Exit,
+        CapabilityKind::File => Capability::File,
+    }
+}
+
+fn capability_visual(state: CapabilityState) -> CapabilityVisual {
+    match state {
+        CapabilityState::Enabled => CapabilityVisual::Active,
+        CapabilityState::Degraded | CapabilityState::Starting => CapabilityVisual::Degraded,
+        CapabilityState::Unsupported => CapabilityVisual::Unsupported,
+        CapabilityState::Disabled | CapabilityState::Unavailable | CapabilityState::Unknown => {
+            CapabilityVisual::Inactive
+        }
+    }
+}
+
+fn capability_label(kind: CapabilityKind, state: CapabilityState) -> &'static str {
+    match (kind, state) {
+        (CapabilityKind::Coordinator, CapabilityState::Enabled) => "Coordinator 开启",
+        (CapabilityKind::Relay, CapabilityState::Enabled) => "Relay 开启",
+        (CapabilityKind::Exit, CapabilityState::Enabled) => "Exit 开启",
+        (CapabilityKind::File, CapabilityState::Enabled) => "File 开启",
+        (CapabilityKind::Coordinator, CapabilityState::Degraded) => "Coordinator 降级",
+        (CapabilityKind::Relay, CapabilityState::Degraded) => "Relay 降级",
+        (CapabilityKind::Exit, CapabilityState::Degraded) => "Exit 降级",
+        (CapabilityKind::File, CapabilityState::Degraded) => "File 降级",
+        (CapabilityKind::Coordinator, CapabilityState::Starting) => "Coordinator 启动中",
+        (CapabilityKind::Relay, CapabilityState::Starting) => "Relay 启动中",
+        (CapabilityKind::Exit, CapabilityState::Starting) => "Exit 启动中",
+        (CapabilityKind::File, CapabilityState::Starting) => "File 启动中",
+        (CapabilityKind::Coordinator, CapabilityState::Unsupported) => "Coordinator 不支持",
+        (CapabilityKind::Relay, CapabilityState::Unsupported) => "Relay 不支持",
+        (CapabilityKind::Exit, CapabilityState::Unsupported) => "Exit 不支持",
+        (CapabilityKind::File, CapabilityState::Unsupported) => "File 不支持",
+        (CapabilityKind::Coordinator, _) => "Coordinator 未启用",
+        (CapabilityKind::Relay, _) => "Relay 未启用",
+        (CapabilityKind::Exit, _) => "Exit 未启用",
+        (CapabilityKind::File, _) => "File 未启用",
     }
 }
 
@@ -1168,30 +1149,6 @@ fn row_card(row: &RowModel) -> gpui::AnyElement {
                 .child(row.detail.clone()),
         )
         .into_any_element()
-}
-
-fn empty_state(title: &str, detail: impl Into<String>) -> impl IntoElement {
-    div().flex().flex_col().gap_3().p_6().flex_1().child(
-        div()
-            .p_6()
-            .rounded_lg()
-            .bg(rgba(COLOR_PANEL))
-            .border_1()
-            .border_color(rgba(COLOR_BORDER))
-            .child(
-                div()
-                    .text_xl()
-                    .text_color(rgba(COLOR_TEXT))
-                    .child(title.to_string()),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(detail.into()),
-            ),
-    )
 }
 
 fn page_label(id: &str) -> &'static str {
@@ -1393,5 +1350,37 @@ mod tests {
     fn validation_enum_is_rendered_from_manifest() {
         let field = crate::node::node_ui_manifest().pages[1].actions[0].fields[0].clone();
         assert_eq!(field.validation, NodeUiValidation::NetworkName);
+    }
+
+    #[test]
+    fn every_primary_status_maps_to_a_visible_semantic_state() {
+        for status in NodePrimaryStatus::ALL {
+            let semantic = primary_status_semantic(status);
+            assert!(!status.label_zh().is_empty());
+            assert!(!semantic.label_key().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_capability_state_has_a_textual_legend() {
+        for kind in CapabilityKind::ALL {
+            for state in [
+                CapabilityState::Enabled,
+                CapabilityState::Degraded,
+                CapabilityState::Starting,
+                CapabilityState::Unsupported,
+                CapabilityState::Disabled,
+                CapabilityState::Unavailable,
+                CapabilityState::Unknown,
+            ] {
+                let label = capability_label(kind, state);
+                assert!(label.contains(match kind {
+                    CapabilityKind::Coordinator => "Coordinator",
+                    CapabilityKind::Relay => "Relay",
+                    CapabilityKind::Exit => "Exit",
+                    CapabilityKind::File => "File",
+                }));
+            }
+        }
     }
 }

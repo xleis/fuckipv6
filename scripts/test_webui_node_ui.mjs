@@ -98,6 +98,124 @@ const overviewEn = ui.projectPage({ id: "overview", title_key: "page.overview", 
 assert.equal(overviewEn.rows[0].title, "Runtime status");
 assert.match(overviewEn.rows[0].detail, /Control service unavailable/);
 
+const topologySnapshot = snapshot({
+  capabilities: {
+    capabilities: [
+      { kind: "coordinator", state: "disabled" },
+      { kind: "relay", state: "enabled" },
+      { kind: "exit", state: "degraded" },
+      { kind: "file", state: "unsupported" },
+    ],
+  },
+  networks: [{
+    name: "home",
+    status: "online",
+    roles: ["relay"],
+    peer_count: 2,
+  }],
+  peers: [
+    {
+      peer_id: "peer-online",
+      network_name: "home",
+      virtual_ipv6: "fd00::2",
+      online: true,
+      p2p_active: true,
+      p2p_healthy: true,
+      rtt_us: 12345,
+      loss_rate: 0.025,
+    },
+    {
+      peer_id: "peer-offline",
+      network_name: "home",
+      virtual_ipv6: "fd00::3",
+      online: false,
+      p2p_active: false,
+      p2p_healthy: false,
+      rtt_us: null,
+      loss_rate: 1,
+    },
+  ],
+});
+const topologyPage = { id: "topology", title_key: "page.topology", actions: [] };
+const topology = ui.projectPage(topologyPage, topologySnapshot, "home", "zh-CN");
+assert.equal(topology.rows.length, 3);
+assert.equal(topology.rows[0].kind, "network");
+assert.match(topology.rows[0].detail, /主状态 在线/);
+assert.match(topology.rows[0].detail, /本节点角色 中继/);
+assert.match(topology.rows[0].detail, /Relay: 已启用/);
+assert.match(topology.rows[0].detail, /Exit: 降级/);
+assert.match(topology.rows[0].detail, /Peer 能力：接口未提供/);
+assert.equal(topology.rows[1].peer_id, "peer-online");
+assert.match(topology.rows[1].detail, /在线/);
+assert.match(topology.rows[1].detail, /P2P/);
+assert.match(topology.rows[1].detail, /P2P 健康 健康/);
+assert.match(topology.rows[1].detail, /RTT 12\.35 ms/);
+assert.match(topology.rows[1].detail, /丢包 2\.50%/);
+assert.equal(topology.rows[2].peer_id, "peer-offline");
+assert.match(topology.rows[2].detail, /离线/);
+assert.match(topology.rows[2].detail, /中继/);
+assert.match(topology.rows[2].detail, /P2P 健康 异常/);
+assert.match(topology.rows[2].detail, /RTT 不适用/);
+assert.match(topology.rows[2].detail, /丢包 100\.00%/);
+const topologyEn = ui.projectPage(topologyPage, topologySnapshot, "home", "en");
+assert.match(topologyEn.rows[0].detail, /Primary status Online/);
+assert.match(topologyEn.rows[0].detail, /Local roles Relay/);
+assert.match(topologyEn.rows[0].detail, /Peer capabilities: not provided by the interface/);
+assert.match(topologyEn.rows[1].detail, /P2P health Healthy/);
+assert.match(topologyEn.rows[2].detail, /· Relay ·/);
+
+const validSnapshot = {
+  revision: 1,
+  lifecycle: { phase: "running", configured_networks: 0, active_networks: 0, failed_networks: [] },
+  control_health: "available",
+  identity: null,
+  configuration: { networks: [] },
+  exit_node_capabilities: {
+    schema_version: 1,
+    platform: "linux",
+    supported: true,
+    ipv4_forwarding: true,
+    ipv6_forwarding: true,
+    nat: true,
+    cleanup: true,
+    unsupported_reasons: [],
+  },
+  capabilities: {
+    capabilities: [
+      { kind: "coordinator", state: "enabled" },
+      { kind: "relay", state: "enabled" },
+      { kind: "exit", state: "degraded" },
+      { kind: "file", state: "unsupported" },
+    ],
+  },
+  permissions: { access_model: "trusted_control_plane", permissions: ["view_state"] },
+  networks: [],
+  peers: [],
+  logs: [],
+  embedded_services: [],
+  ui_mode: null,
+  last_error: null,
+};
+assert.equal(ui.validateSnapshotResponse({ schema_version: 1, snapshot: validSnapshot }), validSnapshot);
+const missingCapability = structuredClone(validSnapshot);
+missingCapability.capabilities.capabilities = missingCapability.capabilities.capabilities.filter((item) => item.kind !== "file");
+assert.throws(
+  () => ui.validateSnapshotResponse({ schema_version: 1, snapshot: missingCapability }),
+  /snapshot capability kind is missing: file/,
+);
+const duplicateCapability = structuredClone(validSnapshot);
+duplicateCapability.capabilities.capabilities[3].kind = "exit";
+assert.throws(
+  () => ui.validateSnapshotResponse({ schema_version: 1, snapshot: duplicateCapability }),
+  /duplicate snapshot capability kind: exit/,
+);
+const unknownCapabilityState = structuredClone(validSnapshot);
+unknownCapabilityState.capabilities.capabilities[0].state = "mystery";
+assert.throws(
+  () => ui.validateSnapshotResponse({ schema_version: 1, snapshot: unknownCapabilityState }),
+  /unknown snapshot capability state: mystery/,
+);
+
 const diagnosticsAction = ui.ACTION_CONTRACT.get_node_diagnostics;
 assert.deepEqual(
   ui.commandForAction(diagnosticsAction, {}, "zh-CN"),

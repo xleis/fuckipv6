@@ -74,6 +74,16 @@
   const NETWORK_ROLES = Object.freeze(["member", "discovery", "relay", "exit_node"]);
   const ROUTING_MODES = Object.freeze(["mesh_only", "bypass_mainland", "global_proxy"]);
   const NETWORK_MODES = Object.freeze(["ipv4_only", "ipv6_only", "dual_stack"]);
+  const CAPABILITY_KINDS = Object.freeze(["coordinator", "relay", "exit", "file"]);
+  const CAPABILITY_STATES = Object.freeze([
+    "disabled",
+    "starting",
+    "enabled",
+    "degraded",
+    "unavailable",
+    "unsupported",
+    "unknown",
+  ]);
   const ACL_ACTIONS = Object.freeze(["allow", "deny"]);
   const LOG_LEVELS = Object.freeze(["trace", "debug", "info", "warn", "error"]);
   const SERVICE_STATUSES = Object.freeze(["starting", "running", "stopping", "stopped", "failed"]);
@@ -1190,6 +1200,19 @@
       requireEnum(reason, EXIT_NODE_UNSUPPORTED_REASONS, "unknown exit capability reason");
     }
 
+    assertContract(isRecord(snapshot.capabilities), "snapshot capabilities are missing");
+    assertContract(Array.isArray(snapshot.capabilities.capabilities), "snapshot capabilities must be an array");
+    const capabilityKinds = snapshot.capabilities.capabilities.map((capability) => {
+      assertContract(isRecord(capability), "snapshot capability must be an object");
+      requireEnum(capability.kind, CAPABILITY_KINDS, "unknown snapshot capability kind");
+      requireEnum(capability.state, CAPABILITY_STATES, "unknown snapshot capability state");
+      return capability.kind;
+    });
+    unique(capabilityKinds, "snapshot capability kind");
+    for (const kind of CAPABILITY_KINDS) {
+      assertContract(capabilityKinds.includes(kind), "snapshot capability kind is missing: " + kind);
+    }
+
     assertContract(isRecord(snapshot.permissions), "snapshot permissions are missing");
     requireEnum(snapshot.permissions.access_model, ACCESS_MODELS, "unknown access model");
     assertContract(Array.isArray(snapshot.permissions.permissions), "snapshot permissions must be an array");
@@ -1834,11 +1857,76 @@
         address: i18n.formatAddress(peer.virtual_ipv6),
         online: label(peer.online ? "status.peer.online" : "status.peer.offline", language),
         transport: label(peer.p2p_active ? "peer.transport.p2p" : "peer.transport.relay", language),
-        rtt: peer.rtt_us === null || peer.rtt_us === undefined
-          ? label("common.not_available", language)
-          : i18n.tr(language, "peer.rtt", { value: i18n.formatDecimal(language, Number(peer.rtt_us) / 1000, 2) }),
+        rtt: peerRtt(peer, language),
       }),
     }));
+  }
+
+  function peerRtt(peer, language) {
+    return peer.rtt_us === null || peer.rtt_us === undefined
+      ? label("common.not_available", language)
+      : i18n.tr(language, "peer.rtt", {
+          value: i18n.formatDecimal(language, Number(peer.rtt_us) / 1000, 2),
+        });
+  }
+
+  function capabilitySummary(snapshot, language) {
+    const capabilities = snapshot.capabilities && Array.isArray(snapshot.capabilities.capabilities)
+      ? snapshot.capabilities.capabilities
+      : [];
+    if (!capabilities.length) return label("topology.local_capabilities_unavailable", language);
+    return capabilities.map((capability) => {
+      const kind = label("capability." + capability.kind, language);
+      const state = label("status.capability." + capability.state, language);
+      return `${kind}: ${state}`;
+    }).join(label("common.list_separator", language));
+  }
+
+  function topologyRows(snapshot, locale) {
+    const language = localeFor(locale);
+    const separator = label("common.list_separator", language);
+    const peerCapabilities = label("topology.peer_capabilities_unavailable", language);
+    const localCapabilities = capabilitySummary(snapshot, language);
+    const rows = [];
+    for (const network of snapshot.networks) {
+      const peers = snapshot.peers.filter((peer) => peer.network_name === network.name);
+      const roles = (network.roles || []).map((role) => label("choice.role." + role, language)).join(separator) ||
+        label("choice.role.member", language);
+      rows.push({
+        kind: "network",
+        network_name: network.name,
+        title: network.name,
+        detail: i18n.tr(language, "topology.network_row", {
+          status: label("status.network." + network.status, language),
+          roles,
+          peers: i18n.formatInteger(language, peers.length),
+          capabilities: localCapabilities,
+          peer_capabilities: peerCapabilities,
+        }),
+      });
+      for (const peer of peers) {
+        rows.push({
+          kind: "peer",
+          peer_id: peer.peer_id,
+          network_name: network.name,
+          title: peer.peer_id,
+          detail: i18n.tr(language, "topology.peer_row", {
+            network: network.name,
+            status: label("status.network." + network.status, language),
+            peer: peer.peer_id,
+            address: i18n.formatAddress(peer.virtual_ipv6),
+            online: label(peer.online ? "status.peer.online" : "status.peer.offline", language),
+            transport: label(peer.p2p_active ? "peer.transport.p2p" : "peer.transport.relay", language),
+            healthy: label(peer.p2p_healthy ? "peer.health.healthy" : "peer.health.unhealthy", language),
+            rtt: peerRtt(peer, language),
+            loss: i18n.tr(language, "peer.loss", {
+              value: i18n.formatDecimal(language, Number(peer.loss_rate) * 100, 2),
+            }),
+          }),
+        });
+      }
+    }
+    return rows;
   }
 
   function configRows(snapshot, locale) {
@@ -1918,15 +2006,7 @@
         empty = label("empty.peers", language);
         break;
       case "topology":
-        rows = snapshot.networks.map((network) => ({
-          title: network.name,
-          detail: i18n.tr(language, "topology.row", {
-            peers: i18n.formatInteger(
-              language,
-              snapshot.peers.filter((peer) => peer.network_name === network.name).length,
-            ),
-          }),
-        }));
+        rows = topologyRows(snapshot, language);
         empty = label("empty.topology", language);
         break;
       case "traffic": {

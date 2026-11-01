@@ -801,14 +801,18 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 边界：本项完成第一版简中/英文及现有产品表面的国际化，不包含后续新增语言；W5-05 可访问性、W5-07 React 单一应用壳和 W5-08 像素级视觉回归仍未完成。
 
-### W5-05 可访问性 `[ ]`
+### W5-05 可访问性 `[x]`
 
-- [ ] 全核心操作键盘完成；
-- [ ] 焦点顺序和焦点环；
-- [ ] 菜单键和右键等价；
-- [ ] 拓扑列表等价视图；
-- [ ] 颜色不作为唯一信息；
-- [ ] WCAG 2.2 AA 检查。
+- [x] 全核心操作键盘完成；
+- [x] 焦点顺序和焦点环；
+- [x] 菜单键和右键等价；
+- [x] 拓扑列表等价视图；
+- [x] 颜色不作为唯一信息；
+- [x] WCAG 2.2 AA 检查。
+
+实现说明：共享 WebUI 组件补齐 Dialog 初始焦点、Tab/Shift+Tab 焦点陷阱、Escape/遮罩关闭、关闭后焦点恢复、嵌套对话框栈和背景 `inert`；Menu/ContextMenu 统一点击、右键、`ContextMenu`/Apps、Shift+F10、方向键、Home/End、Escape 与焦点恢复行为，并明确 `aria-haspopup`、`aria-controls` 和 `aria-expanded`。Tabs 生成稳定 tab/panel 关联并支持方向键、Home/End 切换；CapabilityRing 同时输出能力名称与启用状态文本，不再只靠颜色表达状态。节点 WebUI 的核心控件增加 `:focus-visible` 焦点环，登录、所有者安全和重认证统一接入可访问 Dialog；拓扑页新增逐网络、逐 Peer 的文本等价视图，并为每个网络/Peer 行提供可执行“在节点列表中查看”的键盘与右键菜单，菜单完成后把焦点恢复到新页面内容。`scripts/test_webui_accessibility.mjs` 使用无网络 Chromium/CDP fixture 验证焦点陷阱、背景隔离、焦点恢复、菜单键/右键等价、方向键、Tabs ARIA 和 CapabilityRing 文本状态；`scripts/test_webui_node_ui.mjs` 验证中英文拓扑投影与能力快照契约。
+
+边界：本项覆盖节点 WebUI、共享浏览器组件及当前自动化/人工键盘路径审查，不等于第三方完整 WCAG 认证或真实辅助技术全组合验收。GPUI 原生无障碍属于 W5-06；旧 Coordinator/legacy `UNIFIED_MASTER_HTML` 表面由 W5-07 移除，本项不宣称其完整通过 WCAG 2.2 AA。
 
 ### W5-06 GPUI 基础适配 `[ ]`
 

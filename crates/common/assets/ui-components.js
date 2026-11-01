@@ -58,9 +58,15 @@
   const openMenus = new Set();
   let tooltipSequence = 0;
   let toastSequence = 0;
+  let dialogSequence = 0;
+  let tabSequence = 0;
   let activeDialog = null;
-  let dialogReturnFocus = null;
   let activeDrawer = null;
+  const dialogStates = new WeakMap();
+  const dialogStack = [];
+  const dialogInertState = new Map();
+  const menuStates = new WeakMap();
+  let menuSequence = 0;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -100,10 +106,16 @@
     return Object.freeze({ id: "wide", navigation: "sidebar-with-detail", detail: "persistent" });
   }
 
+  function isFocusable(element) {
+    if (!element || element.hidden || element.disabled) return false;
+    if (element.getAttribute("aria-hidden") === "true") return false;
+    if (element.closest("[hidden], [inert]")) return false;
+    const style = window.getComputedStyle?.(element);
+    return !style || (style.display !== "none" && style.visibility !== "hidden");
+  }
+
   function focusableElements(root) {
-    return [...root.querySelectorAll(FOCUSABLE)].filter(element =>
-      !element.hidden && element.getAttribute("aria-hidden") !== "true"
-    );
+    return [...root.querySelectorAll(FOCUSABLE)].filter(isFocusable);
   }
 
   function drawerElements(root, name) {
@@ -234,12 +246,19 @@
       container.dataset.uiTabsBound = "true";
       container.setAttribute("role", "tablist");
       const tabs = [...container.querySelectorAll("[data-ui-local-tab]")];
+      container.setAttribute("aria-orientation", "horizontal");
       for (const tab of tabs) {
+        const sequence = tabSequence++;
         tab.setAttribute("role", "tab");
-        const panelId = `ui-panel-${tab.dataset.uiLocalTab}`;
+        tab.id ||= `ui-tab-${sequence}`;
+        const panelId = `ui-panel-${sequence}`;
         tab.setAttribute("aria-controls", panelId);
         const panel = container.closest(".ui-app-shell")?.querySelector(`[data-ui-page-panel="${tab.dataset.uiLocalTab}"]`);
-        if (panel) panel.id = panelId;
+        if (panel) {
+          panel.id = panelId;
+          panel.setAttribute("aria-labelledby", tab.id);
+          panel.tabIndex = 0;
+        }
         tab.addEventListener("click", () => selectLocalTab(container, tab.dataset.uiLocalTab));
       }
       container.addEventListener("keydown", event => {
@@ -588,7 +607,6 @@
   function capabilityRing(active = [], options = {}) {
     const root = node("div", "ui-capability-ring");
     setDataComponent(root, COMPONENTS.capabilityRing);
-    if (options.label) root.setAttribute("aria-label", options.label);
     const svg = svgNode("svg", { viewBox: "0 0 36 36", "aria-hidden": "true" });
     const names = ["coordinator", "relay", "exit", "file"];
     const circumference = 2 * Math.PI * 14;
@@ -609,12 +627,103 @@
     });
     const legend = node("div", "ui-capability-ring-legend");
     for (const name of names) {
-      const item = node("span", "", options.labels?.[name] || name);
+      const enabled = active.includes(name);
+      const label = options.labels?.[name] || name;
+      const stateLabel = enabled
+        ? options.stateLabels?.active || "Active"
+        : options.stateLabels?.inactive || "Inactive";
+      const item = node("span", "", `${label}: ${stateLabel}`);
       item.dataset.capability = name;
-      item.dataset.active = String(active.includes(name));
+      item.dataset.active = String(enabled);
       legend.append(item);
     }
     root.append(svg, legend);
+    if (options.label) root.setAttribute("aria-label", options.label);
+    return root;
+  }
+
+  function dialogPanel(root) {
+    return root.querySelector('[role="dialog"], .ui-dialog');
+  }
+
+  function restoreDialogInert() {
+    for (const [element, state] of dialogInertState) {
+      element.inert = state.inert;
+      if (state.ariaHidden === null) element.removeAttribute("aria-hidden");
+      else element.setAttribute("aria-hidden", state.ariaHidden);
+    }
+    dialogInertState.clear();
+  }
+
+  function applyDialogInert(root) {
+    restoreDialogInert();
+    if (!root) return;
+    let current = root;
+    while (current && current.parentElement) {
+      const parent = current.parentElement;
+      for (const sibling of parent.children) {
+        if (sibling === current || ["SCRIPT", "STYLE", "LINK", "META"].includes(sibling.tagName)) continue;
+        if (dialogInertState.has(sibling)) continue;
+        dialogInertState.set(sibling, {
+          inert: Boolean(sibling.inert),
+          ariaHidden: sibling.getAttribute("aria-hidden"),
+        });
+        sibling.inert = true;
+        sibling.setAttribute("aria-hidden", "true");
+      }
+      current = parent;
+    }
+  }
+
+  function trapFocus(root, event) {
+    const focusable = focusableElements(root);
+    if (!focusable.length) {
+      event.preventDefault();
+      dialogPanel(root)?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const panel = dialogPanel(root);
+    if (!root.contains(document.activeElement) || document.activeElement === panel) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function initDialog(target, options = {}) {
+    const root = typeof target === "string" ? document.querySelector(target) : target;
+    if (!root) return null;
+    const panel = dialogPanel(root);
+    if (!panel) throw new TypeError("Accessible dialog root requires a [role=dialog] panel");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.tabIndex = -1;
+    const state = dialogStates.get(root) || { options: {}, bound: false };
+    state.options = { ...(state.options || {}), ...options };
+    dialogStates.set(root, state);
+    if (state.bound) return root;
+    state.bound = true;
+    root.addEventListener("mousedown", event => {
+      if (event.target === root && state.options.dismissible !== false) {
+        closeDialog(root, "backdrop");
+      }
+    });
+    root.addEventListener("keydown", event => {
+      if (event.key === "Escape" && state.options.dismissible !== false) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeDialog(root, "escape");
+        return;
+      }
+      if (event.key === "Tab") trapFocus(root, event);
+    });
     return root;
   }
 
@@ -628,11 +737,16 @@
     const header = node("header", "ui-dialog-header");
     const heading = node("div");
     const title = node("h2", "ui-dialog-title", options.title || "Dialog");
-    title.id = options.titleId || `ui-dialog-title-${dialogs.size + 1}`;
+    title.id = options.titleId || `ui-dialog-title-${++dialogSequence}`;
     panel.setAttribute("aria-labelledby", title.id);
     heading.append(title);
-    if (options.description) heading.append(node("p", "ui-dialog-description", options.description));
-    const close = button({ label: "关闭", iconOnly: true, variant: "ghost", ariaLabel: "关闭对话框", onClick: () => closeDialog(root) });
+    if (options.description) {
+      const description = node("p", "ui-dialog-description", options.description);
+      description.id = options.descriptionId || `${title.id}-description`;
+      panel.setAttribute("aria-describedby", description.id);
+      heading.append(description);
+    }
+    const close = button({ label: "关闭", iconOnly: true, variant: "ghost", ariaLabel: "关闭对话框", onClick: () => closeDialog(root, "close-button") });
     close.textContent = "×";
     header.append(heading, close);
     const body = node("div", "ui-dialog-body");
@@ -641,59 +755,106 @@
     append(actions, options.actions || []);
     panel.append(header, body, actions);
     root.append(panel);
-
-    root.addEventListener("mousedown", event => {
-      if (event.target === root && options.dismissible !== false) closeDialog(root);
-    });
-    root.addEventListener("keydown", event => {
-      if (event.key === "Escape" && options.dismissible !== false) {
-        event.preventDefault();
-        closeDialog(root);
-      }
-      if (event.key === "Tab") trapFocus(root, event);
-    });
     root._uiOptions = options;
     dialogs.add(root);
+    initDialog(root, options);
     return root;
   }
 
-  function trapFocus(root, event) {
-    const focusable = [...root.querySelectorAll(FOCUSABLE)].filter(element => !element.hidden);
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+  function focusDialogInitial(root, options, generation) {
+    requestAnimationFrame(() => {
+      const state = dialogStates.get(root);
+      if (!state?.open || state.generation !== generation) return;
+      let target = null;
+      if (typeof options.initialFocus === "function") target = options.initialFocus(root);
+      else if (options.initialFocus instanceof Element) target = options.initialFocus;
+      else if (typeof options.initialFocus === "string") target = root.querySelector(options.initialFocus);
+      target ||= focusableElements(root)[0] || dialogPanel(root);
+      target?.focus();
+    });
   }
 
-  function openDialog(target) {
+  function openDialog(target, options = {}) {
     const root = typeof target === "string" ? document.querySelector(target) : target;
     if (!root) return null;
-    dialogReturnFocus = document.activeElement;
+    initDialog(root, options);
+    const state = dialogStates.get(root);
+    if (state.open) return root;
+    state.options = { ...(state.options || {}), ...options };
+    state.returnFocus = options.returnFocus instanceof Element
+      ? options.returnFocus
+      : document.activeElement;
+    state.open = true;
+    state.generation = (state.generation || 0) + 1;
     root.hidden = false;
     root.dataset.open = "true";
+    if (!dialogStack.includes(root)) dialogStack.push(root);
     activeDialog = root;
-    const focusable = root.querySelector(FOCUSABLE);
-    requestAnimationFrame(() => (focusable || root.querySelector(".ui-dialog"))?.focus());
+    applyDialogInert(root);
+    focusDialogInitial(root, state.options, state.generation);
     return root;
   }
 
-  function closeDialog(target = activeDialog) {
+  function closeDialog(target = activeDialog, reason = "api") {
     const root = typeof target === "string" ? document.querySelector(target) : target;
     if (!root) return;
+    const state = dialogStates.get(root);
+    if (!state?.open) {
+      root.hidden = true;
+      delete root.dataset.open;
+      return;
+    }
+    state.open = false;
+    state.generation += 1;
     root.hidden = true;
     delete root.dataset.open;
-    if (activeDialog === root) activeDialog = null;
-    if (dialogReturnFocus && typeof dialogReturnFocus.focus === "function") dialogReturnFocus.focus();
-    dialogReturnFocus = null;
+    const index = dialogStack.indexOf(root);
+    if (index >= 0) dialogStack.splice(index, 1);
+    activeDialog = dialogStack.at(-1) || null;
+    applyDialogInert(activeDialog);
+    const returnFocus = state.returnFocus;
+    state.returnFocus = null;
+    root.dispatchEvent(new CustomEvent("ui-dialog-close", { bubbles: false, detail: { reason } }));
+    if (typeof state.options.onClose === "function") state.options.onClose(reason);
+    if (state.options.restoreFocus !== false && returnFocus?.isConnected) returnFocus.focus();
+  }
+
+  function initDialogs(root = document) {
+    const targets = root.matches?.("[data-ui-dialog]")
+      ? [root]
+      : [...root.querySelectorAll("[data-ui-dialog]")];
+    for (const target of targets) initDialog(target);
+  }
+
+  function initMenu(root, options = {}) {
+    const state = menuStates.get(root) || {};
+    state.options = { ...(state.options || {}), ...options };
+    state.bound = Boolean(state.bound);
+    menuStates.set(root, state);
+    if (state.bound) return root;
+    state.bound = true;
+    root.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        hideAllMenus(true);
+        return;
+      }
+      if (event.key === "Tab") {
+        hideAllMenus(false);
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      const items = [...root.querySelectorAll(".ui-menu-item:not(:disabled)")];
+      if (!items.length) return;
+      event.preventDefault();
+      const current = items.indexOf(document.activeElement);
+      let target = 0;
+      if (event.key === "End") target = items.length - 1;
+      else if (event.key === "ArrowUp") target = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+      else if (event.key === "ArrowDown") target = current < 0 ? 0 : (current + 1) % items.length;
+      items[target].focus();
+    });
+    return root;
   }
 
   function menu(options = {}) {
@@ -704,6 +865,7 @@
     if (options.label) root.setAttribute("aria-label", options.label);
     populateMenu(root, options);
     openMenus.add(root);
+    initMenu(root, options);
     return root;
   }
 
@@ -715,6 +877,7 @@
     if (options.label) root.setAttribute("aria-label", options.label);
     populateMenu(root, options);
     openMenus.add(root);
+    initMenu(root, options);
     return root;
   }
 
@@ -735,38 +898,72 @@
       if (item.disabled) action.disabled = true;
       if (item.shortcut) {
         const shortcut = node("span", "", item.shortcut);
+        shortcut.setAttribute("aria-hidden", "true");
         shortcut.style.marginLeft = "auto";
         action.append(shortcut);
       }
       action.addEventListener("click", () => {
-        hideAllMenus();
+        hideAllMenus(true);
         if (typeof item.onSelect === "function") item.onSelect();
       });
       root.append(action);
     }
-    root.addEventListener("keydown", event => {
-      if (event.key === "Escape") {
-        hideAllMenus();
-        return;
-      }
-      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-      const items = [...root.querySelectorAll(".ui-menu-item:not(:disabled)")];
-      if (!items.length) return;
-      event.preventDefault();
-      const current = items.indexOf(document.activeElement);
-      let target = 0;
-      if (event.key === "End") target = items.length - 1;
-      else if (event.key === "ArrowUp") target = (current - 1 + items.length) % items.length;
-      else if (event.key === "ArrowDown") target = (current + 1) % items.length;
-      items[target].focus();
-    });
   }
 
-  function showMenu(target, x, y) {
+  function menuTriggerPoint(trigger, event = null) {
+    const rect = trigger.getBoundingClientRect();
+    return {
+      x: Number.isFinite(event?.clientX) && event.clientX > 0 ? event.clientX : rect.right,
+      y: Number.isFinite(event?.clientY) && event.clientY > 0 ? event.clientY : rect.bottom,
+    };
+  }
+
+  function bindContextMenu(trigger, target, options = {}) {
+    const menuRoot = typeof target === "string" ? document.querySelector(target) : target;
+    if (!trigger || !menuRoot) return null;
+    menuRoot.id ||= `ui-context-menu-${++menuSequence}`;
+    if (options.expose !== false) {
+      trigger.setAttribute("aria-haspopup", "menu");
+      trigger.setAttribute("aria-controls", menuRoot.id);
+      trigger.setAttribute("aria-expanded", "false");
+    }
+    const open = event => {
+      event.preventDefault();
+      const point = menuTriggerPoint(trigger, event.type === "contextmenu" ? event : null);
+      showMenu(menuRoot, point.x, point.y, { trigger });
+    };
+    if (options.click !== false) trigger.addEventListener("click", open);
+    if (options.contextMenu !== false) trigger.addEventListener("contextmenu", open);
+    if (options.keyboard !== false) {
+      trigger.addEventListener("keydown", event => {
+        if (
+          event.key === "ContextMenu" ||
+          event.key === "Apps" ||
+          (event.shiftKey && event.key === "F10") ||
+          event.key === "ArrowDown" ||
+          event.key === "Enter" ||
+          event.key === " "
+        ) {
+          open(event);
+        }
+      });
+    }
+    return menuRoot;
+  }
+
+  function showMenu(target, x, y, options = {}) {
     const root = typeof target === "string" ? document.querySelector(target) : target;
     if (!root) return;
+    initMenu(root);
+    openMenus.add(root);
     hideAllMenus(false);
+    const state = menuStates.get(root);
+    state.trigger = options.trigger instanceof Element ? options.trigger : document.activeElement;
+    state.open = true;
+    state.generation = (state.generation || 0) + 1;
     root.hidden = false;
+    root.dataset.open = "true";
+    if (state.trigger?.setAttribute) state.trigger.setAttribute("aria-expanded", "true");
     root.style.left = "0px";
     root.style.top = "0px";
     const rect = root.getBoundingClientRect();
@@ -774,15 +971,27 @@
     const top = Math.max(8, Math.min(Number(y) || 0, window.innerHeight - rect.height - 8));
     root.style.left = `${left}px`;
     root.style.top = `${top}px`;
-    const first = root.querySelector(".ui-menu-item:not(:disabled)");
-    requestAnimationFrame(() => first?.focus());
+    const generation = state.generation;
+    requestAnimationFrame(() => {
+      if (!state.open || state.generation !== generation) return;
+      root.querySelector(".ui-menu-item:not(:disabled)")?.focus();
+    });
   }
 
   function hideAllMenus(focus = true) {
     for (const menuElement of openMenus) {
       if (menuElement.hidden) continue;
       menuElement.hidden = true;
-      if (focus && menuElement.contains(document.activeElement)) document.activeElement.blur();
+      delete menuElement.dataset.open;
+      const state = menuStates.get(menuElement);
+      if (state) {
+        state.open = false;
+        state.generation += 1;
+        state.trigger?.setAttribute?.("aria-expanded", "false");
+      }
+      if (focus && (menuElement.contains(document.activeElement) || state?.restoreFocus)) {
+        state?.trigger?.focus?.();
+      }
     }
   }
 
@@ -896,6 +1105,7 @@
       if (component === "toolbar") element.setAttribute("role", "toolbar");
       if (component === "table") element.querySelector("table")?.setAttribute("role", "table");
     }
+    initDialogs(root);
     initLocalTabs(root);
     syncLayout(root);
   }
@@ -918,7 +1128,10 @@
   });
   document.addEventListener("pointerdown", event => {
     for (const menuElement of openMenus) {
-      if (!menuElement.hidden && !menuElement.contains(event.target)) menuElement.hidden = true;
+      if (!menuElement.hidden && !menuElement.contains(event.target)) {
+        hideAllMenus(false);
+        break;
+      }
     }
   });
   document.addEventListener("keydown", event => {
@@ -944,10 +1157,13 @@
     statusBadge,
     capabilityRing,
     dialog,
+    initDialog,
+    initDialogs,
     openDialog,
     closeDialog,
     menu,
     contextMenu,
+    bindContextMenu,
     showMenu,
     hideMenu: hideAllMenus,
     tooltip,

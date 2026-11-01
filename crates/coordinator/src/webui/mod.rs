@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
 use crate::auth::jwt::{Claims, JwtManager};
-use crate::signaling::blacklist::{CoordinatorConfigBlacklistStore, SharedBlacklistStore};
+use crate::signaling::blacklist::CoordinatorConfigBlacklistStore;
 use crate::signaling::session::{
     CoordinatorSnapshot, PeerSnapshot, SessionManager, TrafficSnapshot,
 };
@@ -26,6 +26,8 @@ pub struct AppState {
     pub auth_config: CoordinatorAuthConfig,
     pub jwt_manager: Arc<JwtManager>,
     pub config_path: Option<String>,
+    config_store: Option<Arc<CoordinatorConfigBlacklistStore>>,
+    network_config_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -38,6 +40,20 @@ impl AppState {
         auth_config: CoordinatorAuthConfig,
         config_path: Option<String>,
     ) -> Self {
+        let config_store = config_path
+            .as_ref()
+            .map(|path| Arc::new(CoordinatorConfigBlacklistStore::new(path)));
+        Self::new_with_config_store(session_manager, auth_config, config_store)
+    }
+
+    fn new_with_config_store(
+        session_manager: Arc<SessionManager>,
+        auth_config: CoordinatorAuthConfig,
+        config_store: Option<Arc<CoordinatorConfigBlacklistStore>>,
+    ) -> Self {
+        let config_path = config_store
+            .as_ref()
+            .map(|store| store.path().to_string_lossy().into_owned());
         let secret = auth_config.jwt_secret.clone().unwrap_or_else(|| {
             use sha2::{Digest, Sha256};
             let now = std::time::SystemTime::now()
@@ -58,6 +74,8 @@ impl AppState {
             auth_config,
             jwt_manager,
             config_path,
+            config_store,
+            network_config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -124,15 +142,17 @@ pub async fn run_with_options(
     auth_config: CoordinatorAuthConfig,
     config_path: Option<String>,
 ) -> Result<()> {
-    if let Some(path) = &config_path {
-        let store: SharedBlacklistStore = Arc::new(CoordinatorConfigBlacklistStore::new(path));
+    let config_store = config_path
+        .as_ref()
+        .map(|path| Arc::new(CoordinatorConfigBlacklistStore::new(path)));
+    if let Some(store) = &config_store {
         session_manager
-            .attach_blacklist_store(store)
+            .attach_blacklist_store(store.clone())
             .await
             .context("加载协调端持久黑名单失败")?;
     }
 
-    let state = AppState::new_with_config_path(session_manager, auth_config, config_path);
+    let state = AppState::new_with_config_store(session_manager, auth_config, config_store);
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -418,48 +438,97 @@ async fn update_network_config(
         ip_pool: Some(req.ipv6_pool.clone()),
     };
 
-    if let Err(e) = state
+    // Serialize the full persistence + runtime transaction. Without this
+    // guard, two updates could both succeed individually and then race while
+    // rolling back, leaving the persisted and runtime allocations divergent.
+    let _update_guard = state.network_config_write_lock.lock().await;
+    let Some(config_store) = state.config_store.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(NetworkConfigApiResponse {
+                success: false,
+                message: "当前协调端没有关联可写配置文件，拒绝报告未持久化的更新".to_string(),
+                data: None,
+            }),
+        );
+    };
+
+    let previous_alloc = state.session_manager.current_network_allocation().await;
+    let persisted_alloc = new_alloc.clone();
+    let persist_store = config_store.clone();
+    let persist_result = tokio::task::spawn_blocking(move || {
+        persist_store.save_network_allocation(&persisted_alloc)
+    })
+    .await;
+    match persist_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(NetworkConfigApiResponse {
+                    success: false,
+                    message: format!("持久化网络配置失败，运行时配置未修改: {error:#}"),
+                    data: None,
+                }),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(NetworkConfigApiResponse {
+                    success: false,
+                    message: format!("等待网络配置持久化任务失败，运行时配置未修改: {error}"),
+                    data: None,
+                }),
+            );
+        }
+    }
+
+    if let Err(runtime_error) = state
         .session_manager
         .update_network_allocation(new_alloc.clone())
         .await
     {
+        let rollback_store = config_store.clone();
+        let rollback_alloc = previous_alloc.clone();
+        let rollback_result = tokio::task::spawn_blocking(move || {
+            rollback_store.save_network_allocation(&rollback_alloc)
+        })
+        .await;
+        let rollback = match rollback_result {
+            Ok(Ok(())) => "持久化配置已回滚".to_string(),
+            Ok(Err(error)) => format!("持久化配置回滚失败: {error:#}"),
+            Err(error) => format!("等待持久化配置回滚任务失败: {error}"),
+        };
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(NetworkConfigApiResponse {
                 success: false,
-                message: format!("更新运行时网段失败: {e}"),
+                message: format!("更新运行时网段失败: {runtime_error}; {rollback}"),
                 data: None,
             }),
         );
     }
 
-    // 持久化保存到配置文件（如果指定了配置文件路径）
-    if let Some(config_path) = &state.config_path {
-        if let Ok(mut config) = fuckipv6_common::CoordinatorConfig::from_file(config_path) {
-            config.network = new_alloc.clone();
-            if let Err(e) = config.save_to_file(config_path) {
-                tracing::warn!("无法写回协调端配置文件 {}: {:?}", config_path, e);
-            } else {
-                tracing::info!("网络配置已持久化保存到: {}", config_path);
-            }
-        }
-    }
-
     let ipv4_prefix = state.session_manager.ipv4_prefix().await;
     let ipv6_prefix = state.session_manager.ipv6_prefix().await;
+    tracing::info!(
+        "网络配置已持久化并实时生效: {}",
+        config_store.path().display()
+    );
 
     (
         StatusCode::OK,
         Json(NetworkConfigApiResponse {
             success: true,
-            message: "虚拟内网及网段配置已更新并实时生效".to_string(),
+            message: "虚拟内网及网段配置已持久化并实时生效".to_string(),
             data: Some(NetworkConfigDto {
                 mode: req.mode,
                 ipv4_pool: req.ipv4_pool,
                 ipv6_pool: req.ipv6_pool,
                 ipv4_prefix,
                 ipv6_prefix,
-                config_file: state.config_path.clone(),
+                config_file: Some(config_store.path().to_string_lossy().into_owned()),
             }),
         }),
     )
@@ -2871,6 +2940,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
 
+    fn test_coordinator_config_path(label: &str) -> std::path::PathBuf {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-webui-{label}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create WebUI test config directory");
+        dir.join("coordinator.toml")
+    }
+
+    fn test_network_state(label: &str) -> Result<(AppState, std::path::PathBuf)> {
+        let config_path = test_coordinator_config_path(label);
+        fuckipv6_common::CoordinatorConfig::default().save_to_file(&config_path)?;
+        let state = AppState::new_with_config_path(
+            Arc::new(SessionManager::new("fd00::1000/120")?),
+            CoordinatorAuthConfig::default(),
+            Some(config_path.to_string_lossy().into_owned()),
+        );
+        Ok((state, config_path))
+    }
+
     struct FailingBlacklistStore {
         loaded: BlacklistConfig,
     }
@@ -3419,10 +3511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_config_api_get_and_update() -> Result<()> {
-        let state = AppState::new(
-            Arc::new(SessionManager::new("fd00::1000/120")?),
-            CoordinatorAuthConfig::default(),
-        );
+        let (state, config_path) = test_network_state("config-update")?;
 
         // GET 当前配置
         let Json(current) = get_network_config(
@@ -3476,6 +3565,110 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("status: {:?}", e))?;
         assert_eq!(after_get.mode, NetworkMode::Ipv4Only);
         assert_eq!(after_get.ipv4_pool, "192.168.100.0/24");
+
+        let persisted = fuckipv6_common::CoordinatorConfig::from_file(&config_path)?;
+        assert_eq!(persisted.network.mode, NetworkMode::Ipv4Only);
+        assert_eq!(persisted.network.ipv4_pool, "192.168.100.0/24");
+        let _ = std::fs::remove_dir_all(config_path.parent().expect("config parent"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_config_update_rejects_unpersisted_runtime_only_mode() -> Result<()> {
+        let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let state = AppState::new(manager, CoordinatorAuthConfig::default());
+        let before = state.session_manager.current_network_allocation().await;
+
+        let (status, Json(response)) = update_network_config(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(UpdateNetworkConfigRequest {
+                mode: NetworkMode::Ipv4Only,
+                ipv4_pool: "192.168.100.0/24".to_string(),
+                ipv6_pool: "fd00::/64".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(!response.success);
+        assert_eq!(
+            state.session_manager.current_network_allocation().await,
+            before
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_config_update_persistence_failure_keeps_runtime_unchanged() -> Result<()> {
+        let (state, config_path) = test_network_state("config-persist-failure")?;
+        let before = state.session_manager.current_network_allocation().await;
+        std::fs::remove_file(&config_path)?;
+        std::fs::create_dir_all(&config_path)?;
+
+        let (status, Json(response)) = update_network_config(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(UpdateNetworkConfigRequest {
+                mode: NetworkMode::Ipv4Only,
+                ipv4_pool: "192.168.100.0/24".to_string(),
+                ipv6_pool: "fd00::/64".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.success);
+        assert!(response.message.contains("运行时配置未修改"));
+        assert_eq!(
+            state.session_manager.current_network_allocation().await,
+            before
+        );
+        let _ = std::fs::remove_dir_all(config_path.parent().expect("config parent"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_config_update_runtime_rejection_rolls_back_persistence() -> Result<()> {
+        let (state, config_path) = test_network_state("config-runtime-rollback")?;
+        let before = state.session_manager.current_network_allocation().await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .session_manager
+            .register_client(
+                "live-client".to_string(),
+                vec![7; 32],
+                "192.0.2.10:41000".parse().expect("socket address"),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?;
+
+        let (status, Json(response)) = update_network_config(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+            Json(UpdateNetworkConfigRequest {
+                mode: NetworkMode::Ipv4Only,
+                ipv4_pool: "192.168.100.0/24".to_string(),
+                ipv6_pool: "fd00::/64".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.success);
+        assert!(response.message.contains("持久化配置已回滚"));
+        assert_eq!(
+            state.session_manager.current_network_allocation().await,
+            before
+        );
+        let persisted = fuckipv6_common::CoordinatorConfig::from_file(&config_path)?;
+        assert_eq!(persisted.network, before);
+        let _ = std::fs::remove_dir_all(config_path.parent().expect("config parent"));
         Ok(())
     }
 }

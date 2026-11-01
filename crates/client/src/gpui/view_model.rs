@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
+use fuckipv6_common::i18n::{t, Locale};
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
@@ -302,6 +303,7 @@ pub fn build_page_model(
     manifest: &NodeUiManifest,
     snapshot: &NodeSnapshot,
     page_id: &str,
+    locale: Locale,
 ) -> Result<PageModel, ModelError> {
     let page = manifest
         .pages
@@ -310,12 +312,13 @@ pub fn build_page_model(
         .ok_or_else(|| ModelError::UnknownPage {
             page_id: page_id.into(),
         })?;
-    build_page_model_for_page(page, snapshot)
+    build_page_model_for_page(page, snapshot, locale)
 }
 
 pub fn build_page_model_for_page(
     page: &NodeUiPage,
     snapshot: &NodeSnapshot,
+    locale: Locale,
 ) -> Result<PageModel, ModelError> {
     let kind = PageKind::from_id(&page.id).ok_or_else(|| ModelError::UnknownPage {
         page_id: page.id.clone(),
@@ -334,7 +337,7 @@ pub fn build_page_model_for_page(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (metrics, sections) = project_page(kind, snapshot);
+    let (metrics, sections) = project_page(kind, snapshot, locale);
     Ok(PageModel {
         page_id: page.id.clone(),
         kind,
@@ -770,19 +773,23 @@ fn split_names(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn project_page(kind: PageKind, snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_page(
+    kind: PageKind,
+    snapshot: &NodeSnapshot,
+    locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     match kind {
-        PageKind::Overview => project_overview(snapshot),
-        PageKind::Networks => project_networks(snapshot),
-        PageKind::Peers => project_peers(snapshot),
-        PageKind::Topology => project_topology(snapshot),
-        PageKind::Traffic => project_traffic(snapshot),
-        PageKind::Routing => project_routing(snapshot),
-        PageKind::ExitNode => project_exit_node(snapshot),
-        PageKind::Relay => project_relay(snapshot),
-        PageKind::Logs => project_logs(snapshot),
-        PageKind::Identity => project_identity(snapshot),
-        PageKind::Settings => project_settings(snapshot),
+        PageKind::Overview => project_overview(snapshot, locale),
+        PageKind::Networks => project_networks(snapshot, locale),
+        PageKind::Peers => project_peers(snapshot, locale),
+        PageKind::Topology => project_topology(snapshot, locale),
+        PageKind::Traffic => project_traffic(snapshot, locale),
+        PageKind::Routing => project_routing(snapshot, locale),
+        PageKind::ExitNode => project_exit_node(snapshot, locale),
+        PageKind::Relay => project_relay(snapshot, locale),
+        PageKind::Logs => project_logs(snapshot, locale),
+        PageKind::Identity => project_identity(snapshot, locale),
+        PageKind::Settings => project_settings(snapshot, locale),
     }
 }
 
@@ -813,7 +820,10 @@ fn row(title: impl Into<String>, detail: impl Into<String>) -> RowModel {
     }
 }
 
-fn project_overview(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_overview(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let primary_status = snapshot.primary_status();
     let identity = snapshot
         .identity
@@ -860,7 +870,10 @@ fn project_overview(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
     )
 }
 
-fn project_networks(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_networks(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .networks
         .iter()
@@ -912,7 +925,10 @@ fn project_networks(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
     )
 }
 
-fn project_peers(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_peers(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .peers
         .iter()
@@ -951,7 +967,10 @@ fn project_peers(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel
     )
 }
 
-fn project_topology(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_topology(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let sections = snapshot
         .networks
         .iter()
@@ -996,7 +1015,10 @@ fn project_topology(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
     )
 }
 
-fn project_traffic(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_traffic(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let network_rows = snapshot
         .networks
         .iter()
@@ -1041,7 +1063,10 @@ fn project_traffic(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMod
     )
 }
 
-fn project_routing(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_routing(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .configuration
         .networks
@@ -1085,7 +1110,10 @@ fn project_routing(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMod
     )
 }
 
-fn project_exit_node(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_exit_node(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let capabilities = &snapshot.exit_node_capabilities;
     let capability_rows = vec![row(
         "平台能力",
@@ -1166,7 +1194,10 @@ fn exit_node_platform_label(platform: fuckipv6_common::ExitNodePlatform) -> &'st
     }
 }
 
-fn project_relay(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_relay(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let services = snapshot
         .embedded_services
         .iter()
@@ -1204,7 +1235,7 @@ fn project_relay(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel
     )
 }
 
-fn project_logs(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_logs(snapshot: &NodeSnapshot, _locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .logs
         .iter()
@@ -1221,7 +1252,10 @@ fn project_logs(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>
     )
 }
 
-fn project_identity(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_identity(
+    snapshot: &NodeSnapshot,
+    locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let identity_rows = snapshot
         .identity
         .as_ref()
@@ -1264,20 +1298,20 @@ fn project_identity(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
             section("公开身份", "尚未发布节点身份", identity_rows),
             section("网络身份配置", "没有网络配置", config_rows),
             section(
-                "本地身份与 WebUI 认证",
-                "本地 GPUI 与浏览器 WebUI 使用不同的认证边界",
+                t(locale, "owner_auth.identity.section_title"),
+                t(locale, "owner_auth.identity.section_empty"),
                 vec![
                     row(
-                        crate::owner_security::ui_copy::LOCAL_IDENTITY_TITLE,
-                        crate::owner_security::ui_copy::LOCAL_IDENTITY_DETAIL,
+                        t(locale, "owner_auth.local_identity.title"),
+                        t(locale, "owner_auth.local_identity.detail"),
                     ),
                     row(
-                        crate::owner_security::ui_copy::WEBUI_IDENTITY_TITLE,
-                        crate::owner_security::ui_copy::WEBUI_IDENTITY_DETAIL,
+                        t(locale, "owner_auth.web_identity.title"),
+                        t(locale, "owner_auth.web_identity.detail"),
                     ),
                     row(
-                        "所有者恢复",
-                        crate::owner_security::ui_copy::PASSKEY_RECOVERY_HELP,
+                        t(locale, "owner_auth.recovery_row.title"),
+                        t(locale, "owner_auth.passkey_recovery.help"),
                     ),
                 ],
             ),
@@ -1285,7 +1319,10 @@ fn project_identity(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
     )
 }
 
-fn project_settings(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_settings(
+    snapshot: &NodeSnapshot,
+    _locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let permission_rows = snapshot
         .permissions
         .permissions
@@ -1473,7 +1510,8 @@ mod tests {
             .pages
             .iter()
             .map(|page| {
-                let model = build_page_model_for_page(page, &snapshot).expect("page model");
+                let model =
+                    build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("page model");
                 assert_eq!(model.page_id, page.id);
                 assert!(!model.actions.is_empty() || page.actions.is_empty());
                 model.kind
@@ -1491,7 +1529,8 @@ mod tests {
             .find(|page| page.id == "overview")
             .expect("overview page");
         let snapshot = populated_snapshot();
-        let model = build_page_model_for_page(page, &snapshot).expect("overview model");
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("overview model");
 
         assert!(!model
             .metrics
@@ -1514,7 +1553,8 @@ mod tests {
             .iter()
             .find(|page| page.id == "identity")
             .expect("identity page");
-        let model = build_page_model_for_page(page, &populated_snapshot()).expect("identity model");
+        let model = build_page_model_for_page(page, &populated_snapshot(), Locale::ZhCn)
+            .expect("identity model");
         let section = model
             .sections
             .iter()
@@ -1523,11 +1563,11 @@ mod tests {
         assert_eq!(section.rows.len(), 3);
         assert_eq!(
             section.rows[0].detail,
-            crate::owner_security::ui_copy::LOCAL_IDENTITY_DETAIL
+            t(Locale::ZhCn, "owner_auth.local_identity.detail")
         );
         assert_eq!(
             section.rows[1].detail,
-            crate::owner_security::ui_copy::WEBUI_IDENTITY_DETAIL
+            t(Locale::ZhCn, "owner_auth.web_identity.detail")
         );
         assert!(section.rows[2].detail.contains("recover-owner"));
         assert!(!section
@@ -1541,7 +1581,8 @@ mod tests {
         let manifest = node_ui_manifest();
         let snapshot = populated_snapshot();
         for page in &manifest.pages {
-            let model = build_page_model_for_page(page, &snapshot).expect("page model");
+            let model =
+                build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("page model");
             assert!(
                 !model.metrics.is_empty()
                     || model
@@ -1571,11 +1612,18 @@ mod tests {
     fn unknown_page_and_action_fail_closed() {
         let mut manifest = node_ui_manifest();
         manifest.pages[0].id = "unknown".into();
-        assert!(build_page_model(&manifest, &NodeSnapshot::default(), "unknown").is_err());
+        assert!(
+            build_page_model(&manifest, &NodeSnapshot::default(), "unknown", Locale::ZhCn).is_err()
+        );
 
         let mut manifest = node_ui_manifest();
         manifest.pages[0].actions[0].id = "unknown_action".into();
-        assert!(build_page_model_for_page(&manifest.pages[0], &NodeSnapshot::default()).is_err());
+        assert!(build_page_model_for_page(
+            &manifest.pages[0],
+            &NodeSnapshot::default(),
+            Locale::ZhCn
+        )
+        .is_err());
         assert!(validate_manifest_bindings(&manifest).is_err());
     }
 
@@ -1680,7 +1728,8 @@ mod tests {
             fuckipv6_common::ExitNodePlatform::Windows,
         );
 
-        let model = build_page_model_for_page(page, &snapshot).expect("exit node model");
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
         assert!(model.sections[0].rows[0]
             .detail
             .contains("platform=Windows"));
@@ -1715,7 +1764,7 @@ mod tests {
     fn empty_snapshot_pages_have_explicit_empty_states() {
         let manifest = node_ui_manifest();
         for page in &manifest.pages {
-            let model = build_page_model_for_page(page, &NodeSnapshot::default())
+            let model = build_page_model_for_page(page, &NodeSnapshot::default(), Locale::ZhCn)
                 .expect("empty page model");
             assert!(
                 !model.sections.is_empty(),
@@ -1737,7 +1786,8 @@ mod tests {
     fn single_and_dual_network_projection_uses_real_network_rows() {
         let manifest = node_ui_manifest();
         let mut snapshot = populated_snapshot();
-        let single = build_page_model(&manifest, &snapshot, "networks").expect("single network");
+        let single = build_page_model(&manifest, &snapshot, "networks", Locale::ZhCn)
+            .expect("single network");
         let single_section = &single.sections[0];
         assert_eq!(single_section.rows.len(), 1);
         assert!(single_section.rows[0].detail.contains("fd00::2"));
@@ -1747,7 +1797,8 @@ mod tests {
         second.tun_name = "fk-office".into();
         second.assigned_ipv6 = Some("fd00::4".parse().expect("IPv6"));
         snapshot.networks.push(second);
-        let dual = build_page_model(&manifest, &snapshot, "networks").expect("dual network");
+        let dual =
+            build_page_model(&manifest, &snapshot, "networks", Locale::ZhCn).expect("dual network");
         let dual_section = &dual.sections[0];
         assert_eq!(dual_section.rows.len(), 2);
         assert!(dual_section.rows.iter().any(|row| row.title == "home"));

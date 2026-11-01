@@ -859,16 +859,17 @@ impl GpuiShell {
         let Some(manifest) = self.manifest.as_ref() else {
             return loading_skeleton().into_any_element();
         };
-        let model = match build_page_model(manifest, &self.snapshot, &self.selected_page) {
-            Ok(model) => model,
-            Err(error) => {
-                return component_error_state(
-                    t(self.locale, "common.page_mapping_failed"),
-                    error.to_string(),
-                )
-                .into_any_element();
-            }
-        };
+        let model =
+            match build_page_model(manifest, &self.snapshot, &self.selected_page, self.locale) {
+                Ok(model) => model,
+                Err(error) => {
+                    return component_error_state(
+                        t(self.locale, "common.page_mapping_failed"),
+                        error.to_string(),
+                    )
+                    .into_any_element();
+                }
+            };
         let actions = if self.selected_section == PageSection::Actions {
             self.page()
                 .cloned()

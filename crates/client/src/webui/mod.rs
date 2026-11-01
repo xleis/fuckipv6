@@ -195,7 +195,6 @@ fn create_app_web_router_with_mutation_limiter(
         .route("/assets/ui-components.js", get(handle_ui_components_js))
         .route("/assets/node_ui.js", get(handle_node_ui_js))
         .route("/assets/owner_bootstrap.js", get(handle_owner_bootstrap_js))
-        .route("/assets/owner_auth_copy.js", get(handle_owner_auth_copy_js))
         .route("/api/auth/login", post(handle_login))
         .merge(protected);
     if let Some(owner_routes) = owner_routes {
@@ -947,16 +946,6 @@ async fn handle_owner_bootstrap_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store"),
         ],
         owner_bootstrap::OWNER_BOOTSTRAP_JS,
-    )
-}
-
-async fn handle_owner_auth_copy_js() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        crate::owner_security::ui_copy::browser_script(),
     )
 }
 
@@ -5861,28 +5850,6 @@ mod tests {
         assert_eq!(
             response_text(script).await,
             owner_bootstrap::OWNER_BOOTSTRAP_JS
-        );
-
-        let auth_copy = fixture
-            .app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/assets/owner_auth_copy.js")
-                    .body(Body::empty())
-                    .expect("owner auth copy request"),
-            )
-            .await
-            .expect("owner auth copy response");
-        assert_eq!(auth_copy.status(), StatusCode::OK);
-        assert_no_store(&auth_copy);
-        assert_eq!(
-            response_header(&auth_copy, header::CONTENT_TYPE.as_str()),
-            "text/javascript; charset=utf-8"
-        );
-        assert_eq!(
-            response_text(auth_copy).await,
-            crate::owner_security::ui_copy::browser_script()
         );
     }
 

@@ -32,7 +32,7 @@
     <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
     <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
     <nav id="nav" aria-label="节点页面"></nav>
-    <div class="sidebar-footer muted"><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span><button id="owner-security-button" class="owner-security-button" type="button" hidden>所有者安全</button><button id="logout" class="logout" type="button" hidden>退出所有者会话</button></div>
+    <div class="sidebar-footer muted"><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span><button id="owner-security-button" class="owner-security-button" type="button" data-i18n="owner_auth.security.title" hidden>所有者安全</button><button id="logout" class="logout" type="button" data-i18n="owner_auth.session.logout" hidden>退出所有者会话</button></div>
   </aside>
   <div class="ui-app-main">
     <header class="ui-topbar" data-ui-region="topbar">
@@ -83,54 +83,40 @@
 </div>
 <div id="login" role="dialog" aria-modal="true" aria-labelledby="login-title">
   <form class="login-card" id="login-form">
-    <h2 id="login-title">节点所有者登录</h2>
-    <p id="login-description" class="muted">使用已注册的 Passkey 验证节点所有者身份。会话只保存在 HttpOnly、SameSite=Strict Cookie 中，页面不读取或持久化访问令牌。</p>
-    <button class="submit" id="login-passkey" type="submit">使用 Passkey 登录</button>
+    <h2 id="login-title" data-i18n="owner_auth.login.title">节点所有者登录</h2>
+    <p id="login-description" class="muted" data-i18n="owner_auth.login.description">使用已注册的 Passkey 验证节点所有者身份。会话只保存在 HttpOnly、SameSite=Strict Cookie 中，页面不读取或持久化访问令牌。</p>
+    <button class="submit" id="login-passkey" type="submit" data-i18n="owner_auth.login.button">使用 Passkey 登录</button>
     <div id="login-error" class="login-error" role="status" aria-live="polite"></div>
-    <div id="login-help" class="login-help">Passkey 验证需要受信任的 HTTPS 地址，或本机 <code>http://localhost</code>。如果全部 Passkey 已丢失，只能在节点所在设备上执行本地恢复。</div>
+    <div id="login-help" class="login-help" data-i18n="owner_auth.login.help"></div>
   </form>
 </div>
 <div id="owner-security" class="modal-backdrop" hidden>
   <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="owner-security-title">
-    <div class="modal-head"><div><h2 id="owner-security-title">所有者安全</h2><div class="muted">Passkey、会话与 WebAuthn 安全上下文</div></div><button id="owner-security-close" class="modal-close" type="button" aria-label="关闭所有者安全">关闭</button></div>
+    <div class="modal-head"><div><h2 id="owner-security-title" data-i18n="owner_auth.security.title">所有者安全</h2><div class="muted" data-i18n="owner_auth.security.description">Passkey、会话与 WebAuthn 安全上下文</div></div><button id="owner-security-close" class="modal-close" type="button" aria-label="关闭所有者安全" data-i18n="owner_auth.security.close" data-i18n-aria-label="owner_auth.security.close_aria">关闭</button></div>
     <div id="security-note" class="security-note"></div>
     <div id="security-status" class="security-status" role="status" aria-live="polite"></div>
     <div id="security-session" class="security-grid"></div>
-    <div class="modal-head"><div><h2>已注册 Passkey</h2><div class="muted">新增或撤销凭据需要最近五分钟内完成重认证</div></div><button id="security-refresh" class="modal-close" type="button">刷新</button></div>
+    <div class="modal-head"><div><h2 data-i18n="owner_auth.passkey.title">已注册 Passkey</h2><div class="muted" data-i18n="owner_auth.passkey.description">新增或撤销凭据需要最近五分钟内完成重认证</div></div><button id="security-refresh" class="modal-close" type="button" data-i18n="owner_auth.passkey.refresh">刷新</button></div>
     <div id="passkey-list" class="passkey-list" aria-live="polite"></div>
-    <form id="passkey-form" class="passkey-form"><label class="hidden" for="passkey-label">Passkey 名称</label><input id="passkey-label" maxlength="64" autocomplete="off" placeholder="例如：笔记本指纹 / 手机通行密钥"><button id="passkey-register" class="submit" type="submit">注册新 Passkey</button></form>
+    <form id="passkey-form" class="passkey-form"><label class="hidden" for="passkey-label" data-i18n="owner_auth.passkey.name_label">Passkey 名称</label><input id="passkey-label" maxlength="64" autocomplete="off" placeholder="例如：笔记本指纹 / 手机通行密钥" data-i18n-placeholder="owner_auth.passkey.name_placeholder"><button id="passkey-register" class="submit" type="submit" data-i18n="owner_auth.passkey.register">注册新 Passkey</button></form>
   </section>
 </div>
 <div id="reauth" class="modal-backdrop reauth-backdrop" hidden>
   <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
-    <div class="modal-head"><div><h2 id="reauth-title">确认所有者身份</h2><div class="muted">最近认证不足时保护敏感操作</div></div></div>
-    <p id="reauth-description" class="muted"></p>
+    <div class="modal-head"><div><h2 id="reauth-title" data-i18n="owner_auth.reauth.title">确认所有者身份</h2><div class="muted" data-i18n="owner_auth.security.protection_hint">最近认证不足时保护敏感操作</div></div></div>
+    <p id="reauth-description" class="muted" data-i18n="owner_auth.reauth.description"></p>
     <div id="reauth-error" class="login-error" role="status" aria-live="polite"></div>
-    <div class="modal-actions"><button id="reauth-cancel" class="modal-close" type="button">取消</button><button id="reauth-confirm" class="submit" type="button">使用 Passkey 重认证</button></div>
+    <div class="modal-actions"><button id="reauth-cancel" class="modal-close" type="button" data-i18n="owner_auth.security.cancel">取消</button><button id="reauth-confirm" class="submit" type="button" data-i18n="owner_auth.passkey.reauth_button">使用 Passkey 重认证</button></div>
   </section>
 </div>
 <script src="/assets/i18n.js"></script>
-<script src="/assets/owner_auth_copy.js"></script>
 <script src="/assets/node_ui.js"></script>
 <script src="/assets/ui-components.js"></script>
 <script nonce="__CSP_NONCE__">
 (() => {
   "use strict";
   const ui = window.FuckIPV6NodeUi;
-  const authCopy = Object.assign({
-    loginTitle: "节点所有者登录",
-    loginDescription: "使用已注册的 Passkey 验证节点所有者身份。会话只保存在 HttpOnly、SameSite=Strict Cookie 中，页面不读取或持久化访问令牌。",
-    loginHelp: "Passkey 需要受信任的 HTTPS 地址或 http://localhost。若浏览器在页面加载前报告证书或域名错误，必须修复证书与 WebAuthn origin；应用不会提供跳过校验。",
-    secureContextRequirements: "当前页面不是受信任的 WebAuthn 安全上下文。请使用配置的 HTTPS 公网地址或 http://localhost；证书或域名错误必须先修复，不能跳过校验。",
-    passkeyUnsupported: "当前浏览器或平台不支持所需的 Passkey 能力。请使用支持 WebAuthn 的现代浏览器和系统认证器。",
-    originMismatchTemplate: "WebAuthn 地址不匹配。预期 {expected}，当前 {actual}。请使用 {expected} 打开；若浏览器报告证书错误，必须先修复证书，不能跳过校验。",
-    webuiIdentityDetail: "公网 WebUI 使用 Passkey 和 HttpOnly 同源会话；会话状态只在 WebUI 中实时显示。",
-    passkeyRecoveryHelp: "全部 Passkey 丢失时，只能在节点主机执行 fuckipv6 recover-owner；不提供公网找回入口。",
-    reauthTitle: "确认所有者身份",
-    reauthDescription: "该安全操作要求最近五分钟内完成 Passkey 重认证。重认证成功后会自动继续原操作。",
-    operationNotExecuted: "操作未执行：Passkey 重认证已取消。",
-    lastPasskeyError: "不能撤销最后一个可用 Passkey。请先注册新的 Passkey。",
-  }, window.FuckIPV6OwnerAuthCopy || {});
+  const i18n = window.FuckIPV6I18n;
   const state = {
     manifest: null,
     snapshot: null,
@@ -150,28 +136,20 @@
   };
   let eventSocket = null;
   const $ = (id) => document.getElementById(id);
+  const t = (key) => i18n.t(state.locale, key);
+  const tr = (key, params) => i18n.tr(state.locale, key, params);
 
-  function formatCopy(template, values) {
-    return Object.entries(values).reduce(
-      (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
-      String(template || ""),
-    );
-  }
   function webAuthnIssue(expectedOrigin) {
-    if (!window.isSecureContext) return authCopy.secureContextRequirements;
-    if (!window.PublicKeyCredential || !navigator.credentials) return authCopy.passkeyUnsupported;
+    if (!window.isSecureContext) return t("owner_auth.issue.secure_context");
+    if (!window.PublicKeyCredential || !navigator.credentials) return t("owner_auth.issue.passkey_unsupported");
     if (expectedOrigin && window.origin !== expectedOrigin) {
-      return formatCopy(authCopy.originMismatchTemplate, { expected: expectedOrigin, actual: window.origin });
+      return tr("owner_auth.issue.origin_mismatch", { expected: expectedOrigin, actual: window.origin });
     }
     return "";
   }
-  function applyAuthCopy() {
-    $("login-title").textContent = authCopy.loginTitle;
-    $("login-description").textContent = authCopy.loginDescription;
-    $("login-help").textContent = authCopy.loginHelp;
-    $("reauth-title").textContent = authCopy.reauthTitle;
-    $("reauth-description").textContent = authCopy.reauthDescription;
-    $("security-note").textContent = `${authCopy.webuiIdentityDetail} ${authCopy.passkeyRecoveryHelp}`;
+  function applyLocalizedDocument() {
+    i18n.applyDocument(document, state.locale);
+    $("security-note").textContent = t("owner_auth.security.note");
   }
   function showAlert(message) {
     $("alert").textContent = message;
@@ -200,16 +178,14 @@
     $("owner-security-button").hidden = false;
   }
   function passkeyErrorMessage(error) {
-    if (!error) return "Passkey 验证失败";
-    if (error.payload && error.payload.code === "last_passkey") return authCopy.lastPasskeyError;
-    if (error.payload && error.payload.code === "invalid_session") {
-      return "所有者会话已过期，请使用 Passkey 重新验证。";
-    }
-    if (error.name === "NotAllowedError") return "Passkey 验证已取消或超时，请重试。";
-    if (error.name === "SecurityError") return authCopy.secureContextRequirements;
-    if (error.name === "NotSupportedError") return authCopy.passkeyUnsupported;
-    if (error.name === "InvalidStateError") return "该 Passkey 已在此设备注册，请改用其他设备或凭据。";
-    return error.message || "Passkey 验证失败";
+    if (!error) return t("owner_auth.passkey.verification_failed");
+    if (error.payload && error.payload.code === "last_passkey") return t("owner_auth.last_passkey_error");
+    if (error.payload && error.payload.code === "invalid_session") return t("owner_auth.session.expired");
+    if (error.name === "NotAllowedError") return t("owner_auth.passkey.verification_cancelled_or_timeout");
+    if (error.name === "SecurityError") return t("owner_auth.issue.secure_context");
+    if (error.name === "NotSupportedError") return t("owner_auth.issue.passkey_unsupported");
+    if (error.name === "InvalidStateError") return t("owner_auth.passkey.already_registered");
+    return error.message || t("owner_auth.passkey.verification_failed");
   }
   class AuthenticationError extends Error {}
   function isCurrent(generation) {
@@ -262,7 +238,7 @@
     clearSurface();
     showAlert("");
     $("refresh").disabled = false;
-    showLogin(message || "所有者会话已过期，请使用 Passkey 重新验证。");
+    showLogin(message || t("owner_auth.session.expired"));
   }
   function failClosed(error) {
     if (state.failedClosed) return;
@@ -311,7 +287,7 @@
     let payload = null;
     try { payload = await response.json(); } catch (_) {}
     if (response.status === 401) {
-      throw new AuthenticationError("认证失败");
+      throw new AuthenticationError(t("owner_auth.session.auth_failed"));
     }
     return { response, payload };
   }
@@ -321,9 +297,9 @@
     box.className = `security-status${message ? " show" : ""}${kind ? ` ${kind}` : ""}`;
   }
   function formatOwnerTime(unixMs) {
-    if (!unixMs) return "不可用";
+    if (!unixMs) return t("owner_auth.session.not_available");
     try {
-      return new Intl.DateTimeFormat("zh-CN", {
+      return new Intl.DateTimeFormat(state.locale, {
         dateStyle: "medium",
         timeStyle: "medium",
       }).format(new Date(unixMs));
@@ -336,32 +312,37 @@
   }
   function renderSecuritySession() {
     const session = state.session || {};
-    const channel = session.channel === "public" ? "公网 HTTPS" : "本机回环";
+    const channel = session.channel === "public"
+      ? t("owner_auth.session.public_channel")
+      : t("owner_auth.session.local_channel");
     $("security-session").innerHTML = [
-      securityMeta("当前通道", channel),
-      securityMeta("当前凭据", session.credential_id || "未知"),
-      securityMeta("最近认证", formatOwnerTime(session.last_authenticated_at_unix_ms)),
-      securityMeta("会话过期", formatOwnerTime(session.expires_at_unix_ms)),
-      securityMeta("预期 WebAuthn origin", state.expectedOrigin || "未知"),
-      securityMeta("当前页面 origin", window.origin),
+      securityMeta(t("owner_auth.session.channel"), channel),
+      securityMeta(t("owner_auth.session.credential"), session.credential_id || t("owner_auth.session.unknown")),
+      securityMeta(t("owner_auth.session.last_authenticated"), formatOwnerTime(session.last_authenticated_at_unix_ms)),
+      securityMeta(t("owner_auth.session.expires"), formatOwnerTime(session.expires_at_unix_ms)),
+      securityMeta(t("owner_auth.session.expected_origin"), state.expectedOrigin || t("owner_auth.session.unknown")),
+      securityMeta(t("owner_auth.session.current_origin"), window.origin),
     ].join("");
   }
   function renderPasskeys() {
     const active = state.passkeys.filter((passkey) => !passkey.revoked_at_unix_ms);
     if (!state.passkeys.length) {
-      $("passkey-list").innerHTML = '<div class="empty">没有已注册 Passkey。此状态不应出现，请检查所有者安全状态。</div>';
+      $("passkey-list").innerHTML = `<div class="empty">${escapeHtml(t("owner_auth.passkey.none"))}</div>`;
       return;
     }
     $("passkey-list").innerHTML = state.passkeys.map((passkey) => {
       const current = state.session && passkey.credential_id === state.session.credential_id;
       const revoked = Boolean(passkey.revoked_at_unix_ms);
       const backup = passkey.backup_eligible
-        ? `可备份 · 当前${passkey.backup_state ? "已同步" : "未同步"}`
-        : "仅此设备";
-      const status = revoked ? `已撤销于 ${formatOwnerTime(passkey.revoked_at_unix_ms)}` : `最近使用 ${formatOwnerTime(passkey.last_used_at_unix_ms)}`;
+        ? t(passkey.backup_state ? "owner_auth.passkey.backup_synced" : "owner_auth.passkey.backup_pending")
+        : t("owner_auth.passkey.device_bound");
+      const status = revoked
+        ? tr("owner_auth.passkey.revoked_at", { time: formatOwnerTime(passkey.revoked_at_unix_ms) })
+        : tr("owner_auth.passkey.last_used", { time: formatOwnerTime(passkey.last_used_at_unix_ms) });
       const disabled = revoked || active.length <= 1;
-      const title = disabled && !revoked ? authCopy.lastPasskeyError : "";
-      return `<div class="passkey-row ${current && !revoked ? "current" : ""}"><div><div class="passkey-title">${escapeHtml(passkey.label || "未命名 Passkey")}${current && !revoked ? " · 当前会话" : ""}</div><div class="passkey-detail">${escapeHtml(status)} · ${escapeHtml(backup)} · ${escapeHtml(passkey.credential_id)}</div></div><div class="passkey-actions">${revoked ? '<span class="pill">已撤销</span>' : `<button class="modal-close danger" type="button" data-revoke="${escapeHtml(encodeURIComponent(passkey.credential_id))}" data-label="${escapeHtml(passkey.label || "未命名 Passkey")}" ${disabled ? "disabled" : ""} title="${escapeHtml(title)}">撤销</button>`}</div></div>`;
+      const title = disabled && !revoked ? t("owner_auth.last_passkey_error") : "";
+      const label = passkey.label || t("owner_auth.passkey.unnamed");
+      return `<div class="passkey-row ${current && !revoked ? "current" : ""}"><div><div class="passkey-title">${escapeHtml(label)}${current && !revoked ? ` · ${escapeHtml(t("owner_auth.passkey.current_session"))}` : ""}</div><div class="passkey-detail">${escapeHtml(status)} · ${escapeHtml(backup)} · ${escapeHtml(passkey.credential_id)}</div></div><div class="passkey-actions">${revoked ? `<span class="pill">${escapeHtml(t("owner_auth.passkey.revoked"))}</span>` : `<button class="modal-close danger" type="button" data-revoke="${escapeHtml(encodeURIComponent(passkey.credential_id))}" data-label="${escapeHtml(label)}" ${disabled ? "disabled" : ""} title="${escapeHtml(title)}">${escapeHtml(t("owner_auth.passkey.revoke"))}</button>`}</div></div>`;
     }).join("");
     for (const button of $("passkey-list").querySelectorAll("[data-revoke]")) {
       button.addEventListener("click", () => revokePasskey(decodeURIComponent(button.dataset.revoke), button.dataset.label));
@@ -370,7 +351,7 @@
   async function readOwnerSession() {
     const result = await requestJson("/api/v1/auth/session");
     if (!result.response.ok) {
-      throw requestError(ui.httpErrorText(result.payload, "所有者会话状态读取失败", state.locale), result.payload);
+      throw requestError(ui.httpErrorText(result.payload, t("owner_auth.session.read_failed"), state.locale), result.payload);
     }
     state.session = result.payload && result.payload.authenticated ? result.payload : null;
     state.expectedOrigin = result.payload && result.payload.expected_origin ? result.payload.expected_origin : state.expectedOrigin;
@@ -379,7 +360,7 @@
   }
   async function refreshOwnerSecurity() {
     if (!state.authenticated) {
-      showLogin("所有者会话已过期，请使用 Passkey 重新验证。");
+      showLogin(t("owner_auth.session.expired"));
       return false;
     }
     $("security-refresh").disabled = true;
@@ -387,12 +368,12 @@
     try {
       const session = await readOwnerSession();
       if (!session || session.authenticated !== true) {
-        expireSession("所有者会话已过期，请使用 Passkey 重新验证。");
+        expireSession(t("owner_auth.session.expired"));
         return false;
       }
       const result = await requestJson("/api/v1/auth/passkeys");
       if (!result.response.ok || !result.payload || !Array.isArray(result.payload.passkeys)) {
-        throw requestError(ui.httpErrorText(result.payload, "Passkey 列表读取失败", state.locale), result.payload);
+        throw requestError(ui.httpErrorText(result.payload, t("owner_auth.session.passkeys_read_failed"), state.locale), result.payload);
       }
       state.passkeys = result.payload.passkeys;
       renderSecuritySession();
@@ -407,9 +388,9 @@
     } catch (error) {
       state.securityStatusKind = "error";
       if (error instanceof AuthenticationError) {
-        expireSession("所有者会话已过期，请使用 Passkey 重新验证。");
+        expireSession(t("owner_auth.session.expired"));
       } else {
-        setSecurityStatus("所有者安全状态读取失败：" + passkeyErrorMessage(error), "error");
+        setSecurityStatus(tr("owner_auth.session.security_read_failed", { error: passkeyErrorMessage(error) }), "error");
       }
       return false;
     } finally {
@@ -442,51 +423,49 @@
       return;
     }
     button.disabled = true;
-    button.textContent = "正在等待 Passkey 授权…";
+    button.textContent = t("owner_auth.passkey.waiting");
     $("reauth-error").textContent = "";
     try {
       const start = await requestJson("/api/v1/auth/passkey/reauth/start", { method: "POST" });
       if (!start.response.ok) {
-        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 重认证", state.locale), start.payload);
+        throw requestError(ui.httpErrorText(start.payload, t("owner_auth.passkey.start_reauth_failed"), state.locale), start.payload);
       }
       const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload, state.locale));
-      if (!credential) throw new Error("Passkey 重认证已取消");
+      if (!credential) throw new Error(t("owner_auth.passkey.reauth_cancelled"));
       const finish = await requestJson("/api/v1/auth/passkey/reauth/finish", {
         method: "POST",
         body: JSON.stringify({ credential: ui.encodeAuthenticationCredential(credential) }),
       });
       if (!finish.response.ok) {
-        throw requestError(ui.httpErrorText(finish.payload, "Passkey 重认证失败", state.locale), finish.payload);
+        throw requestError(ui.httpErrorText(finish.payload, t("owner_auth.passkey.reauth_failed"), state.locale), finish.payload);
       }
       const session = await readOwnerSession();
       if (!session || session.authenticated !== true) {
-        throw new AuthenticationError("重认证后会话无效");
+        throw new AuthenticationError(t("owner_auth.passkey.session_invalid_after_reauth"));
       }
       renderSecuritySession();
       resolveReauth(true);
     } catch (error) {
       if (error instanceof AuthenticationError) {
         resolveReauth(false);
-        expireSession("所有者会话已过期，请使用 Passkey 重新验证。");
+        expireSession(t("owner_auth.session.expired"));
         return;
       }
       $("reauth-error").textContent = passkeyErrorMessage(error);
     } finally {
       button.disabled = false;
-      button.textContent = "使用 Passkey 重认证";
+      button.textContent = t("owner_auth.passkey.reauth_button");
     }
   }
-  function isRecentAuthenticationError(payload, response) {
-    if (response && response.status !== 403) return false;
-    if (payload && payload.code === "recent_authentication_required") return true;
-    return Boolean(payload && typeof payload.error === "string" && payload.error.includes("最近五分钟"));
+  function isRecentAuthenticationError(payload) {
+    return Boolean(payload && payload.code === "recent_authentication_required");
   }
   async function ownerProtectedRequest(path, options) {
     let result = await requestJson(path, options);
-    if (result.response.ok || !isRecentAuthenticationError(result.payload, result.response)) return result;
+    if (result.response.ok || !isRecentAuthenticationError(result.payload)) return result;
     const authenticated = await promptForReauth();
     if (!authenticated) {
-      const error = new Error(authCopy.operationNotExecuted);
+      const error = new Error(t("owner_auth.reauth.cancelled"));
       error.operationCancelled = true;
       throw error;
     }
@@ -498,7 +477,7 @@
     const label = $("passkey-label").value.trim();
     const button = $("passkey-register");
     if (!label) {
-      setSecurityStatus("请输入 Passkey 名称。", "error");
+      setSecurityStatus(t("owner_auth.passkey.name_required"), "error");
       $("passkey-label").focus();
       return;
     }
@@ -508,7 +487,7 @@
       return;
     }
     button.disabled = true;
-    button.textContent = "正在准备…";
+    button.textContent = t("owner_auth.passkey.register_preparing");
     setSecurityStatus("", "");
     try {
       const start = await ownerProtectedRequest("/api/v1/auth/passkeys/registration/start", {
@@ -516,55 +495,55 @@
         body: JSON.stringify({ label }),
       });
       if (!start.response.ok) {
-        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 注册", state.locale), start.payload);
+        throw requestError(ui.httpErrorText(start.payload, t("owner_auth.passkey.start_registration_failed"), state.locale), start.payload);
       }
-      button.textContent = "等待 Passkey 授权…";
+      button.textContent = t("owner_auth.passkey.waiting");
       const credential = await navigator.credentials.create(ui.decodeCreationOptions(start.payload, state.locale));
-      if (!credential) throw new Error("Passkey 注册已取消");
-      button.textContent = "正在完成注册…";
+      if (!credential) throw new Error(t("owner_auth.passkey.registration_cancelled"));
+      button.textContent = t("owner_auth.passkey.register_finishing");
       const finish = await ownerProtectedRequest("/api/v1/auth/passkeys/registration/finish", {
         method: "POST",
         body: JSON.stringify({ credential: ui.encodeRegistrationCredential(credential) }),
       });
       if (!finish.response.ok || !finish.payload || !finish.payload.passkey) {
-        throw requestError(ui.httpErrorText(finish.payload, "Passkey 注册失败", state.locale), finish.payload);
+        throw requestError(ui.httpErrorText(finish.payload, t("owner_auth.passkey.registration_failed"), state.locale), finish.payload);
       }
       $("passkey-label").value = "";
       if (await refreshOwnerSecurity()) {
-        setSecurityStatus("新 Passkey 已注册。请确认它能在当前设备正常使用。", "ok");
+        setSecurityStatus(t("owner_auth.passkey.registration_succeeded"), "ok");
       }
     } catch (error) {
       if (error instanceof AuthenticationError) {
-        expireSession("所有者会话已过期，请使用 Passkey 重新验证。");
+        expireSession(t("owner_auth.session.expired"));
       } else {
         setSecurityStatus(passkeyErrorMessage(error), error.operationCancelled ? "error" : "error");
       }
     } finally {
-      button.textContent = "注册新 Passkey";
+      button.textContent = t("owner_auth.passkey.register");
       button.disabled = Boolean(webAuthnIssue(state.expectedOrigin)) || !state.authenticated;
     }
   }
   async function revokePasskey(credentialId, label) {
     if (!credentialId) return;
-    if (!window.confirm(`撤销 Passkey「${label}」？\n\n若它正是当前会话凭据，完成后你会立即退出；最后一个可用 Passkey 不能撤销。`)) return;
+    if (!window.confirm(tr("owner_auth.passkey.revoke_confirm", { label }))) return;
     setSecurityStatus("", "");
     try {
       const result = await ownerProtectedRequest(`/api/v1/auth/passkeys/${encodeURIComponent(credentialId)}`, {
         method: "DELETE",
       });
       if (!result.response.ok) {
-        throw requestError(ui.httpErrorText(result.payload, "Passkey 撤销失败", state.locale), result.payload);
+        throw requestError(ui.httpErrorText(result.payload, t("owner_auth.passkey.revocation_failed"), state.locale), result.payload);
       }
       if (result.payload && result.payload.current_session_revoked) {
-        expireSession("当前 Passkey 已撤销，所有者会话已退出。");
+        expireSession(t("owner_auth.passkey.current_revoked"));
         return;
       }
       if (await refreshOwnerSecurity()) {
-        setSecurityStatus("Passkey 已撤销。", "ok");
+        setSecurityStatus(t("owner_auth.passkey.revoked_success"), "ok");
       }
     } catch (error) {
       if (error instanceof AuthenticationError) {
-        expireSession("所有者会话已过期，请使用 Passkey 重新验证。");
+        expireSession(t("owner_auth.session.expired"));
       } else {
         setSecurityStatus(passkeyErrorMessage(error), "error");
       }
@@ -865,7 +844,7 @@
   async function checkOwnerSession() {
     const button = $("login-passkey");
     button.disabled = true;
-    $("login-error").textContent = "正在检查所有者会话…";
+    $("login-error").textContent = t("owner_auth.session.checking");
     try {
       await readOwnerSession();
       if (!state.authenticated) {
@@ -879,9 +858,9 @@
       await loadContract();
     } catch (error) {
       if (error instanceof AuthenticationError) {
-        showLogin("所有者会话已过期，请使用 Passkey 重新验证。");
+        showLogin(t("owner_auth.session.expired"));
       } else {
-        showLogin("无法读取所有者会话：" + passkeyErrorMessage(error));
+        showLogin(tr("owner_auth.session.read_failed_detail", { error: passkeyErrorMessage(error) }));
       }
     } finally {
       button.disabled = Boolean(webAuthnIssue(state.expectedOrigin));
@@ -897,25 +876,25 @@
       return;
     }
     button.disabled = true;
-    button.textContent = "正在等待 Passkey 授权…";
+    button.textContent = t("owner_auth.passkey.waiting");
     $("login-error").textContent = "";
     try {
       const start = await requestJson("/api/v1/auth/passkey/authentication/start", { method: "POST" });
       if (!start.response.ok) {
-        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 登录", state.locale), start.payload);
+        throw requestError(ui.httpErrorText(start.payload, t("owner_auth.passkey.start_login_failed"), state.locale), start.payload);
       }
       const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload, state.locale));
-      if (!credential) throw new Error("Passkey 验证已取消");
+      if (!credential) throw new Error(t("owner_auth.passkey.login_cancelled"));
       const finish = await requestJson("/api/v1/auth/passkey/authentication/finish", {
         method: "POST",
         body: JSON.stringify({ credential: ui.encodeAuthenticationCredential(credential) }),
       });
       if (!finish.response.ok) {
-        throw requestError(ui.httpErrorText(finish.payload, "Passkey 登录失败", state.locale), finish.payload);
+        throw requestError(ui.httpErrorText(finish.payload, t("owner_auth.passkey.login_failed"), state.locale), finish.payload);
       }
       const session = await readOwnerSession();
       if (!session || session.authenticated !== true) {
-        throw new AuthenticationError("登录后会话无效");
+        throw new AuthenticationError(t("owner_auth.passkey.session_invalid_after_login"));
       }
       const postLoginIssue = webAuthnIssue(state.expectedOrigin);
       if (postLoginIssue) {
@@ -924,13 +903,13 @@
       await loadContract();
     } catch (error) {
       if (error instanceof AuthenticationError) {
-        showLogin("所有者会话已过期，请使用 Passkey 重新验证。");
+        showLogin(t("owner_auth.session.expired"));
       } else {
         $("login-error").textContent = passkeyErrorMessage(error);
       }
     } finally {
       button.disabled = Boolean(webAuthnIssue(state.expectedOrigin));
-      button.textContent = "使用 Passkey 登录";
+      button.textContent = t("owner_auth.passkey.login_button");
     }
   }
   async function logout() {
@@ -939,11 +918,11 @@
     try {
       const result = await requestJson("/api/v1/auth/passkey/logout", { method: "POST" });
       if (!result.response.ok && result.response.status !== 401) {
-        throw new Error(ui.httpErrorText(result.payload, "退出登录失败", state.locale));
+        throw new Error(ui.httpErrorText(result.payload, t("owner_auth.session.logout_failed"), state.locale));
       }
-      expireSession("已退出所有者会话。");
+      expireSession(t("owner_auth.session.logged_out"));
     } catch (error) {
-      showAlert("退出登录失败：" + passkeyErrorMessage(error));
+      showAlert(tr("owner_auth.session.logout_failed_detail", { error: passkeyErrorMessage(error) }));
     } finally {
       button.disabled = false;
     }
@@ -956,7 +935,7 @@
   $("reauth-confirm").addEventListener("click", reauthenticate);
   $("reauth-cancel").addEventListener("click", () => resolveReauth(false));
   $("logout").addEventListener("click", logout);
-  applyAuthCopy();
+  applyLocalizedDocument();
   ui.init(document);
   ui.observeLayout(document);
   checkOwnerSession();

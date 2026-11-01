@@ -596,7 +596,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 - WebUI 所有者安全对话框提供会话状态、Passkey 列表、注册和撤销；最后一个可用 Passkey 的撤销由后端 `last_passkey` 稳定错误码失败关闭；
 - 最近五分钟认证过期时，前端打开重认证对话框，Passkey 验证成功后自动重试原操作；取消则明确显示操作未执行，不乐观宣告成功；
-- 初始化页、登录页、本地恢复页和安全对话框统一使用 Rust 生成的 `/assets/owner_auth_copy.js`，覆盖登录边界、恢复码单次展示、`recover-owner` 本地恢复、origin/安全上下文与证书/域名错误提示；断言页面不使用 `localStorage`、`sessionStorage`、Bearer 或 query token；
+- 初始化页、登录页、本地恢复页和安全对话框统一使用共享 `i18n.json` 目录，覆盖登录边界、恢复码单次展示、`recover-owner` 本地恢复、origin/安全上下文与证书/域名错误提示；断言页面不使用 `localStorage`、`sessionStorage`、Bearer 或 query token；
 - `/api/v1/auth/session` 返回通道对应的 `expected_origin`：local 为 `http://localhost:<port>`，public 为配置的 HTTPS 公网 origin；安全 UI 用它诊断 WebAuthn origin 不匹配，不能跳过受信任上下文或 TLS 校验；
 - owner API 错误增加稳定 `code`：`recent_authentication_required`、`last_passkey`、`invalid_session` 等，供共享前端处理且不依赖本地化错误文本；
 - 本地 mutation CSRF origin 与 owner service 的 local WebAuthn origin 对齐；`http://127.0.0.1:<port>` 不再被误认为合法的 `http://localhost:<port>` 所有者来源；

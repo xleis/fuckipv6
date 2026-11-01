@@ -34,6 +34,17 @@ import {
   type ActionValues,
 } from "../contract/invariants";
 import { tr } from "../i18n";
+import { pageStateDefinition, type PageStateKind } from "../state-matrix";
+
+export type ConfigurationDraftMemo = {
+  document: ConfigurationDocument | null;
+  editor: string;
+  history: ConfigurationHistoryEntry[];
+  preview: ConfigurationPreview | null;
+  applied: ConfigurationApplyResult | null;
+  importName: string;
+  activeIssuePath: string;
+};
 
 export const CONFIGURATION_ACTION_IDS = new Set([
   "get_configuration",
@@ -49,6 +60,9 @@ type ConfigurationWorkflowProps = {
   selectedNetwork: string;
   locale: Locale;
   pendingAction: string | null;
+  interactionBlocked?: PageStateKind | null;
+  draft?: ConfigurationDraftMemo | null;
+  onDraftChange?(draft: ConfigurationDraftMemo): void;
   onSubmit(
     action: NodeUiAction,
     values: ActionValues,
@@ -168,6 +182,9 @@ export function ConfigurationWorkflow({
   selectedNetwork,
   locale,
   pendingAction,
+  interactionBlocked = null,
+  draft,
+  onDraftChange,
   onSubmit,
 }: ConfigurationWorkflowProps): JSX.Element {
   const getAction = actions.find((action) => action.id === "get_configuration");
@@ -189,21 +206,36 @@ export function ConfigurationWorkflow({
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialLoadStarted = useRef(false);
-  const [document, setDocument] = useState<ConfigurationDocument | null>(null);
-  const [editor, setEditor] = useState("");
-  const [history, setHistory] = useState<ConfigurationHistoryEntry[]>([]);
-  const [preview, setPreview] = useState<ConfigurationPreview | null>(null);
-  const [applied, setApplied] = useState<ConfigurationApplyResult | null>(null);
-  const [busy, setBusy] = useState<BusyState>("load");
+  const [document, setDocument] = useState<ConfigurationDocument | null>(
+    draft?.document ?? null,
+  );
+  const [editor, setEditor] = useState(draft?.editor ?? "");
+  const [history, setHistory] = useState<ConfigurationHistoryEntry[]>(
+    draft?.history ?? [],
+  );
+  const [preview, setPreview] = useState<ConfigurationPreview | null>(
+    draft?.preview ?? null,
+  );
+  const [applied, setApplied] = useState<ConfigurationApplyResult | null>(
+    draft?.applied ?? null,
+  );
+  const [busy, setBusy] = useState<BusyState>(
+    draft?.document ? null : "load",
+  );
   const [error, setError] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [notice, setNotice] = useState("");
-  const [importName, setImportName] = useState("");
-  const [activeIssuePath, setActiveIssuePath] = useState("");
+  const [importName, setImportName] = useState(draft?.importName ?? "");
+  const [activeIssuePath, setActiveIssuePath] = useState(
+    draft?.activeIssuePath ?? "",
+  );
   const [confirmingApply, setConfirmingApply] = useState(false);
   const [rollbackTarget, setRollbackTarget] =
     useState<ConfigurationHistoryEntry | null>(null);
 
+  const pageBlocked = interactionBlocked
+    ? pageStateDefinition(interactionBlocked)
+    : null;
   const viewBlocked = getAction
     ? executionBlockReason(getAction, snapshot, selectedNetwork)
     : "backend_unavailable";
@@ -213,14 +245,73 @@ export function ConfigurationWorkflow({
   const rollbackBlocked = rollbackAction
     ? executionBlockReason(rollbackAction, snapshot, selectedNetwork)
     : "backend_unavailable";
+  const historyBlocked = historyAction
+    ? executionBlockReason(historyAction, snapshot, selectedNetwork)
+    : "backend_unavailable";
   const dirty = Boolean(
     document && editor !== configurationJson(document),
   );
+  const pending = Boolean(pendingAction) || busy !== null;
   const canApply = Boolean(
     preview?.can_apply &&
       preview.has_changes &&
       !preview.revision_conflict &&
-      !applyBlocked,
+      !applyBlocked &&
+      !pageBlocked,
+  );
+  const pendingReason = pending
+    ? label(locale, "common.control_pending")
+    : "";
+  const pageReason = pageBlocked
+    ? label(locale, pageBlocked.titleKey)
+    : "";
+  const unavailableReason = label(locale, "blocked.backend_unavailable");
+  const firstReason = (...reasons: Array<string | false | null>): string =>
+    reasons.find((reason): reason is string => Boolean(reason)) ?? "";
+  const reloadReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(viewBlocked, locale),
+    !getAction && unavailableReason,
+  );
+  const importReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(viewBlocked, locale),
+    !getAction && unavailableReason,
+    !document && unavailableReason,
+  );
+  const previewReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(viewBlocked, locale),
+    !previewAction && unavailableReason,
+  );
+  const applyReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(applyBlocked, locale),
+    Boolean(preview?.revision_conflict) &&
+      label(locale, "configuration.apply.conflict"),
+    Boolean(preview?.validation_errors.length) &&
+      label(locale, "configuration.apply.invalid"),
+    Boolean(preview && !preview.has_changes) &&
+      label(locale, "configuration.apply.no_changes"),
+    Boolean(preview && !preview.can_apply) &&
+      label(locale, "configuration.apply.blocked"),
+    !applyAction && unavailableReason,
+  );
+  const historyRefreshReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(historyBlocked, locale),
+    !historyAction && unavailableReason,
+  );
+  const applyConfirmReason = firstReason(
+    pendingReason,
+    applyReason,
+    !preview && unavailableReason,
+    !canApply && label(locale, "configuration.apply.blocked"),
   );
 
   async function request(
@@ -235,7 +326,7 @@ export function ConfigurationWorkflow({
   }
 
   async function refreshHistory(): Promise<void> {
-    if (!historyAction) return;
+    if (!historyAction || historyBlocked) return;
     setHistoryError("");
     try {
       const outcome = await request(historyAction, {});
@@ -271,9 +362,32 @@ export function ConfigurationWorkflow({
   }
 
   useEffect(() => {
+    if (onDraftChange) {
+      onDraftChange({
+        document,
+        editor,
+        history,
+        preview,
+        applied,
+        importName,
+        activeIssuePath,
+      });
+    }
+  }, [
+    activeIssuePath,
+    applied,
+    document,
+    editor,
+    history,
+    importName,
+    onDraftChange,
+    preview,
+  ]);
+
+  useEffect(() => {
     if (!getAction || initialLoadStarted.current) return;
     initialLoadStarted.current = true;
-    void loadAll(false);
+    void loadAll(Boolean(draft?.document));
     // The initial load is deliberately once per mounted settings page. Command
     // callbacks are recreated by AppShell and must not restart the workflow.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -345,7 +459,7 @@ export function ConfigurationWorkflow({
   }
 
   async function rollbackDraft(target: ConfigurationHistoryEntry): Promise<void> {
-    if (!rollbackAction || !document) return;
+    if (!rollbackAction || !document || rollbackBlocked) return;
     setRollbackTarget(null);
     setBusy("rollback");
     setError("");
@@ -393,8 +507,6 @@ export function ConfigurationWorkflow({
     editorElement.setSelectionRange(selection.start, selection.end);
   }
 
-  const pending = Boolean(pendingAction) || busy !== null;
-
   return (
     <section
       className="configuration-workspace"
@@ -423,21 +535,42 @@ export function ConfigurationWorkflow({
               {label(locale, "configuration.unsaved")}
             </span>
           ) : null}
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={pending || Boolean(viewBlocked) || !getAction}
-            onClick={() => void loadAll(Boolean(editor))}
-          >
-            {busy === "load" ? (
-              <LoaderCircle className="spin" size={15} />
-            ) : (
-              <RefreshCw size={15} />
-            )}
-            {label(locale, "configuration.reload_latest")}
-          </button>
+          <div className="configuration-control">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={Boolean(reloadReason)}
+              onClick={() => void loadAll(Boolean(editor))}
+            >
+              {busy === "load" ? (
+                <LoaderCircle className="spin" size={15} />
+              ) : (
+                <RefreshCw size={15} />
+              )}
+              {label(locale, "configuration.reload_latest")}
+            </button>
+            {reloadReason ? (
+              <small className="control-reason" role="status">
+                {reloadReason}
+              </small>
+            ) : null}
+          </div>
         </div>
       </header>
+
+      {pageBlocked ? (
+        <div className="inline-notice warning">
+          <ShieldAlert size={16} />
+          <span>{label(locale, pageBlocked.titleKey)}</span>
+        </div>
+      ) : null}
+
+      {pending ? (
+        <div className="inline-notice" role="status">
+          <LoaderCircle className="spin" size={16} />
+          <span>{label(locale, "common.control_pending")}</span>
+        </div>
+      ) : null}
 
       {viewBlocked ? (
         <div className="inline-notice warning">
@@ -482,15 +615,22 @@ export function ConfigurationWorkflow({
                     accept=".json,application/json"
                     onChange={(event) => void importFile(event)}
                   />
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    disabled={pending}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <Upload size={15} />
-                    {label(locale, "configuration.import")}
-                  </button>
+                  <div className="configuration-control">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={Boolean(importReason)}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Upload size={15} />
+                      {label(locale, "configuration.import")}
+                    </button>
+                    {importReason ? (
+                      <small className="control-reason" role="status">
+                        {importReason}
+                      </small>
+                    ) : null}
+                  </div>
                 </div>
               </div>
               {importName ? (
@@ -520,19 +660,26 @@ export function ConfigurationWorkflow({
                   <Braces size={14} />
                   {label(locale, "configuration.editor.networks_only")}
                 </span>
-                <button
-                  className="primary-button"
-                  type="button"
-                  disabled={pending || Boolean(viewBlocked) || !previewAction}
-                  onClick={() => void previewDraft()}
-                >
-                  {busy === "preview" ? (
-                    <LoaderCircle className="spin" size={15} />
-                  ) : (
-                    <GitCompare size={15} />
-                  )}
-                  {label(locale, "configuration.preview")}
-                </button>
+                <div className="configuration-control">
+                  <button
+                    className="primary-button"
+                    type="button"
+                    disabled={Boolean(previewReason)}
+                    onClick={() => void previewDraft()}
+                  >
+                    {busy === "preview" ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <GitCompare size={15} />
+                    )}
+                    {label(locale, "configuration.preview")}
+                  </button>
+                  {previewReason ? (
+                    <small className="control-reason" role="status">
+                      {previewReason}
+                    </small>
+                  ) : null}
+                </div>
               </div>
             </section>
 
@@ -665,19 +812,26 @@ export function ConfigurationWorkflow({
                         <span>{blockReasonText(applyBlocked, locale)}</span>
                       ) : null}
                     </div>
-                    <button
-                      className="primary-button"
-                      type="button"
-                      disabled={pending || !canApply}
-                      onClick={() => setConfirmingApply(true)}
-                    >
-                      {busy === "apply" ? (
-                        <LoaderCircle className="spin" size={15} />
-                      ) : (
-                        <CheckCircle2 size={15} />
-                      )}
-                      {label(locale, "configuration.apply")}
-                    </button>
+                    <div className="configuration-control">
+                      <button
+                        className="primary-button"
+                        type="button"
+                        disabled={Boolean(applyReason)}
+                        onClick={() => setConfirmingApply(true)}
+                      >
+                        {busy === "apply" ? (
+                          <LoaderCircle className="spin" size={15} />
+                        ) : (
+                          <CheckCircle2 size={15} />
+                        )}
+                        {label(locale, "configuration.apply")}
+                      </button>
+                      {applyReason ? (
+                        <small className="control-reason" role="status">
+                          {applyReason}
+                        </small>
+                      ) : null}
+                    </div>
                   </div>
                 </>
               )}
@@ -719,19 +873,26 @@ export function ConfigurationWorkflow({
                   {label(locale, "configuration.history.title")}
                 </h3>
               </div>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={pending || !historyAction}
-                onClick={() => void refreshHistory()}
-              >
-                {busy === "history" ? (
-                  <LoaderCircle className="spin" size={15} />
-                ) : (
-                  <RefreshCw size={15} />
-                )}
-                {label(locale, "configuration.history.refresh")}
-              </button>
+              <div className="configuration-control">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={Boolean(historyRefreshReason)}
+                  onClick={() => void refreshHistory()}
+                >
+                  {busy === "history" ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <RefreshCw size={15} />
+                  )}
+                  {label(locale, "configuration.history.refresh")}
+                </button>
+                {historyRefreshReason ? (
+                  <small className="control-reason" role="status">
+                    {historyRefreshReason}
+                  </small>
+                ) : null}
+              </div>
             </div>
             {historyError ? (
               <div className="inline-notice danger" role="alert">
@@ -771,27 +932,34 @@ export function ConfigurationWorkflow({
                         </span>
                         <span>{entry.source || entry.actor}</span>
                       </div>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={
-                          pending ||
-                          Boolean(rollbackBlocked) ||
-                          !rollbackAction ||
-                          entry.revision === document.revision
-                        }
-                        title={
-                          rollbackBlocked
-                            ? blockReasonText(rollbackBlocked, locale)
-                            : entry.revision === document.revision
-                              ? label(locale, "configuration.rollback.current")
-                              : label(locale, "configuration.rollback.action")
-                        }
-                        onClick={() => setRollbackTarget(entry)}
-                      >
-                        <RotateCcw size={14} />
-                        {label(locale, "configuration.rollback.action")}
-                      </button>
+                      {(() => {
+                        const rollbackReason = firstReason(
+                          pendingReason,
+                          pageReason,
+                          blockReasonText(rollbackBlocked, locale),
+                          !rollbackAction && unavailableReason,
+                          entry.revision === document.revision &&
+                            label(locale, "configuration.rollback.current"),
+                        );
+                        return (
+                          <div className="configuration-control configuration-history-control">
+                            <button
+                              className="secondary-button"
+                              type="button"
+                              disabled={Boolean(rollbackReason)}
+                              onClick={() => setRollbackTarget(entry)}
+                            >
+                              <RotateCcw size={14} />
+                              {label(locale, "configuration.rollback.action")}
+                            </button>
+                            {rollbackReason ? (
+                              <small className="control-reason" role="status">
+                                {rollbackReason}
+                              </small>
+                            ) : null}
+                          </div>
+                        );
+                      })()}
                     </div>
                     <details>
                       <summary>
@@ -833,14 +1001,21 @@ export function ConfigurationWorkflow({
                   {label(locale, "common.cancel")}
                 </button>
               </Dialog.Close>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={pending}
-                onClick={() => void applyDraft()}
-              >
-                {label(locale, "configuration.apply.confirm_action")}
-              </button>
+              <div className="configuration-control dialog-control">
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={Boolean(applyConfirmReason)}
+                  onClick={() => void applyDraft()}
+                >
+                  {label(locale, "configuration.apply.confirm_action")}
+                </button>
+                {applyConfirmReason ? (
+                  <small className="control-reason" role="status">
+                    {applyConfirmReason}
+                  </small>
+                ) : null}
+              </div>
             </div>
             <Dialog.Close asChild>
               <button
@@ -886,16 +1061,34 @@ export function ConfigurationWorkflow({
                   {label(locale, "common.cancel")}
                 </button>
               </Dialog.Close>
-              <button
-                className="danger-button"
-                type="button"
-                disabled={pending || !rollbackTarget}
-                onClick={() =>
-                  rollbackTarget && void rollbackDraft(rollbackTarget)
-                }
-              >
-                {label(locale, "configuration.rollback.confirm_action")}
-              </button>
+              {(() => {
+                const rollbackConfirmReason = firstReason(
+                  pendingReason,
+                  pageReason,
+                  blockReasonText(rollbackBlocked, locale),
+                  !rollbackAction && unavailableReason,
+                  !rollbackTarget && unavailableReason,
+                );
+                return (
+                  <div className="configuration-control dialog-control">
+                    <button
+                      className="danger-button"
+                      type="button"
+                      disabled={Boolean(rollbackConfirmReason)}
+                      onClick={() =>
+                        rollbackTarget && void rollbackDraft(rollbackTarget)
+                      }
+                    >
+                      {label(locale, "configuration.rollback.confirm_action")}
+                    </button>
+                    {rollbackConfirmReason ? (
+                      <small className="control-reason" role="status">
+                        {rollbackConfirmReason}
+                      </small>
+                    ) : null}
+                  </div>
+                );
+              })()}
             </div>
             <Dialog.Close asChild>
               <button

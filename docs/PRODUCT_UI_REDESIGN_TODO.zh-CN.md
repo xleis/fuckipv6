@@ -914,14 +914,16 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **证据（2026-11-02）**：GPUI 与 WebUI 均接入完整事务配置工作台，提供当前 revision、可编辑 networks 文档、JSON 文件导入、候选配置、逐路径 before/after 差异、影响级别、校验问题和稳定的禁用原因。编辑后必须对当前草稿重新预览，且预览 revision 与当前文档一致才允许应用；支持冲突、校验失败、无变化和命令不可用四类阻断。校验问题可定位到 JSON Pointer 对应编辑位置；应用和回滚均有二次确认，成功后刷新文档与审计历史。审计详情展示 transaction、revision、操作者、来源、时间、目标 revision 和变更路径。GPUI 工作流状态机有 6 个专项测试，WebUI 工作流有 5 个专项测试；`cargo test -p fuckipv6-client --all-features` 通过（lib 646 passed、3 ignored；集成测试 9 passed、1 ignored），`cargo test -p fuckipv6-common i18n` 9/9、WebUI 37/37、`typecheck`、`lint`、生产构建及 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 均通过。
 
-### W6-07 状态矩阵落地 `[ ]`
+### W6-07 状态矩阵落地 `[x]`
 
-- [ ] 加载、刷新、空、错误、无权限、不支持；
-- [ ] 降级、维护、陈旧数据、离线；
-- [ ] 会话过期保留编辑上下文；
-- [ ] control/node 不可达分离；
-- [ ] 所有禁用控件有可见原因；
-- [ ] 页面状态测试完整。
+- [x] 加载、刷新、空、错误、无权限、不支持；
+- [x] 降级、维护、陈旧数据、离线；
+- [x] 会话过期保留编辑上下文；
+- [x] control/node 不可达分离；
+- [x] 所有禁用控件有可见原因；
+- [x] 页面状态测试完整。
+
+**证据（2026-11-02）**：WebUI 将页面状态收敛为一个带固定优先级的权威主状态，不再并列渲染多套状态：`error → initial_loading → offline → maintenance → permission_denied → unsupported → node_failed → degraded → control_unavailable → stale → refreshing → empty → ready`。浏览器离线、WebSocket 断开/重同步、控制服务 503、节点 `failed`、运行降级、无查看权限、平台能力不支持、空数据和刷新均有独立信号与可见说明；控制服务异常与节点故障使用不同文案，陈旧状态显示最近权威快照时间。维护状态由控制面临时拒绝请求触发并保留最后快照；陈旧、离线和错误状态会阻断写操作。动作表单、二次确认、配置加载/导入/预览/应用/回滚/历史及全局临时操作均提供稳定的禁用原因。会话过期后保留当前页、网络、搜索、待打开动作，以及配置文档、编辑器内容、预览、应用结果、导入名和校验定位。WebUI 8 个测试文件 60/60 通过（含状态矩阵、维护映射、control/node 分离、陈旧、离线、不支持、会话恢复、配置阻断和确认弹窗阻断），`typecheck`、`lint`、生产构建通过（仅有现存 Vite >500 kB chunk 警告）；`cargo test -p fuckipv6-common i18n` 9/9、`cargo clippy -p fuckipv6-client --all-features --all-targets -- -D warnings` 和 `cargo fmt --all -- --check` 通过，`dist/assets/app.js` 与 `app.css` 已同步刷新。
 
 ## 10. W7：节点页
 
@@ -2384,7 +2386,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] W6-04：设置基础页；
 - [x] W6-05：可搜索的高级设置权威清单；
 - [x] W6-06：差异应用与回滚；
-- [ ] W6-07：状态矩阵；
+- [x] W6-07：状态矩阵；
 - [ ] 删除旧双 WebUI 的新功能入口；
 - [ ] 新 React/Vite 成为唯一 WebUI 产品表面；
 - [ ] GPUI 与 WebUI 使用同一状态/权限/命令契约。

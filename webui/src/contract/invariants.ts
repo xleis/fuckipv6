@@ -168,6 +168,7 @@ export type BlockReason =
   | "node_not_running"
   | "no_online_network"
   | "no_network_selected"
+  | "platform_unsupported"
   | "backend_unavailable";
 
 function fail(message: string): never {
@@ -457,6 +458,18 @@ export function executionBlockReason(
 ): BlockReason | null {
   if (!snapshot.permissions?.permissions.includes(action.permission))
     return "permission_denied";
+  if (action.id === "set_exit_node_role") {
+    const exitCapability = snapshot.capabilities?.capabilities.find(
+      (capability) => capability.kind === "exit",
+    );
+    if (
+      exitCapability?.state === "unsupported" ||
+      (exitCapability?.state === "unknown" &&
+        snapshot.exit_node_capabilities?.supported === false)
+    ) {
+      return "platform_unsupported";
+    }
+  }
   if (
     action.availability === "node_running" &&
     snapshot.lifecycle.phase !== "running"

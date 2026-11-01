@@ -24,7 +24,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type JSX } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type {
   NodeCommandOutcome,
   NodeOperationSnapshot,
@@ -35,6 +35,7 @@ import type {
 } from "../../contracts/typescript/node-contract-v1";
 import {
   AuthenticationError,
+  HttpError,
   loadManifest,
   loadSnapshot,
   newIdempotencyKey,
@@ -61,8 +62,10 @@ import { ActionPanel } from "./components/action-panel";
 import {
   CONFIGURATION_ACTION_IDS,
   ConfigurationWorkflow,
+  type ConfigurationDraftMemo,
 } from "./components/configuration-workflow";
 import { PageContent } from "./components/page-content";
+import { StateNotice } from "./components/state-notice";
 import {
   commandEnvelope,
   defaultNetworkName,
@@ -72,6 +75,12 @@ import {
   validateSnapshot,
   type ActionValues,
 } from "./contract/invariants";
+import {
+  interactionBlockReason,
+  pageStateSignals,
+  pageUnsupported,
+  primaryPageState,
+} from "./state-matrix";
 import {
   searchElementId,
   searchKindKey,
@@ -110,8 +119,28 @@ const LANGUAGE_QUERY_KEY = ["language-preference"] as const;
 const MANIFEST_QUERY_KEY = ["node-manifest", 1] as const;
 const SNAPSHOT_QUERY_KEY = ["node-snapshot", 1] as const;
 
+type UiSessionMemo = {
+  pageId: string;
+  selectedNetwork: string;
+  searchQuery: string;
+  requestedActionId: string | null;
+  configurationDraft: ConfigurationDraftMemo | null;
+};
+
+const EMPTY_UI_SESSION: UiSessionMemo = {
+  pageId: "",
+  selectedNetwork: "",
+  searchQuery: "",
+  requestedActionId: null,
+  configurationDraft: null,
+};
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isControlMaintenance(error: unknown): boolean {
+  return error instanceof HttpError && error.status === 503;
 }
 
 function moduleForPage(pageId: string): ModuleDefinition {
@@ -125,11 +154,21 @@ function resolveLocale(preference: LanguagePreference | undefined): Locale {
   return runtime.resolveLocale(preference ?? "system", navigator.language);
 }
 
+type NodeEventState = {
+  status: "connecting" | "live" | "resyncing" | "reconnecting";
+  stale: boolean;
+  lastAuthoritativeAt: number | null;
+};
+
 function useNodeEvents(
   authenticated: boolean,
   queryClient: QueryClient,
-): boolean {
-  const [stale, setStale] = useState(false);
+): NodeEventState {
+  const [state, setState] = useState<NodeEventState>({
+    status: "connecting",
+    stale: false,
+    lastAuthoritativeAt: null,
+  });
 
   useEffect(() => {
     if (!authenticated) return;
@@ -138,17 +177,24 @@ function useNodeEvents(
     let stopped = false;
 
     const queueResync = () => {
-      setStale(true);
+      setState((current) => ({
+        ...current,
+        status: "resyncing",
+        stale: true,
+      }));
       void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
     };
 
     const connect = () => {
       if (stopped) return;
+      setState((current) => ({ ...current, status: "connecting" }));
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(
         `${protocol}//${window.location.host}/api/node/events?schema_version=1`,
       );
-      socket.addEventListener("open", () => setStale(false));
+      socket.addEventListener("open", () =>
+        setState((current) => ({ ...current, status: "live" })),
+      );
       socket.addEventListener("message", (event) => {
         try {
           const message = JSON.parse(String(event.data)) as Record<
@@ -165,7 +211,11 @@ function useNodeEvents(
           if (message.type === "snapshot" || message.type === "resync") {
             const snapshot = validateSnapshot(message.snapshot as NodeSnapshot);
             queryClient.setQueryData(SNAPSHOT_QUERY_KEY, snapshot);
-            setStale(false);
+            setState({
+              status: "live",
+              stale: false,
+              lastAuthoritativeAt: Date.now(),
+            });
             return;
           }
           if (message.type === "event") {
@@ -180,7 +230,11 @@ function useNodeEvents(
         }
       });
       socket.addEventListener("close", () => {
-        setStale(true);
+        setState((current) => ({
+          ...current,
+          status: stopped ? current.status : "reconnecting",
+          stale: !stopped,
+        }));
         if (!stopped) reconnectTimer = window.setTimeout(connect, 2_000);
       });
       socket.addEventListener("error", () => socket?.close());
@@ -194,7 +248,21 @@ function useNodeEvents(
     };
   }, [authenticated, queryClient]);
 
-  return stale;
+  return state;
+}
+
+function useBrowserOnline(): boolean {
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+  return online;
 }
 
 function LoadingScreen({ locale }: { locale: Locale }): JSX.Element {
@@ -205,6 +273,170 @@ function LoadingScreen({ locale }: { locale: Locale }): JSX.Element {
       </div>
       <h1>{label(locale, "owner_auth.session.checking")}</h1>
     </main>
+  );
+}
+
+function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element {
+  return (
+    <div className="app-shell" aria-busy="true">
+      <a className="skip-link" href="#page-content">
+        {label(locale, "common.skip_content")}
+      </a>
+      <aside
+        className="primary-nav"
+        data-ui-region="sidebar"
+        aria-label={label(locale, "common.main_navigation")}
+      >
+        <div className="brand-lockup">
+          <div className="brand-mark">
+            <Wifi size={22} />
+          </div>
+          <div>
+            <span>fuckipv6</span>
+            <strong>{label(locale, "common.node_contract")}</strong>
+          </div>
+        </div>
+        <nav className="module-list" aria-label={label(locale, "common.main_navigation")}>
+          {MODULES.map((module) => {
+            const Icon = module.icon;
+            return (
+              <button
+                key={module.id}
+                type="button"
+                className="module-button"
+                disabled
+              >
+                <Icon size={19} />
+                <span>{label(locale, module.labelKey)}</span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="nav-footer">
+          <span>{label(locale, "state.initial_loading.title")}</span>
+          <span className="stale-indicator active">
+            <span aria-hidden="true" /> {label(locale, "state.refreshing.title")}
+          </span>
+        </div>
+      </aside>
+
+      <div className="app-main">
+        <header className="global-bar" data-ui-region="topbar">
+          <div className="global-context">
+            <div className="top-status warn" role="status">
+              <LoaderCircle className="spin" size={17} />
+              <div>
+                <strong>{label(locale, "state.initial_loading.title")}</strong>
+                <span>{label(locale, "state.initial_loading.detail")}</span>
+              </div>
+            </div>
+          </div>
+          <label className="network-picker">
+            <span>{label(locale, "common.current_network")}</span>
+            <select disabled value="">
+              <option value="">{label(locale, "state.initial_loading.title")}</option>
+            </select>
+          </label>
+          <div className="global-actions">
+            <button
+              className="toolbar-button"
+              type="button"
+              disabled
+              aria-label={label(locale, "common.language")}
+            >
+              <Globe2 size={16} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              disabled
+              aria-label={label(locale, "common.refresh")}
+            >
+              <RefreshCw className="spin" size={17} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              disabled
+              aria-label={label(locale, "owner_auth.session.logout")}
+            >
+              <LogOut size={17} />
+            </button>
+          </div>
+        </header>
+
+        <div className="secondary-shell">
+          <div className="local-toolbar">
+            <div className="page-tabs" role="tablist" aria-label={label(locale, "common.page_sections")}>
+              {MODULES.map((module) => (
+                <button
+                  key={module.id}
+                  className="page-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  disabled
+                >
+                  {label(locale, module.labelKey)}
+                </button>
+              ))}
+            </div>
+            <div className="local-toolbar-actions">
+              <span className="sync-badge" role="status">
+                {label(locale, "state.initial_loading.title")}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <main className="workspace" id="page-content" tabIndex={-1}>
+          <section
+            className="page-content authenticated-loading-content"
+            data-ui-region="content"
+            aria-label={label(locale, "state.initial_loading.title")}
+          >
+            <header className="page-heading">
+              <div className="page-heading-icon">
+                <LoaderCircle className="spin" size={20} />
+              </div>
+              <div>
+                <h1>{label(locale, "state.initial_loading.title")}</h1>
+                <p>{label(locale, "state.initial_loading.detail")}</p>
+              </div>
+            </header>
+            <div className="page-content-stack">
+              <div className="loading-panel" role="status">
+                <LoaderCircle className="spin" size={19} />
+                <div>
+                  <strong>{label(locale, "state.initial_loading.title")}</strong>
+                  <p>{label(locale, "state.initial_loading.detail")}</p>
+                </div>
+              </div>
+              <div className="loading-skeleton" aria-hidden="true">
+                <div className="loading-skeleton-row">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="loading-skeleton-block tall" />
+                <div className="loading-skeleton-block" />
+              </div>
+            </div>
+          </section>
+          <aside
+            className="actions-panel"
+            data-ui-region="action-panel"
+            aria-label={label(locale, "common.shared_actions")}
+          >
+            <div className="panel-title">{label(locale, "common.shared_actions")}</div>
+            <div className="loading-skeleton" aria-hidden="true">
+              <div className="loading-skeleton-block compact" />
+              <div className="loading-skeleton-block compact" />
+            </div>
+          </aside>
+        </main>
+      </div>
+    </div>
   );
 }
 
@@ -330,48 +562,55 @@ function LanguageMenu({
     { value: "en", title: "English" },
   ];
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button
-          className="toolbar-button"
-          type="button"
-          disabled={disabled}
-          aria-label={label(locale, "common.language")}
-        >
-          <Globe2 size={16} />
-          <span>
-            {choices.find((choice) => choice.value === preference)?.title ??
-              preference}
-          </span>
-          <ChevronDown size={14} />
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          className="dropdown-content"
-          align="end"
-          sideOffset={8}
-        >
-          <DropdownMenu.Label className="dropdown-label">
-            {label(locale, "common.language")}
-          </DropdownMenu.Label>
-          {choices.map((choice) => (
-            <DropdownMenu.Item
-              className="dropdown-item"
-              key={choice.value}
-              onSelect={() => onChange(choice.value)}
-            >
-              {choice.value === preference ? (
-                <CheckCircle2 size={15} />
-              ) : (
-                <span className="menu-spacer" />
-              )}
-              {choice.title}
-            </DropdownMenu.Item>
-          ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <div className="language-control">
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button
+            className="toolbar-button"
+            type="button"
+            disabled={disabled}
+            aria-label={label(locale, "common.language")}
+          >
+            <Globe2 size={16} />
+            <span>
+              {choices.find((choice) => choice.value === preference)?.title ??
+                preference}
+            </span>
+            <ChevronDown size={14} />
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            className="dropdown-content"
+            align="end"
+            sideOffset={8}
+          >
+            <DropdownMenu.Label className="dropdown-label">
+              {label(locale, "common.language")}
+            </DropdownMenu.Label>
+            {choices.map((choice) => (
+              <DropdownMenu.Item
+                className="dropdown-item"
+                key={choice.value}
+                onSelect={() => onChange(choice.value)}
+              >
+                {choice.value === preference ? (
+                  <CheckCircle2 size={15} />
+                ) : (
+                  <span className="menu-spacer" />
+                )}
+                {choice.title}
+              </DropdownMenu.Item>
+            ))}
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+      {disabled ? (
+        <small className="control-reason" role="status">
+          {label(locale, "common.control_pending")}
+        </small>
+      ) : null}
+    </div>
   );
 }
 
@@ -380,26 +619,50 @@ function AppShell({
   snapshot,
   locale,
   languagePreference,
-  stale,
+  eventState,
+  browserOnline,
+  refreshing,
+  lastAuthoritativeAt,
+  snapshotFailure,
+  uiSession,
+  onUiSessionChange,
   queryClient,
 }: {
   manifest: NodeUiManifest;
   snapshot: NodeSnapshot;
   locale: Locale;
   languagePreference: LanguagePreference;
-  stale: boolean;
+  eventState: NodeEventState;
+  browserOnline: boolean;
+  refreshing: boolean;
+  lastAuthoritativeAt: number | null;
+  snapshotFailure: unknown;
+  uiSession: UiSessionMemo;
+  onUiSessionChange(patch: Partial<UiSessionMemo>): void;
   queryClient: QueryClient;
 }): JSX.Element {
   const initialPage =
     manifest.pages.find((page) => page.id === "overview") ?? manifest.pages[0];
-  const [pageId, setPageId] = useState(initialPage?.id ?? "overview");
-  const [selectedNetworkState, setSelectedNetworkState] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const pageId = uiSession.pageId || (initialPage?.id ?? "overview");
+  const selectedNetworkState = uiSession.selectedNetwork;
+  const searchQuery = uiSession.searchQuery;
+  const requestedActionId = uiSession.requestedActionId;
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [requestedActionId, setRequestedActionId] = useState<string | null>(
-    null,
+  const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
+  const [manualRefreshPending, setManualRefreshPending] = useState(false);
+  const setPageId = (value: string) => onUiSessionChange({ pageId: value });
+  const setSelectedNetworkState = (value: string) =>
+    onUiSessionChange({ selectedNetwork: value });
+  const setSearchQuery = (value: string) =>
+    onUiSessionChange({ searchQuery: value });
+  const setRequestedActionId = (value: string | null) =>
+    onUiSessionChange({ requestedActionId: value });
+  const handleConfigurationDraftChange = useCallback(
+    (configurationDraft: ConfigurationDraftMemo | null) => {
+      onUiSessionChange({ configurationDraft });
+    },
+    [onUiSessionChange],
   );
-  const [refreshError, setRefreshError] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const activePage =
     manifest.pages.find((page) => page.id === pageId) ?? initialPage;
@@ -410,6 +673,30 @@ function AppShell({
     [locale, manifest, searchQuery, snapshot],
   );
   const searchOpen = searchQuery.trim().length > 0;
+  const controlRefreshing = refreshing || manualRefreshPending;
+  const maintenance =
+    isControlMaintenance(snapshotFailure) ||
+    isControlMaintenance(refreshFailure);
+  const controlFailure = snapshotFailure ?? refreshFailure;
+  const pageErrorMessage = controlFailure ? errorMessage(controlFailure) : null;
+  const pageSignals = pageStateSignals(snapshot, activePage?.id ?? "overview", {
+    browserOnline,
+    refreshing: controlRefreshing,
+    stale: eventState.stale,
+    lastAuthoritativeAt: lastAuthoritativeAt ?? eventState.lastAuthoritativeAt,
+    error: maintenance ? null : pageErrorMessage,
+    maintenance,
+    permissionDenied:
+      !snapshot.permissions?.permissions.includes("view_state"),
+    unsupported: pageUnsupported(snapshot, activePage?.id ?? ""),
+  });
+  const pageState = primaryPageState(pageSignals);
+  const interactionBlocked = interactionBlockReason(pageSignals);
+  const syncMode = eventState.stale
+    ? "stale"
+    : controlRefreshing
+      ? "refreshing"
+      : "live";
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent): void => {
@@ -436,7 +723,9 @@ function AppShell({
   });
 
   async function refresh(): Promise<void> {
-    setRefreshError("");
+    if (manualRefreshPending || refreshing) return;
+    setManualRefreshPending(true);
+    setRefreshFailure(null);
     try {
       const latest = await loadSnapshot();
       queryClient.setQueryData(SNAPSHOT_QUERY_KEY, latest);
@@ -445,7 +734,9 @@ function AppShell({
         queryClient.setQueryData(SESSION_QUERY_KEY, { authenticated: false });
         return;
       }
-      setRefreshError(errorMessage(error));
+      setRefreshFailure(error);
+    } finally {
+      setManualRefreshPending(false);
     }
   }
 
@@ -547,6 +838,11 @@ function AppShell({
   const subpages = activeModule.pages
     .map((id) => manifest.pages.find((page) => page.id === id))
     .filter((page): page is NodeUiPage => Boolean(page));
+  const controlPending =
+    manualRefreshPending ||
+    refreshing ||
+    languageMutation.isPending ||
+    logoutMutation.isPending;
 
   return (
     <div className="app-shell">
@@ -592,10 +888,18 @@ function AppShell({
             {label(locale, "common.snapshot")} #{snapshot.revision}
           </span>
           <span
-            className={stale ? "stale-indicator active" : "stale-indicator"}
+            className={
+              syncMode === "live"
+                ? "stale-indicator"
+                : "stale-indicator active"
+            }
           >
             <span aria-hidden="true" />{" "}
-            {stale ? label(locale, "common.syncing") : "Live"}
+            {syncMode === "stale"
+              ? label(locale, "state.stale.title")
+              : syncMode === "refreshing"
+                ? label(locale, "state.refreshing.title")
+                : label(locale, "common.live")}
           </span>
         </div>
       </aside>
@@ -633,19 +937,35 @@ function AppShell({
             <button
               className="icon-button"
               type="button"
+              disabled={manualRefreshPending || refreshing}
               onClick={() => void refresh()}
               aria-label={label(locale, "common.refresh")}
             >
-              <RefreshCw size={17} />
+              <RefreshCw
+                className={
+                  manualRefreshPending || refreshing ? "spin" : undefined
+                }
+                size={17}
+              />
             </button>
             <button
               className="icon-button"
               type="button"
+              disabled={logoutMutation.isPending}
               onClick={() => logoutMutation.mutate()}
               aria-label={label(locale, "owner_auth.session.logout")}
             >
-              <LogOut size={17} />
+              {logoutMutation.isPending ? (
+                <LoaderCircle className="spin" size={17} />
+              ) : (
+                <LogOut size={17} />
+              )}
             </button>
+            {controlPending ? (
+              <small className="global-action-reason" role="status">
+                {label(locale, "common.control_pending")}
+              </small>
+            ) : null}
           </div>
         </header>
 
@@ -705,9 +1025,15 @@ function AppShell({
                   </button>
                 ) : null}
               </div>
-              {stale ? (
-                <span className="sync-badge">
-                  {label(locale, "common.syncing")}
+              {syncMode !== "live" ? (
+                <span
+                  className="sync-badge"
+                  data-sync-mode={syncMode}
+                  role="status"
+                >
+                  {syncMode === "stale"
+                    ? label(locale, "state.stale.title")
+                    : label(locale, "state.refreshing.title")}
                 </span>
               ) : null}
             </div>
@@ -748,40 +1074,52 @@ function AppShell({
             </div>
           ) : null}
 
-          {refreshError ? (
+          {!maintenance && pageErrorMessage ? (
             <div className="app-banner danger" role="alert">
-              {refreshError}
+              {pageErrorMessage}
             </div>
           ) : null}
         </div>
         <main className="workspace" id="page-content" tabIndex={-1}>
           {activePage ? (
             <>
-              <PageContent
-                page={activePage}
-                snapshot={snapshot}
-                locale={locale}
-                selectedNetwork={selectedNetwork}
-                footer={
-                  activePage.actions.some((action) =>
-                    CONFIGURATION_ACTION_IDS.has(action.id),
-                  ) ? (
-                    <ConfigurationWorkflow
-                      actions={activePage.actions.filter((action) =>
-                        CONFIGURATION_ACTION_IDS.has(action.id),
-                      )}
-                      snapshot={snapshot}
-                      selectedNetwork={selectedNetwork}
-                      locale={locale}
-                      pendingAction={pendingAction}
-                      onSubmit={submitAction}
-                    />
-                  ) : null
-                }
-                onSelectNetwork={setSelectedNetworkState}
-                onNavigate={navigate}
-                onRequestAction={requestAction}
-              />
+              <div className="page-content-stack" data-ui-region="content">
+                <StateNotice
+                  state={pageState}
+                  locale={locale}
+                  lastAuthoritativeAt={
+                    lastAuthoritativeAt ?? eventState.lastAuthoritativeAt
+                  }
+                />
+                <PageContent
+                  page={activePage}
+                  snapshot={snapshot}
+                  locale={locale}
+                  selectedNetwork={selectedNetwork}
+                  footer={
+                    activePage.actions.some((action) =>
+                      CONFIGURATION_ACTION_IDS.has(action.id),
+                    ) ? (
+                      <ConfigurationWorkflow
+                        actions={activePage.actions.filter((action) =>
+                          CONFIGURATION_ACTION_IDS.has(action.id),
+                        )}
+                        snapshot={snapshot}
+                        selectedNetwork={selectedNetwork}
+                        locale={locale}
+                        pendingAction={pendingAction}
+                        interactionBlocked={interactionBlocked}
+                        draft={uiSession.configurationDraft}
+                        onDraftChange={handleConfigurationDraftChange}
+                        onSubmit={submitAction}
+                      />
+                    ) : null
+                  }
+                  onSelectNetwork={setSelectedNetworkState}
+                  onNavigate={navigate}
+                  onRequestAction={requestAction}
+                />
+              </div>
               <ActionPanel
                 actions={activePage.actions.filter(
                   (action) => !CONFIGURATION_ACTION_IDS.has(action.id),
@@ -790,6 +1128,7 @@ function AppShell({
                 selectedNetwork={selectedNetwork}
                 locale={locale}
                 pendingAction={pendingAction}
+                interactionBlocked={interactionBlocked}
                 requestedActionId={requestedActionId}
                 onRequestedActionOpened={() => setRequestedActionId(null)}
                 onSubmit={submitAction}
@@ -834,12 +1173,16 @@ export function App(): JSX.Element {
     retry: false,
     placeholderData: (previous) => previous,
   });
-  const stale = useNodeEvents(authenticated, queryClient);
+  const eventState = useNodeEvents(authenticated, queryClient);
+  const browserOnline = useBrowserOnline();
+  const [uiSession, setUiSession] = useState<UiSessionMemo>(EMPTY_UI_SESSION);
+  const updateUiSession = useCallback((patch: Partial<UiSessionMemo>) => {
+    setUiSession((current) => ({ ...current, ...patch }));
+  }, []);
   const locale = useMemo(
     () => resolveLocale(languageQuery.data),
     [languageQuery.data],
   );
-
   if (sessionQuery.isPending) return <LoadingScreen locale={locale} />;
   if (
     sessionQuery.error instanceof AuthenticationError ||
@@ -857,15 +1200,16 @@ export function App(): JSX.Element {
       />
     );
   }
-  if (manifestQuery.isPending || snapshotQuery.isPending)
-    return <LoadingScreen locale={locale} />;
   if (
     manifestQuery.error instanceof AuthenticationError ||
     snapshotQuery.error instanceof AuthenticationError
   ) {
     return <LoginScreen locale={locale} />;
   }
-  if (manifestQuery.error || snapshotQuery.error) {
+  if (
+    (manifestQuery.error || snapshotQuery.error) &&
+    (!manifestQuery.data || !snapshotQuery.data)
+  ) {
     return (
       <FatalScreen
         locale={locale}
@@ -878,8 +1222,10 @@ export function App(): JSX.Element {
       />
     );
   }
+  if (manifestQuery.isPending || snapshotQuery.isPending)
+    return <AuthenticatedLoadingShell locale={locale} />;
   if (!manifestQuery.data || !snapshotQuery.data) {
-    return <LoadingScreen locale={locale} />;
+    return <AuthenticatedLoadingShell locale={locale} />;
   }
   return (
     <AppShell
@@ -887,7 +1233,15 @@ export function App(): JSX.Element {
       snapshot={snapshotQuery.data}
       locale={locale}
       languagePreference={languageQuery.data ?? "system"}
-      stale={stale || snapshotQuery.isFetching}
+      eventState={eventState}
+      browserOnline={browserOnline}
+      refreshing={snapshotQuery.isFetching && Boolean(snapshotQuery.data)}
+      lastAuthoritativeAt={
+        snapshotQuery.dataUpdatedAt > 0 ? snapshotQuery.dataUpdatedAt : null
+      }
+      snapshotFailure={snapshotQuery.error}
+      uiSession={uiSession}
+      onUiSessionChange={updateUiSession}
       queryClient={queryClient}
     />
   );

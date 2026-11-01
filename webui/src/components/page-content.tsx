@@ -1331,7 +1331,6 @@ export function PageContent(props: PageContentProps) {
   return (
     <section
       className="page-content"
-      data-ui-region="content"
       aria-labelledby="page-title"
     >
       <header className="page-heading">

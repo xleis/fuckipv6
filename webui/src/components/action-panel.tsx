@@ -16,6 +16,7 @@ import {
   validateActionValues,
   type ActionValues,
 } from "../contract/invariants";
+import { pageStateDefinition, type PageStateKind } from "../state-matrix";
 
 type ActionPanelProps = {
   actions: NodeUiAction[];
@@ -23,6 +24,7 @@ type ActionPanelProps = {
   selectedNetwork: string;
   locale: Locale;
   pendingAction: string | null;
+  interactionBlocked: PageStateKind | null;
   requestedActionId: string | null;
   onRequestedActionOpened(): void;
   onSubmit(
@@ -154,6 +156,7 @@ function ActionCard({
   selectedNetwork,
   locale,
   pending,
+  interactionBlocked,
   requested,
   onRequestedActionOpened,
   onSubmit,
@@ -163,6 +166,7 @@ function ActionCard({
   selectedNetwork: string;
   locale: Locale;
   pending: boolean;
+  interactionBlocked: PageStateKind | null;
   requested: boolean;
   onRequestedActionOpened(): void;
   onSubmit(
@@ -178,7 +182,22 @@ function ActionCard({
   const [errors, setErrors] = useState<string[]>([]);
   const [result, setResult] = useState("");
   const [failure, setFailure] = useState("");
-  const blocked = executionBlockReason(action, snapshot, selectedNetwork);
+  const pageBlocked = interactionBlocked
+    ? pageStateDefinition(interactionBlocked)
+    : null;
+  const executionBlocked = executionBlockReason(
+    action,
+    snapshot,
+    selectedNetwork,
+  );
+  const blocked = Boolean(pageBlocked || executionBlocked);
+  const confirmBlockedReason = pending
+    ? label(locale, "common.control_pending")
+    : pageBlocked
+      ? label(locale, pageBlocked.titleKey)
+      : executionBlocked
+        ? blockReasonText(executionBlocked, locale)
+        : "";
   const [previousRequested, setPreviousRequested] = useState(requested);
 
   if (requested !== previousRequested) {
@@ -239,10 +258,14 @@ function ActionCard({
       </button>
       {open ? (
         <form className="action-form" onSubmit={handleSubmit}>
-          {blocked ? (
+          {pageBlocked || executionBlocked ? (
             <div className="inline-notice warning">
               <ShieldAlert size={15} />
-              <span>{blockReasonText(blocked, locale)}</span>
+              <span>
+                {pageBlocked
+                  ? label(locale, pageBlocked.titleKey)
+                  : blockReasonText(executionBlocked, locale)}
+              </span>
             </div>
           ) : null}
           {action.fields.map((field) => (
@@ -274,10 +297,15 @@ function ActionCard({
               {result}
             </p>
           ) : null}
+          {pending ? (
+            <small className="control-reason" role="status">
+              {label(locale, "common.control_pending")}
+            </small>
+          ) : null}
           <button
             className="primary-button"
             type="submit"
-            disabled={Boolean(blocked) || pending}
+            disabled={blocked || pending}
           >
             {pending
               ? label(locale, "common.operation_in_progress")
@@ -316,6 +344,11 @@ function ActionCard({
                 </Dialog.Description>
               </div>
             </div>
+            {confirmBlockedReason ? (
+              <small className="control-reason" role="status">
+                {confirmBlockedReason}
+              </small>
+            ) : null}
             <div className="dialog-actions">
               <Dialog.Close asChild>
                 <button className="secondary-button" type="button">
@@ -329,7 +362,7 @@ function ActionCard({
                     : "primary-button"
                 }
                 type="button"
-                disabled={pending}
+                disabled={Boolean(confirmBlockedReason)}
                 onClick={() => {
                   setConfirming(false);
                   void submit();
@@ -390,6 +423,7 @@ export function ActionPanel(props: ActionPanelProps) {
             selectedNetwork={props.selectedNetwork}
             locale={locale}
             pending={pendingAction === action.id}
+            interactionBlocked={props.interactionBlocked}
             requested={props.requestedActionId === action.id}
             onRequestedActionOpened={props.onRequestedActionOpened}
             onSubmit={onSubmit}

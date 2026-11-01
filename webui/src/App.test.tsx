@@ -1,5 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -8,11 +16,21 @@ import manifestFixture from "../../contracts/typescript/fixtures/node-manifest.j
 import productFixture from "../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   ActivityEntry,
+  ConfigurationDocument,
+  ConfigurationHistoryEntry,
+  NodeApiCommandResponse,
+  NodeCommandOutcome,
   NodeSnapshot,
   NodeUiManifest,
 } from "../../contracts/typescript/node-contract-v1";
 import { App } from "./App";
-import { loadManifest, loadSnapshot } from "./api/client";
+import {
+  AuthenticationError,
+  HttpError,
+  loadManifest,
+  loadSnapshot,
+  sendCommand,
+} from "./api/client";
 import { loadLanguagePreference, loadOwnerSession } from "./api/session";
 import { installTestI18nRuntime } from "./test/runtime";
 
@@ -64,13 +82,31 @@ const snapshot: NodeSnapshot = {
 };
 
 class SilentWebSocket {
+  static instances: SilentWebSocket[] = [];
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static readonly CLOSING = 2;
   static readonly CLOSED = 3;
   readonly readyState = SilentWebSocket.CONNECTING;
-  addEventListener(): void {}
+  private readonly listeners = new Map<string, Array<(event: Event) => void>>();
+
+  constructor() {
+    SilentWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: Event) => void): void {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
   close(): void {}
+
+  emit(type: string): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(new Event(type));
+    }
+  }
 }
 
 function renderApp() {
@@ -80,11 +116,12 @@ function renderApp() {
       mutations: { retry: false },
     },
   });
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <App />
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
 }
 
 function authenticate(snapshotValue: NodeSnapshot = snapshot): void {
@@ -110,6 +147,55 @@ function activityAt(index: number): ActivityEntry {
   };
 }
 
+function configurationDocument(revision: number): ConfigurationDocument {
+  return {
+    schema_version: 1,
+    revision,
+    networks: { home: { mtu: 1280 } },
+  };
+}
+
+function configurationHistory(
+  revision: number,
+): ConfigurationHistoryEntry {
+  return {
+    transaction_id: `tx-${revision}`,
+    revision,
+    previous_revision: revision - 1,
+    action: "apply",
+    target_revision: null,
+    actor: "owner",
+    source: "webui",
+    occurred_at: "2026-11-02T00:00:00Z",
+    changed_paths: ["/networks/home/mtu"],
+  };
+}
+
+function mockConfigurationCommands(): void {
+  vi.mocked(sendCommand).mockImplementation(
+    async (request): Promise<NodeApiCommandResponse> => {
+      const command = request.request.command.command;
+      let outcome: NodeCommandOutcome;
+      if (command === "get_configuration") {
+        outcome = { status: "configuration", data: configurationDocument(2) };
+      } else if (command === "get_configuration_history") {
+        outcome = {
+          status: "configuration_history",
+          data: [configurationHistory(2)],
+        };
+      } else {
+        throw new Error(`unexpected command ${command}`);
+      }
+      return {
+        schema_version: 1,
+        request_id: request.request.request_id,
+        server_time: "2026-11-02T00:00:00Z",
+        result: { request_id: request.request.request_id, outcome },
+      };
+    },
+  );
+}
+
 async function expectModuleTabs(module: string, tabs: string[]): Promise<void> {
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: `translated:nav.${module}` }));
@@ -122,12 +208,14 @@ async function expectModuleTabs(module: string, tabs: string[]): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   installTestI18nRuntime();
+  SilentWebSocket.instances = [];
   vi.stubGlobal("WebSocket", SilentWebSocket);
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("React WebUI shell", () => {
@@ -153,6 +241,183 @@ describe("React WebUI shell", () => {
     await expectModuleTabs("networks", ["networks", "topology", "exit_node", "relay"]);
     await expectModuleTabs("activity", ["traffic", "logs"]);
     await expectModuleTabs("settings", ["settings"]);
+  });
+
+  it("renders one authoritative page state with node failure ahead of control failure", async () => {
+    authenticate({
+      ...populatedSnapshot,
+      control_health: "unavailable",
+      lifecycle: {
+        ...populatedSnapshot.lifecycle,
+        failed_networks: ["home"],
+        phase: "failed",
+      },
+    });
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    const notices = container.querySelectorAll("[data-page-state]");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toHaveAttribute("data-page-state", "node_failed");
+    expect(container.querySelector('[data-page-state="degraded"]')).not.toBeInTheDocument();
+    expect(
+      container.querySelector('[data-page-state="control_unavailable"]'),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      name: "control service failure",
+      value: { ...populatedSnapshot, control_health: "unavailable" as const },
+      expected: "control_unavailable",
+    },
+    {
+      name: "degraded operation",
+      value: {
+        ...populatedSnapshot,
+        lifecycle: {
+          ...populatedSnapshot.lifecycle,
+          failed_networks: ["home"],
+        },
+      },
+      expected: "degraded",
+    },
+    {
+      name: "missing view permission",
+      value: {
+        ...populatedSnapshot,
+        permissions: {
+          access_model: "trusted_control_plane" as const,
+          permissions: [],
+        },
+      },
+      expected: "permission_denied",
+    },
+  ])("renders the $name as the single primary state", async ({ value, expected }) => {
+    authenticate(value);
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await waitFor(() => {
+      expect(container.querySelectorAll("[data-page-state]")).toHaveLength(1);
+    });
+    expect(container.querySelector("[data-page-state]")).toHaveAttribute(
+      "data-page-state",
+      expected,
+    );
+  });
+
+  it("shows stale state after the event stream disconnects", async () => {
+    authenticate(populatedSnapshot);
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    const socket = SilentWebSocket.instances.at(-1);
+    if (!socket) throw new Error("WebSocket was not created");
+    act(() => socket.emit("close"));
+
+    await waitFor(() => {
+      expect(container.querySelector("[data-page-state]")).toHaveAttribute(
+        "data-page-state",
+        "stale",
+      );
+    });
+    expect(container.querySelectorAll("[data-page-state]")).toHaveLength(1);
+  });
+
+  it("maps a temporary control rejection to maintenance while keeping the snapshot", async () => {
+    const user = userEvent.setup();
+    authenticate(populatedSnapshot);
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    vi.mocked(loadSnapshot).mockRejectedValueOnce(new HttpError(503, null));
+    await user.click(screen.getByRole("button", { name: "translated:common.refresh" }));
+
+    await waitFor(() => {
+      expect(container.querySelector("[data-page-state]")).toHaveAttribute(
+        "data-page-state",
+        "maintenance",
+      );
+    });
+    expect(
+      screen.getByRole("heading", { name: "translated:page.overview" }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".app-banner")).not.toBeInTheDocument();
+  });
+
+  it("shows browser offline as the authoritative state", async () => {
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    authenticate(populatedSnapshot);
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    expect(container.querySelector("[data-page-state]")).toHaveAttribute(
+      "data-page-state",
+      "offline",
+    );
+  });
+
+  it("shows unsupported state for a disabled platform capability", async () => {
+    const user = userEvent.setup();
+    authenticate({
+      ...populatedSnapshot,
+      capabilities: {
+        capabilities: populatedSnapshot.capabilities?.capabilities.map((capability) =>
+          capability.kind === "exit"
+            ? { ...capability, state: "unsupported" as const }
+            : capability,
+        ) ?? [],
+      },
+    });
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(screen.getByRole("button", { name: "translated:nav.networks" }));
+    await user.click(screen.getByRole("tab", { name: "translated:nav.exit_node" }));
+
+    expect(await screen.findByRole("heading", { name: "translated:page.exit_node" })).toBeInTheDocument();
+    expect(container.querySelector("[data-page-state]")).toHaveAttribute(
+      "data-page-state",
+      "unsupported",
+    );
+  });
+
+  it("keeps an unsaved configuration draft across an expired session", async () => {
+    const user = userEvent.setup();
+    authenticate(populatedSnapshot);
+    mockConfigurationCommands();
+    const { queryClient } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(screen.getByRole("button", { name: "translated:nav.settings" }));
+    const editor = await screen.findByRole("textbox", {
+      name: "translated:configuration.editor.label",
+    });
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    const draft = JSON.stringify({ home: { mtu: 1400 } }, null, 2);
+    fireEvent.change(editor, { target: { value: draft } });
+    expect(editor).toHaveValue(draft);
+
+    vi.mocked(loadSnapshot).mockRejectedValueOnce(new AuthenticationError());
+    await user.click(screen.getByRole("button", { name: "translated:common.refresh" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "translated:owner_auth.login.title",
+      }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      queryClient.setQueryData(["owner-session"], { authenticated: true });
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.settings" }),
+    ).toBeInTheDocument();
+    const restored = await screen.findByRole("textbox", {
+      name: "translated:configuration.editor.label",
+    });
+    await waitFor(() => expect(restored).toHaveValue(draft));
   });
 
   it("renders basic and advanced read-only settings with explicit capability states", async () => {
@@ -402,6 +667,7 @@ describe("React WebUI shell", () => {
       const user = userEvent.setup();
       renderApp();
 
+      await screen.findByRole("heading", { name: "translated:page.overview" });
       const panel = await screen.findByRole("complementary", {
         name: "translated:common.shared_actions",
       });

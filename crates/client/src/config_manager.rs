@@ -1,3 +1,7 @@
+use crate::config_transaction::{
+    ConfigurationApplyResult, ConfigurationDocument, ConfigurationHistoryEntry,
+    ConfigurationPreview, ConfigurationTransactionError, ConfigurationTransactionStore,
+};
 use anyhow::{Context, Result};
 use fuckipv6_common::i18n::LanguagePreference;
 use fuckipv6_common::{ClientConfig, Identity};
@@ -34,7 +38,7 @@ pub struct NetworkConfig {
 }
 
 /// 网络配置列表
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkList {
     pub networks: HashMap<String, NetworkConfig>,
     pub default_network: Option<String>,
@@ -251,10 +255,9 @@ impl ConfigManager {
             anyhow::bail!("网络配置已存在: {}", network_name);
         }
 
-        // 创建网络目录
+        // 创建网络目录，并确保基础配置进入当前原子 generation。
         std::fs::create_dir_all(&network_dir)
             .with_context(|| format!("无法创建网络配置目录: {}", network_dir.display()))?;
-
         // 生成配置文件
         let config = ClientConfig {
             client_id: None,
@@ -269,9 +272,8 @@ impl ConfigManager {
             exit_node: Default::default(),
         };
 
-        config
-            .save_to_file(&config_file)
-            .with_context(|| format!("无法保存网络配置: {}", config_file.display()))?;
+        let transaction_store = self.configuration_store();
+        transaction_store.add_network(network_name, &config, "local-owner", "config-manager")?;
 
         // 更新网络列表
         let now = chrono::Utc::now().to_rfc3339();
@@ -294,7 +296,23 @@ impl ConfigManager {
             list.default_network = Some(network_name.to_string());
         }
 
-        self.save_network_list(&list)?;
+        if let Err(error) = self.save_network_list(&list) {
+            let rollback = transaction_store.remove_network(
+                network_name,
+                "local-owner",
+                "config-manager-rollback",
+            );
+            if let Err(rollback_error) = rollback {
+                return Err(error).context(format!(
+                    "网络列表保存失败，且配置事务回滚失败: {rollback_error:#}"
+                ));
+            }
+            return Err(error).context("网络列表保存失败，已回滚配置事务");
+        }
+
+        let mut network_names = list.networks.keys().cloned().collect::<Vec<_>>();
+        network_names.sort();
+        let config_file = transaction_store.current_network_path(&network_names, network_name)?;
 
         Ok(config_file)
     }
@@ -328,18 +346,23 @@ impl ConfigManager {
     /// 获取网络配置文件路径
     pub fn get_network_config(&self, network_name: &str) -> Result<PathBuf> {
         Self::validate_network_name(network_name)?;
-        let config_file = self.get_network_dir(network_name).join("config.toml");
+        let mut list = self.load_network_list()?;
+        if !list.networks.contains_key(network_name) {
+            anyhow::bail!("网络配置不存在: {}", network_name);
+        }
+        let network_names = list.networks.keys().cloned().collect::<Vec<_>>();
+        let config_file = self
+            .configuration_store()
+            .current_network_path(&network_names, network_name)?;
 
-        if !config_file.exists() {
+        if !config_file.is_file() {
             anyhow::bail!("网络配置不存在: {}", network_name);
         }
 
         // 更新最后使用时间
-        if let Ok(mut list) = self.load_network_list() {
-            if let Some(network) = list.networks.get_mut(network_name) {
-                network.last_used = chrono::Utc::now().to_rfc3339();
-                let _ = self.save_network_list(&list);
-            }
+        if let Some(network) = list.networks.get_mut(network_name) {
+            network.last_used = chrono::Utc::now().to_rfc3339();
+            let _ = self.save_network_list(&list);
         }
 
         Ok(config_file)
@@ -349,22 +372,41 @@ impl ConfigManager {
     pub fn delete_network(&self, network_name: &str) -> Result<()> {
         Self::validate_network_name(network_name)?;
         let network_dir = self.get_network_dir(network_name);
+        let mut list = self.load_network_list()?;
+        let previous_list = list.clone();
+
+        if list.networks.contains_key(network_name) {
+            let transaction_store = self.configuration_store();
+            let result =
+                transaction_store.remove_network(network_name, "local-owner", "config-manager")?;
+
+            list.networks.remove(network_name);
+            if list.default_network.as_deref() == Some(network_name) {
+                list.default_network = None;
+            }
+
+            if let Err(error) = self.save_network_list(&list) {
+                let previous_names = previous_list.networks.keys().cloned().collect::<Vec<_>>();
+                let rollback = transaction_store.rollback(
+                    result.revision,
+                    result.previous_revision,
+                    &previous_names,
+                    "local-owner",
+                    "config-manager-rollback",
+                );
+                if let Err(rollback_error) = rollback {
+                    return Err(error).context(format!(
+                        "网络列表保存失败，且配置事务回滚失败: {rollback_error:#}"
+                    ));
+                }
+                return Err(error).context("网络列表保存失败，已回滚配置事务");
+            }
+        }
 
         if network_dir.exists() {
             std::fs::remove_dir_all(&network_dir)
                 .with_context(|| format!("无法删除网络配置目录: {}", network_dir.display()))?;
         }
-
-        // 更新网络列表
-        let mut list = self.load_network_list()?;
-        list.networks.remove(network_name);
-
-        // 如果删除的是默认网络，清除默认设置
-        if list.default_network.as_deref() == Some(network_name) {
-            list.default_network = None;
-        }
-
-        self.save_network_list(&list)?;
 
         Ok(())
     }
@@ -412,6 +454,78 @@ impl ConfigManager {
         } else {
             false
         }
+    }
+
+    fn configuration_store(&self) -> ConfigurationTransactionStore {
+        ConfigurationTransactionStore::new(self.config_dir.clone())
+    }
+
+    fn configured_network_names(&self) -> Result<Vec<String>> {
+        let mut names = self
+            .load_network_list()?
+            .networks
+            .into_keys()
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Complete, redacted configuration for every configured network.
+    pub fn configuration_document(&self) -> Result<ConfigurationDocument> {
+        let names = self.configured_network_names()?;
+        self.configuration_store().current_document(&names)
+    }
+
+    /// Import and preview a complete configuration candidate without writing it.
+    pub fn preview_configuration(
+        &self,
+        expected_revision: u64,
+        networks: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<ConfigurationPreview> {
+        let names = self.configured_network_names()?;
+        self.configuration_store()
+            .preview(expected_revision, &names, networks)
+    }
+
+    /// Atomically commit every network configuration under a new revision.
+    pub fn apply_configuration(
+        &self,
+        expected_revision: u64,
+        networks: std::collections::BTreeMap<String, serde_json::Value>,
+        actor: &str,
+        source: &str,
+    ) -> std::result::Result<ConfigurationApplyResult, ConfigurationTransactionError> {
+        let names = self
+            .configured_network_names()
+            .map_err(|error| ConfigurationTransactionError::Persistence(format!("{error:#}")))?;
+        self.configuration_store()
+            .apply(expected_revision, &names, networks, actor, source)
+    }
+
+    /// Restore a previous generation as a new, auditable revision.
+    pub fn rollback_configuration(
+        &self,
+        expected_revision: u64,
+        target_revision: u64,
+        actor: &str,
+        source: &str,
+    ) -> std::result::Result<ConfigurationApplyResult, ConfigurationTransactionError> {
+        let names = self
+            .configured_network_names()
+            .map_err(|error| ConfigurationTransactionError::Persistence(format!("{error:#}")))?;
+        self.configuration_store().rollback(
+            expected_revision,
+            target_revision,
+            &names,
+            actor,
+            source,
+        )
+    }
+
+    /// Append-only configuration revision history, newest first.
+    pub fn configuration_history(&self) -> Result<Vec<ConfigurationHistoryEntry>> {
+        let names = self.configured_network_names()?;
+        self.configuration_store().history(&names)
     }
 
     /// 从URL提取网络名称
@@ -492,8 +606,12 @@ mod tests {
         let alpha = manager.create_network("alpha", "ws://alpha.example:6666", true)?;
         let beta = manager.create_network("beta", "wss://beta.example:6666", false)?;
 
-        assert!(alpha.ends_with("alpha/config.toml"));
-        assert!(beta.ends_with("beta/config.toml"));
+        assert!(alpha.to_string_lossy().contains("alpha/config.toml"));
+        assert!(beta.to_string_lossy().contains("beta/config.toml"));
+        assert!(alpha
+            .to_string_lossy()
+            .contains(".configuration/generations"));
+        assert_eq!(manager.configuration_document()?.revision, 3);
         assert_eq!(manager.get_default_network()?, Some("alpha".to_string()));
 
         manager.set_default_network("beta")?;
@@ -508,6 +626,13 @@ mod tests {
         manager.delete_network("beta")?;
         assert_eq!(manager.get_default_network()?, None);
         assert!(!manager.network_exists("beta"));
+        let document = manager.configuration_document()?;
+        assert_eq!(document.revision, 4);
+        assert_eq!(document.networks.keys().collect::<Vec<_>>(), vec!["alpha"]);
+        let history = manager.configuration_history()?;
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].revision, 4);
+        assert_eq!(history[0].source, "config-manager");
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

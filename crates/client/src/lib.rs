@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config_manager;
 pub mod config_reload;
+pub mod config_transaction;
 #[cfg(all(
     feature = "gpui-shell",
     any(

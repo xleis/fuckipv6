@@ -2086,6 +2086,74 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writes_headless_product_shell_screenshot_when_requested() {
+        let Some(output) = std::env::var_os("GPUI_VISUAL_SNAPSHOT") else {
+            return;
+        };
+
+        let state = NodeStateStore::new();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("visual-test Tokio runtime");
+        let _runtime_guard = runtime.enter();
+        let bus = NodeCommandBus::spawn(
+            Arc::new(SnapshotCommandHandler {
+                state: state.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        let config_dir =
+            std::env::temp_dir().join(format!("fuckipv6-gpui-visual-{}", std::process::id()));
+        let configs = ConfigManager::new_for_dir(config_dir).expect("temporary config directory");
+        let text_system = Arc::new(gpui_wgpu::CosmicTextSystem::new("Inter"));
+        let mut cx = gpui::HeadlessAppContext::with_platform(
+            text_system,
+            Arc::new(()),
+            gpui_platform::current_headless_renderer,
+        );
+        let window = cx
+            .open_window(size(px(1440.0), px(900.0)), move |_, cx| {
+                cx.new(|cx| GpuiShell::new(state, bus, configs, cx))
+            })
+            .expect("headless GPUI window");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let ready = cx.update(|app| {
+                window
+                    .read(app)
+                    .map(|shell| {
+                        shell.manifest.is_some()
+                            && shell.pending_commands == 0
+                            && shell.error.is_none()
+                    })
+                    .unwrap_or(false)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "GPUI product shell did not finish loading its manifest and snapshot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        cx.run_until_parked();
+        let image = cx
+            .capture_screenshot(window.into())
+            .expect("GPUI headless screenshot");
+        let output = std::path::PathBuf::from(output);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).expect("screenshot directory");
+        }
+        image.save(&output).expect("write GPUI screenshot");
+    }
+
     #[gpui::test]
     fn high_dpi_preserves_logical_window_width_and_breakpoints(cx: &mut TestAppContext) {
         let window = open_shell_window(cx, 900.0);

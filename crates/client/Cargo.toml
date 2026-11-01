@@ -72,6 +72,10 @@ rcgen = { workspace = true }
 gpui = { workspace = true, features = ["test-support"] }
 gpui-platform = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.9", features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), windows, target_os = "macos"))'.dependencies]
 gpui = { workspace = true, optional = true }
 gpui-platform = { workspace = true, optional = true }

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, Passkey, PasskeyRegistration, RegisterPublicKeyCredential,
+    CreationChallengeResponse, Passkey, PasskeyRegistration, RegisterPublicKeyCredential, Url,
 };
 use zeroize::Zeroizing;
 
@@ -19,6 +19,12 @@ const CEREMONY_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_BOOTSTRAP_FAILURES: u32 = 5;
 const BOOTSTRAP_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BOOTSTRAP_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerBootstrapChannel {
+    Local,
+    Public,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,11 +79,13 @@ enum State {
     NoOwner,
     AwaitingPasskey {
         registration: PasskeyRegistration,
+        channel: OwnerBootstrapChannel,
         started_at: Instant,
     },
     AwaitingRecoveryConfirmation {
         candidate: OwnerStore,
         recovery_verifier: [u8; 32],
+        channel: OwnerBootstrapChannel,
         started_at: Instant,
     },
     Complete,
@@ -85,7 +93,8 @@ enum State {
 
 pub(crate) struct OwnerSecurityService {
     persistence: OwnerPersistence,
-    webauthn: OwnerWebauthn,
+    local_webauthn: OwnerWebauthn,
+    public_webauthn: Option<OwnerWebauthn>,
     node_id: NodeId,
     display_name: String,
     state: Mutex<State>,
@@ -99,9 +108,21 @@ impl OwnerSecurityService {
     /// returns the plaintext code for the caller to display once on the local
     /// terminal. Incomplete WebAuthn ceremonies never survive a process
     /// restart because registration state is held only in memory.
+    #[cfg(test)]
     pub(crate) fn from_config(
         config: &ConfigManager,
         port: u16,
+    ) -> Result<(Self, Option<Zeroizing<String>>)> {
+        Self::from_config_with_public_origin(config, port, None)
+    }
+
+    /// Initialize the owner bootstrap boundary with both local and verified
+    /// public WebAuthn origins. A public origin is optional and is only supplied
+    /// after the surrounding exposure policy has validated it.
+    pub(crate) fn from_config_with_public_origin(
+        config: &ConfigManager,
+        port: u16,
+        public_origin: Option<&Url>,
     ) -> Result<(Self, Option<Zeroizing<String>>)> {
         let identity = config.load_node_identity()?;
         let node_id = NodeId::from_public_key(&identity.public_key_bytes());
@@ -128,11 +149,13 @@ impl OwnerSecurityService {
                 anyhow::bail!("所有者安全状态损坏，拒绝重新初始化: {reason}")
             }
         };
-        let webauthn = OwnerWebauthn::new(port)?;
+        let local_webauthn = OwnerWebauthn::new(port)?;
+        let public_webauthn = public_origin.map(OwnerWebauthn::public).transpose()?;
         Ok((
             Self {
                 persistence,
-                webauthn,
+                local_webauthn,
+                public_webauthn,
                 node_id,
                 display_name,
                 state: Mutex::new(state),
@@ -146,6 +169,14 @@ impl OwnerSecurityService {
     }
 
     pub(crate) fn status(&self) -> ServiceResult<BootstrapStatus> {
+        self.status_for(OwnerBootstrapChannel::Local)
+    }
+
+    pub(crate) fn status_for(
+        &self,
+        channel: OwnerBootstrapChannel,
+    ) -> ServiceResult<BootstrapStatus> {
+        let webauthn = self.webauthn_for(channel)?;
         let persisted = self
             .persistence
             .load()
@@ -176,11 +207,21 @@ impl OwnerSecurityService {
         Ok(BootstrapStatus {
             phase,
             initialized: phase.is_initialized(),
-            origin: self.webauthn.origin().to_string(),
+            origin: webauthn.origin().to_string(),
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn verify_bootstrap_code(&self, code: &str) -> ServiceResult<()> {
+        self.verify_bootstrap_code_for(OwnerBootstrapChannel::Local, code)
+    }
+
+    pub(crate) fn verify_bootstrap_code_for(
+        &self,
+        channel: OwnerBootstrapChannel,
+        code: &str,
+    ) -> ServiceResult<()> {
+        self.webauthn_for(channel)?;
         let mut state = self
             .state
             .lock()
@@ -193,10 +234,20 @@ impl OwnerSecurityService {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn start_registration(
         &self,
         code: &str,
     ) -> ServiceResult<CreationChallengeResponse> {
+        self.start_registration_for(OwnerBootstrapChannel::Local, code)
+    }
+
+    pub(crate) fn start_registration_for(
+        &self,
+        channel: OwnerBootstrapChannel,
+        code: &str,
+    ) -> ServiceResult<CreationChallengeResponse> {
+        let webauthn = self.webauthn_for(channel)?;
         let mut state = self
             .state
             .lock()
@@ -222,16 +273,18 @@ impl OwnerSecurityService {
             OwnerLoad::Corrupt(_) => return Err(OwnerSecurityError::CorruptState),
         }
         self.check_bootstrap_code_locked(code)?;
-        let (challenge, registration) = self.webauthn.start(&self.node_id, &self.display_name)?;
+        let (challenge, registration) = webauthn.start(&self.node_id, &self.display_name)?;
         *state = State::AwaitingPasskey {
             registration,
+            channel,
             started_at: Instant::now(),
         };
         Ok(challenge)
     }
 
-    pub(crate) fn finish_registration(
+    pub(crate) fn finish_registration_for(
         &self,
+        channel: OwnerBootstrapChannel,
         response: &RegisterPublicKeyCredential,
     ) -> ServiceResult<String> {
         let registration = {
@@ -240,18 +293,34 @@ impl OwnerSecurityService {
                 .lock()
                 .map_err(|_| OwnerSecurityError::CorruptState)?;
             expire_ceremony(&mut state, Instant::now());
-            let State::AwaitingPasskey { registration, .. } =
-                std::mem::replace(&mut *state, State::NoOwner)
+            let State::AwaitingPasskey {
+                channel: ceremony_channel,
+                ..
+            } = &*state
             else {
                 return Err(OwnerSecurityError::CeremonyMissing);
             };
+            if *ceremony_channel != channel {
+                return Err(OwnerSecurityError::CeremonyMissing);
+            }
+            let State::AwaitingPasskey { registration, .. } =
+                std::mem::replace(&mut *state, State::NoOwner)
+            else {
+                unreachable!("ceremony channel was checked while holding the state lock");
+            };
             registration
         };
-        let passkey = self.webauthn.finish(response, &registration)?;
-        self.finish_with_passkey(passkey)
+        let passkey = self
+            .webauthn_for(channel)?
+            .finish(response, &registration)?;
+        self.finish_with_passkey(passkey, channel)
     }
 
-    fn finish_with_passkey(&self, passkey: Passkey) -> ServiceResult<String> {
+    fn finish_with_passkey(
+        &self,
+        passkey: Passkey,
+        channel: OwnerBootstrapChannel,
+    ) -> ServiceResult<String> {
         let created_at_unix_ms = unix_time_ms()?;
         let recovery_code = generate_secret()?;
         let recovery_verifier = secret_verifier(&recovery_code);
@@ -271,16 +340,26 @@ impl OwnerSecurityService {
         *state = State::AwaitingRecoveryConfirmation {
             candidate,
             recovery_verifier,
+            channel,
             started_at: Instant::now(),
         };
         Ok(recovery_code.to_string())
     }
 
+    #[cfg(test)]
     pub(crate) fn confirm_recovery(&self, confirmed: bool) -> ServiceResult<()> {
+        self.confirm_recovery_for(OwnerBootstrapChannel::Local, confirmed)
+    }
+
+    pub(crate) fn confirm_recovery_for(
+        &self,
+        channel: OwnerBootstrapChannel,
+        confirmed: bool,
+    ) -> ServiceResult<()> {
         if !confirmed {
             return Err(OwnerSecurityError::RecoveryNotConfirmed);
         }
-        let (candidate, recovery_verifier) = {
+        let (candidate, recovery_verifier, ceremony_channel) = {
             let mut state = self
                 .state
                 .lock()
@@ -290,12 +369,16 @@ impl OwnerSecurityService {
                 State::AwaitingRecoveryConfirmation {
                     candidate,
                     recovery_verifier,
+                    channel: ceremony_channel,
                     ..
-                } => (candidate.clone(), *recovery_verifier),
+                } => (candidate.clone(), *recovery_verifier, *ceremony_channel),
                 State::Complete => return Err(OwnerSecurityError::AlreadyInitialized),
                 _ => return Err(OwnerSecurityError::CeremonyMissing),
             }
         };
+        if ceremony_channel != channel {
+            return Err(OwnerSecurityError::CeremonyMissing);
+        }
 
         let outcome = self.persistence.commit(&candidate, &recovery_verifier)?;
 
@@ -316,6 +399,16 @@ impl OwnerSecurityService {
         match outcome {
             CommitOutcome::Committed => Ok(()),
             CommitOutcome::AlreadyInitialized => Err(OwnerSecurityError::AlreadyInitialized),
+        }
+    }
+
+    fn webauthn_for(&self, channel: OwnerBootstrapChannel) -> ServiceResult<&OwnerWebauthn> {
+        match channel {
+            OwnerBootstrapChannel::Local => Ok(&self.local_webauthn),
+            OwnerBootstrapChannel::Public => self
+                .public_webauthn
+                .as_ref()
+                .ok_or(OwnerSecurityError::CorruptState),
         }
     }
 
@@ -365,17 +458,19 @@ impl OwnerSecurityService {
 
     #[cfg(test)]
     pub(crate) fn finish_registration_for_test(&self, passkey: Passkey) -> ServiceResult<String> {
-        {
+        let channel = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| OwnerSecurityError::CorruptState)?;
-            if !matches!(*state, State::AwaitingPasskey { .. }) {
+            let State::AwaitingPasskey { channel, .. } = &*state else {
                 return Err(OwnerSecurityError::CeremonyMissing);
-            }
+            };
+            let channel = *channel;
             *state = State::NoOwner;
-        }
-        self.finish_with_passkey(passkey)
+            channel
+        };
+        self.finish_with_passkey(passkey, channel)
     }
 
     #[cfg(test)]
@@ -481,7 +576,8 @@ mod tests {
         persistence.provision_bootstrap_code(&code)?;
         let service = OwnerSecurityService {
             persistence,
-            webauthn: OwnerWebauthn::new(8080)?,
+            local_webauthn: OwnerWebauthn::new(8080)?,
+            public_webauthn: None,
             node_id: NodeId::from_public_key(b"owner-service-test"),
             display_name: "Owner".to_string(),
             state: Mutex::new(State::NoOwner),

@@ -27,6 +27,25 @@ impl OwnerWebauthn {
         Ok(Self { webauthn, origin })
     }
 
+    pub(crate) fn public(origin: &Url) -> Result<Self> {
+        if origin.scheme() != "https" {
+            anyhow::bail!("公网 WebAuthn origin 必须使用 https");
+        }
+        let host = origin
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("公网 WebAuthn origin 缺少主机名"))?;
+        if host.eq_ignore_ascii_case(LOCAL_RP_ID) {
+            anyhow::bail!("公网 WebAuthn 不能使用 localhost 作为 RP ID");
+        }
+        let origin = origin.origin().ascii_serialization();
+        let origin_url = Url::parse(&origin).context("公网 WebAuthn origin 无效")?;
+        let webauthn = WebauthnBuilder::new(host, &origin_url)
+            .context("无法构造公网 WebAuthn 配置")?
+            .build()
+            .context("无法初始化公网 WebAuthn")?;
+        Ok(Self { webauthn, origin })
+    }
+
     pub(crate) fn origin(&self) -> &str {
         &self.origin
     }
@@ -75,6 +94,23 @@ mod tests {
         assert_eq!(challenge.public_key.user.id.len(), 16);
         assert_eq!(challenge.public_key.user.name, node_id.as_str());
         Ok(())
+    }
+
+    #[test]
+    fn public_origin_binds_rp_id_to_configured_https_host() -> Result<()> {
+        let origin = Url::parse("https://relay.xlei.cc")?;
+        let owner = OwnerWebauthn::public(&origin)?;
+        assert_eq!(owner.origin(), "https://relay.xlei.cc");
+        let node_id = NodeId::from_public_key(b"owner-public-webauthn-test");
+        let (challenge, _state) = owner.start(&node_id, "Owner")?;
+        assert_eq!(challenge.public_key.rp.id, "relay.xlei.cc");
+        Ok(())
+    }
+
+    #[test]
+    fn public_origin_rejects_plaintext_and_localhost() {
+        assert!(OwnerWebauthn::public(&Url::parse("http://relay.xlei.cc").unwrap()).is_err());
+        assert!(OwnerWebauthn::public(&Url::parse("https://localhost").unwrap()).is_err());
     }
 
     #[test]

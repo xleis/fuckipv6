@@ -1,11 +1,14 @@
 pub mod controller;
 mod node_surface;
 mod owner_bootstrap;
+mod public_claim;
 pub mod security;
 
 use crate::config_manager::ConfigManager;
 use crate::node::{NodeHttpAdapter, NodeProblem, NodeProblemCode};
-use crate::owner_security::service::{OwnerSecurityError, OwnerSecurityService};
+use crate::owner_security::service::{
+    OwnerBootstrapChannel, OwnerSecurityError, OwnerSecurityService,
+};
 use anyhow::{Context, Result};
 use axum::{
     extract::{
@@ -28,6 +31,7 @@ use fuckipv6_coordinator::webui::{
     BlacklistActionRequest, BlacklistActionResponse, NetworkConfigApiResponse, NetworkConfigDto,
     UpdateNetworkConfigRequest,
 };
+use public_claim::PublicClaimConfig;
 use security::{http_url, WebUiAuth, WebUiConfig, WebUiLoginError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -81,6 +85,22 @@ fn create_app_web_router_with_auth_node_and_owner(
     node_adapter: Option<NodeHttpAdapter>,
     owner_security: Option<Arc<OwnerSecurityService>>,
 ) -> Router {
+    create_app_web_router_with_auth_node_owner_and_public_claim(
+        controller,
+        auth,
+        node_adapter,
+        owner_security,
+        None,
+    )
+}
+
+fn create_app_web_router_with_auth_node_owner_and_public_claim(
+    controller: Arc<AppController>,
+    auth: WebUiAuth,
+    node_adapter: Option<NodeHttpAdapter>,
+    owner_security: Option<Arc<OwnerSecurityService>>,
+    public_claim: Option<Arc<PublicClaimConfig>>,
+) -> Router {
     let auth = Arc::new(auth);
     let node_manifest_surface = node_adapter.is_some();
     let protected = Router::new()
@@ -117,7 +137,7 @@ fn create_app_web_router_with_auth_node_and_owner(
 
     let owner_routes = owner_security
         .as_ref()
-        .map(|owner| owner_security_router(owner.clone()));
+        .map(|owner| owner_security_router(owner.clone(), public_claim.clone()));
 
     let mut app = Router::new()
         .route("/", get(handle_index))
@@ -144,29 +164,46 @@ pub async fn start_app_webui_with_node(
 ) -> Result<tokio::task::JoinHandle<()>> {
     let config = WebUiConfig::from_process_env(port)?;
     config.validate_runtime_exposure()?;
+    let public_claim = PublicClaimConfig::from_process_env()?.map(Arc::new);
+    if public_claim.is_some() && config.is_remote() {
+        anyhow::bail!(
+            "公网认领当前只允许由受信 HTTPS 反向代理转发到回环监听；禁止让 WebUI 直接以明文 HTTP 监听公网"
+        );
+    }
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("WebUI 无法监听 {addr}"))?;
     let local_addr = listener.local_addr().context("读取 WebUI 监听地址失败")?;
     let owner_config = ConfigManager::new().context("无法读取节点所有者配置目录")?;
-    let (owner_security, bootstrap_code) =
-        OwnerSecurityService::from_config(&owner_config, local_addr.port())
-            .context("无法初始化节点所有者安全边界")?;
+    let (owner_security, bootstrap_code) = OwnerSecurityService::from_config_with_public_origin(
+        &owner_config,
+        local_addr.port(),
+        public_claim.as_ref().map(|claim| claim.origin()),
+    )
+    .context("无法初始化节点所有者安全边界")?;
     if let Some(bootstrap_code) = bootstrap_code {
-        write_bootstrap_code_to_terminal(bootstrap_code.as_str(), local_addr.port())?;
+        write_bootstrap_code_to_terminal(
+            bootstrap_code.as_str(),
+            local_addr.port(),
+            public_claim
+                .as_deref()
+                .map(PublicClaimConfig::origin_string),
+        )?;
     }
-    let app = create_app_web_router_with_auth_node_and_owner(
+    let app = create_app_web_router_with_auth_node_owner_and_public_claim(
         controller.clone(),
         config.auth().clone(),
         Some(node_adapter),
         Some(Arc::new(owner_security)),
+        public_claim.clone(),
     );
 
     tracing::info!(
         listen = %local_addr,
         remote = config.is_remote(),
         authentication = if config.auth().is_required() { "required" } else { "disabled" },
+        public_claim = public_claim.as_ref().map(|_| "verified-reverse-proxy"),
         "fuckipv6 统一控制台已启动: {}",
         http_url(local_addr)
     );
@@ -195,7 +232,11 @@ pub async fn start_app_webui_with_node(
 }
 
 #[cfg(unix)]
-fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
+fn write_bootstrap_code_to_terminal(
+    code: &str,
+    port: u16,
+    public_origin: Option<&str>,
+) -> Result<()> {
     use std::io::Write;
 
     // `/dev/tty` bypasses redirected stdout/stderr and therefore service
@@ -220,11 +261,15 @@ fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
     .context("无法向本机控制终端显示初始化说明")?;
     writeln!(terminal, "🔐 本机所有者初始化码（仅显示一次）: {code}")
         .context("无法向本机控制终端显示初始化码")?;
-    writeln!(
-        terminal,
-        "请打开 http://localhost:{port}/ 完成 Passkey 注册。"
-    )
-    .context("无法向本机控制终端显示初始化地址")?;
+    writeln!(terminal, "本机初始化: http://localhost:{port}/")
+        .context("无法向本机控制终端显示初始化地址")?;
+    if let Some(public_origin) = public_origin {
+        writeln!(
+            terminal,
+            "公网认领: {public_origin}/（仅通过受信 HTTPS 反向代理）"
+        )
+        .context("无法向本机控制终端显示公网初始化地址")?;
+    }
     writeln!(
         terminal,
         "------------------------------------------------------------------------"
@@ -234,7 +279,11 @@ fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
+fn write_bootstrap_code_to_terminal(
+    code: &str,
+    port: u16,
+    public_origin: Option<&str>,
+) -> Result<()> {
     use std::io::{IsTerminal, Write};
 
     let mut terminal = std::io::stderr();
@@ -249,10 +298,13 @@ fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
         "------------------------------------------------------------------------"
     )?;
     writeln!(terminal, "🔐 本机所有者初始化码（仅显示一次）: {code}")?;
-    writeln!(
-        terminal,
-        "请打开 http://localhost:{port}/ 完成 Passkey 注册。"
-    )?;
+    writeln!(terminal, "本机初始化: http://localhost:{port}/")?;
+    if let Some(public_origin) = public_origin {
+        writeln!(
+            terminal,
+            "公网认领: {public_origin}/（仅通过受信 HTTPS 反向代理）"
+        )?;
+    }
     writeln!(
         terminal,
         "------------------------------------------------------------------------"
@@ -267,6 +319,13 @@ async fn require_api_auth(
     next: Next,
 ) -> Response {
     if !auth.is_required() {
+        // A TLS-terminating reverse proxy reaches a loopback-only WebUI
+        // listener with forwarding headers. Until Passkey sessions are wired
+        // into the remote management API, never let that external path inherit
+        // the loopback-only anonymous development policy.
+        if request_has_forwarding_headers(&request) {
+            return unauthorized_response("公网管理 API 需要所有者认证");
+        }
         return next.run(request).await;
     }
 
@@ -308,7 +367,10 @@ fn authorization_bearer_token(request: &axum::extract::Request) -> Option<&str> 
 fn unauthorized_response(message: impl Into<String>) -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer realm=\"fuckipv6-webui\"")],
+        [
+            (header::WWW_AUTHENTICATE, "Bearer realm=\"fuckipv6-webui\""),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         Json(ApiError {
             error: message.into(),
             problem: None,
@@ -394,7 +456,20 @@ async fn handle_webui_css() -> impl IntoResponse {
     )
 }
 
-fn owner_security_router(owner: Arc<OwnerSecurityService>) -> Router {
+#[derive(Clone)]
+struct OwnerAccessState {
+    owner: Arc<OwnerSecurityService>,
+    public_claim: Option<Arc<PublicClaimConfig>>,
+}
+
+fn owner_security_router(
+    owner: Arc<OwnerSecurityService>,
+    public_claim: Option<Arc<PublicClaimConfig>>,
+) -> Router {
+    let access = OwnerAccessState {
+        owner: owner.clone(),
+        public_claim,
+    };
     Router::new()
         .route("/api/v1/auth/bootstrap", get(handle_bootstrap_status))
         .route(
@@ -414,28 +489,68 @@ fn owner_security_router(owner: Arc<OwnerSecurityService>) -> Router {
             post(handle_bootstrap_recovery_confirm),
         )
         .with_state(owner)
-        .route_layer(middleware::from_fn(require_loopback))
+        .route_layer(middleware::from_fn_with_state(
+            access,
+            authorize_owner_access,
+        ))
         .route_layer(middleware::from_fn(owner_no_store))
 }
 
-async fn require_loopback(request: axum::extract::Request, next: Next) -> Response {
+async fn authorize_owner_access(
+    State(access): State<OwnerAccessState>,
+    mut request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if request.uri().query().is_some() {
+        return owner_api_error(
+            StatusCode::BAD_REQUEST,
+            "所有者初始化凭据不得出现在 URL query 中",
+        );
+    }
+
     let Some(ConnectInfo(remote_addr)) = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .cloned()
     else {
-        return owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问");
+        return owner_api_error(StatusCode::FORBIDDEN, "所有者初始化请求缺少可信来源");
     };
-    if !remote_addr.ip().is_loopback() || has_forwarding_headers(&request) {
-        return owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问");
-    }
+    let has_forwarding = request_has_forwarding_headers(&request);
+    let channel = if remote_addr.ip().is_loopback() && !has_forwarding {
+        OwnerBootstrapChannel::Local
+    } else {
+        let Some(public_claim) = &access.public_claim else {
+            return owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问");
+        };
+        if let Err(rejection) =
+            public_claim.authorize(remote_addr.ip(), request.method(), request.headers())
+        {
+            return owner_api_error(rejection.status(), rejection.message());
+        }
+        match access.owner.status_for(OwnerBootstrapChannel::Public) {
+            Ok(status) if status.initialized => {
+                return owner_api_error(StatusCode::GONE, "公网认领入口已永久关闭");
+            }
+            Ok(_) => {}
+            Err(error) => return owner_service_error(error),
+        }
+        OwnerBootstrapChannel::Public
+    };
+
+    request.extensions_mut().insert(channel);
     next.run(request).await
 }
 
-fn has_forwarding_headers(request: &axum::extract::Request) -> bool {
-    ["forwarded", "x-forwarded-for", "x-real-ip"]
-        .iter()
-        .any(|name| request.headers().contains_key(*name))
+fn request_has_forwarding_headers(request: &axum::extract::Request) -> bool {
+    [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    ]
+    .iter()
+    .any(|name| request.headers().contains_key(*name))
 }
 
 async fn owner_no_store(request: axum::extract::Request, next: Next) -> Response {
@@ -513,8 +628,11 @@ struct RecoveryConfirmationRequest {
     confirmed: bool,
 }
 
-async fn handle_bootstrap_status(State(owner): State<Arc<OwnerSecurityService>>) -> Response {
-    match owner.status() {
+async fn handle_bootstrap_status(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+) -> Response {
+    match owner.status_for(channel) {
         Ok(status) => (StatusCode::OK, Json(status)).into_response(),
         Err(error) => owner_service_error(error),
     }
@@ -522,9 +640,10 @@ async fn handle_bootstrap_status(State(owner): State<Arc<OwnerSecurityService>>)
 
 async fn handle_bootstrap_verify(
     State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
     Json(request): Json<BootstrapCodeRequest>,
 ) -> Response {
-    match owner.verify_bootstrap_code(&request.code) {
+    match owner.verify_bootstrap_code_for(channel, &request.code) {
         Ok(()) => (
             StatusCode::OK,
             Json(BootstrapVerifyResponse { verified: true }),
@@ -536,9 +655,10 @@ async fn handle_bootstrap_verify(
 
 async fn handle_webauthn_registration_start(
     State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
     Json(request): Json<BootstrapCodeRequest>,
 ) -> Response {
-    match owner.start_registration(&request.code) {
+    match owner.start_registration_for(channel, &request.code) {
         Ok(challenge) => (StatusCode::OK, Json(challenge)).into_response(),
         Err(error) => owner_service_error(error),
     }
@@ -546,9 +666,10 @@ async fn handle_webauthn_registration_start(
 
 async fn handle_webauthn_registration_finish(
     State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
     Json(request): Json<WebauthnRegistrationFinishRequest>,
 ) -> Response {
-    match owner.finish_registration(&request.credential) {
+    match owner.finish_registration_for(channel, &request.credential) {
         Ok(recovery_code) => (
             StatusCode::OK,
             Json(WebauthnRegistrationFinishResponse { recovery_code }),
@@ -560,9 +681,10 @@ async fn handle_webauthn_registration_finish(
 
 async fn handle_bootstrap_recovery_confirm(
     State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
     Json(request): Json<RecoveryConfirmationRequest>,
 ) -> Response {
-    match owner.confirm_recovery(request.confirmed) {
+    match owner.confirm_recovery_for(channel, request.confirmed) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => owner_service_error(error),
     }
@@ -3864,11 +3986,60 @@ mod tests {
         }
     }
 
+    fn public_owner_app_fixture(port: u16) -> OwnerAppFixture {
+        let config_dir = unique_test_dir("public-owner");
+        let config = ConfigManager::new_for_dir(config_dir.clone()).expect("owner test config");
+        let public_claim = Arc::new(
+            PublicClaimConfig::new("https://relay.xlei.cc", "127.0.0.1/32,::1/128")
+                .expect("public claim config"),
+        );
+        let (service, code) = OwnerSecurityService::from_config_with_public_origin(
+            &config,
+            port,
+            Some(public_claim.origin()),
+        )
+        .expect("public owner service");
+        let service = Arc::new(service);
+        let app = create_app_web_router_with_auth_node_owner_and_public_claim(
+            Arc::new(AppController::new()),
+            WebUiAuth::disabled(),
+            None,
+            Some(service.clone()),
+            Some(public_claim),
+        );
+        OwnerAppFixture {
+            app,
+            service,
+            code: code.expect("uninitialized owner bootstrap code"),
+            config_dir,
+        }
+    }
+
     fn request_from(mut request: Request<Body>, source_ip: IpAddr) -> Request<Body> {
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::new(source_ip, 49_152)));
         request
+    }
+
+    fn verified_public_request(method: &str, uri: &str, body: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "relay.xlei.cc")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-host", "relay.xlei.cc")
+            .header("x-forwarded-for", "203.0.113.9");
+        if method != "GET" && method != "HEAD" && method != "OPTIONS" {
+            builder = builder
+                .header(header::ORIGIN, "https://relay.xlei.cc")
+                .header("sec-fetch-site", "same-origin")
+                .header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.to_string()))
+            .expect("verified public request");
+        request_from(request, IpAddr::V4(Ipv4Addr::LOCALHOST))
     }
 
     #[derive(Clone)]
@@ -4061,6 +4232,179 @@ mod tests {
             .await
             .expect("legacy owner API response");
         assert_eq!(legacy_owner_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn public_owner_claim_requires_verified_https_proxy_and_matching_origin() {
+        let fixture = public_owner_app_fixture(8080);
+
+        let untrusted = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .header(header::HOST, "relay.xlei.cc")
+                    .header("x-forwarded-proto", "https")
+                    .header("x-forwarded-host", "relay.xlei.cc")
+                    .header("x-forwarded-for", "203.0.113.9")
+                    .body(Body::empty())
+                    .expect("untrusted proxy request"),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            ))
+            .await
+            .expect("untrusted proxy response");
+        assert_eq!(untrusted.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&untrusted);
+
+        let plaintext = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .header(header::HOST, "relay.xlei.cc")
+                    .header("x-forwarded-proto", "http")
+                    .header("x-forwarded-host", "relay.xlei.cc")
+                    .header("x-forwarded-for", "203.0.113.9")
+                    .body(Body::empty())
+                    .expect("plaintext proxy request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("plaintext proxy response");
+        assert_eq!(plaintext.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&plaintext);
+
+        let wrong_host = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .header(header::HOST, "evil.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("x-forwarded-host", "relay.xlei.cc")
+                    .header("x-forwarded-for", "203.0.113.9")
+                    .body(Body::empty())
+                    .expect("host injection request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("host injection response");
+        assert_eq!(wrong_host.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&wrong_host);
+
+        let status = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request("GET", "/api/v1/auth/bootstrap", ""))
+            .await
+            .expect("verified public bootstrap status");
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_no_store(&status);
+        let payload = response_json(status).await;
+        assert_eq!(payload["initialized"], false);
+        assert_eq!(payload["origin"], "https://relay.xlei.cc");
+
+        let page = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request("GET", "/", ""))
+            .await
+            .expect("public owner bootstrap page");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_no_store(&page);
+        assert_eq!(
+            response_text(page).await,
+            owner_bootstrap::OWNER_BOOTSTRAP_HTML
+        );
+
+        let protected = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request("GET", "/api/status", ""))
+            .await
+            .expect("public protected API request");
+        assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&protected);
+    }
+
+    #[tokio::test]
+    async fn public_owner_claim_binds_webauthn_origin_rejects_url_secrets_and_closes() {
+        let fixture = public_owner_app_fixture(8080);
+
+        let query_uri = format!("/api/v1/auth/bootstrap?code={}", fixture.code.as_str());
+        let query = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request("GET", &query_uri, ""))
+            .await
+            .expect("bootstrap query rejection");
+        assert_eq!(query.status(), StatusCode::BAD_REQUEST);
+        assert_no_store(&query);
+        let query_body = response_text(query).await;
+        assert!(!query_body.contains(fixture.code.as_str()));
+        assert!(!query_body.contains("?code="));
+
+        let verify = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request(
+                "POST",
+                "/api/v1/auth/bootstrap/verify",
+                &serde_json::json!({ "code": fixture.code.as_str() }).to_string(),
+            ))
+            .await
+            .expect("public bootstrap verification");
+        assert_eq!(verify.status(), StatusCode::OK);
+        assert_no_store(&verify);
+        let verify_body = response_text(verify).await;
+        assert!(!verify_body.contains(fixture.code.as_str()));
+
+        let start = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request(
+                "POST",
+                "/api/v1/auth/webauthn/registration/start",
+                &serde_json::json!({ "code": fixture.code.as_str() }).to_string(),
+            ))
+            .await
+            .expect("public WebAuthn registration start");
+        assert_eq!(start.status(), StatusCode::OK);
+        assert_no_store(&start);
+        let challenge = response_json(start).await;
+        assert_eq!(challenge["publicKey"]["rp"]["id"], "relay.xlei.cc");
+
+        let recovery_code = fixture
+            .service
+            .finish_registration_for_test(fixture_passkey())
+            .expect("public WebAuthn finish fixture");
+        assert!(!recovery_code.is_empty());
+
+        let confirm = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request(
+                "POST",
+                "/api/v1/auth/bootstrap/recovery-confirm",
+                r#"{"confirmed":true}"#,
+            ))
+            .await
+            .expect("public recovery confirmation");
+        assert_eq!(confirm.status(), StatusCode::NO_CONTENT);
+        assert_no_store(&confirm);
+
+        let closed = fixture
+            .app
+            .clone()
+            .oneshot(verified_public_request("GET", "/api/v1/auth/bootstrap", ""))
+            .await
+            .expect("closed public claim response");
+        assert_eq!(closed.status(), StatusCode::GONE);
+        assert_no_store(&closed);
+        assert!(!response_text(closed).await.contains(fixture.code.as_str()));
     }
 
     #[tokio::test]

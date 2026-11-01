@@ -77,17 +77,23 @@
 
   function formatBytes(locale, bytes) {
     const units = [["B", 1], ["KiB", 1024], ["MiB", 1048576], ["GiB", 1073741824]];
-    const value = Math.max(0, Number(bytes) || 0);
+    const numeric = Number(bytes);
+    if (!Number.isFinite(numeric)) return t(locale, "common.not_available");
+    const value = Math.max(0, numeric);
     let selected = units[0];
     for (let index = units.length - 1; index >= 0; index -= 1) {
       if (value >= units[index][1]) { selected = units[index]; break; }
     }
-    const amount = selected[1] === 1 ? formatInteger(locale, value) : formatDecimal(locale, value / selected[1], 1);
+    const amount = selected[1] === 1
+      ? formatInteger(locale, Math.floor(value))
+      : formatDecimal(locale, value / selected[1], 1);
     return amount + " " + selected[0];
   }
 
   function formatDuration(locale, secondsValue) {
-    const seconds = Math.max(0, Math.floor(Number(secondsValue) || 0));
+    const numeric = Number(secondsValue);
+    if (!Number.isFinite(numeric)) return t(locale, "common.not_available");
+    const seconds = Math.max(0, Math.floor(numeric));
     if (seconds < 60) return locale === "zh-CN" ? seconds + " 秒" : seconds + "s";
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) {
@@ -99,22 +105,30 @@
     return locale === "zh-CN" ? hours + " 小时 " + remainder + " 分" : hours + "h " + remainder + "m";
   }
 
-  function formatTimestamp(locale, unixMs) {
+  function formatTimestamp(locale, unixMs, offsetMinutes) {
     const date = new Date(Number(unixMs));
     if (!Number.isFinite(date.getTime())) return t(locale, "common.not_available");
-    const offsetMinutes = -date.getTimezoneOffset();
-    const sign = offsetMinutes < 0 ? "-" : "+";
-    const absolute = Math.abs(offsetMinutes);
+    const requestedOffset = Number(offsetMinutes);
+    const effectiveOffset = Number.isInteger(requestedOffset)
+      ? requestedOffset
+      : -date.getTimezoneOffset();
+    if (!Number.isFinite(effectiveOffset) || Math.abs(effectiveOffset) > 24 * 60) {
+      return t(locale, "common.not_available");
+    }
+    const displayDate = new Date(date.getTime() + effectiveOffset * 60 * 1000);
+    const sign = effectiveOffset < 0 ? "-" : "+";
+    const absolute = Math.abs(effectiveOffset);
     const zone = "UTC" + sign + String(Math.floor(absolute / 60)).padStart(2, "0") + ":" + String(absolute % 60).padStart(2, "0");
     if (locale === "zh-CN") {
       const pad = (value) => String(value).padStart(2, "0");
-      return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " +
-        pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds()) + " " + zone;
+      return displayDate.getUTCFullYear() + "-" + pad(displayDate.getUTCMonth() + 1) + "-" + pad(displayDate.getUTCDate()) + " " +
+        pad(displayDate.getUTCHours()) + ":" + pad(displayDate.getUTCMinutes()) + ":" + pad(displayDate.getUTCSeconds()) + " " + zone;
     }
     return new Intl.DateTimeFormat("en", {
+      timeZone: "UTC",
       year: "numeric", month: "short", day: "numeric",
       hour: "numeric", minute: "2-digit", second: "2-digit",
-    }).format(date) + " " + zone;
+    }).format(displayDate) + " " + zone;
   }
 
   function formatAddress(address, port) {
@@ -125,20 +139,34 @@
   }
 
   function pseudoLocalize(text) {
-    const expanded = String(text).replace(/[aeiouAEIOU]/g, (character) => ({
-      a: "á", e: "é", i: "í", o: "ó", u: "ú",
-      A: "Á", E: "É", I: "Í", O: "Ó", U: "Ú",
-    })[character] || character);
+    const expanded = String(text).replace(
+      /\{[A-Za-z0-9_.-]+\}|[aeiouAEIOU]/g,
+      (match) => match.length > 1 ? match : ({
+        a: "á", e: "é", i: "í", o: "ó", u: "ú",
+        A: "Á", E: "É", I: "Í", O: "Ó", U: "Ú",
+      })[match] || match,
+    );
     return "⟦" + expanded + "⟧";
+  }
+
+  function splitGraphemes(text) {
+    const value = String(text);
+    if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+      return Array.from(
+        new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value),
+        (entry) => entry.segment,
+      );
+    }
+    return Array.from(value);
   }
 
   function truncateUnicode(text, maxChars) {
     const limit = Math.max(0, Math.floor(Number(maxChars) || 0));
-    const characters = Array.from(String(text));
+    const graphemes = splitGraphemes(text);
     if (limit === 0) return "";
-    if (characters.length <= limit) return characters.join("");
+    if (graphemes.length <= limit) return graphemes.join("");
     if (limit === 1) return "…";
-    return characters.slice(0, limit - 1).join("") + "…";
+    return graphemes.slice(0, limit - 1).join("") + "…";
   }
 
   function applyDocument(documentRoot, locale) {

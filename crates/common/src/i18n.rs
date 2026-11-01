@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A concrete language supported by the first product release.
 #[derive(
@@ -354,11 +355,8 @@ pub fn format_socket_address(address: IpAddr, port: u16) -> String {
     }
 }
 
-/// Produce an intentionally expanded, bracketed pseudo locale. It exposes
-/// clipping and hard-coded-width regressions without changing key semantics.
-pub fn pseudo_localize(text: &str) -> String {
-    let expanded: String = text
-        .chars()
+fn pseudo_expand_letters(text: &str) -> String {
+    text.chars()
         .map(|character| match character {
             'a' => 'á',
             'e' => 'é',
@@ -372,23 +370,56 @@ pub fn pseudo_localize(text: &str) -> String {
             'U' => 'Ú',
             character => character,
         })
-        .collect();
+        .collect()
+}
+
+fn ascii_placeholder_end(text: &str, start: usize) -> Option<usize> {
+    let tail = text.get(start + 1..)?;
+    let relative_end = tail.find('}')?;
+    let name = &tail[..relative_end];
+    (!name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')))
+    .then_some(start + 1 + relative_end)
+}
+
+/// Produce an intentionally expanded, bracketed pseudo locale. It exposes
+/// clipping and hard-coded-width regressions without changing key semantics.
+/// Structured `{name}` interpolation tokens remain byte-for-byte unchanged.
+pub fn pseudo_localize(text: &str) -> String {
+    let mut expanded = String::with_capacity(text.len() + 2);
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find('{') {
+        let start = cursor + relative_start;
+        expanded.push_str(&pseudo_expand_letters(&text[cursor..start]));
+        if let Some(end) = ascii_placeholder_end(text, start) {
+            expanded.push_str(&text[start..=end]);
+            cursor = end + 1;
+        } else {
+            let character_end = start + text[start..].chars().next().map_or(0, char::len_utf8);
+            expanded.push_str(&pseudo_expand_letters(&text[start..character_end]));
+            cursor = character_end;
+        }
+    }
+    expanded.push_str(&pseudo_expand_letters(&text[cursor..]));
     format!("⟦{expanded}⟧")
 }
 
-/// Truncate by Unicode scalar values, never byte offsets. The ellipsis is
-/// included in `max_chars`; storing the full value remains the caller's job.
+/// Truncate by Unicode grapheme clusters, never bytes or scalar values. The
+/// ellipsis is included in `max_chars`; storing the full value remains the
+/// caller's job.
 pub fn truncate_unicode(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    if text.chars().count() <= max_chars {
+    if text.graphemes(true).count() <= max_chars {
         return text.to_string();
     }
     if max_chars == 1 {
         return "…".into();
     }
-    let mut truncated: String = text.chars().take(max_chars - 1).collect();
+    let mut truncated: String = text.graphemes(true).take(max_chars - 1).collect();
     truncated.push('…');
     truncated
 }
@@ -397,6 +428,21 @@ pub fn truncate_unicode(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn placeholders(text: &str) -> BTreeSet<&str> {
+        let mut found = BTreeSet::new();
+        let mut cursor = 0;
+        while let Some(relative_start) = text[cursor..].find('{') {
+            let start = cursor + relative_start;
+            let Some(end) = ascii_placeholder_end(text, start) else {
+                cursor = start + 1;
+                continue;
+            };
+            found.insert(&text[start..=end]);
+            cursor = end + 1;
+        }
+        found
+    }
 
     #[test]
     fn catalogs_have_identical_non_empty_keys() {
@@ -410,6 +456,33 @@ mod tests {
                 "empty zh key {key}"
             );
             assert!(!t(Locale::En, key).trim().is_empty(), "empty en key {key}");
+        }
+    }
+
+    #[test]
+    fn pseudo_locale_is_complete_and_preserves_every_placeholder() {
+        for locale in Locale::ALL {
+            for key in message_keys(locale) {
+                let original = t(locale, key);
+                let pseudo = pseudo_localize(original);
+                assert!(
+                    pseudo.starts_with('⟦') && pseudo.ends_with('⟧'),
+                    "pseudo locale markers missing for {locale}/{key}"
+                );
+                assert!(
+                    !pseudo.trim_matches(&['⟦', '⟧'][..]).trim().is_empty(),
+                    "pseudo locale is empty for {locale}/{key}"
+                );
+                assert_eq!(
+                    placeholders(original),
+                    placeholders(&pseudo),
+                    "placeholder changed for {locale}/{key}"
+                );
+                assert!(
+                    !pseudo.contains('\u{FFFD}'),
+                    "invalid Unicode in pseudo locale for {locale}/{key}"
+                );
+            }
         }
     }
 
@@ -452,11 +525,27 @@ mod tests {
     #[test]
     fn numbers_time_zones_units_and_addresses_are_deterministic() {
         assert_eq!(format_integer(Locale::En, 1_234_567), "1,234,567");
+        assert_eq!(format_integer(Locale::En, -1_234_567), "-1,234,567");
+        assert_eq!(format_integer(Locale::En, 0), "0");
         assert_eq!(format_decimal(Locale::En, 12.345, 1), "12.3");
-        assert_eq!(format_bytes(Locale::En, 1536), "1.5 KiB");
+        assert_eq!(format_decimal(Locale::ZhCn, -12.345, 2), "-12.35");
+        assert_eq!(
+            format_decimal(Locale::En, f64::NAN, 1),
+            t(Locale::En, "common.not_available")
+        );
+        assert_eq!(format_bytes(Locale::En, 0), "0 B");
+        assert_eq!(format_bytes(Locale::En, 1_048_576), "1.0 MiB");
         assert_eq!(
             format_duration(Locale::ZhCn, Duration::from_secs(125)),
             "2 分 5 秒"
+        );
+        assert_eq!(
+            format_duration(Locale::En, Duration::from_secs(3605)),
+            "1h 0m"
+        );
+        assert_eq!(
+            format_socket_address("192.0.2.1".parse().unwrap(), 8080),
+            "192.0.2.1:8080"
         );
         assert_eq!(
             format_socket_address("2001:db8::1".parse().unwrap(), 443),
@@ -476,14 +565,33 @@ mod tests {
     }
 
     #[test]
-    fn pseudolocale_expands_and_unicode_truncation_never_splits_bytes() {
-        let pseudo = pseudo_localize("Network");
+    fn pseudolocale_expands_without_changing_interpolation_tokens() {
+        let pseudo = pseudo_localize("Network {network}");
         assert!(pseudo.starts_with('⟦'));
         assert!(pseudo.ends_with('⟧'));
-        assert!(pseudo.chars().count() > "Network".chars().count());
+        assert!(pseudo.chars().count() > "Network {network}".chars().count());
+        assert!(pseudo.contains("{network}"));
+        assert!(!pseudo.contains("{nétwórk}"));
+    }
+
+    #[test]
+    fn unicode_truncation_is_grapheme_safe_and_honors_boundaries() {
+        let combining = "e\u{301}xy";
+        let family = "👨‍👩‍👧‍👦";
 
         assert_eq!(truncate_unicode("网络节点", 3), "网络…");
-        assert_eq!(truncate_unicode("A😀B", 2), "A…");
+        assert_eq!(truncate_unicode(combining, 2), "e\u{301}…");
+        assert_eq!(truncate_unicode(combining, 3), combining);
+        assert_eq!(truncate_unicode(family, 1), family);
+        assert_eq!(truncate_unicode(&format!("{family}x"), 1), "…");
+        assert_eq!(
+            truncate_unicode(&format!("{family}xy"), 2),
+            format!("{family}…")
+        );
+        assert_eq!(
+            truncate_unicode(&format!("{family}x"), 2),
+            format!("{family}x")
+        );
         assert_eq!(truncate_unicode("short", 10), "short");
         assert_eq!(truncate_unicode("anything", 0), "");
     }

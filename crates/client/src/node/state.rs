@@ -846,6 +846,7 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::i18n::{has_key, Locale};
 
     fn network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
         NodeNetworkSnapshot {
@@ -1065,6 +1066,31 @@ mod tests {
             let problem = NodeProblem::new(code, "测试错误")
                 .for_network("home")
                 .retryable(true);
+            assert!(
+                !wire_name.is_empty()
+                    && wire_name.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "unstable wire code: {wire_name}"
+            );
+            assert!(
+                problem.message_key.starts_with("error.")
+                    && problem
+                        .message_key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'.' | b'_' | b'-')),
+                "unstable message key: {}",
+                problem.message_key
+            );
+            for locale in Locale::ALL {
+                assert!(
+                    has_key(locale, &problem.message_key),
+                    "missing {locale:?} translation for {}",
+                    problem.message_key
+                );
+            }
             let encoded = serde_json::to_value(&problem).expect("serialize node problem");
             assert_eq!(encoded["code"], wire_name);
             assert_eq!(encoded["category"], serde_json::json!(problem.category));
@@ -1080,6 +1106,9 @@ mod tests {
             let decoded: NodeProblem =
                 serde_json::from_value(encoded).expect("deserialize node problem");
             assert_eq!(decoded, problem);
+            assert_eq!(decoded.code, code);
+            assert_eq!(decoded.message_key, code.message_key());
+            assert_ne!(decoded.message_key, decoded.message);
         }
     }
 

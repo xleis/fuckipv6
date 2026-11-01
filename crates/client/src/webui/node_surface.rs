@@ -205,6 +205,10 @@ mod tests {
         assert!(NODE_MANIFEST_HTML.contains(r#"credentials: "same-origin""#));
         assert!(NODE_MANIFEST_HTML.contains("/api/node/events?schema_version=1"));
         assert!(NODE_MANIFEST_HTML.contains("function expireSession(message)"));
+        assert!(NODE_MANIFEST_HTML.contains(r#"id="language-preference""#));
+        assert!(NODE_MANIFEST_HTML.contains("/api/v1/settings/language"));
+        assert!(NODE_MANIFEST_HTML.contains("function loadLanguagePreference"));
+        assert!(NODE_MANIFEST_HTML.contains("function changeLanguagePreference"));
         assert!(!NODE_MANIFEST_HTML.contains(r#"data-page="overview""#));
         assert!(NODE_MANIFEST_HTML.contains(r#"$("data-content").innerHTML"#));
         assert!(NODE_MANIFEST_HTML.contains(r#"$("actions-content").innerHTML"#));

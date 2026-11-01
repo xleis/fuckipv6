@@ -20,7 +20,7 @@
     #login{position:fixed;inset:0;background:#02070bd9;display:grid;place-items:center;padding:20px}.login-card{width:min(430px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px;display:grid;gap:13px}.login-card h2{margin:0;font-size:19px}.login-card p{margin:0}.login-card .submit{padding:11px 16px;font-weight:700}.login-help{border-top:1px solid var(--line);padding-top:11px;color:var(--muted);font-size:11px;line-height:1.65}
     .sidebar-footer{margin-top:auto}.primary-detail{display:inline-block;margin-top:7px}.login-error{min-height:1.5em;color:var(--bad);white-space:pre-wrap}.logout,.owner-security-button{display:block;width:100%;margin-top:10px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#0c202c;color:var(--text);cursor:pointer}.logout:hover,.owner-security-button:hover{border-color:#2589b4}.logout[hidden],.owner-security-button[hidden],.hidden{display:none!important}
     .modal-backdrop{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:20px;background:#02070bdc}.modal-backdrop[hidden]{display:none}.reauth-backdrop{z-index:30}.modal-card{width:min(680px,100%);max-height:calc(100vh - 40px);overflow:auto;background:linear-gradient(180deg,#0e202d,#091720);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 24px 80px #000a}.modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.modal-head h2{margin:0;font-size:19px}.modal-close{border:1px solid var(--line);background:#0c202c;color:var(--text);border-radius:8px;padding:6px 9px;cursor:pointer}.security-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:14px 0}.security-meta{border:1px solid var(--line);border-radius:9px;padding:10px;background:#07151e}.security-meta .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em}.security-meta .v{display:block;margin-top:4px;overflow-wrap:anywhere}.security-note{border-left:3px solid var(--accent);padding:9px 12px;background:#082536;color:#bfeafa;margin:12px 0}.security-status{display:none;margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;white-space:pre-wrap}.security-status.show{display:block}.security-status.error{border-color:var(--bad);background:#3b1721;color:#ffd7df}.security-status.ok{border-color:#27775e;background:#0c3329;color:#c9ffe9}.passkey-list{display:grid;gap:9px;margin:12px 0}.passkey-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#0a1923}.passkey-row.current{border-color:#2589b4}.passkey-title{font-weight:700;overflow-wrap:anywhere}.passkey-detail{color:var(--muted);font-size:11px;overflow-wrap:anywhere}.passkey-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.danger{border-color:#9f4152;background:#451a25;color:#ffd7df}.modal-actions{display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px}.passkey-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;margin-top:14px}.passkey-form input{min-width:0}.modal-card .submit,.modal-card .danger{padding:8px 12px}
-    .ui-topbar-actions .submit{min-height:32px;padding:5px 11px}.ui-local-tab{font-family:inherit}.ui-local-tab span{color:var(--muted);font-size:11px}.ui-page-panel>.grid{align-items:start}.ui-detail .row-detail{font-size:12px}.ui-bottom-nav-item{font-family:inherit;text-decoration:none}.ui-bottom-nav-icon{font-size:18px;font-weight:800;line-height:1}
+    .ui-topbar-actions .submit{min-height:32px;padding:5px 11px}.language-control{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px}.language-control[hidden]{display:none!important}.language-control select{border:1px solid var(--line);border-radius:7px;background:#07131d;color:var(--text);padding:5px 7px}.ui-local-tab{font-family:inherit}.ui-local-tab span{color:var(--muted);font-size:11px}.ui-page-panel>.grid{align-items:start}.ui-detail .row-detail{font-size:12px}.ui-bottom-nav-item{font-family:inherit;text-decoration:none}.ui-bottom-nav-icon{font-size:18px;font-weight:800;line-height:1}
     @media(max-width:899px){.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main.ui-content{padding:16px}.passkey-form{grid-template-columns:1fr}.passkey-row{grid-template-columns:1fr}.passkey-actions{justify-content:flex-start}#primary-status{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
     @media(min-width:900px) and (max-width:1279px){[data-ui-drawer-toggle="detail"]{display:none!important}}
   </style>
@@ -39,6 +39,7 @@
       <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="navigation" aria-label="打开节点导航" data-i18n-aria-label="common.open_navigation" aria-controls="navigation-drawer" aria-expanded="false">☰</button>
       <div class="ui-topbar-heading"><h1 class="ui-topbar-title" id="page-title" data-i18n="common.loading_contract">加载共享契约…</h1><div class="ui-topbar-subtitle" id="page-subtitle">/api/node/manifest · /api/node/snapshot</div></div>
       <div class="ui-topbar-actions">
+        <label id="language-control" class="language-control" hidden><span data-i18n="common.language">Language</span><select id="language-preference" data-i18n-aria-label="common.language"><option value="system" data-i18n="lang.system">System</option><option value="zh-CN" data-i18n="lang.zh_cn">Simplified Chinese</option><option value="en" data-i18n="lang.en">English</option></select></label>
         <span id="primary-status" class="primary">--</span>
         <span id="refresh-indicator" class="ui-refresh-indicator" data-i18n="common.syncing" hidden>同步中…</span>
         <button class="submit" id="refresh" data-ui-secondary-action data-i18n="action.refresh_snapshot">刷新快照</button>
@@ -117,11 +118,13 @@
   "use strict";
   const ui = window.FuckIPV6NodeUi;
   const i18n = window.FuckIPV6I18n;
+  const LANGUAGE_PREFERENCES = Object.freeze(["system", "zh-CN", "en"]);
   const state = {
     manifest: null,
     snapshot: null,
     selectedNetwork: "",
-    locale: window.FuckIPV6I18n.normalizeLocale(document.documentElement.lang),
+    languagePreference: "system",
+    locale: i18n.resolveLocale("system", i18n.detectLocale()),
     pageId: "overview",
     requestId: Date.now(),
     generation: 0,
@@ -151,6 +154,74 @@
     i18n.applyDocument(document, state.locale);
     $("security-note").textContent = t("owner_auth.security.note");
   }
+  function languagePreferenceFromPayload(payload) {
+    const preference = payload && payload.preference;
+    if (!LANGUAGE_PREFERENCES.includes(preference)) {
+      throw requestError(t("error.language_persistence_failed"), payload);
+    }
+    return preference;
+  }
+  function applyLanguagePreference(preference) {
+    state.languagePreference = preference;
+    state.locale = i18n.resolveLocale(preference, i18n.detectLocale());
+    $("language-preference").value = preference;
+    applyLocalizedDocument();
+    if (state.manifest && state.snapshot) render();
+    if (state.session) renderSecuritySession();
+    if (state.passkeys.length) renderPasskeys();
+  }
+  async function loadLanguagePreference() {
+    const result = await requestJson("/api/v1/settings/language", { cache: "no-store" });
+    if (!result.response.ok) {
+      throw requestError(ui.httpErrorText(result.payload, "error.language_persistence_failed", state.locale), result.payload);
+    }
+    applyLanguagePreference(languagePreferenceFromPayload(result.payload));
+  }
+  async function changeLanguagePreference() {
+    const select = $("language-preference");
+    const previousPreference = state.languagePreference;
+    const requestedPreference = select.value;
+    if (!LANGUAGE_PREFERENCES.includes(requestedPreference)) {
+      select.value = previousPreference;
+      return;
+    }
+    select.disabled = true;
+    try {
+      const result = await requestJson("/api/v1/settings/language", {
+        method: "PUT",
+        body: JSON.stringify({ preference: requestedPreference }),
+      });
+      if (!result.response.ok) {
+        throw requestError(ui.httpErrorText(result.payload, "error.language_persistence_failed", state.locale), result.payload);
+      }
+      applyLanguagePreference(languagePreferenceFromPayload(result.payload));
+      showAlert("");
+      showToast(t("settings.language_saved"));
+    } catch (error) {
+      select.value = previousPreference;
+      applyLanguagePreference(previousPreference);
+      if (error instanceof AuthenticationError) {
+        expireSession(t("owner_auth.session.expired"));
+      } else {
+        showAlert(ui.httpErrorText(error.payload, "error.language_persistence_failed", state.locale));
+      }
+    } finally {
+      select.disabled = !state.authenticated;
+    }
+  }
+  async function initializeAuthenticatedSurface() {
+    let languageError = null;
+    try {
+      await loadLanguagePreference();
+    } catch (error) {
+      if (error instanceof AuthenticationError) throw error;
+      languageError = error;
+    }
+    await loadContract();
+    if (languageError) {
+      showAlert(ui.httpErrorText(languageError.payload, "error.language_persistence_failed", state.locale));
+    }
+  }
   function showAlert(message) {
     $("alert").textContent = message;
     $("alert").style.display = message ? "block" : "none";
@@ -166,6 +237,8 @@
     $("login").style.display = "grid";
     $("logout").hidden = true;
     $("owner-security-button").hidden = true;
+    $("language-control").hidden = true;
+    $("language-preference").disabled = true;
     $("owner-security").hidden = true;
     $("reauth").hidden = true;
     $("login-passkey").disabled = Boolean(issue);
@@ -176,6 +249,8 @@
     $("login-error").textContent = "";
     $("logout").hidden = false;
     $("owner-security-button").hidden = false;
+    $("language-control").hidden = false;
+    $("language-preference").disabled = false;
   }
   function passkeyErrorMessage(error) {
     if (!error) return t("owner_auth.passkey.verification_failed");
@@ -254,6 +329,8 @@
     $("login").style.display = "none";
     $("logout").hidden = true;
     $("owner-security-button").hidden = true;
+    $("language-control").hidden = true;
+    $("language-preference").disabled = true;
     $("owner-security").hidden = true;
     $("reauth").hidden = true;
     $("page-title").textContent = t("error.contract_incompatible_title");
@@ -865,7 +942,7 @@
         showLogin("");
         return;
       }
-      await loadContract();
+      await initializeAuthenticatedSurface();
     } catch (error) {
       if (error instanceof AuthenticationError) {
         showLogin(t("owner_auth.session.expired"));
@@ -910,7 +987,7 @@
       if (postLoginIssue) {
         throw new Error(postLoginIssue);
       }
-      await loadContract();
+      await initializeAuthenticatedSurface();
     } catch (error) {
       if (error instanceof AuthenticationError) {
         showLogin(t("owner_auth.session.expired"));
@@ -945,6 +1022,7 @@
   $("reauth-confirm").addEventListener("click", reauthenticate);
   $("reauth-cancel").addEventListener("click", () => resolveReauth(false));
   $("logout").addEventListener("click", logout);
+  $("language-preference").addEventListener("change", changeLanguagePreference);
   applyLocalizedDocument();
   ui.init(document);
   ui.observeLayout(document);

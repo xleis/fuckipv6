@@ -33,6 +33,7 @@ ipnet = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+unicode-segmentation = { workspace = true }
 sys-locale = "0.3"
 
 [dev-dependencies]

@@ -79,6 +79,7 @@ urlencoding = "2.1"
 
 # 时间处理
 chrono = { version = "0.4", features = ["serde"] }
+unicode-segmentation = "1.13"
 
 # 错误处理
 anyhow = "1"

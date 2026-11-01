@@ -50,7 +50,7 @@
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
 | W3 所有者安全 | `[x]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全、W3-07 认证管理 UI 已完成；自动化边界与未做的真实公网/硬件认证器实测见各分项证据 |
-| W4 控制 API | `[~]` | P0 | W1,W2 | W4-01 的 v1 路径、统一响应元数据、对象投影与基础 SSE 已完成；operation 生命周期、完整重连/错误模型和权限校验待后续项 |
+| W4 控制 API | `[~]` | P0 | W1,W2 | W4-01 的 v1 路径、统一响应元数据、对象投影与基础 SSE，以及 W4-02 的幂等 operation 注册、202 提交、阶段事件、终态和结构化失败已完成；完整重连、错误模型、权限校验与限额待后续项 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
 | W7 节点页 | `[ ]` | P1 | W2,W4,W5 | 启停、接口、身份、诊断 |
@@ -626,19 +626,29 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - 所有 v1 成功和错误响应包含 `schema_version`、`request_id`、RFC3339 `server_time`；命令响应回显客户端命令 `request_id`，读请求使用适配器单调分配的内部请求 ID；
 - 对象读取仅从权威 `NodeSnapshot` 投影 `node`、`network`、`peer`、`embedded_service`、`network_configuration`，不存在或未知对象统一返回稳定 `not_found`；
 - `/api/v1/events` 为 SSE，首个事件是权威快照；cursor 与服务端当前边界不一致时返回 `resync_required`。完整历史回放、断线恢复和缺口修复仍属于 W4-03，未提前勾选；
-- `/api/v1/operations/<id>` 已建立并受契约约束，但在 W4-02 建立真实 operation 注册表前，对任何 ID 返回稳定 404，不伪造生命周期或永久 `unavailable` 状态；
+- `/api/v1/operations/<id>` 已建立并受契约约束；W4-01 时对任何 ID 返回稳定 404，W4-02 建立真实注册表后，已知 ID 返回权威 operation，未知 ID 仍稳定返回 404；
 - 新 DTO 已加入 `NodeHttpContract`，重新生成 JSON Schema、TypeScript 与 Android 绑定；`scripts/generate-contracts.sh` 的生成、校验和 7 个 Rust 契约测试通过，`node scripts/test_contract_bindings.mjs` 通过；
 - `cargo test -p fuckipv6-client --no-default-features`：库测试 540 passed、3 ignored；集成测试 1 passed（`register_check`）与 8 passed（`w2_runtime`）；特权 lifecycle 集成测试 1 ignored；
 - `cargo test -p fuckipv6-client gpui::view_model`：17 passed；两套目标的 `cargo clippy --all-targets -- -D warnings` 均通过。
 
-### W4-02 Operation 生命周期 `[ ]`
+### W4-02 Operation 生命周期 `[x]`
 
-- [ ] 写命令返回 `operation_id`；
-- [ ] 幂等键复用同一操作；
-- [ ] 阶段进度；
-- [ ] succeeded/failed/cancelled/timed_out；
-- [ ] 失败返回错误码、对象和恢复建议；
-- [ ] UI 不乐观宣告成功。
+- [x] 写命令返回 `operation_id`；
+- [x] 幂等键复用同一操作；
+- [x] 阶段进度；
+- [x] succeeded/failed/cancelled/timed_out；
+- [x] 失败返回错误码、对象和恢复建议；
+- [x] UI 不乐观宣告成功。
+
+**实现与测试证据（2026-11-01）**
+
+- `/api/v1/commands` 使用 `NodeCommandKind::is_write()` 区分读写：写命令必须提交 `idempotency_key`，成功注册后返回 `202 Accepted` 和 queued operation；读命令保持同步结果；重复键与相同命令返回原 operation，不同命令返回稳定 `operation_conflict`，并发重试不会重复派发副作用；
+- operation 注册表只保存适配器生命周期投影，实际执行仍通过共享 `NodeCommandBus`。阶段事件按 `queued → running/dispatching → running/executing → succeeded` 发布；取消和超时分别为 `cancelled`、`timed_out`，业务拒绝为 `failed`；
+- 失败 operation 保留稳定错误码、`message_key`、目标对象、`retryable`、恢复建议和 `partial_changes`；`TimedOut` HTTP 映射为 504，未知 operation 为 404；
+- 当前旧 WebUI 仍调用同步兼容 `/api/node/commands`，只在拿到真实 `NodeCommandResult` 后提示成功，因此不存在乐观宣告；v1 operation 的 UI 消费迁移留给 W6 新界面，届时必须轮询/订阅到终态后才宣告成功；
+- `cargo test -p fuckipv6-client --no-default-features`：库测试 548 passed、3 ignored；集成测试 1 passed（`register_check`）与 8 passed（`w2_runtime`）；特权 lifecycle 集成测试 1 ignored；
+- `cargo test -p fuckipv6-client gpui::view_model`：17 passed；两套目标的 `cargo clippy --all-targets -- -D warnings` 均通过；
+- operation 生命周期、幂等冲突、缺失幂等键、失败恢复字段、取消/超时终态、阶段事件和未知 ID 均由 `node::http_adapter::tests` 覆盖；重新生成 JSON Schema、TypeScript 与 Android 绑定，`scripts/check-contracts.sh` 的 7 个 Rust 契约测试、TypeScript 构建、WebUI 契约测试与 Android `javac` 全部通过；生成器现会把 `NodeId` 等 primitive ID alias 投影为底层 `String`，避免 Android 引用不存在的生成类。
 
 ### W4-03 SSE 与重连 `[ ]`
 

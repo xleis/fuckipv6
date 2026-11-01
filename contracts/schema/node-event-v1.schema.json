@@ -228,6 +228,38 @@
             "data"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "stage": {
+                  "type": "string"
+                },
+                "state": {
+                  "$ref": "#/$defs/OperationState"
+                }
+              },
+              "required": [
+                "operation_id",
+                "state",
+                "stage"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "operation_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -267,6 +299,18 @@
         "mesh_only",
         "bypass_mainland",
         "global_proxy"
+      ],
+      "type": "string"
+    },
+    "OperationState": {
+      "enum": [
+        "queued",
+        "running",
+        "waiting_for_reauth",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out"
       ],
       "type": "string"
     }

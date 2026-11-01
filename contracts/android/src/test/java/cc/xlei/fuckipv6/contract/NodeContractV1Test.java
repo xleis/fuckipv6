@@ -8,6 +8,7 @@ import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupFailureReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
+import cc.xlei.fuckipv6.contract.NodeContractV1.OperationState;
 
 /** Dependency-free executable checks for Android-safe contract bindings. */
 public final class NodeContractV1Test {
@@ -38,11 +39,32 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 53,
+                NodeContractV1.DTO_CLASS_NAMES.length == 66,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
         }
+
+        for (String field : new String[] {
+            "actor",
+            "attempt",
+            "created_at_unix_ms",
+            "error",
+            "idempotency_key",
+            "kind",
+            "max_attempts",
+            "operation_id",
+            "result",
+            "stage",
+            "state",
+            "target",
+            "updated_at_unix_ms"
+        }) {
+            NodeContractV1.NodeOperationSnapshot.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeApiOperationResponse.class.getDeclaredField("operation");
+        NodeContractV1.NodeApiCommandResponse.class.getDeclaredField("operation");
+        NodeContractV1.NodeCommandHttpRequest.class.getDeclaredField("idempotency_key");
 
         for (String field : new String[] {
             "revision",
@@ -94,6 +116,13 @@ public final class NodeContractV1Test {
                 NodeCleanupStepStatus.DEFERRED,
                 NodeCleanupStepStatus.fromWireName("deferred"),
                 "runtime cleanup step status");
+        assertSame(
+                OperationState.TIMED_OUT,
+                OperationState.fromWireName("timed_out"),
+                "operation timed-out state");
+        expectIllegalArgument(
+                () -> OperationState.fromWireName("invented"),
+                "unknown operation state");
         expectIllegalArgument(
                 () -> CapabilityState.fromWireName("invented"),
                 "unknown capability state");

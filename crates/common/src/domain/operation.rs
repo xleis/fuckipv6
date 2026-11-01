@@ -65,6 +65,7 @@ pub enum OperationKind {
     NodeStart,
     NodeStop,
     NodeRestart,
+    NodeCleanup,
     NetworkCreate,
     NetworkApply,
     NetworkLeave,
@@ -75,6 +76,9 @@ pub enum OperationKind {
     PolicyApply,
     PolicyRollback,
     TrafficRulesApply,
+    NetworkRoleUpdate,
+    ClientBlacklistUpdate,
+    NetworkAllocationUpdate,
     CapabilityEnable,
     CapabilityDisable,
     ExitSelect,
@@ -280,6 +284,29 @@ impl Operation {
             self.attempt += 1;
         }
         self.state = state;
+        self.stage = stage;
+        self.updated_at_unix_ms = now_unix_ms;
+        Ok(())
+    }
+
+    /// Advance the human-readable stage of a non-terminal operation without
+    /// manufacturing a state transition. Long-running commands use this to
+    /// report progress while remaining `running` (or `waiting_for_reauth`).
+    pub fn progress(&mut self, stage: impl Into<String>, now_unix_ms: u64) -> DomainResult<()> {
+        if self.state.is_terminal() || self.state == OperationState::Queued {
+            return Err(DomainError::invalid_transition(
+                "only running or reauthentication-waiting operations can report progress",
+            ));
+        }
+        let stage = stage.into();
+        if stage.is_empty() || stage.len() > 96 {
+            return Err(DomainError::invalid_value("operation stage is invalid"));
+        }
+        if now_unix_ms < self.updated_at_unix_ms {
+            return Err(DomainError::invariant(
+                "operation update time moved backwards",
+            ));
+        }
         self.stage = stage;
         self.updated_at_unix_ms = now_unix_ms;
         Ok(())
@@ -521,18 +548,21 @@ mod tests {
         operation
             .transition(OperationState::Running, "applying", 11)
             .unwrap();
+        operation.progress("reconciling", 12).unwrap();
+        assert_eq!(operation.stage, "reconciling");
         operation
-            .transition(OperationState::WaitingForReauth, "reauth", 12)
+            .transition(OperationState::WaitingForReauth, "reauth", 13)
             .unwrap();
         operation
-            .transition(OperationState::Running, "applying", 13)
+            .transition(OperationState::Running, "applying", 14)
             .unwrap();
         operation
-            .transition(OperationState::Succeeded, "committed", 14)
+            .transition(OperationState::Succeeded, "committed", 15)
             .unwrap();
         assert!(operation
-            .transition(OperationState::Running, "retry", 15)
+            .transition(OperationState::Running, "retry", 16)
             .is_err());
+        assert!(operation.progress("late", 17).is_err());
         operation.validate().unwrap();
     }
 

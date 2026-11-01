@@ -3,10 +3,11 @@
 //! The adapter only projects the shared command bus, state store and event bus
 //! onto HTTP/WebSocket. It never owns a node or network state machine.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{
@@ -23,6 +24,11 @@ use axum::{
     Router,
 };
 use chrono::{SecondsFormat, Utc};
+use fuckipv6_common::domain::{
+    ContentHash, DomainActorRef, DomainObjectRef, IdempotencyKey, IdempotencyRegistry,
+    IdempotentSubmission, NodeId, ObjectKind, Operation, OperationError, OperationId,
+    OperationKind, OperationRecovery, OperationState,
+};
 use futures::SinkExt as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -84,7 +90,29 @@ pub struct NodeApiManifestResponse {
 pub struct NodeApiCommandResponse {
     #[serde(flatten)]
     pub meta: NodeApiResponseMeta,
-    pub result: NodeCommandResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<NodeCommandResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<NodeOperationSnapshot>,
+}
+
+/// Transport projection of the shared `Operation` state machine. `result` is
+/// only populated after a mutation reaches a terminal state; consumers must
+/// treat a queued/running operation as in progress, never as successful.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeOperationSnapshot {
+    #[serde(flatten)]
+    pub operation: Operation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<NodeCommandResult>,
+}
+
+/// Versioned response for operation submission and lookup.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiOperationResponse {
+    #[serde(flatten)]
+    pub meta: NodeApiResponseMeta,
+    pub operation: NodeOperationSnapshot,
 }
 
 /// A single canonical object fetched by kind and ID. Objects are projections of
@@ -186,6 +214,11 @@ pub struct NodeManifestResponse {
 pub struct NodeCommandHttpRequest {
     pub schema_version: u16,
     pub request: NodeCommandRequest,
+    /// Required for mutating commands. Reusing the key with the same command
+    /// returns the original operation; reusing it with another command is a
+    /// conflict and never dispatches a second side effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
 }
 
 /// Versioned response DTO containing the exact result returned by the command
@@ -203,10 +236,12 @@ pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
     InvalidRequest,
     NotFound,
+    OperationConflict,
     ResyncRequired,
     BackendRejected,
     BackendUnavailable,
     ContractViolation,
+    Internal,
 }
 
 /// Versioned HTTP error DTO. It is also used for WebSocket version mismatches
@@ -389,17 +424,38 @@ pub enum NodeHttpAdapterError {
     InvalidManifest { violations: Vec<String> },
 }
 
+#[derive(Clone)]
+struct OperationRecord {
+    operation: Operation,
+    result: Option<NodeCommandResult>,
+}
+
+#[derive(Default)]
+struct OperationRegistry {
+    idempotency: IdempotencyRegistry,
+    records: BTreeMap<String, OperationRecord>,
+}
+
+enum OperationSubmitError {
+    Invalid(NodeProblem),
+    Conflict(OperationId),
+    Internal(String),
+}
+
 /// HTTP/WebSocket projection over the shared node bus and state store.
 ///
-/// The only mutable data held here is the request-id allocator for bus
-/// correlation. All operational and durable state remains in the shared node
-/// services passed to [`NodeHttpAdapter::new`].
+/// The adapter owns a request-id allocator and an in-process projection of
+/// idempotency keys and operation states. Durable node and network state still
+/// remains in the shared services passed to [`NodeHttpAdapter::new`]; the
+/// operation registry contains transport lifecycle metadata rather than a
+/// second product state machine.
 #[derive(Clone)]
 pub struct NodeHttpAdapter {
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
     next_request_id: Arc<AtomicU64>,
+    operations: Arc<Mutex<OperationRegistry>>,
 }
 
 impl NodeHttpAdapter {
@@ -409,7 +465,314 @@ impl NodeHttpAdapter {
             state,
             events,
             next_request_id: Arc::new(AtomicU64::new(1)),
+            operations: Arc::new(Mutex::new(OperationRegistry::default())),
         }
+    }
+
+    fn operation(&self, id: &str) -> Option<NodeOperationSnapshot> {
+        let registry = self
+            .operations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry
+            .records
+            .get(id)
+            .map(|record| NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            })
+    }
+
+    /// Register and launch one mutating command. Registration and idempotency
+    /// resolution happen under the same lock, so concurrent retries cannot
+    /// dispatch duplicate side effects.
+    async fn submit_operation(
+        &self,
+        request: NodeCommandRequest,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<(NodeOperationSnapshot, bool), OperationSubmitError> {
+        request.validate().map_err(OperationSubmitError::Invalid)?;
+        if !request.command.kind().is_write() {
+            return Err(OperationSubmitError::Internal(
+                "read-only command cannot be registered as an operation".into(),
+            ));
+        }
+
+        let request_digest = ContentHash::from_bytes(
+            &serde_json::to_vec(&request.command)
+                .map_err(|error| OperationSubmitError::Internal(error.to_string()))?,
+        );
+        let actor = self.local_owner_actor().await;
+        let operation_id = new_operation_id()?;
+        let now = unix_time_ms();
+        let operation = Operation {
+            operation_id: operation_id.clone(),
+            kind: operation_kind(&request.command),
+            actor: actor.clone(),
+            target: operation_target(&request.command, &actor.node_id),
+            idempotency_key: idempotency_key.clone(),
+            state: OperationState::Queued,
+            stage: "queued".into(),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            attempt: 0,
+            max_attempts: 3,
+            error: None,
+        };
+        operation
+            .validate()
+            .map_err(|error| OperationSubmitError::Internal(error.to_string()))?;
+
+        let (snapshot, created) = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match registry.idempotency.resolve_or_insert(
+                &actor.node_id,
+                &idempotency_key,
+                operation_id.clone(),
+                request_digest,
+            ) {
+                IdempotentSubmission::Created { operation_id } => {
+                    registry.records.insert(
+                        operation_id.as_str().to_owned(),
+                        OperationRecord {
+                            operation,
+                            result: None,
+                        },
+                    );
+                    let snapshot = registry
+                        .records
+                        .get(operation_id.as_str())
+                        .map(|record| NodeOperationSnapshot {
+                            operation: record.operation.clone(),
+                            result: None,
+                        })
+                        .expect("newly inserted operation");
+                    (snapshot, true)
+                }
+                IdempotentSubmission::Existing { operation_id } => {
+                    let snapshot = registry
+                        .records
+                        .get(operation_id.as_str())
+                        .map(|record| NodeOperationSnapshot {
+                            operation: record.operation.clone(),
+                            result: record.result.clone(),
+                        })
+                        .ok_or_else(|| {
+                            OperationSubmitError::Internal(
+                                "idempotency registry referenced a missing operation".into(),
+                            )
+                        })?;
+                    (snapshot, false)
+                }
+                IdempotentSubmission::Conflict {
+                    existing_operation_id,
+                } => return Err(OperationSubmitError::Conflict(existing_operation_id)),
+            }
+        };
+
+        if created {
+            self.publish_operation(&snapshot.operation);
+            let adapter = self.clone();
+            let operation_id = snapshot.operation.operation_id.clone();
+            tokio::spawn(async move {
+                adapter.run_operation(operation_id, request).await;
+            });
+        }
+        Ok((snapshot, created))
+    }
+
+    async fn local_owner_actor(&self) -> DomainActorRef {
+        let node_id = self
+            .state
+            .snapshot()
+            .await
+            .identity
+            .as_ref()
+            .and_then(|identity| NodeId::parse(identity.node_id.as_str()).ok())
+            .unwrap_or_else(|| NodeId::from_public_key(b"fuckipv6-uninitialized-local-owner"));
+        DomainActorRef {
+            node_id,
+            display: "local_owner".into(),
+        }
+    }
+
+    async fn run_operation(&self, operation_id: OperationId, request: NodeCommandRequest) {
+        let request_id = request.request_id;
+        if !self.transition_operation(&operation_id, OperationState::Running, "dispatching") {
+            return;
+        }
+        self.progress_operation(&operation_id, "executing");
+        let result = self.commands.execute(request).await;
+        match result {
+            Ok(result) => match result.outcome.clone() {
+                NodeCommandOutcome::Rejected(problem)
+                    if problem.code == NodeProblemCode::Cancelled =>
+                {
+                    self.cancel_operation(&operation_id, problem, result);
+                }
+                NodeCommandOutcome::Rejected(problem)
+                    if problem.code == NodeProblemCode::TimedOut =>
+                {
+                    self.fail_operation(&operation_id, problem, result, true);
+                }
+                NodeCommandOutcome::Rejected(problem) => {
+                    self.fail_operation(&operation_id, problem, result, false);
+                }
+                _ => self.succeed_operation(&operation_id, result),
+            },
+            Err(error) => {
+                let problem = NodeProblem::new(NodeProblemCode::Internal, error.to_string());
+                self.fail_operation(
+                    &operation_id,
+                    problem,
+                    NodeCommandResult::rejected(
+                        request_id,
+                        NodeProblem::new(NodeProblemCode::Internal, error.to_string()),
+                    ),
+                    false,
+                );
+            }
+        }
+    }
+
+    fn transition_operation(&self, id: &OperationId, state: OperationState, stage: &str) -> bool {
+        let snapshot = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = registry.records.get_mut(id.as_str()) else {
+                return false;
+            };
+            if record
+                .operation
+                .transition(state, stage, unix_time_ms())
+                .is_err()
+            {
+                return false;
+            }
+            NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            }
+        };
+        self.publish_operation(&snapshot.operation);
+        true
+    }
+
+    fn progress_operation(&self, id: &OperationId, stage: &str) -> bool {
+        let snapshot = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = registry.records.get_mut(id.as_str()) else {
+                return false;
+            };
+            if record.operation.progress(stage, unix_time_ms()).is_err() {
+                return false;
+            }
+            NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            }
+        };
+        self.publish_operation(&snapshot.operation);
+        true
+    }
+
+    fn succeed_operation(&self, id: &OperationId, result: NodeCommandResult) {
+        let snapshot = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = registry.records.get_mut(id.as_str()) else {
+                return;
+            };
+            if record
+                .operation
+                .transition(OperationState::Succeeded, "succeeded", unix_time_ms())
+                .is_err()
+            {
+                return;
+            }
+            record.result = Some(result);
+            NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            }
+        };
+        self.publish_operation(&snapshot.operation);
+    }
+
+    fn fail_operation(
+        &self,
+        id: &OperationId,
+        problem: NodeProblem,
+        result: NodeCommandResult,
+        timed_out: bool,
+    ) {
+        let snapshot = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = registry.records.get_mut(id.as_str()) else {
+                return;
+            };
+            let error = operation_error_for_problem(&problem, &record.operation.target);
+            if record
+                .operation
+                .fail(error, timed_out, unix_time_ms())
+                .is_err()
+            {
+                return;
+            }
+            record.result = Some(result);
+            NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            }
+        };
+        self.publish_operation(&snapshot.operation);
+    }
+
+    fn cancel_operation(&self, id: &OperationId, problem: NodeProblem, result: NodeCommandResult) {
+        let snapshot = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = registry.records.get_mut(id.as_str()) else {
+                return;
+            };
+            let error = operation_error_for_problem(&problem, &record.operation.target);
+            if record
+                .operation
+                .cancel(Some(error), unix_time_ms())
+                .is_err()
+            {
+                return;
+            }
+            record.result = Some(result);
+            NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            }
+        };
+        self.publish_operation(&snapshot.operation);
+    }
+
+    fn publish_operation(&self, operation: &Operation) {
+        self.events.publish(NodeEventKind::OperationChanged {
+            operation_id: operation.operation_id.as_str().to_owned(),
+            state: operation.state,
+            stage: operation.stage.clone(),
+        });
     }
 
     /// Build a router. It intentionally contains only shared node endpoints;
@@ -567,7 +930,163 @@ fn status_for_problem(code: NodeProblemCode) -> StatusCode {
         NodeProblemCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
         NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
+        NodeProblemCode::TimedOut => StatusCode::GATEWAY_TIMEOUT,
         NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn new_operation_id() -> Result<OperationId, OperationSubmitError> {
+    let mut random = [0_u8; 32];
+    getrandom::fill(&mut random).map_err(|error| {
+        OperationSubmitError::Internal(format!("operation id randomness unavailable: {error}"))
+    })?;
+    Ok(OperationId::from_public_key(&random))
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+fn operation_kind(command: &NodeCommand) -> OperationKind {
+    match command {
+        NodeCommand::StartNetworks { .. } | NodeCommand::StartNode => OperationKind::NodeStart,
+        NodeCommand::StopNetworks { .. } | NodeCommand::StopNode | NodeCommand::Shutdown => {
+            OperationKind::NodeStop
+        }
+        NodeCommand::RestartNetworks { .. } | NodeCommand::RestartNode => {
+            OperationKind::NodeRestart
+        }
+        NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
+        NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
+        NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
+        NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
+        NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
+        NodeCommand::BanClient(_) | NodeCommand::UnbanClient(_) => {
+            OperationKind::ClientBlacklistUpdate
+        }
+        NodeCommand::UpdateNetworkAllocation(_) => OperationKind::NetworkAllocationUpdate,
+        // Read-only commands never enter the operation registry. Keeping a
+        // total mapping avoids a panic if a future caller violates that
+        // invariant before the command is rejected by `submit_operation`.
+        NodeCommand::GetSnapshot
+        | NodeCommand::GetUiManifest
+        | NodeCommand::GetDiagnostics
+        | NodeCommand::GetBlacklist { .. }
+        | NodeCommand::GetNetworkAllocation { .. }
+        | NodeCommand::ProbePeer(_) => OperationKind::PolicyTest,
+    }
+}
+
+fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObjectRef {
+    let node_target = || DomainObjectRef {
+        kind: ObjectKind::Node,
+        id: local_node_id.as_str().to_owned(),
+    };
+    let network_target = |id: &str| DomainObjectRef {
+        kind: ObjectKind::Network,
+        id: id.to_owned(),
+    };
+    match command {
+        NodeCommand::CreateNetwork(command) => network_target(&command.name),
+        NodeCommand::JoinNetwork(command) => command
+            .network_name
+            .as_deref()
+            .map(network_target)
+            .unwrap_or_else(node_target),
+        NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
+        NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
+        NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
+            network_target(&command.network_name)
+        }
+        NodeCommand::UpdateNetworkAllocation(command) => network_target(&command.network_name),
+        NodeCommand::GetBlacklist { network_name }
+        | NodeCommand::GetNetworkAllocation { network_name } => network_target(network_name),
+        NodeCommand::StartNetworks { .. }
+        | NodeCommand::StopNetworks { .. }
+        | NodeCommand::RestartNetworks { .. }
+        | NodeCommand::GetSnapshot
+        | NodeCommand::GetUiManifest
+        | NodeCommand::GetDiagnostics
+        | NodeCommand::ProbePeer(_)
+        | NodeCommand::StartNode
+        | NodeCommand::StopNode
+        | NodeCommand::RestartNode
+        | NodeCommand::CleanupResiduals { .. }
+        | NodeCommand::Shutdown => node_target(),
+    }
+}
+
+fn operation_error_for_problem(problem: &NodeProblem, target: &DomainObjectRef) -> OperationError {
+    let (code, message_key, recovery_kind, recovery_hint) = match problem.code {
+        NodeProblemCode::InvalidRequest => (
+            "operation.invalid_request",
+            "error.operation_invalid_request",
+            "edit_request",
+            "recovery.fix_request",
+        ),
+        NodeProblemCode::NotFound => (
+            "operation.not_found",
+            "error.operation_not_found",
+            "refresh",
+            "recovery.refresh_state",
+        ),
+        NodeProblemCode::Conflict => (
+            "operation.conflict",
+            "error.operation_conflict",
+            "refresh",
+            "recovery.refresh_state",
+        ),
+        NodeProblemCode::Unavailable => (
+            "operation.unavailable",
+            "error.operation_unavailable",
+            "retry",
+            "recovery.retry",
+        ),
+        NodeProblemCode::PermissionDenied => (
+            "operation.permission_denied",
+            "error.operation_permission_denied",
+            "reauth",
+            "recovery.reauthenticate",
+        ),
+        NodeProblemCode::Cancelled => (
+            "operation.cancelled",
+            "error.operation_cancelled",
+            "retry",
+            "recovery.retry",
+        ),
+        NodeProblemCode::TimedOut => (
+            "operation.timed_out",
+            "error.operation_timed_out",
+            "retry",
+            "recovery.retry",
+        ),
+        NodeProblemCode::Unsupported => (
+            "operation.unsupported",
+            "error.operation_unsupported",
+            "change_request",
+            "recovery.use_supported_capability",
+        ),
+        NodeProblemCode::Internal => (
+            "operation.internal",
+            "error.operation_internal",
+            "inspect_diagnostics",
+            "recovery.inspect_diagnostics",
+        ),
+    };
+    OperationError {
+        code: code.into(),
+        message_key: message_key.into(),
+        params: BTreeMap::new(),
+        object: Some(target.clone()),
+        retryable: problem.retryable,
+        recovery: Some(OperationRecovery {
+            kind: recovery_kind.into(),
+            hint_key: recovery_hint.into(),
+        }),
+        partial_changes: Vec::new(),
     }
 }
 
@@ -613,6 +1132,49 @@ async fn handle_v1_command(
         return HttpApiError::invalid_request(request_id, "request_id 必须大于 0").into_response();
     }
 
+    if payload.request.command.kind().is_write() {
+        let Some(idempotency_key) = payload.idempotency_key else {
+            return HttpApiError::invalid_request(
+                request_id,
+                "写命令必须提供 idempotency_key，防止重试产生重复副作用",
+            )
+            .into_response();
+        };
+        return match adapter
+            .submit_operation(payload.request, idempotency_key)
+            .await
+        {
+            Ok((operation, _created)) => (
+                StatusCode::ACCEPTED,
+                Json(NodeApiCommandResponse {
+                    meta: NodeApiResponseMeta::new(request_id),
+                    result: None,
+                    operation: Some(operation),
+                }),
+            )
+                .into_response(),
+            Err(OperationSubmitError::Invalid(problem)) => {
+                let mut error = HttpApiError::invalid_request(request_id, problem.message.clone());
+                error.body.problem = Some(problem);
+                error.into_response()
+            }
+            Err(OperationSubmitError::Conflict(existing_operation_id)) => {
+                let mut error = HttpApiError::operation_conflict(
+                    request_id,
+                    format!(
+                        "idempotency_key 已用于另一个命令；原操作: {}",
+                        existing_operation_id.as_str()
+                    ),
+                );
+                error.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+                error.into_response()
+            }
+            Err(OperationSubmitError::Internal(message)) => {
+                HttpApiError::internal(request_id, message).into_response()
+            }
+        };
+    }
+
     match adapter.execute(payload.request).await {
         Ok(result) => {
             let result = result_for_control_client(result);
@@ -621,7 +1183,8 @@ async fn handle_v1_command(
                 status,
                 Json(NodeApiCommandResponse {
                     meta: NodeApiResponseMeta::new(request_id),
-                    result,
+                    result: Some(result),
+                    operation: None,
                 }),
             )
                 .into_response()
@@ -696,11 +1259,15 @@ async fn handle_v1_operation(
         return (*error).into_response();
     }
 
-    // Operation lifecycle and persistence are implemented by W4-02. Until an
-    // operation registry exists, returning a stable 404 is the only truthful
-    // response; a placeholder "unavailable" operation would hide a contract
-    // that the backend cannot yet satisfy.
-    HttpApiError::not_found(request_id, format!("operation not found: {id}")).into_response()
+    match adapter.operation(&id) {
+        Some(operation) => Json(NodeApiOperationResponse {
+            meta: NodeApiResponseMeta::new(request_id),
+            operation,
+        })
+        .into_response(),
+        None => HttpApiError::not_found(request_id, format!("operation not found: {id}"))
+            .into_response(),
+    }
 }
 
 async fn handle_v1_object(
@@ -1147,6 +1714,24 @@ impl HttpApiError {
         )
     }
 
+    fn operation_conflict(request_id: u64, message: impl Into<String>) -> Self {
+        Self::new(
+            request_id,
+            StatusCode::CONFLICT,
+            NodeHttpErrorCode::OperationConflict,
+            message,
+        )
+    }
+
+    fn internal(request_id: u64, message: impl Into<String>) -> Self {
+        Self::new(
+            request_id,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NodeHttpErrorCode::Internal,
+            message,
+        )
+    }
+
     fn resync_required(request_id: u64, requested_after: Option<u64>, latest: u64) -> Self {
         let requested = requested_after
             .map(|value| value.to_string())
@@ -1241,12 +1826,14 @@ impl IntoResponse for HttpApiError {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use axum::{
         body::{to_bytes, Body},
         http::{header, Method, Request, StatusCode},
     };
+    use fuckipv6_common::domain::{IdempotencyKey, ObjectKind, OperationState};
     use futures::{SinkExt, StreamExt};
     use tokio::{net::TcpListener, sync::broadcast, time::timeout};
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
@@ -1259,15 +1846,27 @@ mod tests {
     };
 
     #[derive(Clone)]
+    enum StubWriteBehavior {
+        Completed,
+        Rejected(NodeProblem),
+    }
+
+    #[derive(Clone)]
     struct StubHandler {
         state: NodeStateStore,
         manifest: NodeUiManifest,
+        write_behavior: StubWriteBehavior,
+        write_delay: Duration,
+        write_count: Arc<AtomicUsize>,
     }
 
     impl NodeCommandHandler for StubHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
             let state = self.state.clone();
             let manifest = self.manifest.clone();
+            let write_behavior = self.write_behavior.clone();
+            let write_delay = self.write_delay;
+            let write_count = self.write_count.clone();
             Box::pin(async move {
                 let request_id = request.request_id;
                 match request.command {
@@ -1277,13 +1876,23 @@ mod tests {
                     NodeCommand::GetUiManifest => {
                         NodeCommandResult::ui_manifest(request_id, manifest)
                     }
-                    _ => NodeCommandResult::rejected(
-                        request_id,
-                        NodeProblem::new(
-                            NodeProblemCode::Unavailable,
-                            "stub only implements read commands",
-                        ),
-                    ),
+                    _ => {
+                        write_count.fetch_add(1, Ordering::SeqCst);
+                        if !write_delay.is_zero() {
+                            tokio::time::sleep(write_delay).await;
+                        }
+                        match write_behavior {
+                            StubWriteBehavior::Completed => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::Completed {
+                                    message: "stub write completed".into(),
+                                },
+                            ),
+                            StubWriteBehavior::Rejected(problem) => {
+                                NodeCommandResult::rejected(request_id, problem)
+                            }
+                        }
+                    }
                 }
             })
         }
@@ -1292,12 +1901,37 @@ mod tests {
     fn adapter_fixture(
         manifest: NodeUiManifest,
     ) -> (NodeHttpAdapter, NodeStateStore, NodeEventBus) {
+        let (adapter, state, events, _writes) = adapter_fixture_with_write(
+            manifest,
+            StubWriteBehavior::Rejected(NodeProblem::new(
+                NodeProblemCode::Unavailable,
+                "stub only implements read commands",
+            )),
+            Duration::ZERO,
+        );
+        (adapter, state, events)
+    }
+
+    fn adapter_fixture_with_write(
+        manifest: NodeUiManifest,
+        write_behavior: StubWriteBehavior,
+        write_delay: Duration,
+    ) -> (
+        NodeHttpAdapter,
+        NodeStateStore,
+        NodeEventBus,
+        Arc<AtomicUsize>,
+    ) {
         let events = NodeEventBus::new(32);
         let state = NodeStateStore::with_events(events.clone());
+        let write_count = Arc::new(AtomicUsize::new(0));
         let commands = NodeCommandBus::spawn(
             Arc::new(StubHandler {
                 state: state.clone(),
                 manifest,
+                write_behavior,
+                write_delay,
+                write_count: write_count.clone(),
             }),
             events.clone(),
             8,
@@ -1306,6 +1940,7 @@ mod tests {
             NodeHttpAdapter::new(commands, state.clone(), events.clone()),
             state,
             events,
+            write_count,
         )
     }
 
@@ -1349,6 +1984,38 @@ mod tests {
             )
             .await
             .expect("v1 command response")
+    }
+
+    async fn fetch_v1_operation(adapter: &NodeHttpAdapter, operation_id: &str) -> Response {
+        adapter
+            .clone()
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/operations/{operation_id}?schema_version=1"
+                    ))
+                    .body(Body::empty())
+                    .expect("operation lookup request"),
+            )
+            .await
+            .expect("operation lookup response")
+    }
+
+    async fn wait_for_terminal_operation(
+        adapter: &NodeHttpAdapter,
+        operation_id: &str,
+    ) -> NodeApiOperationResponse {
+        for _ in 0..200 {
+            let response = fetch_v1_operation(adapter, operation_id).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: NodeApiOperationResponse = json_body(response).await;
+            if body.operation.operation.state.is_terminal() {
+                return body;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("operation {operation_id} did not reach a terminal state");
     }
 
     #[tokio::test]
@@ -1451,6 +2118,7 @@ mod tests {
         let payload = NodeCommandHttpRequest {
             schema_version: NODE_HTTP_SCHEMA_VERSION,
             request: NodeCommandRequest::new(51, NodeCommand::GetSnapshot),
+            idempotency_key: None,
         };
 
         let response = post_v1_command(adapter, &payload).await;
@@ -1460,11 +2128,284 @@ mod tests {
         assert_eq!(body.meta.request_id, 51);
         chrono::DateTime::parse_from_rfc3339(&body.meta.server_time)
             .expect("command server time is RFC3339");
-        assert_eq!(body.result.request_id, 51);
+        let result = body.result.expect("read command returns a result");
+        assert_eq!(result.request_id, 51);
+        assert!(matches!(result.outcome, NodeCommandOutcome::Snapshot(_)));
+    }
+
+    #[tokio::test]
+    async fn v1_write_command_requires_an_idempotency_key() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(52, NodeCommand::StartNode),
+            idempotency_key: None,
+        };
+
+        let response = post_v1_command(adapter, &payload).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: NodeApiErrorResponse = json_body(response).await;
+        assert_eq!(body.code, NodeHttpErrorCode::InvalidRequest);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn v1_write_command_returns_202_without_optimistic_result() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(53, NodeCommand::StartNode),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"write-success")),
+        };
+
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: NodeApiCommandResponse = json_body(response).await;
+        assert!(body.result.is_none(), "acceptance must not claim success");
+        let submitted = body.operation.expect("write returns an operation");
+        assert_eq!(submitted.operation.state, OperationState::Queued);
+        assert_eq!(submitted.operation.stage, "queued");
+        assert!(submitted.result.is_none());
+
+        let completed =
+            wait_for_terminal_operation(&adapter, submitted.operation.operation_id.as_str()).await;
+        assert_eq!(
+            completed.operation.operation.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(completed.operation.operation.stage, "succeeded");
+        let result = completed
+            .operation
+            .result
+            .expect("succeeded operation returns its result");
         assert!(matches!(
-            body.result.outcome,
-            NodeCommandOutcome::Snapshot(_)
+            result.outcome,
+            NodeCommandOutcome::Completed { .. }
         ));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn v1_write_reuses_the_operation_for_the_same_idempotency_key() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::from_millis(20),
+        );
+        let key = IdempotencyKey::from_public_key(b"idempotent-start");
+        let first = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(54, NodeCommand::StartNode),
+            idempotency_key: Some(key.clone()),
+        };
+        let retry = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(55, NodeCommand::StartNode),
+            idempotency_key: Some(key),
+        };
+
+        let first_response = post_v1_command(adapter.clone(), &first).await;
+        assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+        let first_body: NodeApiCommandResponse = json_body(first_response).await;
+        let first_operation = first_body.operation.expect("first operation");
+
+        let retry_response = post_v1_command(adapter.clone(), &retry).await;
+        assert_eq!(retry_response.status(), StatusCode::ACCEPTED);
+        let retry_body: NodeApiCommandResponse = json_body(retry_response).await;
+        let retry_operation = retry_body.operation.expect("replayed operation");
+
+        assert_eq!(
+            retry_operation.operation.operation_id,
+            first_operation.operation.operation_id
+        );
+        let completed =
+            wait_for_terminal_operation(&adapter, first_operation.operation.operation_id.as_str())
+                .await;
+        assert_eq!(
+            completed.operation.operation.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn v1_write_rejects_idempotency_key_reuse_for_another_command() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let key = IdempotencyKey::from_public_key(b"conflicting-reuse");
+        let first = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(56, NodeCommand::StartNode),
+            idempotency_key: Some(key.clone()),
+        };
+        let conflict = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(57, NodeCommand::StopNode),
+            idempotency_key: Some(key),
+        };
+
+        let first_response = post_v1_command(adapter.clone(), &first).await;
+        assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+        let first_body: NodeApiCommandResponse = json_body(first_response).await;
+        let first_operation_id = first_body
+            .operation
+            .expect("first operation")
+            .operation
+            .operation_id;
+        wait_for_terminal_operation(&adapter, first_operation_id.as_str()).await;
+
+        let conflict_response = post_v1_command(adapter, &conflict).await;
+        assert_eq!(conflict_response.status(), StatusCode::CONFLICT);
+        let body: NodeApiErrorResponse = json_body(conflict_response).await;
+        assert_eq!(body.code, NodeHttpErrorCode::OperationConflict);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_operation_exposes_stable_error_object_and_recovery() {
+        let problem = NodeProblem::new(NodeProblemCode::Unavailable, "runtime backend unavailable")
+            .retryable(true);
+        let (adapter, _state, _events, _writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Rejected(problem),
+            Duration::ZERO,
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(58, NodeCommand::StartNode),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"failed-operation")),
+        };
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let submitted: NodeApiCommandResponse = json_body(response).await;
+        let operation_id = submitted
+            .operation
+            .expect("submitted operation")
+            .operation
+            .operation_id;
+
+        let failed = wait_for_terminal_operation(&adapter, operation_id.as_str()).await;
+        assert_eq!(failed.operation.operation.state, OperationState::Failed);
+        let error = failed
+            .operation
+            .operation
+            .error
+            .expect("failed operation carries a stable error");
+        assert_eq!(error.code, "operation.unavailable");
+        assert_eq!(error.message_key, "error.operation_unavailable");
+        assert_eq!(
+            error.object.as_ref().map(|object| &object.kind),
+            Some(&ObjectKind::Node)
+        );
+        assert!(error.retryable);
+        assert_eq!(
+            error
+                .recovery
+                .as_ref()
+                .map(|recovery| recovery.kind.as_str()),
+            Some("retry")
+        );
+        assert!(failed.operation.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_timed_out_operations_have_distinct_terminal_states() {
+        for (key_seed, problem_code, expected, stage) in [
+            (
+                b"cancelled-operation".as_slice(),
+                NodeProblemCode::Cancelled,
+                OperationState::Cancelled,
+                "cancelled",
+            ),
+            (
+                b"timed-out-operation".as_slice(),
+                NodeProblemCode::TimedOut,
+                OperationState::TimedOut,
+                "timed_out",
+            ),
+        ] {
+            let (adapter, _state, _events, _writes) = adapter_fixture_with_write(
+                node_ui_manifest(),
+                StubWriteBehavior::Rejected(
+                    NodeProblem::new(problem_code, "terminal state test").retryable(true),
+                ),
+                Duration::ZERO,
+            );
+            let payload = NodeCommandHttpRequest {
+                schema_version: NODE_HTTP_SCHEMA_VERSION,
+                request: NodeCommandRequest::new(59, NodeCommand::StartNode),
+                idempotency_key: Some(IdempotencyKey::from_public_key(key_seed)),
+            };
+            let response = post_v1_command(adapter.clone(), &payload).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let submitted: NodeApiCommandResponse = json_body(response).await;
+            let operation_id = submitted
+                .operation
+                .expect("submitted operation")
+                .operation
+                .operation_id;
+            let operation = wait_for_terminal_operation(&adapter, operation_id.as_str()).await;
+            assert_eq!(operation.operation.operation.state, expected);
+            assert_eq!(operation.operation.operation.stage, stage);
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_events_report_each_progress_stage_in_order() {
+        let (adapter, _state, events, _writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::from_millis(20),
+        );
+        let mut receiver = events.subscribe();
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(60, NodeCommand::StartNode),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"operation-events")),
+        };
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let submitted: NodeApiCommandResponse = json_body(response).await;
+        let operation_id = submitted
+            .operation
+            .expect("submitted operation")
+            .operation
+            .operation_id;
+        wait_for_terminal_operation(&adapter, operation_id.as_str()).await;
+
+        let mut updates = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let NodeEventKind::OperationChanged {
+                operation_id: observed,
+                state,
+                stage,
+            } = event.kind
+            {
+                if observed == operation_id.as_str() {
+                    updates.push((state, stage));
+                }
+            }
+        }
+        assert_eq!(
+            updates,
+            vec![
+                (OperationState::Queued, "queued".into()),
+                (OperationState::Running, "dispatching".into()),
+                (OperationState::Running, "executing".into()),
+                (OperationState::Succeeded, "succeeded".into()),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1638,6 +2579,7 @@ mod tests {
         let payload = NodeCommandHttpRequest {
             schema_version: NODE_HTTP_SCHEMA_VERSION,
             request: NodeCommandRequest::new(41, NodeCommand::GetSnapshot),
+            idempotency_key: None,
         };
 
         let response = post_command(adapter, &payload).await;
@@ -1663,6 +2605,7 @@ mod tests {
                     all: false,
                 },
             ),
+            idempotency_key: None,
         };
 
         let response = post_command(adapter, &payload).await;
@@ -1679,6 +2622,7 @@ mod tests {
         let payload = NodeCommandHttpRequest {
             schema_version: NODE_HTTP_SCHEMA_VERSION,
             request: NodeCommandRequest::new(43, NodeCommand::Shutdown),
+            idempotency_key: None,
         };
 
         let response = post_command(adapter, &payload).await;
@@ -1707,6 +2651,7 @@ mod tests {
         let payload = NodeCommandHttpRequest {
             schema_version: NODE_HTTP_SCHEMA_VERSION + 1,
             request: NodeCommandRequest::new(44, NodeCommand::GetSnapshot),
+            idempotency_key: None,
         };
 
         let response = post_command(adapter, &payload).await;

@@ -24,11 +24,11 @@ pub use command::{
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use http_adapter::{
     NodeApiCommandResponse, NodeApiErrorResponse, NodeApiEvent, NodeApiManifestResponse,
-    NodeApiObject, NodeApiObjectResponse, NodeApiResponseMeta, NodeApiSnapshotResponse,
-    NodeCommandHttpRequest, NodeCommandHttpResponse, NodeHttpAdapter, NodeHttpAdapterError,
-    NodeHttpErrorCode, NodeHttpErrorResponse, NodeManifestResponse, NodeSnapshotResponse,
-    NodeWsMessage, NodeWsResyncReason, NodeWsSession, NodeWsSessionError, NODE_HTTP_API_PREFIX,
-    NODE_HTTP_SCHEMA_VERSION, NODE_HTTP_V1_API_PREFIX,
+    NodeApiObject, NodeApiObjectResponse, NodeApiOperationResponse, NodeApiResponseMeta,
+    NodeApiSnapshotResponse, NodeCommandHttpRequest, NodeCommandHttpResponse, NodeHttpAdapter,
+    NodeHttpAdapterError, NodeHttpErrorCode, NodeHttpErrorResponse, NodeManifestResponse,
+    NodeOperationSnapshot, NodeSnapshotResponse, NodeWsMessage, NodeWsResyncReason, NodeWsSession,
+    NodeWsSessionError, NODE_HTTP_API_PREFIX, NODE_HTTP_SCHEMA_VERSION, NODE_HTTP_V1_API_PREFIX,
 };
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};

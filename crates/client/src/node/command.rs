@@ -138,6 +138,30 @@ impl NodeCommandKind {
             Self::Shutdown => "shutdown",
         }
     }
+
+    /// Whether this command can change node or network state. Read-only and
+    /// diagnostic commands keep the synchronous command response; mutations
+    /// must be submitted as idempotent operations by the v1 control API.
+    pub const fn is_write(self) -> bool {
+        matches!(
+            self,
+            Self::StartNetworks
+                | Self::StopNetworks
+                | Self::RestartNetworks
+                | Self::CreateNetwork
+                | Self::JoinNetwork
+                | Self::UpdateRouting
+                | Self::SetNetworkRole
+                | Self::BanClient
+                | Self::UnbanClient
+                | Self::UpdateNetworkAllocation
+                | Self::StartNode
+                | Self::StopNode
+                | Self::RestartNode
+                | Self::CleanupResiduals
+                | Self::Shutdown
+        )
+    }
 }
 
 /// Product-neutral node operations. A node creates, joins or serves a network;
@@ -1126,6 +1150,33 @@ mod tests {
         assert!(encoded.contains("exit_node"));
         assert!(!encoded.contains("client_mode"));
         assert!(!encoded.contains("server_mode"));
+    }
+
+    #[test]
+    fn mutation_classification_keeps_reads_synchronous() {
+        for kind in [
+            NodeCommandKind::GetSnapshot,
+            NodeCommandKind::GetUiManifest,
+            NodeCommandKind::GetDiagnostics,
+            NodeCommandKind::GetBlacklist,
+            NodeCommandKind::GetNetworkAllocation,
+            NodeCommandKind::ProbePeer,
+        ] {
+            assert!(!kind.is_write(), "{kind:?}");
+        }
+
+        for kind in NodeCommandKind::ACTIONS {
+            if !matches!(
+                kind,
+                NodeCommandKind::GetSnapshot
+                    | NodeCommandKind::GetDiagnostics
+                    | NodeCommandKind::GetBlacklist
+                    | NodeCommandKind::GetNetworkAllocation
+                    | NodeCommandKind::ProbePeer
+            ) {
+                assert!(kind.is_write(), "{kind:?}");
+            }
+        }
     }
 
     #[tokio::test]

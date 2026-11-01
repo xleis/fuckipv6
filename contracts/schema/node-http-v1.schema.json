@@ -48,6 +48,36 @@
       ],
       "type": "string"
     },
+    "DomainActorRef": {
+      "properties": {
+        "display": {
+          "type": "string"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "node_id",
+        "display"
+      ],
+      "type": "object"
+    },
+    "DomainObjectRef": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ObjectKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
     "ExitNodeCapabilities": {
       "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable.",
       "properties": {
@@ -115,6 +145,9 @@
       ],
       "type": "string"
     },
+    "IdempotencyKey": {
+      "type": "string"
+    },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
       "oneOf": [
@@ -144,13 +177,30 @@
     "NodeApiCommandResponse": {
       "description": "Versioned command result returned by `POST /api/v1/commands`.",
       "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeOperationSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "request_id": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "result": {
-          "$ref": "#/$defs/NodeCommandResult"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeCommandResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "schema_version": {
           "format": "uint16",
@@ -165,8 +215,7 @@
       "required": [
         "schema_version",
         "request_id",
-        "server_time",
-        "result"
+        "server_time"
       ],
       "type": "object"
     },
@@ -505,6 +554,35 @@
         "request_id",
         "server_time",
         "object"
+      ],
+      "type": "object"
+    },
+    "NodeApiOperationResponse": {
+      "description": "Versioned response for operation submission and lookup.",
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/NodeOperationSnapshot"
+        },
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "server_time",
+        "operation"
       ],
       "type": "object"
     },
@@ -1057,6 +1135,17 @@
     "NodeCommandHttpRequest": {
       "description": "Versioned request DTO for `POST /api/node/commands`.\n\nThe embedded `NodeCommandRequest` is forwarded unchanged to\n`NodeCommandBus`; the adapter does not inspect or mutate node state.",
       "properties": {
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdempotencyKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required for mutating commands. Reusing the key with the same command\nreturns the original operation; reusing it with another command is a\nconflict and never dispatches a second side effect."
+        },
         "request": {
           "$ref": "#/$defs/NodeCommandRequest"
         },
@@ -1710,6 +1799,38 @@
             "data"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "stage": {
+                  "type": "string"
+                },
+                "state": {
+                  "$ref": "#/$defs/OperationState"
+                }
+              },
+              "required": [
+                "operation_id",
+                "state",
+                "stage"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "operation_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1719,10 +1840,12 @@
         "schema_version_mismatch",
         "invalid_request",
         "not_found",
+        "operation_conflict",
         "resync_required",
         "backend_rejected",
         "backend_unavailable",
-        "contract_violation"
+        "contract_violation",
+        "internal"
       ],
       "type": "string"
     },
@@ -1776,6 +1899,9 @@
         "message"
       ],
       "type": "object"
+    },
+    "NodeId": {
+      "type": "string"
     },
     "NodeIdentitySnapshot": {
       "description": "Public node identity metadata. Secret key material must never enter this DTO.",
@@ -2207,6 +2333,87 @@
       ],
       "type": "string"
     },
+    "NodeOperationSnapshot": {
+      "description": "Transport projection of the shared `Operation` state machine. `result` is\nonly populated after a mutation reaches a terminal state; consumers must\ntreat a queued/running operation as in progress, never as successful.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/DomainActorRef"
+        },
+        "attempt": {
+          "description": "The number of execution attempts started. A retry uses the same\noperation id and idempotency key but starts a new attempt.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "kind": {
+          "$ref": "#/$defs/OperationKind"
+        },
+        "max_attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeCommandResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/OperationState"
+        },
+        "target": {
+          "$ref": "#/$defs/DomainObjectRef"
+        },
+        "updated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "operation_id",
+        "kind",
+        "actor",
+        "target",
+        "idempotency_key",
+        "state",
+        "stage",
+        "created_at_unix_ms",
+        "updated_at_unix_ms",
+        "attempt",
+        "max_attempts"
+      ],
+      "type": "object"
+    },
     "NodePeerProbeSnapshot": {
       "properties": {
         "endpoint": {
@@ -2409,6 +2616,7 @@
             "unavailable",
             "permission_denied",
             "cancelled",
+            "timed_out",
             "internal"
           ],
           "type": "string"
@@ -3155,6 +3363,141 @@
         }
       ]
     },
+    "ObjectKind": {
+      "enum": [
+        "node",
+        "network",
+        "membership",
+        "group",
+        "security_policy",
+        "traffic_policy",
+        "capability",
+        "exit_grant",
+        "coordinator_term",
+        "file_share",
+        "operation",
+        "audit"
+      ],
+      "type": "string"
+    },
+    "OperationError": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message_key": {
+          "type": "string"
+        },
+        "object": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DomainObjectRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "partial_changes": {
+          "default": [],
+          "description": "Cancellation is not the same as having no side effects.",
+          "items": {
+            "$ref": "#/$defs/DomainObjectRef"
+          },
+          "type": "array"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message_key",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "OperationId": {
+      "type": "string"
+    },
+    "OperationKind": {
+      "enum": [
+        "node_start",
+        "node_stop",
+        "node_restart",
+        "node_cleanup",
+        "network_create",
+        "network_apply",
+        "network_leave",
+        "membership_approve",
+        "membership_reject",
+        "membership_remove",
+        "policy_test",
+        "policy_apply",
+        "policy_rollback",
+        "traffic_rules_apply",
+        "network_role_update",
+        "client_blacklist_update",
+        "network_allocation_update",
+        "capability_enable",
+        "capability_disable",
+        "exit_select",
+        "exit_revoke",
+        "coordinator_candidates_update",
+        "coordinator_recover",
+        "file_share_update",
+        "file_upload_start",
+        "file_download_start",
+        "owner_passkey_register",
+        "owner_passkey_revoke",
+        "certificate_reload"
+      ],
+      "type": "string"
+    },
+    "OperationRecovery": {
+      "properties": {
+        "hint_key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "hint_key"
+      ],
+      "type": "object"
+    },
+    "OperationState": {
+      "enum": [
+        "queued",
+        "running",
+        "waiting_for_reauth",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
     "UiMode": {
       "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane. It remains available on\nheadless hosts as a server-only surface; the display environment only\ndecides whether a browser window can also be opened. `WebUi` must never be\nrepresented as the native `Gpui` surface.",
       "enum": [
@@ -3216,6 +3559,9 @@
     "api_object_response": {
       "$ref": "#/$defs/NodeApiObjectResponse"
     },
+    "api_operation_response": {
+      "$ref": "#/$defs/NodeApiOperationResponse"
+    },
     "api_snapshot_response": {
       "$ref": "#/$defs/NodeApiSnapshotResponse"
     },
@@ -3248,6 +3594,7 @@
     "api_snapshot_response",
     "api_manifest_response",
     "api_command_response",
+    "api_operation_response",
     "api_object_response",
     "api_error_response",
     "api_event"

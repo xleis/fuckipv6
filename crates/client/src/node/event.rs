@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+use fuckipv6_common::domain::OperationState;
+
 use super::{NodeEmbeddedServiceStatus, NodeLogLevel, NodeNetworkStatus, NodeRoutingMode};
 
 /// Ordered event delivered to every attached UI and control adapter.
@@ -46,6 +48,11 @@ pub enum NodeEventKind {
     CommandCompleted {
         request_id: u64,
         success: bool,
+    },
+    OperationChanged {
+        operation_id: String,
+        state: OperationState,
+        stage: String,
     },
 }
 

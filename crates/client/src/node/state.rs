@@ -620,6 +620,7 @@ pub enum NodeProblemCode {
     Unavailable,
     PermissionDenied,
     Cancelled,
+    TimedOut,
     /// The operation is valid but unavailable on this platform or host.
     Unsupported,
     Internal,

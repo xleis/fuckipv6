@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -372,10 +372,12 @@ public final class NodeContractV1 {
         SCHEMA_VERSION_MISMATCH("schema_version_mismatch"),
         INVALID_REQUEST("invalid_request"),
         NOT_FOUND("not_found"),
+        OPERATION_CONFLICT("operation_conflict"),
         RESYNC_REQUIRED("resync_required"),
         BACKEND_REJECTED("backend_rejected"),
         BACKEND_UNAVAILABLE("backend_unavailable"),
-        CONTRACT_VIOLATION("contract_violation");
+        CONTRACT_VIOLATION("contract_violation"),
+        INTERNAL("internal");
 
         private final String wireName;
 
@@ -541,6 +543,7 @@ public final class NodeContractV1 {
         UNAVAILABLE("unavailable"),
         PERMISSION_DENIED("permission_denied"),
         CANCELLED("cancelled"),
+        TIMED_OUT("timed_out"),
         INTERNAL("internal"),
         UNSUPPORTED("unsupported");
 
@@ -753,6 +756,120 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum ObjectKind {
+        NODE("node"),
+        NETWORK("network"),
+        MEMBERSHIP("membership"),
+        GROUP("group"),
+        SECURITY_POLICY("security_policy"),
+        TRAFFIC_POLICY("traffic_policy"),
+        CAPABILITY("capability"),
+        EXIT_GRANT("exit_grant"),
+        COORDINATOR_TERM("coordinator_term"),
+        FILE_SHARE("file_share"),
+        OPERATION("operation"),
+        AUDIT("audit");
+
+        private final String wireName;
+
+        ObjectKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ObjectKind fromWireName(String value) {
+            for (ObjectKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ObjectKind wire value: " + value);
+        }
+    }
+
+    public enum OperationKind {
+        NODE_START("node_start"),
+        NODE_STOP("node_stop"),
+        NODE_RESTART("node_restart"),
+        NODE_CLEANUP("node_cleanup"),
+        NETWORK_CREATE("network_create"),
+        NETWORK_APPLY("network_apply"),
+        NETWORK_LEAVE("network_leave"),
+        MEMBERSHIP_APPROVE("membership_approve"),
+        MEMBERSHIP_REJECT("membership_reject"),
+        MEMBERSHIP_REMOVE("membership_remove"),
+        POLICY_TEST("policy_test"),
+        POLICY_APPLY("policy_apply"),
+        POLICY_ROLLBACK("policy_rollback"),
+        TRAFFIC_RULES_APPLY("traffic_rules_apply"),
+        NETWORK_ROLE_UPDATE("network_role_update"),
+        CLIENT_BLACKLIST_UPDATE("client_blacklist_update"),
+        NETWORK_ALLOCATION_UPDATE("network_allocation_update"),
+        CAPABILITY_ENABLE("capability_enable"),
+        CAPABILITY_DISABLE("capability_disable"),
+        EXIT_SELECT("exit_select"),
+        EXIT_REVOKE("exit_revoke"),
+        COORDINATOR_CANDIDATES_UPDATE("coordinator_candidates_update"),
+        COORDINATOR_RECOVER("coordinator_recover"),
+        FILE_SHARE_UPDATE("file_share_update"),
+        FILE_UPLOAD_START("file_upload_start"),
+        FILE_DOWNLOAD_START("file_download_start"),
+        OWNER_PASSKEY_REGISTER("owner_passkey_register"),
+        OWNER_PASSKEY_REVOKE("owner_passkey_revoke"),
+        CERTIFICATE_RELOAD("certificate_reload");
+
+        private final String wireName;
+
+        OperationKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static OperationKind fromWireName(String value) {
+            for (OperationKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown OperationKind wire value: " + value);
+        }
+    }
+
+    public enum OperationState {
+        QUEUED("queued"),
+        RUNNING("running"),
+        WAITING_FOR_REAUTH("waiting_for_reauth"),
+        SUCCEEDED("succeeded"),
+        FAILED("failed"),
+        CANCELLED("cancelled"),
+        TIMED_OUT("timed_out");
+
+        private final String wireName;
+
+        OperationState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static OperationState fromWireName(String value) {
+            for (OperationState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown OperationState wire value: " + value);
+        }
+    }
+
     public enum UiMode {
         GPUI("gpui"),
         WEB_UI("web_ui"),
@@ -804,6 +921,28 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for DomainActorRef. */
+    public static final class DomainActorRef {
+        public final String display;
+        public final String node_id;
+
+        public DomainActorRef(String display, String node_id) {
+            this.display = display;
+            this.node_id = node_id;
+        }
+    }
+
+    /** DTO for DomainObjectRef. */
+    public static final class DomainObjectRef {
+        public final String id;
+        public final ObjectKind kind;
+
+        public DomainObjectRef(String id, ObjectKind kind) {
+            this.id = id;
+            this.kind = kind;
+        }
+    }
+
     /** DTO for ExitNodeCapabilities. */
     public static final class ExitNodeCapabilities {
         public final Boolean cleanup;
@@ -829,12 +968,14 @@ public final class NodeContractV1 {
 
     /** DTO for NodeApiCommandResponse. */
     public static final class NodeApiCommandResponse {
+        public final NodeOperationSnapshot operation;
         public final Long request_id;
         public final NodeCommandResult result;
         public final Integer schema_version;
         public final String server_time;
 
-        public NodeApiCommandResponse(Long request_id, NodeCommandResult result, Integer schema_version, String server_time) {
+        public NodeApiCommandResponse(NodeOperationSnapshot operation, Long request_id, NodeCommandResult result, Integer schema_version, String server_time) {
+            this.operation = operation;
             this.request_id = request_id;
             this.result = result;
             this.schema_version = schema_version;
@@ -895,6 +1036,21 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeApiOperationResponse. */
+    public static final class NodeApiOperationResponse {
+        public final NodeOperationSnapshot operation;
+        public final Long request_id;
+        public final Integer schema_version;
+        public final String server_time;
+
+        public NodeApiOperationResponse(NodeOperationSnapshot operation, Long request_id, Integer schema_version, String server_time) {
+            this.operation = operation;
+            this.request_id = request_id;
+            this.schema_version = schema_version;
+            this.server_time = server_time;
+        }
+    }
+
     /** DTO for NodeApiSnapshotResponse. */
     public static final class NodeApiSnapshotResponse {
         public final Long request_id;
@@ -935,9 +1091,9 @@ public final class NodeContractV1 {
     /** DTO for NodeCapabilitySnapshot. */
     public static final class NodeCapabilitySnapshot {
         public final CapabilityKind kind;
-        public final CapabilityState state;
+        public final String state;
 
-        public NodeCapabilitySnapshot(CapabilityKind kind, CapabilityState state) {
+        public NodeCapabilitySnapshot(CapabilityKind kind, String state) {
             this.kind = kind;
             this.state = state;
         }
@@ -982,10 +1138,12 @@ public final class NodeContractV1 {
 
     /** DTO for NodeCommandHttpRequest. */
     public static final class NodeCommandHttpRequest {
+        public final String idempotency_key;
         public final NodeCommandRequest request;
         public final Integer schema_version;
 
-        public NodeCommandHttpRequest(NodeCommandRequest request, Integer schema_version) {
+        public NodeCommandHttpRequest(String idempotency_key, NodeCommandRequest request, Integer schema_version) {
+            this.idempotency_key = idempotency_key;
             this.request = request;
             this.schema_version = schema_version;
         }
@@ -1113,6 +1271,7 @@ public final class NodeContractV1 {
         public final NodeApiEvent api_event;
         public final NodeApiManifestResponse api_manifest_response;
         public final NodeApiObjectResponse api_object_response;
+        public final NodeApiOperationResponse api_operation_response;
         public final NodeApiSnapshotResponse api_snapshot_response;
         public final NodeCommandHttpRequest command_request;
         public final NodeCommandHttpResponse command_response;
@@ -1121,12 +1280,13 @@ public final class NodeContractV1 {
         public final NodeSnapshotResponse snapshot_response;
         public final NodeWsMessage websocket_message;
 
-        public NodeHttpContract(NodeApiCommandResponse api_command_response, NodeApiErrorResponse api_error_response, NodeApiEvent api_event, NodeApiManifestResponse api_manifest_response, NodeApiObjectResponse api_object_response, NodeApiSnapshotResponse api_snapshot_response, NodeCommandHttpRequest command_request, NodeCommandHttpResponse command_response, NodeHttpErrorResponse error_response, NodeManifestResponse manifest_response, NodeSnapshotResponse snapshot_response, NodeWsMessage websocket_message) {
+        public NodeHttpContract(NodeApiCommandResponse api_command_response, NodeApiErrorResponse api_error_response, NodeApiEvent api_event, NodeApiManifestResponse api_manifest_response, NodeApiObjectResponse api_object_response, NodeApiOperationResponse api_operation_response, NodeApiSnapshotResponse api_snapshot_response, NodeCommandHttpRequest command_request, NodeCommandHttpResponse command_response, NodeHttpErrorResponse error_response, NodeManifestResponse manifest_response, NodeSnapshotResponse snapshot_response, NodeWsMessage websocket_message) {
             this.api_command_response = api_command_response;
             this.api_error_response = api_error_response;
             this.api_event = api_event;
             this.api_manifest_response = api_manifest_response;
             this.api_object_response = api_object_response;
+            this.api_operation_response = api_operation_response;
             this.api_snapshot_response = api_snapshot_response;
             this.command_request = command_request;
             this.command_response = command_response;
@@ -1227,9 +1387,9 @@ public final class NodeContractV1 {
     public static final class NodeNetworkAllocation {
         public final String ipv4_pool;
         public final String ipv6_pool;
-        public final NetworkMode mode;
+        public final String mode;
 
-        public NodeNetworkAllocation(String ipv4_pool, String ipv6_pool, NetworkMode mode) {
+        public NodeNetworkAllocation(String ipv4_pool, String ipv6_pool, String mode) {
             this.ipv4_pool = ipv4_pool;
             this.ipv6_pool = ipv6_pool;
             this.mode = mode;
@@ -1274,10 +1434,10 @@ public final class NodeContractV1 {
         public final List<String> proxy_cidrs;
         public final NodeRoutingMode routing_mode;
         public final String tun_name;
-        public final NetworkMode virtual_mode;
+        public final String virtual_mode;
         public final String virtual_network;
 
-        public NodeNetworkConfigSnapshot(AclAction acl_default_action, Boolean acl_enabled, Long acl_rule_count, String coordinator_url, List<String> direct_cidrs, String exit_node, Boolean exit_node_allow_lan_access, List<String> exit_node_allowed_clients, Boolean exit_node_enabled, String exit_node_region, Boolean identity_configured, Boolean log_file_configured, String log_level, Integer mtu, String network_name, Long p2p_connect_timeout_secs, Long p2p_heartbeat_interval_secs, Integer p2p_listen_port, String preferred_ipv4, String preferred_ipv6, List<String> proxy_cidrs, NodeRoutingMode routing_mode, String tun_name, NetworkMode virtual_mode, String virtual_network) {
+        public NodeNetworkConfigSnapshot(AclAction acl_default_action, Boolean acl_enabled, Long acl_rule_count, String coordinator_url, List<String> direct_cidrs, String exit_node, Boolean exit_node_allow_lan_access, List<String> exit_node_allowed_clients, Boolean exit_node_enabled, String exit_node_region, Boolean identity_configured, Boolean log_file_configured, String log_level, Integer mtu, String network_name, Long p2p_connect_timeout_secs, Long p2p_heartbeat_interval_secs, Integer p2p_listen_port, String preferred_ipv4, String preferred_ipv6, List<String> proxy_cidrs, NodeRoutingMode routing_mode, String tun_name, String virtual_mode, String virtual_network) {
             this.acl_default_action = acl_default_action;
             this.acl_enabled = acl_enabled;
             this.acl_rule_count = acl_rule_count;
@@ -1330,6 +1490,39 @@ public final class NodeContractV1 {
             this.traffic = traffic;
             this.tun_name = tun_name;
             this.uptime_secs = uptime_secs;
+        }
+    }
+
+    /** DTO for NodeOperationSnapshot. */
+    public static final class NodeOperationSnapshot {
+        public final DomainActorRef actor;
+        public final Long attempt;
+        public final Long created_at_unix_ms;
+        public final OperationError error;
+        public final String idempotency_key;
+        public final OperationKind kind;
+        public final Long max_attempts;
+        public final String operation_id;
+        public final NodeCommandResult result;
+        public final String stage;
+        public final OperationState state;
+        public final DomainObjectRef target;
+        public final Long updated_at_unix_ms;
+
+        public NodeOperationSnapshot(DomainActorRef actor, Long attempt, Long created_at_unix_ms, OperationError error, String idempotency_key, OperationKind kind, Long max_attempts, String operation_id, NodeCommandResult result, String stage, OperationState state, DomainObjectRef target, Long updated_at_unix_ms) {
+            this.actor = actor;
+            this.attempt = attempt;
+            this.created_at_unix_ms = created_at_unix_ms;
+            this.error = error;
+            this.idempotency_key = idempotency_key;
+            this.kind = kind;
+            this.max_attempts = max_attempts;
+            this.operation_id = operation_id;
+            this.result = result;
+            this.stage = stage;
+            this.state = state;
+            this.target = target;
+            this.updated_at_unix_ms = updated_at_unix_ms;
         }
     }
 
@@ -1407,12 +1600,12 @@ public final class NodeContractV1 {
 
     /** DTO for NodeProblem. */
     public static final class NodeProblem {
-        public final NodeProblemCode code;
+        public final String code;
         public final String message;
         public final String network_name;
         public final Boolean retryable;
 
-        public NodeProblem(NodeProblemCode code, String message, String network_name, Boolean retryable) {
+        public NodeProblem(String code, String message, String network_name, Boolean retryable) {
             this.code = code;
             this.message = message;
             this.network_name = network_name;
@@ -1544,7 +1737,7 @@ public final class NodeContractV1 {
     public static final class NodeUiAction {
         public final NodeUiAudit audit;
         public final NodeUiAvailability availability;
-        public final NodeUiBackendStatus backend_status;
+        public final String backend_status;
         public final String command;
         public final NodeUiConfirmation confirmation;
         public final List<NodeUiField> fields;
@@ -1552,7 +1745,7 @@ public final class NodeContractV1 {
         public final String label_key;
         public final NodePermission permission;
 
-        public NodeUiAction(NodeUiAudit audit, NodeUiAvailability availability, NodeUiBackendStatus backend_status, String command, NodeUiConfirmation confirmation, List<NodeUiField> fields, String id, String label_key, NodePermission permission) {
+        public NodeUiAction(NodeUiAudit audit, NodeUiAvailability availability, String backend_status, String command, NodeUiConfirmation confirmation, List<NodeUiField> fields, String id, String label_key, NodePermission permission) {
             this.audit = audit;
             this.availability = availability;
             this.backend_status = backend_status;
@@ -1655,6 +1848,38 @@ public final class NodeContractV1 {
             this.is_exit_node = is_exit_node;
             this.mode = mode;
             this.network_name = network_name;
+        }
+    }
+
+    /** DTO for OperationError. */
+    public static final class OperationError {
+        public final String code;
+        public final String message_key;
+        public final DomainObjectRef object;
+        public final Map<String, Object> params;
+        public final List<DomainObjectRef> partial_changes;
+        public final OperationRecovery recovery;
+        public final Boolean retryable;
+
+        public OperationError(String code, String message_key, DomainObjectRef object, Map<String, Object> params, List<DomainObjectRef> partial_changes, OperationRecovery recovery, Boolean retryable) {
+            this.code = code;
+            this.message_key = message_key;
+            this.object = object;
+            this.params = params;
+            this.partial_changes = partial_changes;
+            this.recovery = recovery;
+            this.retryable = retryable;
+        }
+    }
+
+    /** DTO for OperationRecovery. */
+    public static final class OperationRecovery {
+        public final String hint_key;
+        public final String kind;
+
+        public OperationRecovery(String hint_key, String kind) {
+            this.hint_key = hint_key;
+            this.kind = kind;
         }
     }
 
@@ -2294,6 +2519,27 @@ public final class NodeContractV1 {
                 }
             }
         }
+
+        public static final class OperationChanged extends NodeEventKind {
+            public final OperationChangedData data;
+
+            public OperationChanged(OperationChangedData data) {
+                super("operation_changed");
+                this.data = data;
+            }
+            /** DTO for OperationChangedData. */
+            public static final class OperationChangedData {
+                public final String operation_id;
+                public final String stage;
+                public final OperationState state;
+
+                public OperationChangedData(String operation_id, String stage, OperationState state) {
+                    this.operation_id = operation_id;
+                    this.stage = stage;
+                    this.state = state;
+                }
+            }
+        }
     }
 
     /** Tagged union DTO for NodeNetworkSelection. */
@@ -2363,11 +2609,11 @@ public final class NodeContractV1 {
         }
 
         public static final class Resync extends NodeWsMessage {
-            public final NodeWsResyncReason reason;
+            public final String reason;
             public final Integer schema_version;
             public final NodeSnapshot snapshot;
 
-            public Resync(NodeWsResyncReason reason, Integer schema_version, NodeSnapshot snapshot) {
+            public Resync(String reason, Integer schema_version, NodeSnapshot snapshot) {
                 super("resync");
                 this.reason = reason;
                 this.schema_version = schema_version;

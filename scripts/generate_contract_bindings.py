@@ -380,7 +380,21 @@ def java_value_type(schema: Any, definitions: dict[str, dict[str, Any]]) -> str:
         name = reference[len(prefix) :]
         if name not in definitions:
             raise ContractError(f"schema reference targets unknown definition {name}")
-        return name
+        target = definitions[name]
+        # Alias definitions such as NodeId, OperationId, and IdempotencyKey
+        # are primitive strings in the wire schema. Only object, enum, and
+        # tagged-union definitions have generated Java classes; aliases must
+        # project to their underlying Java type or the binding will not compile.
+        if (
+            target.get("type") == "object"
+            or isinstance(target.get("enum"), list)
+            or any(
+                isinstance(variant, dict) and variant.get("type") == "object"
+                for variant in target.get("oneOf", [])
+            )
+        ):
+            return name
+        return java_value_type(target, definitions)
 
     if "const" in schema:
         value = schema["const"]

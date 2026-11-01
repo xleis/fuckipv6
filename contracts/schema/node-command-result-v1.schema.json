@@ -1106,6 +1106,7 @@
             "unavailable",
             "permission_denied",
             "cancelled",
+            "timed_out",
             "internal"
           ],
           "type": "string"

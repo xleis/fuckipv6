@@ -11,10 +11,10 @@ use serde_json::{json, Value};
 
 use super::{
     NodeApiCommandResponse, NodeApiErrorResponse, NodeApiEvent, NodeApiManifestResponse,
-    NodeApiObjectResponse, NodeApiSnapshotResponse, NodeCommand, NodeCommandHttpRequest,
-    NodeCommandHttpResponse, NodeCommandKind, NodeCommandRequest, NodeCommandResult, NodeEvent,
-    NodeHttpErrorResponse, NodeManifestResponse, NodeSnapshotResponse, NodeUiManifest,
-    NodeWsMessage,
+    NodeApiObjectResponse, NodeApiOperationResponse, NodeApiSnapshotResponse, NodeCommand,
+    NodeCommandHttpRequest, NodeCommandHttpResponse, NodeCommandKind, NodeCommandRequest,
+    NodeCommandResult, NodeEvent, NodeHttpErrorResponse, NodeManifestResponse,
+    NodeSnapshotResponse, NodeUiManifest, NodeWsMessage,
 };
 
 /// Wire-contract version shared by every generated node artifact.
@@ -41,6 +41,7 @@ struct NodeHttpContract {
     api_snapshot_response: NodeApiSnapshotResponse,
     api_manifest_response: NodeApiManifestResponse,
     api_command_response: NodeApiCommandResponse,
+    api_operation_response: NodeApiOperationResponse,
     api_object_response: NodeApiObjectResponse,
     api_error_response: NodeApiErrorResponse,
     api_event: NodeApiEvent,

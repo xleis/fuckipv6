@@ -16,6 +16,16 @@ export type CapabilityState = "disabled" | "starting" | "enabled" | "degraded" |
 
 export type DisplayEnvironment = "linux_x11" | "linux_wayland" | "windows_desktop" | "macos_desktop" | "headless";
 
+export type DomainActorRef = {
+  "display": string;
+  "node_id": NodeId;
+};
+
+export type DomainObjectRef = {
+  "id": string;
+  "kind": ObjectKind;
+};
+
 export type ExitNodeCapabilities = {
   "cleanup": boolean;
   "ipv4_forwarding": boolean;
@@ -31,13 +41,16 @@ export type ExitNodePlatform = "linux" | "windows" | "macos" | "other";
 
 export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_required" | "routing_tool_unavailable" | "iptables_unavailable" | "ipv4_forwarding_unavailable";
 
+export type IdempotencyKey = string;
+
 export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
 
 export type NodeAccessModel = "trusted_control_plane";
 
 export type NodeApiCommandResponse = {
+  "operation"?: NodeOperationSnapshot | null;
   "request_id": number;
-  "result": NodeCommandResult;
+  "result"?: NodeCommandResult | null;
   "schema_version": number;
   "server_time": string;
 };
@@ -105,6 +118,13 @@ export type NodeApiObject = {
 
 export type NodeApiObjectResponse = {
   "object": NodeApiObject;
+  "request_id": number;
+  "schema_version": number;
+  "server_time": string;
+};
+
+export type NodeApiOperationResponse = {
+  "operation": NodeOperationSnapshot;
   "request_id": number;
   "schema_version": number;
   "server_time": string;
@@ -227,6 +247,7 @@ export type NodeCommand = {
 };
 
 export type NodeCommandHttpRequest = {
+  "idempotency_key"?: IdempotencyKey | null;
   "request": NodeCommandRequest;
   "schema_version": number;
 };
@@ -372,6 +393,13 @@ export type NodeEventKind = {
   "success": boolean;
 };
   "type": "command_completed";
+} | {
+  "data": {
+  "operation_id": string;
+  "stage": string;
+  "state": OperationState;
+};
+  "type": "operation_changed";
 };
 
 export type NodeHttpContract = {
@@ -380,6 +408,7 @@ export type NodeHttpContract = {
   "api_event": NodeApiEvent;
   "api_manifest_response": NodeApiManifestResponse;
   "api_object_response": NodeApiObjectResponse;
+  "api_operation_response": NodeApiOperationResponse;
   "api_snapshot_response": NodeApiSnapshotResponse;
   "command_request": NodeCommandHttpRequest;
   "command_response": NodeCommandHttpResponse;
@@ -389,7 +418,7 @@ export type NodeHttpContract = {
   "websocket_message": NodeWsMessage;
 };
 
-export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "not_found" | "resync_required" | "backend_rejected" | "backend_unavailable" | "contract_violation";
+export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "not_found" | "operation_conflict" | "resync_required" | "backend_rejected" | "backend_unavailable" | "contract_violation" | "internal";
 
 export type NodeHttpErrorResponse = {
   "code": NodeHttpErrorCode;
@@ -399,6 +428,8 @@ export type NodeHttpErrorResponse = {
   "schema_version": number;
   "supported_schema_version"?: number | null;
 };
+
+export type NodeId = string;
 
 export type NodeIdentitySnapshot = {
   "display_name"?: string | null;
@@ -494,6 +525,22 @@ export type NodeNetworkSnapshot = {
 
 export type NodeNetworkStatus = "offline" | "connecting" | "online" | "degraded" | "stopping" | "failed";
 
+export type NodeOperationSnapshot = {
+  "actor": DomainActorRef;
+  "attempt": number;
+  "created_at_unix_ms": number;
+  "error"?: OperationError | null;
+  "idempotency_key": IdempotencyKey;
+  "kind": OperationKind;
+  "max_attempts": number;
+  "operation_id": OperationId;
+  "result"?: NodeCommandResult | null;
+  "stage": string;
+  "state": OperationState;
+  "target": DomainObjectRef;
+  "updated_at_unix_ms": number;
+};
+
 export type NodePeerProbeSnapshot = {
   "endpoint"?: string | null;
   "p2p_active": boolean;
@@ -539,7 +586,7 @@ export type NodeProblem = {
   "retryable": boolean;
 };
 
-export type NodeProblemCode = "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "internal" | "unsupported";
+export type NodeProblemCode = "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "timed_out" | "internal" | "unsupported";
 
 export type NodeResidualCleanupResult = {
   "cleaned_networks": Array<string>;
@@ -686,6 +733,29 @@ export type NodeWsMessage = {
 };
 
 export type NodeWsResyncReason = "lagged" | "revision_gap";
+
+export type ObjectKind = "node" | "network" | "membership" | "group" | "security_policy" | "traffic_policy" | "capability" | "exit_grant" | "coordinator_term" | "file_share" | "operation" | "audit";
+
+export type OperationError = {
+  "code": string;
+  "message_key": string;
+  "object"?: DomainObjectRef | null;
+  "params"?: Record<string, string>;
+  "partial_changes"?: Array<DomainObjectRef>;
+  "recovery"?: OperationRecovery | null;
+  "retryable": boolean;
+};
+
+export type OperationId = string;
+
+export type OperationKind = "node_start" | "node_stop" | "node_restart" | "node_cleanup" | "network_create" | "network_apply" | "network_leave" | "membership_approve" | "membership_reject" | "membership_remove" | "policy_test" | "policy_apply" | "policy_rollback" | "traffic_rules_apply" | "network_role_update" | "client_blacklist_update" | "network_allocation_update" | "capability_enable" | "capability_disable" | "exit_select" | "exit_revoke" | "coordinator_candidates_update" | "coordinator_recover" | "file_share_update" | "file_upload_start" | "file_download_start" | "owner_passkey_register" | "owner_passkey_revoke" | "certificate_reload";
+
+export type OperationRecovery = {
+  "hint_key": string;
+  "kind": string;
+};
+
+export type OperationState = "queued" | "running" | "waiting_for_reauth" | "succeeded" | "failed" | "cancelled" | "timed_out";
 
 export type UiMode = "gpui" | "web_ui" | "headless";
 

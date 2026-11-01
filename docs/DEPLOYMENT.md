@@ -48,7 +48,7 @@
 - 建议具有稳定的公网 IPv4/IPv6 地址或可转发端口；
 - 开放 TCP `6666`（WebSocket 信令）；
 - 开放 UDP `6667`（QUIC 中继）；
-- WebUI 默认只监听回环地址 `127.0.0.1:8080`，不应为远程管理直接开放到公网；
+- WebUI 默认只监听回环地址 `127.0.0.1:8080`；公网管理必须使用内置 HTTPS 或受信 TLS 反向代理；
 - 如果网络服务位于 NAT 后，应配置 TCP/UDP 端口映射。
 
 IPv6 普及后，普通成员之间可以优先使用公网 IPv6 直连；但信令、NAT 穿透和中继仍可能需要可达端点。不要把“每个设备都有公网 IPv6”当作所有网络环境都已成立的假设。
@@ -219,47 +219,67 @@ headless 节点默认只在本机回环地址提供 WebUI：
 http://127.0.0.1:8080
 ```
 
-远程管理优先使用 SSH 隧道：
+本机管理仍优先使用回环访问或 SSH 隧道：
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 user@node
 ```
 
-需要在受控网络中直接监听时，必须显式设置全部危险开关与认证变量：
+生产环境如需公网访问，只能在以下两种互斥方案中选择一种：
+
+1. WebUI 使用内置 TLS 直接提供 HTTPS；
+2. WebUI 仅监听回环，由受信 TLS 反向代理终止 HTTPS。
+
+禁止把明文 HTTP WebUI 直接暴露到公网。
+
+### 直接 HTTPS
+
+直接 HTTPS 时必须同时设置证书、私钥和公网 origin。需要远程管理时还应配置认证变量：
 
 ```bash
 export FUCKIPV6_WEBUI_BIND=0.0.0.0       # IPv6 可用 ::
 export FUCKIPV6_WEBUI_ALLOW_REMOTE=1
+export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://node.example.com
+export FUCKIPV6_WEBUI_TLS_CERT=/etc/fuckipv6/tls/fullchain.pem
+export FUCKIPV6_WEBUI_TLS_KEY=/etc/fuckipv6/tls/privkey.pem
 export FUCKIPV6_WEBUI_USERNAME=admin
 export FUCKIPV6_WEBUI_PASSWORD='使用足够长的随机密码'
 export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
 ```
 
-- 非回环监听缺少 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 或非空密码时，节点拒绝启动；
-- 设置 `FUCKIPV6_WEBUI_BIND=::1` 可显式使用 IPv6 回环；设为 `::` 属于非回环危险监听；
-- `/`、`/assets/webui.css` 和 `/api/auth/login` 可匿名访问，其余 REST API 与 `/ws` 需要有效 JWT；
-- REST API 使用 `Authorization: Bearer <token>`，浏览器 WebSocket 使用 `/ws?token=<token>`；认证失败返回 HTTP 401、`WWW-Authenticate: Bearer realm="fuckipv6-webui"` 和 JSON 错误；
-- `/api/auth/login` 按直连源 IP 和用户名独立计数；连续失败会触发指数退避并返回 HTTP 429 与 `Retry-After`，成功登录会清除该键的失败状态。进程内状态表最多保留 4096 项、15 分钟未活动后清理，不信任可伪造的 `X-Forwarded-For`；
-- 认证开启时，显式配置的 `FUCKIPV6_WEBUI_JWT_SECRET` 必须至少 32 字节且估计熵不低于 128 bit；应使用密码学随机源生成，不要使用可记忆短语。未显式配置时节点会生成进程级随机密钥，重启后既有 Token 失效；
-- WebUI/API 没有内置 TLS，远程使用时必须置于 TLS 反向代理或受控管理网之后；
-- 回环模式默认免密，本机同权限进程仍可访问控制面；需要本机认证时也可仅设置 `FUCKIPV6_WEBUI_PASSWORD`。
+- `FUCKIPV6_WEBUI_TLS_CERT` 与 `FUCKIPV6_WEBUI_TLS_KEY` 必须同时设置；任一缺失、PEM 损坏或私钥不匹配都会使节点拒绝启动；
+- 证书必须当前有效，叶证书 SAN 必须包含公网 origin 的 DNS 主机名；存在 EKU 时必须允许 `serverAuth`；
+- 公网 origin 必须是 `https://` DNS 主机名，不能包含用户信息、路径、query、fragment、`localhost` 或 IP 地址；
+- 证书/私钥应只允许 `root` 或专用服务用户读取，例如 `root:root`、目录 `0700`、文件 `0600`；运行用户必须保留可读权限；
+- 直接 TLS 与 `FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS` 互斥；直接 TLS 会拒绝 `Forwarded`、`X-Forwarded-For`、`X-Forwarded-Host`、`X-Forwarded-Proto` 和 `X-Real-IP`；
+- 证书续期失败或新证书不匹配时，下次启动会失败关闭，不会回退到 HTTP；
+- 未配置密码时，非回环直接 TLS 只开放一次性所有者认领页与认领 API，普通管理 API 返回 HTTP 401。需要完成初始化后的远程管理时必须配置密码或等价的正式所有者会话。
 
-### 公网首次所有者认领
+非回环监听必须显式设置 `FUCKIPV6_WEBUI_ALLOW_REMOTE=1`。除一次性直接 TLS 所有者认领外，还必须配置非空密码；否则节点拒绝启动。
 
-公网认领必须由受信 TLS 反向代理转发到仍只监听回环的 WebUI。启用时同时设置：
+### 受信反向代理
+
+反向代理方案要求 WebUI 仍只监听回环，由代理连接 `127.0.0.1:8080`：
 
 ```bash
-export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://relay.xlei.cc
+export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://relay.example.com
 export FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 ```
 
-- 不要设置 `FUCKIPV6_WEBUI_BIND=0.0.0.0` 或 `::`；反向代理应连接 `127.0.0.1:8080`，由代理终止 TLS；
+- 不要设置 `FUCKIPV6_WEBUI_BIND=0.0.0.0` 或 `::`；反向代理公网模式禁止明文监听公网；
 - `FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS` 只能填写实际代理地址，不能使用 `0.0.0.0/0` 或 `::/0`；
-- 代理必须覆盖而不是追加转发头：`Host` 与 `X-Forwarded-Host` 必须等于配置 origin 的主机，`X-Forwarded-Proto` 必须为 `https`，`X-Forwarded-For` 必须只含一个真实客户端 IP；POST 还必须带完全匹配的 `Origin`；
-- 只要出现 `Forwarded` 或 `X-Real-IP`，公网认领即拒绝，避免不同代理层对来源产生歧义；
-- 不接受 HTTP 降级，也不允许 WebUI 直接以明文 HTTP 监听公网；
+- 代理必须覆盖而不是追加 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto` 和 `X-Forwarded-For`；`Host` 与 `X-Forwarded-Host` 必须等于配置 origin 的主机，`X-Forwarded-Proto` 必须为 `https`；
+- `X-Forwarded-For` 必须只包含一个由代理覆盖的真实客户端 IP；`Forwarded`、`X-Real-IP` 和重复转发头都会被拒绝；
+- POST 必须带与配置 origin 完全匹配的 `Origin`；来源不明的跨站请求失败关闭；
+- 不接受 HTTP 降级；代理到 WebUI 的链路只能位于受信回环或受控管理网。
+
+### 所有者认领与安全响应头
+
 - 一次性初始化码只能放在 JSON 请求体中，禁止放入 URL、query、Referer 或日志；成功后公网认领入口永久返回 `410 Gone`；
-- 所有者初始化请求的最终 HTTP 状态写入配置目录下的 `owner-security-audit.jsonl`。文件权限为 `0600`，仅记录通道、来源 IP、方法、路径、状态和固定 outcome，不记录请求体、请求头、初始化码、恢复码或 Passkey；审计写入失败时控制面失败关闭。
+- 所有者初始化请求的最终 HTTP 状态写入配置目录下的 `owner-security-audit.jsonl`。文件权限为 `0600`，仅记录通道、来源 IP、方法、路径、状态和固定 outcome，不记录请求体、请求头、初始化码、恢复码或 Passkey；审计写入失败时控制面失败关闭；
+- 已验证的 HTTPS 边界返回 `Strict-Transport-Security: max-age=31536000; includeSubDomains`；本机 HTTP 或未通过来源校验的请求不会误发 HSTS；
+- 生产 node surface 使用每次响应随机生成的 CSP nonce；脚本仅允许同源与对应 nonce，样式仅允许同源、对应 nonce 和运行时 `style` 属性；同时返回 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 与同源隔离响应头；
+- 旧的内嵌主界面仅作为迁移兼容路径，使用较宽松的 CSP；正式部署必须走 manifest 驱动 node surface，安全验收不以旧兼容页为准。
 
 本地 IPC 默认监听 `127.0.0.1:6668`，可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。由于 IPC 尚无认证握手，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 只表示显式确认危险意图，非回环地址仍会拒绝启动；远程操作请使用 SSH 隧道。
 
@@ -353,7 +373,7 @@ sudo find /var/backups/fuckipv6 -type f -mtime +30 -delete
 ### 网络暴露面
 
 - WebUI/API 默认只监听回环；远程监听必须显式开启危险开关并配置管理员密码，否则拒绝启动；
-- WebUI/API 没有内置 TLS，生产环境应使用 SSH 隧道、管理网或 TLS 终止反向代理，不应直接暴露到公网；
+- WebUI/API 支持内置 TLS；默认回环模式是 HTTP，公网暴露必须使用内置 HTTPS 或受信 TLS 终止反向代理，禁止明文直接暴露；
 - IPC 默认只监听回环且没有认证协议，远程 IPC 始终 fail-closed；
 - 网络服务需开放的端口应只对预期成员地址开放；
 - TLS client/server、握手 Initiator/Responder 是协议角色，不是节点权限等级；
@@ -545,7 +565,7 @@ sudo ./scripts/test-lifecycle-cleanup-netns.sh
 - 云主机承担信令和 QUIC 中继服务角色；
 - 家庭和办公节点作为普通成员加入；
 - 通过防火墙限制信令和 WebUI 访问范围；
-- TLS 终止、反向代理和访问控制独立部署并审计。
+- 可直接启用内置 TLS，或由受信反向代理终止 TLS；两种边界都需独立配置和审计。
 
 ### 多网络节点
 

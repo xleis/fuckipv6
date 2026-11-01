@@ -26,7 +26,7 @@
 
 - TCP `6666`：WebSocket 信令；
 - UDP `6667`：QUIC 中继；
-- TCP `8080`：WebUI；生产环境应仅绑定可信网络或放在认证反向代理后。
+- TCP `8080`：WebUI；公网访问必须使用内置 TLS 或受信认证反向代理。
 
 ## 编译
 
@@ -103,15 +103,41 @@ fuckipv6 leave home           # 删除网络配置和该网络使用的身份材
 http://127.0.0.1:8080
 ```
 
-远程管理优先使用 SSH 隧道，不要直接把控制面暴露到公网：
+本机管理优先直接访问回环；远程管理可使用 SSH 隧道：
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 user@node
 ```
 
-随后在操作机打开 `http://127.0.0.1:8080`。如确需让 WebUI/API 监听非回环地址，必须同时设置 `FUCKIPV6_WEBUI_BIND`、`FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 和非空 `FUCKIPV6_WEBUI_PASSWORD`，否则节点拒绝启动；远程部署还应通过 TLS 反向代理或受控管理网提供传输保护。完整变量见[部署指南](DEPLOYMENT.md#运行-webui)。
+随后在操作机打开 `http://127.0.0.1:8080`。
 
-公网首次认领走受信 HTTPS 反向代理到回环 WebUI，而不是直接暴露 WebUI。设置 `FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://你的域名` 和 `FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS=代理CIDR`；代理必须覆盖 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto: https`、单个 `X-Forwarded-For`，并对 POST 保留匹配的 `Origin`。`Forwarded`、`X-Real-IP`、HTTP 降级都会被拒绝。初始化码只提交到 JSON 请求体，成功后入口永久关闭；详细限制见[公网首次所有者认领](DEPLOYMENT.md#公网首次所有者认领)。
+需要公网访问时，只能在以下两种互斥方案中选择一种：
+
+### 内置直接 HTTPS
+
+```bash
+export FUCKIPV6_WEBUI_BIND=0.0.0.0
+export FUCKIPV6_WEBUI_ALLOW_REMOTE=1
+export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://node.example.com
+export FUCKIPV6_WEBUI_TLS_CERT=/etc/fuckipv6/tls/fullchain.pem
+export FUCKIPV6_WEBUI_TLS_KEY=/etc/fuckipv6/tls/privkey.pem
+export FUCKIPV6_WEBUI_USERNAME=admin
+export FUCKIPV6_WEBUI_PASSWORD='使用足够长的随机密码'
+export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
+```
+
+证书必须当前有效、SAN 匹配公网域名、可供 `serverAuth` 使用，并与私钥匹配；配置错误时节点拒绝启动，不会回退到 HTTP。建议证书/私钥由 `root` 或专用服务用户独占读取，例如目录 `0700`、文件 `0600`，同时保证运行用户可读。
+
+### 受信 TLS 反向代理
+
+```bash
+export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://relay.example.com
+export FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+```
+
+WebUI 必须继续监听回环，代理应连接 `127.0.0.1:8080`。代理必须覆盖 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto: https` 和单个 `X-Forwarded-For`；POST 必须保留精确匹配的 `Origin`。`Forwarded`、`X-Real-IP`、重复转发头和 HTTP 降级都会被拒绝。直接 TLS 与可信代理 CIDR 不能同时配置。
+
+已验证 HTTPS 边界返回一年期 HSTS；生产 node surface 使用动态 CSP nonce，并返回 `X-Frame-Options: DENY`、`nosniff`、`no-referrer` 和同源隔离响应头。本机 HTTP 不返回 HSTS。完整变量、证书限制和代理配置见[部署指南](DEPLOYMENT.md#运行-webui)。
 
 IPC 默认监听 `127.0.0.1:6668`，也可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。IPC 当前没有认证协议，因此即使设置 `FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会允许非回环监听。
 

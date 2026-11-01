@@ -1,16 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
-use fuckipv6_common::i18n::{t, Locale};
+use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeCreateNetworkCommand,
-    NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection,
-    NodePhase, NodeProbePeerCommand, NodeRoutingMode, NodeSetNetworkRoleCommand, NodeSnapshot,
-    NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
-    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole,
+    NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase, NodeProbePeerCommand,
+    NodeRoutingMode, NodeSetNetworkRoleCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability,
+    NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
+    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
+use crate::ui::UiMode;
 
 /// Typed views supported by the native adapter. Keeping this closed set separate
 /// from page strings makes an unknown manifest page fail closed rather than
@@ -822,7 +824,7 @@ fn row(title: impl Into<String>, detail: impl Into<String>) -> RowModel {
 
 fn project_overview(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let primary_status = snapshot.primary_status();
     let identity = snapshot
@@ -838,32 +840,53 @@ fn project_overview(
                 identity.public_key_fingerprint
             )
         })
-        .unwrap_or_else(|| "尚未发布节点身份".into());
+        .unwrap_or_else(|| t(locale, "gpui.empty.node_identity").into());
     let problem = snapshot
         .last_error
         .as_ref()
-        .map(|problem| format!("{:?}: {}", problem.code, problem.message))
-        .unwrap_or_else(|| "无".into());
+        .map(|problem| {
+            format!(
+                "{:?}: {}",
+                problem.code,
+                t(locale, problem.code.message_key())
+            )
+        })
+        .unwrap_or_else(|| t(locale, "gpui.empty.node_problem").into());
     (
         vec![
-            metric("网络", snapshot.networks.len(), "NodeSnapshot.networks"),
-            metric("Peer", snapshot.peers.len(), "NodeSnapshot.peers"),
-            metric("Revision", snapshot.revision, "NodeSnapshot.revision"),
+            metric(
+                t(locale, "gpui.metric.networks"),
+                snapshot.networks.len(),
+                "NodeSnapshot.networks",
+            ),
+            metric(
+                t(locale, "gpui.metric.peers"),
+                snapshot.peers.len(),
+                "NodeSnapshot.peers",
+            ),
+            metric(
+                t(locale, "gpui.metric.revision"),
+                snapshot.revision,
+                "NodeSnapshot.revision",
+            ),
         ],
         vec![
             section(
-                "运行状态",
-                primary_status.detail_zh(),
-                vec![row(primary_status.label_zh(), primary_status.detail_zh())],
+                t(locale, "common.runtime_status"),
+                t(locale, primary_status.detail_key()),
+                vec![row(
+                    t(locale, primary_status.label_key()),
+                    t(locale, primary_status.detail_key()),
+                )],
             ),
             section(
-                "节点身份",
-                "尚未发布节点身份",
-                vec![row("当前身份", identity)],
+                t(locale, "gpui.section.node_identity"),
+                t(locale, "gpui.empty.node_identity"),
+                vec![row(t(locale, "gpui.row.current_identity"), identity)],
             ),
             section(
-                "最近问题",
-                "没有记录到节点问题",
+                t(locale, "gpui.section.last_problem"),
+                t(locale, "gpui.empty.node_problem"),
                 vec![row("last_error", problem)],
             ),
         ],
@@ -872,23 +895,32 @@ fn project_overview(
 
 fn project_networks(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .networks
         .iter()
         .map(|network| {
+            let status = t(locale, network_status_key(network.status));
+            let ipv6 = display_option(locale, network.assigned_ipv6);
+            let ipv4 = display_option(locale, network.assigned_ipv4);
+            let peers = network.peer_count.to_string();
+            let uptime = network.uptime_secs.to_string();
+            let roles = display_roles(locale, &network.roles);
             row(
                 network.name.clone(),
-                format!(
-                    "{:?} · TUN {} · IPv6 {} · IPv4 {} · {} peers · {}s · roles {:?}",
-                    network.status,
-                    network.tun_name,
-                    display_option(network.assigned_ipv6),
-                    display_option(network.assigned_ipv4),
-                    network.peer_count,
-                    network.uptime_secs,
-                    network.roles
+                tr(
+                    locale,
+                    "gpui.network_run_detail",
+                    &[
+                        ("status", status),
+                        ("tun", &network.tun_name),
+                        ("ipv6", &ipv6),
+                        ("ipv4", &ipv4),
+                        ("peers", &peers),
+                        ("uptime", &uptime),
+                        ("roles", &roles),
+                    ],
                 ),
             )
         })
@@ -898,63 +930,89 @@ fn project_networks(
         .networks
         .iter()
         .map(|network| {
+            let mtu = network.mtu.to_string();
+            let port = network.p2p_listen_port.to_string();
+            let routing = t(locale, routing_mode_key(network.routing_mode));
+            let exit = display_optional_text(locale, network.exit_node.as_deref());
             row(
                 network.network_name.clone(),
-                format!(
-                    "{} · TUN {} · MTU {} · P2P {} · {:?} · exit={}",
-                    network.coordinator_url,
-                    network.tun_name,
-                    network.mtu,
-                    network.p2p_listen_port,
-                    network.routing_mode,
-                    network.exit_node.as_deref().unwrap_or("none")
+                tr(
+                    locale,
+                    "gpui.network_config_detail",
+                    &[
+                        ("coordinator", &network.coordinator_url),
+                        ("tun", &network.tun_name),
+                        ("mtu", &mtu),
+                        ("port", &port),
+                        ("routing", routing),
+                        ("exit", &exit),
+                    ],
                 ),
             )
         })
         .collect::<Vec<_>>();
     (
         vec![metric(
-            "运行网络",
+            t(locale, "gpui.metric.running_networks"),
             snapshot.networks.len(),
             "NodeSnapshot.networks",
         )],
         vec![
-            section("运行网络", "没有运行中的网络", rows),
-            section("已保存配置", "没有已保存的网络配置", config_rows),
+            section(
+                t(locale, "gpui.section.running_networks"),
+                t(locale, "gpui.empty.running_networks"),
+                rows,
+            ),
+            section(
+                t(locale, "gpui.section.saved_config"),
+                t(locale, "gpui.empty.saved_config"),
+                config_rows,
+            ),
         ],
     )
 }
 
-fn project_peers(
-    snapshot: &NodeSnapshot,
-    _locale: Locale,
-) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_peers(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .peers
         .iter()
         .map(|peer| {
+            let online = display_bool(locale, peer.online);
+            let p2p = display_bool(locale, peer.p2p_active);
+            let healthy = display_bool(locale, peer.p2p_healthy);
+            let rtt = peer
+                .rtt_us
+                .map(|rtt| format!("{rtt}us"))
+                .unwrap_or_else(|| t(locale, "common.not_available").into());
+            let loss = format!("{:.3}", peer.loss_rate);
+            let endpoints = format!("{:?}", peer.endpoints);
             row(
                 format!("{} / {}", peer.network_name, peer.peer_id),
-                format!(
-                    "{} · online={} · p2p={} healthy={} · rtt={} · loss={:.3} · endpoints={:?}",
-                    peer.virtual_ipv6,
-                    peer.online,
-                    peer.p2p_active,
-                    peer.p2p_healthy,
-                    peer.rtt_us
-                        .map(|rtt| format!("{rtt}us"))
-                        .unwrap_or_else(|| "n/a".into()),
-                    peer.loss_rate,
-                    peer.endpoints
+                tr(
+                    locale,
+                    "gpui.peer_detail",
+                    &[
+                        ("address", &peer.virtual_ipv6.to_string()),
+                        ("online", online),
+                        ("p2p", p2p),
+                        ("healthy", healthy),
+                        ("rtt", &rtt),
+                        ("loss", &loss),
+                        ("endpoints", &endpoints),
+                    ],
                 ),
             )
         })
         .collect::<Vec<_>>();
     (
         vec![
-            metric("可见 Peer", snapshot.peers.len(), "NodeSnapshot.peers"),
             metric(
-                "P2P 健康",
+                t(locale, "gpui.metric.visible_peers"),
+                snapshot.peers.len(),
+                "NodeSnapshot.peers",
+            ),
+            metric(
+                t(locale, "gpui.metric.p2p_healthy"),
                 snapshot
                     .peers
                     .iter()
@@ -963,13 +1021,17 @@ fn project_peers(
                 "NodePeerSnapshot.p2p_healthy",
             ),
         ],
-        vec![section("Peer 列表", "当前没有 Peer", rows)],
+        vec![section(
+            t(locale, "gpui.section.peer_list"),
+            t(locale, "gpui.empty.peers"),
+            rows,
+        )],
     )
 }
 
 fn project_topology(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let sections = snapshot
         .networks
@@ -980,35 +1042,50 @@ fn project_topology(
                 .iter()
                 .filter(|peer| peer.network_name == network.name)
                 .map(|peer| {
+                    let transport = if peer.p2p_active {
+                        t(locale, "peer.transport.p2p")
+                    } else {
+                        t(locale, "gpui.value.p2p_unknown")
+                    };
                     row(
                         peer.peer_id.clone(),
-                        format!(
-                            "{} · {}",
-                            peer.virtual_ipv6,
-                            if peer.p2p_active {
-                                "P2P"
-                            } else {
-                                "relay/unknown"
-                            }
+                        tr(
+                            locale,
+                            "gpui.topology_peer_detail",
+                            &[
+                                ("address", &peer.virtual_ipv6.to_string()),
+                                ("transport", transport),
+                            ],
                         ),
                     )
                 })
                 .collect::<Vec<_>>();
             section(
-                format!("{} [{:?}]", network.name, network.status),
-                "此网络没有可见 Peer",
+                tr(
+                    locale,
+                    "gpui.network_status_title",
+                    &[
+                        ("network", &network.name),
+                        ("status", t(locale, network_status_key(network.status))),
+                    ],
+                ),
+                t(locale, "gpui.empty.network_peers"),
                 rows,
             )
         })
         .collect::<Vec<_>>();
     (
         vec![metric(
-            "拓扑边",
+            t(locale, "gpui.metric.topology_edges"),
             snapshot.peers.len(),
             "network-scoped peers",
         )],
         if sections.is_empty() {
-            vec![section("拓扑", "没有网络或 Peer，无法绘制拓扑", Vec::new())]
+            vec![section(
+                t(locale, "gpui.section.topology"),
+                t(locale, "gpui.empty.topology"),
+                Vec::new(),
+            )]
         } else {
             sections
         },
@@ -1017,25 +1094,29 @@ fn project_topology(
 
 fn project_traffic(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let network_rows = snapshot
         .networks
         .iter()
         .map(|network| {
+            let traffic = &network.traffic;
             row(
                 network.name.clone(),
-                format!(
-                    "TUN rx {} pkt / {} B · tx {} pkt / {} B · P2P rx {} pkt / {} B · tx {} pkt / {} B · errors {}",
-                    network.traffic.tun_rx_packets,
-                    network.traffic.tun_rx_bytes,
-                    network.traffic.tun_tx_packets,
-                    network.traffic.tun_tx_bytes,
-                    network.traffic.p2p_rx_packets,
-                    network.traffic.p2p_rx_bytes,
-                    network.traffic.p2p_tx_packets,
-                    network.traffic.p2p_tx_bytes,
-                    network.traffic.error_count
+                tr(
+                    locale,
+                    "gpui.traffic_detail",
+                    &[
+                        ("rx_packets", &traffic.tun_rx_packets.to_string()),
+                        ("rx_bytes", &traffic.tun_rx_bytes.to_string()),
+                        ("tx_packets", &traffic.tun_tx_packets.to_string()),
+                        ("tx_bytes", &traffic.tun_tx_bytes.to_string()),
+                        ("p2p_rx_packets", &traffic.p2p_rx_packets.to_string()),
+                        ("p2p_rx_bytes", &traffic.p2p_rx_bytes.to_string()),
+                        ("p2p_tx_packets", &traffic.p2p_tx_packets.to_string()),
+                        ("p2p_tx_bytes", &traffic.p2p_tx_bytes.to_string()),
+                        ("errors", &traffic.error_count.to_string()),
+                    ],
                 ),
             )
         })
@@ -1048,9 +1129,13 @@ fn project_traffic(
     });
     (
         vec![
-            metric("累计字节", total, "NodeTrafficSnapshot"),
             metric(
-                "错误计数",
+                t(locale, "gpui.metric.total_bytes"),
+                total,
+                "NodeTrafficSnapshot",
+            ),
+            metric(
+                t(locale, "gpui.metric.error_count"),
                 snapshot
                     .networks
                     .iter()
@@ -1059,31 +1144,46 @@ fn project_traffic(
                 "NodeTrafficSnapshot.error_count",
             ),
         ],
-        vec![section("按网络", "没有流量快照", network_rows)],
+        vec![section(
+            t(locale, "gpui.section.by_network"),
+            t(locale, "gpui.empty.traffic"),
+            network_rows,
+        )],
     )
 }
 
 fn project_routing(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .configuration
         .networks
         .iter()
         .map(|network| {
+            let routing = t(locale, routing_mode_key(network.routing_mode));
+            let exit = display_optional_text(locale, network.exit_node.as_deref());
+            let direct = format!("{:?}", network.direct_cidrs);
+            let proxy = format!("{:?}", network.proxy_cidrs);
+            let enabled = display_bool(locale, network.exit_node_enabled);
+            let allowed_clients = format!("{:?}", network.exit_node_allowed_clients);
+            let allow_lan = display_bool(locale, network.exit_node_allow_lan_access);
+            let region = display_optional_text(locale, network.exit_node_region.as_deref());
             row(
                 network.network_name.clone(),
-                format!(
-                    "{:?} · exit={} · direct={:?} · proxy={:?} · exit_enabled={} · allowed_clients={:?} · allow_lan={} · region={}",
-                    network.routing_mode,
-                    network.exit_node.as_deref().unwrap_or("none"),
-                    network.direct_cidrs,
-                    network.proxy_cidrs,
-                    network.exit_node_enabled,
-                    network.exit_node_allowed_clients,
-                    network.exit_node_allow_lan_access,
-                    network.exit_node_region.as_deref().unwrap_or("none")
+                tr(
+                    locale,
+                    "gpui.routing_detail",
+                    &[
+                        ("routing", routing),
+                        ("exit", &exit),
+                        ("direct", &direct),
+                        ("proxy", &proxy),
+                        ("enabled", enabled),
+                        ("allowed_clients", &allowed_clients),
+                        ("allow_lan", allow_lan),
+                        ("region", &region),
+                    ],
                 ),
             )
         })
@@ -1091,12 +1191,12 @@ fn project_routing(
     (
         vec![
             metric(
-                "配置网络",
+                t(locale, "gpui.metric.configured_networks"),
                 snapshot.configuration.networks.len(),
                 "NodeConfigurationSnapshot",
             ),
             metric(
-                "Exit Node 启用",
+                t(locale, "gpui.metric.exit_enabled"),
                 snapshot
                     .configuration
                     .networks
@@ -1106,35 +1206,56 @@ fn project_routing(
                 "exit_node_enabled",
             ),
         ],
-        vec![section("路由配置", "没有网络路由配置", rows)],
+        vec![section(
+            t(locale, "gpui.section.routing_config"),
+            t(locale, "gpui.empty.routing"),
+            rows,
+        )],
     )
 }
 
 fn project_exit_node(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let capabilities = &snapshot.exit_node_capabilities;
     let capability_rows = vec![row(
-        "平台能力",
-        format!(
-            "platform={} · supported={} · ipv4_forwarding={} · ipv6_forwarding={} · nat={} · cleanup={}",
-            exit_node_platform_label(capabilities.platform),
-            capabilities.supported,
-            capabilities.ipv4_forwarding,
-            capabilities.ipv6_forwarding,
-            capabilities.nat,
-            capabilities.cleanup
+        t(locale, "exit_node.row.platform"),
+        tr(
+            locale,
+            "gpui.exit_capability_detail",
+            &[
+                (
+                    "platform",
+                    exit_node_platform_label(locale, capabilities.platform),
+                ),
+                ("supported", display_bool(locale, capabilities.supported)),
+                (
+                    "ipv4_forwarding",
+                    display_bool(locale, capabilities.ipv4_forwarding),
+                ),
+                (
+                    "ipv6_forwarding",
+                    display_bool(locale, capabilities.ipv6_forwarding),
+                ),
+                ("nat", display_bool(locale, capabilities.nat)),
+                ("cleanup", display_bool(locale, capabilities.cleanup)),
+            ],
         ),
     )];
     let unsupported_rows = (!capabilities.unsupported_reasons.is_empty())
         .then(|| {
             row(
-                "不受支持的原因",
+                t(locale, "gpui.row.unsupported_reasons"),
                 capabilities
                     .unsupported_reasons
                     .iter()
-                    .map(|reason| format!("{reason:?}: {}", reason.message()))
+                    .map(|reason| {
+                        format!(
+                            "{reason:?}: {}",
+                            t(locale, exit_node_unsupported_reason_key(*reason))
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("; "),
             )
@@ -1146,15 +1267,23 @@ fn project_exit_node(
         .networks
         .iter()
         .map(|network| {
+            let enabled = display_bool(locale, network.exit_node_enabled);
+            let region = display_optional_text(locale, network.exit_node_region.as_deref());
+            let allow_lan = display_bool(locale, network.exit_node_allow_lan_access);
+            let allowed_clients = format!("{:?}", network.exit_node_allowed_clients);
+            let selected_exit = display_optional_text(locale, network.exit_node.as_deref());
             row(
                 network.network_name.clone(),
-                format!(
-                    "enabled={} · region={} · allow_lan={} · allowed_clients={:?} · selected_exit={}",
-                    network.exit_node_enabled,
-                    network.exit_node_region.as_deref().unwrap_or("none"),
-                    network.exit_node_allow_lan_access,
-                    network.exit_node_allowed_clients,
-                    network.exit_node.as_deref().unwrap_or("none")
+                tr(
+                    locale,
+                    "gpui.exit_config_detail",
+                    &[
+                        ("enabled", enabled),
+                        ("region", &region),
+                        ("allow_lan", allow_lan),
+                        ("allowed_clients", &allowed_clients),
+                        ("selected_exit", &selected_exit),
+                    ],
                 ),
             )
         })
@@ -1163,52 +1292,102 @@ fn project_exit_node(
         .networks
         .iter()
         .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
-        .map(|network| row(network.name.clone(), "当前节点承担 Exit Node 角色"))
+        .map(|network| row(network.name.clone(), t(locale, "gpui.value.exit_role")))
         .collect::<Vec<_>>();
     (
         vec![
-            metric("Exit 配置", rows.len(), "exit_node_enabled"),
-            metric("Exit 角色", role_rows.len(), "NodeNetworkRole::ExitNode"),
+            metric(
+                t(locale, "gpui.metric.exit_configs"),
+                rows.len(),
+                "exit_node_enabled",
+            ),
+            metric(
+                t(locale, "gpui.metric.exit_roles"),
+                role_rows.len(),
+                "NodeNetworkRole::ExitNode",
+            ),
         ],
         vec![
-            section("平台能力", "没有可用的 Exit Node 能力快照", capability_rows),
             section(
-                "能力限制",
-                "当前主机满足全部 Exit Node 能力要求",
+                t(locale, "gpui.section.platform_capabilities"),
+                t(locale, "gpui.empty.exit_capabilities"),
+                capability_rows,
+            ),
+            section(
+                t(locale, "gpui.section.capability_limits"),
+                t(locale, "gpui.empty.capability_limits"),
                 unsupported_rows,
             ),
-            section("Exit Node 配置", "没有 Exit Node 配置", rows),
-            section("当前角色", "当前没有网络承担 Exit Node 角色", role_rows),
+            section(
+                t(locale, "gpui.section.exit_config"),
+                t(locale, "gpui.empty.exit_config"),
+                rows,
+            ),
+            section(
+                t(locale, "gpui.section.current_roles"),
+                t(locale, "gpui.empty.exit_roles"),
+                role_rows,
+            ),
         ],
     )
 }
 
-fn exit_node_platform_label(platform: fuckipv6_common::ExitNodePlatform) -> &'static str {
+fn exit_node_platform_label(
+    locale: Locale,
+    platform: fuckipv6_common::ExitNodePlatform,
+) -> &'static str {
     use fuckipv6_common::ExitNodePlatform;
 
     match platform {
         ExitNodePlatform::Linux => "Linux",
         ExitNodePlatform::Windows => "Windows",
         ExitNodePlatform::Macos => "macOS",
-        ExitNodePlatform::Other => "Other",
+        ExitNodePlatform::Other => t(locale, "gpui.platform.other"),
     }
 }
 
-fn project_relay(
-    snapshot: &NodeSnapshot,
-    _locale: Locale,
-) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn exit_node_unsupported_reason_key(
+    reason: fuckipv6_common::ExitNodeUnsupportedReason,
+) -> &'static str {
+    use fuckipv6_common::ExitNodeUnsupportedReason;
+
+    match reason {
+        ExitNodeUnsupportedReason::PlatformNotLinux => {
+            "exit_node.unsupported_reason.platform_not_linux"
+        }
+        ExitNodeUnsupportedReason::PrivilegesRequired => {
+            "exit_node.unsupported_reason.privileges_required"
+        }
+        ExitNodeUnsupportedReason::RoutingToolUnavailable => {
+            "exit_node.unsupported_reason.routing_tool_unavailable"
+        }
+        ExitNodeUnsupportedReason::IptablesUnavailable => {
+            "exit_node.unsupported_reason.iptables_unavailable"
+        }
+        ExitNodeUnsupportedReason::Ipv4ForwardingUnavailable => {
+            "exit_node.unsupported_reason.ipv4_forwarding_unavailable"
+        }
+    }
+}
+
+fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let services = snapshot
         .embedded_services
         .iter()
         .map(|service| {
+            let status = t(locale, embedded_service_status_key(service.status));
+            let signaling = display_option(locale, service.signaling_addr);
+            let relay = display_option(locale, service.relay_addr);
             row(
                 service.network_name.clone(),
-                format!(
-                    "{:?} · signaling={} · relay={}",
-                    service.status,
-                    display_option(service.signaling_addr),
-                    display_option(service.relay_addr)
+                tr(
+                    locale,
+                    "gpui.embedded_service_detail",
+                    &[
+                        ("status", status),
+                        ("signal", &signaling),
+                        ("relay", &relay),
+                    ],
                 ),
             )
         })
@@ -1217,25 +1396,37 @@ fn project_relay(
         .networks
         .iter()
         .filter(|network| network.roles.contains(&NodeNetworkRole::Relay))
-        .map(|network| row(network.name.clone(), "当前节点承担 Relay 角色"))
+        .map(|network| row(network.name.clone(), t(locale, "gpui.value.relay_role")))
         .collect::<Vec<_>>();
     (
         vec![
             metric(
-                "内嵌服务",
+                t(locale, "gpui.metric.embedded_services"),
                 snapshot.embedded_services.len(),
                 "NodeSnapshot.embedded_services",
             ),
-            metric("Relay 角色", roles.len(), "NodeNetworkRole::Relay"),
+            metric(
+                t(locale, "gpui.metric.relay_roles"),
+                roles.len(),
+                "NodeNetworkRole::Relay",
+            ),
         ],
         vec![
-            section("内嵌信令/中继", "没有内嵌服务状态", services),
-            section("当前角色", "当前没有网络承担 Relay 角色", roles),
+            section(
+                t(locale, "gpui.section.embedded_services"),
+                t(locale, "gpui.empty.embedded_services"),
+                services,
+            ),
+            section(
+                t(locale, "gpui.section.current_roles"),
+                t(locale, "gpui.empty.relay_roles"),
+                roles,
+            ),
         ],
     )
 }
 
-fn project_logs(snapshot: &NodeSnapshot, _locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
+fn project_logs(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let rows = snapshot
         .logs
         .iter()
@@ -1247,8 +1438,16 @@ fn project_logs(snapshot: &NodeSnapshot, _locale: Locale) -> (Vec<MetricModel>, 
         })
         .collect::<Vec<_>>();
     (
-        vec![metric("日志缓冲", snapshot.logs.len(), "NodeSnapshot.logs")],
-        vec![section("有界日志", "没有 WARN/ERROR 日志", rows)],
+        vec![metric(
+            t(locale, "gpui.metric.log_buffer"),
+            snapshot.logs.len(),
+            "NodeSnapshot.logs",
+        )],
+        vec![section(
+            t(locale, "gpui.section.bounded_logs"),
+            t(locale, "gpui.empty.logs"),
+            rows,
+        )],
     )
 }
 
@@ -1262,14 +1461,17 @@ fn project_identity(
         .map(|identity| {
             vec![
                 row(
-                    "显示名",
+                    t(locale, "identity.row.display_name"),
                     identity
                         .display_name
                         .clone()
-                        .unwrap_or_else(|| "未设置".into()),
+                        .unwrap_or_else(|| t(locale, "gpui.value.unset").into()),
                 ),
-                row("节点 ID", identity.node_id.clone()),
-                row("公钥指纹", identity.public_key_fingerprint.clone()),
+                row(t(locale, "identity.row.node_id"), identity.node_id.clone()),
+                row(
+                    t(locale, "identity.row.fingerprint"),
+                    identity.public_key_fingerprint.clone(),
+                ),
             ]
         })
         .unwrap_or_default();
@@ -1280,23 +1482,38 @@ fn project_identity(
         .map(|network| {
             row(
                 network.network_name.clone(),
-                format!("identity_configured={}", network.identity_configured),
+                tr(
+                    locale,
+                    "gpui.identity_config_detail",
+                    &[(
+                        "configured",
+                        display_bool(locale, network.identity_configured),
+                    )],
+                ),
             )
         })
         .collect::<Vec<_>>();
     (
         vec![metric(
-            "身份状态",
+            t(locale, "gpui.metric.identity_status"),
             if snapshot.identity.is_some() {
-                "已发布"
+                t(locale, "gpui.value.published")
             } else {
-                "未发布"
+                t(locale, "gpui.value.unpublished")
             },
             "NodeSnapshot.identity",
         )],
         vec![
-            section("公开身份", "尚未发布节点身份", identity_rows),
-            section("网络身份配置", "没有网络配置", config_rows),
+            section(
+                t(locale, "gpui.section.public_identity"),
+                t(locale, "gpui.empty.node_identity"),
+                identity_rows,
+            ),
+            section(
+                t(locale, "gpui.section.network_identity_config"),
+                t(locale, "gpui.empty.identity_config"),
+                config_rows,
+            ),
             section(
                 t(locale, "owner_auth.identity.section_title"),
                 t(locale, "owner_auth.identity.section_empty"),
@@ -1321,28 +1538,40 @@ fn project_identity(
 
 fn project_settings(
     snapshot: &NodeSnapshot,
-    _locale: Locale,
+    locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let permission_rows = snapshot
         .permissions
         .permissions
         .iter()
-        .map(|permission| row(format!("{permission:?}"), "已授予"))
+        .map(|permission| {
+            row(
+                t(locale, permission_key(*permission)),
+                t(locale, "gpui.value.granted"),
+            )
+        })
         .collect::<Vec<_>>();
     let config_rows = snapshot
         .configuration
         .networks
         .iter()
         .map(|network| {
+            let log_file = display_bool(locale, network.log_file_configured);
+            let acl_enabled = display_bool(locale, network.acl_enabled);
+            let acl_default = t(locale, acl_action_key(network.acl_default_action));
+            let acl_rules = network.acl_rule_count.to_string();
             row(
                 network.network_name.clone(),
-                format!(
-                    "log_level={} · log_file={} · ACL enabled={} default={:?} rules={}",
-                    network.log_level,
-                    network.log_file_configured,
-                    network.acl_enabled,
-                    network.acl_default_action,
-                    network.acl_rule_count
+                tr(
+                    locale,
+                    "gpui.settings_network_detail",
+                    &[
+                        ("log_level", &network.log_level),
+                        ("log_file", log_file),
+                        ("acl_enabled", acl_enabled),
+                        ("acl_default", acl_default),
+                        ("acl_rules", &acl_rules),
+                    ],
                 ),
             )
         })
@@ -1351,13 +1580,19 @@ fn project_settings(
         .embedded_services
         .iter()
         .map(|service| {
+            let status = t(locale, embedded_service_status_key(service.status));
+            let signaling = display_option(locale, service.signaling_addr);
+            let relay = display_option(locale, service.relay_addr);
             row(
                 service.network_name.clone(),
-                format!(
-                    "{:?} · signaling={} · relay={}",
-                    service.status,
-                    display_option(service.signaling_addr),
-                    display_option(service.relay_addr)
+                tr(
+                    locale,
+                    "gpui.embedded_service_detail",
+                    &[
+                        ("status", status),
+                        ("signal", &signaling),
+                        ("relay", &relay),
+                    ],
                 ),
             )
         })
@@ -1365,37 +1600,158 @@ fn project_settings(
     (
         vec![
             metric(
-                "节点阶段",
-                format!("{:?}", snapshot.lifecycle.phase),
+                t(locale, "gpui.metric.node_phase"),
+                t(locale, phase_key(snapshot.lifecycle.phase)),
                 "NodeLifecycleSnapshot.phase",
             ),
             metric(
-                "访问模型",
-                format!("{:?}", snapshot.permissions.access_model),
+                t(locale, "gpui.metric.access_model"),
+                t(locale, access_model_key(snapshot.permissions.access_model)),
                 "NodePermissionSnapshot.access_model",
             ),
             metric(
-                "UI 模式",
+                t(locale, "gpui.metric.ui_mode"),
                 snapshot
                     .ui_mode
                     .as_ref()
-                    .map(|mode| format!("{:?}", mode.effective))
-                    .unwrap_or_else(|| "unknown".into()),
+                    .map(|mode| t(locale, ui_mode_key(mode.effective)))
+                    .unwrap_or_else(|| t(locale, "common.unknown")),
                 "NodeSnapshot.ui_mode",
             ),
         ],
         vec![
-            section("权限快照", "没有授予任何权限", permission_rows),
-            section("网络设置", "没有网络设置", config_rows),
-            section("内嵌服务", "没有内嵌服务状态", service_rows),
+            section(
+                t(locale, "gpui.section.permission_snapshot"),
+                t(locale, "gpui.empty.permissions"),
+                permission_rows,
+            ),
+            section(
+                t(locale, "gpui.section.network_settings"),
+                t(locale, "gpui.empty.network_settings"),
+                config_rows,
+            ),
+            section(
+                t(locale, "gpui.section.embedded_services"),
+                t(locale, "gpui.empty.embedded_services"),
+                service_rows,
+            ),
         ],
     )
 }
 
-fn display_option<T: std::fmt::Display>(value: Option<T>) -> String {
+fn network_status_key(status: NodeNetworkStatus) -> &'static str {
+    match status {
+        NodeNetworkStatus::Offline => "status.network.offline",
+        NodeNetworkStatus::Connecting => "status.network.connecting",
+        NodeNetworkStatus::Online => "status.network.online",
+        NodeNetworkStatus::Degraded => "status.network.degraded",
+        NodeNetworkStatus::Stopping => "status.network.stopping",
+        NodeNetworkStatus::Failed => "status.network.failed",
+    }
+}
+
+fn embedded_service_status_key(status: NodeEmbeddedServiceStatus) -> &'static str {
+    match status {
+        NodeEmbeddedServiceStatus::Starting => "status.service.starting",
+        NodeEmbeddedServiceStatus::Running => "status.service.running",
+        NodeEmbeddedServiceStatus::Stopping => "status.service.stopping",
+        NodeEmbeddedServiceStatus::Stopped => "status.service.stopped",
+        NodeEmbeddedServiceStatus::Failed => "status.service.failed",
+    }
+}
+
+fn role_key(role: NodeNetworkRole) -> &'static str {
+    match role {
+        NodeNetworkRole::Member => "choice.role.member",
+        NodeNetworkRole::Discovery => "choice.role.discovery",
+        NodeNetworkRole::Relay => "choice.role.relay",
+        NodeNetworkRole::ExitNode => "choice.role.exit_node",
+    }
+}
+
+fn routing_mode_key(mode: NodeRoutingMode) -> &'static str {
+    match mode {
+        NodeRoutingMode::MeshOnly => "choice.routing.mesh_only",
+        NodeRoutingMode::BypassMainland => "choice.routing.bypass_mainland",
+        NodeRoutingMode::GlobalProxy => "choice.routing.global_proxy",
+    }
+}
+
+fn permission_key(permission: NodePermission) -> &'static str {
+    match permission {
+        NodePermission::ViewState => "choice.permission.view_state",
+        NodePermission::ManageNetworks => "choice.permission.manage_networks",
+        NodePermission::ChangeRouting => "choice.permission.change_routing",
+        NodePermission::ManageRoles => "choice.permission.manage_roles",
+        NodePermission::ProbePeers => "choice.permission.probe_peers",
+        NodePermission::StopNode => "choice.permission.stop_node",
+        NodePermission::ViewLogs => "choice.permission.view_logs",
+    }
+}
+
+fn phase_key(phase: NodePhase) -> &'static str {
+    match phase {
+        NodePhase::Stopped => "choice.phase.stopped",
+        NodePhase::Starting => "choice.phase.starting",
+        NodePhase::Running => "choice.phase.running",
+        NodePhase::Stopping => "choice.phase.stopping",
+        NodePhase::Failed => "choice.phase.failed",
+    }
+}
+
+fn access_model_key(model: crate::node::NodeAccessModel) -> &'static str {
+    match model {
+        crate::node::NodeAccessModel::TrustedControlPlane => {
+            "choice.access_model.trusted_control_plane"
+        }
+    }
+}
+
+fn ui_mode_key(mode: UiMode) -> &'static str {
+    match mode {
+        UiMode::Gpui => "choice.ui_mode.gpui",
+        UiMode::WebUi => "choice.ui_mode.web_ui",
+        UiMode::Headless => "choice.ui_mode.headless",
+    }
+}
+
+fn acl_action_key(action: fuckipv6_common::AclAction) -> &'static str {
+    match action {
+        fuckipv6_common::AclAction::Allow => "choice.acl.allow",
+        fuckipv6_common::AclAction::Deny => "choice.acl.deny",
+    }
+}
+
+fn display_bool(locale: Locale, value: bool) -> &'static str {
+    t(
+        locale,
+        if value {
+            "common.enabled"
+        } else {
+            "common.disabled"
+        },
+    )
+}
+
+fn display_roles(locale: Locale, roles: &[NodeNetworkRole]) -> String {
+    roles
+        .iter()
+        .map(|role| t(locale, role_key(*role)))
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"))
+}
+
+fn display_optional_text(locale: Locale, value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| t(locale, "common.none").into())
+}
+
+fn display_option<T: std::fmt::Display>(locale: Locale, value: Option<T>) -> String {
     value
         .map(|value| value.to_string())
-        .unwrap_or_else(|| "n/a".into())
+        .unwrap_or_else(|| t(locale, "common.not_available").into())
 }
 
 pub fn validate_manifest_bindings(manifest: &NodeUiManifest) -> Result<(), String> {
@@ -1535,13 +1891,19 @@ mod tests {
         assert!(!model
             .metrics
             .iter()
-            .any(|metric| metric.label == "节点阶段"));
-        assert_eq!(model.sections[0].title, "运行状态");
+            .any(|metric| metric.label == t(Locale::ZhCn, "gpui.metric.node_phase")));
+        assert_eq!(
+            model.sections[0].title,
+            t(Locale::ZhCn, "common.runtime_status")
+        );
         assert_eq!(model.sections[0].rows.len(), 1);
-        assert_eq!(model.sections[0].rows[0].title, "运行正常");
+        assert_eq!(
+            model.sections[0].rows[0].title,
+            t(Locale::ZhCn, snapshot.primary_status().label_key())
+        );
         assert_eq!(
             model.sections[0].rows[0].detail,
-            snapshot.primary_status().detail_zh()
+            t(Locale::ZhCn, snapshot.primary_status().detail_key())
         );
     }
 
@@ -1558,7 +1920,7 @@ mod tests {
         let section = model
             .sections
             .iter()
-            .find(|section| section.title == "本地身份与 WebUI 认证")
+            .find(|section| section.title == t(Locale::ZhCn, "owner_auth.identity.section_title"))
             .expect("authentication boundary section");
         assert_eq!(section.rows.len(), 3);
         assert_eq!(
@@ -1574,6 +1936,66 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.detail.contains("已登录 WebUI")));
+    }
+
+    #[test]
+    fn localized_projection_copy_contains_no_hard_coded_han_characters() {
+        let source = include_str!("view_model.rs");
+        let projections = source
+            .split_once("fn project_overview(")
+            .and_then(|(_, tail)| tail.split_once("\npub fn validate_manifest_bindings"))
+            .map(|(projections, _)| projections)
+            .expect("projection source range");
+        assert!(
+            !projections.chars().any(|character| {
+                matches!(
+                    character as u32,
+                    0x3400..=0x4DBF
+                        | 0x4E00..=0x9FFF
+                        | 0xF900..=0xFAFF
+                        | 0x20000..=0x2FA1F
+                )
+            }),
+            "GPUI projection copy must come from the shared i18n catalog"
+        );
+    }
+
+    #[test]
+    fn english_projections_never_leak_chinese_catalog_copy() {
+        let manifest = node_ui_manifest();
+        for snapshot in [NodeSnapshot::default(), populated_snapshot()] {
+            for page in &manifest.pages {
+                let model = build_page_model_for_page(page, &snapshot, Locale::En)
+                    .expect("English page model");
+                let visible_copy = model
+                    .metrics
+                    .iter()
+                    .map(|metric| metric.label.as_str())
+                    .chain(model.sections.iter().flat_map(|section| {
+                        std::iter::once(section.title.as_str())
+                            .chain(std::iter::once(section.empty_text.as_str()))
+                            .chain(section.rows.iter().flat_map(|row| {
+                                std::iter::once(row.title.as_str())
+                                    .chain(std::iter::once(row.detail.as_str()))
+                            }))
+                    }));
+                for copy in visible_copy {
+                    assert!(
+                        !copy.chars().any(|character| {
+                            matches!(
+                                character as u32,
+                                0x3400..=0x4DBF
+                                    | 0x4E00..=0x9FFF
+                                    | 0xF900..=0xFAFF
+                                    | 0x20000..=0x2FA1F
+                            )
+                        }),
+                        "English projection for {} leaked Chinese copy: {copy}",
+                        page.id
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1730,16 +2152,17 @@ mod tests {
 
         let model =
             build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        assert!(model.sections[0].rows[0].detail.contains("Windows"));
         assert!(model.sections[0].rows[0]
             .detail
-            .contains("platform=Windows"));
-        assert!(model.sections[0].rows[0].detail.contains("supported=false"));
+            .contains(t(Locale::ZhCn, "common.disabled")));
         assert!(model.sections[1].rows[0]
             .detail
             .contains("PlatformNotLinux"));
-        assert!(model.sections[1].rows[0]
-            .detail
-            .contains("only supported on Linux"));
+        assert!(model.sections[1].rows[0].detail.contains(t(
+            Locale::ZhCn,
+            "exit_node.unsupported_reason.platform_not_linux"
+        )));
     }
 
     #[test]

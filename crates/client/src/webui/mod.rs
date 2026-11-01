@@ -22,6 +22,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 pub use controller::{
     AppController, AppControllerError, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
     CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
@@ -157,11 +158,20 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
     if let Some(owner_routes) = owner_routes {
         app = app.merge(owner_routes);
     }
-    app.layer(Extension(auth)).layer(Extension(WebUiSurface {
-        node_manifest_surface,
-        owner_security,
+    let security_headers = SecurityHeadersState {
         direct_tls,
-    }))
+        public_claim,
+    };
+    app.layer(Extension(auth))
+        .layer(Extension(WebUiSurface {
+            node_manifest_surface,
+            owner_security,
+            direct_tls,
+        }))
+        .layer(middleware::from_fn_with_state(
+            security_headers,
+            apply_security_headers,
+        ))
 }
 
 /// Start the only production WebUI surface: a manifest-driven view backed by
@@ -463,19 +473,122 @@ struct WebUiSurface {
     direct_tls: bool,
 }
 
+#[derive(Clone)]
+struct SecurityHeadersState {
+    direct_tls: bool,
+    public_claim: Option<Arc<PublicClaimConfig>>,
+}
+
+const CSP_NONCE_PLACEHOLDER: &str = "__CSP_NONCE__";
+const HSTS_VALUE: &str = "max-age=31536000; includeSubDomains";
+const LEGACY_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+async fn apply_security_headers(
+    State(state): State<SecurityHeadersState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let secured = request_uses_https_transport(&state, &request);
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+    );
+    headers.insert(
+        "cross-origin-opener-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    if secured {
+        headers.insert(
+            "strict-transport-security",
+            HeaderValue::from_static(HSTS_VALUE),
+        );
+    }
+    response
+}
+
+fn request_uses_https_transport(
+    state: &SecurityHeadersState,
+    request: &axum::extract::Request,
+) -> bool {
+    if state.direct_tls {
+        return true;
+    }
+    let Some(public_claim) = &state.public_claim else {
+        return false;
+    };
+    let Some(ConnectInfo(remote)) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+        return false;
+    };
+    public_claim
+        .authorize(remote.ip(), request.method(), request.headers())
+        .is_ok()
+}
+
+fn render_html_surface(template: &'static str) -> Response {
+    if !template.contains(CSP_NONCE_PLACEHOLDER) {
+        let mut response = Html(template).into_response();
+        response.headers_mut().insert(
+            "content-security-policy",
+            HeaderValue::from_static(LEGACY_CONTENT_SECURITY_POLICY),
+        );
+        return with_no_store(response);
+    }
+
+    let Some(nonce) = content_security_nonce() else {
+        tracing::error!("无法生成 WebUI CSP nonce，页面失败关闭");
+        let mut response = (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html("<!doctype html><title>安全错误</title><p>无法生成安全页面。</p>"),
+        )
+            .into_response();
+        response.headers_mut().insert(
+            "content-security-policy",
+            HeaderValue::from_static(
+                "default-src 'none'; style-src 'none'; script-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+            ),
+        );
+        return with_no_store(response);
+    };
+    let html = template.replace(CSP_NONCE_PLACEHOLDER, &nonce);
+    let policy = format!(
+        "default-src 'none'; script-src 'self' 'nonce-{nonce}'; script-src-attr 'none'; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    );
+    let policy =
+        HeaderValue::from_str(&policy).expect("generated WebUI CSP is an ASCII header value");
+    let mut response = Html(html).into_response();
+    response
+        .headers_mut()
+        .insert("content-security-policy", policy);
+    with_no_store(response)
+}
+
+fn content_security_nonce() -> Option<String> {
+    let mut bytes = [0_u8; 18];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(BASE64_STANDARD.encode(bytes))
+}
+
 async fn handle_index(Extension(surface): Extension<WebUiSurface>, headers: HeaderMap) -> Response {
     if let Some(owner) = &surface.owner_security {
         let status = match owner.status() {
             Ok(status) => status,
             Err(error) => {
                 tracing::error!(%error, "所有者安全状态读取失败，WebUI 已失败关闭");
-                return with_no_store(
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Html(owner_bootstrap::OWNER_UNAVAILABLE_HTML),
-                    )
-                        .into_response(),
-                );
+                let mut response = render_html_surface(owner_bootstrap::OWNER_UNAVAILABLE_HTML);
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return response;
             }
         };
         if !status.initialized {
@@ -484,16 +597,15 @@ async fn handle_index(Extension(surface): Extension<WebUiSurface>, headers: Head
                     return with_no_store(redirect.into_response());
                 }
             }
-            return with_no_store(Html(owner_bootstrap::OWNER_BOOTSTRAP_HTML).into_response());
+            return render_html_surface(owner_bootstrap::OWNER_BOOTSTRAP_HTML);
         }
     }
 
-    let response = if surface.node_manifest_surface {
-        Html(node_surface::NODE_MANIFEST_HTML).into_response()
+    if surface.node_manifest_surface {
+        render_html_surface(node_surface::NODE_MANIFEST_HTML)
     } else {
-        Html(UNIFIED_MASTER_HTML).into_response()
-    };
-    with_no_store(response)
+        render_html_surface(UNIFIED_MASTER_HTML)
+    }
 }
 
 fn localhost_redirect(headers: &HeaderMap) -> Option<Redirect> {
@@ -4402,6 +4514,92 @@ mod tests {
         );
     }
 
+    fn response_header<'a>(response: &'a axum::response::Response, name: &str) -> &'a str {
+        response
+            .headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("missing response header {name}"))
+            .to_str()
+            .unwrap_or_else(|_| panic!("response header {name} is not visible ASCII"))
+    }
+
+    fn csp_nonce(response: &axum::response::Response) -> String {
+        let policy = response_header(response, "content-security-policy");
+        let marker = "'nonce-";
+        let start = policy
+            .find(marker)
+            .unwrap_or_else(|| panic!("CSP does not contain a nonce: {policy}"))
+            + marker.len();
+        let end = policy[start..]
+            .find('\'')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("CSP nonce is not terminated: {policy}"));
+        let nonce = &policy[start..end];
+        assert!(
+            nonce.len() >= 24,
+            "CSP nonce is unexpectedly short: {nonce}"
+        );
+        assert!(
+            policy.contains(&format!("script-src 'self' {marker}{nonce}'")),
+            "script-src and style-src must share one strict nonce: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("style-src 'self' {marker}{nonce}'")),
+            "script-src and style-src must share one strict nonce: {policy}"
+        );
+        nonce.to_string()
+    }
+
+    async fn response_html_with_nonce(
+        response: axum::response::Response,
+        template: &str,
+    ) -> String {
+        let nonce = csp_nonce(&response);
+        let body = response_text(response).await;
+        assert!(!body.contains(CSP_NONCE_PLACEHOLDER));
+        assert!(
+            body.contains(&format!(r#"nonce="{nonce}""#)),
+            "response HTML does not consume the CSP nonce"
+        );
+        assert_eq!(body, template.replace(CSP_NONCE_PLACEHOLDER, &nonce));
+        body
+    }
+
+    fn assert_security_headers(response: &axum::response::Response, hsts: bool) {
+        assert_eq!(
+            response_header(response, "x-content-type-options"),
+            "nosniff"
+        );
+        assert_eq!(response_header(response, "x-frame-options"), "DENY");
+        assert_eq!(response_header(response, "referrer-policy"), "no-referrer");
+        assert_eq!(
+            response_header(response, "permissions-policy"),
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        );
+        assert_eq!(
+            response_header(response, "cross-origin-opener-policy"),
+            "same-origin"
+        );
+        assert_eq!(
+            response_header(response, "cross-origin-resource-policy"),
+            "same-origin"
+        );
+        if hsts {
+            assert_eq!(
+                response_header(response, "strict-transport-security"),
+                HSTS_VALUE
+            );
+        } else {
+            assert!(
+                response
+                    .headers()
+                    .get("strict-transport-security")
+                    .is_none(),
+                "HSTS must not be emitted outside a verified HTTPS boundary"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn owner_bootstrap_api_is_loopback_only_and_always_no_store() {
         let fixture = owner_app_fixture(8080);
@@ -4495,10 +4693,7 @@ mod tests {
             .expect("direct TLS bootstrap page");
         assert_eq!(page.status(), StatusCode::OK);
         assert_no_store(&page);
-        assert_eq!(
-            response_text(page).await,
-            owner_bootstrap::OWNER_BOOTSTRAP_HTML
-        );
+        response_html_with_nonce(page, owner_bootstrap::OWNER_BOOTSTRAP_HTML).await;
 
         let status = fixture
             .app
@@ -4551,6 +4746,113 @@ mod tests {
             .await
             .expect("missing peer response");
         assert_eq!(no_peer.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webui_security_headers_bind_csp_nonce_and_hsts_to_verified_https() {
+        let direct = direct_tls_public_owner_app_fixture(8080);
+        let direct_page = direct
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request("GET", "/", ""))
+            .await
+            .expect("direct TLS secured page");
+        assert_eq!(direct_page.status(), StatusCode::OK);
+        assert_no_store(&direct_page);
+        assert_security_headers(&direct_page, true);
+        let direct_nonce = csp_nonce(&direct_page);
+        response_html_with_nonce(direct_page, owner_bootstrap::OWNER_BOOTSTRAP_HTML).await;
+
+        let second_direct_page = direct
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request("GET", "/", ""))
+            .await
+            .expect("second direct TLS secured page");
+        assert_security_headers(&second_direct_page, true);
+        assert_ne!(
+            csp_nonce(&second_direct_page),
+            direct_nonce,
+            "CSP nonce must be fresh for every HTML response"
+        );
+
+        let protected_api = direct
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request("GET", "/api/status", ""))
+            .await
+            .expect("direct TLS protected API");
+        assert_eq!(protected_api.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&protected_api);
+        assert_security_headers(&protected_api, true);
+
+        let proxied = public_owner_app_fixture(8080);
+        let proxied_page = proxied
+            .app
+            .clone()
+            .oneshot(verified_public_request("GET", "/", ""))
+            .await
+            .expect("verified proxy secured page");
+        assert_eq!(proxied_page.status(), StatusCode::OK);
+        assert_no_store(&proxied_page);
+        assert_security_headers(&proxied_page, true);
+        response_html_with_nonce(proxied_page, owner_bootstrap::OWNER_BOOTSTRAP_HTML).await;
+
+        let local = owner_app_fixture(8080);
+        let local_page = local
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "localhost:8080")
+                    .body(Body::empty())
+                    .expect("local plaintext page"),
+            )
+            .await
+            .expect("local plaintext response");
+        assert_eq!(local_page.status(), StatusCode::OK);
+        assert_no_store(&local_page);
+        assert_security_headers(&local_page, false);
+        response_html_with_nonce(local_page, owner_bootstrap::OWNER_BOOTSTRAP_HTML).await;
+
+        let rejected_plaintext = proxied
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .header(header::HOST, "relay.xlei.cc")
+                    .header("x-forwarded-proto", "http")
+                    .header("x-forwarded-host", "relay.xlei.cc")
+                    .header("x-forwarded-for", "203.0.113.9")
+                    .body(Body::empty())
+                    .expect("rejected plaintext proxy request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("rejected plaintext proxy response");
+        assert_eq!(rejected_plaintext.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&rejected_plaintext);
+        assert_security_headers(&rejected_plaintext, false);
+
+        let legacy =
+            create_app_web_router_with_auth(Arc::new(AppController::new()), WebUiAuth::disabled());
+        let legacy_page = legacy
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("legacy plaintext page"),
+            )
+            .await
+            .expect("legacy plaintext response");
+        assert_eq!(legacy_page.status(), StatusCode::OK);
+        assert_no_store(&legacy_page);
+        assert_security_headers(&legacy_page, false);
+        let policy = response_header(&legacy_page, "content-security-policy");
+        assert!(policy.contains("script-src 'self' 'unsafe-inline'"));
+        assert_eq!(response_text(legacy_page).await, UNIFIED_MASTER_HTML);
     }
 
     #[tokio::test]
@@ -4634,10 +4936,7 @@ mod tests {
             .expect("public owner bootstrap page");
         assert_eq!(page.status(), StatusCode::OK);
         assert_no_store(&page);
-        assert_eq!(
-            response_text(page).await,
-            owner_bootstrap::OWNER_BOOTSTRAP_HTML
-        );
+        response_html_with_nonce(page, owner_bootstrap::OWNER_BOOTSTRAP_HTML).await;
 
         let protected = fixture
             .app
@@ -4801,10 +5100,7 @@ mod tests {
             .expect("owner bootstrap index response");
         assert_eq!(page.status(), StatusCode::OK);
         assert_no_store(&page);
-        assert_eq!(
-            response_text(page).await,
-            owner_bootstrap::OWNER_BOOTSTRAP_HTML
-        );
+        response_html_with_nonce(page, owner_bootstrap::OWNER_BOOTSTRAP_HTML).await;
 
         let script = fixture
             .app
@@ -5080,8 +5376,7 @@ mod tests {
             .expect("locked index response");
         assert_eq!(page.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_no_store(&page);
-        let body = response_text(page).await;
-        assert_eq!(body, owner_bootstrap::OWNER_UNAVAILABLE_HTML);
+        let body = response_html_with_nonce(page, owner_bootstrap::OWNER_UNAVAILABLE_HTML).await;
         assert!(!body.contains(UNIFIED_MASTER_HTML));
     }
 
@@ -5105,10 +5400,7 @@ mod tests {
             .await
             .expect("node index response");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response_text(response).await,
-            node_surface::NODE_MANIFEST_HTML
-        );
+        response_html_with_nonce(response, node_surface::NODE_MANIFEST_HTML).await;
 
         let response = node_app
             .oneshot(

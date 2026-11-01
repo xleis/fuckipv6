@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>fuckipv6 · node contract</title>
-  <style>
+  <style nonce="__CSP_NONCE__">
     :root{color-scheme:dark;--bg:#071018;--panel:#0d1b26;--panel2:#102635;--line:#1d4256;--text:#d8edf6;--muted:#7fa3b3;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#fb7185;--sidebar:250px}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 70% 0,#103247 0,var(--bg) 42%);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     button,input,select{font:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:var(--sidebar) 1fr}.sidebar{border-right:1px solid var(--line);background:#07131dcc;padding:18px;display:flex;flex-direction:column;gap:16px}
@@ -17,6 +17,7 @@
     .primary{border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:11px;color:var(--text);background:var(--panel2)}.primary.running{color:#c9ffe9;border-color:#27775e;background:#0c3329}.primary.degraded,.primary.control_unavailable{color:#ffe8a3;border-color:#7b6420;background:#33280c}.primary.failed{color:#ffd7df;border-color:var(--bad);background:#3b1721}
     #alert{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid var(--bad);background:#3b1721;color:#ffd7df;white-space:pre-wrap}#toast{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid #27775e;background:#0c3329;color:#c9ffe9}
     #login{position:fixed;inset:0;background:#02070bd9;display:none;place-items:center;padding:20px}.login-card{width:min(380px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;display:grid;gap:11px}.login-card input{padding:9px;background:#07131d;border:1px solid var(--line);border-radius:8px;color:var(--text)}
+    .sidebar-footer{margin-top:auto}.primary-detail{display:inline-block;margin-top:7px}.login-error{color:var(--bad)}
     @media(max-width:760px){.shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:16px}}
   </style>
 </head>
@@ -26,7 +27,7 @@
     <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
     <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
     <nav id="nav" aria-label="节点页面"></nav>
-    <div style="margin-top:auto" class="muted"><span id="primary-status" class="primary">--</span><br><span id="primary-detail" style="display:inline-block;margin-top:7px">--</span><br><span id="revision">revision --</span></div>
+    <div class="sidebar-footer muted"><span id="primary-status" class="primary">--</span><br><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span></div>
   </aside>
   <main>
     <div class="top">
@@ -45,11 +46,11 @@
     <input id="username" autocomplete="username" placeholder="用户名" required>
     <input id="password" type="password" autocomplete="current-password" placeholder="密码" required>
     <button class="submit" type="submit">登录并加载契约</button>
-    <div id="login-error" style="color:var(--bad)"></div>
+    <div id="login-error" class="login-error"></div>
   </form>
 </div>
 <script src="/assets/node_ui.js"></script>
-<script>
+<script nonce="__CSP_NONCE__">
 (() => {
   "use strict";
   const ui = window.FuckIPV6NodeUi;

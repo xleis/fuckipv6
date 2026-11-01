@@ -1,442 +1,44 @@
 {
-  "oneOf": [
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "get_snapshot"
-        }
-      },
-      "required": [
-        "command"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "get_ui_manifest"
-        }
-      },
-      "required": [
-        "command"
-      ],
-      "description": "Bootstrap query for the declarative UI contract. This is not rendered as\na page action and should be called before an adapter builds its UI."
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "get_node_diagnostics"
-        }
-      },
-      "required": [
-        "command"
-      ],
-      "description": "Query live runtime residue and cleanup state from the actor that owns\nnetwork sessions, embedded services and retained resource owners."
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "start_networks"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "selection": {
-              "$ref": "#/$defs/NodeNetworkSelection"
-            }
-          },
-          "required": [
-            "selection"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "stop_networks"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "networks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "all": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "networks",
-            "all"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "restart_networks"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "networks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "all": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "networks",
-            "all"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "create_network"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeCreateNetworkCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "join_network"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeJoinNetworkCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "update_routing"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeUpdateRoutingCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "set_network_role"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeSetNetworkRoleCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "get_blacklist"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "network_name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "network_name"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "ban_client"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeClientBlacklistCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "unban_client"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeClientBlacklistCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "get_network_allocation"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "network_name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "network_name"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "update_network_allocation"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeUpdateNetworkAllocationCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "probe_peer"
-        },
-        "payload": {
-          "$ref": "#/$defs/NodeProbePeerCommand"
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "start_node"
-        }
-      },
-      "required": [
-        "command"
-      ],
-      "description": "Start all persistently configured networks while keeping this node IPC\nand the control/UI processes alive."
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "stop_node"
-        }
-      },
-      "required": [
-        "command"
-      ],
-      "description": "Stop all data-plane sessions and owned embedded services while keeping\nthis node IPC and the control/UI processes alive."
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "restart_node"
-        }
-      },
-      "required": [
-        "command"
-      ],
-      "description": "Reload every persisted network and replace the complete data plane under\none single-flight lifecycle operation."
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "cleanup_node_residuals"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "networks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "all": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "networks",
-            "all"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "payload"
-      ],
-      "description": "Retry cleanup for runtime resources whose previous owner reported a\ndeferred or failed shutdown."
-    },
-    {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "const": "shutdown"
-        }
-      },
-      "required": [
-        "command"
-      ]
-    }
-  ],
-  "description": "Product-neutral node operations. A node creates, joins or serves a network;\nthere are deliberately no product-level client/server command variants.",
-  "title": "NodeCommand",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
-    "NodeNetworkSelection": {
+    "NetworkMode": {
+      "description": "虚拟网络工作模式",
       "oneOf": [
         {
-          "type": "string",
-          "enum": [
-            "default",
-            "all"
-          ]
-        },
-        {
-          "type": "string",
-          "const": "none",
-          "description": "Keep the node and its control surfaces running without joining a network."
-        },
-        {
-          "type": "object",
-          "properties": {
-            "named": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "required": [
-            "named"
-          ],
-          "additionalProperties": false
-        }
-      ],
-      "description": "How a node should choose the networks it loads at startup."
-    },
-    "NodeCreateNetworkCommand": {
-      "type": "object",
-      "properties": {
-        "name": {
+          "const": "ipv4_only",
+          "description": "仅使用 IPv4 虚拟内网",
           "type": "string"
         },
-        "signaling_port": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
+        {
+          "const": "ipv6_only",
+          "description": "仅使用 IPv6 虚拟内网",
+          "type": "string"
         },
-        "relay_port": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
+        {
+          "const": "dual_stack",
+          "description": "同时支持 IPv4 和 IPv6 虚拟双栈",
+          "type": "string"
+        }
+      ]
+    },
+    "NodeClientBlacklistCommand": {
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "client_id"
+      ],
+      "type": "object"
+    },
+    "NodeCreateNetworkCommand": {
+      "properties": {
+        "auto_connect": {
+          "type": "boolean"
         },
         "external_host": {
           "type": [
@@ -444,8 +46,20 @@
             "null"
           ]
         },
-        "auto_connect": {
-          "type": "boolean"
+        "name": {
+          "type": "string"
+        },
+        "relay_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signaling_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
@@ -453,14 +67,11 @@
         "signaling_port",
         "relay_port",
         "auto_connect"
-      ]
+      ],
+      "type": "object"
     },
     "NodeJoinNetworkCommand": {
-      "type": "object",
       "properties": {
-        "target": {
-          "type": "string"
-        },
         "network_name": {
           "type": [
             "string",
@@ -469,116 +80,28 @@
         },
         "start": {
           "type": "boolean"
+        },
+        "target": {
+          "type": "string"
         }
       },
       "required": [
         "target",
         "start"
-      ]
-    },
-    "NodeUpdateRoutingCommand": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "mode": {
-          "$ref": "#/$defs/NodeRoutingMode"
-        },
-        "exit_node": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "is_exit_node": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "network_name",
-        "mode",
-        "is_exit_node"
-      ]
-    },
-    "NodeRoutingMode": {
-      "type": "string",
-      "enum": [
-        "mesh_only",
-        "bypass_mainland",
-        "global_proxy"
-      ]
-    },
-    "NodeSetNetworkRoleCommand": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "role": {
-          "$ref": "#/$defs/NodeNetworkRole"
-        },
-        "enabled": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "network_name",
-        "role",
-        "enabled"
-      ]
-    },
-    "NodeNetworkRole": {
-      "type": "string",
-      "enum": [
-        "member",
-        "discovery",
-        "relay",
-        "exit_node"
       ],
-      "description": "Network roles are capabilities within a network, never product identities."
-    },
-    "NodeClientBlacklistCommand": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "client_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "network_name",
-        "client_id"
-      ]
-    },
-    "NodeUpdateNetworkAllocationCommand": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "allocation": {
-          "$ref": "#/$defs/NodeNetworkAllocation"
-        }
-      },
-      "required": [
-        "network_name",
-        "allocation"
-      ]
+      "type": "object"
     },
     "NodeNetworkAllocation": {
-      "type": "object",
+      "description": "Transport-neutral allocation payload shared by local adapters and the\nnode command protocol. Persistence is owned by the embedded service actor,\nnever by a UI adapter.",
       "properties": {
-        "mode": {
-          "$ref": "#/$defs/NetworkMode"
-        },
         "ipv4_pool": {
           "type": "string"
         },
         "ipv6_pool": {
           "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/NetworkMode"
         }
       },
       "required": [
@@ -586,30 +109,51 @@
         "ipv4_pool",
         "ipv6_pool"
       ],
-      "description": "Transport-neutral allocation payload shared by local adapters and the\nnode command protocol. Persistence is owned by the embedded service actor,\nnever by a UI adapter."
+      "type": "object"
     },
-    "NetworkMode": {
+    "NodeNetworkRole": {
+      "description": "Network roles are capabilities within a network, never product identities.",
+      "enum": [
+        "member",
+        "discovery",
+        "relay",
+        "exit_node"
+      ],
+      "type": "string"
+    },
+    "NodeNetworkSelection": {
+      "description": "How a node should choose the networks it loads at startup.",
       "oneOf": [
         {
-          "type": "string",
-          "const": "ipv4_only",
-          "description": "仅使用 IPv4 虚拟内网"
+          "enum": [
+            "default",
+            "all"
+          ],
+          "type": "string"
         },
         {
-          "type": "string",
-          "const": "ipv6_only",
-          "description": "仅使用 IPv6 虚拟内网"
+          "const": "none",
+          "description": "Keep the node and its control surfaces running without joining a network.",
+          "type": "string"
         },
         {
-          "type": "string",
-          "const": "dual_stack",
-          "description": "同时支持 IPv4 和 IPv6 虚拟双栈"
+          "additionalProperties": false,
+          "properties": {
+            "named": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "type": "object"
         }
-      ],
-      "description": "虚拟网络工作模式"
+      ]
     },
     "NodeProbePeerCommand": {
-      "type": "object",
       "properties": {
         "network_name": {
           "type": "string"
@@ -618,19 +162,475 @@
           "type": "string"
         },
         "timeout_ms": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "network_name",
         "target",
         "timeout_ms"
-      ]
+      ],
+      "type": "object"
+    },
+    "NodeRoutingMode": {
+      "enum": [
+        "mesh_only",
+        "bypass_mainland",
+        "global_proxy"
+      ],
+      "type": "string"
+    },
+    "NodeSetNetworkRoleCommand": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/NodeNetworkRole"
+        }
+      },
+      "required": [
+        "network_name",
+        "role",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "NodeUpdateNetworkAllocationCommand": {
+      "properties": {
+        "allocation": {
+          "$ref": "#/$defs/NodeNetworkAllocation"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "allocation"
+      ],
+      "type": "object"
+    },
+    "NodeUpdateRoutingCommand": {
+      "properties": {
+        "exit_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_exit_node": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/NodeRoutingMode"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "mode",
+        "is_exit_node"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-command-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Product-neutral node operations. A node creates, joins or serves a network;\nthere are deliberately no product-level client/server command variants.",
+  "oneOf": [
+    {
+      "properties": {
+        "command": {
+          "const": "get_snapshot",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Bootstrap query for the declarative UI contract. This is not rendered as\na page action and should be called before an adapter builds its UI.",
+      "properties": {
+        "command": {
+          "const": "get_ui_manifest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Query live runtime residue and cleanup state from the actor that owns\nnetwork sessions, embedded services and retained resource owners.",
+      "properties": {
+        "command": {
+          "const": "get_node_diagnostics",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "start_networks",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "selection": {
+              "$ref": "#/$defs/NodeNetworkSelection"
+            }
+          },
+          "required": [
+            "selection"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "stop_networks",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "all": {
+              "type": "boolean"
+            },
+            "networks": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "networks",
+            "all"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "restart_networks",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "all": {
+              "type": "boolean"
+            },
+            "networks": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "networks",
+            "all"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "create_network",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeCreateNetworkCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "join_network",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeJoinNetworkCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "update_routing",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeUpdateRoutingCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "set_network_role",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeSetNetworkRoleCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "get_blacklist",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "network_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network_name"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "ban_client",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeClientBlacklistCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "unban_client",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeClientBlacklistCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "get_network_allocation",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "network_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network_name"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "update_network_allocation",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeUpdateNetworkAllocationCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "probe_peer",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeProbePeerCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Start all persistently configured networks while keeping this node IPC\nand the control/UI processes alive.",
+      "properties": {
+        "command": {
+          "const": "start_node",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Stop all data-plane sessions and owned embedded services while keeping\nthis node IPC and the control/UI processes alive.",
+      "properties": {
+        "command": {
+          "const": "stop_node",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Reload every persisted network and replace the complete data plane under\none single-flight lifecycle operation.",
+      "properties": {
+        "command": {
+          "const": "restart_node",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Retry cleanup for runtime resources whose previous owner reported a\ndeferred or failed shutdown.",
+      "properties": {
+        "command": {
+          "const": "cleanup_node_residuals",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "all": {
+              "type": "boolean"
+            },
+            "networks": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "networks",
+            "all"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "shutdown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "NodeCommand",
   "x-fuckipv6-contract-version": 1,
   "x-fuckipv6-rust-source": "fuckipv6-client::node"
 }

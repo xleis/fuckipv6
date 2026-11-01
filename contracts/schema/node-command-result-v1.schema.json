@@ -1,161 +1,393 @@
 {
-  "type": "object",
-  "properties": {
-    "request_id": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0
-    },
-    "outcome": {
-      "$ref": "#/$defs/NodeCommandOutcome"
-    }
-  },
-  "required": [
-    "request_id",
-    "outcome"
-  ],
-  "title": "NodeCommandResult",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "AclAction": {
+      "description": "访问控制规则动作",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "CapabilityKind": {
+      "description": "The fixed first-version capability set. Unknown wire values fail closed at\ndeserialization and are never inferred from a free-form label.",
+      "enum": [
+        "coordinator",
+        "relay",
+        "exit",
+        "file"
+      ],
+      "type": "string"
+    },
+    "CapabilityState": {
+      "oneOf": [
+        {
+          "enum": [
+            "disabled",
+            "starting",
+            "enabled",
+            "degraded",
+            "unavailable",
+            "unsupported"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "A migrated record may preserve an unreadable state without making the\ncapability usable. New writes may not create this state.",
+          "type": "string"
+        }
+      ]
+    },
+    "DisplayEnvironment": {
+      "enum": [
+        "linux_x11",
+        "linux_wayland",
+        "windows_desktop",
+        "macos_desktop",
+        "headless"
+      ],
+      "type": "string"
+    },
+    "ExitNodeCapabilities": {
+      "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable.",
+      "properties": {
+        "cleanup": {
+          "type": "boolean"
+        },
+        "ipv4_forwarding": {
+          "type": "boolean"
+        },
+        "ipv6_forwarding": {
+          "type": "boolean"
+        },
+        "nat": {
+          "type": "boolean"
+        },
+        "platform": {
+          "$ref": "#/$defs/ExitNodePlatform"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "unsupported_reasons": {
+          "items": {
+            "$ref": "#/$defs/ExitNodeUnsupportedReason"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "platform",
+        "supported",
+        "ipv4_forwarding",
+        "ipv6_forwarding",
+        "nat",
+        "cleanup",
+        "unsupported_reasons"
+      ],
+      "type": "object"
+    },
+    "ExitNodePlatform": {
+      "description": "Host platforms with distinct Exit Node implementation requirements.",
+      "enum": [
+        "linux",
+        "windows",
+        "macos",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ExitNodeUnsupportedReason": {
+      "description": "Machine-readable reasons that make an Exit Node action unavailable.\n\nAdapters must render these reasons instead of treating an enabled config\nflag as proof that kernel forwarding and NAT were installed.",
+      "enum": [
+        "platform_not_linux",
+        "privileges_required",
+        "routing_tool_unavailable",
+        "iptables_unavailable",
+        "ipv4_forwarding_unavailable"
+      ],
+      "type": "string"
+    },
+    "NetworkMode": {
+      "description": "虚拟网络工作模式",
+      "oneOf": [
+        {
+          "const": "ipv4_only",
+          "description": "仅使用 IPv4 虚拟内网",
+          "type": "string"
+        },
+        {
+          "const": "ipv6_only",
+          "description": "仅使用 IPv6 虚拟内网",
+          "type": "string"
+        },
+        {
+          "const": "dual_stack",
+          "description": "同时支持 IPv4 和 IPv6 虚拟双栈",
+          "type": "string"
+        }
+      ]
+    },
+    "NodeAccessModel": {
+      "enum": [
+        "trusted_control_plane"
+      ],
+      "type": "string"
+    },
+    "NodeBlacklistSnapshot": {
+      "properties": {
+        "changed": {
+          "description": "True when the operation changed persisted blacklist state. Queries and\nidempotent mutations report false.",
+          "type": "boolean"
+        },
+        "clients": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "clients",
+        "changed"
+      ],
+      "type": "object"
+    },
+    "NodeCapabilityRegistrySnapshot": {
+      "description": "Stable projection of the fixed first-version capability set. Unknown\nentries fail closed and unsupported capabilities remain visible so the UI\ncan explain why an action is unavailable.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/NodeCapabilitySnapshot"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "NodeCapabilitySnapshot": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/CapabilityKind"
+        },
+        "state": {
+          "$ref": "#/$defs/CapabilityState"
+        }
+      },
+      "required": [
+        "kind",
+        "state"
+      ],
+      "type": "object"
+    },
+    "NodeCleanupFailureReason": {
+      "enum": [
+        "still_running",
+        "owner_unavailable",
+        "timed_out",
+        "incomplete",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "NodeCleanupFailureSnapshot": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/NodeCleanupFailureReason"
+        }
+      },
+      "required": [
+        "network_name",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "NodeCleanupStepSnapshot": {
+      "description": "One sanitized runtime cleanup step. Host paths and raw operating-system\nerrors are intentionally excluded from this public contract.",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeCleanupStepStatus"
+        }
+      },
+      "required": [
+        "network_name",
+        "resource",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NodeCleanupStepStatus": {
+      "enum": [
+        "removed",
+        "not_owned",
+        "deferred",
+        "failed",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "NodeCommandOutcome": {
       "oneOf": [
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "snapshot"
-            },
             "data": {
               "$ref": "#/$defs/NodeSnapshot"
+            },
+            "status": {
+              "const": "snapshot",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "ui_manifest"
-            },
             "data": {
               "$ref": "#/$defs/NodeUiManifest"
+            },
+            "status": {
+              "const": "ui_manifest",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "diagnostics"
-            },
             "data": {
               "$ref": "#/$defs/NodeDiagnosticsSnapshot"
+            },
+            "status": {
+              "const": "diagnostics",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "cleanup"
-            },
             "data": {
               "$ref": "#/$defs/NodeResidualCleanupResult"
+            },
+            "status": {
+              "const": "cleanup",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "blacklist"
-            },
             "data": {
               "$ref": "#/$defs/NodeBlacklistSnapshot"
+            },
+            "status": {
+              "const": "blacklist",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "network_allocation"
-            },
             "data": {
               "$ref": "#/$defs/NodeNetworkAllocationSnapshot"
+            },
+            "status": {
+              "const": "network_allocation",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "probe"
-            },
             "data": {
               "$ref": "#/$defs/NodePeerProbeSnapshot"
+            },
+            "status": {
+              "const": "probe",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "network_created"
-            },
             "data": {
               "$ref": "#/$defs/NodeCreatedNetwork"
+            },
+            "status": {
+              "const": "network_created",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "accepted"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "operation_id": {
                   "type": "string"
@@ -163,23 +395,23 @@
               },
               "required": [
                 "operation_id"
-              ]
+              ],
+              "type": "object"
+            },
+            "status": {
+              "const": "accepted",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "completed"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "message": {
                   "type": "string"
@@ -187,230 +419,165 @@
               },
               "required": [
                 "message"
-              ]
+              ],
+              "type": "object"
+            },
+            "status": {
+              "const": "completed",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "status": {
-              "type": "string",
-              "const": "rejected"
-            },
             "data": {
               "$ref": "#/$defs/NodeProblem"
+            },
+            "status": {
+              "const": "rejected",
+              "type": "string"
             }
           },
           "required": [
             "status",
             "data"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
-    "NodeSnapshot": {
-      "type": "object",
+    "NodeConfigurationSnapshot": {
+      "description": "Effective, non-secret network configuration exposed to every UI adapter.",
       "properties": {
-        "revision": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/NodeLifecycleSnapshot"
-        },
-        "control_health": {
-          "$ref": "#/$defs/NodeControlHealth",
-          "description": "Health of the UI adapter's control connection. This is local transport\nobservation, not authoritative node state, so changing it must not\nmanufacture a new node revision.",
-          "default": "unknown"
-        },
-        "identity": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NodeIdentitySnapshot"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "configuration": {
-          "$ref": "#/$defs/NodeConfigurationSnapshot",
-          "default": {
-            "networks": []
-          }
-        },
-        "exit_node_capabilities": {
-          "$ref": "#/$defs/ExitNodeCapabilities",
-          "description": "Runtime capability truth for this host. Adapters must disable Exit Node\nactions when `supported` is false and render the typed reasons instead\nof inferring success from configuration alone.",
-          "default": {
-            "schema_version": 1,
-            "platform": "linux",
-            "supported": false,
-            "ipv4_forwarding": false,
-            "ipv6_forwarding": false,
-            "nat": false,
-            "cleanup": false,
-            "unsupported_reasons": [
-              "privileges_required",
-              "ipv4_forwarding_unavailable"
-            ]
-          }
-        },
-        "capabilities": {
-          "$ref": "#/$defs/NodeCapabilityRegistrySnapshot",
-          "description": "Unified four-capability projection shared by every UI adapter. Missing\nentries deserialize as `Unknown`; they are never inferred as enabled.",
-          "default": {
-            "capabilities": [
-              {
-                "kind": "coordinator",
-                "state": "unknown"
-              },
-              {
-                "kind": "relay",
-                "state": "unknown"
-              },
-              {
-                "kind": "exit",
-                "state": "unknown"
-              },
-              {
-                "kind": "file",
-                "state": "unknown"
-              }
-            ]
-          }
-        },
-        "permissions": {
-          "$ref": "#/$defs/NodePermissionSnapshot",
-          "default": {
-            "access_model": "trusted_control_plane",
-            "permissions": []
-          }
-        },
-        "embedded_services": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeEmbeddedServiceSnapshot"
-          },
-          "default": []
-        },
-        "ui_mode": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UiModeResolution"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "networks": {
-          "type": "array",
           "items": {
-            "$ref": "#/$defs/NodeNetworkSnapshot"
-          }
-        },
-        "peers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodePeerSnapshot"
-          }
-        },
-        "logs": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeLogEntry"
-          }
-        },
-        "last_error": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NodeProblem"
-            },
-            {
-              "type": "null"
-            }
-          ]
+            "$ref": "#/$defs/NodeNetworkConfigSnapshot"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "revision",
-        "lifecycle",
-        "networks",
-        "peers",
-        "logs"
+        "networks"
       ],
-      "description": "Stable, transport-neutral state rendered by every node UI adapter."
-    },
-    "NodeLifecycleSnapshot": {
-      "type": "object",
-      "properties": {
-        "phase": {
-          "$ref": "#/$defs/NodePhase"
-        },
-        "configured_networks": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "active_networks": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "failed_networks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "phase",
-        "configured_networks",
-        "active_networks",
-        "failed_networks"
-      ],
-      "description": "Shared lifecycle snapshot consumed by CLI, IPC, WebUI, and (later) GPUI."
-    },
-    "NodePhase": {
-      "type": "string",
-      "enum": [
-        "stopped",
-        "starting",
-        "running",
-        "stopping",
-        "failed"
-      ],
-      "description": "Node-global lifecycle. Network sessions may come and go while the node\nremains in one of these phases."
+      "type": "object"
     },
     "NodeControlHealth": {
-      "type": "string",
+      "description": "Whether the adapter can currently reach the node control plane.",
       "enum": [
         "unknown",
         "available",
         "unavailable"
       ],
-      "description": "Whether the adapter can currently reach the node control plane."
+      "type": "string"
     },
-    "NodeIdentitySnapshot": {
-      "type": "object",
+    "NodeCreatedNetwork": {
+      "description": "Owner-local result of creating a network.\n\nThe invitation ticket is deliberately returned only by this command result\nand is never added to `NodeSnapshot`, events, or logs. Its `Debug` output is\nredacted so an adapter cannot accidentally leak it through generic error\nformatting.",
       "properties": {
-        "node_id": {
+        "config_saved": {
+          "type": "boolean"
+        },
+        "invitation_ticket": {
           "type": "string"
         },
+        "network_name": {
+          "type": "string"
+        },
+        "started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "network_name",
+        "config_saved",
+        "started",
+        "invitation_ticket"
+      ],
+      "type": "object"
+    },
+    "NodeDiagnosticsSnapshot": {
+      "description": "Live actor-owned diagnostics. Counts describe observed runtime ownership,\nnot merely configuration or UI snapshot projections.",
+      "properties": {
+        "cleanup_candidate_networks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/NodeLifecycleSnapshot"
+        },
+        "residue": {
+          "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
+        },
+        "retained_owner_networks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "lifecycle",
+        "retained_owner_networks",
+        "cleanup_candidate_networks",
+        "residue"
+      ],
+      "type": "object"
+    },
+    "NodeEmbeddedServiceSnapshot": {
+      "description": "Non-secret runtime state for one network's embedded signaling and relay\nservices. Invitation tickets, identity material, and host-local paths are\ndeliberately excluded from this shared UI contract.",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "relay_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signaling_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/NodeEmbeddedServiceStatus"
+        }
+      },
+      "required": [
+        "network_name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NodeEmbeddedServiceStatus": {
+      "enum": [
+        "starting",
+        "running",
+        "stopping",
+        "stopped",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "NodeIdentitySnapshot": {
+      "description": "Public node identity metadata. Secret key material must never enter this DTO.",
+      "properties": {
         "display_name": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "node_id": {
+          "type": "string"
         },
         "public_key_fingerprint": {
           "type": "string"
@@ -420,30 +587,218 @@
         "node_id",
         "public_key_fingerprint"
       ],
-      "description": "Public node identity metadata. Secret key material must never enter this DTO."
+      "type": "object"
     },
-    "NodeConfigurationSnapshot": {
-      "type": "object",
+    "NodeLifecycleSnapshot": {
+      "description": "Shared lifecycle snapshot consumed by CLI, IPC, WebUI, and (later) GPUI.",
       "properties": {
-        "networks": {
-          "type": "array",
+        "active_networks": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "configured_networks": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed_networks": {
           "items": {
-            "$ref": "#/$defs/NodeNetworkConfigSnapshot"
-          }
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "phase": {
+          "$ref": "#/$defs/NodePhase"
         }
       },
       "required": [
-        "networks"
+        "phase",
+        "configured_networks",
+        "active_networks",
+        "failed_networks"
       ],
-      "description": "Effective, non-secret network configuration exposed to every UI adapter."
+      "type": "object"
+    },
+    "NodeLogEntry": {
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/NodeLogLevel"
+        },
+        "message": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "unix_ms",
+        "level",
+        "target",
+        "message"
+      ],
+      "type": "object"
+    },
+    "NodeLogLevel": {
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "type": "string"
+    },
+    "NodeNetworkAllocation": {
+      "description": "Transport-neutral allocation payload shared by local adapters and the\nnode command protocol. Persistence is owned by the embedded service actor,\nnever by a UI adapter.",
+      "properties": {
+        "ipv4_pool": {
+          "type": "string"
+        },
+        "ipv6_pool": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/NetworkMode"
+        }
+      },
+      "required": [
+        "mode",
+        "ipv4_pool",
+        "ipv6_pool"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkAllocationSnapshot": {
+      "properties": {
+        "allocation": {
+          "$ref": "#/$defs/NodeNetworkAllocation"
+        },
+        "config_saved": {
+          "type": "boolean"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "allocation",
+        "config_saved"
+      ],
+      "type": "object"
     },
     "NodeNetworkConfigSnapshot": {
-      "type": "object",
+      "description": "One network's effective configuration after loading startup overrides.\n\nFilesystem paths and other host-local details are deliberately omitted. The\nboolean fields only state whether optional host-local settings are present.",
       "properties": {
+        "acl_default_action": {
+          "$ref": "#/$defs/AclAction"
+        },
+        "acl_enabled": {
+          "type": "boolean"
+        },
+        "acl_rule_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "coordinator_url": {
+          "type": "string"
+        },
+        "direct_cidrs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exit_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exit_node_allow_lan_access": {
+          "type": "boolean"
+        },
+        "exit_node_allowed_clients": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exit_node_enabled": {
+          "type": "boolean"
+        },
+        "exit_node_region": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identity_configured": {
+          "type": "boolean"
+        },
+        "log_file_configured": {
+          "type": "boolean"
+        },
+        "log_level": {
+          "type": "string"
+        },
+        "mtu": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
         "network_name": {
           "type": "string"
         },
-        "coordinator_url": {
+        "p2p_connect_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p2p_heartbeat_interval_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p2p_listen_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preferred_ipv4": {
+          "format": "ipv4",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferred_ipv6": {
+          "format": "ipv6",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proxy_cidrs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "routing_mode": {
+          "$ref": "#/$defs/NodeRoutingMode"
+        },
+        "tun_name": {
           "type": "string"
         },
         "virtual_mode": {
@@ -456,109 +811,11 @@
             }
           ]
         },
-        "preferred_ipv4": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "ipv4"
-        },
-        "preferred_ipv6": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "ipv6"
-        },
         "virtual_network": {
           "type": [
             "string",
             "null"
           ]
-        },
-        "tun_name": {
-          "type": "string"
-        },
-        "mtu": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "p2p_listen_port": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "p2p_connect_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "p2p_heartbeat_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "routing_mode": {
-          "$ref": "#/$defs/NodeRoutingMode"
-        },
-        "exit_node": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "direct_cidrs": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "proxy_cidrs": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "exit_node_enabled": {
-          "type": "boolean"
-        },
-        "exit_node_allowed_clients": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "exit_node_allow_lan_access": {
-          "type": "boolean"
-        },
-        "exit_node_region": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "acl_enabled": {
-          "type": "boolean"
-        },
-        "acl_default_action": {
-          "$ref": "#/$defs/AclAction"
-        },
-        "acl_rule_count": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "log_level": {
-          "type": "string"
-        },
-        "log_file_configured": {
-          "type": "boolean"
-        },
-        "identity_configured": {
-          "type": "boolean"
         }
       },
       "required": [
@@ -582,323 +839,37 @@
         "log_file_configured",
         "identity_configured"
       ],
-      "description": "One network's effective configuration after loading startup overrides.\n\nFilesystem paths and other host-local details are deliberately omitted. The\nboolean fields only state whether optional host-local settings are present."
+      "type": "object"
     },
-    "NetworkMode": {
-      "oneOf": [
-        {
-          "type": "string",
-          "const": "ipv4_only",
-          "description": "仅使用 IPv4 虚拟内网"
-        },
-        {
-          "type": "string",
-          "const": "ipv6_only",
-          "description": "仅使用 IPv6 虚拟内网"
-        },
-        {
-          "type": "string",
-          "const": "dual_stack",
-          "description": "同时支持 IPv4 和 IPv6 虚拟双栈"
-        }
-      ],
-      "description": "虚拟网络工作模式"
-    },
-    "NodeRoutingMode": {
-      "type": "string",
+    "NodeNetworkRole": {
+      "description": "Network roles are capabilities within a network, never product identities.",
       "enum": [
-        "mesh_only",
-        "bypass_mainland",
-        "global_proxy"
-      ]
-    },
-    "AclAction": {
-      "type": "string",
-      "enum": [
-        "allow",
-        "deny"
-      ],
-      "description": "访问控制规则动作"
-    },
-    "ExitNodeCapabilities": {
-      "type": "object",
-      "properties": {
-        "schema_version": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "platform": {
-          "$ref": "#/$defs/ExitNodePlatform"
-        },
-        "supported": {
-          "type": "boolean"
-        },
-        "ipv4_forwarding": {
-          "type": "boolean"
-        },
-        "ipv6_forwarding": {
-          "type": "boolean"
-        },
-        "nat": {
-          "type": "boolean"
-        },
-        "cleanup": {
-          "type": "boolean"
-        },
-        "unsupported_reasons": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ExitNodeUnsupportedReason"
-          }
-        }
-      },
-      "required": [
-        "schema_version",
-        "platform",
-        "supported",
-        "ipv4_forwarding",
-        "ipv6_forwarding",
-        "nat",
-        "cleanup",
-        "unsupported_reasons"
-      ],
-      "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable."
-    },
-    "ExitNodePlatform": {
-      "type": "string",
-      "enum": [
-        "linux",
-        "windows",
-        "macos",
-        "other"
-      ],
-      "description": "Host platforms with distinct Exit Node implementation requirements."
-    },
-    "ExitNodeUnsupportedReason": {
-      "type": "string",
-      "enum": [
-        "platform_not_linux",
-        "privileges_required",
-        "routing_tool_unavailable",
-        "iptables_unavailable",
-        "ipv4_forwarding_unavailable"
-      ],
-      "description": "Machine-readable reasons that make an Exit Node action unavailable.\n\nAdapters must render these reasons instead of treating an enabled config\nflag as proof that kernel forwarding and NAT were installed."
-    },
-    "NodeCapabilityRegistrySnapshot": {
-      "type": "object",
-      "properties": {
-        "capabilities": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeCapabilitySnapshot"
-          }
-        }
-      },
-      "required": [
-        "capabilities"
-      ],
-      "description": "Stable projection of the fixed first-version capability set. Unknown\nentries fail closed and unsupported capabilities remain visible so the UI\ncan explain why an action is unavailable."
-    },
-    "NodeCapabilitySnapshot": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/CapabilityKind"
-        },
-        "state": {
-          "$ref": "#/$defs/CapabilityState"
-        }
-      },
-      "required": [
-        "kind",
-        "state"
-      ]
-    },
-    "CapabilityKind": {
-      "type": "string",
-      "enum": [
-        "coordinator",
+        "member",
+        "discovery",
         "relay",
-        "exit",
-        "file"
+        "exit_node"
       ],
-      "description": "The fixed first-version capability set. Unknown wire values fail closed at\ndeserialization and are never inferred from a free-form label."
-    },
-    "CapabilityState": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "disabled",
-            "starting",
-            "enabled",
-            "degraded",
-            "unavailable",
-            "unsupported"
-          ]
-        },
-        {
-          "type": "string",
-          "const": "unknown",
-          "description": "A migrated record may preserve an unreadable state without making the\ncapability usable. New writes may not create this state."
-        }
-      ]
-    },
-    "NodePermissionSnapshot": {
-      "type": "object",
-      "properties": {
-        "access_model": {
-          "$ref": "#/$defs/NodeAccessModel"
-        },
-        "permissions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodePermission"
-          }
-        }
-      },
-      "required": [
-        "access_model",
-        "permissions"
-      ],
-      "description": "Control-plane authorization posture shared with UI adapters.\n\n`TrustedControlPlane` means the runtime accepts every connected adapter as\nfully privileged. It does not mean per-user or remote authentication exists."
-    },
-    "NodeAccessModel": {
-      "type": "string",
-      "enum": [
-        "trusted_control_plane"
-      ]
-    },
-    "NodePermission": {
-      "type": "string",
-      "enum": [
-        "view_state",
-        "manage_networks",
-        "change_routing",
-        "manage_roles",
-        "probe_peers",
-        "stop_node",
-        "view_logs"
-      ],
-      "description": "Stable capability classes used by both the permission snapshot and UI actions."
-    },
-    "NodeEmbeddedServiceSnapshot": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/$defs/NodeEmbeddedServiceStatus"
-        },
-        "signaling_addr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "relay_addr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "network_name",
-        "status"
-      ],
-      "description": "Non-secret runtime state for one network's embedded signaling and relay\nservices. Invitation tickets, identity material, and host-local paths are\ndeliberately excluded from this shared UI contract."
-    },
-    "NodeEmbeddedServiceStatus": {
-      "type": "string",
-      "enum": [
-        "starting",
-        "running",
-        "stopping",
-        "stopped",
-        "failed"
-      ]
-    },
-    "UiModeResolution": {
-      "type": "object",
-      "properties": {
-        "requested": {
-          "$ref": "#/$defs/UiModeRequest"
-        },
-        "effective": {
-          "$ref": "#/$defs/UiMode"
-        },
-        "display": {
-          "$ref": "#/$defs/DisplayEnvironment"
-        },
-        "gpui_available": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "requested",
-        "effective",
-        "display",
-        "gpui_available"
-      ]
-    },
-    "UiModeRequest": {
-      "type": "string",
-      "enum": [
-        "auto",
-        "gpui",
-        "web_ui",
-        "headless"
-      ]
-    },
-    "UiMode": {
-      "type": "string",
-      "enum": [
-        "gpui",
-        "web_ui",
-        "headless"
-      ],
-      "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane. It remains available on\nheadless hosts as a server-only surface; the display environment only\ndecides whether a browser window can also be opened. `WebUi` must never be\nrepresented as the native `Gpui` surface."
-    },
-    "DisplayEnvironment": {
-      "type": "string",
-      "enum": [
-        "linux_x11",
-        "linux_wayland",
-        "windows_desktop",
-        "macos_desktop",
-        "headless"
-      ]
+      "type": "string"
     },
     "NodeNetworkSnapshot": {
-      "type": "object",
+      "description": "One local network and the roles this node currently performs in it.",
       "properties": {
-        "name": {
-          "type": "string"
-        },
-        "tun_name": {
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/$defs/NodeNetworkStatus"
+        "assigned_ipv4": {
+          "format": "ipv4",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "assigned_ipv6": {
+          "format": "ipv6",
           "type": [
             "string",
             "null"
-          ],
-          "format": "ipv6"
+          ]
         },
-        "assigned_ipv4": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "ipv4"
+        "name": {
+          "type": "string"
         },
         "p2p_listen_addr": {
           "type": [
@@ -906,24 +877,30 @@
             "null"
           ]
         },
-        "uptime_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
+        "peer_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         },
         "roles": {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/NodeNetworkRole"
-          }
+          },
+          "type": "array"
         },
-        "peer_count": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
+        "status": {
+          "$ref": "#/$defs/NodeNetworkStatus"
         },
         "traffic": {
           "$ref": "#/$defs/NodeTrafficSnapshot"
+        },
+        "tun_name": {
+          "type": "string"
+        },
+        "uptime_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
@@ -935,10 +912,9 @@
         "peer_count",
         "traffic"
       ],
-      "description": "One local network and the roles this node currently performs in it."
+      "type": "object"
     },
     "NodeNetworkStatus": {
-      "type": "string",
       "enum": [
         "offline",
         "connecting",
@@ -946,104 +922,62 @@
         "degraded",
         "stopping",
         "failed"
-      ]
-    },
-    "NodeNetworkRole": {
-      "type": "string",
-      "enum": [
-        "member",
-        "discovery",
-        "relay",
-        "exit_node"
       ],
-      "description": "Network roles are capabilities within a network, never product identities."
+      "type": "string"
     },
-    "NodeTrafficSnapshot": {
-      "type": "object",
+    "NodePeerProbeSnapshot": {
       "properties": {
-        "tun_rx_packets": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "tun_rx_bytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "tun_tx_packets": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "tun_tx_bytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "p2p_rx_packets": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "p2p_rx_bytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "p2p_tx_packets": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "p2p_tx_bytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "error_count": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "tun_rx_packets",
-        "tun_rx_bytes",
-        "tun_tx_packets",
-        "tun_tx_bytes",
-        "p2p_rx_packets",
-        "p2p_rx_bytes",
-        "p2p_tx_packets",
-        "p2p_tx_bytes",
-        "error_count"
-      ]
-    },
-    "NodePeerSnapshot": {
-      "type": "object",
-      "properties": {
-        "peer_id": {
-          "type": "string"
-        },
-        "network_name": {
-          "type": "string"
-        },
-        "virtual_ipv6": {
-          "type": "string",
-          "format": "ipv6"
-        },
-        "virtual_ipv4": {
+        "endpoint": {
           "type": [
             "string",
             "null"
-          ],
-          "format": "ipv4"
+          ]
         },
+        "p2p_active": {
+          "type": "boolean"
+        },
+        "peer_id": {
+          "type": "string"
+        },
+        "rtt_us": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "virtual_ipv6": {
+          "format": "ipv6",
+          "type": "string"
+        }
+      },
+      "required": [
+        "peer_id",
+        "virtual_ipv6",
+        "p2p_active",
+        "timed_out"
+      ],
+      "type": "object"
+    },
+    "NodePeerSnapshot": {
+      "description": "Peer state scoped to a network. The same node may appear in multiple networks.",
+      "properties": {
         "endpoints": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
+        },
+        "loss_rate": {
+          "format": "float",
+          "type": "number"
+        },
+        "network_name": {
+          "type": "string"
         },
         "online": {
           "type": "boolean"
@@ -1054,20 +988,30 @@
         "p2p_healthy": {
           "type": "boolean"
         },
+        "peer_id": {
+          "type": "string"
+        },
         "rtt_us": {
+          "format": "uint64",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        },
-        "loss_rate": {
-          "type": "number",
-          "format": "float"
+          ]
         },
         "traffic": {
           "$ref": "#/$defs/NodeTrafficSnapshot"
+        },
+        "virtual_ipv4": {
+          "format": "ipv4",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "virtual_ipv6": {
+          "format": "ipv6",
+          "type": "string"
         }
       },
       "required": [
@@ -1081,45 +1025,53 @@
         "loss_rate",
         "traffic"
       ],
-      "description": "Peer state scoped to a network. The same node may appear in multiple networks."
+      "type": "object"
     },
-    "NodeLogEntry": {
-      "type": "object",
+    "NodePermission": {
+      "description": "Stable capability classes used by both the permission snapshot and UI actions.",
+      "enum": [
+        "view_state",
+        "manage_networks",
+        "change_routing",
+        "manage_roles",
+        "probe_peers",
+        "stop_node",
+        "view_logs"
+      ],
+      "type": "string"
+    },
+    "NodePermissionSnapshot": {
+      "description": "Control-plane authorization posture shared with UI adapters.\n\n`TrustedControlPlane` means the runtime accepts every connected adapter as\nfully privileged. It does not mean per-user or remote authentication exists.",
       "properties": {
-        "unix_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
+        "access_model": {
+          "$ref": "#/$defs/NodeAccessModel"
         },
-        "level": {
-          "$ref": "#/$defs/NodeLogLevel"
-        },
-        "target": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/NodePermission"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "unix_ms",
-        "level",
-        "target",
-        "message"
-      ]
+        "access_model",
+        "permissions"
+      ],
+      "type": "object"
     },
-    "NodeLogLevel": {
-      "type": "string",
+    "NodePhase": {
+      "description": "Node-global lifecycle. Network sessions may come and go while the node\nremains in one of these phases.",
       "enum": [
-        "trace",
-        "debug",
-        "info",
-        "warn",
-        "error"
-      ]
+        "stopped",
+        "starting",
+        "running",
+        "stopping",
+        "failed"
+      ],
+      "type": "string"
     },
     "NodeProblem": {
-      "type": "object",
+      "description": "UI- and transport-neutral error returned by every node command adapter.",
       "properties": {
         "code": {
           "$ref": "#/$defs/NodeProblemCode"
@@ -1142,12 +1094,11 @@
         "message",
         "retryable"
       ],
-      "description": "UI- and transport-neutral error returned by every node command adapter."
+      "type": "object"
     },
     "NodeProblemCode": {
       "oneOf": [
         {
-          "type": "string",
           "enum": [
             "invalid_request",
             "not_found",
@@ -1156,74 +1107,317 @@
             "permission_denied",
             "cancelled",
             "internal"
-          ]
+          ],
+          "type": "string"
         },
         {
-          "type": "string",
           "const": "unsupported",
-          "description": "The operation is valid but unavailable on this platform or host."
+          "description": "The operation is valid but unavailable on this platform or host.",
+          "type": "string"
         }
       ]
     },
-    "NodeUiManifest": {
-      "type": "object",
+    "NodeResidualCleanupResult": {
+      "description": "Partial-success aware result for explicit residual cleanup.",
       "properties": {
-        "schema_version": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "pages": {
-          "type": "array",
+        "cleaned_networks": {
           "items": {
-            "$ref": "#/$defs/NodeUiPage"
-          }
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failed_networks": {
+          "items": {
+            "$ref": "#/$defs/NodeCleanupFailureSnapshot"
+          },
+          "type": "array"
+        },
+        "residue": {
+          "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
         }
       },
       "required": [
-        "schema_version",
-        "pages"
+        "cleaned_networks",
+        "failed_networks",
+        "residue"
       ],
-      "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic."
+      "type": "object"
     },
-    "NodeUiPage": {
-      "type": "object",
+    "NodeRoutingMode": {
+      "enum": [
+        "mesh_only",
+        "bypass_mainland",
+        "global_proxy"
+      ],
+      "type": "string"
+    },
+    "NodeRuntimeResidueSnapshot": {
+      "description": "Transport-neutral residue report shared by diagnostics and explicit cleanup.",
       "properties": {
-        "id": {
-          "type": "string"
-        },
-        "nav_label_key": {
-          "type": "string"
-        },
-        "title_key": {
-          "type": "string"
-        },
-        "actions": {
-          "type": "array",
+        "cleanup_steps": {
           "items": {
-            "$ref": "#/$defs/NodeUiAction"
-          }
+            "$ref": "#/$defs/NodeCleanupStepSnapshot"
+          },
+          "type": "array"
+        },
+        "configuration_retained": {
+          "type": "boolean"
+        },
+        "embedded_services_remaining": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "listeners_remaining": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "peers_remaining": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "residual_networks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sessions_remaining": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
-        "id",
-        "nav_label_key",
-        "title_key",
-        "actions"
-      ]
+        "sessions_remaining",
+        "listeners_remaining",
+        "peers_remaining",
+        "embedded_services_remaining",
+        "configuration_retained",
+        "residual_networks",
+        "cleanup_steps",
+        "issues"
+      ],
+      "type": "object"
+    },
+    "NodeSnapshot": {
+      "description": "Stable, transport-neutral state rendered by every node UI adapter.",
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/NodeCapabilityRegistrySnapshot",
+          "default": {
+            "capabilities": [
+              {
+                "kind": "coordinator",
+                "state": "unknown"
+              },
+              {
+                "kind": "relay",
+                "state": "unknown"
+              },
+              {
+                "kind": "exit",
+                "state": "unknown"
+              },
+              {
+                "kind": "file",
+                "state": "unknown"
+              }
+            ]
+          },
+          "description": "Unified four-capability projection shared by every UI adapter. Missing\nentries deserialize as `Unknown`; they are never inferred as enabled."
+        },
+        "configuration": {
+          "$ref": "#/$defs/NodeConfigurationSnapshot",
+          "default": {
+            "networks": []
+          }
+        },
+        "control_health": {
+          "$ref": "#/$defs/NodeControlHealth",
+          "default": "unknown",
+          "description": "Health of the UI adapter's control connection. This is local transport\nobservation, not authoritative node state, so changing it must not\nmanufacture a new node revision."
+        },
+        "embedded_services": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeEmbeddedServiceSnapshot"
+          },
+          "type": "array"
+        },
+        "exit_node_capabilities": {
+          "$ref": "#/$defs/ExitNodeCapabilities",
+          "default": {
+            "cleanup": false,
+            "ipv4_forwarding": false,
+            "ipv6_forwarding": false,
+            "nat": false,
+            "platform": "linux",
+            "schema_version": 1,
+            "supported": false,
+            "unsupported_reasons": [
+              "privileges_required",
+              "ipv4_forwarding_unavailable"
+            ]
+          },
+          "description": "Runtime capability truth for this host. Adapters must disable Exit Node\nactions when `supported` is false and render the typed reasons instead\nof inferring success from configuration alone."
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeIdentitySnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/NodeLifecycleSnapshot"
+        },
+        "logs": {
+          "items": {
+            "$ref": "#/$defs/NodeLogEntry"
+          },
+          "type": "array"
+        },
+        "networks": {
+          "items": {
+            "$ref": "#/$defs/NodeNetworkSnapshot"
+          },
+          "type": "array"
+        },
+        "peers": {
+          "items": {
+            "$ref": "#/$defs/NodePeerSnapshot"
+          },
+          "type": "array"
+        },
+        "permissions": {
+          "$ref": "#/$defs/NodePermissionSnapshot",
+          "default": {
+            "access_model": "trusted_control_plane",
+            "permissions": []
+          }
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ui_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiModeResolution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "revision",
+        "lifecycle",
+        "networks",
+        "peers",
+        "logs"
+      ],
+      "type": "object"
+    },
+    "NodeTrafficSnapshot": {
+      "properties": {
+        "error_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p2p_rx_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p2p_rx_packets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p2p_tx_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p2p_tx_packets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tun_rx_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tun_rx_packets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tun_tx_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tun_tx_packets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tun_rx_packets",
+        "tun_rx_bytes",
+        "tun_tx_packets",
+        "tun_tx_bytes",
+        "p2p_rx_packets",
+        "p2p_rx_bytes",
+        "p2p_tx_packets",
+        "p2p_tx_bytes",
+        "error_count"
+      ],
+      "type": "object"
     },
     "NodeUiAction": {
-      "type": "object",
       "properties": {
-        "id": {
-          "type": "string"
+        "audit": {
+          "$ref": "#/$defs/NodeUiAudit",
+          "description": "Stable audit requirement for this command. Reads that are too noisy to\nrecord still carry an explicit `none` declaration instead of leaving\nadapters to guess."
         },
-        "label_key": {
-          "type": "string"
+        "availability": {
+          "$ref": "#/$defs/NodeUiAvailability"
+        },
+        "backend_status": {
+          "$ref": "#/$defs/NodeUiBackendStatus"
         },
         "command": {
-          "type": "string",
           "enum": [
             "get_snapshot",
             "get_node_diagnostics",
@@ -1245,26 +1439,8 @@
             "restart_node",
             "cleanup_node_residuals",
             "shutdown"
-          ]
-        },
-        "backend_status": {
-          "$ref": "#/$defs/NodeUiBackendStatus"
-        },
-        "permission": {
-          "$ref": "#/$defs/NodePermission"
-        },
-        "audit": {
-          "$ref": "#/$defs/NodeUiAudit",
-          "description": "Stable audit requirement for this command. Reads that are too noisy to\nrecord still carry an explicit `none` declaration instead of leaving\nadapters to guess."
-        },
-        "availability": {
-          "$ref": "#/$defs/NodeUiAvailability"
-        },
-        "fields": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeUiField"
-          }
+          ],
+          "type": "string"
         },
         "confirmation": {
           "anyOf": [
@@ -1275,6 +1451,21 @@
               "type": "null"
             }
           ]
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/NodeUiField"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label_key": {
+          "type": "string"
+        },
+        "permission": {
+          "$ref": "#/$defs/NodePermission"
         }
       },
       "required": [
@@ -1286,67 +1477,86 @@
         "audit",
         "availability",
         "fields"
-      ]
-    },
-    "NodeUiBackendStatus": {
-      "oneOf": [
-        {
-          "type": "string",
-          "const": "implemented",
-          "description": "The production command handler currently accepts this command."
-        },
-        {
-          "type": "string",
-          "const": "unavailable",
-          "description": "The shared command exists, but the runtime backend rejects it as unavailable."
-        }
-      ]
+      ],
+      "type": "object"
     },
     "NodeUiAudit": {
-      "type": "object",
       "properties": {
-        "policy": {
-          "$ref": "#/$defs/NodeUiAuditPolicy"
-        },
         "action": {
+          "description": "Stable action name written to the append-only audit log.",
           "type": [
             "string",
             "null"
-          ],
-          "description": "Stable action name written to the append-only audit log."
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/NodeUiAuditPolicy"
         }
       },
       "required": [
         "policy"
-      ]
+      ],
+      "type": "object"
     },
     "NodeUiAuditPolicy": {
-      "type": "string",
       "enum": [
         "none",
         "record_outcome"
-      ]
+      ],
+      "type": "string"
     },
     "NodeUiAvailability": {
-      "type": "string",
       "enum": [
         "always",
         "node_running",
         "network_online",
         "network_selected"
+      ],
+      "type": "string"
+    },
+    "NodeUiBackendStatus": {
+      "oneOf": [
+        {
+          "const": "implemented",
+          "description": "The production command handler currently accepts this command.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The shared command exists, but the runtime backend rejects it as unavailable.",
+          "type": "string"
+        }
       ]
     },
+    "NodeUiConfirmation": {
+      "properties": {
+        "consequence_key": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean"
+        },
+        "title_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title_key",
+        "consequence_key",
+        "destructive"
+      ],
+      "type": "object"
+    },
     "NodeUiField": {
-      "type": "object",
       "properties": {
         "id": {
           "type": "string"
         },
-        "label_key": {
-          "type": "string"
-        },
         "input": {
           "$ref": "#/$defs/NodeUiInputKind"
+        },
+        "label_key": {
+          "type": "string"
         },
         "required": {
           "type": "boolean"
@@ -1361,10 +1571,10 @@
         "input",
         "required",
         "validation"
-      ]
+      ],
+      "type": "object"
     },
     "NodeUiInputKind": {
-      "type": "string",
       "enum": [
         "boolean",
         "client_id",
@@ -1378,10 +1588,58 @@
         "routing_mode",
         "url_or_ticket",
         "timeout_ms"
-      ]
+      ],
+      "type": "string"
+    },
+    "NodeUiManifest": {
+      "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic.",
+      "properties": {
+        "pages": {
+          "items": {
+            "$ref": "#/$defs/NodeUiPage"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "pages"
+      ],
+      "type": "object"
+    },
+    "NodeUiPage": {
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/NodeUiAction"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "nav_label_key": {
+          "type": "string"
+        },
+        "title_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "nav_label_key",
+        "title_key",
+        "actions"
+      ],
+      "type": "object"
     },
     "NodeUiValidation": {
-      "type": "string",
       "enum": [
         "none",
         "non_empty",
@@ -1393,327 +1651,69 @@
         "role",
         "routing_mode",
         "positive_timeout"
-      ]
-    },
-    "NodeUiConfirmation": {
-      "type": "object",
-      "properties": {
-        "title_key": {
-          "type": "string"
-        },
-        "consequence_key": {
-          "type": "string"
-        },
-        "destructive": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "title_key",
-        "consequence_key",
-        "destructive"
-      ]
-    },
-    "NodeDiagnosticsSnapshot": {
-      "type": "object",
-      "properties": {
-        "lifecycle": {
-          "$ref": "#/$defs/NodeLifecycleSnapshot"
-        },
-        "retained_owner_networks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "cleanup_candidate_networks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "residue": {
-          "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
-        }
-      },
-      "required": [
-        "lifecycle",
-        "retained_owner_networks",
-        "cleanup_candidate_networks",
-        "residue"
       ],
-      "description": "Live actor-owned diagnostics. Counts describe observed runtime ownership,\nnot merely configuration or UI snapshot projections."
+      "type": "string"
     },
-    "NodeRuntimeResidueSnapshot": {
-      "type": "object",
-      "properties": {
-        "sessions_remaining": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "listeners_remaining": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "peers_remaining": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "embedded_services_remaining": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "configuration_retained": {
-          "type": "boolean"
-        },
-        "residual_networks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "cleanup_steps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeCleanupStepSnapshot"
-          }
-        },
-        "issues": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "sessions_remaining",
-        "listeners_remaining",
-        "peers_remaining",
-        "embedded_services_remaining",
-        "configuration_retained",
-        "residual_networks",
-        "cleanup_steps",
-        "issues"
-      ],
-      "description": "Transport-neutral residue report shared by diagnostics and explicit cleanup."
-    },
-    "NodeCleanupStepSnapshot": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "resource": {
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/$defs/NodeCleanupStepStatus"
-        },
-        "detail": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "network_name",
-        "resource",
-        "status"
-      ],
-      "description": "One sanitized runtime cleanup step. Host paths and raw operating-system\nerrors are intentionally excluded from this public contract."
-    },
-    "NodeCleanupStepStatus": {
-      "type": "string",
+    "UiMode": {
+      "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane. It remains available on\nheadless hosts as a server-only surface; the display environment only\ndecides whether a browser window can also be opened. `WebUi` must never be\nrepresented as the native `Gpui` surface.",
       "enum": [
-        "removed",
-        "not_owned",
-        "deferred",
-        "failed",
-        "unknown"
-      ]
-    },
-    "NodeResidualCleanupResult": {
-      "type": "object",
-      "properties": {
-        "cleaned_networks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "failed_networks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeCleanupFailureSnapshot"
-          }
-        },
-        "residue": {
-          "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
-        }
-      },
-      "required": [
-        "cleaned_networks",
-        "failed_networks",
-        "residue"
+        "gpui",
+        "web_ui",
+        "headless"
       ],
-      "description": "Partial-success aware result for explicit residual cleanup."
+      "type": "string"
     },
-    "NodeCleanupFailureSnapshot": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "reason": {
-          "$ref": "#/$defs/NodeCleanupFailureReason"
-        }
-      },
-      "required": [
-        "network_name",
-        "reason"
-      ]
-    },
-    "NodeCleanupFailureReason": {
-      "type": "string",
+    "UiModeRequest": {
       "enum": [
-        "still_running",
-        "owner_unavailable",
-        "timed_out",
-        "incomplete",
-        "unknown"
-      ]
-    },
-    "NodeBlacklistSnapshot": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "clients": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "changed": {
-          "type": "boolean",
-          "description": "True when the operation changed persisted blacklist state. Queries and\nidempotent mutations report false."
-        }
-      },
-      "required": [
-        "network_name",
-        "clients",
-        "changed"
-      ]
-    },
-    "NodeNetworkAllocationSnapshot": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "allocation": {
-          "$ref": "#/$defs/NodeNetworkAllocation"
-        },
-        "config_saved": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "network_name",
-        "allocation",
-        "config_saved"
-      ]
-    },
-    "NodeNetworkAllocation": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/NetworkMode"
-        },
-        "ipv4_pool": {
-          "type": "string"
-        },
-        "ipv6_pool": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "mode",
-        "ipv4_pool",
-        "ipv6_pool"
+        "auto",
+        "gpui",
+        "web_ui",
+        "headless"
       ],
-      "description": "Transport-neutral allocation payload shared by local adapters and the\nnode command protocol. Persistence is owned by the embedded service actor,\nnever by a UI adapter."
+      "type": "string"
     },
-    "NodePeerProbeSnapshot": {
-      "type": "object",
+    "UiModeResolution": {
       "properties": {
-        "peer_id": {
-          "type": "string"
+        "display": {
+          "$ref": "#/$defs/DisplayEnvironment"
         },
-        "virtual_ipv6": {
-          "type": "string",
-          "format": "ipv6"
+        "effective": {
+          "$ref": "#/$defs/UiMode"
         },
-        "endpoint": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "rtt_us": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        },
-        "p2p_active": {
+        "gpui_available": {
           "type": "boolean"
         },
-        "timed_out": {
-          "type": "boolean"
+        "requested": {
+          "$ref": "#/$defs/UiModeRequest"
         }
       },
       "required": [
-        "peer_id",
-        "virtual_ipv6",
-        "p2p_active",
-        "timed_out"
-      ]
-    },
-    "NodeCreatedNetwork": {
-      "type": "object",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "config_saved": {
-          "type": "boolean"
-        },
-        "started": {
-          "type": "boolean"
-        },
-        "invitation_ticket": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "network_name",
-        "config_saved",
-        "started",
-        "invitation_ticket"
+        "requested",
+        "effective",
+        "display",
+        "gpui_available"
       ],
-      "description": "Owner-local result of creating a network.\n\nThe invitation ticket is deliberately returned only by this command result\nand is never added to `NodeSnapshot`, events, or logs. Its `Debug` output is\nredacted so an adapter cannot accidentally leak it through generic error\nformatting."
+      "type": "object"
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-command-result-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "outcome": {
+      "$ref": "#/$defs/NodeCommandOutcome"
+    },
+    "request_id": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "request_id",
+    "outcome"
+  ],
+  "title": "NodeCommandResult",
+  "type": "object",
   "x-fuckipv6-contract-version": 1,
   "x-fuckipv6-rust-source": "fuckipv6-client::node"
 }

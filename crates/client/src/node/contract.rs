@@ -92,7 +92,29 @@ fn schema_document<T: ?Sized + JsonSchema>(artifact: &str, title: &str) -> Value
         "x-fuckipv6-rust-source".into(),
         json!("fuckipv6-client::node"),
     );
-    value
+    canonicalize_json_keys(value)
+}
+
+/// Sort object keys recursively so contract rendering is independent of
+/// `serde_json`'s `preserve_order` feature being enabled by another target in
+/// the same dependency graph (for example, the optional GPUI shell).
+fn canonicalize_json_keys(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json_keys(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(canonicalize_json_keys).collect())
+        }
+        scalar => scalar,
+    }
 }
 
 /// Serialize every artifact with stable formatting and a trailing newline.
@@ -357,6 +379,33 @@ mod tests {
                 "{} is stale; run scripts/generate-contracts.sh",
                 path.display()
             );
+        }
+    }
+
+    #[test]
+    fn generated_schema_objects_have_canonical_key_order() {
+        fn assert_sorted(value: &Value, path: &str) {
+            match value {
+                Value::Object(map) => {
+                    let keys: Vec<_> = map.keys().cloned().collect();
+                    let mut sorted = keys.clone();
+                    sorted.sort();
+                    assert_eq!(keys, sorted, "object keys are not sorted at {path}");
+                    for (key, child) in map {
+                        assert_sorted(child, &format!("{path}.{key}"));
+                    }
+                }
+                Value::Array(values) => {
+                    for (index, child) in values.iter().enumerate() {
+                        assert_sorted(child, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (name, schema) in contract_schema_artifacts() {
+            assert_sorted(&schema, name);
         }
     }
 

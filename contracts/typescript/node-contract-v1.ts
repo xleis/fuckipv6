@@ -17,13 +17,13 @@ export type CapabilityState = "disabled" | "starting" | "enabled" | "degraded" |
 export type DisplayEnvironment = "linux_x11" | "linux_wayland" | "windows_desktop" | "macos_desktop" | "headless";
 
 export type ExitNodeCapabilities = {
-  "schema_version": number;
-  "platform": ExitNodePlatform;
-  "supported": boolean;
+  "cleanup": boolean;
   "ipv4_forwarding": boolean;
   "ipv6_forwarding": boolean;
   "nat": boolean;
-  "cleanup": boolean;
+  "platform": ExitNodePlatform;
+  "schema_version": number;
+  "supported": boolean;
   "unsupported_reasons": Array<ExitNodeUnsupportedReason>;
 };
 
@@ -36,9 +36,9 @@ export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
 export type NodeAccessModel = "trusted_control_plane";
 
 export type NodeBlacklistSnapshot = {
-  "network_name": string;
-  "clients": Array<string>;
   "changed": boolean;
+  "clients": Array<string>;
+  "network_name": string;
 };
 
 export type NodeCapabilityRegistrySnapshot = {
@@ -58,17 +58,17 @@ export type NodeCleanupFailureSnapshot = {
 };
 
 export type NodeCleanupStepSnapshot = {
+  "detail"?: string | null;
   "network_name": string;
   "resource": string;
   "status": NodeCleanupStepStatus;
-  "detail"?: string | null;
 };
 
 export type NodeCleanupStepStatus = "removed" | "not_owned" | "deferred" | "failed" | "unknown";
 
 export type NodeClientBlacklistCommand = {
-  "network_name": string;
   "client_id": string;
+  "network_name": string;
 };
 
 export type NodeCommand = {
@@ -85,14 +85,14 @@ export type NodeCommand = {
 } | {
   "command": "stop_networks";
   "payload": {
-  "networks": Array<string>;
   "all": boolean;
+  "networks": Array<string>;
 };
 } | {
   "command": "restart_networks";
   "payload": {
-  "networks": Array<string>;
   "all": boolean;
+  "networks": Array<string>;
 };
 } | {
   "command": "create_network";
@@ -137,70 +137,70 @@ export type NodeCommand = {
 } | {
   "command": "cleanup_node_residuals";
   "payload": {
-  "networks": Array<string>;
   "all": boolean;
+  "networks": Array<string>;
 };
 } | {
   "command": "shutdown";
 };
 
 export type NodeCommandHttpRequest = {
-  "schema_version": number;
   "request": NodeCommandRequest;
+  "schema_version": number;
 };
 
 export type NodeCommandHttpResponse = {
-  "schema_version": number;
   "result": NodeCommandResult;
+  "schema_version": number;
 };
 
 export type NodeCommandOutcome = {
-  "status": "snapshot";
   "data": NodeSnapshot;
+  "status": "snapshot";
 } | {
-  "status": "ui_manifest";
   "data": NodeUiManifest;
+  "status": "ui_manifest";
 } | {
-  "status": "diagnostics";
   "data": NodeDiagnosticsSnapshot;
+  "status": "diagnostics";
 } | {
-  "status": "cleanup";
   "data": NodeResidualCleanupResult;
+  "status": "cleanup";
 } | {
-  "status": "blacklist";
   "data": NodeBlacklistSnapshot;
+  "status": "blacklist";
 } | {
-  "status": "network_allocation";
   "data": NodeNetworkAllocationSnapshot;
+  "status": "network_allocation";
 } | {
-  "status": "probe";
   "data": NodePeerProbeSnapshot;
+  "status": "probe";
 } | {
-  "status": "network_created";
   "data": NodeCreatedNetwork;
+  "status": "network_created";
 } | {
-  "status": "accepted";
   "data": {
   "operation_id": string;
 };
+  "status": "accepted";
 } | {
-  "status": "completed";
   "data": {
   "message": string;
 };
+  "status": "completed";
 } | {
-  "status": "rejected";
   "data": NodeProblem;
+  "status": "rejected";
 };
 
 export type NodeCommandRequest = {
-  "request_id": number;
   "command": NodeCommand;
+  "request_id": number;
 };
 
 export type NodeCommandResult = {
-  "request_id": number;
   "outcome": NodeCommandOutcome;
+  "request_id": number;
 };
 
 export type NodeConfigurationSnapshot = {
@@ -210,179 +210,179 @@ export type NodeConfigurationSnapshot = {
 export type NodeControlHealth = "unknown" | "available" | "unavailable";
 
 export type NodeCreateNetworkCommand = {
-  "name": string;
-  "signaling_port": number;
-  "relay_port": number;
-  "external_host"?: string | null;
   "auto_connect": boolean;
+  "external_host"?: string | null;
+  "name": string;
+  "relay_port": number;
+  "signaling_port": number;
 };
 
 export type NodeCreatedNetwork = {
-  "network_name": string;
   "config_saved": boolean;
-  "started": boolean;
   "invitation_ticket": string;
+  "network_name": string;
+  "started": boolean;
 };
 
 export type NodeDiagnosticsSnapshot = {
-  "lifecycle": NodeLifecycleSnapshot;
-  "retained_owner_networks": Array<string>;
   "cleanup_candidate_networks": Array<string>;
+  "lifecycle": NodeLifecycleSnapshot;
   "residue": NodeRuntimeResidueSnapshot;
+  "retained_owner_networks": Array<string>;
 };
 
 export type NodeEmbeddedServiceSnapshot = {
   "network_name": string;
-  "status": NodeEmbeddedServiceStatus;
-  "signaling_addr"?: string | null;
   "relay_addr"?: string | null;
+  "signaling_addr"?: string | null;
+  "status": NodeEmbeddedServiceStatus;
 };
 
 export type NodeEmbeddedServiceStatus = "starting" | "running" | "stopping" | "stopped" | "failed";
 
 export type NodeEvent = {
-  "sequence": number;
   "kind": NodeEventKind;
+  "sequence": number;
 };
 
 export type NodeEventKind = {
-  "type": "state_changed";
   "data": {
   "revision": number;
 };
+  "type": "state_changed";
 } | {
-  "type": "network_changed";
   "data": {
   "network_name": string;
   "status": NodeNetworkStatus;
 };
+  "type": "network_changed";
 } | {
-  "type": "embedded_service_changed";
   "data": {
   "network_name": string;
   "status": NodeEmbeddedServiceStatus;
 };
+  "type": "embedded_service_changed";
 } | {
-  "type": "log_appended";
   "data": {
   "level": NodeLogLevel;
   "message": string;
 };
+  "type": "log_appended";
 } | {
-  "type": "routing_changed";
   "data": {
-  "network_name": string;
-  "mode": NodeRoutingMode;
   "exit_node"?: string | null;
   "is_exit_node": boolean;
+  "mode": NodeRoutingMode;
+  "network_name": string;
 };
+  "type": "routing_changed";
 } | {
-  "type": "role_changed";
   "data": {
+  "enabled": boolean;
   "network_name": string;
   "role": NodeNetworkRole;
-  "enabled": boolean;
   "roles": Array<NodeNetworkRole>;
 };
+  "type": "role_changed";
 } | {
-  "type": "command_completed";
   "data": {
   "request_id": number;
   "success": boolean;
 };
+  "type": "command_completed";
 };
 
 export type NodeHttpContract = {
   "command_request": NodeCommandHttpRequest;
   "command_response": NodeCommandHttpResponse;
+  "error_response": NodeHttpErrorResponse;
   "manifest_response": NodeManifestResponse;
   "snapshot_response": NodeSnapshotResponse;
-  "error_response": NodeHttpErrorResponse;
   "websocket_message": NodeWsMessage;
 };
 
 export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "backend_rejected" | "backend_unavailable" | "contract_violation";
 
 export type NodeHttpErrorResponse = {
-  "schema_version": number;
   "code": NodeHttpErrorCode;
   "message": string;
-  "requested_schema_version"?: number | null;
-  "supported_schema_version"?: number | null;
   "problem"?: NodeProblem | null;
+  "requested_schema_version"?: number | null;
+  "schema_version": number;
+  "supported_schema_version"?: number | null;
 };
 
 export type NodeIdentitySnapshot = {
-  "node_id": string;
   "display_name"?: string | null;
+  "node_id": string;
   "public_key_fingerprint": string;
 };
 
 export type NodeJoinNetworkCommand = {
-  "target": string;
   "network_name"?: string | null;
   "start": boolean;
+  "target": string;
 };
 
 export type NodeLifecycleSnapshot = {
-  "phase": NodePhase;
-  "configured_networks": number;
   "active_networks": number;
+  "configured_networks": number;
   "failed_networks": Array<string>;
+  "phase": NodePhase;
 };
 
 export type NodeLogEntry = {
-  "unix_ms": number;
   "level": NodeLogLevel;
-  "target": string;
   "message": string;
+  "target": string;
+  "unix_ms": number;
 };
 
 export type NodeLogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
 export type NodeManifestResponse = {
-  "schema_version": number;
   "manifest": NodeUiManifest;
+  "schema_version": number;
 };
 
 export type NodeNetworkAllocation = {
-  "mode": NetworkMode;
   "ipv4_pool": string;
   "ipv6_pool": string;
+  "mode": NetworkMode;
 };
 
 export type NodeNetworkAllocationSnapshot = {
-  "network_name": string;
   "allocation": NodeNetworkAllocation;
   "config_saved": boolean;
+  "network_name": string;
 };
 
 export type NodeNetworkConfigSnapshot = {
-  "network_name": string;
+  "acl_default_action": AclAction;
+  "acl_enabled": boolean;
+  "acl_rule_count": number;
   "coordinator_url": string;
-  "virtual_mode"?: NetworkMode | null;
-  "preferred_ipv4"?: string | null;
-  "preferred_ipv6"?: string | null;
-  "virtual_network"?: string | null;
-  "tun_name": string;
+  "direct_cidrs": Array<string>;
+  "exit_node"?: string | null;
+  "exit_node_allow_lan_access": boolean;
+  "exit_node_allowed_clients": Array<string>;
+  "exit_node_enabled": boolean;
+  "exit_node_region"?: string | null;
+  "identity_configured": boolean;
+  "log_file_configured": boolean;
+  "log_level": string;
   "mtu": number;
-  "p2p_listen_port": number;
+  "network_name": string;
   "p2p_connect_timeout_secs": number;
   "p2p_heartbeat_interval_secs": number;
-  "routing_mode": NodeRoutingMode;
-  "exit_node"?: string | null;
-  "direct_cidrs": Array<string>;
+  "p2p_listen_port": number;
+  "preferred_ipv4"?: string | null;
+  "preferred_ipv6"?: string | null;
   "proxy_cidrs": Array<string>;
-  "exit_node_enabled": boolean;
-  "exit_node_allowed_clients": Array<string>;
-  "exit_node_allow_lan_access": boolean;
-  "exit_node_region"?: string | null;
-  "acl_enabled": boolean;
-  "acl_default_action": AclAction;
-  "acl_rule_count": number;
-  "log_level": string;
-  "log_file_configured": boolean;
-  "identity_configured": boolean;
+  "routing_mode": NodeRoutingMode;
+  "tun_name": string;
+  "virtual_mode"?: NetworkMode | null;
+  "virtual_network"?: string | null;
 };
 
 export type NodeNetworkRole = "member" | "discovery" | "relay" | "exit_node";
@@ -392,41 +392,41 @@ export type NodeNetworkSelection = "default" | "all" | "none" | {
 };
 
 export type NodeNetworkSnapshot = {
-  "name": string;
-  "tun_name": string;
-  "status": NodeNetworkStatus;
-  "assigned_ipv6"?: string | null;
   "assigned_ipv4"?: string | null;
+  "assigned_ipv6"?: string | null;
+  "name": string;
   "p2p_listen_addr"?: string | null;
-  "uptime_secs": number;
-  "roles": Array<NodeNetworkRole>;
   "peer_count": number;
+  "roles": Array<NodeNetworkRole>;
+  "status": NodeNetworkStatus;
   "traffic": NodeTrafficSnapshot;
+  "tun_name": string;
+  "uptime_secs": number;
 };
 
 export type NodeNetworkStatus = "offline" | "connecting" | "online" | "degraded" | "stopping" | "failed";
 
 export type NodePeerProbeSnapshot = {
-  "peer_id": string;
-  "virtual_ipv6": string;
   "endpoint"?: string | null;
-  "rtt_us"?: number | null;
   "p2p_active": boolean;
+  "peer_id": string;
+  "rtt_us"?: number | null;
   "timed_out": boolean;
+  "virtual_ipv6": string;
 };
 
 export type NodePeerSnapshot = {
-  "peer_id": string;
-  "network_name": string;
-  "virtual_ipv6": string;
-  "virtual_ipv4"?: string | null;
   "endpoints": Array<string>;
+  "loss_rate": number;
+  "network_name": string;
   "online": boolean;
   "p2p_active": boolean;
   "p2p_healthy": boolean;
+  "peer_id": string;
   "rtt_us"?: number | null;
-  "loss_rate": number;
   "traffic": NodeTrafficSnapshot;
+  "virtual_ipv4"?: string | null;
+  "virtual_ipv6": string;
 };
 
 export type NodePermission = "view_state" | "manage_networks" | "change_routing" | "manage_roles" | "probe_peers" | "stop_node" | "view_logs";
@@ -462,37 +462,37 @@ export type NodeResidualCleanupResult = {
 export type NodeRoutingMode = "mesh_only" | "bypass_mainland" | "global_proxy";
 
 export type NodeRuntimeResidueSnapshot = {
-  "sessions_remaining": number;
+  "cleanup_steps": Array<NodeCleanupStepSnapshot>;
+  "configuration_retained": boolean;
+  "embedded_services_remaining": number;
+  "issues": Array<string>;
   "listeners_remaining": number;
   "peers_remaining": number;
-  "embedded_services_remaining": number;
-  "configuration_retained": boolean;
   "residual_networks": Array<string>;
-  "cleanup_steps": Array<NodeCleanupStepSnapshot>;
-  "issues": Array<string>;
+  "sessions_remaining": number;
 };
 
 export type NodeSetNetworkRoleCommand = {
+  "enabled": boolean;
   "network_name": string;
   "role": NodeNetworkRole;
-  "enabled": boolean;
 };
 
 export type NodeSnapshot = {
-  "revision": number;
-  "lifecycle": NodeLifecycleSnapshot;
-  "control_health"?: NodeControlHealth;
-  "identity"?: NodeIdentitySnapshot | null;
-  "configuration"?: NodeConfigurationSnapshot;
-  "exit_node_capabilities"?: ExitNodeCapabilities;
   "capabilities"?: NodeCapabilityRegistrySnapshot;
-  "permissions"?: NodePermissionSnapshot;
+  "configuration"?: NodeConfigurationSnapshot;
+  "control_health"?: NodeControlHealth;
   "embedded_services"?: Array<NodeEmbeddedServiceSnapshot>;
-  "ui_mode"?: UiModeResolution | null;
+  "exit_node_capabilities"?: ExitNodeCapabilities;
+  "identity"?: NodeIdentitySnapshot | null;
+  "last_error"?: NodeProblem | null;
+  "lifecycle": NodeLifecycleSnapshot;
+  "logs": Array<NodeLogEntry>;
   "networks": Array<NodeNetworkSnapshot>;
   "peers": Array<NodePeerSnapshot>;
-  "logs": Array<NodeLogEntry>;
-  "last_error"?: NodeProblem | null;
+  "permissions"?: NodePermissionSnapshot;
+  "revision": number;
+  "ui_mode"?: UiModeResolution | null;
 };
 
 export type NodeSnapshotResponse = {
@@ -501,32 +501,32 @@ export type NodeSnapshotResponse = {
 };
 
 export type NodeTrafficSnapshot = {
-  "tun_rx_packets": number;
-  "tun_rx_bytes": number;
-  "tun_tx_packets": number;
-  "tun_tx_bytes": number;
-  "p2p_rx_packets": number;
-  "p2p_rx_bytes": number;
-  "p2p_tx_packets": number;
-  "p2p_tx_bytes": number;
   "error_count": number;
+  "p2p_rx_bytes": number;
+  "p2p_rx_packets": number;
+  "p2p_tx_bytes": number;
+  "p2p_tx_packets": number;
+  "tun_rx_bytes": number;
+  "tun_rx_packets": number;
+  "tun_tx_bytes": number;
+  "tun_tx_packets": number;
 };
 
 export type NodeUiAction = {
-  "id": string;
-  "label_key": string;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "shutdown";
-  "backend_status": NodeUiBackendStatus;
-  "permission": NodePermission;
   "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
-  "fields": Array<NodeUiField>;
+  "backend_status": NodeUiBackendStatus;
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
+  "fields": Array<NodeUiField>;
+  "id": string;
+  "label_key": string;
+  "permission": NodePermission;
 };
 
 export type NodeUiAudit = {
-  "policy": NodeUiAuditPolicy;
   "action"?: string | null;
+  "policy": NodeUiAuditPolicy;
 };
 
 export type NodeUiAuditPolicy = "none" | "record_outcome";
@@ -536,15 +536,15 @@ export type NodeUiAvailability = "always" | "node_running" | "network_online" | 
 export type NodeUiBackendStatus = "implemented" | "unavailable";
 
 export type NodeUiConfirmation = {
-  "title_key": string;
   "consequence_key": string;
   "destructive": boolean;
+  "title_key": string;
 };
 
 export type NodeUiField = {
   "id": string;
-  "label_key": string;
   "input": NodeUiInputKind;
+  "label_key": string;
   "required": boolean;
   "validation": NodeUiValidation;
 };
@@ -552,49 +552,49 @@ export type NodeUiField = {
 export type NodeUiInputKind = "boolean" | "client_id" | "external_host" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "port" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
 
 export type NodeUiManifest = {
-  "schema_version": number;
   "pages": Array<NodeUiPage>;
+  "schema_version": number;
 };
 
 export type NodeUiPage = {
+  "actions": Array<NodeUiAction>;
   "id": string;
   "nav_label_key": string;
   "title_key": string;
-  "actions": Array<NodeUiAction>;
 };
 
 export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout";
 
 export type NodeUpdateNetworkAllocationCommand = {
-  "network_name": string;
   "allocation": NodeNetworkAllocation;
+  "network_name": string;
 };
 
 export type NodeUpdateRoutingCommand = {
-  "network_name": string;
-  "mode": NodeRoutingMode;
   "exit_node"?: string | null;
   "is_exit_node": boolean;
+  "mode": NodeRoutingMode;
+  "network_name": string;
 };
 
 export type NodeWsMessage = {
+  "schema_version": number;
+  "snapshot": NodeSnapshot;
   "type": "snapshot";
-  "schema_version": number;
-  "snapshot": NodeSnapshot;
 } | {
-  "type": "event";
-  "schema_version": number;
   "event": NodeEvent;
-} | {
-  "type": "resync";
   "schema_version": number;
+  "type": "event";
+} | {
   "reason": NodeWsResyncReason;
-  "snapshot": NodeSnapshot;
-} | {
-  "type": "error";
   "schema_version": number;
+  "snapshot": NodeSnapshot;
+  "type": "resync";
+} | {
   "code": NodeHttpErrorCode;
   "message": string;
+  "schema_version": number;
+  "type": "error";
 };
 
 export type NodeWsResyncReason = "lagged" | "revision_gap";
@@ -604,10 +604,10 @@ export type UiMode = "gpui" | "web_ui" | "headless";
 export type UiModeRequest = "auto" | "gpui" | "web_ui" | "headless";
 
 export type UiModeResolution = {
-  "requested": UiModeRequest;
-  "effective": UiMode;
   "display": DisplayEnvironment;
+  "effective": UiMode;
   "gpui_available": boolean;
+  "requested": UiModeRequest;
 };
 
 

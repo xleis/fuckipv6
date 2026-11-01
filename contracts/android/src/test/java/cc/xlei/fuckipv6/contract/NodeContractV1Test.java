@@ -38,7 +38,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 47,
+                NodeContractV1.DTO_CLASS_NAMES.length == 53,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -161,13 +161,13 @@ public final class NodeContractV1Test {
         NodeContractV1.NodeCommand.CleanupNodeResiduals cleanup =
                 new NodeContractV1.NodeCommand.CleanupNodeResiduals(
                         new NodeContractV1.NodeCommand.CleanupNodeResiduals.CleanupNodeResidualsPayload(
-                                Collections.emptyList(), false));
+                                false, Collections.emptyList()));
         assertSame(
                 NodeCommandKind.CLEANUP_NODE_RESIDUALS,
                 cleanup.command,
                 "cleanup_node_residuals command DTO");
         NodeContractV1.NodeCreateNetworkCommand createNetwork =
-                new NodeContractV1.NodeCreateNetworkCommand("lab", 41000, 41001, null, true);
+                new NodeContractV1.NodeCreateNetworkCommand(true, null, "lab", 41000, 41001);
         NodeContractV1.NodeCommand.CreateNetwork createCommand =
                 new NodeContractV1.NodeCommand.CreateNetwork(createNetwork);
         assertSame(
@@ -212,9 +212,9 @@ public final class NodeContractV1Test {
                 "named network selection tag");
 
         new NodeContractV1.NodeWsMessage.Snapshot(1, null);
-        new NodeContractV1.NodeWsMessage.Event(1, null);
-        new NodeContractV1.NodeWsMessage.Resync(1, null, null);
-        new NodeContractV1.NodeWsMessage.Error(1, null, "error");
+        new NodeContractV1.NodeWsMessage.Event(null, 1);
+        new NodeContractV1.NodeWsMessage.Resync(null, 1, null);
+        new NodeContractV1.NodeWsMessage.Error(null, "error", 1);
 
         System.out.println("NodeContractV1Test: passed");
     }

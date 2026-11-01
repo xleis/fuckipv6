@@ -804,37 +804,37 @@ public final class NodeContractV1 {
 
     /** DTO for ExitNodeCapabilities. */
     public static final class ExitNodeCapabilities {
-        public final Integer schema_version;
-        public final ExitNodePlatform platform;
-        public final Boolean supported;
+        public final Boolean cleanup;
         public final Boolean ipv4_forwarding;
         public final Boolean ipv6_forwarding;
         public final Boolean nat;
-        public final Boolean cleanup;
+        public final ExitNodePlatform platform;
+        public final Integer schema_version;
+        public final Boolean supported;
         public final List<ExitNodeUnsupportedReason> unsupported_reasons;
 
-        public ExitNodeCapabilities(Integer schema_version, ExitNodePlatform platform, Boolean supported, Boolean ipv4_forwarding, Boolean ipv6_forwarding, Boolean nat, Boolean cleanup, List<ExitNodeUnsupportedReason> unsupported_reasons) {
-            this.schema_version = schema_version;
-            this.platform = platform;
-            this.supported = supported;
+        public ExitNodeCapabilities(Boolean cleanup, Boolean ipv4_forwarding, Boolean ipv6_forwarding, Boolean nat, ExitNodePlatform platform, Integer schema_version, Boolean supported, List<ExitNodeUnsupportedReason> unsupported_reasons) {
+            this.cleanup = cleanup;
             this.ipv4_forwarding = ipv4_forwarding;
             this.ipv6_forwarding = ipv6_forwarding;
             this.nat = nat;
-            this.cleanup = cleanup;
+            this.platform = platform;
+            this.schema_version = schema_version;
+            this.supported = supported;
             this.unsupported_reasons = unsupported_reasons;
         }
     }
 
     /** DTO for NodeBlacklistSnapshot. */
     public static final class NodeBlacklistSnapshot {
-        public final String network_name;
-        public final List<String> clients;
         public final Boolean changed;
+        public final List<String> clients;
+        public final String network_name;
 
-        public NodeBlacklistSnapshot(String network_name, List<String> clients, Boolean changed) {
-            this.network_name = network_name;
-            this.clients = clients;
+        public NodeBlacklistSnapshot(Boolean changed, List<String> clients, String network_name) {
             this.changed = changed;
+            this.clients = clients;
+            this.network_name = network_name;
         }
     }
 
@@ -871,71 +871,71 @@ public final class NodeContractV1 {
 
     /** DTO for NodeCleanupStepSnapshot. */
     public static final class NodeCleanupStepSnapshot {
+        public final String detail;
         public final String network_name;
         public final String resource;
         public final NodeCleanupStepStatus status;
-        public final String detail;
 
-        public NodeCleanupStepSnapshot(String network_name, String resource, NodeCleanupStepStatus status, String detail) {
+        public NodeCleanupStepSnapshot(String detail, String network_name, String resource, NodeCleanupStepStatus status) {
+            this.detail = detail;
             this.network_name = network_name;
             this.resource = resource;
             this.status = status;
-            this.detail = detail;
         }
     }
 
     /** DTO for NodeClientBlacklistCommand. */
     public static final class NodeClientBlacklistCommand {
-        public final String network_name;
         public final String client_id;
+        public final String network_name;
 
-        public NodeClientBlacklistCommand(String network_name, String client_id) {
-            this.network_name = network_name;
+        public NodeClientBlacklistCommand(String client_id, String network_name) {
             this.client_id = client_id;
+            this.network_name = network_name;
         }
     }
 
     /** DTO for NodeCommandHttpRequest. */
     public static final class NodeCommandHttpRequest {
-        public final Integer schema_version;
         public final NodeCommandRequest request;
+        public final Integer schema_version;
 
-        public NodeCommandHttpRequest(Integer schema_version, NodeCommandRequest request) {
-            this.schema_version = schema_version;
+        public NodeCommandHttpRequest(NodeCommandRequest request, Integer schema_version) {
             this.request = request;
+            this.schema_version = schema_version;
         }
     }
 
     /** DTO for NodeCommandHttpResponse. */
     public static final class NodeCommandHttpResponse {
-        public final Integer schema_version;
         public final NodeCommandResult result;
+        public final Integer schema_version;
 
-        public NodeCommandHttpResponse(Integer schema_version, NodeCommandResult result) {
-            this.schema_version = schema_version;
+        public NodeCommandHttpResponse(NodeCommandResult result, Integer schema_version) {
             this.result = result;
+            this.schema_version = schema_version;
         }
     }
 
     /** DTO for NodeCommandRequest. */
     public static final class NodeCommandRequest {
-        public final Long request_id;
         public final NodeCommand command;
+        public final Long request_id;
 
-        public NodeCommandRequest(Long request_id, NodeCommand command) {
-            this.request_id = request_id;
+        public NodeCommandRequest(NodeCommand command, Long request_id) {
             this.command = command;
+            this.request_id = request_id;
         }
     }
 
     /** DTO for NodeCommandResult. */
     public static final class NodeCommandResult {
-        public final Long request_id;
         public final NodeCommandOutcome outcome;
+        public final Long request_id;
 
-        public NodeCommandResult(Long request_id, NodeCommandOutcome outcome) {
-            this.request_id = request_id;
+        public NodeCommandResult(NodeCommandOutcome outcome, Long request_id) {
             this.outcome = outcome;
+            this.request_id = request_id;
         }
     }
 
@@ -950,74 +950,74 @@ public final class NodeContractV1 {
 
     /** DTO for NodeCreateNetworkCommand. */
     public static final class NodeCreateNetworkCommand {
-        public final String name;
-        public final Integer signaling_port;
-        public final Integer relay_port;
-        public final String external_host;
         public final Boolean auto_connect;
+        public final String external_host;
+        public final String name;
+        public final Integer relay_port;
+        public final Integer signaling_port;
 
-        public NodeCreateNetworkCommand(String name, Integer signaling_port, Integer relay_port, String external_host, Boolean auto_connect) {
-            this.name = name;
-            this.signaling_port = signaling_port;
-            this.relay_port = relay_port;
-            this.external_host = external_host;
+        public NodeCreateNetworkCommand(Boolean auto_connect, String external_host, String name, Integer relay_port, Integer signaling_port) {
             this.auto_connect = auto_connect;
+            this.external_host = external_host;
+            this.name = name;
+            this.relay_port = relay_port;
+            this.signaling_port = signaling_port;
         }
     }
 
     /** DTO for NodeCreatedNetwork. */
     public static final class NodeCreatedNetwork {
-        public final String network_name;
         public final Boolean config_saved;
-        public final Boolean started;
         public final String invitation_ticket;
+        public final String network_name;
+        public final Boolean started;
 
-        public NodeCreatedNetwork(String network_name, Boolean config_saved, Boolean started, String invitation_ticket) {
-            this.network_name = network_name;
+        public NodeCreatedNetwork(Boolean config_saved, String invitation_ticket, String network_name, Boolean started) {
             this.config_saved = config_saved;
-            this.started = started;
             this.invitation_ticket = invitation_ticket;
+            this.network_name = network_name;
+            this.started = started;
         }
     }
 
     /** DTO for NodeDiagnosticsSnapshot. */
     public static final class NodeDiagnosticsSnapshot {
-        public final NodeLifecycleSnapshot lifecycle;
-        public final List<String> retained_owner_networks;
         public final List<String> cleanup_candidate_networks;
+        public final NodeLifecycleSnapshot lifecycle;
         public final NodeRuntimeResidueSnapshot residue;
+        public final List<String> retained_owner_networks;
 
-        public NodeDiagnosticsSnapshot(NodeLifecycleSnapshot lifecycle, List<String> retained_owner_networks, List<String> cleanup_candidate_networks, NodeRuntimeResidueSnapshot residue) {
-            this.lifecycle = lifecycle;
-            this.retained_owner_networks = retained_owner_networks;
+        public NodeDiagnosticsSnapshot(List<String> cleanup_candidate_networks, NodeLifecycleSnapshot lifecycle, NodeRuntimeResidueSnapshot residue, List<String> retained_owner_networks) {
             this.cleanup_candidate_networks = cleanup_candidate_networks;
+            this.lifecycle = lifecycle;
             this.residue = residue;
+            this.retained_owner_networks = retained_owner_networks;
         }
     }
 
     /** DTO for NodeEmbeddedServiceSnapshot. */
     public static final class NodeEmbeddedServiceSnapshot {
         public final String network_name;
-        public final NodeEmbeddedServiceStatus status;
-        public final String signaling_addr;
         public final String relay_addr;
+        public final String signaling_addr;
+        public final NodeEmbeddedServiceStatus status;
 
-        public NodeEmbeddedServiceSnapshot(String network_name, NodeEmbeddedServiceStatus status, String signaling_addr, String relay_addr) {
+        public NodeEmbeddedServiceSnapshot(String network_name, String relay_addr, String signaling_addr, NodeEmbeddedServiceStatus status) {
             this.network_name = network_name;
-            this.status = status;
-            this.signaling_addr = signaling_addr;
             this.relay_addr = relay_addr;
+            this.signaling_addr = signaling_addr;
+            this.status = status;
         }
     }
 
     /** DTO for NodeEvent. */
     public static final class NodeEvent {
-        public final Long sequence;
         public final NodeEventKind kind;
+        public final Long sequence;
 
-        public NodeEvent(Long sequence, NodeEventKind kind) {
-            this.sequence = sequence;
+        public NodeEvent(NodeEventKind kind, Long sequence) {
             this.kind = kind;
+            this.sequence = sequence;
         }
     }
 
@@ -1025,262 +1025,262 @@ public final class NodeContractV1 {
     public static final class NodeHttpContract {
         public final NodeCommandHttpRequest command_request;
         public final NodeCommandHttpResponse command_response;
+        public final NodeHttpErrorResponse error_response;
         public final NodeManifestResponse manifest_response;
         public final NodeSnapshotResponse snapshot_response;
-        public final NodeHttpErrorResponse error_response;
         public final NodeWsMessage websocket_message;
 
-        public NodeHttpContract(NodeCommandHttpRequest command_request, NodeCommandHttpResponse command_response, NodeManifestResponse manifest_response, NodeSnapshotResponse snapshot_response, NodeHttpErrorResponse error_response, NodeWsMessage websocket_message) {
+        public NodeHttpContract(NodeCommandHttpRequest command_request, NodeCommandHttpResponse command_response, NodeHttpErrorResponse error_response, NodeManifestResponse manifest_response, NodeSnapshotResponse snapshot_response, NodeWsMessage websocket_message) {
             this.command_request = command_request;
             this.command_response = command_response;
+            this.error_response = error_response;
             this.manifest_response = manifest_response;
             this.snapshot_response = snapshot_response;
-            this.error_response = error_response;
             this.websocket_message = websocket_message;
         }
     }
 
     /** DTO for NodeHttpErrorResponse. */
     public static final class NodeHttpErrorResponse {
-        public final Integer schema_version;
         public final NodeHttpErrorCode code;
         public final String message;
-        public final Integer requested_schema_version;
-        public final Integer supported_schema_version;
         public final NodeProblem problem;
+        public final Integer requested_schema_version;
+        public final Integer schema_version;
+        public final Integer supported_schema_version;
 
-        public NodeHttpErrorResponse(Integer schema_version, NodeHttpErrorCode code, String message, Integer requested_schema_version, Integer supported_schema_version, NodeProblem problem) {
-            this.schema_version = schema_version;
+        public NodeHttpErrorResponse(NodeHttpErrorCode code, String message, NodeProblem problem, Integer requested_schema_version, Integer schema_version, Integer supported_schema_version) {
             this.code = code;
             this.message = message;
-            this.requested_schema_version = requested_schema_version;
-            this.supported_schema_version = supported_schema_version;
             this.problem = problem;
+            this.requested_schema_version = requested_schema_version;
+            this.schema_version = schema_version;
+            this.supported_schema_version = supported_schema_version;
         }
     }
 
     /** DTO for NodeIdentitySnapshot. */
     public static final class NodeIdentitySnapshot {
-        public final String node_id;
         public final String display_name;
+        public final String node_id;
         public final String public_key_fingerprint;
 
-        public NodeIdentitySnapshot(String node_id, String display_name, String public_key_fingerprint) {
-            this.node_id = node_id;
+        public NodeIdentitySnapshot(String display_name, String node_id, String public_key_fingerprint) {
             this.display_name = display_name;
+            this.node_id = node_id;
             this.public_key_fingerprint = public_key_fingerprint;
         }
     }
 
     /** DTO for NodeJoinNetworkCommand. */
     public static final class NodeJoinNetworkCommand {
-        public final String target;
         public final String network_name;
         public final Boolean start;
+        public final String target;
 
-        public NodeJoinNetworkCommand(String target, String network_name, Boolean start) {
-            this.target = target;
+        public NodeJoinNetworkCommand(String network_name, Boolean start, String target) {
             this.network_name = network_name;
             this.start = start;
+            this.target = target;
         }
     }
 
     /** DTO for NodeLifecycleSnapshot. */
     public static final class NodeLifecycleSnapshot {
-        public final NodePhase phase;
-        public final Long configured_networks;
         public final Long active_networks;
+        public final Long configured_networks;
         public final List<String> failed_networks;
+        public final NodePhase phase;
 
-        public NodeLifecycleSnapshot(NodePhase phase, Long configured_networks, Long active_networks, List<String> failed_networks) {
-            this.phase = phase;
-            this.configured_networks = configured_networks;
+        public NodeLifecycleSnapshot(Long active_networks, Long configured_networks, List<String> failed_networks, NodePhase phase) {
             this.active_networks = active_networks;
+            this.configured_networks = configured_networks;
             this.failed_networks = failed_networks;
+            this.phase = phase;
         }
     }
 
     /** DTO for NodeLogEntry. */
     public static final class NodeLogEntry {
-        public final Long unix_ms;
         public final NodeLogLevel level;
-        public final String target;
         public final String message;
+        public final String target;
+        public final Long unix_ms;
 
-        public NodeLogEntry(Long unix_ms, NodeLogLevel level, String target, String message) {
-            this.unix_ms = unix_ms;
+        public NodeLogEntry(NodeLogLevel level, String message, String target, Long unix_ms) {
             this.level = level;
-            this.target = target;
             this.message = message;
+            this.target = target;
+            this.unix_ms = unix_ms;
         }
     }
 
     /** DTO for NodeManifestResponse. */
     public static final class NodeManifestResponse {
-        public final Integer schema_version;
         public final NodeUiManifest manifest;
+        public final Integer schema_version;
 
-        public NodeManifestResponse(Integer schema_version, NodeUiManifest manifest) {
-            this.schema_version = schema_version;
+        public NodeManifestResponse(NodeUiManifest manifest, Integer schema_version) {
             this.manifest = manifest;
+            this.schema_version = schema_version;
         }
     }
 
     /** DTO for NodeNetworkAllocation. */
     public static final class NodeNetworkAllocation {
-        public final NetworkMode mode;
         public final String ipv4_pool;
         public final String ipv6_pool;
+        public final NetworkMode mode;
 
-        public NodeNetworkAllocation(NetworkMode mode, String ipv4_pool, String ipv6_pool) {
-            this.mode = mode;
+        public NodeNetworkAllocation(String ipv4_pool, String ipv6_pool, NetworkMode mode) {
             this.ipv4_pool = ipv4_pool;
             this.ipv6_pool = ipv6_pool;
+            this.mode = mode;
         }
     }
 
     /** DTO for NodeNetworkAllocationSnapshot. */
     public static final class NodeNetworkAllocationSnapshot {
-        public final String network_name;
         public final NodeNetworkAllocation allocation;
         public final Boolean config_saved;
+        public final String network_name;
 
-        public NodeNetworkAllocationSnapshot(String network_name, NodeNetworkAllocation allocation, Boolean config_saved) {
-            this.network_name = network_name;
+        public NodeNetworkAllocationSnapshot(NodeNetworkAllocation allocation, Boolean config_saved, String network_name) {
             this.allocation = allocation;
             this.config_saved = config_saved;
+            this.network_name = network_name;
         }
     }
 
     /** DTO for NodeNetworkConfigSnapshot. */
     public static final class NodeNetworkConfigSnapshot {
-        public final String network_name;
+        public final AclAction acl_default_action;
+        public final Boolean acl_enabled;
+        public final Long acl_rule_count;
         public final String coordinator_url;
-        public final NetworkMode virtual_mode;
-        public final String preferred_ipv4;
-        public final String preferred_ipv6;
-        public final String virtual_network;
-        public final String tun_name;
+        public final List<String> direct_cidrs;
+        public final String exit_node;
+        public final Boolean exit_node_allow_lan_access;
+        public final List<String> exit_node_allowed_clients;
+        public final Boolean exit_node_enabled;
+        public final String exit_node_region;
+        public final Boolean identity_configured;
+        public final Boolean log_file_configured;
+        public final String log_level;
         public final Integer mtu;
-        public final Integer p2p_listen_port;
+        public final String network_name;
         public final Long p2p_connect_timeout_secs;
         public final Long p2p_heartbeat_interval_secs;
-        public final NodeRoutingMode routing_mode;
-        public final String exit_node;
-        public final List<String> direct_cidrs;
+        public final Integer p2p_listen_port;
+        public final String preferred_ipv4;
+        public final String preferred_ipv6;
         public final List<String> proxy_cidrs;
-        public final Boolean exit_node_enabled;
-        public final List<String> exit_node_allowed_clients;
-        public final Boolean exit_node_allow_lan_access;
-        public final String exit_node_region;
-        public final Boolean acl_enabled;
-        public final AclAction acl_default_action;
-        public final Long acl_rule_count;
-        public final String log_level;
-        public final Boolean log_file_configured;
-        public final Boolean identity_configured;
+        public final NodeRoutingMode routing_mode;
+        public final String tun_name;
+        public final NetworkMode virtual_mode;
+        public final String virtual_network;
 
-        public NodeNetworkConfigSnapshot(String network_name, String coordinator_url, NetworkMode virtual_mode, String preferred_ipv4, String preferred_ipv6, String virtual_network, String tun_name, Integer mtu, Integer p2p_listen_port, Long p2p_connect_timeout_secs, Long p2p_heartbeat_interval_secs, NodeRoutingMode routing_mode, String exit_node, List<String> direct_cidrs, List<String> proxy_cidrs, Boolean exit_node_enabled, List<String> exit_node_allowed_clients, Boolean exit_node_allow_lan_access, String exit_node_region, Boolean acl_enabled, AclAction acl_default_action, Long acl_rule_count, String log_level, Boolean log_file_configured, Boolean identity_configured) {
-            this.network_name = network_name;
+        public NodeNetworkConfigSnapshot(AclAction acl_default_action, Boolean acl_enabled, Long acl_rule_count, String coordinator_url, List<String> direct_cidrs, String exit_node, Boolean exit_node_allow_lan_access, List<String> exit_node_allowed_clients, Boolean exit_node_enabled, String exit_node_region, Boolean identity_configured, Boolean log_file_configured, String log_level, Integer mtu, String network_name, Long p2p_connect_timeout_secs, Long p2p_heartbeat_interval_secs, Integer p2p_listen_port, String preferred_ipv4, String preferred_ipv6, List<String> proxy_cidrs, NodeRoutingMode routing_mode, String tun_name, NetworkMode virtual_mode, String virtual_network) {
+            this.acl_default_action = acl_default_action;
+            this.acl_enabled = acl_enabled;
+            this.acl_rule_count = acl_rule_count;
             this.coordinator_url = coordinator_url;
-            this.virtual_mode = virtual_mode;
-            this.preferred_ipv4 = preferred_ipv4;
-            this.preferred_ipv6 = preferred_ipv6;
-            this.virtual_network = virtual_network;
-            this.tun_name = tun_name;
+            this.direct_cidrs = direct_cidrs;
+            this.exit_node = exit_node;
+            this.exit_node_allow_lan_access = exit_node_allow_lan_access;
+            this.exit_node_allowed_clients = exit_node_allowed_clients;
+            this.exit_node_enabled = exit_node_enabled;
+            this.exit_node_region = exit_node_region;
+            this.identity_configured = identity_configured;
+            this.log_file_configured = log_file_configured;
+            this.log_level = log_level;
             this.mtu = mtu;
-            this.p2p_listen_port = p2p_listen_port;
+            this.network_name = network_name;
             this.p2p_connect_timeout_secs = p2p_connect_timeout_secs;
             this.p2p_heartbeat_interval_secs = p2p_heartbeat_interval_secs;
-            this.routing_mode = routing_mode;
-            this.exit_node = exit_node;
-            this.direct_cidrs = direct_cidrs;
+            this.p2p_listen_port = p2p_listen_port;
+            this.preferred_ipv4 = preferred_ipv4;
+            this.preferred_ipv6 = preferred_ipv6;
             this.proxy_cidrs = proxy_cidrs;
-            this.exit_node_enabled = exit_node_enabled;
-            this.exit_node_allowed_clients = exit_node_allowed_clients;
-            this.exit_node_allow_lan_access = exit_node_allow_lan_access;
-            this.exit_node_region = exit_node_region;
-            this.acl_enabled = acl_enabled;
-            this.acl_default_action = acl_default_action;
-            this.acl_rule_count = acl_rule_count;
-            this.log_level = log_level;
-            this.log_file_configured = log_file_configured;
-            this.identity_configured = identity_configured;
+            this.routing_mode = routing_mode;
+            this.tun_name = tun_name;
+            this.virtual_mode = virtual_mode;
+            this.virtual_network = virtual_network;
         }
     }
 
     /** DTO for NodeNetworkSnapshot. */
     public static final class NodeNetworkSnapshot {
-        public final String name;
-        public final String tun_name;
-        public final NodeNetworkStatus status;
-        public final String assigned_ipv6;
         public final String assigned_ipv4;
+        public final String assigned_ipv6;
+        public final String name;
         public final String p2p_listen_addr;
-        public final Long uptime_secs;
-        public final List<NodeNetworkRole> roles;
         public final Long peer_count;
+        public final List<NodeNetworkRole> roles;
+        public final NodeNetworkStatus status;
         public final NodeTrafficSnapshot traffic;
+        public final String tun_name;
+        public final Long uptime_secs;
 
-        public NodeNetworkSnapshot(String name, String tun_name, NodeNetworkStatus status, String assigned_ipv6, String assigned_ipv4, String p2p_listen_addr, Long uptime_secs, List<NodeNetworkRole> roles, Long peer_count, NodeTrafficSnapshot traffic) {
-            this.name = name;
-            this.tun_name = tun_name;
-            this.status = status;
-            this.assigned_ipv6 = assigned_ipv6;
+        public NodeNetworkSnapshot(String assigned_ipv4, String assigned_ipv6, String name, String p2p_listen_addr, Long peer_count, List<NodeNetworkRole> roles, NodeNetworkStatus status, NodeTrafficSnapshot traffic, String tun_name, Long uptime_secs) {
             this.assigned_ipv4 = assigned_ipv4;
+            this.assigned_ipv6 = assigned_ipv6;
+            this.name = name;
             this.p2p_listen_addr = p2p_listen_addr;
-            this.uptime_secs = uptime_secs;
-            this.roles = roles;
             this.peer_count = peer_count;
+            this.roles = roles;
+            this.status = status;
             this.traffic = traffic;
+            this.tun_name = tun_name;
+            this.uptime_secs = uptime_secs;
         }
     }
 
     /** DTO for NodePeerProbeSnapshot. */
     public static final class NodePeerProbeSnapshot {
-        public final String peer_id;
-        public final String virtual_ipv6;
         public final String endpoint;
-        public final Long rtt_us;
         public final Boolean p2p_active;
+        public final String peer_id;
+        public final Long rtt_us;
         public final Boolean timed_out;
+        public final String virtual_ipv6;
 
-        public NodePeerProbeSnapshot(String peer_id, String virtual_ipv6, String endpoint, Long rtt_us, Boolean p2p_active, Boolean timed_out) {
-            this.peer_id = peer_id;
-            this.virtual_ipv6 = virtual_ipv6;
+        public NodePeerProbeSnapshot(String endpoint, Boolean p2p_active, String peer_id, Long rtt_us, Boolean timed_out, String virtual_ipv6) {
             this.endpoint = endpoint;
-            this.rtt_us = rtt_us;
             this.p2p_active = p2p_active;
+            this.peer_id = peer_id;
+            this.rtt_us = rtt_us;
             this.timed_out = timed_out;
+            this.virtual_ipv6 = virtual_ipv6;
         }
     }
 
     /** DTO for NodePeerSnapshot. */
     public static final class NodePeerSnapshot {
-        public final String peer_id;
-        public final String network_name;
-        public final String virtual_ipv6;
-        public final String virtual_ipv4;
         public final List<String> endpoints;
+        public final Double loss_rate;
+        public final String network_name;
         public final Boolean online;
         public final Boolean p2p_active;
         public final Boolean p2p_healthy;
+        public final String peer_id;
         public final Long rtt_us;
-        public final Double loss_rate;
         public final NodeTrafficSnapshot traffic;
+        public final String virtual_ipv4;
+        public final String virtual_ipv6;
 
-        public NodePeerSnapshot(String peer_id, String network_name, String virtual_ipv6, String virtual_ipv4, List<String> endpoints, Boolean online, Boolean p2p_active, Boolean p2p_healthy, Long rtt_us, Double loss_rate, NodeTrafficSnapshot traffic) {
-            this.peer_id = peer_id;
-            this.network_name = network_name;
-            this.virtual_ipv6 = virtual_ipv6;
-            this.virtual_ipv4 = virtual_ipv4;
+        public NodePeerSnapshot(List<String> endpoints, Double loss_rate, String network_name, Boolean online, Boolean p2p_active, Boolean p2p_healthy, String peer_id, Long rtt_us, NodeTrafficSnapshot traffic, String virtual_ipv4, String virtual_ipv6) {
             this.endpoints = endpoints;
+            this.loss_rate = loss_rate;
+            this.network_name = network_name;
             this.online = online;
             this.p2p_active = p2p_active;
             this.p2p_healthy = p2p_healthy;
+            this.peer_id = peer_id;
             this.rtt_us = rtt_us;
-            this.loss_rate = loss_rate;
             this.traffic = traffic;
+            this.virtual_ipv4 = virtual_ipv4;
+            this.virtual_ipv6 = virtual_ipv6;
         }
     }
 
@@ -1338,72 +1338,72 @@ public final class NodeContractV1 {
 
     /** DTO for NodeRuntimeResidueSnapshot. */
     public static final class NodeRuntimeResidueSnapshot {
-        public final Long sessions_remaining;
+        public final List<NodeCleanupStepSnapshot> cleanup_steps;
+        public final Boolean configuration_retained;
+        public final Long embedded_services_remaining;
+        public final List<String> issues;
         public final Long listeners_remaining;
         public final Long peers_remaining;
-        public final Long embedded_services_remaining;
-        public final Boolean configuration_retained;
         public final List<String> residual_networks;
-        public final List<NodeCleanupStepSnapshot> cleanup_steps;
-        public final List<String> issues;
+        public final Long sessions_remaining;
 
-        public NodeRuntimeResidueSnapshot(Long sessions_remaining, Long listeners_remaining, Long peers_remaining, Long embedded_services_remaining, Boolean configuration_retained, List<String> residual_networks, List<NodeCleanupStepSnapshot> cleanup_steps, List<String> issues) {
-            this.sessions_remaining = sessions_remaining;
+        public NodeRuntimeResidueSnapshot(List<NodeCleanupStepSnapshot> cleanup_steps, Boolean configuration_retained, Long embedded_services_remaining, List<String> issues, Long listeners_remaining, Long peers_remaining, List<String> residual_networks, Long sessions_remaining) {
+            this.cleanup_steps = cleanup_steps;
+            this.configuration_retained = configuration_retained;
+            this.embedded_services_remaining = embedded_services_remaining;
+            this.issues = issues;
             this.listeners_remaining = listeners_remaining;
             this.peers_remaining = peers_remaining;
-            this.embedded_services_remaining = embedded_services_remaining;
-            this.configuration_retained = configuration_retained;
             this.residual_networks = residual_networks;
-            this.cleanup_steps = cleanup_steps;
-            this.issues = issues;
+            this.sessions_remaining = sessions_remaining;
         }
     }
 
     /** DTO for NodeSetNetworkRoleCommand. */
     public static final class NodeSetNetworkRoleCommand {
+        public final Boolean enabled;
         public final String network_name;
         public final NodeNetworkRole role;
-        public final Boolean enabled;
 
-        public NodeSetNetworkRoleCommand(String network_name, NodeNetworkRole role, Boolean enabled) {
+        public NodeSetNetworkRoleCommand(Boolean enabled, String network_name, NodeNetworkRole role) {
+            this.enabled = enabled;
             this.network_name = network_name;
             this.role = role;
-            this.enabled = enabled;
         }
     }
 
     /** DTO for NodeSnapshot. */
     public static final class NodeSnapshot {
-        public final Long revision;
-        public final NodeLifecycleSnapshot lifecycle;
-        public final NodeControlHealth control_health;
-        public final NodeIdentitySnapshot identity;
-        public final NodeConfigurationSnapshot configuration;
-        public final ExitNodeCapabilities exit_node_capabilities;
         public final NodeCapabilityRegistrySnapshot capabilities;
-        public final NodePermissionSnapshot permissions;
+        public final NodeConfigurationSnapshot configuration;
+        public final NodeControlHealth control_health;
         public final List<NodeEmbeddedServiceSnapshot> embedded_services;
-        public final UiModeResolution ui_mode;
+        public final ExitNodeCapabilities exit_node_capabilities;
+        public final NodeIdentitySnapshot identity;
+        public final NodeProblem last_error;
+        public final NodeLifecycleSnapshot lifecycle;
+        public final List<NodeLogEntry> logs;
         public final List<NodeNetworkSnapshot> networks;
         public final List<NodePeerSnapshot> peers;
-        public final List<NodeLogEntry> logs;
-        public final NodeProblem last_error;
+        public final NodePermissionSnapshot permissions;
+        public final Long revision;
+        public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(Long revision, NodeLifecycleSnapshot lifecycle, NodeControlHealth control_health, NodeIdentitySnapshot identity, NodeConfigurationSnapshot configuration, ExitNodeCapabilities exit_node_capabilities, NodeCapabilityRegistrySnapshot capabilities, NodePermissionSnapshot permissions, List<NodeEmbeddedServiceSnapshot> embedded_services, UiModeResolution ui_mode, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, List<NodeLogEntry> logs, NodeProblem last_error) {
-            this.revision = revision;
-            this.lifecycle = lifecycle;
-            this.control_health = control_health;
-            this.identity = identity;
-            this.configuration = configuration;
-            this.exit_node_capabilities = exit_node_capabilities;
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, Long revision, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
-            this.permissions = permissions;
+            this.configuration = configuration;
+            this.control_health = control_health;
             this.embedded_services = embedded_services;
-            this.ui_mode = ui_mode;
+            this.exit_node_capabilities = exit_node_capabilities;
+            this.identity = identity;
+            this.last_error = last_error;
+            this.lifecycle = lifecycle;
+            this.logs = logs;
             this.networks = networks;
             this.peers = peers;
-            this.logs = logs;
-            this.last_error = last_error;
+            this.permissions = permissions;
+            this.revision = revision;
+            this.ui_mode = ui_mode;
         }
     }
 
@@ -1420,90 +1420,90 @@ public final class NodeContractV1 {
 
     /** DTO for NodeTrafficSnapshot. */
     public static final class NodeTrafficSnapshot {
-        public final Long tun_rx_packets;
-        public final Long tun_rx_bytes;
-        public final Long tun_tx_packets;
-        public final Long tun_tx_bytes;
-        public final Long p2p_rx_packets;
-        public final Long p2p_rx_bytes;
-        public final Long p2p_tx_packets;
-        public final Long p2p_tx_bytes;
         public final Long error_count;
+        public final Long p2p_rx_bytes;
+        public final Long p2p_rx_packets;
+        public final Long p2p_tx_bytes;
+        public final Long p2p_tx_packets;
+        public final Long tun_rx_bytes;
+        public final Long tun_rx_packets;
+        public final Long tun_tx_bytes;
+        public final Long tun_tx_packets;
 
-        public NodeTrafficSnapshot(Long tun_rx_packets, Long tun_rx_bytes, Long tun_tx_packets, Long tun_tx_bytes, Long p2p_rx_packets, Long p2p_rx_bytes, Long p2p_tx_packets, Long p2p_tx_bytes, Long error_count) {
-            this.tun_rx_packets = tun_rx_packets;
-            this.tun_rx_bytes = tun_rx_bytes;
-            this.tun_tx_packets = tun_tx_packets;
-            this.tun_tx_bytes = tun_tx_bytes;
-            this.p2p_rx_packets = p2p_rx_packets;
-            this.p2p_rx_bytes = p2p_rx_bytes;
-            this.p2p_tx_packets = p2p_tx_packets;
-            this.p2p_tx_bytes = p2p_tx_bytes;
+        public NodeTrafficSnapshot(Long error_count, Long p2p_rx_bytes, Long p2p_rx_packets, Long p2p_tx_bytes, Long p2p_tx_packets, Long tun_rx_bytes, Long tun_rx_packets, Long tun_tx_bytes, Long tun_tx_packets) {
             this.error_count = error_count;
+            this.p2p_rx_bytes = p2p_rx_bytes;
+            this.p2p_rx_packets = p2p_rx_packets;
+            this.p2p_tx_bytes = p2p_tx_bytes;
+            this.p2p_tx_packets = p2p_tx_packets;
+            this.tun_rx_bytes = tun_rx_bytes;
+            this.tun_rx_packets = tun_rx_packets;
+            this.tun_tx_bytes = tun_tx_bytes;
+            this.tun_tx_packets = tun_tx_packets;
         }
     }
 
     /** DTO for NodeUiAction. */
     public static final class NodeUiAction {
-        public final String id;
-        public final String label_key;
-        public final String command;
-        public final NodeUiBackendStatus backend_status;
-        public final NodePermission permission;
         public final NodeUiAudit audit;
         public final NodeUiAvailability availability;
-        public final List<NodeUiField> fields;
+        public final NodeUiBackendStatus backend_status;
+        public final String command;
         public final NodeUiConfirmation confirmation;
+        public final List<NodeUiField> fields;
+        public final String id;
+        public final String label_key;
+        public final NodePermission permission;
 
-        public NodeUiAction(String id, String label_key, String command, NodeUiBackendStatus backend_status, NodePermission permission, NodeUiAudit audit, NodeUiAvailability availability, List<NodeUiField> fields, NodeUiConfirmation confirmation) {
-            this.id = id;
-            this.label_key = label_key;
-            this.command = command;
-            this.backend_status = backend_status;
-            this.permission = permission;
+        public NodeUiAction(NodeUiAudit audit, NodeUiAvailability availability, NodeUiBackendStatus backend_status, String command, NodeUiConfirmation confirmation, List<NodeUiField> fields, String id, String label_key, NodePermission permission) {
             this.audit = audit;
             this.availability = availability;
-            this.fields = fields;
+            this.backend_status = backend_status;
+            this.command = command;
             this.confirmation = confirmation;
+            this.fields = fields;
+            this.id = id;
+            this.label_key = label_key;
+            this.permission = permission;
         }
     }
 
     /** DTO for NodeUiAudit. */
     public static final class NodeUiAudit {
-        public final NodeUiAuditPolicy policy;
         public final String action;
+        public final NodeUiAuditPolicy policy;
 
-        public NodeUiAudit(NodeUiAuditPolicy policy, String action) {
-            this.policy = policy;
+        public NodeUiAudit(String action, NodeUiAuditPolicy policy) {
             this.action = action;
+            this.policy = policy;
         }
     }
 
     /** DTO for NodeUiConfirmation. */
     public static final class NodeUiConfirmation {
-        public final String title_key;
         public final String consequence_key;
         public final Boolean destructive;
+        public final String title_key;
 
-        public NodeUiConfirmation(String title_key, String consequence_key, Boolean destructive) {
-            this.title_key = title_key;
+        public NodeUiConfirmation(String consequence_key, Boolean destructive, String title_key) {
             this.consequence_key = consequence_key;
             this.destructive = destructive;
+            this.title_key = title_key;
         }
     }
 
     /** DTO for NodeUiField. */
     public static final class NodeUiField {
         public final String id;
-        public final String label_key;
         public final NodeUiInputKind input;
+        public final String label_key;
         public final Boolean required;
         public final NodeUiValidation validation;
 
-        public NodeUiField(String id, String label_key, NodeUiInputKind input, Boolean required, NodeUiValidation validation) {
+        public NodeUiField(String id, NodeUiInputKind input, String label_key, Boolean required, NodeUiValidation validation) {
             this.id = id;
-            this.label_key = label_key;
             this.input = input;
+            this.label_key = label_key;
             this.required = required;
             this.validation = validation;
         }
@@ -1511,68 +1511,68 @@ public final class NodeContractV1 {
 
     /** DTO for NodeUiManifest. */
     public static final class NodeUiManifest {
-        public final Integer schema_version;
         public final List<NodeUiPage> pages;
+        public final Integer schema_version;
 
-        public NodeUiManifest(Integer schema_version, List<NodeUiPage> pages) {
-            this.schema_version = schema_version;
+        public NodeUiManifest(List<NodeUiPage> pages, Integer schema_version) {
             this.pages = pages;
+            this.schema_version = schema_version;
         }
     }
 
     /** DTO for NodeUiPage. */
     public static final class NodeUiPage {
+        public final List<NodeUiAction> actions;
         public final String id;
         public final String nav_label_key;
         public final String title_key;
-        public final List<NodeUiAction> actions;
 
-        public NodeUiPage(String id, String nav_label_key, String title_key, List<NodeUiAction> actions) {
+        public NodeUiPage(List<NodeUiAction> actions, String id, String nav_label_key, String title_key) {
+            this.actions = actions;
             this.id = id;
             this.nav_label_key = nav_label_key;
             this.title_key = title_key;
-            this.actions = actions;
         }
     }
 
     /** DTO for NodeUpdateNetworkAllocationCommand. */
     public static final class NodeUpdateNetworkAllocationCommand {
-        public final String network_name;
         public final NodeNetworkAllocation allocation;
+        public final String network_name;
 
-        public NodeUpdateNetworkAllocationCommand(String network_name, NodeNetworkAllocation allocation) {
-            this.network_name = network_name;
+        public NodeUpdateNetworkAllocationCommand(NodeNetworkAllocation allocation, String network_name) {
             this.allocation = allocation;
+            this.network_name = network_name;
         }
     }
 
     /** DTO for NodeUpdateRoutingCommand. */
     public static final class NodeUpdateRoutingCommand {
-        public final String network_name;
-        public final NodeRoutingMode mode;
         public final String exit_node;
         public final Boolean is_exit_node;
+        public final NodeRoutingMode mode;
+        public final String network_name;
 
-        public NodeUpdateRoutingCommand(String network_name, NodeRoutingMode mode, String exit_node, Boolean is_exit_node) {
-            this.network_name = network_name;
-            this.mode = mode;
+        public NodeUpdateRoutingCommand(String exit_node, Boolean is_exit_node, NodeRoutingMode mode, String network_name) {
             this.exit_node = exit_node;
             this.is_exit_node = is_exit_node;
+            this.mode = mode;
+            this.network_name = network_name;
         }
     }
 
     /** DTO for UiModeResolution. */
     public static final class UiModeResolution {
-        public final UiModeRequest requested;
-        public final UiMode effective;
         public final DisplayEnvironment display;
+        public final UiMode effective;
         public final Boolean gpui_available;
+        public final UiModeRequest requested;
 
-        public UiModeResolution(UiModeRequest requested, UiMode effective, DisplayEnvironment display, Boolean gpui_available) {
-            this.requested = requested;
-            this.effective = effective;
+        public UiModeResolution(DisplayEnvironment display, UiMode effective, Boolean gpui_available, UiModeRequest requested) {
             this.display = display;
+            this.effective = effective;
             this.gpui_available = gpui_available;
+            this.requested = requested;
         }
     }
 
@@ -1628,12 +1628,12 @@ public final class NodeContractV1 {
             }
             /** DTO for StopNetworksPayload. */
             public static final class StopNetworksPayload {
-                public final List<String> networks;
                 public final Boolean all;
+                public final List<String> networks;
 
-                public StopNetworksPayload(List<String> networks, Boolean all) {
-                    this.networks = networks;
+                public StopNetworksPayload(Boolean all, List<String> networks) {
                     this.all = all;
+                    this.networks = networks;
                 }
             }
         }
@@ -1647,12 +1647,12 @@ public final class NodeContractV1 {
             }
             /** DTO for RestartNetworksPayload. */
             public static final class RestartNetworksPayload {
-                public final List<String> networks;
                 public final Boolean all;
+                public final List<String> networks;
 
-                public RestartNetworksPayload(List<String> networks, Boolean all) {
-                    this.networks = networks;
+                public RestartNetworksPayload(Boolean all, List<String> networks) {
                     this.all = all;
+                    this.networks = networks;
                 }
             }
         }
@@ -1790,12 +1790,12 @@ public final class NodeContractV1 {
             }
             /** DTO for CleanupNodeResidualsPayload. */
             public static final class CleanupNodeResidualsPayload {
-                public final List<String> networks;
                 public final Boolean all;
+                public final List<String> networks;
 
-                public CleanupNodeResidualsPayload(List<String> networks, Boolean all) {
-                    this.networks = networks;
+                public CleanupNodeResidualsPayload(Boolean all, List<String> networks) {
                     this.all = all;
+                    this.networks = networks;
                 }
             }
         }
@@ -2022,16 +2022,16 @@ public final class NodeContractV1 {
             }
             /** DTO for RoutingChangedData. */
             public static final class RoutingChangedData {
-                public final String network_name;
-                public final NodeRoutingMode mode;
                 public final String exit_node;
                 public final Boolean is_exit_node;
+                public final NodeRoutingMode mode;
+                public final String network_name;
 
-                public RoutingChangedData(String network_name, NodeRoutingMode mode, String exit_node, Boolean is_exit_node) {
-                    this.network_name = network_name;
-                    this.mode = mode;
+                public RoutingChangedData(String exit_node, Boolean is_exit_node, NodeRoutingMode mode, String network_name) {
                     this.exit_node = exit_node;
                     this.is_exit_node = is_exit_node;
+                    this.mode = mode;
+                    this.network_name = network_name;
                 }
             }
         }
@@ -2045,15 +2045,15 @@ public final class NodeContractV1 {
             }
             /** DTO for RoleChangedData. */
             public static final class RoleChangedData {
+                public final Boolean enabled;
                 public final String network_name;
                 public final NodeNetworkRole role;
-                public final Boolean enabled;
                 public final List<NodeNetworkRole> roles;
 
-                public RoleChangedData(String network_name, NodeNetworkRole role, Boolean enabled, List<NodeNetworkRole> roles) {
+                public RoleChangedData(Boolean enabled, String network_name, NodeNetworkRole role, List<NodeNetworkRole> roles) {
+                    this.enabled = enabled;
                     this.network_name = network_name;
                     this.role = role;
-                    this.enabled = enabled;
                     this.roles = roles;
                 }
             }
@@ -2135,39 +2135,39 @@ public final class NodeContractV1 {
         }
 
         public static final class Event extends NodeWsMessage {
-            public final Integer schema_version;
             public final NodeEvent event;
+            public final Integer schema_version;
 
-            public Event(Integer schema_version, NodeEvent event) {
+            public Event(NodeEvent event, Integer schema_version) {
                 super("event");
-                this.schema_version = schema_version;
                 this.event = event;
+                this.schema_version = schema_version;
             }
         }
 
         public static final class Resync extends NodeWsMessage {
-            public final Integer schema_version;
             public final NodeWsResyncReason reason;
+            public final Integer schema_version;
             public final NodeSnapshot snapshot;
 
-            public Resync(Integer schema_version, NodeWsResyncReason reason, NodeSnapshot snapshot) {
+            public Resync(NodeWsResyncReason reason, Integer schema_version, NodeSnapshot snapshot) {
                 super("resync");
-                this.schema_version = schema_version;
                 this.reason = reason;
+                this.schema_version = schema_version;
                 this.snapshot = snapshot;
             }
         }
 
         public static final class Error extends NodeWsMessage {
-            public final Integer schema_version;
             public final NodeHttpErrorCode code;
             public final String message;
+            public final Integer schema_version;
 
-            public Error(Integer schema_version, NodeHttpErrorCode code, String message) {
+            public Error(NodeHttpErrorCode code, String message, Integer schema_version) {
                 super("error");
-                this.schema_version = schema_version;
                 this.code = code;
                 this.message = message;
+                this.schema_version = schema_version;
             }
         }
     }

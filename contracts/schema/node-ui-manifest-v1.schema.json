@@ -1,64 +1,31 @@
 {
-  "type": "object",
-  "properties": {
-    "schema_version": {
-      "type": "integer",
-      "format": "uint16",
-      "minimum": 0,
-      "maximum": 65535
-    },
-    "pages": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/NodeUiPage"
-      }
-    }
-  },
-  "required": [
-    "schema_version",
-    "pages"
-  ],
-  "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic.",
-  "title": "NodeUiManifest",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
-    "NodeUiPage": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "nav_label_key": {
-          "type": "string"
-        },
-        "title_key": {
-          "type": "string"
-        },
-        "actions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeUiAction"
-          }
-        }
-      },
-      "required": [
-        "id",
-        "nav_label_key",
-        "title_key",
-        "actions"
-      ]
+    "NodePermission": {
+      "description": "Stable capability classes used by both the permission snapshot and UI actions.",
+      "enum": [
+        "view_state",
+        "manage_networks",
+        "change_routing",
+        "manage_roles",
+        "probe_peers",
+        "stop_node",
+        "view_logs"
+      ],
+      "type": "string"
     },
     "NodeUiAction": {
-      "type": "object",
       "properties": {
-        "id": {
-          "type": "string"
+        "audit": {
+          "$ref": "#/$defs/NodeUiAudit",
+          "description": "Stable audit requirement for this command. Reads that are too noisy to\nrecord still carry an explicit `none` declaration instead of leaving\nadapters to guess."
         },
-        "label_key": {
-          "type": "string"
+        "availability": {
+          "$ref": "#/$defs/NodeUiAvailability"
+        },
+        "backend_status": {
+          "$ref": "#/$defs/NodeUiBackendStatus"
         },
         "command": {
-          "type": "string",
           "enum": [
             "get_snapshot",
             "get_node_diagnostics",
@@ -80,26 +47,8 @@
             "restart_node",
             "cleanup_node_residuals",
             "shutdown"
-          ]
-        },
-        "backend_status": {
-          "$ref": "#/$defs/NodeUiBackendStatus"
-        },
-        "permission": {
-          "$ref": "#/$defs/NodePermission"
-        },
-        "audit": {
-          "$ref": "#/$defs/NodeUiAudit",
-          "description": "Stable audit requirement for this command. Reads that are too noisy to\nrecord still carry an explicit `none` declaration instead of leaving\nadapters to guess."
-        },
-        "availability": {
-          "$ref": "#/$defs/NodeUiAvailability"
-        },
-        "fields": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NodeUiField"
-          }
+          ],
+          "type": "string"
         },
         "confirmation": {
           "anyOf": [
@@ -110,6 +59,21 @@
               "type": "null"
             }
           ]
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/NodeUiField"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label_key": {
+          "type": "string"
+        },
+        "permission": {
+          "$ref": "#/$defs/NodePermission"
         }
       },
       "required": [
@@ -121,80 +85,86 @@
         "audit",
         "availability",
         "fields"
-      ]
-    },
-    "NodeUiBackendStatus": {
-      "oneOf": [
-        {
-          "type": "string",
-          "const": "implemented",
-          "description": "The production command handler currently accepts this command."
-        },
-        {
-          "type": "string",
-          "const": "unavailable",
-          "description": "The shared command exists, but the runtime backend rejects it as unavailable."
-        }
-      ]
-    },
-    "NodePermission": {
-      "type": "string",
-      "enum": [
-        "view_state",
-        "manage_networks",
-        "change_routing",
-        "manage_roles",
-        "probe_peers",
-        "stop_node",
-        "view_logs"
       ],
-      "description": "Stable capability classes used by both the permission snapshot and UI actions."
+      "type": "object"
     },
     "NodeUiAudit": {
-      "type": "object",
       "properties": {
-        "policy": {
-          "$ref": "#/$defs/NodeUiAuditPolicy"
-        },
         "action": {
+          "description": "Stable action name written to the append-only audit log.",
           "type": [
             "string",
             "null"
-          ],
-          "description": "Stable action name written to the append-only audit log."
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/NodeUiAuditPolicy"
         }
       },
       "required": [
         "policy"
-      ]
+      ],
+      "type": "object"
     },
     "NodeUiAuditPolicy": {
-      "type": "string",
       "enum": [
         "none",
         "record_outcome"
-      ]
+      ],
+      "type": "string"
     },
     "NodeUiAvailability": {
-      "type": "string",
       "enum": [
         "always",
         "node_running",
         "network_online",
         "network_selected"
+      ],
+      "type": "string"
+    },
+    "NodeUiBackendStatus": {
+      "oneOf": [
+        {
+          "const": "implemented",
+          "description": "The production command handler currently accepts this command.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The shared command exists, but the runtime backend rejects it as unavailable.",
+          "type": "string"
+        }
       ]
     },
+    "NodeUiConfirmation": {
+      "properties": {
+        "consequence_key": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean"
+        },
+        "title_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title_key",
+        "consequence_key",
+        "destructive"
+      ],
+      "type": "object"
+    },
     "NodeUiField": {
-      "type": "object",
       "properties": {
         "id": {
           "type": "string"
         },
-        "label_key": {
-          "type": "string"
-        },
         "input": {
           "$ref": "#/$defs/NodeUiInputKind"
+        },
+        "label_key": {
+          "type": "string"
         },
         "required": {
           "type": "boolean"
@@ -209,10 +179,10 @@
         "input",
         "required",
         "validation"
-      ]
+      ],
+      "type": "object"
     },
     "NodeUiInputKind": {
-      "type": "string",
       "enum": [
         "boolean",
         "client_id",
@@ -226,10 +196,36 @@
         "routing_mode",
         "url_or_ticket",
         "timeout_ms"
-      ]
+      ],
+      "type": "string"
+    },
+    "NodeUiPage": {
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/NodeUiAction"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "nav_label_key": {
+          "type": "string"
+        },
+        "title_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "nav_label_key",
+        "title_key",
+        "actions"
+      ],
+      "type": "object"
     },
     "NodeUiValidation": {
-      "type": "string",
       "enum": [
         "none",
         "non_empty",
@@ -241,29 +237,33 @@
         "role",
         "routing_mode",
         "positive_timeout"
-      ]
-    },
-    "NodeUiConfirmation": {
-      "type": "object",
-      "properties": {
-        "title_key": {
-          "type": "string"
-        },
-        "consequence_key": {
-          "type": "string"
-        },
-        "destructive": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "title_key",
-        "consequence_key",
-        "destructive"
-      ]
+      ],
+      "type": "string"
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-ui-manifest-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic.",
+  "properties": {
+    "pages": {
+      "items": {
+        "$ref": "#/$defs/NodeUiPage"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "pages"
+  ],
+  "title": "NodeUiManifest",
+  "type": "object",
   "x-fuckipv6-contract-version": 1,
   "x-fuckipv6-rust-source": "fuckipv6-client::node"
 }

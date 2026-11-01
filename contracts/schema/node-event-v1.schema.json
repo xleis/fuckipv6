@@ -1,60 +1,46 @@
 {
-  "type": "object",
-  "properties": {
-    "sequence": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0
-    },
-    "kind": {
-      "$ref": "#/$defs/NodeEventKind"
-    }
-  },
-  "required": [
-    "sequence",
-    "kind"
-  ],
-  "description": "Ordered event delivered to every attached UI and control adapter.",
-  "title": "NodeEvent",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "NodeEmbeddedServiceStatus": {
+      "enum": [
+        "starting",
+        "running",
+        "stopping",
+        "stopped",
+        "failed"
+      ],
+      "type": "string"
+    },
     "NodeEventKind": {
       "oneOf": [
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "state_changed"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "revision": {
-                  "type": "integer",
                   "format": "uint64",
-                  "minimum": 0
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
                 "revision"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "state_changed",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "network_changed"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "network_name": {
                   "type": "string"
@@ -66,23 +52,23 @@
               "required": [
                 "network_name",
                 "status"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "network_changed",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "embedded_service_changed"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "network_name": {
                   "type": "string"
@@ -94,23 +80,23 @@
               "required": [
                 "network_name",
                 "status"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "embedded_service_changed",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "log_appended"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "level": {
                   "$ref": "#/$defs/NodeLogLevel"
@@ -122,30 +108,24 @@
               "required": [
                 "level",
                 "message"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "log_appended",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "routing_changed"
-            },
             "data": {
-              "type": "object",
               "properties": {
-                "network_name": {
-                  "type": "string"
-                },
-                "mode": {
-                  "$ref": "#/$defs/NodeRoutingMode"
-                },
                 "exit_node": {
                   "type": [
                     "string",
@@ -154,44 +134,50 @@
                 },
                 "is_exit_node": {
                   "type": "boolean"
+                },
+                "mode": {
+                  "$ref": "#/$defs/NodeRoutingMode"
+                },
+                "network_name": {
+                  "type": "string"
                 }
               },
               "required": [
                 "network_name",
                 "mode",
                 "is_exit_node"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "routing_changed",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "role_changed"
-            },
             "data": {
-              "type": "object",
               "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
                 "network_name": {
                   "type": "string"
                 },
                 "role": {
                   "$ref": "#/$defs/NodeNetworkRole"
                 },
-                "enabled": {
-                  "type": "boolean"
-                },
                 "roles": {
-                  "type": "array",
                   "items": {
                     "$ref": "#/$defs/NodeNetworkRole"
-                  }
+                  },
+                  "type": "array"
                 }
               },
               "required": [
@@ -199,28 +185,28 @@
                 "role",
                 "enabled",
                 "roles"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "role_changed",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
-            "type": {
-              "type": "string",
-              "const": "command_completed"
-            },
             "data": {
-              "type": "object",
               "properties": {
                 "request_id": {
-                  "type": "integer",
                   "format": "uint64",
-                  "minimum": 0
+                  "minimum": 0,
+                  "type": "integer"
                 },
                 "success": {
                   "type": "boolean"
@@ -229,18 +215,43 @@
               "required": [
                 "request_id",
                 "success"
-              ]
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "command_completed",
+              "type": "string"
             }
           },
           "required": [
             "type",
             "data"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
+    "NodeLogLevel": {
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "type": "string"
+    },
+    "NodeNetworkRole": {
+      "description": "Network roles are capabilities within a network, never product identities.",
+      "enum": [
+        "member",
+        "discovery",
+        "relay",
+        "exit_node"
+      ],
+      "type": "string"
+    },
     "NodeNetworkStatus": {
-      "type": "string",
       "enum": [
         "offline",
         "connecting",
@@ -248,48 +259,37 @@
         "degraded",
         "stopping",
         "failed"
-      ]
-    },
-    "NodeEmbeddedServiceStatus": {
-      "type": "string",
-      "enum": [
-        "starting",
-        "running",
-        "stopping",
-        "stopped",
-        "failed"
-      ]
-    },
-    "NodeLogLevel": {
-      "type": "string",
-      "enum": [
-        "trace",
-        "debug",
-        "info",
-        "warn",
-        "error"
-      ]
+      ],
+      "type": "string"
     },
     "NodeRoutingMode": {
-      "type": "string",
       "enum": [
         "mesh_only",
         "bypass_mainland",
         "global_proxy"
-      ]
-    },
-    "NodeNetworkRole": {
-      "type": "string",
-      "enum": [
-        "member",
-        "discovery",
-        "relay",
-        "exit_node"
       ],
-      "description": "Network roles are capabilities within a network, never product identities."
+      "type": "string"
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-event-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Ordered event delivered to every attached UI and control adapter.",
+  "properties": {
+    "kind": {
+      "$ref": "#/$defs/NodeEventKind"
+    },
+    "sequence": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "sequence",
+    "kind"
+  ],
+  "title": "NodeEvent",
+  "type": "object",
   "x-fuckipv6-contract-version": 1,
   "x-fuckipv6-rust-source": "fuckipv6-client::node"
 }

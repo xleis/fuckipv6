@@ -4482,12 +4482,17 @@ mod tests {
         let engine = P2pEngine::new(0).await?;
         let release = Arc::new(AtomicBool::new(false));
         let blocking_release = release.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let task = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
             while !blocking_release.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(5));
             }
         });
         engine.register_child_task(task);
+        started_rx
+            .await
+            .expect("blocking task must start before bounded shutdown");
 
         let error = engine
             .shutdown_bounded(Duration::from_millis(100))

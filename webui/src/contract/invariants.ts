@@ -1,6 +1,7 @@
 import type {
   NodeApiCommandResponse,
   NodeApiManifestResponse,
+  NodeApiOperationResponse,
   NodeApiSnapshotResponse,
   NodeCommand,
   NodeCommandHttpRequest,
@@ -10,6 +11,7 @@ import type {
   ConfigurationHistoryEntry,
   ConfigurationPreview,
   NodeNetworkSelection,
+  NodeOperationSnapshot,
   NodeProblem,
   NodeSnapshot,
   NodeUiAction,
@@ -81,6 +83,21 @@ const AVAILABILITIES = new Set([
   "network_selected",
 ]);
 const BACKEND_STATUSES = new Set(["implemented", "unavailable"]);
+const OPERATION_STATES = new Set([
+  "queued",
+  "running",
+  "waiting_for_reauth",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+const OPERATION_TERMINAL_STATES = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
 const INPUT_KINDS = new Set([
   "boolean",
   "client_id",
@@ -1027,17 +1044,10 @@ export function commandEnvelope(
   };
 }
 
-export function validateCommandResponse(
-  response: NodeApiCommandResponse,
-  requestId: number,
-): NodeCommandOutcome {
-  if (!record(response) || response.schema_version !== HTTP_SCHEMA_VERSION)
-    fail("command HTTP schema mismatch");
-  if (!record(response.result) || response.result.request_id !== requestId)
-    fail("command request id mismatch");
-  const outcome = response.result.outcome as NodeCommandOutcome;
-  if (!record(outcome) || !OUTCOME_STATUSES.has(outcome.status))
+function validatedOutcome(value: unknown): NodeCommandOutcome {
+  if (!record(value) || !OUTCOME_STATUSES.has(String(value.status)))
     fail("unknown command outcome");
+  const outcome = value as NodeCommandOutcome;
   if (outcome.status === "snapshot") validateSnapshot(outcome.data);
   if (outcome.status === "configuration") configurationDocument(outcome.data);
   if (outcome.status === "configuration_preview")
@@ -1051,6 +1061,63 @@ export function validateCommandResponse(
   if (outcome.status === "accepted" && !record(outcome.data))
     fail("accepted outcome is missing operation");
   return outcome;
+}
+
+export function validateOperationSnapshot(value: unknown): NodeOperationSnapshot {
+  if (!record(value) || typeof value.operation_id !== "string" || !value.operation_id)
+    fail("operation snapshot is missing its id");
+  if (!OPERATION_STATES.has(String(value.state)))
+    fail("operation snapshot has an unknown state");
+  if (value.result !== undefined && value.result !== null) {
+    if (!record(value.result)) fail("operation result is invalid");
+    validatedOutcome(value.result.outcome);
+  }
+  return value as NodeOperationSnapshot;
+}
+
+export function operationStateIsTerminal(state: string): boolean {
+  return OPERATION_TERMINAL_STATES.has(state);
+}
+
+export function validateCommandResponse(
+  response: NodeApiCommandResponse,
+  requestId: number,
+): NodeCommandOutcome {
+  if (!record(response) || response.schema_version !== HTTP_SCHEMA_VERSION)
+    fail("command HTTP schema mismatch");
+  if (!record(response.result) || response.result.request_id !== requestId)
+    fail("command request id mismatch");
+  return validatedOutcome(response.result.outcome);
+}
+
+export function validateAcceptedCommandResponse(
+  response: NodeApiCommandResponse,
+  requestId: number,
+): NodeOperationSnapshot {
+  if (!record(response) || response.schema_version !== HTTP_SCHEMA_VERSION)
+    fail("command HTTP schema mismatch");
+  if (response.request_id !== requestId) fail("command request id mismatch");
+  if (response.result !== undefined && response.result !== null)
+    fail("accepted command unexpectedly returned a synchronous result");
+  if (!response.operation) fail("accepted command is missing its operation");
+  const operation = validateOperationSnapshot(response.operation);
+  if (operation.operation_id !== response.operation.operation_id)
+    fail("accepted command operation id mismatch");
+  return operation;
+}
+
+export function validateOperationResponse(
+  response: NodeApiOperationResponse,
+  operationId: string,
+): NodeOperationSnapshot {
+  if (!record(response) || response.schema_version !== HTTP_SCHEMA_VERSION)
+    fail("operation HTTP schema mismatch");
+  if (!record(response.operation))
+    fail("operation HTTP response is missing its operation");
+  const operation = validateOperationSnapshot(response.operation);
+  if (operation.operation_id !== operationId)
+    fail("operation HTTP response id mismatch");
+  return operation;
 }
 
 export function problemText(

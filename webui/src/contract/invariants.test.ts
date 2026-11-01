@@ -3,12 +3,16 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productVisualFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   NodeApiManifestResponse,
+  NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiManifest,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   commandEnvelope,
+  operationStateIsTerminal,
+  validateAcceptedCommandResponse,
   validateManifestResponse,
+  validateOperationResponse,
   validateSnapshot,
   validateSnapshotResponse,
 } from "./invariants";
@@ -145,5 +149,56 @@ describe("node UI contract invariants", () => {
         auto_connect: true,
       },
     });
+  });
+
+  it("validates asynchronous command acceptance and terminal operation snapshots", () => {
+    const operation = {
+      operation_id: "op-42",
+      state: "running",
+      result: null,
+    } as unknown as NodeOperationSnapshot;
+
+    expect(
+      validateAcceptedCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 42,
+          server_time: "2026-11-01T00:00:00Z",
+          operation,
+        },
+        42,
+      ).operation_id,
+    ).toBe("op-42");
+    expect(operationStateIsTerminal("running")).toBe(false);
+    expect(operationStateIsTerminal("succeeded")).toBe(true);
+
+    const completed = {
+      ...operation,
+      state: "succeeded",
+      result: { request_id: 42, outcome: { status: "completed" } },
+    } as NodeOperationSnapshot;
+    expect(
+      validateOperationResponse(
+        {
+          schema_version: 1,
+          request_id: 43,
+          server_time: "2026-11-01T00:00:01Z",
+          operation: completed,
+        },
+        "op-42",
+      ).result?.outcome.status,
+    ).toBe("completed");
+
+    expect(() =>
+      validateAcceptedCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 41,
+          server_time: "2026-11-01T00:00:00Z",
+          operation,
+        },
+        42,
+      ),
+    ).toThrow("command request id mismatch");
   });
 });

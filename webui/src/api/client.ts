@@ -2,14 +2,19 @@ import type {
   NodeApiCommandResponse,
   NodeApiErrorResponse,
   NodeApiManifestResponse,
+  NodeApiOperationResponse,
   NodeApiSnapshotResponse,
   NodeCommandHttpRequest,
+  NodeOperationSnapshot,
   NodeUiManifest,
   NodeSnapshot,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
+  operationStateIsTerminal,
+  validateAcceptedCommandResponse,
   validateCommandResponse,
   validateManifestResponse,
+  validateOperationResponse,
   validateSnapshotResponse,
 } from "../contract/invariants";
 import { NODE_CONTRACT_SCHEMA_VERSION } from "../../../contracts/typescript/node-contract-v1";
@@ -110,6 +115,55 @@ export async function sendCommand(envelope: NodeCommandHttpRequest): Promise<Nod
     method: "POST",
     body: JSON.stringify(envelope),
   });
-  validateCommandResponse(payload, envelope.request.request_id);
+  if (payload.result) {
+    validateCommandResponse(payload, envelope.request.request_id);
+  } else {
+    validateAcceptedCommandResponse(payload, envelope.request.request_id);
+  }
   return payload;
+}
+
+export async function loadOperation(operationId: string): Promise<NodeOperationSnapshot> {
+  const payload = await apiRequest<NodeApiOperationResponse>(
+    `/api/v1/operations/${encodeURIComponent(operationId)}?schema_version=${NODE_CONTRACT_SCHEMA_VERSION}`,
+  );
+  return validateOperationResponse(payload, operationId);
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("operation wait aborted"));
+      return;
+    }
+    const timer = window.setTimeout(resolve, milliseconds);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timer);
+        reject(new Error("operation wait aborted"));
+      },
+      { once: true },
+    );
+  });
+}
+
+export async function waitForOperation(
+  operationId: string,
+  options: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<NodeOperationSnapshot> {
+  const intervalMs = options.intervalMs ?? 400;
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const operation = await loadOperation(operationId);
+    if (operationStateIsTerminal(operation.state)) return operation;
+    if (Date.now() >= deadline)
+      throw new Error(`operation ${operationId} did not reach a terminal state in time`);
+    await abortableDelay(intervalMs, options.signal);
+  }
 }

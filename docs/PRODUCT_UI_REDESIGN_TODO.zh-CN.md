@@ -827,14 +827,17 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 边界：自动测试验证快捷键注册、双语言菜单、角色声明、a11y 启用和逻辑像素断点，不等同于第三方屏幕阅读器全组合验收；当前 GPUI 测试平台也未暴露辅助技术激活回调，因此不以合成无障碍树代替真实辅助技术测试。原生路径选择在本项只完成适配器，不代表已有业务页面使用路径字段。
 
-### W5-07 WebUI 基础工程 `[ ]`
+### W5-07 WebUI 基础工程 `[x]`
 
-- [ ] React + TypeScript + Vite；
-- [ ] 单一应用壳，不保留旧双表面；
-- [ ] Radix/Shadcn 行为原语；
-- [ ] TanStack Query/Table/Virtual；
-- [ ] 静态资源嵌入单一二进制；
-- [ ] 构建、Lint、类型和单测。
+- [x] React 19 + TypeScript + Vite；
+- [x] 单一应用壳，不保留旧双表面；旧内嵌 `node_ui.html` / `node_ui.js` 已删除；
+- [x] Radix 行为原语（Dialog、Dropdown、ContextMenu、Tooltip、Tabs）；
+- [x] TanStack Query/Table/Virtual；
+- [x] Vite 生产资源（`app.js`、`app.css`、`index.html`）通过 `include_bytes!` 嵌入单一二进制；
+- [x] `npm run build`、`npm run lint`、`npm run typecheck`、`npm test -- --run` 通过；
+- [x] 契约固件接受/拒绝、快照校验、命令封包/请求 ID/幂等键、Passkey 未认证视图、五模块与十一页面 manifest 驱动外壳均有自动化测试。
+
+**证据（2026-11-01）**：React 单元测试 8/8 通过；WebUI 生产构建成功；Rust `webui::node_surface` 嵌入资源测试通过。CSP 已收紧为 `script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-inline'`：内联脚本继续完全禁止，仅允许 Radix 弹层和虚拟列表所需的 `style` 属性。W5-08 的 GPUI/WebUI 像素级对比仍未完成，不能将本项视为整体 UI 重构完成。
 
 ### W5-08 视觉与语义回归 `[ ]`
 

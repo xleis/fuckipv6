@@ -11,6 +11,7 @@ pub(super) const NODE_UI_JS: &str = include_str!("node_ui.js");
 mod tests {
     use super::{NODE_MANIFEST_HTML, NODE_UI_JS};
     use crate::node::{node_ui_manifest, NodePrimaryStatus, NodeUiManifest};
+    use fuckipv6_common::i18n::{message_keys, t, Locale};
     use serde_json::Value;
     use std::collections::BTreeSet;
 
@@ -33,14 +34,6 @@ mod tests {
             "/* NODE_UI_MANIFEST_CONTRACT_BEGIN */",
             "/* NODE_UI_MANIFEST_CONTRACT_END */",
         )
-    }
-
-    fn embedded_labels() -> Value {
-        marker_json(NODE_UI_JS, "/* LABELS_BEGIN */", "/* LABELS_END */")
-    }
-
-    fn embedded_error_text() -> Value {
-        marker_json(NODE_UI_JS, "/* ERROR_TEXT_BEGIN */", "/* ERROR_TEXT_END */")
     }
 
     fn source_between<'a>(source: &'a str, begin: &str, end: &str) -> &'a str {
@@ -86,25 +79,25 @@ mod tests {
     }
 
     #[test]
-    fn every_manifest_page_action_field_and_confirmation_has_a_label() {
+    fn every_manifest_page_action_field_and_confirmation_has_a_localized_label() {
         let manifest = node_ui_manifest();
-        let labels_value = embedded_labels();
-        let labels = labels_value.as_object().expect("label object");
-        for key in required_label_keys(&manifest) {
-            assert!(
-                labels
-                    .get(&key)
-                    .and_then(Value::as_str)
-                    .is_some_and(|label| !label.is_empty()),
-                "missing non-empty label for {key}"
-            );
+        for locale in [Locale::ZhCn, Locale::En] {
+            let labels = message_keys(locale);
+            for key in required_label_keys(&manifest) {
+                assert!(
+                    labels.contains(key.as_str()),
+                    "missing {locale:?} label key {key}"
+                );
+                assert!(
+                    !t(locale, &key).trim().is_empty(),
+                    "empty {locale:?} label for {key}"
+                );
+            }
         }
     }
 
     #[test]
-    fn browser_error_text_covers_transport_and_problem_codes() {
-        let errors_value = embedded_error_text();
-        let errors = errors_value.as_object().expect("error object");
+    fn browser_error_text_covers_transport_and_problem_codes_in_every_locale() {
         for code in [
             "schema_version_mismatch",
             "invalid_request",
@@ -119,13 +112,17 @@ mod tests {
             "unsupported",
             "internal",
         ] {
-            assert!(
-                errors
-                    .get(code)
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| !text.is_empty()),
-                "missing error text for {code}"
-            );
+            let key = format!("error.{code}");
+            for locale in [Locale::ZhCn, Locale::En] {
+                assert!(
+                    message_keys(locale).contains(key.as_str()),
+                    "missing {locale:?} key {key}"
+                );
+                assert!(
+                    !t(locale, &key).trim().is_empty(),
+                    "empty {locale:?} error text for {key}"
+                );
+            }
         }
     }
 
@@ -168,21 +165,23 @@ mod tests {
     fn browser_surface_uses_the_single_primary_status() {
         assert!(NODE_MANIFEST_HTML.contains(r#"id="primary-status""#));
         assert!(NODE_MANIFEST_HTML.contains(r#"id="primary-detail""#));
-        assert!(NODE_MANIFEST_HTML.contains("ui.primaryStatusFor(state.snapshot)"));
+        assert!(NODE_MANIFEST_HTML.contains("ui.primaryStatusFor(state.snapshot, state.locale)"));
         assert!(!NODE_MANIFEST_HTML.contains(r#"$("lifecycle")"#));
-        assert!(NODE_UI_JS.contains("function primaryStatusFor(snapshot)"));
+        assert!(NODE_UI_JS.contains("function primaryStatusFor(snapshot, locale)"));
         assert!(NODE_UI_JS.contains("unknown control health"));
         for status in NodePrimaryStatus::ALL {
-            assert!(
-                NODE_UI_JS.contains(status.label_zh()),
-                "missing primary status label: {}",
-                status.label_zh()
-            );
-            assert!(
-                NODE_UI_JS.contains(status.detail_zh()),
-                "missing primary status detail: {}",
-                status.detail_zh()
-            );
+            for locale in [Locale::ZhCn, Locale::En] {
+                assert!(
+                    message_keys(locale).contains(status.label_key()),
+                    "missing {locale:?} primary status label: {}",
+                    status.label_key()
+                );
+                assert!(
+                    message_keys(locale).contains(status.detail_key()),
+                    "missing {locale:?} primary status detail: {}",
+                    status.detail_key()
+                );
+            }
         }
     }
 

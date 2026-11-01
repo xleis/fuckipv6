@@ -1,11 +1,15 @@
 (function (root, factory) {
-  const api = factory();
+  const api = factory(root.FuckIPV6I18n);
   if (typeof module !== "undefined" && module.exports) {
     module.exports = api;
   }
   root.FuckIPV6NodeUi = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (i18n) {
   "use strict";
+
+  if (!i18n || typeof i18n.t !== "function" || typeof i18n.tr !== "function") {
+    throw new Error("node-ui-contract: shared i18n runtime is missing");
+  }
 
   const HTTP_SCHEMA_VERSION = 1;
   const MANIFEST_SCHEMA_VERSION = 1;
@@ -830,122 +834,54 @@
       .map((action) => [action.id, action]),
   ));
 
-  const LABELS = Object.freeze(
-    /* LABELS_BEGIN */
-    {
-      "nav.overview": "概览",
-      "nav.networks": "网络",
-      "nav.peers": "节点",
-      "nav.topology": "拓扑",
-      "nav.traffic": "流量",
-      "nav.routing": "路由",
-      "nav.exit_node": "Exit Node",
-      "nav.relay": "中继",
-      "nav.logs": "日志",
-      "nav.identity": "身份",
-      "nav.settings": "设置",
-      "page.overview": "节点概览",
-      "page.networks": "网络管理",
-      "page.peers": "对等节点",
-      "page.topology": "拓扑视图",
-      "page.traffic": "流量统计",
-      "page.routing": "路由策略",
-      "page.exit_node": "Exit Node",
-      "page.relay": "中继能力",
-      "page.logs": "运行日志",
-      "page.identity": "节点身份",
-      "page.settings": "权限与设置",
-      "action.refresh_snapshot": "刷新快照",
-      "action.get_node_diagnostics": "查看运行时诊断",
-      "action.get_blacklist": "读取节点黑名单",
-      "action.ban_client": "封禁节点",
-      "action.unban_client": "解除封禁",
-      "action.get_network_allocation": "读取地址池",
-      "action.update_network_allocation": "更新地址池",
-      "action.create_network": "创建网络",
-      "action.join_network": "加入网络",
-      "action.start_networks": "启动网络",
-      "action.stop_networks": "停止网络",
-      "action.restart_networks": "重启网络",
-      "action.probe_peer": "探测节点",
-      "action.update_routing": "更新路由",
-      "action.set_exit_node_role": "设置 Exit Node 角色",
-      "action.set_relay_role": "设置中继角色",
-      "action.start_node": "启动节点",
-      "action.stop_node": "停止节点",
-      "action.restart_node": "重启节点",
-      "action.cleanup_node_residuals": "清理运行时残留",
-      "action.shutdown_node": "关闭节点",
-      "field.network_name": "网络名称",
-      "field.signaling_port": "信令端口",
-      "field.relay_port": "中继端口",
-      "field.external_host": "外部主机",
-      "field.client_id": "节点标识",
-      "field.network_mode": "地址族模式",
-      "field.ipv4_pool": "IPv4 地址池",
-      "field.ipv6_pool": "IPv6 地址池",
-      "field.auto_connect": "创建后连接",
-      "field.ticket_or_url": "票据或 URL",
-      "field.start_after_join": "加入后启动",
-      "field.network_selection": "网络选择",
-      "field.network_names": "网络名称列表",
-      "field.all_networks": "全部网络",
-      "field.peer_target": "对等节点",
-      "field.timeout_ms": "超时（毫秒）",
-      "field.routing_mode": "路由模式",
-      "field.exit_node": "出口节点",
-      "field.is_exit_node": "启用本节点 Exit Node",
-      "field.role": "角色",
-      "field.enabled": "启用",
-      "confirm.stop_networks.title": "确认停止网络",
-      "confirm.stop_networks.consequence": "所选网络及其 Peer 会话会停止。",
-      "confirm.restart_networks.title": "确认重启网络",
-      "confirm.restart_networks.consequence": "所选网络会停止并按持久化配置重新启动。",
-      "confirm.update_routing.title": "确认更新路由",
-      "confirm.update_routing.consequence": "新路由会热应用到当前网络，不重启网络。",
-      "confirm.set_exit_node_role.title": "确认角色变更",
-      "confirm.set_exit_node_role.consequence": "角色变更会立即影响此节点在网络中的能力。",
-      "confirm.set_relay_role.title": "确认角色变更",
-      "confirm.set_relay_role.consequence": "角色变更会立即影响此节点在网络中的能力。",
-      "confirm.ban_client.title": "确认封禁节点",
-      "confirm.ban_client.consequence": "该节点会立即被协调端拒绝，直到管理员解除封禁。",
-      "confirm.update_network_allocation.title": "确认更新地址池",
-      "confirm.update_network_allocation.consequence": "新地址池会持久化并热应用到协调端，已有会话可能因地址变更重新分配。",
-      "confirm.restart_node.title": "确认重启节点",
-      "confirm.restart_node.consequence": "所有数据面和自托管服务会停止，随后按持久化配置重新启动。",
-      "confirm.shutdown_node.title": "确认关闭节点",
-      "confirm.shutdown_node.consequence": "所有网络和数据面会停止，且当前操作不可撤销。"
-    }
-    /* LABELS_END */
-  );
-
-  const ERROR_TEXT = Object.freeze(
-    /* ERROR_TEXT_BEGIN */
-    {
-      "schema_version_mismatch": "协议版本不兼容，已拒绝静默降级。",
-      "invalid_request": "请求字段无效。",
-      "backend_rejected": "节点后端拒绝了命令。",
-      "backend_unavailable": "节点命令总线当前不可用。",
-      "contract_violation": "共享 UI 契约违规，界面已失败关闭。",
-      "not_found": "目标不存在。",
-      "conflict": "操作与当前节点状态冲突。",
-      "unavailable": "所需能力当前不可用。",
-      "permission_denied": "共享权限快照未授予此操作。",
-      "cancelled": "操作已取消。",
-      "unsupported": "当前平台或主机不支持此操作。",
-      "internal": "节点内部错误。"
-    }
-    /* ERROR_TEXT_END */
-  );
-
   function assertContract(condition, message) {
     if (!condition) {
       throw new Error("node-ui-contract: " + message);
     }
   }
 
-  function label(key) {
-    return LABELS[key] || key;
+  function localeFor(locale) {
+    return i18n.normalizeLocale(locale || i18n.detectLocale());
+  }
+
+  function label(key, locale) {
+    return i18n.t(localeFor(locale), key);
+  }
+
+  function errorMessageKey(code) {
+    switch (code) {
+      case "authentication_required":
+      case "invalid_request":
+      case "not_found":
+      case "conflict":
+      case "unavailable":
+      case "permission_denied":
+      case "cancelled":
+      case "timed_out":
+      case "unsupported":
+      case "internal":
+        return "error." + code;
+      case "schema_version_mismatch":
+      case "backend_rejected":
+      case "backend_unavailable":
+      case "contract_violation":
+      case "language_persistence_failed":
+      case "request_failed":
+      case "unexpected_outcome":
+      case "empty_outcome":
+        return "error." + code;
+      default:
+        return null;
+    }
+  }
+
+  function problemText(problem, locale) {
+    if (!problem || typeof problem !== "object") return label("common.unknown", locale);
+    if (typeof problem.message_key === "string" && problem.message_key) {
+      return label(problem.message_key, locale);
+    }
+    const key = errorMessageKey(problem.code);
+    return key ? label(key, locale) : label("common.unknown", locale);
   }
 
   function unique(values, kind) {
@@ -1038,45 +974,10 @@
     validateRuntimeResidue(cleanup.residue, "cleanup");
   }
 
-  const PRIMARY_STATUS_COPY = Object.freeze({
-    uninitialized: Object.freeze({
-      label: "未初始化",
-      detail: "完成节点初始化后创建或加入网络。",
-    }),
-    stopped: Object.freeze({
-      label: "已停止",
-      detail: "启动节点以恢复网络连接。",
-    }),
-    starting: Object.freeze({
-      label: "正在启动",
-      detail: "正在启动节点，请稍候。",
-    }),
-    stopping: Object.freeze({
-      label: "正在停止",
-      detail: "正在停止节点，请稍候。",
-    }),
-    running: Object.freeze({
-      label: "运行正常",
-      detail: "节点和已配置网络运行正常。",
-    }),
-    degraded: Object.freeze({
-      label: "运行降级",
-      detail: "检查最近问题并重试受影响网络。",
-    }),
-    failed: Object.freeze({
-      label: "节点故障",
-      detail: "打开诊断并重启节点。",
-    }),
-    control_unavailable: Object.freeze({
-      label: "控制服务异常",
-      detail: "节点控制服务暂时不可达；数据面不会被自动停止，正在重连。",
-    }),
-  });
-
   // This mirrors NodeSnapshot::primary_status() in Rust. Control health is
   // only considered after node-local degradation so the UI never reports a
   // transport symptom while a more actionable node problem exists.
-  function primaryStatusFor(snapshot) {
+  function primaryStatusFor(snapshot, locale) {
     assertContract(isRecord(snapshot), "snapshot payload is missing");
     assertContract(isRecord(snapshot.lifecycle), "snapshot lifecycle is missing");
     const phase = snapshot.lifecycle.phase;
@@ -1113,7 +1014,12 @@
       throw new Error("node-ui-contract: unknown lifecycle phase " + phase);
     }
 
-    return Object.freeze(Object.assign({ id: status }, PRIMARY_STATUS_COPY[status]));
+    const language = localeFor(locale);
+    return Object.freeze({
+      id: status,
+      label: label("status.primary." + status, language),
+      detail: label("status.primary." + status + ".detail", language),
+    });
   }
 
   function canonicalValue(value) {
@@ -1205,7 +1111,10 @@
       ]),
     ]);
     for (const key of new Set(labelKeys)) {
-      assertContract(typeof LABELS[key] === "string" && LABELS[key].length > 0, "missing label: " + key);
+      for (const locale of i18n.locales) {
+        const text = label(key, locale);
+        assertContract(text !== key && text.length > 0, "missing " + locale + " label: " + key);
+      }
     }
     return manifest;
   }
@@ -1416,18 +1325,14 @@
     return null;
   }
 
-  function blockReasonText(reason) {
+  function blockReasonText(reason, locale) {
     switch (reason) {
       case "permission_denied":
-        return "共享权限快照未授予此动作。";
       case "node_not_running":
-        return "节点尚未运行。";
       case "no_online_network":
-        return "没有在线网络。";
       case "no_network_selected":
-        return "请先选择网络。";
       case "backend_unavailable":
-        return "后端成熟度为 Unavailable，已禁止伪成功。";
+        return label("blocked." + reason, locale);
       default:
         return "";
     }
@@ -1477,12 +1382,12 @@
     return value === undefined || value === null || String(value).trim() === "";
   }
 
-  function booleanValue(value) {
+  function booleanValue(value, locale) {
     if (typeof value === "boolean") return value;
     const normalized = String(value === undefined || value === null ? "" : value).trim().toLowerCase();
     if (["true", "1", "yes", "on"].includes(normalized)) return true;
     if (["false", "0", "no", "off", ""].includes(normalized)) return false;
-    throw new Error("布尔值无效: " + value);
+    throw new Error(i18n.tr(localeFor(locale), "validation.boolean_invalid", { value }));
   }
 
   function splitNames(value) {
@@ -1492,77 +1397,78 @@
     return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
   }
 
-  function networkSelection(value) {
+  function networkSelection(value, locale) {
     const normalized = String(value || "").trim();
     if (normalized === "none") return "none";
     if (normalized === "default") return "default";
     if (normalized === "all") return "all";
     const names = splitNames(normalized);
-    if (!names.length) throw new Error("网络选择不能为空");
+    if (!names.length) throw new Error(label("validation.network_selection_empty", locale));
     return { named: names };
   }
 
-  function networkNameValidation(value) {
+  function networkNameValidation(value, locale) {
     const name = String(value).trim();
     return /^[A-Za-z0-9._-]+$/.test(name) && name !== "." && name !== ".."
       ? null
-      : "只能包含 ASCII 字母、数字、点、短横线和下划线";
+      : label("validation.network_name_invalid", locale);
   }
 
-  function validateNetworkSelection(value) {
+  function validateNetworkSelection(value, locale) {
     const normalized = String(value || "").trim();
     if (["none", "default", "all"].includes(normalized)) return [];
     const names = splitNames(normalized);
-    if (!names.length) return ["不能为空"];
+    if (!names.length) return [label("validation.network_selection_empty", locale)];
     const errors = [];
     const seen = new Set();
     for (const name of names) {
-      const invalid = networkNameValidation(name);
+      const invalid = networkNameValidation(name, locale);
       if (invalid) errors.push(name + " " + invalid);
-      if (seen.has(name)) errors.push("网络重复: " + name);
+      if (seen.has(name)) errors.push(i18n.tr(localeFor(locale), "validation.network_duplicate", { name }));
       seen.add(name);
     }
     return errors;
   }
 
-  function validateActionValues(action, values) {
+  function validateActionValues(action, values, locale) {
+    const language = localeFor(locale);
     const errors = [];
     for (const field of action.fields) {
       const value = values[field.id];
       if (field.required && blank(value)) {
-        errors.push(label(field.label_key) + "不能为空");
+        errors.push(i18n.tr(language, "validation.required", { field: label(field.label_key, language) }));
         continue;
       }
       if (blank(value)) continue;
       try {
         if (field.validation === "network_name") {
-          const invalid = networkNameValidation(value);
-          if (invalid) errors.push(label(field.label_key) + invalid);
+          const invalid = networkNameValidation(value, language);
+          if (invalid) errors.push(label(field.label_key, language) + " " + invalid);
         } else if (field.validation === "port" || field.validation === "distinct_ports") {
           const port = Number(value);
           if (!Number.isInteger(port) || port < 1 || port > 65535) {
-            errors.push(label(field.label_key) + "必须是 1-65535 的端口");
+            errors.push(i18n.tr(language, "validation.port_range", { field: label(field.label_key, language) }));
           }
         } else if (field.validation === "network_selection") {
-          for (const invalid of validateNetworkSelection(value)) {
+          for (const invalid of validateNetworkSelection(value, language)) {
             errors.push(label(field.label_key) + ": " + invalid);
           }
         } else if (field.validation === "role") {
           if (!["member", "discovery", "relay", "exit_node"].includes(String(value))) {
-            errors.push("角色值无效");
+            errors.push(label("validation.role_invalid", language));
           }
         } else if (field.validation === "routing_mode") {
           if (!["mesh_only", "bypass_mainland", "global_proxy"].includes(String(value))) {
-            errors.push("路由模式无效");
+            errors.push(label("validation.routing_invalid", language));
           }
         } else if (field.validation === "network_mode") {
           if (!NETWORK_MODES.includes(String(value))) {
-            errors.push("地址族模式无效");
+            errors.push(label("validation.network_mode_invalid", language));
           }
         } else if (field.validation === "positive_timeout") {
           const timeout = Number(value);
           if (!Number.isInteger(timeout) || timeout <= 0) {
-            errors.push(label(field.label_key) + "必须是正整数");
+            errors.push(i18n.tr(language, "validation.positive_integer", { field: label(field.label_key, language) }));
           }
         }
       } catch (error) {
@@ -1571,33 +1477,33 @@
     }
     if (action.id === "create_network") {
       if (Number(values.signaling_port) === Number(values.relay_port)) {
-        errors.push("信令端口和中继端口不能相同");
+        errors.push(label("validation.port_distinct", language));
       }
     }
     if (action.id === "update_network_allocation") {
       const mode = String(values.mode || "");
       if (["ipv4_only", "dual_stack"].includes(mode) && blank(values.ipv4_pool)) {
-        errors.push("当前地址族模式要求填写 IPv4 地址池");
+        errors.push(label("validation.ipv4_pool_required", language));
       }
       if (["ipv6_only", "dual_stack"].includes(mode) && blank(values.ipv6_pool)) {
-        errors.push("当前地址族模式要求填写 IPv6 地址池");
+        errors.push(label("validation.ipv6_pool_required", language));
       }
     }
     if ((action.id === "stop_networks" || action.id === "restart_networks" || action.id === "cleanup_node_residuals") &&
-        !booleanValue(values.all) && !splitNames(values.networks).length) {
-      const verb = action.id === "restart_networks"
-        ? "重启"
+        !booleanValue(values.all, language) && !splitNames(values.networks).length) {
+      const key = action.id === "restart_networks"
+        ? "validation.restart_networks_selection"
         : action.id === "stop_networks"
-          ? "停止"
-          : "清理";
-      errors.push(verb + "时必须指定网络名称，或勾选全部网络");
+          ? "validation.stop_networks_selection"
+          : "validation.cleanup_networks_selection";
+      errors.push(label(key, language));
     }
     return errors;
   }
 
-  function required(values, fieldId) {
+  function required(values, fieldId, locale) {
     if (blank(values[fieldId])) {
-      throw new Error("缺少字段 " + fieldId);
+      throw new Error(i18n.tr(localeFor(locale), "validation.missing_field", { field: fieldId }));
     }
     return values[fieldId];
   }
@@ -1606,14 +1512,16 @@
     return blank(values[fieldId]) ? null : String(values[fieldId]).trim();
   }
 
-  function commandForAction(action, values) {
+  function commandForAction(action, values, locale) {
+    const language = localeFor(locale);
     const expected = ACTION_CONTRACT[action.id];
     assertContract(expected, "unknown action command: " + action.id);
     const command = expected.command;
-    const errors = validateActionValues(action, values);
+    const errors = validateActionValues(action, values, locale);
     if (errors.length) {
-      throw new Error(errors.join("；"));
+      throw new Error(errors.join(label("common.list_separator", language)));
     }
+    const requireValue = (fieldId) => required(values, fieldId, language);
     switch (action.id) {
       case "refresh_snapshot":
       case "get_node_diagnostics":
@@ -1622,24 +1530,24 @@
       case "get_network_allocation":
         return {
           command,
-          payload: { network_name: String(required(values, "network_name")).trim() },
+          payload: { network_name: String(requireValue("network_name")).trim() },
         };
       case "ban_client":
       case "unban_client":
         return {
           command,
           payload: {
-            network_name: String(required(values, "network_name")).trim(),
-            client_id: String(required(values, "client_id")).trim(),
+            network_name: String(requireValue("network_name")).trim(),
+            client_id: String(requireValue("client_id")).trim(),
           },
         };
       case "update_network_allocation":
         return {
           command,
           payload: {
-            network_name: String(required(values, "network_name")).trim(),
+            network_name: String(requireValue("network_name")).trim(),
             allocation: {
-              mode: String(required(values, "mode")),
+              mode: String(requireValue("mode")),
               ipv4_pool: optional(values, "ipv4_pool") || "",
               ipv6_pool: optional(values, "ipv6_pool") || "",
             },
@@ -1649,43 +1557,43 @@
         return {
           command,
           payload: {
-            name: String(required(values, "name")).trim(),
-            signaling_port: Number(required(values, "signaling_port")),
-            relay_port: Number(required(values, "relay_port")),
+            name: String(requireValue("name")).trim(),
+            signaling_port: Number(requireValue("signaling_port")),
+            relay_port: Number(requireValue("relay_port")),
             external_host: optional(values, "external_host"),
-            auto_connect: booleanValue(values.auto_connect),
+            auto_connect: booleanValue(values.auto_connect, language),
           },
         };
       case "join_network":
         return {
           command,
           payload: {
-            target: String(required(values, "target")).trim(),
+            target: String(requireValue("target")).trim(),
             network_name: optional(values, "network_name"),
-            start: booleanValue(values.start),
+            start: booleanValue(values.start, language),
           },
         };
       case "start_networks":
         return {
           command,
-          payload: { selection: networkSelection(required(values, "selection")) },
+          payload: { selection: networkSelection(requireValue("selection"), language) },
         };
       case "stop_networks": {
-        const all = booleanValue(values.all);
+        const all = booleanValue(values.all, language);
         return {
           command,
           payload: { networks: all ? [] : splitNames(values.networks), all },
         };
       }
       case "restart_networks": {
-        const all = booleanValue(values.all);
+        const all = booleanValue(values.all, language);
         return {
           command,
           payload: { networks: all ? [] : splitNames(values.networks), all },
         };
       }
       case "cleanup_node_residuals": {
-        const all = booleanValue(required(values, "all"));
+        const all = booleanValue(requireValue("all"), language);
         return {
           command,
           payload: { networks: all ? [] : splitNames(values.networks), all },
@@ -1695,19 +1603,19 @@
         return {
           command,
           payload: {
-            network_name: String(required(values, "network_name")).trim(),
-            target: String(required(values, "target")).trim(),
-            timeout_ms: Number(required(values, "timeout_ms")),
+            network_name: String(requireValue("network_name")).trim(),
+            target: String(requireValue("target")).trim(),
+            timeout_ms: Number(requireValue("timeout_ms")),
           },
         };
       case "update_routing":
         return {
           command,
           payload: {
-            network_name: String(required(values, "network_name")).trim(),
-            mode: String(required(values, "mode")),
+            network_name: String(requireValue("network_name")).trim(),
+            mode: String(requireValue("mode")),
             exit_node: optional(values, "exit_node"),
-            is_exit_node: booleanValue(values.is_exit_node),
+            is_exit_node: booleanValue(values.is_exit_node, language),
           },
         };
       case "set_exit_node_role":
@@ -1715,9 +1623,9 @@
         return {
           command,
           payload: {
-            network_name: String(required(values, "network_name")).trim(),
-            role: String(required(values, "role")),
-            enabled: booleanValue(required(values, "enabled")),
+            network_name: String(requireValue("network_name")).trim(),
+            role: String(requireValue("role")),
+            enabled: booleanValue(requireValue("enabled"), language),
           },
         };
       case "start_node":
@@ -1727,17 +1635,17 @@
       case "shutdown_node":
         return { command };
       default:
-        throw new Error("拒绝为未知动作构造命令: " + action.id);
+        throw new Error(i18n.tr(language, "error.unknown_action_command", { action: action.id }));
     }
   }
 
-  function commandEnvelope(requestId, action, values) {
+  function commandEnvelope(requestId, action, values, locale) {
     assertContract(Number.isSafeInteger(requestId) && requestId > 0, "request id must be a positive safe integer");
     return {
       schema_version: HTTP_SCHEMA_VERSION,
       request: {
         request_id: requestId,
-        command: commandForAction(action, values),
+        command: commandForAction(action, values, locale),
       },
     };
   }
@@ -1821,108 +1729,140 @@
     return outcome;
   }
 
-  function httpErrorText(payload, fallback) {
+  function httpErrorText(payload, fallbackKey, locale) {
+    const language = localeFor(locale);
     if (payload && typeof payload === "object") {
-      if (payload.problem && payload.problem.code && ERROR_TEXT[payload.problem.code]) {
-        return ERROR_TEXT[payload.problem.code] + " " + (payload.problem.message || "");
+      if (payload.problem && typeof payload.problem === "object") {
+        const problemMessage = problemText(payload.problem, language);
+        if (problemMessage !== label("common.unknown", language)) return problemMessage;
       }
-      if (payload.code && ERROR_TEXT[payload.code]) {
-        return ERROR_TEXT[payload.code] + (payload.message ? " " + payload.message : "");
+      const key = errorMessageKey(payload.code);
+      if (key) {
+        return label(key, language);
       }
     }
-    return fallback || "请求失败";
+    return label(fallbackKey || "error.request_failed", language);
   }
 
-  function outcomeErrorText(outcome) {
+  function outcomeErrorText(outcome, locale) {
     if (outcome && outcome.status === "rejected" && outcome.data) {
-      return httpErrorText({ problem: outcome.data }, "节点命令被拒绝");
+      return httpErrorText({ problem: outcome.data }, "error.backend_rejected", locale);
     }
-    return "节点返回了未预期的结果";
+    return label("error.unexpected_outcome", locale);
   }
 
-  function outcomeSummary(outcome) {
-    if (!outcome || typeof outcome !== "object") return "节点返回了空结果";
+  function outcomeSummary(outcome, locale) {
+    const language = localeFor(locale);
+    if (!outcome || typeof outcome !== "object") return label("error.empty_outcome", language);
     if (outcome.status === "diagnostics") {
       const residue = outcome.data.residue;
-      const counts = "会话 " + residue.sessions_remaining +
-        " · 监听器 " + residue.listeners_remaining +
-        " · Peer " + residue.peers_remaining +
-        " · 内嵌服务 " + residue.embedded_services_remaining;
+      const counts = i18n.tr(language, "outcome.residue_counts", {
+        sessions: i18n.formatInteger(language, residue.sessions_remaining),
+        listeners: i18n.formatInteger(language, residue.listeners_remaining),
+        peers: i18n.formatInteger(language, residue.peers_remaining),
+        services: i18n.formatInteger(language, residue.embedded_services_remaining),
+      });
       const candidates = outcome.data.cleanup_candidate_networks.length;
-      const issues = residue.issues.length ? "；" + residue.issues.join("；") : "；无残留问题";
-      return "诊断完成 · " + counts + " · 可重试清理 " + candidates + " 个网络" + issues;
+      const issues = residue.issues.length
+        ? i18n.tr(language, "outcome.issues", { issues: residue.issues.join(label("common.list_separator", language)) })
+        : label("outcome.no_residue_issues", language);
+      return i18n.tr(language, "outcome.diagnostics", {
+        counts,
+        candidates: i18n.formatInteger(language, candidates),
+        issues,
+      });
     }
     if (outcome.status === "cleanup") {
       const cleaned = outcome.data.cleaned_networks.length;
       const failed = outcome.data.failed_networks.length;
       const issues = outcome.data.residue.issues.length
-        ? "；" + outcome.data.residue.issues.join("；")
-        : "；无残留问题";
-      return "残留清理完成 · 成功 " + cleaned + " 个 · 失败 " + failed + " 个" + issues;
+        ? i18n.tr(language, "outcome.issues", {
+            issues: outcome.data.residue.issues.join(label("common.list_separator", language)),
+          })
+        : label("outcome.no_residue_issues", language);
+      return i18n.tr(language, "outcome.cleanup", {
+        cleaned: i18n.formatInteger(language, cleaned),
+        failed: i18n.formatInteger(language, failed),
+        issues,
+      });
     }
     if (outcome.status === "blacklist") {
-      const changed = outcome.data.changed ? " · 已变更" : " · 状态未变化";
-      return "黑名单读取完成 · " + outcome.data.clients.length + " 个节点" + changed;
+      return i18n.tr(language, "outcome.blacklist", {
+        nodes: i18n.formatInteger(language, outcome.data.clients.length),
+        change: label(outcome.data.changed ? "outcome.changed" : "outcome.unchanged", language),
+      });
     }
     if (outcome.status === "network_allocation") {
-      return "地址池已更新 · " + outcome.data.allocation.mode +
-        " · IPv4 " + (outcome.data.allocation.ipv4_pool || "禁用") +
-        " · IPv6 " + (outcome.data.allocation.ipv6_pool || "禁用");
+      return i18n.tr(language, "outcome.network_allocation", {
+        mode: label("choice.network_mode." + outcome.data.allocation.mode, language),
+        ipv4: outcome.data.allocation.ipv4_pool || label("common.disabled", language),
+        ipv6: outcome.data.allocation.ipv6_pool || label("common.disabled", language),
+      });
     }
     if (outcome.status === "network_created") {
-      return "网络已创建 · " + outcome.data.network_name +
-        (outcome.data.config_saved ? " · 已持久化" : " · 未持久化") +
-        (outcome.data.started ? " · 已启动" : " · 未启动");
+      return i18n.tr(language, "outcome.network_created", {
+        network: outcome.data.network_name,
+        persistence: label(outcome.data.config_saved ? "outcome.persisted" : "outcome.not_persisted", language),
+        startup: label(outcome.data.started ? "outcome.started" : "outcome.not_started", language),
+      });
     }
-    const message = outcome.data && outcome.data.message ? " · " + outcome.data.message : "";
-    return outcome.status + message;
+    if (outcome.status === "accepted") {
+      return i18n.tr(language, "outcome.accepted", { operation: outcome.data.operation_id });
+    }
+    if (outcome.status === "completed") return label("outcome.completed", language);
+    return label("outcome.unknown", language);
   }
 
-  function networkRows(snapshot) {
+  function networkRows(snapshot, locale) {
     return snapshot.networks.map((network) => ({
       title: network.name,
-      detail: [
-        "状态 " + network.status,
-        "角色 " + ((network.roles || []).join(", ") || "member"),
-        "Peers " + (network.peer_count || 0),
-        "IPv6 " + (network.assigned_ipv6 || "--"),
-      ].join(" · "),
+      detail: i18n.tr(localeFor(locale), "network.row", {
+        status: label("status.network." + network.status, locale),
+        roles: (network.roles || []).map((role) => label("choice.role." + role, locale)).join(label("common.list_separator", locale)) || label("choice.role.member", locale),
+        peers: i18n.formatInteger(locale, network.peer_count || 0),
+        address: i18n.formatAddress(network.assigned_ipv6 || label("common.not_available", locale)),
+      }),
     }));
   }
 
-  function peerRows(snapshot) {
+  function peerRows(snapshot, locale) {
+    const language = localeFor(locale);
     return snapshot.peers.map((peer) => ({
       title: peer.peer_id || peer.virtual_ipv6,
-      detail: [
-        peer.network_name,
-        peer.virtual_ipv6,
-        peer.online ? "online" : "offline",
-        peer.p2p_active ? "P2P" : "relay",
-        peer.rtt_us === null || peer.rtt_us === undefined ? "--" : peer.rtt_us + "us",
-      ].join(" · "),
+      detail: i18n.tr(language, "peer.row", {
+        network: peer.network_name,
+        address: i18n.formatAddress(peer.virtual_ipv6),
+        online: label(peer.online ? "status.peer.online" : "status.peer.offline", language),
+        transport: label(peer.p2p_active ? "peer.transport.p2p" : "peer.transport.relay", language),
+        rtt: peer.rtt_us === null || peer.rtt_us === undefined
+          ? label("common.not_available", language)
+          : i18n.tr(language, "peer.rtt", { value: i18n.formatDecimal(language, Number(peer.rtt_us) / 1000, 2) }),
+      }),
     }));
   }
 
-  function configRows(snapshot) {
+  function configRows(snapshot, locale) {
+    const language = localeFor(locale);
     return ((snapshot.configuration && snapshot.configuration.networks) || []).map((network) => ({
       title: network.network_name,
-      detail: [
-        network.coordinator_url,
-        "routing=" + network.routing_mode,
-        "exit=" + (network.exit_node || "--"),
-        "ExitNode=" + (network.exit_node_enabled ? "enabled" : "disabled"),
-      ].join(" · "),
+      detail: i18n.tr(language, "routing.row", {
+        coordinator: i18n.formatAddress(network.coordinator_url),
+        routing: label("choice.routing." + network.routing_mode, language),
+        exit: network.exit_node ? i18n.formatAddress(network.exit_node) : label("common.not_available", language),
+        enabled: label(network.exit_node_enabled ? "common.enabled" : "common.disabled", language),
+      }),
     }));
   }
 
-  function serviceRows(snapshot) {
+  function serviceRows(snapshot, locale) {
+    const language = localeFor(locale);
     return (snapshot.embedded_services || []).map((service) => ({
       title: service.network_name,
-      detail: [
-        service.status,
-        "signal=" + (service.signaling_addr || "--"),
-        "relay=" + (service.relay_addr || "--"),
-      ].join(" · "),
+      detail: i18n.tr(language, "relay.row", {
+        status: label("status.service." + service.status, language),
+        signal: service.signaling_addr ? i18n.formatAddress(service.signaling_addr) : label("common.not_available", language),
+        relay: service.relay_addr ? i18n.formatAddress(service.relay_addr) : label("common.not_available", language),
+      }),
     }));
   }
 
@@ -1936,82 +1876,146 @@
     }, { rx: 0, tx: 0, errors: 0 });
   }
 
-  function projectPage(page, snapshot, selectedNetwork) {
+  function projectPage(page, snapshot, selectedNetwork, locale) {
     assertContract(REQUIRED_PAGES.includes(page.id), "unknown page: " + page.id);
+    const language = localeFor(locale);
     const selected = defaultNetworkName(snapshot, selectedNetwork);
     let rows = [];
     let empty = "";
     switch (page.id) {
       case "overview": {
-        const primary = primaryStatusFor(snapshot);
+        const primary = primaryStatusFor(snapshot, language);
         rows = [
-          { title: "运行状态", detail: primary.label + " · " + primary.detail },
-          { title: "网络", detail: snapshot.networks.length + " 个 · Peers " + snapshot.peers.length },
-          { title: "最近错误", detail: snapshot.last_error ? snapshot.last_error.code + " · " + snapshot.last_error.message : "无" },
+          {
+            title: label("overview.row.runtime_status", language),
+            detail: i18n.tr(language, "overview.runtime_status", {
+              status: primary.label,
+              detail: primary.detail,
+            }),
+          },
+          {
+            title: label("overview.row.networks", language),
+            detail: i18n.tr(language, "overview.network_counts", {
+              networks: i18n.formatInteger(language, snapshot.networks.length),
+              peers: i18n.formatInteger(language, snapshot.peers.length),
+            }),
+          },
+          {
+            title: label("overview.row.last_error", language),
+            detail: snapshot.last_error
+              ? problemText(snapshot.last_error, language)
+              : label("overview.no_last_error", language),
+          },
         ];
         break;
       }
       case "networks":
-        rows = networkRows(snapshot);
-        empty = "当前没有配置或运行的网络。";
+        rows = networkRows(snapshot, language);
+        empty = label("empty.networks", language);
         break;
       case "peers":
-        rows = peerRows(snapshot);
-        empty = "当前没有对等节点。";
+        rows = peerRows(snapshot, language);
+        empty = label("empty.peers", language);
         break;
       case "topology":
         rows = snapshot.networks.map((network) => ({
           title: network.name,
-          detail: "本节点 ↔ " + snapshot.peers.filter((peer) => peer.network_name === network.name).length + " 个 Peer",
+          detail: i18n.tr(language, "topology.row", {
+            peers: i18n.formatInteger(
+              language,
+              snapshot.peers.filter((peer) => peer.network_name === network.name).length,
+            ),
+          }),
         }));
-        empty = "没有可绘制的拓扑节点。";
+        empty = label("empty.topology", language);
         break;
       case "traffic": {
         const totals = trafficTotals(snapshot);
         rows = [
-          { title: "TUN 接收", detail: totals.rx + " bytes" },
-          { title: "TUN 发送", detail: totals.tx + " bytes" },
-          { title: "错误计数", detail: String(totals.errors) },
+          { title: label("traffic.row.tun_rx", language), detail: i18n.formatBytes(language, totals.rx) },
+          { title: label("traffic.row.tun_tx", language), detail: i18n.formatBytes(language, totals.tx) },
+          { title: label("traffic.row.errors", language), detail: i18n.formatInteger(language, totals.errors) },
         ];
         break;
       }
       case "routing":
-        rows = configRows(snapshot);
-        empty = "没有可用路由配置。";
+        rows = configRows(snapshot, language);
+        empty = label("empty.routing", language);
         break;
       case "exit_node": {
         const capabilities = snapshot.exit_node_capabilities || {};
+        const reasons = (capabilities.unsupported_reasons || []).map((reason) => (
+          EXIT_NODE_UNSUPPORTED_REASONS.includes(reason)
+            ? label("exit_node.unsupported_reason." + reason, language)
+            : reason
+        ));
+        const role = snapshot.networks.find((network) => network.name === selected)?.roles || [];
         rows = [
-          { title: "平台能力", detail: capabilities.supported ? "supported" : "unsupported · " + (capabilities.unsupported_reasons || []).join(", ") },
-          { title: "转发/NAT/清理", detail: "ipv4=" + !!capabilities.ipv4_forwarding + " · ipv6=" + !!capabilities.ipv6_forwarding + " · nat=" + !!capabilities.nat + " · cleanup=" + !!capabilities.cleanup },
-          { title: "当前网络角色", detail: (snapshot.networks.find((network) => network.name === selected)?.roles || []).join(", ") || "member" },
+          {
+            title: label("exit_node.row.platform", language),
+            detail: capabilities.supported
+              ? label("exit_node.platform_supported", language)
+              : i18n.tr(language, "exit_node.platform_unsupported", {
+                  reasons: reasons.join(label("common.list_separator", language)),
+                }),
+          },
+          {
+            title: label("exit_node.row.capabilities", language),
+            detail: i18n.tr(language, "exit_node.capabilities", {
+              ipv4: label(capabilities.ipv4_forwarding ? "common.enabled" : "common.disabled", language),
+              ipv6: label(capabilities.ipv6_forwarding ? "common.enabled" : "common.disabled", language),
+              nat: label(capabilities.nat ? "common.enabled" : "common.disabled", language),
+              cleanup: label(capabilities.cleanup ? "common.enabled" : "common.disabled", language),
+            }),
+          },
+          {
+            title: label("exit_node.row.role", language),
+            detail: role.length
+              ? role.map((value) => label("choice.role." + value, language)).join(label("common.list_separator", language))
+              : label("choice.role.member", language),
+          },
         ];
         break;
       }
       case "relay":
-        rows = serviceRows(snapshot);
-        empty = "当前没有内嵌中继服务。";
+        rows = serviceRows(snapshot, language);
+        empty = label("empty.relay", language);
         break;
       case "logs":
         rows = snapshot.logs.map((entry) => ({
           title: entry.level + " · " + entry.target,
           detail: entry.message,
         }));
-        empty = "当前没有日志。";
+        empty = label("empty.logs", language);
         break;
       case "identity":
         rows = snapshot.identity ? [
-          { title: "Node ID", detail: snapshot.identity.node_id },
-          { title: "显示名称", detail: snapshot.identity.display_name || "--" },
-          { title: "公钥指纹", detail: snapshot.identity.public_key_fingerprint },
+          { title: label("identity.row.node_id", language), detail: snapshot.identity.node_id },
+          { title: label("identity.row.display_name", language), detail: snapshot.identity.display_name || label("common.not_available", language) },
+          { title: label("identity.row.fingerprint", language), detail: snapshot.identity.public_key_fingerprint || label("common.not_available", language) },
         ] : [];
-        empty = "节点身份尚未初始化。";
+        empty = label("empty.identity", language);
         break;
       case "settings":
         rows = [
-          { title: "访问模型", detail: snapshot.permissions.access_model || "unknown" },
-          { title: "权限", detail: snapshot.permissions.permissions.join(", ") || "无" },
-          { title: "UI 模式", detail: snapshot.ui_mode ? snapshot.ui_mode.effective : "unknown" },
+          {
+            title: label("settings.row.access_model", language),
+            detail: snapshot.permissions.access_model
+              ? label("choice.access_model." + snapshot.permissions.access_model, language)
+              : label("common.unknown", language),
+          },
+          {
+            title: label("settings.row.permissions", language),
+            detail: snapshot.permissions.permissions.length
+              ? snapshot.permissions.permissions.map((permission) => label("choice.permission." + permission, language)).join(label("common.list_separator", language))
+              : label("common.none", language),
+          },
+          {
+            title: label("settings.row.ui_mode", language),
+            detail: snapshot.ui_mode
+              ? label("choice.ui_mode." + snapshot.ui_mode.effective, language)
+              : label("common.unknown", language),
+          },
         ];
         break;
       default:
@@ -2019,25 +2023,25 @@
     }
     return {
       page_id: page.id,
-      title: label(page.title_key),
+      title: label(page.title_key, language),
       selected_network: selected || null,
       rows,
       empty,
       actions: page.actions.map((action) => ({
         id: action.id,
-        label: label(action.label_key),
+        label: label(action.label_key, language),
         permission: action.permission,
         availability: action.availability,
         backend_status: action.backend_status,
-        block_reason: executionBlockReason(action, snapshot, selected || null),
+        block_reason: blockReasonText(executionBlockReason(action, snapshot, selected || null), language),
       })),
     };
   }
 
 
-  function base64urlToBuffer(value) {
+  function base64urlToBuffer(value, locale) {
     if (typeof value !== "string" || value.length === 0) {
-      throw new Error("WebAuthn 数据缺少有效的 base64url 内容");
+      throw new Error(label("error.webauthn_invalid_base64url", locale));
     }
     const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
     const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
@@ -2058,41 +2062,41 @@
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
   }
 
-  function decodeRequestOptions(challenge) {
+  function decodeRequestOptions(challenge, locale) {
     const options = challenge && challenge.publicKey;
     if (!options || typeof options !== "object") {
-      throw new Error("服务端返回的 Passkey 登录参数无效");
+      throw new Error(label("error.webauthn_invalid_login_options", locale));
     }
     const decoded = {
       ...options,
-      challenge: base64urlToBuffer(options.challenge),
+      challenge: base64urlToBuffer(options.challenge, locale),
     };
     if (Array.isArray(options.allowCredentials)) {
       decoded.allowCredentials = options.allowCredentials.map((credential) => ({
         ...credential,
-        id: base64urlToBuffer(credential.id),
+        id: base64urlToBuffer(credential.id, locale),
       }));
     }
     return { publicKey: decoded };
   }
 
-  function decodeCreationOptions(challenge) {
+  function decodeCreationOptions(challenge, locale) {
     const options = challenge && challenge.publicKey;
     if (!options || typeof options !== "object") {
-      throw new Error("服务端返回的 Passkey 注册参数无效");
+      throw new Error(label("error.webauthn_invalid_creation_options", locale));
     }
     const decoded = {
       ...options,
-      challenge: base64urlToBuffer(options.challenge),
+      challenge: base64urlToBuffer(options.challenge, locale),
       user: {
         ...options.user,
-        id: base64urlToBuffer(options.user && options.user.id),
+        id: base64urlToBuffer(options.user && options.user.id, locale),
       },
     };
     if (Array.isArray(options.excludeCredentials)) {
       decoded.excludeCredentials = options.excludeCredentials.map((credential) => ({
         ...credential,
-        id: base64urlToBuffer(credential.id),
+        id: base64urlToBuffer(credential.id, locale),
       }));
     }
     return { publicKey: decoded };
@@ -2142,7 +2146,6 @@
     MANIFEST_SCHEMA_VERSION,
     REQUIRED_PAGES,
     ACTION_CONTRACT,
-    ERROR_TEXT,
     label,
     validateManifestResponse,
     validateSnapshotResponse,

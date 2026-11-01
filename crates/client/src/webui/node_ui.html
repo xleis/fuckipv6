@@ -109,6 +109,7 @@
     <div class="modal-actions"><button id="reauth-cancel" class="modal-close" type="button">取消</button><button id="reauth-confirm" class="submit" type="button">使用 Passkey 重认证</button></div>
   </section>
 </div>
+<script src="/assets/i18n.js"></script>
 <script src="/assets/owner_auth_copy.js"></script>
 <script src="/assets/node_ui.js"></script>
 <script src="/assets/ui-components.js"></script>
@@ -134,6 +135,7 @@
     manifest: null,
     snapshot: null,
     selectedNetwork: "",
+    locale: window.FuckIPV6I18n.normalizeLocale(document.documentElement.lang),
     pageId: "overview",
     requestId: Date.now(),
     generation: 0,
@@ -368,7 +370,7 @@
   async function readOwnerSession() {
     const result = await requestJson("/api/v1/auth/session");
     if (!result.response.ok) {
-      throw requestError(ui.httpErrorText(result.payload, "所有者会话状态读取失败"), result.payload);
+      throw requestError(ui.httpErrorText(result.payload, "所有者会话状态读取失败", state.locale), result.payload);
     }
     state.session = result.payload && result.payload.authenticated ? result.payload : null;
     state.expectedOrigin = result.payload && result.payload.expected_origin ? result.payload.expected_origin : state.expectedOrigin;
@@ -390,7 +392,7 @@
       }
       const result = await requestJson("/api/v1/auth/passkeys");
       if (!result.response.ok || !result.payload || !Array.isArray(result.payload.passkeys)) {
-        throw requestError(ui.httpErrorText(result.payload, "Passkey 列表读取失败"), result.payload);
+        throw requestError(ui.httpErrorText(result.payload, "Passkey 列表读取失败", state.locale), result.payload);
       }
       state.passkeys = result.payload.passkeys;
       renderSecuritySession();
@@ -445,16 +447,16 @@
     try {
       const start = await requestJson("/api/v1/auth/passkey/reauth/start", { method: "POST" });
       if (!start.response.ok) {
-        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 重认证"), start.payload);
+        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 重认证", state.locale), start.payload);
       }
-      const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload));
+      const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload, state.locale));
       if (!credential) throw new Error("Passkey 重认证已取消");
       const finish = await requestJson("/api/v1/auth/passkey/reauth/finish", {
         method: "POST",
         body: JSON.stringify({ credential: ui.encodeAuthenticationCredential(credential) }),
       });
       if (!finish.response.ok) {
-        throw requestError(ui.httpErrorText(finish.payload, "Passkey 重认证失败"), finish.payload);
+        throw requestError(ui.httpErrorText(finish.payload, "Passkey 重认证失败", state.locale), finish.payload);
       }
       const session = await readOwnerSession();
       if (!session || session.authenticated !== true) {
@@ -514,10 +516,10 @@
         body: JSON.stringify({ label }),
       });
       if (!start.response.ok) {
-        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 注册"), start.payload);
+        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 注册", state.locale), start.payload);
       }
       button.textContent = "等待 Passkey 授权…";
-      const credential = await navigator.credentials.create(ui.decodeCreationOptions(start.payload));
+      const credential = await navigator.credentials.create(ui.decodeCreationOptions(start.payload, state.locale));
       if (!credential) throw new Error("Passkey 注册已取消");
       button.textContent = "正在完成注册…";
       const finish = await ownerProtectedRequest("/api/v1/auth/passkeys/registration/finish", {
@@ -525,7 +527,7 @@
         body: JSON.stringify({ credential: ui.encodeRegistrationCredential(credential) }),
       });
       if (!finish.response.ok || !finish.payload || !finish.payload.passkey) {
-        throw requestError(ui.httpErrorText(finish.payload, "Passkey 注册失败"), finish.payload);
+        throw requestError(ui.httpErrorText(finish.payload, "Passkey 注册失败", state.locale), finish.payload);
       }
       $("passkey-label").value = "";
       if (await refreshOwnerSecurity()) {
@@ -551,7 +553,7 @@
         method: "DELETE",
       });
       if (!result.response.ok) {
-        throw requestError(ui.httpErrorText(result.payload, "Passkey 撤销失败"), result.payload);
+        throw requestError(ui.httpErrorText(result.payload, "Passkey 撤销失败", state.locale), result.payload);
       }
       if (result.payload && result.payload.current_session_revoked) {
         expireSession("当前 Passkey 已撤销，所有者会话已退出。");
@@ -589,10 +591,10 @@
       ]);
       if (!isCurrent(generation)) return;
       if (!manifestResult.response.ok) {
-        throw requestError(ui.httpErrorText(manifestResult.payload, "manifest 加载失败"), manifestResult.payload);
+        throw requestError(ui.httpErrorText(manifestResult.payload, "manifest 加载失败", state.locale), manifestResult.payload);
       }
       if (!snapshotResult.response.ok) {
-        throw requestError(ui.httpErrorText(snapshotResult.payload, "snapshot 加载失败"), snapshotResult.payload);
+        throw requestError(ui.httpErrorText(snapshotResult.payload, "snapshot 加载失败", state.locale), snapshotResult.payload);
       }
       const manifest = ui.validateManifestResponse(manifestResult.payload);
       const snapshot = ui.validateSnapshotResponse(snapshotResult.payload);
@@ -625,7 +627,7 @@
       const result = await requestJson("/api/node/snapshot?schema_version=1", { cache: "no-store" });
       if (!isCurrent(generation)) return;
       if (!result.response.ok) {
-        throw requestError(ui.httpErrorText(result.payload, "快照刷新失败"), result.payload);
+        throw requestError(ui.httpErrorText(result.payload, "快照刷新失败", state.locale), result.payload);
       }
       const snapshot = ui.validateSnapshotResponse(result.payload);
       if (!isCurrent(generation)) return;
@@ -663,7 +665,7 @@
       button.dataset.page = page.id;
       button.dataset.primaryNav = ui.primaryNavigation.find((item) => item.pageId === page.id)?.id || "";
       if (selected) button.setAttribute("aria-current", "page");
-      button.textContent = ui.label(page.nav_label_key);
+      button.textContent = ui.label(page.nav_label_key, state.locale);
       button.addEventListener("click", () => navigateTo(page.id));
       return button;
     });
@@ -678,13 +680,13 @@
       button.dataset.primaryNav = item.id;
       button.dataset.page = item.pageId;
       button.disabled = !available;
-      button.setAttribute("aria-label", ui.label(item.labelKey));
+      button.setAttribute("aria-label", ui.label(item.labelKey, state.locale));
       const icon = document.createElement("span");
       icon.className = "ui-bottom-nav-icon";
       icon.setAttribute("aria-hidden", "true");
       icon.textContent = icons[item.id] || "•";
       const label = document.createElement("span");
-      label.textContent = ui.label(item.labelKey);
+      label.textContent = ui.label(item.labelKey, state.locale);
       button.append(icon, label);
       button.addEventListener("click", () => navigateTo(item.pageId));
       return button;
@@ -707,7 +709,7 @@
     }
     if (!page) return;
     $("revision").textContent = "revision " + state.snapshot.revision;
-    const primary = ui.primaryStatusFor(state.snapshot);
+    const primary = ui.primaryStatusFor(state.snapshot, state.locale);
     const primaryStatus = $("primary-status");
     primaryStatus.textContent = primary.label;
     primaryStatus.className = "primary " + primary.id;
@@ -718,7 +720,7 @@
       ? state.snapshot.networks.map((network) => `<option value="${escapeHtml(network.name)}" ${network.name === state.selectedNetwork ? "selected" : ""}>${escapeHtml(network.name)} · ${escapeHtml(network.status)}</option>`).join("")
       : '<option value="">无网络</option>';
     picker.onchange = () => { state.selectedNetwork = picker.value; render(); };
-    const projection = ui.projectPage(page, state.snapshot, state.selectedNetwork || null);
+    const projection = ui.projectPage(page, state.snapshot, state.selectedNetwork || null, state.locale);
     $("page-title").textContent = projection.title;
     $("page-subtitle").textContent = page.id + " · " + page.actions.length + " actions · manifest schema " + state.manifest.schema_version;
     $("data-count").textContent = String(projection.rows.length);
@@ -740,7 +742,7 @@
     const value = ui.defaultFieldValue(action, field, state.snapshot, state.selectedNetwork);
     const id = `${action.id}-${field.id}`;
     if (field.input === "boolean") {
-      return `<div class="field"><label class="check"><input id="${id}" name="${field.id}" type="checkbox" ${value ? "checked" : ""}>${escapeHtml(ui.label(field.label_key))}</label></div>`;
+      return `<div class="field"><label class="check"><input id="${id}" name="${field.id}" type="checkbox" ${value ? "checked" : ""}>${escapeHtml(ui.label(field.label_key, state.locale))}</label></div>`;
     }
     let control = `<input id="${id}" name="${field.id}" value="${escapeHtml(value)}" ${field.required ? "required" : ""}>`;
     if (field.input === "role") {
@@ -750,12 +752,12 @@
     } else if (field.input === "port" || field.input === "timeout_ms") {
       control = `<input id="${id}" name="${field.id}" type="number" min="1" value="${escapeHtml(value)}" ${field.required ? "required" : ""}>`;
     }
-    return `<div class="field"><label for="${id}">${escapeHtml(ui.label(field.label_key))}${field.required ? " *" : ""}</label>${control}</div>`;
+    return `<div class="field"><label for="${id}">${escapeHtml(ui.label(field.label_key, state.locale))}${field.required ? " *" : ""}</label>${control}</div>`;
   }
   function renderAction(action) {
     const blocked = ui.executionBlockReason(action, state.snapshot, state.selectedNetwork || null);
     const statusClass = action.backend_status === "implemented" ? "implemented" : "unavailable";
-    return `<article class="card"><form data-action="${escapeHtml(action.id)}"><div class="action-head"><div><div class="action-title">${escapeHtml(ui.label(action.label_key))}</div><div class="muted">${escapeHtml(action.id)} · ${escapeHtml(action.permission)} · ${escapeHtml(action.availability)}</div></div><span class="status ${statusClass}">${escapeHtml(action.backend_status)}</span></div><div class="fields">${action.fields.map((field) => fieldControl(action, field)).join("")}</div>${blocked ? `<div class="muted">${escapeHtml(ui.blockReasonText(blocked))}</div>` : ""}<button class="submit" type="submit" ${blocked ? "disabled" : ""}>执行</button></form></article>`;
+    return `<article class="card"><form data-action="${escapeHtml(action.id)}"><div class="action-head"><div><div class="action-title">${escapeHtml(ui.label(action.label_key, state.locale))}</div><div class="muted">${escapeHtml(action.id)} · ${escapeHtml(action.permission)} · ${escapeHtml(action.availability)}</div></div><span class="status ${statusClass}">${escapeHtml(action.backend_status)}</span></div><div class="fields">${action.fields.map((field) => fieldControl(action, field)).join("")}</div>${blocked ? `<div class="muted">${escapeHtml(ui.blockReasonText(blocked, state.locale))}</div>` : ""}<button class="submit" type="submit" ${blocked ? "disabled" : ""}>执行</button></form></article>`;
   }
   async function submitAction(event) {
     event.preventDefault();
@@ -768,17 +770,17 @@
       const element = form.elements.namedItem(field.id);
       values[field.id] = field.input === "boolean" ? !!element.checked : element.value;
     }
-    const errors = ui.validateActionValues(action, values);
+    const errors = ui.validateActionValues(action, values, state.locale);
     if (errors.length) return showAlert(errors.join("\n"));
     if (action.confirmation) {
-      const text = ui.label(action.confirmation.title_key) + "\n\n" + ui.label(action.confirmation.consequence_key);
+      const text = ui.label(action.confirmation.title_key, state.locale) + "\n\n" + ui.label(action.confirmation.consequence_key, state.locale);
       if (!window.confirm(text)) return;
     }
     showAlert("");
     const generation = state.generation;
     try {
       const requestId = ++state.requestId;
-      const envelope = ui.commandEnvelope(requestId, action, values);
+      const envelope = ui.commandEnvelope(requestId, action, values, state.locale);
       const result = await requestJson("/api/node/commands", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -789,18 +791,18 @@
         const outcome = ui.validateCommandResponse(result.payload, requestId);
         if (!isCurrent(generation)) return;
         if (outcome.status === "rejected") {
-          showAlert(ui.outcomeErrorText(outcome));
+          showAlert(ui.outcomeErrorText(outcome, state.locale));
           return;
         }
         if (outcome.status === "snapshot") {
           state.snapshot = ui.validateSnapshotResponse({ schema_version: 1, snapshot: outcome.data });
           state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
         }
-        showToast(ui.outcomeSummary(outcome));
+        showToast(ui.outcomeSummary(outcome, state.locale));
         await refreshSnapshot();
         return;
       }
-      throw requestError(ui.httpErrorText(result.payload, "命令失败 HTTP " + result.response.status), result.payload);
+      throw requestError(ui.httpErrorText(result.payload, "命令失败 HTTP " + result.response.status, state.locale), result.payload);
     } catch (error) {
       if (error instanceof AuthenticationError) {
         if (generation === state.generation) expireSession();
@@ -841,9 +843,9 @@
           refreshSnapshot();
         } else if (payload.type === "error") {
           if (payload.code === "contract_violation" || payload.code === "schema_version_mismatch") {
-            throw new Error("node-ui-contract: " + ui.httpErrorText(payload, "事件流契约错误"));
+            throw new Error("node-ui-contract: " + ui.httpErrorText(payload, "事件流契约错误", state.locale));
           }
-          showAlert(ui.httpErrorText(payload, "事件流错误"));
+          showAlert(ui.httpErrorText(payload, "事件流错误", state.locale));
         } else {
           throw new Error("node-ui-contract: unknown event type " + payload.type);
         }
@@ -900,16 +902,16 @@
     try {
       const start = await requestJson("/api/v1/auth/passkey/authentication/start", { method: "POST" });
       if (!start.response.ok) {
-        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 登录"), start.payload);
+        throw requestError(ui.httpErrorText(start.payload, "无法开始 Passkey 登录", state.locale), start.payload);
       }
-      const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload));
+      const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload, state.locale));
       if (!credential) throw new Error("Passkey 验证已取消");
       const finish = await requestJson("/api/v1/auth/passkey/authentication/finish", {
         method: "POST",
         body: JSON.stringify({ credential: ui.encodeAuthenticationCredential(credential) }),
       });
       if (!finish.response.ok) {
-        throw requestError(ui.httpErrorText(finish.payload, "Passkey 登录失败"), finish.payload);
+        throw requestError(ui.httpErrorText(finish.payload, "Passkey 登录失败", state.locale), finish.payload);
       }
       const session = await readOwnerSession();
       if (!session || session.authenticated !== true) {
@@ -937,7 +939,7 @@
     try {
       const result = await requestJson("/api/v1/auth/passkey/logout", { method: "POST" });
       if (!result.response.ok && result.response.status !== 401) {
-        throw new Error(ui.httpErrorText(result.payload, "退出登录失败"));
+        throw new Error(ui.httpErrorText(result.payload, "退出登录失败", state.locale));
       }
       expireSession("已退出所有者会话。");
     } catch (error) {

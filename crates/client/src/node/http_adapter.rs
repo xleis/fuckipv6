@@ -15,7 +15,7 @@ use axum::{
         ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Extension, Path, Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Json, Response,
@@ -32,7 +32,7 @@ use fuckipv6_common::domain::{
 use futures::SinkExt as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
@@ -57,6 +57,11 @@ pub const NODE_HTTP_V1_API_PREFIX: &str = "/api/v1";
 /// by the HTTP adapter before JSON deserialization so oversized chunked or
 /// content-length requests cannot consume unbounded memory.
 pub const NODE_HTTP_MAX_COMMAND_BODY_BYTES: usize = 256 * 1024;
+
+/// Maximum number of command requests an adapter processes concurrently.
+/// Requests above this bound fail fast instead of accumulating in an
+/// unbounded wait queue.
+pub const NODE_HTTP_MAX_CONCURRENT_COMMANDS: usize = 32;
 
 /// Metadata carried by every v1 success and error response.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -254,6 +259,7 @@ pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
     InvalidRequest,
     PayloadTooLarge,
+    RateLimited,
     NotFound,
     AuthenticationRequired,
     PermissionDenied,
@@ -302,9 +308,10 @@ impl NodeHttpErrorCode {
             Self::AuthenticationRequired => NodeErrorCategory::Authentication,
             Self::PermissionDenied => NodeErrorCategory::Authorization,
             Self::CapabilityUnavailable => NodeErrorCategory::Capability,
-            Self::OperationTimedOut | Self::DependencyUnavailable | Self::BackendUnavailable => {
-                NodeErrorCategory::Dependency
-            }
+            Self::OperationTimedOut
+            | Self::DependencyUnavailable
+            | Self::BackendUnavailable
+            | Self::RateLimited => NodeErrorCategory::Dependency,
             Self::ContractViolation | Self::Internal => NodeErrorCategory::Internal,
         }
     }
@@ -314,6 +321,7 @@ impl NodeHttpErrorCode {
             Self::SchemaVersionMismatch => "error.schema_version_mismatch",
             Self::InvalidRequest => "error.invalid_request",
             Self::PayloadTooLarge => "error.payload_too_large",
+            Self::RateLimited => "error.rate_limited",
             Self::NotFound => "error.not_found",
             Self::AuthenticationRequired => "error.authentication_required",
             Self::PermissionDenied => "error.permission_denied",
@@ -336,6 +344,7 @@ impl NodeHttpErrorCode {
             Self::SchemaVersionMismatch => "请求的节点 API 版本不受支持",
             Self::InvalidRequest => "请求无效",
             Self::PayloadTooLarge => "请求体超过允许的大小",
+            Self::RateLimited => "请求过于频繁，请稍后重试",
             Self::NotFound => "请求的对象不存在",
             Self::AuthenticationRequired => "需要重新进行身份认证",
             Self::PermissionDenied => "无权执行此操作",
@@ -365,7 +374,8 @@ impl NodeHttpErrorCode {
             | Self::OperationTimedOut
             | Self::DependencyUnavailable
             | Self::BackendRejected
-            | Self::BackendUnavailable => Some(("retry", "recovery.retry")),
+            | Self::BackendUnavailable
+            | Self::RateLimited => Some(("retry", "recovery.retry")),
             Self::CapabilityUnavailable => {
                 Some(("change_request", "recovery.use_supported_capability"))
             }
@@ -382,6 +392,7 @@ impl NodeHttpErrorCode {
                 | Self::DependencyUnavailable
                 | Self::BackendUnavailable
                 | Self::BackendRejected
+                | Self::RateLimited
         )
     }
 }
@@ -652,6 +663,8 @@ pub struct NodeHttpAdapter {
     events: NodeEventBus,
     next_request_id: Arc<AtomicU64>,
     operations: Arc<Mutex<OperationRegistry>>,
+    command_slots: Arc<Semaphore>,
+    command_concurrency_limit: usize,
 }
 
 impl NodeHttpAdapter {
@@ -662,7 +675,20 @@ impl NodeHttpAdapter {
             events,
             next_request_id: Arc::new(AtomicU64::new(1)),
             operations: Arc::new(Mutex::new(OperationRegistry::default())),
+            command_slots: Arc::new(Semaphore::new(NODE_HTTP_MAX_CONCURRENT_COMMANDS)),
+            command_concurrency_limit: NODE_HTTP_MAX_CONCURRENT_COMMANDS,
         }
+    }
+
+    #[cfg(test)]
+    fn with_command_concurrency_limit(mut self, limit: usize) -> Self {
+        self.command_concurrency_limit = limit.max(1);
+        self.command_slots = Arc::new(Semaphore::new(self.command_concurrency_limit));
+        self
+    }
+
+    fn try_acquire_command_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.command_slots.clone().try_acquire_owned().ok()
     }
 
     fn operation(&self, id: &str) -> Option<NodeOperationSnapshot> {
@@ -1368,6 +1394,13 @@ fn api_json_rejection_response(request_id: u64, error: JsonRejection) -> Respons
     }
 }
 
+fn with_retry_after(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
 fn validate_api_query(query: &NodeApiQuery, request_id: u64) -> Result<(), Box<HttpApiError>> {
     let version = query.schema_version.unwrap_or(NODE_HTTP_SCHEMA_VERSION);
     if version != NODE_HTTP_SCHEMA_VERSION {
@@ -1404,6 +1437,16 @@ async fn handle_v1_command(
     if request_id == 0 {
         return HttpApiError::invalid_request(request_id, "request_id 必须大于 0").into_response();
     }
+
+    let _command_permit = match adapter.try_acquire_command_permit() {
+        Some(permit) => permit,
+        None => {
+            return with_retry_after(
+                HttpApiError::rate_limited(request_id, adapter.command_concurrency_limit)
+                    .into_response(),
+            );
+        }
+    };
 
     if payload.request.command.kind().is_write() {
         let Some(idempotency_key) = payload.idempotency_key else {
@@ -1805,6 +1848,15 @@ async fn handle_command(
         return error.into_response();
     }
 
+    let _command_permit = match adapter.try_acquire_command_permit() {
+        Some(permit) => permit,
+        None => {
+            return with_retry_after(
+                HttpAdapterError::rate_limited(adapter.command_concurrency_limit).into_response(),
+            );
+        }
+    };
+
     match adapter.execute(context, payload.request).await {
         Ok(result) => {
             let result = result_for_control_client(result);
@@ -2082,6 +2134,19 @@ impl HttpAdapterError {
         }
     }
 
+    fn rate_limited(concurrency_limit: usize) -> Self {
+        let mut response = Self::from_code(
+            StatusCode::TOO_MANY_REQUESTS,
+            NodeHttpErrorCode::RateLimited,
+            "node command concurrency limit reached",
+        );
+        response.body.error = response
+            .body
+            .error
+            .with_param("concurrency_limit", concurrency_limit.to_string());
+        response
+    }
+
     fn from_json_rejection(error: JsonRejection) -> Self {
         if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
             let mut response = Self::from_code(
@@ -2148,6 +2213,19 @@ impl HttpApiError {
             StatusCode::BAD_REQUEST,
             NodeHttpErrorCode::InvalidRequest,
         )
+    }
+
+    fn rate_limited(request_id: u64, concurrency_limit: usize) -> Self {
+        let mut error = Self::new(
+            request_id,
+            StatusCode::TOO_MANY_REQUESTS,
+            NodeHttpErrorCode::RateLimited,
+        );
+        error.body.error = error
+            .body
+            .error
+            .with_param("concurrency_limit", concurrency_limit.to_string());
+        error
     }
 
     fn payload_too_large(request_id: u64) -> Self {
@@ -2678,6 +2756,127 @@ mod tests {
             );
             assert_eq!(body["retryable"], false, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn command_endpoints_fail_fast_when_concurrency_limit_is_exhausted() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let adapter = adapter.with_command_concurrency_limit(2);
+        let permits = (0..2)
+            .map(|_| {
+                adapter
+                    .command_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("hold concurrency permit")
+            })
+            .collect::<Vec<_>>();
+        let requests = [
+            (
+                "/api/node/commands",
+                NodeCommandHttpRequest {
+                    schema_version: NODE_HTTP_SCHEMA_VERSION,
+                    request: NodeCommandRequest::new(71, NodeCommand::StartNode),
+                    idempotency_key: None,
+                },
+            ),
+            (
+                "/api/v1/commands",
+                NodeCommandHttpRequest {
+                    schema_version: NODE_HTTP_SCHEMA_VERSION,
+                    request: NodeCommandRequest::new(72, NodeCommand::StartNode),
+                    idempotency_key: Some(IdempotencyKey::from_public_key(b"concurrency-limit-v1")),
+                },
+            ),
+        ];
+
+        for (path, payload) in requests {
+            let body = serde_json::to_vec(&payload).expect("serialize command request");
+            let response = post_raw_command(adapter.clone(), path, body).await;
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                Some("1"),
+                "{path}"
+            );
+            let body: serde_json::Value = json_body(response).await;
+            assert_eq!(body["code"], "rate_limited", "{path}");
+            assert_eq!(body["message_key"], "error.rate_limited", "{path}");
+            assert_eq!(body["category"], "dependency", "{path}");
+            assert_eq!(body["retryable"], true, "{path}");
+            assert_eq!(body["params"]["concurrency_limit"], "2", "{path}");
+            assert_eq!(body["recovery"]["kind"], "retry", "{path}");
+        }
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "rate-limited commands must not reach the command bus"
+        );
+
+        drop(permits);
+        let response = post_v1_command(
+            adapter,
+            &NodeCommandHttpRequest {
+                schema_version: NODE_HTTP_SCHEMA_VERSION,
+                request: NodeCommandRequest::new(73, NodeCommand::GetSnapshot),
+                idempotency_key: None,
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn command_concurrency_permit_is_released_after_success_and_rejection() {
+        let (adapter, _state, _events, _writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let adapter = adapter.with_command_concurrency_limit(1);
+
+        let success = post_v1_command(
+            adapter.clone(),
+            &NodeCommandHttpRequest {
+                schema_version: NODE_HTTP_SCHEMA_VERSION,
+                request: NodeCommandRequest::new(74, NodeCommand::GetSnapshot),
+                idempotency_key: None,
+            },
+        )
+        .await;
+        assert_eq!(success.status(), StatusCode::OK);
+        assert_eq!(adapter.command_slots.available_permits(), 1);
+
+        let rejection = post_v1_command(
+            adapter.clone(),
+            &NodeCommandHttpRequest {
+                schema_version: NODE_HTTP_SCHEMA_VERSION,
+                request: NodeCommandRequest::new(75, NodeCommand::StartNode),
+                idempotency_key: None,
+            },
+        )
+        .await;
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(adapter.command_slots.available_permits(), 1);
+
+        let final_success = post_v1_command(
+            adapter.clone(),
+            &NodeCommandHttpRequest {
+                schema_version: NODE_HTTP_SCHEMA_VERSION,
+                request: NodeCommandRequest::new(76, NodeCommand::GetSnapshot),
+                idempotency_key: None,
+            },
+        )
+        .await;
+        assert_eq!(final_success.status(), StatusCode::OK);
+        assert_eq!(adapter.command_slots.available_permits(), 1);
     }
 
     #[tokio::test]

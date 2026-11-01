@@ -428,6 +428,7 @@ public final class NodeContractV1 {
         SCHEMA_VERSION_MISMATCH("schema_version_mismatch"),
         INVALID_REQUEST("invalid_request"),
         PAYLOAD_TOO_LARGE("payload_too_large"),
+        RATE_LIMITED("rate_limited"),
         NOT_FOUND("not_found"),
         AUTHENTICATION_REQUIRED("authentication_required"),
         PERMISSION_DENIED("permission_denied"),

@@ -1961,6 +1961,7 @@
         "schema_version_mismatch",
         "invalid_request",
         "payload_too_large",
+        "rate_limited",
         "not_found",
         "authentication_required",
         "permission_denied",

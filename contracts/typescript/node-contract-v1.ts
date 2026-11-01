@@ -439,7 +439,7 @@ export type NodeHttpContract = {
   "websocket_message": NodeWsMessage;
 };
 
-export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "payload_too_large" | "not_found" | "authentication_required" | "permission_denied" | "operation_conflict" | "operation_cancelled" | "operation_timed_out" | "resync_required" | "capability_unavailable" | "dependency_unavailable" | "backend_rejected" | "backend_unavailable" | "contract_violation" | "internal";
+export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "payload_too_large" | "rate_limited" | "not_found" | "authentication_required" | "permission_denied" | "operation_conflict" | "operation_cancelled" | "operation_timed_out" | "resync_required" | "capability_unavailable" | "dependency_unavailable" | "backend_rejected" | "backend_unavailable" | "contract_violation" | "internal";
 
 export type NodeHttpErrorResponse = {
   "category": NodeErrorCategory;

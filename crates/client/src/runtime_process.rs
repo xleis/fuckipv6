@@ -276,15 +276,30 @@ fn argument_value<'a>(
         .with_context(|| format!("内部进程参数 {name} 缺少路径"))
 }
 
-pub(crate) fn service_options_json(webui_port: u16) -> Result<String> {
+pub(crate) fn service_options_json(
+    webui_port: u16,
+    capabilities: crate::ui::UiCapabilities,
+) -> Result<String> {
+    let ui_mode = service_ui_resolution(capabilities)?;
     InternalOptions {
         routing_mode: None,
         exit_node: None,
         is_exit_node: None,
         webui_port,
-        ui_mode: None,
+        ui_mode: Some(ui_mode),
     }
     .encode()
+}
+
+fn service_ui_resolution(
+    capabilities: crate::ui::UiCapabilities,
+) -> Result<crate::ui::UiModeResolution> {
+    crate::ui::resolve_ui_mode(crate::ui::UiModeRequest::WebUi, capabilities)
+        .map_err(|error| anyhow::anyhow!("服务模式只能在无桌面环境的主机上运行: {error}"))
+}
+
+pub(crate) fn ensure_service_ui_available(capabilities: crate::ui::UiCapabilities) -> Result<()> {
+    service_ui_resolution(capabilities).map(|_| ())
 }
 
 fn run_runtime(run: impl FnOnce(&tokio::runtime::Runtime) -> Result<()>) -> Result<()> {
@@ -457,10 +472,14 @@ async fn run_control(options: InternalOptions) -> Result<()> {
 }
 
 async fn run_service(
-    options: InternalOptions,
+    mut options: InternalOptions,
     windows_shutdown: Option<watch::Receiver<bool>>,
 ) -> Result<()> {
     logging::init_default()?;
+    // A system service is the WebUI process. Re-check the live display
+    // environment instead of trusting options written at installation time or
+    // an older service.json that predates explicit UI modes.
+    options.ui_mode = Some(service_ui_resolution(crate::ui::UiCapabilities::detect())?);
     if options.webui_port == 0 {
         bail!("服务模式要求非零 WebUI 监听端口");
     }
@@ -975,6 +994,28 @@ mod tests {
         assert!(!node.gui);
         assert_eq!(node.webui_port, 0);
         assert_eq!(node.ui_mode, Some(ui_mode));
+    }
+
+    #[test]
+    fn service_mode_is_explicit_webui_and_rejects_desktops() {
+        let headless = crate::ui::UiCapabilities {
+            display: crate::ui::DisplayEnvironment::Headless,
+            gpui_available: false,
+        };
+        let encoded = service_options_json(8080, headless).expect("headless service options");
+        let decoded = InternalOptions::decode(&encoded).expect("decode service options");
+        let ui_mode = decoded.ui_mode.expect("service must persist its UI mode");
+        assert_eq!(ui_mode.requested, crate::ui::UiModeRequest::WebUi);
+        assert_eq!(ui_mode.effective, crate::ui::UiMode::WebUi);
+        assert_eq!(ui_mode.display, crate::ui::DisplayEnvironment::Headless);
+
+        let desktop = crate::ui::UiCapabilities {
+            display: crate::ui::DisplayEnvironment::LinuxWayland,
+            gpui_available: true,
+        };
+        let error =
+            service_options_json(8080, desktop).expect_err("desktop service must fail closed");
+        assert!(error.to_string().contains("无桌面环境"));
     }
 
     #[test]

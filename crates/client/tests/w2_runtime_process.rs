@@ -43,6 +43,25 @@ fn temp_dir(label: &str) -> Result<PathBuf> {
     Ok(directory)
 }
 
+fn headless_test_command(directory: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fuckipv6"));
+    command
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("XDG_SESSION_TYPE")
+        .env_remove("XDG_CURRENT_DESKTOP")
+        .env_remove("DESKTOP_SESSION")
+        .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
+        .env("XDG_CONFIG_HOME", directory.join("config"))
+        .env("HOME", directory.join("home"))
+        .env("RUST_LOG", "error")
+        .current_dir(directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
 fn read_pid(path: &Path) -> Result<u32> {
     std::fs::read_to_string(path)
         .with_context(|| format!("无法读取进程锁 {}", path.display()))?
@@ -83,41 +102,26 @@ async fn wait_for_exit(child: &mut ProcessGuard) -> Result<std::process::ExitSta
 }
 
 fn spawn_control(directory: &Path) -> Result<ProcessGuard> {
-    let runtime_dir = directory.join("runtime");
+    let mut command = headless_test_command(directory);
     Ok(ProcessGuard {
-        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+        child: command
             .arg("__control")
-            .env("FUCKIPV6_RUNTIME_DIR", runtime_dir)
-            .env("XDG_CONFIG_HOME", directory.join("config"))
-            .env("HOME", directory.join("home"))
             .env(
                 "FUCKIPV6_INTERNAL_OPTIONS",
                 r#"{"routing_mode":null,"exit_node":null,"is_exit_node":null,"webui_port":0}"#,
             )
-            .env("RUST_LOG", "error")
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .context("无法启动 __control 集成测试进程")?,
     })
 }
 
 fn spawn_headless_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
+    let mut command = headless_test_command(directory);
     Ok(ProcessGuard {
-        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+        child: command
             .arg("--headless")
             .arg("--webui-port")
             .arg(port.to_string())
-            .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
-            .env("XDG_CONFIG_HOME", directory.join("config"))
-            .env("HOME", directory.join("home"))
-            .env("RUST_LOG", "error")
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .context("无法启动无头 WebUI 集成测试进程")?,
     })
@@ -133,38 +137,25 @@ fn spawn_service(directory: &Path, port: u16) -> Result<ProcessGuard> {
             r#"{{"routing_mode":null,"exit_node":null,"is_exit_node":null,"webui_port":{port}}}"#
         ),
     )?;
+    let mut command = headless_test_command(directory);
     Ok(ProcessGuard {
-        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+        child: command
             .arg("__service")
             .arg("--options-file")
             .arg(&options_file)
             .arg("--config-dir")
             .arg(&config_dir)
-            .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
-            .env("HOME", directory.join("home"))
-            .env("RUST_LOG", "error")
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .context("无法启动 __service 集成测试进程")?,
     })
 }
 
 fn spawn_headless_up_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
+    let mut command = headless_test_command(directory);
     Ok(ProcessGuard {
-        child: Command::new(env!("CARGO_BIN_EXE_fuckipv6"))
+        child: command
             .args(["up", "--all", "--headless", "--webui-port"])
             .arg(port.to_string())
-            .env("FUCKIPV6_RUNTIME_DIR", directory.join("runtime"))
-            .env("XDG_CONFIG_HOME", directory.join("config"))
-            .env("HOME", directory.join("home"))
-            .env("RUST_LOG", "error")
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .context("无法启动无头命令 UI 集成测试进程")?,
     })

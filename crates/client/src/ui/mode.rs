@@ -80,6 +80,25 @@ impl DisplayEnvironment {
             {
                 return Self::LinuxX11;
             }
+            let session_type = get_var("XDG_SESSION_TYPE")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            if session_type == "wayland" {
+                return Self::LinuxWayland;
+            }
+            if session_type == "x11" {
+                return Self::LinuxX11;
+            }
+            if ["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION"]
+                .iter()
+                .any(|key| {
+                    get_var(key)
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false)
+                })
+            {
+                return Self::LinuxX11;
+            }
             Self::Headless
         }
 
@@ -551,6 +570,17 @@ mod tests {
         assert_eq!(
             headless_environment_variable_cannot_mask_desktop,
             DisplayEnvironment::LinuxX11
+        );
+
+        let desktop_session_without_display_variables =
+            DisplayEnvironment::detect_with(|key| match key {
+                "XDG_CURRENT_DESKTOP" => Some("niri".into()),
+                "XDG_SESSION_TYPE" => Some("wayland".into()),
+                _ => None,
+            });
+        assert_eq!(
+            desktop_session_without_display_variables,
+            DisplayEnvironment::LinuxWayland
         );
     }
 

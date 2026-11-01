@@ -255,21 +255,55 @@ struct ServiceManager {
     layout: ServiceLayout,
     runner: Arc<dyn CommandRunner>,
     source_binary: PathBuf,
+    capabilities: crate::ui::UiCapabilities,
 }
 
 impl ServiceManager {
     fn new(layout: ServiceLayout, runner: Arc<dyn CommandRunner>, source_binary: PathBuf) -> Self {
+        Self::with_capabilities(
+            layout,
+            runner,
+            source_binary,
+            crate::ui::UiCapabilities::detect(),
+        )
+    }
+
+    fn with_capabilities(
+        layout: ServiceLayout,
+        runner: Arc<dyn CommandRunner>,
+        source_binary: PathBuf,
+        capabilities: crate::ui::UiCapabilities,
+    ) -> Self {
         Self {
             layout,
             runner,
             source_binary,
+            capabilities,
         }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        layout: ServiceLayout,
+        runner: Arc<dyn CommandRunner>,
+        source_binary: PathBuf,
+    ) -> Self {
+        Self::with_capabilities(
+            layout,
+            runner,
+            source_binary,
+            crate::ui::UiCapabilities {
+                display: crate::ui::DisplayEnvironment::Headless,
+                gpui_available: false,
+            },
+        )
     }
 
     fn install(&self, webui_port: u16) -> Result<()> {
         if self.is_registered()? {
             bail!("服务已安装；升级请使用 `fuckipv6 service upgrade`");
         }
+        self.validate_ui_policy()?;
         self.create_layout()?;
         self.write_default_options(webui_port)?;
         self.install_binary()?;
@@ -287,6 +321,7 @@ impl ServiceManager {
         if !self.is_registered()? {
             bail!("服务尚未安装；请先运行 `fuckipv6 service install`");
         }
+        self.validate_ui_policy()?;
         self.create_layout()?;
         self.write_default_options(webui_port)?;
         let was_active = self.is_active()?;
@@ -334,6 +369,7 @@ impl ServiceManager {
     }
 
     fn start(&self) -> Result<()> {
+        self.validate_ui_policy()?;
         match self.layout.platform {
             ServicePlatform::Systemd => {
                 self.systemctl_checked(&["start", SYSTEMD_UNIT])?;
@@ -346,6 +382,10 @@ impl ServiceManager {
             }
         }
         Ok(())
+    }
+
+    fn validate_ui_policy(&self) -> Result<()> {
+        crate::runtime_process::ensure_service_ui_available(self.capabilities)
     }
 
     fn stop(&self) -> Result<()> {
@@ -469,7 +509,7 @@ impl ServiceManager {
         if path.exists() {
             return Ok(());
         }
-        let encoded = crate::runtime_process::service_options_json(webui_port)?;
+        let encoded = crate::runtime_process::service_options_json(webui_port, self.capabilities)?;
         write_atomic(&path, encoded.as_bytes(), 0o600)
     }
 
@@ -1026,7 +1066,8 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, "binary-v1").unwrap();
         let runner = Arc::new(FakeRunner::new(active));
-        let manager = ServiceManager::new(test_layout(&root), runner.clone(), source.clone());
+        let manager =
+            ServiceManager::new_for_test(test_layout(&root), runner.clone(), source.clone());
         (root, runner, manager, source)
     }
 
@@ -1057,6 +1098,32 @@ mod tests {
 
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn desktop_service_install_fails_closed_before_writing_service_files() {
+        let root = temp_root("desktop-policy");
+        let source = root.join("source/fuckipv6");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "binary-v1").unwrap();
+        let manager = ServiceManager::with_capabilities(
+            test_layout(&root),
+            Arc::new(FakeRunner::new(false)),
+            source,
+            crate::ui::UiCapabilities {
+                display: crate::ui::DisplayEnvironment::LinuxWayland,
+                gpui_available: true,
+            },
+        );
+
+        let error = manager
+            .install(8080)
+            .expect_err("desktop service must fail");
+        assert!(error.to_string().contains("无桌面环境"));
+        assert!(!manager.layout.service_file.exists());
+        assert!(!manager.layout.binary.exists());
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1143,7 +1210,7 @@ mod tests {
         let mut layout = test_layout(&root);
         layout.platform = ServicePlatform::Launchd;
         layout.service_file = root.join("Library/LaunchDaemons/cc.xlei.fuckipv6.plist");
-        let manager = ServiceManager::new(layout, runner.clone(), source);
+        let manager = ServiceManager::new_for_test(layout, runner.clone(), source);
 
         manager.install(8080)?;
         assert!(*runner.launchd_loaded.lock().unwrap());
@@ -1168,7 +1235,7 @@ mod tests {
         let root = temp_root("render");
         let mut layout = test_layout(&root);
         layout.platform = ServicePlatform::Launchd;
-        let manager = ServiceManager::new(
+        let manager = ServiceManager::new_for_test(
             layout.clone(),
             Arc::new(FakeRunner::new(false)),
             root.join("source"),

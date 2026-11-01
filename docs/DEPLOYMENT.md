@@ -310,7 +310,11 @@ sudo journalctl -u fuckipv6 -f
 `__service` 持有 control 锁，监督 node 和 WebUI；不要改成 `--headless`、`host` 或其他
 交互式子命令。网络创建、加入和默认连接应先用 CLI 写入配置，再重启服务。
 
-用户级服务使用：
+服务模式属于无头 WebUI 表面。`service install` 与 `__service` 启动时都会检查当前显示环境；
+检测到 X11、Wayland、Windows 或 macOS 桌面会话时会失败关闭，避免桌面主机同时运行 GPUI 与
+WebUI。桌面用户应直接运行 `fuckipv6` 使用 GPUI。
+
+无桌面用户会话中的长期服务使用：
 
 ```bash
 fuckipv6 service install --scope user --webui-port 8080

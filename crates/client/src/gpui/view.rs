@@ -3,14 +3,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
-use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
 use fuckipv6_common::i18n::{
     detect_system_locale, resolve_language, t, tr, LanguagePreference, Locale,
 };
-use fuckipv6_common::ui_components::{Capability, SemanticState};
+use fuckipv6_common::ui_components::SemanticState;
 use fuckipv6_common::ui_layout::{
-    navigation_module_for_page, navigation_modules, ActionPanelPresentation, LayoutClass,
-    NavigationModule,
+    navigation_module_for_page, navigation_modules, ActionPanelPresentation, AppRegion,
+    LayoutClass, NavigationModule,
 };
 use gpui::{
     actions, div, prelude::*, px, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle,
@@ -18,9 +17,8 @@ use gpui::{
 };
 
 use super::components::{
-    button, capability_ring, choice_control, empty_state as component_empty_state,
-    error_state as component_error_state, nav_tab, status_badge, tab_control, tabs,
-    toast as component_toast, toolbar, ButtonVariant, CapabilityItem, CapabilityVisual,
+    button, choice_control, error_state as component_error_state, nav_tab, semantic_palette, tabs,
+    toast as component_toast, ButtonVariant,
 };
 use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
@@ -57,6 +55,15 @@ const A11Y_HEADING_ROLE: Role = Role::Heading;
 const A11Y_TAB_LIST_ROLE: Role = Role::TabList;
 const A11Y_TAB_PANEL_ROLE: Role = Role::TabPanel;
 
+/// The native shell consumes the same ordered region contract as the WebUI.
+/// These identifiers are also used as stable GPUI element IDs for tests,
+/// keyboard traversal, and future accessibility inspection.
+const APP_REGION_ORDER: [AppRegion; 4] = AppRegion::ALL;
+
+fn app_region_id(region: AppRegion) -> SharedString {
+    SharedString::from(format!("gpui-region-{}", region.name()))
+}
+
 struct GpuiShell {
     commands: NodeCommandBus,
     configs: ConfigManager,
@@ -67,6 +74,7 @@ struct GpuiShell {
     selected_page: String,
     selected_network: Option<String>,
     pending_confirmation: Option<String>,
+    expanded_actions: HashMap<String, bool>,
     form_values: HashMap<String, String>,
     text_inputs: HashMap<String, Entity<NativeTextInput>>,
     focus_handle: FocusHandle,
@@ -74,6 +82,8 @@ struct GpuiShell {
     next_request_id: u64,
     error: Option<String>,
     notice: Option<String>,
+    language_menu_open: bool,
+    network_menu_open: bool,
 }
 
 impl GpuiShell {
@@ -101,6 +111,7 @@ impl GpuiShell {
             selected_page: "overview".into(),
             selected_network,
             pending_confirmation: None,
+            expanded_actions: HashMap::new(),
             form_values: HashMap::new(),
             text_inputs: HashMap::new(),
             focus_handle: cx.focus_handle(),
@@ -108,6 +119,8 @@ impl GpuiShell {
             next_request_id: 1,
             error: None,
             notice: None,
+            language_menu_open: false,
+            network_menu_open: false,
         };
 
         shell.watch_state(updates, cx);
@@ -595,110 +608,231 @@ impl GpuiShell {
     }
 
     fn language_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(t(self.locale, "common.language").to_string()),
+        let selected_label = t(self.locale, self.language_preference.label_key()).to_string();
+        let mut selector = div().relative().child(
+            button(
+                SharedString::from("language-menu-trigger"),
+                format!("{selected_label} ▾"),
+                ButtonVariant::Secondary,
+                false,
             )
-            .children(LanguagePreference::ALL.into_iter().map(|preference| {
-                choice_control(
-                    SharedString::from(format!("language-{}", preference.storage_value())),
-                    t(self.locale, preference.label_key()).to_string(),
-                    self.language_preference == preference,
-                )
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.set_language(preference, cx);
-                }))
-                .into_any_element()
-            }))
-    }
+            .aria_label(t(self.locale, "common.language").to_string())
+            .h(px(34.0))
+            .px_3()
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.language_menu_open = !shell.language_menu_open;
+                shell.network_menu_open = false;
+                cx.notify();
+            })),
+        );
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = page_title(self.locale, &self.selected_page);
-        let subtitle = self
-            .page()
-            .map(|page| {
-                tr(
-                    self.locale,
-                    "gpui.page_action_count",
-                    &[
-                        ("page", &page.id),
-                        ("count", &page.actions.len().to_string()),
-                    ],
-                )
-            })
-            .unwrap_or_else(|| t(self.locale, "common.waiting_manifest").to_string());
-        let disabled = self.pending_commands > 0;
-        let primary_status = self.snapshot.primary_status();
-
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_6()
-            .py_4()
-            .border_b_1()
-            .border_color(rgba(COLOR_BORDER))
-            .child(
+        if self.language_menu_open {
+            selector = selector.child(
                 div()
+                    .absolute()
+                    .top(px(38.0))
+                    .right(px(0.0))
+                    .w(px(180.0))
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .p_1()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .children(LanguagePreference::ALL.into_iter().map(|preference| {
+                        let selected = self.language_preference == preference;
+                        button(
+                            SharedString::from(format!("language-{}", preference.storage_value())),
+                            t(self.locale, preference.label_key()).to_string(),
+                            if selected {
+                                ButtonVariant::Secondary
+                            } else {
+                                ButtonVariant::Ghost
+                            },
+                            false,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.language_menu_open = false;
+                            shell.set_language(preference, cx);
+                        }))
+                    })),
+            );
+        }
+
+        selector
+    }
+
+    fn network_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected_label = self
+            .selected_network
+            .clone()
+            .or_else(|| {
+                self.snapshot
+                    .networks
+                    .first()
+                    .map(|network| network.name.clone())
+            })
+            .unwrap_or_else(|| t(self.locale, "common.no_running_networks").to_string());
+        let disabled = self.snapshot.networks.is_empty();
+        let mut picker = div()
+            .relative()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(DARK_THEME.colors.text_faint.rgba_hex()))
+                    .child(t(self.locale, "common.current_network").to_string()),
+            )
+            .child(
+                button(
+                    SharedString::from("network-picker-trigger"),
+                    format!("{selected_label} ▾"),
+                    ButtonVariant::Secondary,
+                    disabled,
+                )
+                .aria_label(t(self.locale, "common.current_network").to_string())
+                .h(px(34.0))
+                .min_w(px(132.0))
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.network_menu_open = !shell.network_menu_open;
+                    shell.language_menu_open = false;
+                    cx.notify();
+                })),
+            );
+
+        if self.network_menu_open && !self.snapshot.networks.is_empty() {
+            picker = picker.child(
+                div()
+                    .absolute()
+                    .top(px(42.0))
+                    .right(px(0.0))
+                    .w(px(220.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_1()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .children(self.snapshot.networks.iter().map(|network| {
+                        let network_name = network.name.clone();
+                        let selected =
+                            self.selected_network.as_deref() == Some(network.name.as_str());
+                        button(
+                            SharedString::from(format!("network-{}", network.name)),
+                            network.name.clone(),
+                            if selected {
+                                ButtonVariant::Secondary
+                            } else {
+                                ButtonVariant::Ghost
+                            },
+                            false,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.selected_network = Some(network_name.clone());
+                            shell.network_menu_open = false;
+                            shell.fill_empty_network_fields();
+                            cx.notify();
+                        }))
+                    })),
+            );
+        }
+
+        picker
+    }
+
+    fn top_status(&self) -> impl IntoElement {
+        let primary_status = self.snapshot.primary_status();
+        let palette = semantic_palette(primary_status_semantic(primary_status));
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.0))
+            .child(
+                div()
+                    .w(px(9.0))
+                    .h(px(9.0))
+                    .rounded_full()
+                    .bg(rgba(palette.foreground.rgba_hex())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .min_w(px(0.0))
                     .child(
                         div()
-                            .id("page-heading")
-                            .role(A11Y_HEADING_ROLE)
-                            .aria_level(1)
-                            .aria_label(title.clone())
-                            .text_2xl()
+                            .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_TEXT))
-                            .child(title),
+                            .child(t(self.locale, primary_status.label_key()).to_string()),
                     )
                     .child(
                         div()
-                            .text_sm()
+                            .overflow_hidden()
+                            .text_xs()
                             .text_color(rgba(COLOR_MUTED))
-                            .child(subtitle),
+                            .child(t(self.locale, primary_status.detail_key()).to_string()),
                     ),
             )
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let disabled = self.pending_commands > 0;
+        div()
+            .id(app_region_id(AppRegion::Topbar))
+            .h(px(DIMENSIONS.topbar_px as f32))
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_5()
+            .border_b_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(div().flex_1().min_w(px(0.0)).child(self.top_status()))
+            .child(self.network_picker(cx))
+            .child(self.language_selector(cx))
             .child(
-                toolbar("header-toolbar")
-                    .child(status_badge(
-                        "header-primary-status",
-                        t(self.locale, primary_status.label_key()).to_string(),
-                        primary_status_semantic(primary_status),
-                    ))
-                    .child(div().text_sm().text_color(rgba(COLOR_MUTED)).child(format!(
-                        "{} · {} {}",
-                        self.selected_network
-                            .as_deref()
-                            .unwrap_or(t(self.locale, "common.not_selected")),
-                        t(self.locale, "common.revision"),
-                        self.snapshot.revision
-                    )))
-                    .child(self.language_selector(cx))
-                    .child(
-                        button(
-                            SharedString::from("refresh-snapshot"),
-                            if disabled {
-                                t(self.locale, "common.operation_in_progress")
-                            } else {
-                                t(self.locale, "common.refresh")
-                            },
-                            ButtonVariant::Primary,
-                            disabled,
-                        )
-                        .on_click(cx.listener(|shell, _, _, cx| {
-                            if shell.pending_commands == 0 {
-                                shell.submit_raw(NodeCommand::GetSnapshot, cx);
-                            }
-                        })),
-                    ),
+                button(
+                    SharedString::from("refresh-snapshot"),
+                    "⟳",
+                    ButtonVariant::Secondary,
+                    disabled,
+                )
+                .aria_label(if disabled {
+                    t(self.locale, "common.operation_in_progress").to_string()
+                } else {
+                    t(self.locale, "common.refresh").to_string()
+                })
+                .w(px(34.0))
+                .h(px(34.0))
+                .px_0()
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    if shell.pending_commands == 0 {
+                        shell.submit_raw(NodeCommand::GetSnapshot, cx);
+                    }
+                })),
+            )
+            .child(
+                button(
+                    SharedString::from("quit-application"),
+                    "↪",
+                    ButtonVariant::Secondary,
+                    false,
+                )
+                .aria_label(t(self.locale, "common.quit").to_string())
+                .w(px(34.0))
+                .h(px(34.0))
+                .px_0()
+                .on_click(cx.listener(|_, _, window, _| window.remove_window())),
             )
     }
 
@@ -710,9 +844,17 @@ impl GpuiShell {
             .map(|module| {
                 let page_id = self.module_landing_page(module);
                 let selected = active_module_id == Some(module.id.as_str());
+                let icon = match module.id.as_str() {
+                    "overview" => "◎",
+                    "nodes" => "▦",
+                    "networks" => "◇",
+                    "activity" => "∿",
+                    "settings" => "⚙",
+                    _ => "·",
+                };
                 nav_tab(
                     SharedString::from(format!("nav-module-{}", module.id)),
-                    t(self.locale, &module.label_key).to_string(),
+                    format!("{icon}  {}", t(self.locale, &module.label_key)),
                     selected,
                 )
                 .on_click(cx.listener(move |shell, _, _, cx| {
@@ -720,58 +862,30 @@ impl GpuiShell {
                     shell.pending_confirmation = None;
                     shell.error = None;
                     shell.notice = None;
+                    shell.language_menu_open = false;
+                    shell.network_menu_open = false;
                     cx.notify();
                 }))
                 .into_any_element()
             })
             .collect::<Vec<_>>();
 
-        let network_chips = self
-            .snapshot
-            .networks
-            .iter()
-            .map(|network| {
-                let network_name = network.name.clone();
-                let selected = self.selected_network.as_deref() == Some(network.name.as_str());
-                choice_control(
-                    SharedString::from(format!("network-{}", network.name)),
-                    network.name.clone(),
-                    selected,
-                )
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.selected_network = Some(network_name.clone());
-                    shell.fill_empty_network_fields();
-                    cx.notify();
-                }))
-                .into_any_element()
-            })
-            .collect::<Vec<_>>();
-
-        let capability_items = self
-            .snapshot
-            .capabilities
-            .capabilities
-            .iter()
-            .map(|item| CapabilityItem {
-                capability: capability_contract(item.kind),
-                visual: capability_visual(item.state),
-                label: capability_label(self.locale, item.kind, item.state),
-            })
-            .collect::<Vec<_>>();
-
-        let manifest_state = match &self.manifest {
-            Some(manifest) => format!(
-                "manifest v{} · {} pages",
-                manifest.schema_version,
-                manifest.pages.len()
-            ),
-            None => t(self.locale, "common.manifest_not_loaded").to_string(),
+        let syncing = self.pending_commands > 0;
+        let sync_label = if syncing {
+            t(self.locale, "common.syncing")
+        } else {
+            "Live"
+        };
+        let sync_color = if syncing {
+            COLOR_WARNING
+        } else {
+            DARK_THEME.colors.success.rgba_hex()
         };
 
         div()
-            .id("primary-sidebar")
+            .id(app_region_id(AppRegion::Sidebar))
             .role(A11Y_NAVIGATION_ROLE)
-            .aria_label(t(self.locale, "common.navigation").to_string())
+            .aria_label(t(self.locale, "common.main_navigation").to_string())
             .flex()
             .flex_col()
             .w(px(DIMENSIONS.sidebar_px as f32))
@@ -781,75 +895,80 @@ impl GpuiShell {
             .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
-                    .px_6()
-                    .pt_6()
-                    .pb_5()
+                    .h(px(DIMENSIONS.topbar_px as f32))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(rgba(COLOR_BORDER))
                     .child(
                         div()
-                            .text_xl()
+                            .w(px(36.0))
+                            .h(px(36.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                            .border_1()
+                            .border_color(rgba(DARK_THEME.colors.accent.rgba_hex()))
+                            .text_size(px(20.0))
                             .text_color(rgba(COLOR_ACCENT))
-                            .child("fuckipv6"),
+                            .child("⌁"),
                     )
                     .child(
                         div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "gpui.subtitle").to_string()),
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child("fuckipv6"),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_size(px(10.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(t(self.locale, "common.node_contract").to_string()),
+                            ),
                     ),
             )
-            .child(tabs("primary-navigation").flex_1().children(nav))
+            .child(tabs("primary-navigation").flex_1().p_2().children(nav))
             .child(
                 div()
-                    .mx_3()
-                    .p_3()
-                    .rounded_md()
-                    .bg(rgba(COLOR_PANEL))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .text_size(px(10.0))
+                    .text_color(rgba(DARK_THEME.colors.text_faint.rgba_hex()))
+                    .child(format!(
+                        "{} #{}",
+                        t(self.locale, "common.snapshot"),
+                        self.snapshot.revision
+                    ))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "common.current_network").to_string()),
-                    )
-                    .child(div().mt_2().flex().flex_wrap().gap_1().children(
-                        if network_chips.is_empty() {
-                            vec![div()
-                                .text_xs()
-                                .text_color(rgba(COLOR_MUTED))
-                                .child(t(self.locale, "common.no_running_networks").to_string())
-                                .into_any_element()]
-                        } else {
-                            network_chips
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .mx_3()
-                    .p_3()
-                    .rounded_md()
-                    .bg(rgba(COLOR_PANEL))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "common.node_capabilities").to_string()),
-                    )
-                    .child(
-                        div()
-                            .mt_2()
-                            .child(capability_ring("node-capabilities", &capability_items)),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(7.0))
+                                    .h(px(7.0))
+                                    .rounded_full()
+                                    .bg(rgba(sync_color)),
+                            )
+                            .child(sync_label.to_string()),
                     ),
-            )
-            .child(
-                div()
-                    .m_3()
-                    .p_3()
-                    .rounded_md()
-                    .bg(rgba(COLOR_PANEL))
-                    .text_xs()
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(manifest_state),
             )
     }
 
@@ -864,14 +983,6 @@ impl GpuiShell {
             shell.error = None;
             cx.notify();
         }))
-    }
-
-    fn notice_banner(&self) -> impl IntoElement {
-        component_toast(
-            "operation-notice",
-            self.notice.clone().unwrap_or_default(),
-            SemanticState::Success,
-        )
     }
 
     fn local_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -889,7 +1000,7 @@ impl GpuiShell {
                         .map(|page| {
                             let page_id = page.id.clone();
                             let selected = page.id == self.selected_page;
-                            tab_control(
+                            page_tab_control(
                                 SharedString::from(format!("local-page-{}", page.id)),
                                 t(self.locale, &page.nav_label_key).to_string(),
                                 selected,
@@ -908,50 +1019,116 @@ impl GpuiShell {
 
         div()
             .id("local-toolbar")
+            .h(px(48.0))
             .flex()
             .items_center()
+            .justify_between()
             .gap_4()
-            .px_6()
-            .pt_4()
+            .px_5()
+            .border_b_1()
+            .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
                     .id("module-page-tabs")
                     .role(A11Y_TAB_LIST_ROLE)
-                    .aria_label(t(self.locale, "common.module_pages").to_string())
+                    .aria_label(t(self.locale, "common.page_sections").to_string())
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .children(page_tabs),
             )
+            .children((self.pending_commands > 0).then(|| {
+                sync_badge(
+                    "snapshot-syncing",
+                    t(self.locale, "common.syncing").to_string(),
+                )
+            }))
     }
 
     fn page_content(&self) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
-            return loading_skeleton().into_any_element();
+            return div()
+                .id(app_region_id(AppRegion::Content))
+                .flex_1()
+                .min_w(px(0.0))
+                .child(loading_skeleton())
+                .into_any_element();
         };
         let model =
             match build_page_model(manifest, &self.snapshot, &self.selected_page, self.locale) {
                 Ok(model) => model,
                 Err(error) => {
-                    return component_error_state(
-                        "page-mapping-error",
-                        t(self.locale, "common.page_mapping_failed"),
-                        error.to_string(),
-                    )
-                    .into_any_element();
+                    return div()
+                        .id(app_region_id(AppRegion::Content))
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(component_error_state(
+                            "page-mapping-error",
+                            t(self.locale, "common.page_mapping_failed"),
+                            error.to_string(),
+                        ))
+                        .into_any_element();
                 }
             };
+        let selected_page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == self.selected_page);
+        let page_title = selected_page
+            .map(|page| t(self.locale, &page.title_key).to_string())
+            .unwrap_or_else(|| t(self.locale, "common.unknown_page").to_string());
+        let page_icon = page_icon(&self.selected_page);
 
         let mut content = div()
-            .id("page-scroll")
+            .id(app_region_id(AppRegion::Content))
+            .role(Role::Article)
+            .aria_label(page_title.clone())
             .flex()
             .flex_col()
-            .gap_4()
-            .px_6()
-            .pb_6()
-            .pt_3()
+            .gap_5()
+            .min_w(px(0.0))
+            .flex_1()
             .overflow_y_scroll()
-            .flex_1();
+            .child(
+                div()
+                    .id("page-heading")
+                    .role(A11Y_HEADING_ROLE)
+                    .aria_level(1)
+                    .aria_label(page_title.clone())
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(rgba(COLOR_PANEL))
+                            .border_1()
+                            .border_color(rgba(COLOR_BORDER))
+                            .text_color(rgba(COLOR_ACCENT))
+                            .child(page_icon),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(20.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(page_title),
+                            )
+                            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(
+                                t(self.locale, "common.node_contract_description").to_string(),
+                            )),
+                    ),
+            );
 
         if !model.metrics.is_empty() {
             content = content.child(
@@ -967,7 +1144,7 @@ impl GpuiShell {
             div()
                 .flex()
                 .flex_col()
-                .gap_3()
+                .gap_4()
                 .children(model.sections.iter().map(section_card)),
         );
 
@@ -976,10 +1153,17 @@ impl GpuiShell {
 
     fn action_card(&self, action: NodeUiAction, cx: &mut Context<Self>) -> gpui::AnyElement {
         let action_id = action.id.clone();
+        let toggle_action_id = action.id.clone();
         let block_reason =
             action_block_reason(&action, &self.snapshot, self.selected_network.as_deref());
+        let blocked = block_reason.is_some();
         let confirmation_pending = self.pending_confirmation.as_deref() == Some(action.id.as_str());
-        let disabled = self.pending_commands > 0 || block_reason.is_some();
+        let expanded = self
+            .expanded_actions
+            .get(&action.id)
+            .copied()
+            .unwrap_or(false);
+        let disabled = self.pending_commands > 0 || blocked;
         let button_variant = if confirmation_pending {
             ButtonVariant::Danger
         } else if action.backend_status == NodeUiBackendStatus::Unavailable {
@@ -996,8 +1180,6 @@ impl GpuiShell {
             NodeUiBackendStatus::Implemented => t(self.locale, "status.backend.implemented"),
             NodeUiBackendStatus::Unavailable => t(self.locale, "status.backend.unavailable"),
         };
-        let availability = format!("{:?}", action.availability);
-        let permission = format!("{:?}", action.permission);
         let button_label = if confirmation_pending {
             t(self.locale, "common.confirm_again")
         } else if action.confirmation.is_some() {
@@ -1006,14 +1188,13 @@ impl GpuiShell {
             t(self.locale, "common.submit_command")
         };
 
-        div()
+        let action_label = action_label(self.locale, &action.id);
+        let mut card = div()
+            .id(SharedString::from(format!("action-card-{}", action.id)))
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
-            .rounded_lg()
-            .bg(rgba(COLOR_PANEL))
-            .border_1()
+            .w_full()
+            .border_b_1()
             .border_color(rgba(if confirmation_pending {
                 COLOR_WARNING
             } else {
@@ -1021,64 +1202,83 @@ impl GpuiShell {
             }))
             .child(
                 div()
+                    .id(SharedString::from(format!(
+                        "action-card-head-{}",
+                        action.id
+                    )))
+                    .role(Role::Button)
+                    .aria_label(action_label.clone())
+                    .aria_expanded(expanded)
+                    .focusable()
+                    .tab_stop(true)
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_2()
+                    .min_h(px(46.0))
+                    .px_4()
+                    .py_2()
+                    .text_sm()
+                    .text_color(rgba(COLOR_TEXT))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        let expanded = shell
+                            .expanded_actions
+                            .entry(toggle_action_id.clone())
+                            .or_insert(false);
+                        *expanded = !*expanded;
+                        cx.notify();
+                    }))
+                    .child(action_label)
+                    .child(if expanded { "⌄" } else { "›" }),
+            );
+
+        if expanded {
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .px_4()
+                    .pb_4()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .text_color(rgba(COLOR_TEXT))
-                                    .child(action_label(self.locale, &action.id)),
-                            )
-                            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
-                                "{} · {:?} · permission={} · availability={} · {}",
-                                action.id, action.command, permission, availability, status
-                            ))),
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(format!("{} · {}", action.id, status)),
                     )
-                    .child(status_badge(
-                        SharedString::from(format!("action-status-{}", action.id)),
-                        status,
-                        if action.backend_status == NodeUiBackendStatus::Implemented {
-                            SemanticState::Success
-                        } else {
-                            SemanticState::Unsupported
-                        },
-                    )),
-            )
-            .children(fields)
-            .children(block_reason.map(|reason| {
-                div()
-                    .text_xs()
-                    .text_color(rgba(COLOR_WARNING))
-                    .child(tr(
-                        self.locale,
-                        "gpui.action_blocked",
-                        &[
-                            ("action", &action.id),
-                            ("reason", t(self.locale, reason.message_key())),
-                        ],
-                    ))
-                    .into_any_element()
-            }))
-            .child(
-                button(
-                    SharedString::from(format!("action-{}", action.id)),
-                    button_label,
-                    button_variant,
-                    disabled,
-                )
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    if shell.pending_commands == 0 && block_reason.is_none() {
-                        shell.submit_manifest_action(&action_id, cx);
-                    }
-                })),
-            )
-            .into_any_element()
+                    .children(fields)
+                    .children(block_reason.map(|reason| {
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_WARNING))
+                            .child(tr(
+                                self.locale,
+                                "gpui.action_blocked",
+                                &[
+                                    ("action", &action.id),
+                                    ("reason", t(self.locale, reason.message_key())),
+                                ],
+                            ))
+                            .into_any_element()
+                    }))
+                    .child(
+                        button(
+                            SharedString::from(format!("action-{}", action.id)),
+                            button_label,
+                            button_variant,
+                            disabled,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            if shell.pending_commands == 0 && !blocked {
+                                shell.submit_manifest_action(&action_id, cx);
+                            }
+                        })),
+                    ),
+            );
+        }
+
+        card.into_any_element()
     }
 
     fn field_editor(
@@ -1214,47 +1414,60 @@ impl GpuiShell {
             .map(|action| self.action_card(action, cx))
             .collect::<Vec<_>>();
         let body = if action_cards.is_empty() {
-            component_empty_state(
-                "no-shared-actions",
-                t(self.locale, "common.no_shared_actions"),
-                t(self.locale, "common.page_no_actions"),
-            )
-            .into_any_element()
+            div()
+                .id("no-shared-actions")
+                .p_4()
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "common.page_actions_empty").to_string())
+                .into_any_element()
         } else {
             div()
                 .id("action-panel-body")
                 .flex()
                 .flex_col()
-                .gap_3()
                 .overflow_y_scroll()
                 .children(action_cards)
                 .into_any_element()
         };
 
         let mut panel = div()
-            .id("action-panel")
+            .id(app_region_id(AppRegion::ActionPanel))
             .role(Role::Complementary)
             .aria_label(t(self.locale, "common.shared_actions").to_string())
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
-            .bg(rgba(COLOR_SIDEBAR))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
             .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .h(px(38.0))
+                    .px_4()
+                    .border_b_1()
+                    .border_color(rgba(COLOR_BORDER))
                     .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
                     .text_color(rgba(COLOR_MUTED))
-                    .child(t(self.locale, "common.shared_actions").to_string()),
+                    .child(
+                        t(self.locale, "common.shared_actions")
+                            .to_string()
+                            .to_uppercase(),
+                    ),
             )
             .child(body);
 
         panel = match presentation {
-            ActionPanelPresentation::Stacked => panel.w_full().max_h(px(360.0)).border_t_1(),
+            ActionPanelPresentation::Stacked => panel.w_full().max_h(px(360.0)),
             ActionPanelPresentation::Compact | ActionPanelPresentation::Full => panel
-                .h_full()
+                .max_h_full()
                 .w(px(presentation.width_px().unwrap_or_default() as f32))
-                .border_l_1(),
+                .flex_shrink_0(),
         };
         panel
     }
@@ -1262,6 +1475,7 @@ impl GpuiShell {
 
 impl Render for GpuiShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        debug_assert_eq!(APP_REGION_ORDER, AppRegion::ALL);
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
         let presentation = ActionPanelPresentation::for_layout(layout);
         let content = self.page_content();
@@ -1275,6 +1489,9 @@ impl Render for GpuiShell {
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
+                .gap_5()
+                .p_5()
+                .overflow_hidden()
                 .child(content)
                 .child(action_panel)
         } else {
@@ -1287,6 +1504,10 @@ impl Render for GpuiShell {
                 .flex_1()
                 .min_h(px(0.0))
                 .min_w(px(0.0))
+                .items_start()
+                .gap_5()
+                .p_5()
+                .overflow_hidden()
                 .child(content)
                 .child(action_panel)
         };
@@ -1301,13 +1522,13 @@ impl Render for GpuiShell {
             .bg(rgba(COLOR_BG))
             .child(self.header(cx));
 
+        main = main.child(self.local_tabs(cx));
+
         if self.error.is_some() {
             main = main.child(self.error_banner(cx));
-        } else if self.notice.is_some() {
-            main = main.child(self.notice_banner());
         }
 
-        main = main.child(self.local_tabs(cx)).child(workspace);
+        main = main.child(workspace);
 
         div()
             .id("gpui-root")
@@ -1365,6 +1586,72 @@ fn loading_skeleton() -> Div {
         .child(block(140.0))
 }
 
+fn page_tab_control(
+    id: SharedString,
+    label: impl Into<SharedString>,
+    selected: bool,
+) -> gpui::Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .role(Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(selected)
+        .focusable()
+        .tab_stop(true)
+        .flex()
+        .items_center()
+        .h(px(34.0))
+        .px_3()
+        .rounded_sm()
+        .border_b_2()
+        .border_color(rgba(if selected { COLOR_ACCENT } else { 0x00000000 }))
+        .bg(rgba(if selected {
+            COLOR_PANEL_RAISED
+        } else {
+            0x00000000
+        }))
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight(if selected { 600.0 } else { 400.0 }))
+        .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
+        .child(label)
+}
+
+fn sync_badge(id: impl Into<gpui::ElementId>, label: String) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Status)
+        .aria_label(label.clone())
+        .flex_shrink_0()
+        .rounded_full()
+        .border_1()
+        .border_color(rgba(COLOR_WARNING))
+        .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+        .px_2()
+        .py_1()
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight(600.0))
+        .text_color(rgba(COLOR_WARNING))
+        .child(label)
+}
+
+fn page_icon(id: &str) -> &'static str {
+    match PageKind::from_id(id) {
+        Some(PageKind::Overview) => "◎",
+        Some(PageKind::Networks) => "◇",
+        Some(PageKind::Peers) => "⌘",
+        Some(PageKind::Topology) => "◉",
+        Some(PageKind::Traffic) => "∿",
+        Some(PageKind::Routing) => "⇄",
+        Some(PageKind::ExitNode) => "↗",
+        Some(PageKind::Relay) => "⌁",
+        Some(PageKind::Logs) => "☷",
+        Some(PageKind::Identity) => "⚿",
+        Some(PageKind::Settings) => "⚙",
+        None => "·",
+    }
+}
+
 fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
     div()
         .flex()
@@ -1406,45 +1693,6 @@ fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
         NodePrimaryStatus::Starting | NodePrimaryStatus::Stopping => SemanticState::Info,
         NodePrimaryStatus::Uninitialized | NodePrimaryStatus::Stopped => SemanticState::Neutral,
     }
-}
-
-fn capability_contract(kind: CapabilityKind) -> Capability {
-    match kind {
-        CapabilityKind::Coordinator => Capability::Coordinator,
-        CapabilityKind::Relay => Capability::Relay,
-        CapabilityKind::Exit => Capability::Exit,
-        CapabilityKind::File => Capability::File,
-    }
-}
-
-fn capability_visual(state: CapabilityState) -> CapabilityVisual {
-    match state {
-        CapabilityState::Enabled => CapabilityVisual::Active,
-        CapabilityState::Degraded | CapabilityState::Starting => CapabilityVisual::Degraded,
-        CapabilityState::Unsupported => CapabilityVisual::Unsupported,
-        CapabilityState::Disabled | CapabilityState::Unavailable | CapabilityState::Unknown => {
-            CapabilityVisual::Inactive
-        }
-    }
-}
-
-fn capability_label(locale: Locale, kind: CapabilityKind, state: CapabilityState) -> String {
-    let capability_key = match kind {
-        CapabilityKind::Coordinator => "capability.coordinator",
-        CapabilityKind::Relay => "capability.relay",
-        CapabilityKind::Exit => "capability.exit",
-        CapabilityKind::File => "capability.file",
-    };
-    let state_key = match state {
-        CapabilityState::Enabled => "status.capability.enabled",
-        CapabilityState::Degraded => "status.capability.degraded",
-        CapabilityState::Starting => "status.capability.starting",
-        CapabilityState::Unsupported => "status.capability.unsupported",
-        CapabilityState::Disabled | CapabilityState::Unavailable | CapabilityState::Unknown => {
-            "status.capability.unknown"
-        }
-    };
-    format!("{} · {}", t(locale, capability_key), t(locale, state_key))
 }
 
 fn section_card(section: &SectionModel) -> gpui::AnyElement {
@@ -1496,24 +1744,6 @@ fn row_card(row: &RowModel) -> gpui::AnyElement {
                 .child(row.detail.clone()),
         )
         .into_any_element()
-}
-
-fn page_label(locale: Locale, id: &str) -> String {
-    let key = match PageKind::from_id(id) {
-        Some(PageKind::Overview) => "nav.overview",
-        Some(PageKind::Networks) => "nav.networks",
-        Some(PageKind::Peers) => "nav.peers",
-        Some(PageKind::Topology) => "nav.topology",
-        Some(PageKind::Traffic) => "nav.traffic",
-        Some(PageKind::Routing) => "nav.routing",
-        Some(PageKind::ExitNode) => "nav.exit_node",
-        Some(PageKind::Relay) => "nav.relay",
-        Some(PageKind::Logs) => "nav.logs",
-        Some(PageKind::Identity) => "nav.identity",
-        Some(PageKind::Settings) => "nav.settings",
-        None => "common.unknown_page",
-    };
-    t(locale, key).to_string()
 }
 
 fn action_label(locale: Locale, id: &str) -> String {
@@ -1574,10 +1804,6 @@ fn placeholder_for(
         }
         _ => t(locale, "common.input_value").into(),
     }
-}
-
-fn page_title(locale: Locale, id: &str) -> String {
-    format!("{} · {}", page_label(locale, id), id)
 }
 
 fn bind_shell_keys(cx: &mut App) {
@@ -1757,7 +1983,11 @@ mod tests {
     #[test]
     fn all_manifest_pages_have_a_navigation_label() {
         for page in crate::node::node_ui_manifest().pages {
-            assert_ne!(page_label(Locale::ZhCn, &page.id), "未知页面");
+            assert!(fuckipv6_common::i18n::has_key(
+                Locale::ZhCn,
+                &page.nav_label_key
+            ));
+            assert!(!t(Locale::ZhCn, &page.nav_label_key).is_empty());
         }
     }
 
@@ -1773,11 +2003,28 @@ mod tests {
     }
 
     #[test]
-    fn page_titles_keep_the_stable_manifest_id() {
+    fn shell_regions_follow_the_shared_contract_order() {
         assert_eq!(
-            page_title(Locale::ZhCn, "exit_node"),
-            "Exit Node · exit_node"
+            APP_REGION_ORDER.map(AppRegion::name),
+            ["sidebar", "topbar", "content", "action-panel"]
         );
+        for region in APP_REGION_ORDER {
+            assert_eq!(
+                app_region_id(region).to_string(),
+                format!("gpui-region-{}", region.name())
+            );
+        }
+    }
+
+    #[test]
+    fn every_manifest_page_has_a_content_heading_and_icon() {
+        for page in crate::node::node_ui_manifest().pages {
+            assert!(fuckipv6_common::i18n::has_key(
+                Locale::ZhCn,
+                &page.title_key
+            ));
+            assert_ne!(page_icon(&page.id), "·");
+        }
     }
 
     #[test]
@@ -1869,29 +2116,6 @@ mod tests {
             let semantic = primary_status_semantic(status);
             assert!(!status.label_zh().is_empty());
             assert!(!semantic.label_key().is_empty());
-        }
-    }
-
-    #[test]
-    fn every_capability_state_has_a_textual_legend() {
-        for kind in CapabilityKind::ALL {
-            for state in [
-                CapabilityState::Enabled,
-                CapabilityState::Degraded,
-                CapabilityState::Starting,
-                CapabilityState::Unsupported,
-                CapabilityState::Disabled,
-                CapabilityState::Unavailable,
-                CapabilityState::Unknown,
-            ] {
-                let label = capability_label(Locale::ZhCn, kind, state);
-                assert!(label.contains(match kind {
-                    CapabilityKind::Coordinator => "Coordinator",
-                    CapabilityKind::Relay => "Relay",
-                    CapabilityKind::Exit => "Exit",
-                    CapabilityKind::File => "File",
-                }));
-            }
         }
     }
 

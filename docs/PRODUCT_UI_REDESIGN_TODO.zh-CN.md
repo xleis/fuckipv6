@@ -903,14 +903,16 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **证据（2026-11-02）**：GPUI 与 WebUI 同时提供同一套 5 组、21 个高级设置项：监听与接口、DNS 与隐私、NAT/连接与资源、WebUI 与访问安全、日志/指标与维护。每项均标注 `启动配置`、`只读`、`部分接入` 或 `不支持`，并显示真实快照值或稳定的未接入原因；P2P 实时监听地址优先于配置端口，Keepalive、连接超时和日志级别来自逐网络安全快照。全局搜索可从中英文关键词定位高级设置并导航到设置页。当前切片不渲染伪开关或伪按钮，事务性编辑、完整配置预览、差异应用和回滚仍由 W6-06 负责。`cargo test -p fuckipv6-client --all-features` 通过（lib 630 passed、3 ignored；集成测试 9 passed、1 ignored），`cargo clippy -p fuckipv6-client --all-features --all-targets -- -D warnings`、WebUI `typecheck`、`lint`、31/31 单元测试和嵌入式生产构建均通过，`dist/assets/app.js` 已同步刷新。
 
-### W6-06 配置预览与回滚 `[ ]`
+### W6-06 配置预览与回滚 `[x]`
 
-- [ ] 完整配置预览；
-- [ ] 差异导入；
-- [ ] 校验错误定位；
-- [ ] 原子应用；
-- [ ] 回滚；
-- [ ] 配置变更审计。
+- [x] 完整配置预览；
+- [x] 差异导入；
+- [x] 校验错误定位；
+- [x] 原子应用；
+- [x] 回滚；
+- [x] 配置变更审计。
+
+**证据（2026-11-02）**：GPUI 与 WebUI 均接入完整事务配置工作台，提供当前 revision、可编辑 networks 文档、JSON 文件导入、候选配置、逐路径 before/after 差异、影响级别、校验问题和稳定的禁用原因。编辑后必须对当前草稿重新预览，且预览 revision 与当前文档一致才允许应用；支持冲突、校验失败、无变化和命令不可用四类阻断。校验问题可定位到 JSON Pointer 对应编辑位置；应用和回滚均有二次确认，成功后刷新文档与审计历史。审计详情展示 transaction、revision、操作者、来源、时间、目标 revision 和变更路径。GPUI 工作流状态机有 6 个专项测试，WebUI 工作流有 5 个专项测试；`cargo test -p fuckipv6-client --all-features` 通过（lib 646 passed、3 ignored；集成测试 9 passed、1 ignored），`cargo test -p fuckipv6-common i18n` 9/9、WebUI 37/37、`typecheck`、`lint`、生产构建及 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 均通过。
 
 ### W6-07 状态矩阵落地 `[ ]`
 
@@ -2381,7 +2383,8 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] W6-01～W6-03：五模块外壳、唯一主状态和概览；
 - [x] W6-04：设置基础页；
 - [x] W6-05：可搜索的高级设置权威清单；
-- [ ] W6-06～W6-07：差异应用和状态矩阵；
+- [x] W6-06：差异应用与回滚；
+- [ ] W6-07：状态矩阵；
 - [ ] 删除旧双 WebUI 的新功能入口；
 - [ ] 新 React/Vite 成为唯一 WebUI 产品表面；
 - [ ] GPUI 与 WebUI 使用同一状态/权限/命令契约。

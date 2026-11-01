@@ -15,11 +15,17 @@ use gpui::{
     actions, div, prelude::*, px, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle,
     KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window, WindowBounds, WindowOptions,
 };
+use gpui_base::input::{InputEvent, Textarea, TextareaState};
 
 use super::components::{
     button, choice_control, error_state as component_error_state, nav_tab, semantic_palette, tabs,
     toast as component_toast, ButtonVariant,
 };
+use super::configuration_workflow::{
+    is_configuration_action, json_pointer_selection, ConfigurationOperation,
+    GpuiConfigurationWorkflow,
+};
+use super::path_picker::{pick_paths, PathPickerMode};
 use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values, network_status_key,
@@ -27,11 +33,15 @@ use super::view_model::{
     RowModel, SearchResult, SectionModel,
 };
 use crate::config_manager::ConfigManager;
+use crate::config_transaction::{
+    ConfigurationChangeAction, ConfigurationHistoryEntry, ConfigurationImpact,
+};
 use crate::node::{
-    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
-    NodeCommandRequest, NodeCommandResult, NodeNetworkStatus, NodePrimaryStatus, NodeSnapshot,
-    NodeStateStore, NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind,
-    NodeUiManifest, NodeUiPage,
+    NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
+    NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
+    NodeNetworkStatus, NodePreviewConfigurationCommand, NodePrimaryStatus,
+    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
+    NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
 };
 
 const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
@@ -99,6 +109,10 @@ struct GpuiShell {
     text_inputs: HashMap<String, Entity<NativeTextInput>>,
     search_query: String,
     search_input: Option<Entity<NativeTextInput>>,
+    configuration: GpuiConfigurationWorkflow,
+    configuration_editor: Option<Entity<TextareaState>>,
+    configuration_editor_placeholder: Option<String>,
+    configuration_initial_load_requested: bool,
     focus_handle: FocusHandle,
     content_focus_handle: FocusHandle,
     pending_commands: u32,
@@ -139,6 +153,10 @@ impl GpuiShell {
             text_inputs: HashMap::new(),
             search_query: String::new(),
             search_input: None,
+            configuration: GpuiConfigurationWorkflow::default(),
+            configuration_editor: None,
+            configuration_editor_placeholder: None,
+            configuration_initial_load_requested: false,
             focus_handle: cx.focus_handle(),
             content_focus_handle: cx.focus_handle(),
             pending_commands: 0,
@@ -341,6 +359,298 @@ impl GpuiShell {
         }
     }
 
+    fn configuration_action(&self, action_id: &str) -> Option<&NodeUiAction> {
+        self.manifest
+            .as_ref()?
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.id == action_id)
+    }
+
+    fn configuration_action_blocked(&self, action_id: &str) -> Option<&'static str> {
+        let action = self.configuration_action(action_id)?;
+        action_block_reason(action, &self.snapshot, self.selected_network.as_deref())
+            .map(|reason| reason.message_key())
+    }
+
+    fn configuration_available(&self, action_id: &str) -> bool {
+        self.configuration_action(action_id)
+            .is_some_and(|action| action.backend_status == NodeUiBackendStatus::Implemented)
+            && self.configuration_action_blocked(action_id).is_none()
+    }
+
+    fn selected_page_has_configuration_actions(&self) -> bool {
+        self.manifest
+            .as_ref()
+            .and_then(|manifest| {
+                manifest
+                    .pages
+                    .iter()
+                    .find(|page| page.id == self.selected_page)
+            })
+            .is_some_and(|page| {
+                page.actions
+                    .iter()
+                    .any(|action| is_configuration_action(&action.id))
+            })
+    }
+
+    fn submit_configuration(
+        &mut self,
+        operation: ConfigurationOperation,
+        command: NodeCommand,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_commands > 0 {
+            self.configuration
+                .set_error(t(self.locale, "gpui.busy").to_string());
+            cx.notify();
+            return;
+        }
+        self.configuration.begin(operation);
+        self.submit_raw(command, cx);
+    }
+
+    fn load_configuration(&mut self, cx: &mut Context<Self>) {
+        if !self.configuration_available("get_configuration") {
+            self.configuration.set_error(
+                self.configuration_action_blocked("get_configuration")
+                    .map(|key| t(self.locale, key).to_string())
+                    .unwrap_or_else(|| t(self.locale, "configuration.loading").to_string()),
+            );
+            cx.notify();
+            return;
+        }
+        self.submit_configuration(
+            ConfigurationOperation::Load,
+            NodeCommand::GetConfiguration,
+            cx,
+        );
+    }
+
+    fn load_configuration_history(&mut self, cx: &mut Context<Self>) {
+        if !self.configuration_available("get_configuration_history") {
+            return;
+        }
+        self.submit_configuration(
+            ConfigurationOperation::History,
+            NodeCommand::GetConfigurationHistory,
+            cx,
+        );
+    }
+
+    fn preview_configuration_draft(&mut self, cx: &mut Context<Self>) {
+        if !self.configuration_available("preview_configuration") {
+            self.configuration.set_error(
+                self.configuration_action_blocked("preview_configuration")
+                    .map(|key| t(self.locale, key).to_string())
+                    .unwrap_or_else(|| t(self.locale, "configuration.apply.blocked").to_string()),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(revision) = self
+            .configuration
+            .document
+            .as_ref()
+            .map(|document| document.revision)
+        else {
+            self.configuration
+                .set_error(t(self.locale, "configuration.loading").to_string());
+            cx.notify();
+            return;
+        };
+        let networks = match self.configuration.draft_networks() {
+            Ok(networks) => networks,
+            Err(error) => {
+                self.configuration.set_error(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.submit_configuration(
+            ConfigurationOperation::Preview,
+            NodeCommand::PreviewConfiguration(NodePreviewConfigurationCommand {
+                expected_revision: revision,
+                networks,
+            }),
+            cx,
+        );
+    }
+
+    fn apply_configuration_draft(&mut self, cx: &mut Context<Self>) {
+        if !self.configuration.can_apply() {
+            return;
+        }
+        if !self.configuration_available("apply_configuration") {
+            self.configuration.set_error(
+                self.configuration_action_blocked("apply_configuration")
+                    .map(|key| t(self.locale, key).to_string())
+                    .unwrap_or_else(|| t(self.locale, "configuration.apply.blocked").to_string()),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(revision) = self
+            .configuration
+            .document
+            .as_ref()
+            .map(|document| document.revision)
+        else {
+            return;
+        };
+        let networks = match self.configuration.draft_networks() {
+            Ok(networks) => networks,
+            Err(error) => {
+                self.configuration.set_error(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.submit_configuration(
+            ConfigurationOperation::Apply,
+            NodeCommand::ApplyConfiguration(NodeApplyConfigurationCommand {
+                expected_revision: revision,
+                networks,
+            }),
+            cx,
+        );
+    }
+
+    fn rollback_configuration_to(&mut self, target_revision: u64, cx: &mut Context<Self>) {
+        if !self.configuration_available("rollback_configuration") {
+            self.configuration.set_error(
+                self.configuration_action_blocked("rollback_configuration")
+                    .map(|key| t(self.locale, key).to_string())
+                    .unwrap_or_else(|| t(self.locale, "configuration.apply.blocked").to_string()),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(revision) = self
+            .configuration
+            .document
+            .as_ref()
+            .map(|document| document.revision)
+        else {
+            return;
+        };
+        self.submit_configuration(
+            ConfigurationOperation::Rollback,
+            NodeCommand::RollbackConfiguration(NodeRollbackConfigurationCommand {
+                expected_revision: revision,
+                target_revision,
+            }),
+            cx,
+        );
+    }
+
+    fn import_configuration_file(&mut self, cx: &mut Context<Self>) {
+        if self.pending_commands > 0 {
+            return;
+        }
+        let task = pick_paths(cx, PathPickerMode::Files { multiple: false });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |shell, cx| {
+                match result {
+                    Ok(Some(paths)) => {
+                        let Some(path) = paths.first() else {
+                            return;
+                        };
+                        match std::fs::read_to_string(path) {
+                            Ok(source) => {
+                                let name = path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("configuration.json")
+                                    .to_string();
+                                match shell.configuration.import(source, name) {
+                                    Ok(()) => {
+                                        shell.configuration.set_notice(
+                                            t(shell.locale, "configuration.import").to_string(),
+                                        );
+                                    }
+                                    Err(error) => shell.configuration.set_error(error),
+                                }
+                            }
+                            Err(error) => shell.configuration.set_error(format!(
+                                "{}: {error}",
+                                t(shell.locale, "configuration.import")
+                            )),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => shell.configuration.set_error(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn sync_configuration_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_page_has_configuration_actions() {
+            return;
+        }
+        if self.configuration_editor.is_none() {
+            let draft = self.configuration.draft.clone();
+            let placeholder = t(self.locale, "configuration.editor.help").to_string();
+            let editor = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(placeholder.clone())
+                    .default_value(draft)
+            });
+            cx.subscribe(
+                &editor,
+                |shell: &mut Self, editor, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let draft = editor.read(cx).value().to_string();
+                        shell.configuration.edit(draft);
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            self.configuration_editor = Some(editor);
+            self.configuration_editor_placeholder = Some(placeholder);
+            return;
+        }
+
+        let Some(editor) = self.configuration_editor.clone() else {
+            return;
+        };
+        let draft = self.configuration.draft.clone();
+        if editor.read(cx).value().as_ref() != draft {
+            editor.update(cx, |editor, cx| editor.set_value(draft, window, cx));
+        }
+        let placeholder = t(self.locale, "configuration.editor.help").to_string();
+        if self.configuration_editor_placeholder.as_deref() != Some(placeholder.as_str()) {
+            editor.update(cx, |editor, cx| {
+                editor.set_placeholder(placeholder.clone(), window, cx)
+            });
+            self.configuration_editor_placeholder = Some(placeholder);
+        }
+    }
+
+    fn focus_configuration_issue(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = json_pointer_selection(&self.configuration.draft, &path);
+        self.configuration.select_issue(path);
+        if let Some(editor) = self.configuration_editor.clone() {
+            editor.update(cx, |editor, cx| {
+                editor.focus(window, cx);
+                editor.set_selected_range(range, cx);
+            });
+        }
+        cx.notify();
+    }
+
     fn apply_command_result(
         &mut self,
         result: Result<NodeCommandResult, NodeCommandBusError>,
@@ -350,11 +660,16 @@ impl GpuiShell {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                self.error = Some(tr(
+                let message = tr(
                     self.locale,
                     "gpui.command_channel_error",
                     &[("error", &error.to_string())],
-                ));
+                );
+                if self.configuration.operation.is_some() {
+                    self.configuration.set_error(message.clone());
+                    self.configuration.finish();
+                }
+                self.error = Some(message);
                 return;
             }
         };
@@ -402,18 +717,23 @@ impl GpuiShell {
                 ));
             }
             NodeCommandOutcome::Rejected(problem) => {
-                let network = problem
-                    .network_name
-                    .as_deref()
-                    .map(|network| format!(" · {network}"))
-                    .unwrap_or_default();
-                self.error = Some(format!(
-                    "{}{} ({:?}, retryable={})",
-                    t(self.locale, problem.code.message_key()),
-                    network,
-                    problem.code,
-                    problem.retryable
-                ));
+                if self.configuration.operation.is_some() {
+                    self.configuration.record_rejection(&problem);
+                    self.configuration.finish();
+                } else {
+                    let network = problem
+                        .network_name
+                        .as_deref()
+                        .map(|network| format!(" · {network}"))
+                        .unwrap_or_default();
+                    self.error = Some(format!(
+                        "{}{} ({:?}, retryable={})",
+                        t(self.locale, problem.code.message_key()),
+                        network,
+                        problem.code,
+                        problem.retryable
+                    ));
+                }
             }
             NodeCommandOutcome::Probe(probe) => {
                 self.notice = Some(tr(
@@ -510,21 +830,36 @@ impl GpuiShell {
                     ],
                 ));
             }
-            NodeCommandOutcome::Configuration(_) => {
-                self.notice = Some(t(self.locale, "gpui.configuration_loaded").to_string());
+            NodeCommandOutcome::Configuration(document) => {
+                self.configuration.receive_document(document, true);
+                self.configuration
+                    .set_notice(t(self.locale, "gpui.configuration_loaded").to_string());
+                self.configuration.finish();
+                self.load_configuration_history(cx);
             }
             NodeCommandOutcome::ConfigurationPreview(preview) => {
-                self.notice = Some(tr(
-                    self.locale,
-                    "gpui.configuration_previewed",
-                    &[
-                        ("diffs", &preview.diffs.len().to_string()),
-                        ("errors", &preview.validation_errors.len().to_string()),
-                    ],
-                ));
+                let preview = *preview;
+                let diff_count = preview.diffs.len();
+                let validation_count = preview.validation_errors.len();
+                self.configuration.receive_preview(preview);
+                let notice = if self.configuration.has_revision_conflict() {
+                    t(self.locale, "configuration.revision_conflict").to_string()
+                } else {
+                    tr(
+                        self.locale,
+                        "gpui.configuration_previewed",
+                        &[
+                            ("diffs", &diff_count.to_string()),
+                            ("errors", &validation_count.to_string()),
+                        ],
+                    )
+                };
+                self.configuration.set_notice(notice);
+                self.configuration.finish();
             }
             NodeCommandOutcome::ConfigurationApplied(result) => {
-                self.notice = Some(tr(
+                let result = *result;
+                self.configuration.set_notice(tr(
                     self.locale,
                     "gpui.configuration_applied",
                     &[
@@ -533,13 +868,19 @@ impl GpuiShell {
                         ("no_op", &result.no_op.to_string()),
                     ],
                 ));
+                self.configuration.receive_applied(result);
+                self.configuration.finish();
+                self.load_configuration_history(cx);
             }
             NodeCommandOutcome::ConfigurationHistory(history) => {
-                self.notice = Some(tr(
+                let count = history.len();
+                self.configuration.receive_history(history);
+                self.configuration.set_notice(tr(
                     self.locale,
                     "gpui.configuration_history_loaded",
-                    &[("count", &history.len().to_string())],
+                    &[("count", &count.to_string())],
                 ));
+                self.configuration.finish();
             }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
@@ -561,6 +902,9 @@ impl GpuiShell {
         let mut defaults = HashMap::new();
         let mut text_fields = Vec::new();
         for action in manifest.pages.iter().flat_map(|page| &page.actions) {
+            if is_configuration_action(&action.id) {
+                continue;
+            }
             for (field, value) in default_form_values(action, self.selected_network.as_deref()) {
                 defaults.insert(self.field_key(&action.id, &field), value);
             }
@@ -612,6 +956,12 @@ impl GpuiShell {
             self.text_inputs.insert(key, input);
         }
         self.sync_text_inputs(cx);
+        if !self.configuration_initial_load_requested
+            && self.configuration_action("get_configuration").is_some()
+        {
+            self.configuration_initial_load_requested = true;
+            self.load_configuration(cx);
+        }
     }
 
     fn sync_text_inputs(&mut self, cx: &mut Context<Self>) {
@@ -1674,6 +2024,1144 @@ impl GpuiShell {
         stack.into_any_element()
     }
 
+    fn configuration_workspace(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let document = self.configuration.document.clone();
+        let preview = self.configuration.preview.clone();
+        let history = self.configuration.history.clone();
+        let applied = self.configuration.applied.clone();
+        let validation_issues = self.configuration.validation_issues.clone();
+        let active_issue_path = self.configuration.active_issue_path.clone();
+        let selected_audit = self.configuration.selected_audit.clone();
+        let imported_from = self.configuration.imported_from.clone();
+        let candidate = self.configuration.candidate_json();
+        let show_candidate = self.configuration.show_candidate;
+        let confirm_apply = self.configuration.confirm_apply;
+        let rollback_target = self.configuration.rollback_target;
+        let error = self.configuration.error.clone();
+        let notice = self.configuration.notice.clone();
+        let operation = self.configuration.operation;
+        let dirty = self.configuration.is_dirty();
+        let can_apply = self.configuration.can_apply();
+        let apply_block = t(self.locale, self.configuration.apply_block_key()).to_string();
+        let busy = self.pending_commands > 0 || operation.is_some();
+        let load_available = self.configuration_available("get_configuration");
+        let history_available = self.configuration_available("get_configuration_history");
+        let preview_available = self.configuration_available("preview_configuration");
+        let apply_available = self.configuration_available("apply_configuration");
+        let rollback_available = self.configuration_available("rollback_configuration");
+        let apply_permission_block = self
+            .configuration_action_blocked("apply_configuration")
+            .map(|key| t(self.locale, key).to_string());
+        let rollback_permission_block = self
+            .configuration_action_blocked("rollback_configuration")
+            .map(|key| t(self.locale, key).to_string());
+        let editor = self.configuration_editor.clone();
+        let current_revision = document.as_ref().map(|document| document.revision);
+        let revision_label = document
+            .as_ref()
+            .map(|document| {
+                tr(
+                    self.locale,
+                    "configuration.revision",
+                    &[("revision", &document.revision.to_string())],
+                )
+            })
+            .unwrap_or_else(|| t(self.locale, "configuration.loading").to_string());
+
+        let reload_button = button(
+            SharedString::from("configuration-reload"),
+            t(self.locale, "configuration.reload_latest"),
+            ButtonVariant::Secondary,
+            busy || !load_available,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| shell.load_configuration(cx)));
+
+        let mut heading = div()
+            .id("configuration-heading")
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_4()
+            .p_5()
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .w(px(46.0))
+                    .h(px(46.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                    .border_1()
+                    .border_color(rgba(COLOR_ACCENT))
+                    .text_color(rgba(COLOR_ACCENT))
+                    .child("{ }"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(260.0))
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(
+                                t(self.locale, "configuration.eyebrow")
+                                    .to_string()
+                                    .to_uppercase(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(20.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "configuration.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "configuration.description").to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .border_1()
+                            .border_color(rgba(COLOR_BORDER))
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(revision_label),
+                    ),
+            );
+        if dirty {
+            heading = heading.child(sync_badge(
+                "configuration-dirty",
+                t(self.locale, "configuration.unsaved").to_string(),
+            ));
+        }
+        heading = heading.child(reload_button);
+
+        let mut editor_card =
+            div()
+                .id("configuration-editor-card")
+                .flex()
+                .flex_col()
+                .min_w(px(0.0))
+                .p_5()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .mb_4()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(
+                                            t(self.locale, "configuration.editor.eyebrow")
+                                                .to_string()
+                                                .to_uppercase(),
+                                        ),
+                                )
+                                .child(div().text_base().text_color(rgba(COLOR_TEXT)).child(
+                                    t(self.locale, "configuration.editor.title").to_string(),
+                                )),
+                        )
+                        .child(
+                            button(
+                                SharedString::from("configuration-import"),
+                                t(self.locale, "configuration.import"),
+                                ButtonVariant::Secondary,
+                                busy,
+                            )
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.import_configuration_file(cx)),
+                            ),
+                        ),
+                );
+        if let Some(source) = imported_from {
+            editor_card = editor_card.child(
+                div()
+                    .mb_2()
+                    .text_xs()
+                    .text_color(rgba(COLOR_ACCENT))
+                    .child(tr(
+                        self.locale,
+                        "configuration.imported_from",
+                        &[("file", &source)],
+                    )),
+            );
+        }
+        let editor_body = if let Some(editor) = editor {
+            div()
+                .w_full()
+                .h(px(470.0))
+                .overflow_hidden()
+                .rounded_md()
+                .bg(rgba(DARK_THEME.colors.input_background.rgba_hex()))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .flex()
+                .child(Textarea::new(&editor))
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .h(px(180.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "configuration.loading").to_string())
+                .into_any_element()
+        };
+        editor_card = editor_card
+            .child(editor_body)
+            .child(
+                div()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "configuration.editor.help").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .mt_4()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div().text_xs().text_color(rgba(COLOR_MUTED)).child(
+                            t(self.locale, "configuration.editor.networks_only").to_string(),
+                        ),
+                    )
+                    .child(
+                        button(
+                            SharedString::from("configuration-preview"),
+                            t(self.locale, "configuration.preview"),
+                            ButtonVariant::Primary,
+                            busy || document.is_none() || !preview_available,
+                        )
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.preview_configuration_draft(cx)),
+                        ),
+                    ),
+            );
+
+        let mut review_card =
+            div()
+                .id("configuration-review-card")
+                .flex()
+                .flex_col()
+                .min_w(px(0.0))
+                .p_5()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .mb_4()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(
+                                            t(self.locale, "configuration.review.eyebrow")
+                                                .to_string()
+                                                .to_uppercase(),
+                                        ),
+                                )
+                                .child(div().text_base().text_color(rgba(COLOR_TEXT)).child(
+                                    t(self.locale, "configuration.review.title").to_string(),
+                                )),
+                        )
+                        .when_some(preview.as_ref(), |this, preview| {
+                            this.child(
+                                div()
+                                    .rounded_full()
+                                    .px_2()
+                                    .py_1()
+                                    .bg(rgba(COLOR_PANEL_RAISED))
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(tr(
+                                        self.locale,
+                                        "configuration.diff_count",
+                                        &[("count", &preview.diffs.len().to_string())],
+                                    )),
+                            )
+                        }),
+                );
+
+        if let Some(preview) = preview.as_ref() {
+            if preview.revision_conflict {
+                review_card = review_card.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_3()
+                        .mb_3()
+                        .rounded_md()
+                        .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                        .border_1()
+                        .border_color(rgba(COLOR_WARNING))
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_sm()
+                                .text_color(rgba(COLOR_WARNING))
+                                .child(
+                                    t(self.locale, "configuration.revision_conflict").to_string(),
+                                ),
+                        )
+                        .child(div().text_xs().text_color(rgba(COLOR_WARNING)).child(tr(
+                            self.locale,
+                            "configuration.revision_conflict_detail",
+                            &[
+                                ("expected", &preview.expected_revision.to_string()),
+                                ("current", &preview.current_revision.to_string()),
+                            ],
+                        ))),
+                );
+            }
+
+            if !validation_issues.is_empty() {
+                let issues = validation_issues
+                    .iter()
+                    .enumerate()
+                    .map(|(index, issue)| {
+                        let path = issue.path.clone();
+                        let active = active_issue_path.as_deref() == Some(issue.path.as_str());
+                        div()
+                            .id(SharedString::from(format!("configuration-issue-{index}")))
+                            .role(Role::Button)
+                            .aria_label(format!("{} · {}", issue.path, issue.message))
+                            .focusable()
+                            .tab_stop(true)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_3()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgba(if active {
+                                DARK_THEME.colors.danger.rgba_hex()
+                            } else {
+                                COLOR_BORDER
+                            }))
+                            .bg(rgba(if active {
+                                DARK_THEME.colors.danger_soft.rgba_hex()
+                            } else {
+                                COLOR_PANEL_RAISED
+                            }))
+                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                shell.focus_configuration_issue(path.clone(), window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .text_color(rgba(DARK_THEME.colors.danger_text.rgba_hex()))
+                                    .child(issue.path.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(format!("{} · {}", issue.code, issue.message)),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>();
+                review_card = review_card.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .mb_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(tr(
+                                    self.locale,
+                                    "configuration.validation.title",
+                                    &[("count", &validation_issues.len().to_string())],
+                                )),
+                        )
+                        .children(issues),
+                );
+            }
+
+            let diffs = preview
+                .diffs
+                .iter()
+                .enumerate()
+                .map(|(index, diff)| {
+                    let impact = match diff.impact {
+                        ConfigurationImpact::Immediate => {
+                            t(self.locale, "configuration.impact.immediate").to_string()
+                        }
+                        ConfigurationImpact::RestartRequired => {
+                            t(self.locale, "configuration.impact.restart_required").to_string()
+                        }
+                    };
+                    let before = serde_json::to_string_pretty(&diff.before)
+                        .unwrap_or_else(|_| "null".to_string());
+                    let after = serde_json::to_string_pretty(&diff.after)
+                        .unwrap_or_else(|_| "null".to_string());
+                    div()
+                        .id(SharedString::from(format!("configuration-diff-{index}")))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgba(COLOR_PANEL_RAISED))
+                        .border_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .font_family("monospace")
+                                        .text_xs()
+                                        .text_color(rgba(COLOR_TEXT))
+                                        .child(diff.path.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .rounded_full()
+                                        .px_2()
+                                        .py_1()
+                                        .bg(rgba(
+                                            if diff.impact == ConfigurationImpact::Immediate {
+                                                DARK_THEME.colors.success_soft.rgba_hex()
+                                            } else {
+                                                DARK_THEME.colors.warning_soft.rgba_hex()
+                                            },
+                                        ))
+                                        .text_size(px(10.0))
+                                        .text_color(rgba(
+                                            if diff.impact == ConfigurationImpact::Immediate {
+                                                DARK_THEME.colors.success.rgba_hex()
+                                            } else {
+                                                COLOR_WARNING
+                                            },
+                                        ))
+                                        .child(impact),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_w(px(120.0))
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(rgba(COLOR_MUTED))
+                                                .child(
+                                                    t(self.locale, "configuration.before")
+                                                        .to_string(),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family("monospace")
+                                                .text_xs()
+                                                .text_color(rgba(COLOR_MUTED))
+                                                .child(before),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_w(px(120.0))
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(rgba(COLOR_MUTED))
+                                                .child(
+                                                    t(self.locale, "configuration.after")
+                                                        .to_string(),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family("monospace")
+                                                .text_xs()
+                                                .text_color(rgba(COLOR_TEXT))
+                                                .child(after),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            review_card = review_card.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .mb_4()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "configuration.diffs.title").to_string()),
+                    )
+                    .children(diffs),
+            );
+
+            if preview.diffs.is_empty() {
+                review_card = review_card.child(
+                    div()
+                        .mb_4()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "configuration.no_changes").to_string()),
+                );
+            }
+
+            if let Some(candidate) = candidate {
+                review_card = review_card.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .mb_4()
+                        .child(
+                            button(
+                                SharedString::from("configuration-toggle-candidate"),
+                                t(self.locale, "configuration.candidate.title"),
+                                ButtonVariant::Ghost,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.configuration.show_candidate =
+                                        !shell.configuration.show_candidate;
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .when(show_candidate, |this| {
+                            this.child(
+                                div()
+                                    .id("configuration-candidate")
+                                    .max_h(px(260.0))
+                                    .overflow_y_scroll()
+                                    .p_3()
+                                    .rounded_md()
+                                    .bg(rgba(DARK_THEME.colors.input_background.rgba_hex()))
+                                    .border_1()
+                                    .border_color(rgba(COLOR_BORDER))
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(candidate.clone()),
+                            )
+                        }),
+                );
+            }
+
+            let mut apply_bar = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .pt_4()
+                .border_t_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(if can_apply {
+                                    DARK_THEME.colors.success.rgba_hex()
+                                } else {
+                                    COLOR_WARNING
+                                }))
+                                .child(apply_block),
+                        )
+                        .when_some(apply_permission_block.clone(), |this, reason| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_WARNING))
+                                    .child(reason),
+                            )
+                        }),
+                );
+
+            if confirm_apply {
+                apply_bar = apply_bar.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_xs().text_color(rgba(COLOR_WARNING)).child(tr(
+                            self.locale,
+                            "configuration.apply.confirm_detail",
+                            &[
+                                ("count", &preview.diffs.len().to_string()),
+                                (
+                                    "revision",
+                                    &preview.candidate_revision.saturating_sub(1).to_string(),
+                                ),
+                            ],
+                        )))
+                        .child(
+                            button(
+                                SharedString::from("configuration-confirm-apply"),
+                                t(self.locale, "configuration.apply.confirm_action"),
+                                ButtonVariant::Danger,
+                                busy || !can_apply || !apply_available,
+                            )
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.apply_configuration_draft(cx)),
+                            ),
+                        )
+                        .child(
+                            button(
+                                SharedString::from("configuration-cancel-apply"),
+                                t(self.locale, "common.cancel"),
+                                ButtonVariant::Ghost,
+                                busy,
+                            )
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.configuration.confirm_apply = false;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                );
+            } else {
+                apply_bar = apply_bar.child(
+                    button(
+                        SharedString::from("configuration-apply"),
+                        t(self.locale, "configuration.apply"),
+                        ButtonVariant::Primary,
+                        busy || !can_apply || !apply_available,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        if shell.configuration.request_apply_confirmation() {
+                            cx.notify();
+                        }
+                    })),
+                );
+            }
+            review_card = review_card.child(apply_bar);
+        } else {
+            review_card = review_card.child(
+                div()
+                    .min_h(px(180.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .p_4()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .text_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "configuration.review.empty").to_string()),
+                    ),
+            );
+        }
+
+        let status_banner = error
+            .as_ref()
+            .map(|error| {
+                div()
+                    .id("configuration-error")
+                    .role(Role::Alert)
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(DARK_THEME.colors.danger_soft.rgba_hex()))
+                    .border_1()
+                    .border_color(rgba(DARK_THEME.colors.danger.rgba_hex()))
+                    .text_xs()
+                    .text_color(rgba(DARK_THEME.colors.danger_text.rgba_hex()))
+                    .child(error.clone())
+                    .into_any_element()
+            })
+            .or_else(|| {
+                notice.as_ref().map(|notice| {
+                    div()
+                        .id("configuration-notice")
+                        .role(Role::Status)
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgba(DARK_THEME.colors.info_soft.rgba_hex()))
+                        .border_1()
+                        .border_color(rgba(DARK_THEME.colors.info.rgba_hex()))
+                        .text_xs()
+                        .text_color(rgba(DARK_THEME.colors.info.rgba_hex()))
+                        .child(notice.clone())
+                        .into_any_element()
+                })
+            });
+
+        let applied_card = applied.map(|applied| {
+            let audit = applied.audit.clone();
+            div()
+                .id("configuration-applied")
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_5()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(
+                                            t(self.locale, "configuration.audit.eyebrow")
+                                                .to_string()
+                                                .to_uppercase(),
+                                        ),
+                                )
+                                .child(div().text_base().text_color(rgba(COLOR_TEXT)).child(
+                                    t(self.locale, "configuration.audit.title").to_string(),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .rounded_full()
+                                .px_2()
+                                .py_1()
+                                .bg(rgba(DARK_THEME.colors.success_soft.rgba_hex()))
+                                .text_xs()
+                                .text_color(rgba(DARK_THEME.colors.success.rgba_hex()))
+                                .child(
+                                    t(
+                                        self.locale,
+                                        if applied.no_op {
+                                            "configuration.applied.unchanged"
+                                        } else {
+                                            "configuration.applied.changed"
+                                        },
+                                    )
+                                    .to_string(),
+                                ),
+                        ),
+                )
+                .when_some(audit, |this, audit| {
+                    this.child(configuration_audit_details(self.locale, &audit))
+                })
+                .when(applied.audit.is_none(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "configuration.audit.unavailable").to_string()),
+                    )
+                })
+                .into_any_element()
+        });
+
+        let history_rows = history
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let entry = entry.clone();
+                let transaction_id = entry.transaction_id.clone();
+                let audit_open = selected_audit.as_deref() == Some(entry.transaction_id.as_str());
+                let target_confirmation = rollback_target == Some(entry.revision);
+                let is_current = current_revision == Some(entry.revision);
+                let action_label = match entry.action {
+                    ConfigurationChangeAction::Apply => {
+                        t(self.locale, "configuration.history.action.apply")
+                    }
+                    ConfigurationChangeAction::Rollback => {
+                        t(self.locale, "configuration.history.action.rollback")
+                    }
+                };
+                let rollback_target_revision = entry.revision;
+                let details_entry = entry.clone();
+                let mut row = div()
+                    .id(SharedString::from(format!("configuration-history-{index}")))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight(600.0))
+                                            .text_sm()
+                                            .text_color(rgba(COLOR_TEXT))
+                                            .child(tr(
+                                                self.locale,
+                                                "configuration.history.revision",
+                                                &[("revision", &entry.revision.to_string())],
+                                            )),
+                                    )
+                                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(
+                                        format!(
+                                                "{action_label}{}",
+                                                entry
+                                                    .target_revision
+                                                    .map(|target| tr(
+                                                        self.locale,
+                                                        "configuration.history.target_value",
+                                                        &[("revision", &target.to_string())],
+                                                    ))
+                                                    .unwrap_or_default()
+                                            ),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(format!("{} · {}", entry.actor, entry.source)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_family("monospace")
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(entry.occurred_at.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "configuration-history-details-{index}"
+                                    )),
+                                    t(self.locale, "configuration.history.details"),
+                                    ButtonVariant::Ghost,
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.configuration.select_audit(transaction_id.clone());
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "configuration-history-rollback-{index}"
+                                    )),
+                                    if is_current {
+                                        t(self.locale, "configuration.rollback.current")
+                                    } else {
+                                        t(self.locale, "configuration.rollback.action")
+                                    },
+                                    ButtonVariant::Secondary,
+                                    busy || is_current
+                                        || !rollback_available
+                                        || rollback_target.is_some(),
+                                )
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        if shell
+                                            .configuration
+                                            .request_rollback_confirmation(rollback_target_revision)
+                                        {
+                                            cx.notify();
+                                        }
+                                    },
+                                )),
+                            ),
+                    );
+                if audit_open {
+                    row = row.child(configuration_audit_details(self.locale, &details_entry));
+                }
+                if target_confirmation {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                            .border_1()
+                            .border_color(rgba(COLOR_WARNING))
+                            .child(div().text_xs().text_color(rgba(COLOR_WARNING)).child(tr(
+                                self.locale,
+                                "configuration.rollback.confirm_detail",
+                                &[
+                                    ("current", &current_revision.unwrap_or_default().to_string()),
+                                    ("target", &entry.revision.to_string()),
+                                ],
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        button(
+                                            SharedString::from(format!(
+                                                "configuration-confirm-rollback-{index}"
+                                            )),
+                                            t(self.locale, "configuration.rollback.confirm_action"),
+                                            ButtonVariant::Danger,
+                                            busy || !rollback_available,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |shell, _, _, cx| {
+                                                shell.rollback_configuration_to(entry.revision, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        button(
+                                            SharedString::from(format!(
+                                                "configuration-cancel-rollback-{index}"
+                                            )),
+                                            t(self.locale, "common.cancel"),
+                                            ButtonVariant::Ghost,
+                                            busy,
+                                        )
+                                        .on_click(
+                                            cx.listener(|shell, _, _, cx| {
+                                                shell.configuration.rollback_target = None;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    );
+                }
+                row.into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        let history_card =
+            div()
+                .id("configuration-history")
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_5()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(
+                                            t(self.locale, "configuration.history.eyebrow")
+                                                .to_string()
+                                                .to_uppercase(),
+                                        ),
+                                )
+                                .child(div().text_base().text_color(rgba(COLOR_TEXT)).child(
+                                    t(self.locale, "configuration.history.title").to_string(),
+                                )),
+                        )
+                        .child(
+                            button(
+                                SharedString::from("configuration-history-refresh"),
+                                t(self.locale, "configuration.history.refresh"),
+                                ButtonVariant::Secondary,
+                                busy || !history_available,
+                            )
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.load_configuration_history(cx)),
+                            ),
+                        ),
+                )
+                .when_some(rollback_permission_block, |this, reason| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_WARNING))
+                            .child(reason),
+                    )
+                })
+                .when(history_rows.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .min_h(px(120.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgba(COLOR_BORDER))
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "configuration.history.empty").to_string()),
+                    )
+                })
+                .children(history_rows);
+
+        let mut workspace = div()
+            .id("configuration-workspace")
+            .role(Role::Form)
+            .aria_label(t(self.locale, "configuration.title").to_string())
+            .flex()
+            .flex_col()
+            .gap_4()
+            .mt_5()
+            .child(heading)
+            .when_some(status_banner, |this, status| this.child(status))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_4()
+                    .child(div().flex_1().min_w(px(360.0)).child(editor_card))
+                    .child(div().flex_1().min_w(px(360.0)).child(review_card)),
+            )
+            .when_some(applied_card, |this, applied| this.child(applied))
+            .child(history_card);
+        if busy {
+            workspace =
+                workspace.child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
+                    "{} · {:?}",
+                    t(self.locale, "common.operation_in_progress"),
+                    operation
+                )));
+        }
+        workspace.into_any_element()
+    }
+
     fn page_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
@@ -1785,6 +3273,14 @@ impl GpuiShell {
                 .gap_4()
                 .children(model.sections.iter().map(section_card)),
         );
+        let has_configuration_actions = selected_page.is_some_and(|page| {
+            page.actions
+                .iter()
+                .any(|action| is_configuration_action(&action.id))
+        });
+        if has_configuration_actions {
+            content = content.child(self.configuration_workspace(cx));
+        }
 
         content.into_any_element()
     }
@@ -2046,7 +3542,10 @@ impl GpuiShell {
             .page()
             .cloned()
             .map(|page| page.actions)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|action| !is_configuration_action(&action.id))
+            .collect::<Vec<_>>();
         let action_cards = actions
             .into_iter()
             .map(|action| self.action_card(action, cx))
@@ -2116,6 +3615,7 @@ impl Render for GpuiShell {
         debug_assert_eq!(APP_REGION_ORDER, AppRegion::ALL);
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
         let presentation = ActionPanelPresentation::for_layout(layout);
+        self.sync_configuration_editor(window, cx);
         let content = self.page_content(cx);
         let action_panel = self.action_panel(layout, cx);
         let workspace = if presentation == ActionPanelPresentation::Stacked {
@@ -2293,6 +3793,119 @@ fn page_icon(id: &str) -> &'static str {
         Some(PageKind::Settings) => "⚙",
         None => "·",
     }
+}
+
+fn configuration_audit_details(
+    locale: Locale,
+    audit: &ConfigurationHistoryEntry,
+) -> gpui::AnyElement {
+    let field = |label: String, value: String, monospace: bool| {
+        let mut value_element = div().text_sm().text_color(rgba(COLOR_TEXT)).child(value);
+        if monospace {
+            value_element = value_element.font_family("monospace");
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_w(px(150.0))
+            .p_2()
+            .rounded_sm()
+            .bg(rgba(COLOR_BG))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(label),
+            )
+            .child(value_element)
+            .into_any_element()
+    };
+
+    let mut details = div()
+        .id(SharedString::from(format!(
+            "configuration-audit-{}",
+            audit.transaction_id
+        )))
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .child(field(
+            t(locale, "configuration.history.revision").to_string(),
+            audit.revision.to_string(),
+            false,
+        ))
+        .child(field(
+            t(locale, "configuration.history.previous").to_string(),
+            audit.previous_revision.to_string(),
+            false,
+        ))
+        .child(field(
+            t(locale, "configuration.history.actor").to_string(),
+            audit.actor.clone(),
+            false,
+        ))
+        .child(field(
+            t(locale, "configuration.history.source").to_string(),
+            audit.source.clone(),
+            false,
+        ))
+        .child(field(
+            t(locale, "configuration.history.transaction").to_string(),
+            audit.transaction_id.clone(),
+            true,
+        ))
+        .child(field(
+            t(locale, "configuration.history.time").to_string(),
+            audit.occurred_at.clone(),
+            true,
+        ));
+    if let Some(target) = audit.target_revision {
+        details = details.child(field(
+            t(locale, "configuration.history.target").to_string(),
+            target.to_string(),
+            false,
+        ));
+    }
+    details
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .p_2()
+                .rounded_sm()
+                .bg(rgba(COLOR_BG))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(locale, "configuration.history.changed_paths").to_string()),
+                )
+                .children(if audit.changed_paths.is_empty() {
+                    vec![div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(locale, "configuration.history.no_changes").to_string())
+                        .into_any_element()]
+                } else {
+                    audit
+                        .changed_paths
+                        .iter()
+                        .map(|path| {
+                            div()
+                                .font_family("monospace")
+                                .text_xs()
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(path.clone())
+                                .into_any_element()
+                        })
+                        .collect()
+                }),
+        )
+        .into_any_element()
 }
 
 fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
@@ -2484,6 +4097,7 @@ pub fn run_window(
     let error_slot = open_error.clone();
 
     gpui_platform::application().run(move |cx: &mut App| {
+        gpui_base::init(cx);
         super::text_input::bind_keys(cx);
         bind_shell_keys(cx);
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());

@@ -1652,6 +1652,67 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_applies_with_the_same_revision_commit_exactly_once() {
+        let (root, names, store) = fixture(&["home"]);
+        let baseline = document_map(&store, &names);
+        let mut first_candidate = baseline.clone();
+        first_candidate
+            .get_mut("home")
+            .and_then(Value::as_object_mut)
+            .expect("home")
+            .insert(
+                "coordinator_url".into(),
+                serde_json::json!("ws://first.example:6666"),
+            );
+        let mut second_candidate = baseline;
+        second_candidate
+            .get_mut("home")
+            .and_then(Value::as_object_mut)
+            .expect("home")
+            .insert(
+                "coordinator_url".into(),
+                serde_json::json!("ws://second.example:6666"),
+            );
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = [first_candidate, second_candidate]
+            .into_iter()
+            .map(|candidate| {
+                let store = store.clone();
+                let names = names.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.apply(1, &names, candidate, "owner", "concurrency-test")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut successes = 0;
+        let mut conflicts = 0;
+        for result in handles
+            .into_iter()
+            .map(|handle| handle.join().expect("apply thread"))
+        {
+            match result {
+                Ok(result) => {
+                    successes += 1;
+                    assert_eq!(result.revision, 2);
+                }
+                Err(ConfigurationTransactionError::RevisionConflict { expected, current }) => {
+                    conflicts += 1;
+                    assert_eq!((expected, current), (1, 2));
+                }
+                Err(error) => panic!("unexpected concurrent apply error: {error}"),
+            }
+        }
+        assert_eq!((successes, conflicts), (1, 1));
+        assert_eq!(store.current_document(&names).unwrap().revision, 2);
+        assert_eq!(store.history(&names).expect("history").len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn apply_commits_every_network_atomically_and_creates_audit_history() {
         let (root, names, store) = fixture(&["home", "office"]);
         let mut candidate = document_map(&store, &names);

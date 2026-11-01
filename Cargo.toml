@@ -62,6 +62,7 @@ ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc", "g
 # AccessKit、EntityInputHandler、原生路径选择器和系统菜单 API。
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["wayland", "x11"] }
+gpui-base = { version = "=0.8.0", default-features = false }
 
 # gpui 的 xattr 0.2.3 仍引用 Linux libc::ENOATTR；0.2.191 已移除该常量。
 libc = "=0.2.186"

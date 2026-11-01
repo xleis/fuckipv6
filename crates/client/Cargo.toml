@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["gpui-shell"]
-gpui-shell = ["dep:gpui", "dep:gpui-platform"]
+gpui-shell = ["dep:gpui", "dep:gpui-platform", "dep:gpui-base"]
 secure-lock-metrics = []
 userspace-nat-prototype = []
 
@@ -80,6 +80,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), windows, target_os = "macos"))'.dependencies]
 gpui = { workspace = true, optional = true }
 gpui-platform = { workspace = true, optional = true }
+gpui-base = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

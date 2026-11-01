@@ -1,4 +1,5 @@
 pub mod components;
+mod configuration_workflow;
 #[allow(dead_code)]
 mod path_picker;
 mod session;

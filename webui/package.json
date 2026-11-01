@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest"
+    "test": "vitest",
+    "visual:snapshot": "node scripts/visual-snapshot.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.16",

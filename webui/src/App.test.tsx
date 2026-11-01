@@ -155,6 +155,62 @@ describe("React WebUI shell", () => {
     await expectModuleTabs("settings", ["settings"]);
   });
 
+  it("renders five read-only settings groups with explicit platform limits", async () => {
+    authenticate({
+      ...populatedSnapshot,
+      ui_mode: {
+        display: "headless",
+        effective: "web_ui",
+        gpui_available: false,
+        requested: "auto",
+      },
+      recent_activity: [activityAt(1)],
+    });
+    const user = userEvent.setup();
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.settings" }),
+    );
+    await screen.findByRole("heading", { name: "translated:page.settings" });
+
+    const grid = container.querySelector<HTMLElement>(".settings-grid");
+    expect(grid).toBeInTheDocument();
+    const groups = Array.from(
+      grid?.querySelectorAll<HTMLElement>("[data-settings-group]") ?? [],
+    );
+    expect(groups.map((group) => group.dataset.settingsGroup)).toEqual([
+      "owner-security",
+      "remote-access",
+      "services-updates",
+      "discovery-index",
+      "data-recovery",
+    ]);
+    expect(groups.map((group) => group.querySelector("h3")?.textContent)).toEqual([
+      "translated:settings.section.owner_security",
+      "translated:settings.section.remote_access",
+      "translated:settings.section.services_updates",
+      "translated:settings.section.discovery_index",
+      "translated:settings.section.data_recovery",
+    ]);
+
+    expect(groups[0]).toHaveTextContent("Visual Fixture Node");
+    expect(groups[0]).toHaveTextContent("node-visual-01");
+    expect(groups[0]).toHaveTextContent(
+      "translated:choice.permission.manage_networks",
+    );
+    expect(groups[1]).toHaveTextContent("translated:settings.webui_configuration.detail");
+    expect(groups[2]).toHaveTextContent("translated:capability.file");
+    expect(groups[2]).toHaveTextContent("translated:status.capability.unsupported");
+    expect(groups[2]).toHaveTextContent("translated:settings.platform_limitations.detail");
+    expect(groups[2]).not.toHaveTextContent("translated:settings.platform_limitations.none");
+    expect(groups[3]).toHaveTextContent("translated:settings.discovery_index.detail");
+    expect(groups[4]).toHaveTextContent("translated:settings.value.read_only");
+    expect(groups[4]).toHaveTextContent("translated:settings.read_only.detail");
+    expect(grid?.querySelector("button, input, select, textarea")).toBeNull();
+  });
+
   it("exposes the shared four-region shell with a persistent action panel", async () => {
     authenticate();
     const { container } = renderApp();

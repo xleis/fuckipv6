@@ -13,7 +13,7 @@ use crate::node::{
     NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
     NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
-use crate::ui::UiMode;
+use crate::ui::{DisplayEnvironment, UiMode};
 
 /// Typed views supported by the native adapter. Keeping this closed set separate
 /// from page strings makes an unknown manifest page fail closed rather than
@@ -1959,46 +1959,110 @@ fn project_settings(
     snapshot: &NodeSnapshot,
     locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
-    let permission_rows = snapshot
+    let granted_permissions = snapshot
         .permissions
         .permissions
         .iter()
-        .map(|permission| {
+        .map(|permission| t(locale, permission_key(*permission)))
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"));
+    let owner_rows = vec![
+        row(
+            t(locale, "settings.row.owner_identity"),
+            snapshot
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.display_name.as_deref())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(t(locale, "common.unknown")),
+        ),
+        row(
+            t(locale, "settings.row.node_id"),
+            snapshot
+                .identity
+                .as_ref()
+                .map(|identity| identity.node_id.clone())
+                .unwrap_or_else(|| t(locale, "common.not_available").into()),
+        ),
+        row(
+            t(locale, "settings.row.public_key_fingerprint"),
+            snapshot
+                .identity
+                .as_ref()
+                .map(|identity| identity.public_key_fingerprint.clone())
+                .unwrap_or_else(|| t(locale, "common.not_available").into()),
+        ),
+        row(
+            t(locale, "settings.row.access_model"),
+            t(locale, access_model_key(snapshot.permissions.access_model)),
+        ),
+        row(
+            t(locale, "settings.row.granted_permissions"),
+            if granted_permissions.is_empty() {
+                t(locale, "common.none").into()
+            } else {
+                granted_permissions
+            },
+        ),
+        row(
+            t(locale, "settings.row.web_authentication"),
+            t(locale, "settings.web_session.detail"),
+        ),
+        row(
+            t(locale, "settings.row.owner_recovery"),
+            t(locale, "settings.owner_recovery.detail"),
+        ),
+    ];
+    let remote_rows = vec![
+        row(
+            t(locale, "settings.row.effective_ui"),
+            snapshot
+                .ui_mode
+                .as_ref()
+                .map(|mode| t(locale, ui_mode_key(mode.effective)))
+                .unwrap_or_else(|| t(locale, "common.unknown")),
+        ),
+        row(
+            t(locale, "settings.row.display_environment"),
+            snapshot
+                .ui_mode
+                .as_ref()
+                .map(|mode| t(locale, display_environment_key(mode.display)))
+                .unwrap_or_else(|| t(locale, "common.unknown")),
+        ),
+        row(
+            t(locale, "settings.row.webui_configuration"),
+            t(locale, "settings.webui_configuration.detail"),
+        ),
+        row(
+            t(locale, "settings.row.session_security"),
+            t(locale, "settings.web_session.detail"),
+        ),
+    ];
+    let mut service_rows = snapshot
+        .capabilities
+        .capabilities
+        .iter()
+        .map(|capability| {
             row(
-                t(locale, permission_key(*permission)),
-                t(locale, "gpui.value.granted"),
+                t(locale, capability_key(capability.kind)),
+                t(locale, capability_state_key(capability.state)),
             )
         })
         .collect::<Vec<_>>();
-    let config_rows = snapshot
-        .configuration
-        .networks
-        .iter()
-        .map(|network| {
-            let log_file = display_bool(locale, network.log_file_configured);
-            let acl_enabled = display_bool(locale, network.acl_enabled);
-            let acl_default = t(locale, acl_action_key(network.acl_default_action));
-            let acl_rules = network.acl_rule_count.to_string();
-            row(
-                network.network_name.clone(),
-                tr(
-                    locale,
-                    "gpui.settings_network_detail",
-                    &[
-                        ("log_level", &network.log_level),
-                        ("log_file", log_file),
-                        ("acl_enabled", acl_enabled),
-                        ("acl_default", acl_default),
-                        ("acl_rules", &acl_rules),
-                    ],
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    let service_rows = snapshot
-        .embedded_services
-        .iter()
-        .map(|service| {
+    if service_rows.is_empty() {
+        service_rows.push(row(
+            t(locale, "settings.row.capabilities"),
+            t(locale, "common.unknown"),
+        ));
+    }
+    if snapshot.embedded_services.is_empty() {
+        service_rows.push(row(
+            t(locale, "settings.row.embedded_services"),
+            t(locale, "common.none"),
+        ));
+    } else {
+        service_rows.extend(snapshot.embedded_services.iter().map(|service| {
             let status = t(locale, embedded_service_status_key(service.status));
             let signaling = display_option(locale, service.signaling_addr);
             let relay = display_option(locale, service.relay_addr);
@@ -2014,45 +2078,139 @@ fn project_settings(
                     ],
                 ),
             )
+        }));
+    }
+    service_rows.push(row(
+        t(locale, "settings.row.update_configuration"),
+        t(locale, "settings.updates.detail"),
+    ));
+    let unsupported_capabilities = snapshot
+        .capabilities
+        .capabilities
+        .iter()
+        .filter(|capability| capability.state == CapabilityState::Unsupported)
+        .map(|capability| t(locale, capability_key(capability.kind)))
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"));
+    let unsupported_reasons = snapshot
+        .exit_node_capabilities
+        .unsupported_reasons
+        .iter()
+        .map(|reason| t(locale, exit_node_unsupported_reason_key(*reason)))
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"));
+    let platform_limitations =
+        if unsupported_capabilities.is_empty() && unsupported_reasons.is_empty() {
+            t(locale, "settings.platform_limitations.none").to_string()
+        } else {
+            let capabilities = if unsupported_capabilities.is_empty() {
+                t(locale, "capability.exit")
+            } else {
+                &unsupported_capabilities
+            };
+            let mut detail = tr(
+                locale,
+                "settings.platform_limitations.detail",
+                &[("capabilities", capabilities)],
+            );
+            if !unsupported_reasons.is_empty() {
+                detail.push_str(t(locale, "common.list_separator"));
+                detail.push_str(&tr(
+                    locale,
+                    "settings.platform_limitations.reasons",
+                    &[("reasons", &unsupported_reasons)],
+                ));
+            }
+            detail
+        };
+    service_rows.push(row(
+        t(locale, "settings.row.platform_limitations"),
+        platform_limitations,
+    ));
+    let discovery_roles = snapshot
+        .networks
+        .iter()
+        .filter(|network| network.roles.contains(&NodeNetworkRole::Discovery))
+        .map(|network| {
+            format!(
+                "{} · {}",
+                network.name,
+                t(locale, network_status_key(network.status))
+            )
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"));
+    let discovery_rows = vec![
+        row(
+            t(locale, "settings.row.discovery_roles"),
+            if discovery_roles.is_empty() {
+                t(locale, "settings.discovery_roles.none").into()
+            } else {
+                discovery_roles
+            },
+        ),
+        row(
+            t(locale, "settings.row.discovery_index"),
+            t(locale, "settings.discovery_index.detail"),
+        ),
+        row(
+            t(locale, "settings.row.custom_discovery_index"),
+            t(locale, "settings.custom_index.detail"),
+        ),
+    ];
+    let data_rows = vec![
+        row(
+            t(locale, "settings.row.snapshot_revision"),
+            snapshot.revision.to_string(),
+        ),
+        row(
+            t(locale, "settings.row.configured_networks"),
+            snapshot.configuration.networks.len().to_string(),
+        ),
+        row(
+            t(locale, "settings.row.recent_activity"),
+            snapshot.recent_activity.len().to_string(),
+        ),
+        row(
+            t(locale, "settings.row.backup_restore"),
+            t(locale, "settings.backup.detail"),
+        ),
+        row(
+            t(locale, "settings.row.write_mode"),
+            format!(
+                "{} · {}",
+                t(locale, "settings.value.read_only"),
+                t(locale, "settings.read_only.detail")
+            ),
+        ),
+    ];
     (
-        vec![
-            metric(
-                t(locale, "gpui.metric.node_phase"),
-                t(locale, phase_key(snapshot.lifecycle.phase)),
-                "NodeLifecycleSnapshot.phase",
-            ),
-            metric(
-                t(locale, "gpui.metric.access_model"),
-                t(locale, access_model_key(snapshot.permissions.access_model)),
-                "NodePermissionSnapshot.access_model",
-            ),
-            metric(
-                t(locale, "gpui.metric.ui_mode"),
-                snapshot
-                    .ui_mode
-                    .as_ref()
-                    .map(|mode| t(locale, ui_mode_key(mode.effective)))
-                    .unwrap_or_else(|| t(locale, "common.unknown")),
-                "NodeSnapshot.ui_mode",
-            ),
-        ],
+        Vec::new(),
         vec![
             section(
-                t(locale, "gpui.section.permission_snapshot"),
-                t(locale, "gpui.empty.permissions"),
-                permission_rows,
+                t(locale, "settings.section.owner_security"),
+                t(locale, "common.no_data"),
+                owner_rows,
             ),
             section(
-                t(locale, "gpui.section.network_settings"),
-                t(locale, "gpui.empty.network_settings"),
-                config_rows,
+                t(locale, "settings.section.remote_access"),
+                t(locale, "common.not_available"),
+                remote_rows,
             ),
             section(
-                t(locale, "gpui.section.embedded_services"),
+                t(locale, "settings.section.services_updates"),
                 t(locale, "gpui.empty.embedded_services"),
                 service_rows,
+            ),
+            section(
+                t(locale, "settings.section.discovery_index"),
+                t(locale, "settings.discovery_index.detail"),
+                discovery_rows,
+            ),
+            section(
+                t(locale, "settings.section.data_recovery"),
+                t(locale, "common.no_data"),
+                data_rows,
             ),
         ],
     )
@@ -2076,6 +2234,27 @@ fn embedded_service_status_key(status: NodeEmbeddedServiceStatus) -> &'static st
         NodeEmbeddedServiceStatus::Stopping => "status.service.stopping",
         NodeEmbeddedServiceStatus::Stopped => "status.service.stopped",
         NodeEmbeddedServiceStatus::Failed => "status.service.failed",
+    }
+}
+
+fn capability_key(kind: CapabilityKind) -> &'static str {
+    match kind {
+        CapabilityKind::Coordinator => "capability.coordinator",
+        CapabilityKind::Relay => "capability.relay",
+        CapabilityKind::Exit => "capability.exit",
+        CapabilityKind::File => "capability.file",
+    }
+}
+
+fn capability_state_key(state: CapabilityState) -> &'static str {
+    match state {
+        CapabilityState::Enabled => "status.capability.enabled",
+        CapabilityState::Disabled => "status.capability.disabled",
+        CapabilityState::Degraded => "status.capability.degraded",
+        CapabilityState::Starting => "status.capability.starting",
+        CapabilityState::Unavailable => "status.capability.unavailable",
+        CapabilityState::Unsupported => "status.capability.unsupported",
+        CapabilityState::Unknown => "status.capability.unknown",
     }
 }
 
@@ -2108,16 +2287,6 @@ fn permission_key(permission: NodePermission) -> &'static str {
     }
 }
 
-fn phase_key(phase: NodePhase) -> &'static str {
-    match phase {
-        NodePhase::Stopped => "choice.phase.stopped",
-        NodePhase::Starting => "choice.phase.starting",
-        NodePhase::Running => "choice.phase.running",
-        NodePhase::Stopping => "choice.phase.stopping",
-        NodePhase::Failed => "choice.phase.failed",
-    }
-}
-
 fn access_model_key(model: crate::node::NodeAccessModel) -> &'static str {
     match model {
         crate::node::NodeAccessModel::TrustedControlPlane => {
@@ -2134,10 +2303,13 @@ fn ui_mode_key(mode: UiMode) -> &'static str {
     }
 }
 
-fn acl_action_key(action: fuckipv6_common::AclAction) -> &'static str {
-    match action {
-        fuckipv6_common::AclAction::Allow => "choice.acl.allow",
-        fuckipv6_common::AclAction::Deny => "choice.acl.deny",
+fn display_environment_key(display: DisplayEnvironment) -> &'static str {
+    match display {
+        DisplayEnvironment::LinuxX11 => "choice.display_environment.linux_x11",
+        DisplayEnvironment::LinuxWayland => "choice.display_environment.linux_wayland",
+        DisplayEnvironment::WindowsDesktop => "choice.display_environment.windows_desktop",
+        DisplayEnvironment::MacosDesktop => "choice.display_environment.macos_desktop",
+        DisplayEnvironment::Headless => "choice.display_environment.headless",
     }
 }
 
@@ -2375,6 +2547,91 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["create_network", "discover_networks", "join_network"]
         );
+    }
+
+    #[test]
+    fn settings_projects_five_read_only_groups_and_platform_limitations() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "settings")
+            .expect("settings page");
+        let mut snapshot = populated_snapshot();
+        snapshot.ui_mode = Some(crate::ui::UiModeResolution {
+            requested: crate::ui::UiModeRequest::Auto,
+            effective: UiMode::WebUi,
+            display: crate::ui::DisplayEnvironment::Headless,
+            gpui_available: false,
+        });
+        snapshot.networks[0].roles.push(NodeNetworkRole::Discovery);
+        snapshot.refresh_capability_states();
+
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("settings model");
+        assert!(model.metrics.is_empty());
+        assert_eq!(
+            model
+                .sections
+                .iter()
+                .map(|section| section.title.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                t(Locale::ZhCn, "settings.section.owner_security"),
+                t(Locale::ZhCn, "settings.section.remote_access"),
+                t(Locale::ZhCn, "settings.section.services_updates"),
+                t(Locale::ZhCn, "settings.section.discovery_index"),
+                t(Locale::ZhCn, "settings.section.data_recovery"),
+            ]
+        );
+        assert!(model
+            .sections
+            .iter()
+            .all(|section| !section.rows.is_empty()));
+
+        let owner = &model.sections[0];
+        assert!(owner.rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.node_id") && row.detail == "node-1"
+        }));
+        assert!(owner.rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.granted_permissions")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "choice.permission.manage_networks"))
+        }));
+
+        let services = &model.sections[2];
+        let platform_limits = services
+            .rows
+            .iter()
+            .find(|row| row.title == t(Locale::ZhCn, "settings.row.platform_limitations"))
+            .expect("platform limitations row");
+        assert!(platform_limits
+            .detail
+            .contains(t(Locale::ZhCn, "capability.file")));
+        assert!(services
+            .rows
+            .iter()
+            .any(|row| row.detail == t(Locale::ZhCn, "status.capability.unsupported")));
+
+        let discovery = &model.sections[3];
+        assert!(discovery.rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.discovery_roles")
+                && row.detail.contains("home")
+        }));
+
+        let data = &model.sections[4];
+        let write_mode = data
+            .rows
+            .iter()
+            .find(|row| row.title == t(Locale::ZhCn, "settings.row.write_mode"))
+            .expect("write mode row");
+        assert!(write_mode
+            .detail
+            .contains(t(Locale::ZhCn, "settings.value.read_only")));
+        assert!(write_mode
+            .detail
+            .contains(t(Locale::ZhCn, "settings.read_only.detail")));
     }
 
     #[test]

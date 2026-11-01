@@ -29,7 +29,7 @@ import {
   WifiOff,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useRef, type JSX } from "react";
+import { useMemo, useRef, type JSX, type ReactNode } from "react";
 import type {
   ActivityEntry,
   NodeLogEntry,
@@ -931,6 +931,28 @@ function Identity({
   );
 }
 
+function SettingsSection({
+  group,
+  title,
+  icon: Icon,
+  children,
+}: {
+  group: string;
+  title: string;
+  icon: LucideIcon;
+  children: ReactNode;
+}) {
+  return (
+    <section className="surface-card settings-section" data-settings-group={group}>
+      <div className="card-heading">
+        <h3>{title}</h3>
+        <Icon size={17} />
+      </div>
+      {children}
+    </section>
+  );
+}
+
 function Settings({
   snapshot,
   locale,
@@ -938,63 +960,246 @@ function Settings({
   PageContentProps,
   "page" | "selectedNetwork" | "onSelectNetwork" | "onNavigate"
 >) {
+  const permissions = snapshot.permissions?.permissions ?? [];
+  const permissionText = permissions.length
+    ? permissions
+        .map((permission) => label(locale, `choice.permission.${permission}`))
+        .join(label(locale, "common.list_separator"))
+    : label(locale, "common.none");
+  const capabilities = snapshot.capabilities?.capabilities ?? [];
+  const embeddedServices = snapshot.embedded_services ?? [];
+  const unsupportedCapabilities = capabilities
+    .filter((capability) => capability.state === "unsupported")
+    .map((capability) => label(locale, `capability.${capability.kind}`));
+  const unsupportedReasons = (
+    snapshot.exit_node_capabilities?.unsupported_reasons ?? []
+  ).map((reason) => label(locale, `exit_node.unsupported_reason.${reason}`));
+  const platformLimitations =
+    unsupportedCapabilities.length === 0 && unsupportedReasons.length === 0
+      ? label(locale, "settings.platform_limitations.none")
+      : [
+          tr(locale, "settings.platform_limitations.detail", {
+            capabilities:
+              unsupportedCapabilities.join(label(locale, "common.list_separator")) ||
+              label(locale, "capability.exit"),
+          }),
+          unsupportedReasons.length
+            ? tr(locale, "settings.platform_limitations.reasons", {
+                reasons: unsupportedReasons.join(
+                  label(locale, "common.list_separator"),
+                ),
+              })
+            : "",
+        ]
+          .filter(Boolean)
+          .join(label(locale, "common.list_separator"));
+  const discoveryRoles = snapshot.networks
+    .filter((network) => network.roles.includes("discovery"))
+    .map(
+      (network) =>
+        `${network.name} · ${label(locale, `status.network.${network.status}`)}`,
+    )
+    .join(label(locale, "common.list_separator"));
+
   return (
     <div className="settings-grid">
-      <section className="surface-card">
-        <div className="card-heading">
-          <h3>{label(locale, "settings.row.permissions")}</h3>
-          <ShieldCheck size={17} />
-        </div>
-        <div className="chip-list">
-          {snapshot.permissions?.permissions.map((permission) => (
-            <span className="data-chip" key={permission}>
-              {permission}
-            </span>
-          )) ?? empty(label(locale, "common.no_data"))}
-        </div>
-      </section>
-      <section className="surface-card">
-        <div className="card-heading">
-          <h3>{label(locale, "settings.row.ui_mode")}</h3>
-          <Cpu size={17} />
-        </div>
+      <SettingsSection
+        group="owner-security"
+        title={label(locale, "settings.section.owner_security")}
+        icon={ShieldCheck}
+      >
         <dl className="detail-list">
           <div>
-            <dt>{label(locale, "settings.row.access_model")}</dt>
+            <dt>{label(locale, "settings.row.owner_identity")}</dt>
             <dd>
-              {snapshot.permissions?.access_model ?? "trusted_control_plane"}
+              {snapshot.identity?.display_name?.trim() ||
+                label(locale, "common.unknown")}
             </dd>
           </div>
           <div>
-            <dt>Mode</dt>
-            <dd>{snapshot.ui_mode?.effective ?? "web_ui"}</dd>
+            <dt>{label(locale, "settings.row.node_id")}</dt>
+            <dd>
+              <code>
+                {snapshot.identity?.node_id ??
+                  label(locale, "common.not_available")}
+              </code>
+            </dd>
           </div>
           <div>
-            <dt>Environment</dt>
-            <dd>{snapshot.ui_mode?.display ?? "headless"}</dd>
+            <dt>{label(locale, "settings.row.public_key_fingerprint")}</dt>
+            <dd>
+              <code>
+                {snapshot.identity?.public_key_fingerprint ??
+                  label(locale, "common.not_available")}
+              </code>
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.access_model")}</dt>
+            <dd>
+              {label(
+                locale,
+                `choice.access_model.${snapshot.permissions?.access_model ?? "trusted_control_plane"}`,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.granted_permissions")}</dt>
+            <dd>{permissionText}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.web_authentication")}</dt>
+            <dd>{label(locale, "settings.web_session.detail")}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.owner_recovery")}</dt>
+            <dd>{label(locale, "settings.owner_recovery.detail")}</dd>
           </div>
         </dl>
-      </section>
-      <section className="surface-card">
-        <div className="card-heading">
-          <h3>{label(locale, "common.runtime_status")}</h3>
-          <Server size={17} />
-        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        group="remote-access"
+        title={label(locale, "settings.section.remote_access")}
+        icon={Globe2}
+      >
         <dl className="detail-list">
           <div>
-            <dt>{label(locale, "common.primary_status")}</dt>
-            <dd>{primaryStatus(snapshot, locale).label}</dd>
+            <dt>{label(locale, "settings.row.effective_ui")}</dt>
+            <dd>
+              {snapshot.ui_mode
+                ? label(locale, `choice.ui_mode.${snapshot.ui_mode.effective}`)
+                : label(locale, "common.unknown")}
+            </dd>
           </div>
           <div>
-            <dt>{label(locale, "common.revision")}</dt>
+            <dt>{label(locale, "settings.row.display_environment")}</dt>
+            <dd>
+              {snapshot.ui_mode
+                ? label(
+                    locale,
+                    `choice.display_environment.${snapshot.ui_mode.display}`,
+                  )
+                : label(locale, "common.unknown")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.webui_configuration")}</dt>
+            <dd>{label(locale, "settings.webui_configuration.detail")}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.session_security")}</dt>
+            <dd>{label(locale, "settings.web_session.detail")}</dd>
+          </div>
+        </dl>
+      </SettingsSection>
+
+      <SettingsSection
+        group="services-updates"
+        title={label(locale, "settings.section.services_updates")}
+        icon={Server}
+      >
+        <dl className="detail-list">
+          {capabilities.length ? (
+            capabilities.map((capability) => (
+              <div key={capability.kind}>
+                <dt>{label(locale, `capability.${capability.kind}`)}</dt>
+                <dd>{label(locale, `status.capability.${capability.state}`)}</dd>
+              </div>
+            ))
+          ) : (
+            <div>
+              <dt>{label(locale, "settings.row.capabilities")}</dt>
+              <dd>{label(locale, "common.unknown")}</dd>
+            </div>
+          )}
+          {embeddedServices.length ? (
+            embeddedServices.map((service) => (
+              <div key={service.network_name}>
+                <dt>{service.network_name}</dt>
+                <dd>
+                  {tr(locale, "gpui.embedded_service_detail", {
+                    status: label(locale, `status.service.${service.status}`),
+                    signal:
+                      service.signaling_addr ??
+                      label(locale, "common.not_available"),
+                    relay:
+                      service.relay_addr ?? label(locale, "common.not_available"),
+                  })}
+                </dd>
+              </div>
+            ))
+          ) : (
+            <div>
+              <dt>{label(locale, "settings.row.embedded_services")}</dt>
+              <dd>{label(locale, "common.none")}</dd>
+            </div>
+          )}
+          <div>
+            <dt>{label(locale, "settings.row.update_configuration")}</dt>
+            <dd>{label(locale, "settings.updates.detail")}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.platform_limitations")}</dt>
+            <dd>{platformLimitations}</dd>
+          </div>
+        </dl>
+      </SettingsSection>
+
+      <SettingsSection
+        group="discovery-index"
+        title={label(locale, "settings.section.discovery_index")}
+        icon={Wifi}
+      >
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "settings.row.discovery_roles")}</dt>
+            <dd>
+              {discoveryRoles || label(locale, "settings.discovery_roles.none")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.discovery_index")}</dt>
+            <dd>{label(locale, "settings.discovery_index.detail")}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.custom_discovery_index")}</dt>
+            <dd>{label(locale, "settings.custom_index.detail")}</dd>
+          </div>
+        </dl>
+      </SettingsSection>
+
+      <SettingsSection
+        group="data-recovery"
+        title={label(locale, "settings.section.data_recovery")}
+        icon={Database}
+      >
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "settings.row.snapshot_revision")}</dt>
             <dd>{snapshot.revision}</dd>
           </div>
           <div>
-            <dt>{label(locale, "common.node_capabilities")}</dt>
-            <dd>{snapshot.capabilities?.capabilities.length ?? 0}</dd>
+            <dt>{label(locale, "settings.row.configured_networks")}</dt>
+            <dd>{snapshot.configuration?.networks.length ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.recent_activity")}</dt>
+            <dd>{snapshot.recent_activity?.length ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.backup_restore")}</dt>
+            <dd>{label(locale, "settings.backup.detail")}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "settings.row.write_mode")}</dt>
+            <dd>
+              {label(locale, "settings.value.read_only")} ·{" "}
+              {label(locale, "settings.read_only.detail")}
+            </dd>
           </div>
         </dl>
-      </section>
+      </SettingsSection>
     </div>
   );
 }

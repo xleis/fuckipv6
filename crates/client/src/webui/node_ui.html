@@ -4,41 +4,82 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>fuckipv6 · node contract</title>
+  <link rel="stylesheet" href="/assets/webui.css">
   <style nonce="__CSP_NONCE__">
     :root{color-scheme:dark;--bg:#071018;--panel:#0d1b26;--panel2:#102635;--line:#1d4256;--text:#d8edf6;--muted:#7fa3b3;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#fb7185;--sidebar:250px}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 70% 0,#103247 0,var(--bg) 42%);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    *{box-sizing:border-box}body{margin:0;overflow:hidden;background:radial-gradient(circle at 70% 0,#103247 0,var(--bg) 42%);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     button,input,select{font:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:var(--sidebar) 1fr}.sidebar{border-right:1px solid var(--line);background:#07131dcc;padding:18px;display:flex;flex-direction:column;gap:16px}
     .brand{font-size:18px;font-weight:800;letter-spacing:.08em;color:var(--accent)}.contract{color:var(--muted);font-size:11px}.network-picker{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:9px;border-radius:8px;width:100%}
     nav{display:grid;gap:5px}.nav-button{text-align:left;background:transparent;color:var(--muted);border:1px solid transparent;border-radius:8px;padding:9px 10px;cursor:pointer}.nav-button:hover{border-color:var(--line);color:var(--text)}.nav-button.active{background:#0d2a3b;border-color:#247092;color:#fff}
-    main{padding:26px;max-width:1400px;width:100%}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:18px}.top h1{margin:0;font-size:24px}.muted{color:var(--muted)}.pill{padding:3px 8px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--muted)}
+    main.ui-content{padding:26px;max-width:none;width:100%}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:18px}.top h1{margin:0;font-size:24px}.muted{color:var(--muted)}.pill{padding:3px 8px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--muted)}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}.card{background:linear-gradient(180deg,#0e202d,#0a1721);border:1px solid var(--line);border-radius:12px;padding:16px}.card h2{font-size:15px;margin:0 0 12px}.row{padding:10px 0;border-top:1px solid #173243}.row:first-child{border-top:0}.row-title{font-weight:700}.row-detail{color:var(--muted);font-size:12px;word-break:break-word}.empty{color:var(--muted);padding:14px 0}
     .action{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px;margin-bottom:12px}.action-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.action-title{font-weight:700}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:12px 0}.field{display:grid;gap:4px}.field label{color:var(--muted);font-size:11px}.field input,.field select{width:100%;padding:8px;border:1px solid var(--line);border-radius:7px;background:#07131d;color:var(--text)}.check{display:flex;align-items:center;gap:8px}.check input{width:auto}
     .submit{border:1px solid #2589b4;background:#0b3b53;color:#e8f9ff;padding:8px 14px;border-radius:8px;cursor:pointer}.submit:disabled{opacity:.45;cursor:not-allowed}.status{font-size:11px;border-radius:999px;padding:2px 7px;border:1px solid}.implemented{color:var(--ok);border-color:#27775e}.unavailable{color:var(--warn);border-color:#7b6420}
     .primary{border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:11px;color:var(--text);background:var(--panel2)}.primary.running{color:#c9ffe9;border-color:#27775e;background:#0c3329}.primary.degraded,.primary.control_unavailable{color:#ffe8a3;border-color:#7b6420;background:#33280c}.primary.failed{color:#ffd7df;border-color:var(--bad);background:#3b1721}
-    #alert{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid var(--bad);background:#3b1721;color:#ffd7df;white-space:pre-wrap}#toast{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid #27775e;background:#0c3329;color:#c9ffe9}
+    #alert{display:none;padding:11px 13px;border-radius:9px;border:1px solid var(--bad);background:#3b1721;color:#ffd7df;white-space:pre-wrap}#toast{display:none;padding:11px 13px;border-radius:9px;border:1px solid #27775e;background:#0c3329;color:#c9ffe9}
     #login{position:fixed;inset:0;background:#02070bd9;display:grid;place-items:center;padding:20px}.login-card{width:min(430px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px;display:grid;gap:13px}.login-card h2{margin:0;font-size:19px}.login-card p{margin:0}.login-card .submit{padding:11px 16px;font-weight:700}.login-help{border-top:1px solid var(--line);padding-top:11px;color:var(--muted);font-size:11px;line-height:1.65}
     .sidebar-footer{margin-top:auto}.primary-detail{display:inline-block;margin-top:7px}.login-error{min-height:1.5em;color:var(--bad);white-space:pre-wrap}.logout,.owner-security-button{display:block;width:100%;margin-top:10px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#0c202c;color:var(--text);cursor:pointer}.logout:hover,.owner-security-button:hover{border-color:#2589b4}.logout[hidden],.owner-security-button[hidden],.hidden{display:none!important}
     .modal-backdrop{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:20px;background:#02070bdc}.modal-backdrop[hidden]{display:none}.reauth-backdrop{z-index:30}.modal-card{width:min(680px,100%);max-height:calc(100vh - 40px);overflow:auto;background:linear-gradient(180deg,#0e202d,#091720);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 24px 80px #000a}.modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.modal-head h2{margin:0;font-size:19px}.modal-close{border:1px solid var(--line);background:#0c202c;color:var(--text);border-radius:8px;padding:6px 9px;cursor:pointer}.security-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:14px 0}.security-meta{border:1px solid var(--line);border-radius:9px;padding:10px;background:#07151e}.security-meta .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em}.security-meta .v{display:block;margin-top:4px;overflow-wrap:anywhere}.security-note{border-left:3px solid var(--accent);padding:9px 12px;background:#082536;color:#bfeafa;margin:12px 0}.security-status{display:none;margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;white-space:pre-wrap}.security-status.show{display:block}.security-status.error{border-color:var(--bad);background:#3b1721;color:#ffd7df}.security-status.ok{border-color:#27775e;background:#0c3329;color:#c9ffe9}.passkey-list{display:grid;gap:9px;margin:12px 0}.passkey-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#0a1923}.passkey-row.current{border-color:#2589b4}.passkey-title{font-weight:700;overflow-wrap:anywhere}.passkey-detail{color:var(--muted);font-size:11px;overflow-wrap:anywhere}.passkey-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.danger{border-color:#9f4152;background:#451a25;color:#ffd7df}.modal-actions{display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px}.passkey-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;margin-top:14px}.passkey-form input{min-width:0}.modal-card .submit,.modal-card .danger{padding:8px 12px}
-    @media(max-width:760px){.shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:16px}.passkey-form{grid-template-columns:1fr}.passkey-row{grid-template-columns:1fr}.passkey-actions{justify-content:flex-start}}
+    .ui-topbar-actions .submit{min-height:32px;padding:5px 11px}.ui-local-tab{font-family:inherit}.ui-local-tab span{color:var(--muted);font-size:11px}.ui-page-panel>.grid{align-items:start}.ui-detail .row-detail{font-size:12px}.ui-bottom-nav-item{font-family:inherit;text-decoration:none}.ui-bottom-nav-icon{font-size:18px;font-weight:800;line-height:1}
+    @media(max-width:899px){.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main.ui-content{padding:16px}.passkey-form{grid-template-columns:1fr}.passkey-row{grid-template-columns:1fr}.passkey-actions{justify-content:flex-start}#primary-status{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+    @media(min-width:900px) and (max-width:1279px){[data-ui-drawer-toggle="detail"]{display:none!important}}
   </style>
 </head>
 <body>
-<div class="shell">
-  <aside class="sidebar">
+<a class="ui-skip-link" href="#content">跳到主要内容</a>
+<div class="ui-app-shell" id="app-shell">
+  <aside class="ui-sidebar sidebar" id="navigation-drawer" data-ui-region="sidebar" aria-label="节点导航">
     <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
     <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
     <nav id="nav" aria-label="节点页面"></nav>
-    <div class="sidebar-footer muted"><span id="primary-status" class="primary">--</span><br><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span><button id="owner-security-button" class="owner-security-button" type="button" hidden>所有者安全</button><button id="logout" class="logout" type="button" hidden>退出所有者会话</button></div>
+    <div class="sidebar-footer muted"><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span><button id="owner-security-button" class="owner-security-button" type="button" hidden>所有者安全</button><button id="logout" class="logout" type="button" hidden>退出所有者会话</button></div>
   </aside>
-  <main>
-    <div class="top">
-      <div><h1 id="page-title">加载共享契约…</h1><div class="muted" id="page-subtitle">/api/node/manifest · /api/node/snapshot</div></div>
-      <button class="submit" id="refresh">刷新快照</button>
+  <div class="ui-app-main">
+    <header class="ui-topbar" data-ui-region="topbar">
+      <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="navigation" aria-label="打开节点导航" aria-controls="navigation-drawer" aria-expanded="false">☰</button>
+      <div class="ui-topbar-heading"><h1 class="ui-topbar-title" id="page-title">加载共享契约…</h1><div class="ui-topbar-subtitle" id="page-subtitle">/api/node/manifest · /api/node/snapshot</div></div>
+      <div class="ui-topbar-actions">
+        <span id="primary-status" class="primary">--</span>
+        <span id="refresh-indicator" class="ui-refresh-indicator" hidden>同步中…</span>
+        <button class="submit" id="refresh" data-ui-secondary-action>刷新快照</button>
+        <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="detail" aria-label="打开页面详情" aria-controls="detail-drawer" aria-expanded="false">详情</button>
+      </div>
+    </header>
+    <div class="ui-workspace">
+      <main id="content" class="ui-content" data-ui-region="content" aria-live="polite" aria-busy="true">
+        <div class="ui-content-inner">
+          <div id="alert" role="alert"></div>
+          <div id="toast" role="status"></div>
+          <div class="ui-local-tabs" data-ui-local-tabs aria-label="页面区域">
+            <button class="ui-local-tab" type="button" data-ui-local-tab="data" aria-selected="true">数据 <span id="data-count"></span></button>
+            <button class="ui-local-tab" type="button" data-ui-local-tab="actions" aria-selected="false">动作 <span id="actions-count"></span></button>
+          </div>
+          <section class="ui-page-panel" data-ui-page-panel="data" role="tabpanel">
+            <div id="data-content" class="grid">
+              <div class="ui-skeleton-stack" id="initial-skeleton" aria-hidden="true">
+                <div class="ui-skeleton ui-skeleton-card"><div class="ui-skeleton ui-skeleton-line" data-width="medium"></div><div class="ui-skeleton ui-skeleton-line" data-width="long"></div></div>
+                <div class="ui-skeleton ui-skeleton-card"><div class="ui-skeleton ui-skeleton-line" data-width="short"></div><div class="ui-skeleton ui-skeleton-line" data-width="long"></div></div>
+              </div>
+            </div>
+          </section>
+          <section class="ui-page-panel" data-ui-page-panel="actions" role="tabpanel" hidden>
+            <div id="actions-content" class="grid"></div>
+          </section>
+        </div>
+      </main>
+      <aside class="ui-detail" id="detail-drawer" data-ui-region="detail" aria-label="页面详情" aria-hidden="true">
+        <div class="ui-detail-header"><span class="ui-detail-title">页面详情</span><button class="ui-topbar-button" type="button" data-ui-drawer-close="detail" aria-label="关闭页面详情">×</button></div>
+        <div class="ui-detail-body">
+          <section class="ui-detail-section"><h3>当前页面</h3><div id="detail-page" class="row-detail">--</div></section>
+          <section class="ui-detail-section"><h3>当前网络</h3><div id="detail-network" class="row-detail">--</div></section>
+          <section class="ui-detail-section"><h3>运行状态</h3><div id="detail-status" class="row-detail">--</div></section>
+          <section class="ui-detail-section"><h3>快照</h3><div id="detail-revision" class="row-detail">revision --</div></section>
+        </div>
+      </aside>
     </div>
-    <div id="alert" role="alert"></div>
-    <div id="toast" role="status"></div>
-    <section id="content" class="grid" aria-live="polite"></section>
-  </main>
+  </div>
+  <button class="ui-drawer-backdrop" type="button" data-ui-drawer-backdrop aria-label="关闭抽屉"></button>
+  <nav class="ui-bottom-nav" id="bottom-nav" aria-label="主导航"></nav>
 </div>
 <div id="login" role="dialog" aria-modal="true" aria-labelledby="login-title">
   <form class="login-card" id="login-form">
@@ -70,6 +111,7 @@
 </div>
 <script src="/assets/owner_auth_copy.js"></script>
 <script src="/assets/node_ui.js"></script>
+<script src="/assets/ui-components.js"></script>
 <script nonce="__CSP_NONCE__">
 (() => {
   "use strict";
@@ -102,6 +144,7 @@
     passkeys: [],
     reauthResolver: null,
     securityStatusKind: "",
+    refreshPending: 0,
   };
   let eventSocket = null;
   const $ = (id) => document.getElementById(id);
@@ -173,13 +216,23 @@
   function clearSurface() {
     $("nav").innerHTML = "";
     $("network-picker").innerHTML = "";
-    $("content").innerHTML = "";
+    $("data-content").replaceChildren(ui.skeleton(2));
+    $("actions-content").innerHTML = "";
+    $("bottom-nav").innerHTML = "";
+    $("data-count").textContent = "";
+    $("actions-count").textContent = "";
+    $("detail-page").textContent = "--";
+    $("detail-network").textContent = "--";
+    $("detail-status").textContent = "--";
+    $("detail-revision").textContent = "revision --";
     $("revision").textContent = "revision --";
     $("primary-status").textContent = "--";
     $("primary-status").className = "primary";
     $("primary-detail").textContent = "--";
     $("page-title").textContent = "加载共享契约…";
     $("page-subtitle").textContent = "/api/node/manifest · /api/node/snapshot";
+    state.refreshPending = 0;
+    ui.setContentBusy(document, false);
     showToast("");
   }
   function closeEvents() {
@@ -527,6 +580,8 @@
   async function loadContract() {
     if (state.failedClosed) return;
     const generation = ++state.generation;
+    state.refreshPending += 1;
+    ui.setContentBusy(document, true);
     try {
       const [manifestResult, snapshotResult] = await Promise.all([
         requestJson("/api/node/manifest?schema_version=1", { cache: "no-store" }),
@@ -556,11 +611,16 @@
         return;
       }
       if (generation === state.generation && !state.failedClosed) failClosed(error);
+    } finally {
+      state.refreshPending = Math.max(0, state.refreshPending - 1);
+      if (generation === state.generation) ui.setContentBusy(document, state.refreshPending > 0);
     }
   }
   async function refreshSnapshot() {
     if (state.failedClosed || !state.manifest) return;
     const generation = state.generation;
+    state.refreshPending += 1;
+    ui.setContentBusy(document, true);
     try {
       const result = await requestJson("/api/node/snapshot?schema_version=1", { cache: "no-store" });
       if (!isCurrent(generation)) return;
@@ -582,39 +642,99 @@
       if (generation !== state.generation || state.failedClosed) return;
       if (contractFailure(error)) failClosed(error);
       else showAlert("快照刷新失败：" + error.message);
+    } finally {
+      state.refreshPending = Math.max(0, state.refreshPending - 1);
+      if (generation === state.generation) ui.setContentBusy(document, state.refreshPending > 0);
     }
+  }
+  function navigateTo(pageId) {
+    if (!pageId || !state.manifest?.pages.some((page) => page.id === pageId)) return;
+    state.pageId = pageId;
+    ui.closeDrawer(document, "navigation", false);
+    render();
+  }
+  function renderNavigation() {
+    const nav = $("nav");
+    const fragments = state.manifest.pages.map((page) => {
+      const selected = page.id === state.pageId;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `nav-button${selected ? " active" : ""}`;
+      button.dataset.page = page.id;
+      button.dataset.primaryNav = ui.primaryNavigation.find((item) => item.pageId === page.id)?.id || "";
+      if (selected) button.setAttribute("aria-current", "page");
+      button.textContent = ui.label(page.nav_label_key);
+      button.addEventListener("click", () => navigateTo(page.id));
+      return button;
+    });
+    nav.replaceChildren(...fragments);
+
+    const icons = { overview: "◉", nodes: "◇", networks: "▦", activity: "≡", settings: "⚙" };
+    const bottomItems = ui.primaryNavigation.map((item) => {
+      const available = state.manifest.pages.some((page) => page.id === item.pageId);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ui-bottom-nav-item";
+      button.dataset.primaryNav = item.id;
+      button.dataset.page = item.pageId;
+      button.disabled = !available;
+      button.setAttribute("aria-label", ui.label(item.labelKey));
+      const icon = document.createElement("span");
+      icon.className = "ui-bottom-nav-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = icons[item.id] || "•";
+      const label = document.createElement("span");
+      label.textContent = ui.label(item.labelKey);
+      button.append(icon, label);
+      button.addEventListener("click", () => navigateTo(item.pageId));
+      return button;
+    });
+    $("bottom-nav").replaceChildren(...bottomItems);
+    ui.setNavigationCurrent(document, ui.primaryNavigation.find((item) => item.pageId === state.pageId)?.id || "");
+  }
+  function renderDetail(primary, page, projection) {
+    $("detail-page").textContent = `${projection.title} (${page.id})`;
+    $("detail-network").textContent = state.selectedNetwork || "未选择网络";
+    $("detail-status").textContent = `${primary.label} · ${primary.detail}`;
+    $("detail-revision").textContent = `revision ${state.snapshot.revision}`;
   }
   function render() {
     if (state.failedClosed || !state.manifest || !state.snapshot) return;
+    let page = state.manifest.pages.find((entry) => entry.id === state.pageId);
+    if (!page) {
+      page = state.manifest.pages[0];
+      state.pageId = page?.id || "overview";
+    }
+    if (!page) return;
     $("revision").textContent = "revision " + state.snapshot.revision;
     const primary = ui.primaryStatusFor(state.snapshot);
     const primaryStatus = $("primary-status");
     primaryStatus.textContent = primary.label;
     primaryStatus.className = "primary " + primary.id;
     $("primary-detail").textContent = primary.detail;
-    $("nav").innerHTML = state.manifest.pages.map((page) =>
-      `<button class="nav-button ${page.id === state.pageId ? "active" : ""}" data-page="${escapeHtml(page.id)}">${escapeHtml(ui.label(page.nav_label_key))}</button>`
-    ).join("");
-    for (const button of $("nav").querySelectorAll("[data-page]")) {
-      button.addEventListener("click", () => { state.pageId = button.dataset.page; render(); });
-    }
+    renderNavigation();
     const picker = $("network-picker");
     picker.innerHTML = state.snapshot.networks.length
       ? state.snapshot.networks.map((network) => `<option value="${escapeHtml(network.name)}" ${network.name === state.selectedNetwork ? "selected" : ""}>${escapeHtml(network.name)} · ${escapeHtml(network.status)}</option>`).join("")
       : '<option value="">无网络</option>';
     picker.onchange = () => { state.selectedNetwork = picker.value; render(); };
-    const page = state.manifest.pages.find((entry) => entry.id === state.pageId);
     const projection = ui.projectPage(page, state.snapshot, state.selectedNetwork || null);
     $("page-title").textContent = projection.title;
     $("page-subtitle").textContent = page.id + " · " + page.actions.length + " actions · manifest schema " + state.manifest.schema_version;
+    $("data-count").textContent = String(projection.rows.length);
+    $("actions-count").textContent = String(page.actions.length);
     const dataCard = `<article class="card"><h2>节点快照</h2>${projection.rows.length ? projection.rows.map((row) =>
       `<div class="row"><div class="row-title">${escapeHtml(row.title)}</div><div class="row-detail">${escapeHtml(row.detail)}</div></div>`
     ).join("") : `<div class="empty">${escapeHtml(projection.empty || "没有数据")}</div>`}</article>`;
     const actionCards = page.actions.map((action) => renderAction(action, projection)).join("");
-    $("content").innerHTML = dataCard + actionCards;
-    for (const form of $("content").querySelectorAll("form[data-action]")) {
+    $("data-content").innerHTML = dataCard;
+    $("actions-content").innerHTML = actionCards || '<div class="empty">此页面没有共享动作。</div>';
+    for (const form of $("actions-content").querySelectorAll("form[data-action]")) {
       form.addEventListener("submit", submitAction);
     }
+    renderDetail(primary, page, projection);
+    ui.initLocalTabs(document);
+    ui.syncLayout(document);
   }
   function fieldControl(action, field) {
     const value = ui.defaultFieldValue(action, field, state.snapshot, state.selectedNetwork);
@@ -835,6 +955,8 @@
   $("reauth-cancel").addEventListener("click", () => resolveReauth(false));
   $("logout").addEventListener("click", logout);
   applyAuthCopy();
+  ui.init(document);
+  ui.observeLayout(document);
   checkOwnerSession();
   setInterval(() => {
     if (!state.failedClosed && state.snapshot) refreshSnapshot();

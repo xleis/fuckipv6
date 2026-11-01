@@ -16,6 +16,7 @@ pub mod routing;
 pub mod ticket;
 pub mod types;
 pub mod ui_components;
+pub mod ui_layout;
 
 pub use acl::*;
 pub use chunk::*;

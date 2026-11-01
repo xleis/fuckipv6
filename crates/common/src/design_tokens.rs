@@ -355,7 +355,15 @@ pub const RADII: RadiusTokens = RadiusTokens {
 pub struct DimensionTokens {
     pub sidebar_px: u16,
     pub topbar_px: u16,
+    pub detail_min_px: u16,
+    pub detail_default_px: u16,
+    pub detail_max_px: u16,
+    pub bottom_nav_px: u16,
     pub content_max_px: u16,
+    pub content_form_max_px: u16,
+    pub mobile_breakpoint_px: u16,
+    pub navigation_breakpoint_px: u16,
+    pub detail_breakpoint_px: u16,
     pub control_sm_px: u16,
     pub control_md_px: u16,
     pub control_lg_px: u16,
@@ -365,10 +373,21 @@ pub struct DimensionTokens {
     pub window_default_height_px: u16,
 }
 
+/// Shared geometry for every application surface. Breakpoints are inclusive
+/// lower bounds; `mobile_breakpoint_px` is the lower bound of compact mode, so
+/// widths below it are the mobile single-column layout.
 pub const DIMENSIONS: DimensionTokens = DimensionTokens {
-    sidebar_px: 264,
-    topbar_px: 76,
+    sidebar_px: 232,
+    topbar_px: 56,
+    detail_min_px: 320,
+    detail_default_px: 360,
+    detail_max_px: 480,
+    bottom_nav_px: 64,
     content_max_px: 1440,
+    content_form_max_px: 960,
+    mobile_breakpoint_px: 600,
+    navigation_breakpoint_px: 900,
+    detail_breakpoint_px: 1280,
     control_sm_px: 32,
     control_md_px: 40,
     control_lg_px: 44,
@@ -590,7 +609,31 @@ pub fn webui_css() -> &'static str {
         }
         ThemeTokens::push_px(&mut css, "sidebar-w", DIMENSIONS.sidebar_px);
         ThemeTokens::push_px(&mut css, "topbar-h", DIMENSIONS.topbar_px);
+        ThemeTokens::push_px(&mut css, "detail-min-w", DIMENSIONS.detail_min_px);
+        ThemeTokens::push_px(&mut css, "detail-w", DIMENSIONS.detail_default_px);
+        ThemeTokens::push_px(&mut css, "detail-max-w", DIMENSIONS.detail_max_px);
+        ThemeTokens::push_px(&mut css, "bottom-nav-h", DIMENSIONS.bottom_nav_px);
         ThemeTokens::push_px(&mut css, "content-max-w", DIMENSIONS.content_max_px);
+        ThemeTokens::push_px(
+            &mut css,
+            "content-form-max-w",
+            DIMENSIONS.content_form_max_px,
+        );
+        ThemeTokens::push_px(
+            &mut css,
+            "breakpoint-mobile",
+            DIMENSIONS.mobile_breakpoint_px,
+        );
+        ThemeTokens::push_px(
+            &mut css,
+            "breakpoint-navigation",
+            DIMENSIONS.navigation_breakpoint_px,
+        );
+        ThemeTokens::push_px(
+            &mut css,
+            "breakpoint-detail",
+            DIMENSIONS.detail_breakpoint_px,
+        );
         ThemeTokens::push_px(&mut css, "control-sm-h", DIMENSIONS.control_sm_px);
         ThemeTokens::push_px(&mut css, "control-md-h", DIMENSIONS.control_md_px);
         ThemeTokens::push_px(&mut css, "control-lg-h", DIMENSIONS.control_lg_px);
@@ -755,6 +798,14 @@ mod tests {
             "--radius-md:",
             "--shadow-panel:",
             "--control-md-h:",
+            "--detail-min-w:",
+            "--detail-w:",
+            "--detail-max-w:",
+            "--bottom-nav-h:",
+            "--content-form-max-w:",
+            "--breakpoint-mobile:",
+            "--breakpoint-navigation:",
+            "--breakpoint-detail:",
             "--motion-duration-base:",
             "--motion-ease-standard:",
             "--motion-duration-reduced:",

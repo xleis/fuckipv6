@@ -207,6 +207,13 @@ mod tests {
         assert!(NODE_MANIFEST_HTML.contains("/api/node/events?schema_version=1"));
         assert!(NODE_MANIFEST_HTML.contains("function expireSession(message)"));
         assert!(!NODE_MANIFEST_HTML.contains(r#"data-page="overview""#));
+        assert!(NODE_MANIFEST_HTML.contains(r#"$("data-content").innerHTML"#));
+        assert!(NODE_MANIFEST_HTML.contains(r#"$("actions-content").innerHTML"#));
+        assert!(NODE_MANIFEST_HTML.contains("ui.primaryNavigation"));
+        assert!(NODE_MANIFEST_HTML.contains("ui.setContentBusy"));
+        assert!(NODE_MANIFEST_HTML.contains("ui.observeLayout"));
+        assert!(NODE_MANIFEST_HTML.contains("ui.initLocalTabs"));
+        assert!(!NODE_MANIFEST_HTML.contains(r#"$("content").innerHTML"#));
         assert!(NODE_UI_JS.contains("NODE_UI_MANIFEST_CONTRACT_BEGIN"));
         assert!(NODE_UI_JS.contains("function executionBlockReason"));
         assert!(NODE_UI_JS.contains("contract_violation"));

@@ -37,6 +37,21 @@
     unsupportedState: "unsupported-state"
   });
 
+  const LAYOUT_BREAKPOINTS = Object.freeze({
+    mobile: Object.freeze({ minWidth: 0, maxWidth: 599 }),
+    compact: Object.freeze({ minWidth: 600, maxWidth: 899 }),
+    desktop: Object.freeze({ minWidth: 900, maxWidth: 1279 }),
+    wide: Object.freeze({ minWidth: 1280, maxWidth: Infinity })
+  });
+
+  const PRIMARY_NAVIGATION = Object.freeze([
+    Object.freeze({ id: "overview", labelKey: "nav.overview", pageId: "overview" }),
+    Object.freeze({ id: "nodes", labelKey: "nav.nodes", pageId: "peers" }),
+    Object.freeze({ id: "networks", labelKey: "nav.networks", pageId: "networks" }),
+    Object.freeze({ id: "activity", labelKey: "nav.activity", pageId: "logs" }),
+    Object.freeze({ id: "settings", labelKey: "nav.settings", pageId: "settings" })
+  ]);
+
   const COMPONENT_NAMES = new Set(Object.values(COMPONENTS));
   const TONES = new Set(["neutral", "info", "success", "warning", "danger"]);
   const dialogs = new Set();
@@ -45,6 +60,7 @@
   let toastSequence = 0;
   let activeDialog = null;
   let dialogReturnFocus = null;
+  let activeDrawer = null;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -68,6 +84,202 @@
       parent.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
     return parent;
+  }
+
+  function layoutForWidth(width) {
+    const normalized = Number.isFinite(Number(width)) ? Math.max(0, Number(width)) : 0;
+    if (normalized <= LAYOUT_BREAKPOINTS.mobile.maxWidth) {
+      return Object.freeze({ id: "mobile", navigation: "bottom-navigation", detail: "drawer" });
+    }
+    if (normalized <= LAYOUT_BREAKPOINTS.compact.maxWidth) {
+      return Object.freeze({ id: "compact", navigation: "menu-drawer", detail: "drawer" });
+    }
+    if (normalized <= LAYOUT_BREAKPOINTS.desktop.maxWidth) {
+      return Object.freeze({ id: "desktop", navigation: "sidebar", detail: "hidden" });
+    }
+    return Object.freeze({ id: "wide", navigation: "sidebar-with-detail", detail: "persistent" });
+  }
+
+  function focusableElements(root) {
+    return [...root.querySelectorAll(FOCUSABLE)].filter(element =>
+      !element.hidden && element.getAttribute("aria-hidden") !== "true"
+    );
+  }
+
+  function drawerElements(root, name) {
+    const region = name === "detail" ? "detail" : "sidebar";
+    return {
+      drawer: root.querySelector(`[data-ui-region="${region}"]`),
+      backdrop: root.querySelector("[data-ui-drawer-backdrop]"),
+      toggle: root.querySelector(`[data-ui-drawer-toggle="${name}"]`)
+    };
+  }
+
+  function closeDrawer(root = document, name = null, restoreFocus = true) {
+    const shells = root.matches?.(".ui-app-shell") ? [root] : [...root.querySelectorAll(".ui-app-shell")];
+    for (const shell of shells) {
+      for (const drawerName of ["navigation", "detail"]) {
+        if (name && name !== drawerName) continue;
+        const { drawer, backdrop, toggle } = drawerElements(shell, drawerName);
+        if (drawer) {
+          drawer.dataset.open = "false";
+          if (drawer.dataset.uiRegion !== "detail" || shell.dataset.layout !== "wide") {
+            drawer.setAttribute("aria-hidden", "true");
+          }
+        }
+        if (toggle) toggle.setAttribute("aria-expanded", "false");
+        if (backdrop) backdrop.dataset.open = "false";
+        delete shell.dataset.drawerOpen;
+      }
+    }
+    const returnFocus = activeDrawer?.trigger;
+    activeDrawer = null;
+    if (restoreFocus && returnFocus?.isConnected) requestAnimationFrame(() => returnFocus.focus());
+  }
+
+  function openDrawer(root = document, name = "navigation", trigger = null) {
+    const shell = root.matches?.(".ui-app-shell") ? root : root.querySelector(".ui-app-shell");
+    if (!shell || !["navigation", "detail"].includes(name)) return null;
+    closeDrawer(shell, null, false);
+    const { drawer, backdrop, toggle } = drawerElements(shell, name);
+    if (!drawer) return null;
+    drawer.dataset.open = "true";
+    drawer.setAttribute("aria-hidden", "false");
+    if (backdrop) backdrop.dataset.open = "true";
+    if (toggle) toggle.setAttribute("aria-expanded", "true");
+    shell.dataset.drawerOpen = name;
+    activeDrawer = { shell, name, trigger: trigger || toggle, drawer };
+    requestAnimationFrame(() => focusableElements(drawer)[0]?.focus());
+    return drawer;
+  }
+
+  function syncLayout(root = document) {
+    const target = root.documentElement || root;
+    const width = Math.max(0, Math.round(target.clientWidth || window.innerWidth || 0));
+    const layout = layoutForWidth(width);
+    const shells = root.matches?.(".ui-app-shell") ? [root] : [...root.querySelectorAll(".ui-app-shell")];
+    for (const shell of shells) {
+      shell.dataset.layout = layout.id;
+      shell.dataset.navigationMode = layout.navigation;
+      shell.dataset.detailPresentation = layout.detail;
+      const navigationToggle = shell.querySelector('[data-ui-drawer-toggle="navigation"]');
+      if (navigationToggle) navigationToggle.hidden = !["bottom-navigation", "menu-drawer"].includes(layout.navigation);
+      const detailToggle = shell.querySelector('[data-ui-drawer-toggle="detail"]');
+      if (detailToggle) detailToggle.hidden = layout.detail !== "drawer";
+      const sidebar = shell.querySelector('[data-ui-region="sidebar"]');
+      const detail = shell.querySelector('[data-ui-region="detail"]');
+      const navigationOpen = sidebar?.dataset.open === "true";
+      const detailOpen = detail?.dataset.open === "true";
+      const sidebarHidden = layout.navigation === "menu-drawer" || layout.navigation === "bottom-navigation";
+      if (sidebar) sidebar.setAttribute("aria-hidden", String(sidebarHidden && !navigationOpen));
+      if (detail) detail.setAttribute("aria-hidden", String(layout.detail !== "persistent" && !detailOpen));
+    }
+    return layout;
+  }
+
+  function observeLayout(root = document, callback = null) {
+    const target = root.documentElement || root;
+    let previous = "";
+    const update = () => {
+      const layout = syncLayout(root);
+      if (layout.id !== previous) {
+        previous = layout.id;
+        if (typeof callback === "function") callback(layout);
+      }
+    };
+    update();
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(update);
+      observer.observe(target);
+      return () => observer.disconnect();
+    }
+    window.addEventListener("resize", update, { passive: true });
+    return () => window.removeEventListener("resize", update);
+  }
+
+  function setNavigationCurrent(root = document, current = "") {
+    for (const item of root.querySelectorAll("[data-primary-nav]")) {
+      const selected = item.dataset.primaryNav === current || item.dataset.page === current;
+      if (selected) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    }
+  }
+
+  function selectLocalTab(root = document, name) {
+    const containers = root.matches?.("[data-ui-local-tabs]")
+      ? [root]
+      : [...root.querySelectorAll("[data-ui-local-tabs]")];
+    for (const container of containers) {
+      const tabs = [...container.querySelectorAll("[data-ui-local-tab]")];
+      const selected = tabs.find(tab => tab.dataset.uiLocalTab === name) || tabs[0];
+      if (!selected) continue;
+      for (const tab of tabs) {
+        const active = tab === selected;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+      }
+      const shell = container.closest(".ui-app-shell") || document;
+      for (const panel of shell.querySelectorAll("[data-ui-page-panel]")) {
+        panel.hidden = panel.dataset.uiPagePanel !== selected.dataset.uiLocalTab;
+      }
+    }
+  }
+
+  function initLocalTabs(root = document) {
+    const containers = root.matches?.("[data-ui-local-tabs]")
+      ? [root]
+      : [...root.querySelectorAll("[data-ui-local-tabs]")];
+    for (const container of containers) {
+      if (container.dataset.uiTabsBound === "true") continue;
+      container.dataset.uiTabsBound = "true";
+      container.setAttribute("role", "tablist");
+      const tabs = [...container.querySelectorAll("[data-ui-local-tab]")];
+      for (const tab of tabs) {
+        tab.setAttribute("role", "tab");
+        const panelId = `ui-panel-${tab.dataset.uiLocalTab}`;
+        tab.setAttribute("aria-controls", panelId);
+        const panel = container.closest(".ui-app-shell")?.querySelector(`[data-ui-page-panel="${tab.dataset.uiLocalTab}"]`);
+        if (panel) panel.id = panelId;
+        tab.addEventListener("click", () => selectLocalTab(container, tab.dataset.uiLocalTab));
+      }
+      container.addEventListener("keydown", event => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        const enabled = tabs.filter(tab => !tab.disabled);
+        if (!enabled.length) return;
+        const current = Math.max(0, enabled.findIndex(tab => tab.getAttribute("aria-selected") === "true"));
+        let index = current;
+        if (event.key === "Home") index = 0;
+        else if (event.key === "End") index = enabled.length - 1;
+        else if (event.key === "ArrowLeft") index = (current - 1 + enabled.length) % enabled.length;
+        else index = (current + 1) % enabled.length;
+        event.preventDefault();
+        selectLocalTab(container, enabled[index].dataset.uiLocalTab);
+        enabled[index].focus();
+      });
+      selectLocalTab(container, container.querySelector('[aria-selected="true"]')?.dataset.uiLocalTab);
+    }
+  }
+
+  function setContentBusy(root = document, busy = false) {
+    const shell = root.matches?.(".ui-app-shell") ? root : root.querySelector(".ui-app-shell");
+    const content = shell?.querySelector('[data-ui-region="content"]');
+    if (content) content.setAttribute("aria-busy", String(Boolean(busy)));
+    const indicator = shell?.querySelector(".ui-refresh-indicator");
+    if (indicator) indicator.hidden = !busy;
+  }
+
+  function skeleton(lines = 3) {
+    const stack = node("div", "ui-skeleton-stack");
+    stack.setAttribute("aria-hidden", "true");
+    for (let index = 0; index < Math.max(1, Number(lines) || 3); index += 1) {
+      const card = node("div", "ui-skeleton ui-skeleton-card");
+      card.append(node("div", "ui-skeleton ui-skeleton-line", ""));
+      card.append(node("div", "ui-skeleton ui-skeleton-line", ""));
+      card.querySelectorAll(".ui-skeleton-line")[0].dataset.width = "medium";
+      card.querySelectorAll(".ui-skeleton-line")[1].dataset.width = "long";
+      stack.append(card);
+    }
+    return stack;
   }
 
   function setDataComponent(element, name) {
@@ -684,15 +896,36 @@
       if (component === "toolbar") element.setAttribute("role", "toolbar");
       if (component === "table") element.querySelector("table")?.setAttribute("role", "table");
     }
+    initLocalTabs(root);
+    syncLayout(root);
   }
 
+  document.addEventListener("click", event => {
+    const toggle = event.target.closest?.("[data-ui-drawer-toggle]");
+    if (toggle) {
+      const shell = toggle.closest(".ui-app-shell");
+      const name = toggle.dataset.uiDrawerToggle;
+      if (shell && shell.dataset.drawerOpen === name) closeDrawer(shell, name);
+      else if (shell) openDrawer(shell, name, toggle);
+      return;
+    }
+    const closer = event.target.closest?.("[data-ui-drawer-close]");
+    if (closer) {
+      closeDrawer(closer.closest(".ui-app-shell") || document, closer.dataset.uiDrawerClose || null);
+      return;
+    }
+    if (event.target.closest?.("[data-ui-drawer-backdrop]")) closeDrawer(document, null);
+  });
   document.addEventListener("pointerdown", event => {
     for (const menuElement of openMenus) {
       if (!menuElement.hidden && !menuElement.contains(event.target)) menuElement.hidden = true;
     }
   });
   document.addEventListener("keydown", event => {
-    if (event.key === "Escape") hideAllMenus();
+    if (event.key === "Escape") {
+      hideAllMenus();
+      closeDrawer(document, null);
+    }
   });
 
   const api = Object.freeze({
@@ -723,7 +956,19 @@
     errorState,
     permissionDeniedState,
     unsupportedState,
-    init
+    init,
+    breakpoints: LAYOUT_BREAKPOINTS,
+    primaryNavigation: PRIMARY_NAVIGATION,
+    layoutForWidth,
+    syncLayout,
+    observeLayout,
+    openDrawer,
+    closeDrawer,
+    setNavigationCurrent,
+    initLocalTabs,
+    selectLocalTab,
+    setContentBusy,
+    skeleton
   });
 
   window.FuckIPv6UI = api;

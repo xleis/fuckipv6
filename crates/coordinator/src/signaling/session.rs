@@ -1388,17 +1388,43 @@ impl IpAllocator {
     }
 
     pub fn update_allocation(&mut self, new_alloc: &NetworkAllocation) -> Result<()> {
-        let v4_allocator = if new_alloc.mode.is_ipv4_enabled() {
+        let mut v4_allocator = if new_alloc.mode.is_ipv4_enabled() {
             Some(Ipv4SubnetAllocator::new(&new_alloc.ipv4_pool)?)
         } else {
             None
         };
 
-        let v6_allocator = if new_alloc.mode.is_ipv6_enabled() {
+        let mut v6_allocator = if new_alloc.mode.is_ipv6_enabled() {
             Some(Ipv6SubnetAllocator::new(new_alloc.effective_ipv6_pool())?)
         } else {
             None
         };
+
+        // A network allocation controls the identity lease of every online
+        // session. Never rebuild the allocators as empty tables: if a live
+        // address remains inside the new pool, reserve it in the replacement
+        // allocator; if it does not, reject the update without mutating runtime
+        // state so a new client cannot be assigned an already-used address.
+        if let Some(previous) = &self.v4_allocator {
+            for ip in previous.allocated.keys().copied() {
+                let Some(next) = v4_allocator.as_mut() else {
+                    anyhow::bail!("已有会话正在使用 IPv4 地址 {ip}，不能切换为仅 IPv6 模式");
+                };
+                if !next.reserve(ip) {
+                    anyhow::bail!("已有会话正在使用 IPv4 地址 {ip}，该地址不在新 IPv4 地址池内");
+                }
+            }
+        }
+        if let Some(previous) = &self.v6_allocator {
+            for ip in previous.allocated.keys().copied() {
+                let Some(next) = v6_allocator.as_mut() else {
+                    anyhow::bail!("已有会话正在使用 IPv6 地址 {ip}，不能切换为仅 IPv4 模式");
+                };
+                if !next.reserve(ip) {
+                    anyhow::bail!("已有会话正在使用 IPv6 地址 {ip}，该地址不在新 IPv6 地址池内");
+                }
+            }
+        }
 
         self.allocation = new_alloc.clone();
         self.v4_allocator = v4_allocator;
@@ -1666,6 +1692,43 @@ mod tests {
         let ips_dual = allocator.allocate()?;
         assert!(ips_dual.ipv4.is_some());
         assert!(ips_dual.ipv6.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn allocation_update_preserves_live_leases_or_fails_without_mutation() -> Result<()> {
+        let mut allocator = IpAllocator::new("fd00::1000/120")?;
+        let first = allocator.allocate()?;
+        let second = allocator.allocate()?;
+
+        let incompatible = NetworkAllocation {
+            mode: NetworkMode::DualStack,
+            ipv4_pool: "10.8.0.0/24".to_string(),
+            ipv6_pool: "fd00::2000/120".to_string(),
+            ip_pool: Some("fd00::2000/120".to_string()),
+        };
+        let error = allocator
+            .update_allocation(&incompatible)
+            .expect_err("live leases outside the replacement pool must reject the update");
+        assert!(format!("{error:#}").contains("已有会话正在使用 IPv6 地址"));
+
+        // The rejected update must leave the old allocator usable and keep all
+        // existing leases reserved.
+        let third = allocator.allocate()?;
+        assert_ne!(third.ipv6, first.ipv6);
+        assert_ne!(third.ipv6, second.ipv6);
+
+        let expanded = NetworkAllocation {
+            mode: NetworkMode::DualStack,
+            ipv4_pool: "10.8.0.0/24".to_string(),
+            ipv6_pool: "fd00::1000/120".to_string(),
+            ip_pool: Some("fd00::1000/120".to_string()),
+        };
+        allocator.update_allocation(&expanded)?;
+        let fourth = allocator.allocate()?;
+        assert_ne!(fourth.ipv6, first.ipv6);
+        assert_ne!(fourth.ipv6, second.ipv6);
+        assert_ne!(fourth.ipv6, third.ipv6);
         Ok(())
     }
 

@@ -50,7 +50,7 @@
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
 | W3 所有者安全 | `[x]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全、W3-07 认证管理 UI 已完成；自动化边界与未做的真实公网/硬件认证器实测见各分项证据 |
-| W4 控制 API | `[~]` | P0 | W1,W2 | W4-01 的 v1 路径、统一响应元数据、对象投影与基础 SSE，W4-02 的幂等 operation 注册、202 提交、阶段事件、终态和结构化失败，以及 W4-03 的可恢复 SSE cursor、快照 revision 对齐、缺口重同步和安全 WebSocket 认证已完成；错误模型、权限校验与限额待后续项 |
+| W4 控制 API | `[~]` | P0 | W1,W2 | W4-01 的 v1 路径、统一响应元数据、对象投影与基础 SSE，W4-02 的幂等 operation 注册、202 提交、阶段事件、终态和结构化失败，W4-03 的可恢复 SSE cursor、快照 revision 对齐、缺口重同步和安全 WebSocket 认证，以及 W4-04 的分类错误、稳定 key/参数、重试恢复建议和授权脱敏已完成；服务端权限校验与限额待后续项 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
 | W7 节点页 | `[ ]` | P1 | W2,W4,W5 | 启停、接口、身份、诊断 |
@@ -670,14 +670,24 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `cargo test -p fuckipv6-client gpui::view_model`：17 passed；默认特性与 `--no-default-features` 两套 `cargo clippy --all-targets -- -D warnings` 均通过；
 - 重新生成 JSON Schema、TypeScript 与 Android 绑定；`scripts/check-contracts.sh` 的 7 个 Rust 契约测试、TypeScript 构建、WebUI 契约测试与 Android `NodeContractV1Test` 全部通过，`node scripts/test_contract_bindings.mjs` 通过。
 
-### W4-04 错误模型 `[ ]`
+### W4-04 错误模型 `[x]`
 
-- [ ] 区分认证、权限、校验、状态、能力、依赖和内部错误；
-- [ ] 稳定 message key；
-- [ ] 结构化参数；
-- [ ] retryable 和 recovery；
-- [ ] 不泄漏无权限对象存在性；
-- [ ] 错误码生成 TypeScript 类型。
+- [x] 区分认证、权限、校验、状态、能力、依赖和内部错误；
+- [x] 稳定 message key；
+- [x] 结构化参数；
+- [x] retryable 和 recovery；
+- [x] 不泄漏无权限对象存在性；
+- [x] 错误码生成 TypeScript 类型。
+
+**实现与测试证据（2026-11-01）**
+
+- `NodeErrorCategory` 固定为 `authentication`、`authorization`、`validation`、`state`、`capability`、`dependency`、`internal` 七类；命令结果使用 `NodeProblem`，HTTP/WebSocket/operation 使用同类的结构化 `NodeErrorDetails`/`OperationError`，UI 不解析人类可读文案来判断错误类型；
+- 每个错误同时携带稳定 `code`、`message_key`、可选结构化 `params`、`retryable` 和安全 `recovery`；文案只作为回退，参数值使用字符串映射并通过契约生成到 JSON Schema、TypeScript 和 Android；
+- 认证/授权错误在同步命令结果、异步 operation 终态和 HTTP/WebSocket 错误投影中统一脱敏：不返回受保护对象引用、网络名、对象参数或原始诊断文案，只保留稳定错误码、通用文案、`message_key` 和恢复建议；
+- `authorization_errors_do_not_reveal_protected_objects_or_parameters` 同时覆盖旧命令响应与 v1 operation，验证参数、网络名、对象 ID 和原始消息均不会进入序列化响应；`node_problem_round_trips_with_stable_codes_and_flags` 覆盖全部错误码及稳定标志序列化；
+- TypeScript 契约生成 `NodeErrorCategory` 与 `NodeHttpErrorCode` 联合类型，`scripts/check-contracts.sh` 的 7 个 Rust 契约测试、TypeScript 构建、WebUI 契约测试和 Android `NodeContractV1Test` 全部通过；
+- `cargo test --workspace`：958 passed、0 failed、4 ignored；`cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
+- 对应提交：`871060e`（错误模型主体）与 `24e97d7`（授权错误脱敏及回归测试）。
 
 ### W4-05 服务端权限校验 `[ ]`
 

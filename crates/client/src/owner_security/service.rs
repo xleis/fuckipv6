@@ -293,6 +293,10 @@ impl OwnerSecurityService {
         self.status_for(OwnerBootstrapChannel::Local)
     }
 
+    pub(crate) fn origin_for(&self, channel: OwnerBootstrapChannel) -> ServiceResult<&str> {
+        Ok(self.webauthn_for(channel)?.origin())
+    }
+
     pub(crate) fn status_for(
         &self,
         channel: OwnerBootstrapChannel,

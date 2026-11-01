@@ -28,13 +28,13 @@
 
         <section id="step-recovery" class="step" aria-labelledby="recovery-title">
           <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title">离线保存新恢复码</span></div>
-          <div class="warning">新恢复码只显示这一次。请在下方的确认框勾选前，将它保存到离线安全位置。</div>
+          <div id="recovery-warning" class="warning">新恢复码只显示这一次。请在下方的确认框勾选前，将它保存到离线安全位置。</div>
           <label for="recovery-code">新恢复码</label>
           <div class="recovery">
             <code id="recovery-code" class="code" tabindex="0"></code>
             <button id="copy-recovery" class="secondary" type="button">复制</button>
           </div>
-          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox">我已离线保存新恢复码，并确认旧 Passkey 与会话将全部失效。</label>
+          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox"><span id="recovery-confirmation">我已离线保存新恢复码，并确认旧 Passkey 与会话将全部失效。</span></label>
           <div class="actions">
             <button id="confirm-recovery" type="button" disabled>完成本地恢复</button>
             <button id="cancel-after-registration" class="secondary" type="button">取消恢复</button>
@@ -52,6 +52,7 @@
       <footer><span class="dot"></span><span>仅本机回环 · WebAuthn 来源校验 · 一次性恢复会话</span></footer>
     </section>
   </div>
+  <script src="/assets/owner_auth_copy.js"></script>
   <script src="/assets/recovery.js"></script>
 </body>
 </html>

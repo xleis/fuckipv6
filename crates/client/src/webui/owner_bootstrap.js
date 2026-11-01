@@ -1,6 +1,15 @@
 "use strict";
 
 (() => {
+  const authCopy = Object.assign({
+    bootstrapDescription: "这个节点只属于一位所有者。请使用节点所有者可访问终端中显示的一次性初始化码注册 Passkey，并离线保存随后生成的恢复码。",
+    bootstrapCodeHelp: "初始化码只通过节点所有者可访问的终端显示，不会写入 URL、日志或磁盘明文。",
+    secureContextRequirements: "当前页面不是受信任的 WebAuthn 安全上下文。请使用配置的 HTTPS 公网地址或 http://localhost；证书或域名错误必须先修复，不能跳过校验。",
+    passkeyUnsupported: "当前浏览器或平台不支持所需的 Passkey 能力。请使用支持 WebAuthn 的现代浏览器和系统认证器。",
+    originMismatchTemplate: "WebAuthn 地址不匹配。预期 {expected}，当前 {actual}。请使用 {expected} 打开；若浏览器报告证书错误，必须先修复证书，不能跳过校验。",
+    recoveryCodeWarning: "恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据，请立即保存到离线安全位置。",
+    recoveryCodeConfirmation: "我已将恢复码保存到离线安全位置，并确认页面关闭后无法再次查看。",
+  }, window.FuckIPV6OwnerAuthCopy || {});
   const $ = (id) => document.getElementById(id);
   const codeStep = $("step-code");
   const recoveryStep = $("step-recovery");
@@ -15,6 +24,30 @@
   const footer = $("bootstrap-footer");
 
   let currentRecoveryCode = "";
+  let currentExpectedOrigin = "";
+
+  function applyAuthCopy() {
+    $("bootstrap-description").textContent = authCopy.bootstrapDescription;
+    $("bootstrap-code-help").textContent = authCopy.bootstrapCodeHelp;
+    $("recovery-warning").textContent = authCopy.recoveryCodeWarning;
+    $("recovery-confirmation").textContent = authCopy.recoveryCodeConfirmation;
+  }
+
+  function formatCopy(template, values) {
+    return Object.entries(values).reduce(
+      (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+      String(template || ""),
+    );
+  }
+
+  function webAuthnIssue(expectedOrigin) {
+    if (!window.isSecureContext) return authCopy.secureContextRequirements;
+    if (!window.PublicKeyCredential || !navigator.credentials) return authCopy.passkeyUnsupported;
+    if (expectedOrigin && window.origin !== expectedOrigin) {
+      return formatCopy(authCopy.originMismatchTemplate, { expected: expectedOrigin, actual: window.origin });
+    }
+    return "";
+  }
 
   function showStatus(message, kind = "") {
     statusBox.textContent = message;
@@ -125,18 +158,21 @@
   }
 
   async function verifyBootstrapSurface() {
+    applyAuthCopy();
     try {
       const status = await requestJson("/api/v1/auth/bootstrap", { method: "GET" });
       if (status.initialized) {
         window.location.replace("/");
         return false;
       }
-      if (status.origin && window.origin !== status.origin) {
-        showStatus(`WebAuthn 地址不匹配。请使用 ${status.origin} 打开本页。`, "error");
+      currentExpectedOrigin = status.origin || window.origin;
+      applySurfaceMode(currentExpectedOrigin);
+      const issue = webAuthnIssue(currentExpectedOrigin);
+      if (issue) {
+        showStatus(issue, "error");
         startButton.disabled = true;
         return false;
       }
-      applySurfaceMode(status.origin || window.origin);
       return true;
     } catch (error) {
       showStatus(error && error.message ? error.message : "无法读取所有者初始化状态", "error");
@@ -152,8 +188,9 @@
       codeInput.focus();
       return;
     }
-    if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials) {
-      showStatus("当前浏览器不支持安全 WebAuthn。请使用 HTTPS 公网地址或 http://localhost 打开本页，并使用现代浏览器。", "error");
+    const issue = webAuthnIssue(currentExpectedOrigin);
+    if (issue) {
+      showStatus(issue, "error");
       return;
     }
 
@@ -192,7 +229,7 @@
     } catch (error) {
       showStatus(error && error.message ? error.message : "Passkey 注册失败", "error");
     } finally {
-      startButton.disabled = false;
+      startButton.disabled = Boolean(webAuthnIssue(currentExpectedOrigin));
       startButton.textContent = "验证并注册 Passkey";
     }
   }

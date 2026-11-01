@@ -25,12 +25,12 @@
       <header>
         <div class="brand">fuckipv6</div>
         <h1 id="page-title" class="title">所有者初始化</h1>
-        <p class="sub">这个节点只属于一位所有者。请使用节点所有者可访问终端中显示的一次性初始化码注册 Passkey，并离线保存随后生成的恢复码。</p>
+        <p id="bootstrap-description" class="sub">这个节点只属于一位所有者。请使用节点所有者可访问终端中显示的一次性初始化码注册 Passkey，并离线保存随后生成的恢复码。</p>
       </header>
       <main>
         <section id="step-code" class="step active" aria-labelledby="code-title">
           <div class="step-head"><span class="step-no">1</span><span id="code-title" class="step-title">验证一次性初始化码</span></div>
-          <p class="hint">初始化码只通过节点所有者可访问的终端显示，不会写入 URL、日志或磁盘明文。</p>
+          <p id="bootstrap-code-help" class="hint">初始化码只通过节点所有者可访问的终端显示，不会写入 URL、日志或磁盘明文。</p>
           <label for="bootstrap-code">初始化码</label>
           <input id="bootstrap-code" class="code" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴终端中的初始化码">
           <div class="actions"><button id="start-passkey" type="button">验证并注册 Passkey</button></div>
@@ -38,13 +38,13 @@
 
         <section id="step-recovery" class="step" aria-labelledby="recovery-title">
           <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title">离线保存恢复码</span></div>
-          <div class="warning">恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据。</div>
+          <div id="recovery-warning" class="warning">恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据。</div>
           <label for="recovery-code">恢复码</label>
           <div class="recovery">
             <code id="recovery-code" class="code" tabindex="0"></code>
             <button id="copy-recovery" class="secondary" type="button">复制</button>
           </div>
-          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox">我已将恢复码保存到离线安全位置，并确认无法再次查看。</label>
+          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox"><span id="recovery-confirmation">我已将恢复码保存到离线安全位置，并确认无法再次查看。</span></label>
           <div class="actions"><button id="confirm-recovery" type="button" disabled>完成所有者初始化</button></div>
         </section>
 
@@ -53,6 +53,7 @@
       <footer><span class="dot"></span><span id="bootstrap-footer">初始化 API 受来源校验、限流与安全审计保护 · WebAuthn origin 由服务端校验</span></footer>
     </section>
   </div>
+  <script src="/assets/owner_auth_copy.js"></script>
   <script src="/assets/owner_bootstrap.js"></script>
 </body>
 </html>

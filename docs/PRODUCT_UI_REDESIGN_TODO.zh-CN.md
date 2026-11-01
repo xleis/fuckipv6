@@ -49,7 +49,7 @@
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
-| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全已完成；W3-07 认证管理 UI 仍待完成 |
+| W3 所有者安全 | `[x]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全、W3-07 认证管理 UI 已完成；自动化边界与未做的真实公网/硬件认证器实测见各分项证据 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
@@ -583,14 +583,29 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`node scripts/test_webui_node_ui.mjs`、`cargo fmt --all -- --check` 与 `git diff --check` 均通过；
 - 公网项完成的是受信反向代理和直接 TLS 安全边界的自动化测试，不等同于已在真实外部公网、真实证书链、真实代理和全部浏览器组合上完成部署实测。
 
-### W3-07 认证 UI `[ ]`
+### W3-07 认证 UI `[x]`
 
-- [ ] 初始化页；
-- [ ] 登录页；
-- [ ] 重认证对话框；
-- [ ] 恢复码确认；
-- [ ] 证书/域名错误状态；
-- [ ] GPUI/WebUI 文案一致。
+- [x] 初始化页；
+- [x] 登录页；
+- [x] 重认证对话框；
+- [x] 恢复码确认；
+- [x] 证书/域名错误状态；
+- [x] GPUI/WebUI 文案一致。
+
+完成证据（本轮提交）：
+
+- WebUI 所有者安全对话框提供会话状态、Passkey 列表、注册和撤销；最后一个可用 Passkey 的撤销由后端 `last_passkey` 稳定错误码失败关闭；
+- 最近五分钟认证过期时，前端打开重认证对话框，Passkey 验证成功后自动重试原操作；取消则明确显示操作未执行，不乐观宣告成功；
+- 初始化页、登录页、本地恢复页和安全对话框统一使用 Rust 生成的 `/assets/owner_auth_copy.js`，覆盖登录边界、恢复码单次展示、`recover-owner` 本地恢复、origin/安全上下文与证书/域名错误提示；断言页面不使用 `localStorage`、`sessionStorage`、Bearer 或 query token；
+- `/api/v1/auth/session` 返回通道对应的 `expected_origin`：local 为 `http://localhost:<port>`，public 为配置的 HTTPS 公网 origin；安全 UI 用它诊断 WebAuthn origin 不匹配，不能跳过受信任上下文或 TLS 校验；
+- owner API 错误增加稳定 `code`：`recent_authentication_required`、`last_passkey`、`invalid_session` 等，供共享前端处理且不依赖本地化错误文本；
+- 本地 mutation CSRF origin 与 owner service 的 local WebAuthn origin 对齐；`http://127.0.0.1:<port>` 不再被误认为合法的 `http://localhost:<port>` 所有者来源；
+- GPUI 身份页明确区分“本地 GPUI 使用操作系统用户身份/本地 IPC”与“公网 WebUI 使用 Passkey/HttpOnly 同源会话”，并由共享文案和 `identity_explains_local_gpui_and_webui_authentication_boundaries` 测试防止漂移；
+- `cargo test -p fuckipv6-client --no-default-features`：库测试 534 passed、3 ignored；集成测试 1 passed（`register_check`）与 8 passed（`w2_runtime`）；特权 lifecycle 集成测试 1 ignored；
+- `cargo test -p fuckipv6-client gpui::view_model`：17 passed；
+- `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`cargo check -p fuckipv6-client --all-targets`、`cargo clippy -p fuckipv6-client --all-targets -- -D warnings` 均通过；
+- `node --check crates/client/src/webui/owner_bootstrap.js`、`node --check crates/client/src/owner_security/owner_recovery.js`、`node scripts/test_webui_node_ui.mjs`、`cargo fmt --all -- --check` 与 `git diff --check` 均通过；
+- 真实浏览器硬件 Passkey 生命周期测试仍需显式启用 Chrome/Chromium 虚拟认证器以外的物理认证器矩阵；公网 TLS 域名/证书目前只有自动化配置与安全边界验证，未在本轮做真实外部 TLS 部署实测。
 
 ## 7. W4：控制 API 与状态同步
 
@@ -2248,7 +2263,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [ ] W1 生成 schema、枚举、状态机、错误码和契约测试；
 - [ ] W2-01～W2-03：先解决控制面/数据面生命周期和 UI 归属；
 - [ ] W2-04～W2-09：完成启停语义、崩溃恢复、服务监督和清理看门狗；
-- [ ] W3：完成 HTTPS、Passkey、一次性初始化码和本地恢复；
+- [x] W3：完成 HTTPS、Passkey、一次性初始化码、本地恢复和认证管理 UI；
 - [ ] W4：完成权威命令、operation、SSE、快照和错误模型。
 
 **完成标志**：UI 关闭不影响节点，control/node 可独立恢复，公网写操作有安全认证，前后端契约单一且可生成。

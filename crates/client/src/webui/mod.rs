@@ -177,6 +177,7 @@ fn create_app_web_router_with_mutation_limiter(
         .route("/assets/webui.css", get(handle_webui_css))
         .route("/assets/node_ui.js", get(handle_node_ui_js))
         .route("/assets/owner_bootstrap.js", get(handle_owner_bootstrap_js))
+        .route("/assets/owner_auth_copy.js", get(handle_owner_auth_copy_js))
         .route("/api/auth/login", post(handle_login))
         .merge(protected);
     if let Some(owner_routes) = owner_routes {
@@ -528,6 +529,11 @@ fn local_mutation_has_same_origin(state: &ApiAuthState, request: &axum::extract:
             return false;
         };
         public_claim.origin().origin().ascii_serialization()
+    } else if let Some(owner) = &state.owner {
+        match owner.origin_for(OwnerBootstrapChannel::Local) {
+            Ok(origin) => origin.to_string(),
+            Err(_) => return false,
+        }
     } else {
         let Some(host) = single_header_value(headers, header::HOST.as_str()) else {
             return false;
@@ -600,6 +606,7 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
         ],
         Json(ApiError {
             error: message.into(),
+            code: None,
             problem: None,
         }),
     )
@@ -612,6 +619,7 @@ fn forbidden_response(message: impl Into<String>) -> Response {
         [(header::CACHE_CONTROL, "no-store")],
         Json(ApiError {
             error: message.into(),
+            code: None,
             problem: None,
         }),
     )
@@ -635,6 +643,7 @@ fn mutation_rate_limited_response(retry_after: Duration) -> Response {
         ],
         Json(ApiError {
             error: "控制命令过于频繁，请稍后重试".to_string(),
+            code: None,
             problem: None,
         }),
     )
@@ -813,6 +822,16 @@ async fn handle_owner_bootstrap_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store"),
         ],
         owner_bootstrap::OWNER_BOOTSTRAP_JS,
+    )
+}
+
+async fn handle_owner_auth_copy_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        crate::owner_security::ui_copy::browser_script(),
     )
 }
 
@@ -1070,11 +1089,20 @@ async fn owner_no_store(request: axum::extract::Request, next: Next) -> Response
 }
 
 fn owner_api_error(status: StatusCode, message: impl Into<String>) -> Response {
+    owner_api_error_with_code(status, None, message)
+}
+
+fn owner_api_error_with_code(
+    status: StatusCode,
+    code: Option<&'static str>,
+    message: impl Into<String>,
+) -> Response {
     (
         status,
         [(header::CACHE_CONTROL, "no-store")],
         Json(ApiError {
             error: message.into(),
+            code,
             problem: None,
         }),
     )
@@ -1105,7 +1133,27 @@ fn owner_service_error(error: OwnerSecurityError) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     };
-    owner_api_error(status, error.to_string())
+    let code = match &error {
+        OwnerSecurityError::AlreadyInitialized => "already_initialized",
+        OwnerSecurityError::InvalidBootstrapCode => "invalid_bootstrap_code",
+        OwnerSecurityError::RateLimited => "rate_limited",
+        OwnerSecurityError::CeremonyInProgress => "ceremony_in_progress",
+        OwnerSecurityError::CeremonyMissing => "registration_ceremony_missing",
+        OwnerSecurityError::AuthenticationCeremonyMissing => "authentication_ceremony_missing",
+        OwnerSecurityError::NotInitialized => "owner_not_initialized",
+        OwnerSecurityError::InvalidSession => "invalid_session",
+        OwnerSecurityError::RecentAuthenticationRequired => "recent_authentication_required",
+        OwnerSecurityError::PasskeyNotFound => "passkey_not_found",
+        OwnerSecurityError::PasskeyAlreadyExists => "passkey_already_exists",
+        OwnerSecurityError::PasskeyAlreadyRevoked => "passkey_already_revoked",
+        OwnerSecurityError::PasskeyLimitReached => "passkey_limit_reached",
+        OwnerSecurityError::InvalidPasskeyLabel => "invalid_passkey_label",
+        OwnerSecurityError::LastPasskey => "last_passkey",
+        OwnerSecurityError::RecoveryNotConfirmed => "recovery_not_confirmed",
+        OwnerSecurityError::CorruptState => "owner_state_corrupt",
+        OwnerSecurityError::Internal(_) => "owner_internal",
+    };
+    owner_api_error_with_code(status, Some(code), error.to_string())
 }
 
 #[derive(Deserialize)]
@@ -1227,6 +1275,8 @@ struct PasskeyRegistrationStartRequest {
 struct OwnerSessionStatusResponse {
     authenticated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    expected_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     credential_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<String>,
@@ -1252,10 +1302,14 @@ struct RevokedPasskeyResponse {
     current_session_revoked: bool,
 }
 
-fn owner_session_status(session: Option<&AuthenticatedOwnerSession>) -> OwnerSessionStatusResponse {
+fn owner_session_status(
+    session: Option<&AuthenticatedOwnerSession>,
+    expected_origin: Option<&str>,
+) -> OwnerSessionStatusResponse {
     match session {
         Some(session) => OwnerSessionStatusResponse {
             authenticated: true,
+            expected_origin: expected_origin.map(ToString::to_string),
             credential_id: Some(session.credential_id.as_str().to_string()),
             channel: Some(session.channel.as_str().to_string()),
             expires_at_unix_ms: Some(session.expires_at_unix_ms),
@@ -1263,6 +1317,7 @@ fn owner_session_status(session: Option<&AuthenticatedOwnerSession>) -> OwnerSes
         },
         None => OwnerSessionStatusResponse {
             authenticated: false,
+            expected_origin: expected_origin.map(ToString::to_string),
             credential_id: None,
             channel: None,
             expires_at_unix_ms: None,
@@ -1274,9 +1329,10 @@ fn owner_session_status(session: Option<&AuthenticatedOwnerSession>) -> OwnerSes
 fn issued_owner_session_response(
     channel: OwnerBootstrapChannel,
     issued: IssuedOwnerSession,
+    expected_origin: &str,
 ) -> Response {
     let cookie = owner_session_cookie_header(issued.token.as_str(), channel);
-    let body = owner_session_status(Some(&issued.session));
+    let body = owner_session_status(Some(&issued.session), Some(expected_origin));
     let mut response = (StatusCode::OK, Json(body)).into_response();
     response.headers_mut().insert(header::SET_COOKIE, cookie);
     response
@@ -1308,8 +1364,12 @@ async fn handle_owner_authentication_finish(
     Extension(channel): Extension<OwnerBootstrapChannel>,
     Json(request): Json<WebauthnAuthenticationFinishRequest>,
 ) -> Response {
+    let expected_origin = match owner.origin_for(channel) {
+        Ok(origin) => origin.to_string(),
+        Err(error) => return owner_service_error(error),
+    };
     match owner.finish_authentication(channel, &request.credential) {
-        Ok(issued) => issued_owner_session_response(channel, issued),
+        Ok(issued) => issued_owner_session_response(channel, issued, &expected_origin),
         Err(error) => owner_service_error(error),
     }
 }
@@ -1340,8 +1400,12 @@ async fn handle_owner_reauthentication_finish(
     if let Err(error) = owner.authenticate_session(channel, token) {
         return owner_service_error(error);
     }
+    let expected_origin = match owner.origin_for(channel) {
+        Ok(origin) => origin.to_string(),
+        Err(error) => return owner_service_error(error),
+    };
     match owner.finish_authentication(channel, &request.credential) {
-        Ok(issued) => issued_owner_session_response(channel, issued),
+        Ok(issued) => issued_owner_session_response(channel, issued, &expected_origin),
         Err(error) => owner_service_error(error),
     }
 }
@@ -1353,7 +1417,15 @@ async fn handle_owner_session_status(
 ) -> Response {
     let session = owner_session_cookie(&headers)
         .and_then(|token| owner.authenticate_session(channel, token).ok());
-    (StatusCode::OK, Json(owner_session_status(session.as_ref()))).into_response()
+    let expected_origin = match owner.origin_for(channel) {
+        Ok(origin) => Some(origin),
+        Err(error) => return owner_service_error(error),
+    };
+    (
+        StatusCode::OK,
+        Json(owner_session_status(session.as_ref(), expected_origin)),
+    )
+        .into_response()
 }
 
 async fn handle_owner_logout(
@@ -1471,6 +1543,8 @@ fn default_probe_timeout_ms() -> u64 {
 struct ApiError {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     problem: Option<NodeProblem>,
 }
 
@@ -1489,6 +1563,7 @@ fn api_error_with_problem(
         status,
         Json(ApiError {
             error: message.into(),
+            code: None,
             problem,
         }),
     )
@@ -4736,7 +4811,7 @@ mod tests {
         owner_node_app_fixture(port, None)
     }
 
-    fn initialize_owner_and_issue_local_cookie(fixture: &OwnerAppFixture) -> String {
+    fn initialize_owner(fixture: &OwnerAppFixture) {
         fixture
             .service
             .start_registration(fixture.code.as_str())
@@ -4749,6 +4824,10 @@ mod tests {
             .service
             .confirm_recovery(true)
             .expect("owner recovery confirmation");
+    }
+
+    fn initialize_owner_and_issue_local_cookie(fixture: &OwnerAppFixture) -> String {
+        initialize_owner(fixture);
         let issued = fixture
             .service
             .issue_session_for_test(OwnerBootstrapChannel::Local)
@@ -4970,7 +5049,7 @@ mod tests {
         let mut builder = Request::builder()
             .method("POST")
             .uri(uri)
-            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::HOST, "localhost:8080")
             .header(header::CONTENT_TYPE, "application/json");
         if let Some(cookie) = cookie {
             builder = builder.header(header::COOKIE, cookie);
@@ -5632,6 +5711,52 @@ mod tests {
             response_text(script).await,
             owner_bootstrap::OWNER_BOOTSTRAP_JS
         );
+
+        let auth_copy = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/owner_auth_copy.js")
+                    .body(Body::empty())
+                    .expect("owner auth copy request"),
+            )
+            .await
+            .expect("owner auth copy response");
+        assert_eq!(auth_copy.status(), StatusCode::OK);
+        assert_no_store(&auth_copy);
+        assert_eq!(
+            response_header(&auth_copy, header::CONTENT_TYPE.as_str()),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            response_text(auth_copy).await,
+            crate::owner_security::ui_copy::browser_script()
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_api_errors_expose_stable_frontend_codes() {
+        let recent = owner_service_error(OwnerSecurityError::RecentAuthenticationRequired);
+        assert_eq!(recent.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&recent);
+        assert_eq!(
+            response_json(recent).await["code"],
+            "recent_authentication_required"
+        );
+
+        let last = owner_service_error(OwnerSecurityError::LastPasskey);
+        assert_eq!(last.status(), StatusCode::CONFLICT);
+        assert_no_store(&last);
+        assert_eq!(response_json(last).await["code"], "last_passkey");
+
+        let invalid_session = owner_service_error(OwnerSecurityError::InvalidSession);
+        assert_eq!(invalid_session.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&invalid_session);
+        assert_eq!(
+            response_json(invalid_session).await["code"],
+            "invalid_session"
+        );
     }
 
     #[tokio::test]
@@ -6059,6 +6184,7 @@ mod tests {
         let payload = response_json(session).await;
         assert_eq!(payload["authenticated"], true);
         assert_eq!(payload["channel"], "local");
+        assert_eq!(payload["expected_origin"], "http://localhost:8080");
 
         let snapshot = fixture
             .app
@@ -6130,6 +6256,57 @@ mod tests {
             .expect("revoked owner cookie session response");
         assert_eq!(revoked.status(), StatusCode::OK);
         assert_eq!(response_json(revoked).await["authenticated"], false);
+    }
+
+    #[tokio::test]
+    async fn owner_session_status_exposes_channel_specific_webauthn_origin() {
+        let local = owner_app_fixture(8080);
+        initialize_owner(&local);
+        let local_session = local
+            .service
+            .issue_session_for_test(OwnerBootstrapChannel::Local)
+            .expect("local owner session");
+        let local_cookie = format!("{OWNER_SESSION_COOKIE}={}", local_session.token.as_str());
+        let local_response = local
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/session")
+                    .header(header::COOKIE, local_cookie)
+                    .body(Body::empty())
+                    .expect("local session request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("local session response");
+        assert_eq!(local_response.status(), StatusCode::OK);
+        let local_payload = response_json(local_response).await;
+        assert_eq!(local_payload["channel"], "local");
+        assert_eq!(local_payload["expected_origin"], "http://localhost:8080");
+
+        let public = public_owner_app_fixture(8080);
+        initialize_owner(&public);
+        let public_session = public
+            .service
+            .issue_session_for_test(OwnerBootstrapChannel::Public)
+            .expect("public owner session");
+        let public_cookie = format!("{OWNER_SESSION_COOKIE}={}", public_session.token.as_str());
+        let mut public_request = verified_public_request("GET", "/api/v1/auth/session", "");
+        public_request.headers_mut().insert(
+            header::COOKIE,
+            HeaderValue::from_str(&public_cookie).expect("public session cookie"),
+        );
+        let public_response = public
+            .app
+            .clone()
+            .oneshot(public_request)
+            .await
+            .expect("public session response");
+        assert_eq!(public_response.status(), StatusCode::OK);
+        let public_payload = response_json(public_response).await;
+        assert_eq!(public_payload["channel"], "public");
+        assert_eq!(public_payload["expected_origin"], "https://relay.xlei.cc");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6216,7 +6393,7 @@ mod tests {
                     "/api/node/commands",
                     body,
                     Some(cookie.as_str()),
-                    Some("http://127.0.0.1:8080"),
+                    Some("http://localhost:8080"),
                     Some("same-origin"),
                 ),
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -6225,6 +6402,24 @@ mod tests {
             .expect("same-origin owner cookie command");
         assert_eq!(accepted.status(), StatusCode::OK);
         assert_eq!(command_count.load(Ordering::SeqCst), 1);
+
+        let loopback_alias = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    Some(cookie.as_str()),
+                    Some("http://127.0.0.1:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("literal loopback owner cookie command");
+        assert_eq!(loopback_alias.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&loopback_alias);
 
         let cross_origin = fixture
             .app
@@ -6252,7 +6447,7 @@ mod tests {
                     "/api/node/commands",
                     body,
                     Some(cookie.as_str()),
-                    Some("http://127.0.0.1:8080"),
+                    Some("http://localhost:8080"),
                     Some("cross-site"),
                 ),
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -6298,7 +6493,7 @@ mod tests {
                     "/api/node/commands",
                     body,
                     None,
-                    Some("http://127.0.0.1:8080"),
+                    Some("http://localhost:8080"),
                     Some("same-origin"),
                 ),
                 IpAddr::V4(Ipv4Addr::LOCALHOST),

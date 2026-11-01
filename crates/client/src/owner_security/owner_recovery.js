@@ -1,6 +1,13 @@
 "use strict";
 
 (() => {
+  const authCopy = Object.assign({
+    secureContextRequirements: "当前页面不是受信任的 WebAuthn 安全上下文。请使用配置的 HTTPS 公网地址或 http://localhost；证书或域名错误必须先修复，不能跳过校验。",
+    passkeyUnsupported: "当前浏览器或平台不支持所需的 Passkey 能力。请使用支持 WebAuthn 的现代浏览器和系统认证器。",
+    originMismatchTemplate: "WebAuthn 地址不匹配。预期 {expected}，当前 {actual}。请使用 {expected} 打开；若浏览器报告证书错误，必须先修复证书，不能跳过校验。",
+    recoveryCodeWarning: "恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据，请立即保存到离线安全位置。",
+    recoveryCodeConfirmation: "我已将恢复码保存到离线安全位置，并确认页面关闭后无法再次查看。",
+  }, window.FuckIPV6OwnerAuthCopy || {});
   const ticket = document.body.dataset.recoveryTicket || "";
   const expectedOrigin = document.body.dataset.recoveryOrigin || "";
   const introStep = document.getElementById("step-intro");
@@ -18,6 +25,27 @@
   const statusBox = document.getElementById("status");
 
   let currentRecoveryCode = "";
+
+  function applyAuthCopy() {
+    document.getElementById("recovery-warning").textContent = authCopy.recoveryCodeWarning;
+    document.getElementById("recovery-confirmation").textContent = authCopy.recoveryCodeConfirmation;
+  }
+
+  function formatCopy(template, values) {
+    return Object.entries(values).reduce(
+      (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+      String(template || ""),
+    );
+  }
+
+  function webAuthnIssue(expected) {
+    if (!window.isSecureContext) return authCopy.secureContextRequirements;
+    if (!window.PublicKeyCredential || !navigator.credentials) return authCopy.passkeyUnsupported;
+    if (expected && window.origin !== expected) {
+      return formatCopy(authCopy.originMismatchTemplate, { expected, actual: window.origin });
+    }
+    return "";
+  }
 
   function showStatus(message, kind = "") {
     statusBox.textContent = message;
@@ -133,8 +161,9 @@
   }
 
   async function beginRecovery() {
-    if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials) {
-      showStatus("当前浏览器不支持安全 WebAuthn。请使用支持 Passkey 的现代浏览器打开本机恢复页。", "error");
+    const issue = webAuthnIssue(expectedOrigin);
+    if (issue) {
+      showStatus(issue, "error");
       return;
     }
 
@@ -232,13 +261,15 @@
     }
   }
 
-  if (!ticket || !expectedOrigin) {
-    showStatus("恢复页面缺少一次性安全上下文。请关闭本页并从终端重新启动恢复。", "error");
+  applyAuthCopy();
+  const issue = webAuthnIssue(expectedOrigin);
+  if (issue) {
+    showStatus(issue, "error");
     setRecoveryButtonsDisabled(true);
     return;
   }
-  if (window.origin !== expectedOrigin) {
-    showStatus(`WebAuthn 地址不匹配。请使用 ${expectedOrigin} 打开本页。`, "error");
+  if (!ticket || !expectedOrigin) {
+    showStatus("恢复页面缺少一次性安全上下文。请关闭本页并从终端重新启动恢复。", "error");
     setRecoveryButtonsDisabled(true);
     return;
   }

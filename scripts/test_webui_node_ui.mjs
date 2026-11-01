@@ -222,17 +222,38 @@ assert.deepEqual(registration.response, {
 });
 
 const html = readFileSync(path.join(root, "crates/client/src/webui/node_ui.html"), "utf8");
-assert.doesNotMatch(html, /localStorage|Authorization|Bearer /);
+assert.doesNotMatch(html, /localStorage|sessionStorage|Authorization|Bearer /);
 assert.doesNotMatch(html, /\?token=|&token=/);
+assert.match(html, /<script src="\/assets\/owner_auth_copy\.js"><\/script>/);
 assert.match(html, /credentials: "same-origin"/);
 assert.match(html, /\/api\/v1\/auth\/passkey\/authentication\/start/);
 assert.match(html, /\/api\/v1\/auth\/passkey\/authentication\/finish/);
+assert.match(html, /\/api\/v1\/auth\/passkey\/reauth\/start/);
+assert.match(html, /\/api\/v1\/auth\/passkey\/reauth\/finish/);
 assert.match(html, /\/api\/v1\/auth\/session/);
 assert.match(html, /\/api\/v1\/auth\/passkey\/logout/);
+assert.match(html, /\/api\/v1\/auth\/passkeys/);
+assert.match(html, /\/api\/v1\/auth\/passkeys\/registration\/start/);
+assert.match(html, /\/api\/v1\/auth\/passkeys\/registration\/finish/);
+assert.match(html, /\/api\/v1\/auth\/passkeys\/\$\{encodeURIComponent\(credentialId\)\}/);
 assert.match(html, /\/api\/node\/events\?schema_version=1/);
+assert.match(html, /function applyAuthCopy\(\)/);
 assert.match(html, /function expireSession\(message\)/);
+assert.match(html, /pending\.resolve\(authenticated\)/);
+assert.match(html, /expected_origin/);
+assert.match(html, /recent_authentication_required/);
+assert.match(html, /last_passkey/);
 const inlineScripts = [...html.matchAll(/<script nonce="__CSP_NONCE__">([\s\S]*?)<\/script>/g)];
 assert.equal(inlineScripts.length, 1, "node UI must have one inline renderer script");
 new Function(inlineScripts[0][1]);
+
+for (const relative of [
+  "crates/client/src/webui/owner_bootstrap.html",
+  "crates/client/src/owner_security/owner_recovery.html",
+]) {
+  const surface = readFileSync(path.join(root, relative), "utf8");
+  assert.match(surface, /<script src="\/assets\/owner_auth_copy\.js"><\/script>/);
+  assert.doesNotMatch(surface, /localStorage|sessionStorage|Authorization|Bearer /);
+}
 
 console.log("test_webui_node_ui: passed");

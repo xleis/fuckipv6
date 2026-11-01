@@ -1261,6 +1261,24 @@ fn project_identity(snapshot: &NodeSnapshot) -> (Vec<MetricModel>, Vec<SectionMo
         vec![
             section("公开身份", "尚未发布节点身份", identity_rows),
             section("网络身份配置", "没有网络配置", config_rows),
+            section(
+                "本地身份与 WebUI 认证",
+                "本地 GPUI 与浏览器 WebUI 使用不同的认证边界",
+                vec![
+                    row(
+                        crate::owner_security::ui_copy::LOCAL_IDENTITY_TITLE,
+                        crate::owner_security::ui_copy::LOCAL_IDENTITY_DETAIL,
+                    ),
+                    row(
+                        crate::owner_security::ui_copy::WEBUI_IDENTITY_TITLE,
+                        crate::owner_security::ui_copy::WEBUI_IDENTITY_DETAIL,
+                    ),
+                    row(
+                        "所有者恢复",
+                        crate::owner_security::ui_copy::PASSKEY_RECOVERY_HELP,
+                    ),
+                ],
+            ),
         ],
     )
 }
@@ -1484,6 +1502,36 @@ mod tests {
             model.sections[0].rows[0].detail,
             snapshot.primary_status().detail_zh()
         );
+    }
+
+    #[test]
+    fn identity_explains_local_gpui_and_webui_authentication_boundaries() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "identity")
+            .expect("identity page");
+        let model = build_page_model_for_page(page, &populated_snapshot()).expect("identity model");
+        let section = model
+            .sections
+            .iter()
+            .find(|section| section.title == "本地身份与 WebUI 认证")
+            .expect("authentication boundary section");
+        assert_eq!(section.rows.len(), 3);
+        assert_eq!(
+            section.rows[0].detail,
+            crate::owner_security::ui_copy::LOCAL_IDENTITY_DETAIL
+        );
+        assert_eq!(
+            section.rows[1].detail,
+            crate::owner_security::ui_copy::WEBUI_IDENTITY_DETAIL
+        );
+        assert!(section.rows[2].detail.contains("recover-owner"));
+        assert!(!section
+            .rows
+            .iter()
+            .any(|row| row.detail.contains("已登录 WebUI")));
     }
 
     #[test]

@@ -454,22 +454,10 @@ async fn require_api_auth(
         return next.run(request).await;
     }
 
-    // Browser WebSocket clients cannot set an Authorization header. Accept a
-    // query token only for the upgrade endpoint; regular HTTP APIs must use
-    // Bearer authentication so credentials do not end up in access/proxy logs.
-    let token = authorization_bearer_token(&request).or_else(|| {
-        matches!(request.uri().path(), "/ws" | "/api/node/events")
-            .then(|| request.uri().query())
-            .flatten()
-            .and_then(|query| {
-                query.split('&').find_map(|pair| {
-                    let (key, value) = pair.split_once('=')?;
-                    (key == "token" && !value.is_empty()).then_some(value)
-                })
-            })
-    });
-
-    match token {
+    // Browser WebSocket clients authenticate with the same-origin owner cookie
+    // checked above. Never accept credentials in URL query strings because they
+    // leak into access logs, browser history, and proxy traces.
+    match authorization_bearer_token(&request) {
         Some(token) if state.auth.verify(token).is_ok() => next.run(request).await,
         _ => unauthorized_response(
             "控制面认证失败：请使用 Passkey 登录或通过 /api/auth/login 获取 Bearer Token",
@@ -4580,8 +4568,8 @@ mod tests {
     use super::*;
     use crate::node::{
         node_ui_manifest, NodeCommand, NodeCommandBus, NodeCommandFuture, NodeCommandHandler,
-        NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeEventBus, NodeStateStore,
-        NodeUiManifest,
+        NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeEventBus, NodeHttpAdapter,
+        NodeStateStore, NodeUiManifest,
     };
     use crate::owner_security::store::fixture_passkey;
     use axum::body::{to_bytes, Body};
@@ -4622,6 +4610,10 @@ mod tests {
     }
 
     fn owner_app_fixture(port: u16) -> OwnerAppFixture {
+        owner_node_app_fixture(port, None)
+    }
+
+    fn owner_node_app_fixture(port: u16, node_adapter: Option<NodeHttpAdapter>) -> OwnerAppFixture {
         let config_dir = unique_test_dir("owner");
         let config = ConfigManager::new_for_dir(config_dir.clone()).expect("owner test config");
         let (service, code) =
@@ -4630,7 +4622,7 @@ mod tests {
         let app = create_app_web_router_with_auth_node_and_owner(
             Arc::new(AppController::new()),
             WebUiAuth::disabled(),
-            None,
+            node_adapter,
             Some(service.clone()),
         );
         OwnerAppFixture {
@@ -5785,7 +5777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_routes_require_bearer_and_only_events_accept_query_auth() {
+    async fn node_routes_accept_bearer_only_and_reject_query_tokens() {
         let auth = test_auth();
         let token = auth
             .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
@@ -5858,7 +5850,7 @@ mod tests {
             )
             .await
             .expect("event query token response");
-        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let response = app
             .oneshot(
@@ -5870,6 +5862,122 @@ mod tests {
             .await
             .expect("anonymous event response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn owner_cookie_authorizes_node_api_and_websocket_upgrade() {
+        let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
+        let fixture = owner_node_app_fixture(8080, Some(adapter));
+        fixture
+            .service
+            .start_registration(fixture.code.as_str())
+            .expect("owner registration start");
+        fixture
+            .service
+            .finish_registration_for_test(fixture_passkey())
+            .expect("owner registration finish");
+        fixture
+            .service
+            .confirm_recovery(true)
+            .expect("owner recovery confirmation");
+        let issued = fixture
+            .service
+            .issue_session_for_test(OwnerBootstrapChannel::Local)
+            .expect("owner test session");
+        let cookie =
+            owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local)
+                .to_str()
+                .expect("owner session cookie")
+                .to_string();
+
+        let session = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/session")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("owner session status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("owner session status response");
+        assert_eq!(session.status(), StatusCode::OK);
+        let payload = response_json(session).await;
+        assert_eq!(payload["authenticated"], true);
+        assert_eq!(payload["channel"], "local");
+
+        let snapshot = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/node/snapshot?schema_version=1")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("owner cookie snapshot request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("owner cookie snapshot response");
+        assert_eq!(snapshot.status(), StatusCode::OK);
+
+        let events = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/node/events?schema_version=1")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("owner cookie event request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("owner cookie event response");
+        assert_eq!(events.status(), StatusCode::UPGRADE_REQUIRED);
+
+        let logout = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/passkey/logout")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::empty())
+                    .expect("owner logout request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("owner logout response");
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let clear_cookie = logout
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("owner logout clear cookie");
+        assert!(clear_cookie.contains("HttpOnly"));
+        assert!(clear_cookie.contains("SameSite=Strict"));
+        assert!(clear_cookie.contains("Max-Age=0"));
+
+        let revoked = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/session")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("revoked owner cookie session request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("revoked owner cookie session response");
+        assert_eq!(revoked.status(), StatusCode::OK);
+        assert_eq!(response_json(revoked).await["authenticated"], false);
     }
 
     #[tokio::test]

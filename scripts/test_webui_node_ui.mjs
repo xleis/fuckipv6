@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,5 +153,86 @@ assert.throws(
   () => ui.validateCommandResponse(invalidCleanupResponse, 8),
   /unknown cleanup failure reason/,
 );
+
+
+const binary = new Uint8Array([0, 1, 2, 250]).buffer;
+assert.equal(ui.bufferToBase64url(binary), "AAEC-g");
+assert.deepEqual([...new Uint8Array(ui.base64urlToBuffer("AAEC-g"))], [0, 1, 2, 250]);
+assert.throws(() => ui.base64urlToBuffer(""), /base64url/);
+
+const requestOptions = ui.decodeRequestOptions({
+  publicKey: {
+    challenge: "AQI",
+    allowCredentials: [{ type: "public-key", id: "AwQ" }],
+  },
+});
+assert.ok(requestOptions.publicKey.challenge instanceof ArrayBuffer);
+assert.equal(requestOptions.publicKey.allowCredentials[0].id.byteLength, 2);
+
+const authentication = ui.encodeAuthenticationCredential({
+  id: "credential-id",
+  rawId: new Uint8Array([1, 2]).buffer,
+  type: "public-key",
+  response: {
+    authenticatorData: new Uint8Array([3]).buffer,
+    clientDataJSON: new Uint8Array([4]).buffer,
+    signature: new Uint8Array([5]).buffer,
+    userHandle: new Uint8Array([6]).buffer,
+  },
+  getClientExtensionResults: () => ({ appid: true }),
+});
+assert.deepEqual(authentication, {
+  id: "credential-id",
+  rawId: "AQI",
+  type: "public-key",
+  response: {
+    authenticatorData: "Aw",
+    clientDataJSON: "BA",
+    signature: "BQ",
+    userHandle: "Bg",
+  },
+  clientExtensionResults: { appid: true },
+});
+
+const creationOptions = ui.decodeCreationOptions({
+  publicKey: {
+    challenge: "AQI",
+    user: { id: "AwQ", name: "owner", displayName: "Owner" },
+    excludeCredentials: [{ type: "public-key", id: "BQ" }],
+  },
+});
+assert.equal(creationOptions.publicKey.user.id.byteLength, 2);
+assert.equal(creationOptions.publicKey.excludeCredentials[0].id.byteLength, 1);
+
+const registration = ui.encodeRegistrationCredential({
+  id: "new-credential",
+  rawId: new Uint8Array([7]).buffer,
+  type: "public-key",
+  response: {
+    attestationObject: new Uint8Array([8]).buffer,
+    clientDataJSON: new Uint8Array([9]).buffer,
+    getTransports: () => ["internal", "hybrid"],
+  },
+  getClientExtensionResults: () => ({}),
+});
+assert.deepEqual(registration.response, {
+  attestationObject: "CA",
+  clientDataJSON: "CQ",
+  transports: ["internal", "hybrid"],
+});
+
+const html = readFileSync(path.join(root, "crates/client/src/webui/node_ui.html"), "utf8");
+assert.doesNotMatch(html, /localStorage|Authorization|Bearer /);
+assert.doesNotMatch(html, /\?token=|&token=/);
+assert.match(html, /credentials: "same-origin"/);
+assert.match(html, /\/api\/v1\/auth\/passkey\/authentication\/start/);
+assert.match(html, /\/api\/v1\/auth\/passkey\/authentication\/finish/);
+assert.match(html, /\/api\/v1\/auth\/session/);
+assert.match(html, /\/api\/v1\/auth\/passkey\/logout/);
+assert.match(html, /\/api\/node\/events\?schema_version=1/);
+assert.match(html, /function expireSession\(message\)/);
+const inlineScripts = [...html.matchAll(/<script nonce="__CSP_NONCE__">([\s\S]*?)<\/script>/g)];
+assert.equal(inlineScripts.length, 1, "node UI must have one inline renderer script");
+new Function(inlineScripts[0][1]);
 
 console.log("test_webui_node_ui: passed");

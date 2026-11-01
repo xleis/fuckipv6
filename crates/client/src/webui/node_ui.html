@@ -16,8 +16,8 @@
     .submit{border:1px solid #2589b4;background:#0b3b53;color:#e8f9ff;padding:8px 14px;border-radius:8px;cursor:pointer}.submit:disabled{opacity:.45;cursor:not-allowed}.status{font-size:11px;border-radius:999px;padding:2px 7px;border:1px solid}.implemented{color:var(--ok);border-color:#27775e}.unavailable{color:var(--warn);border-color:#7b6420}
     .primary{border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:11px;color:var(--text);background:var(--panel2)}.primary.running{color:#c9ffe9;border-color:#27775e;background:#0c3329}.primary.degraded,.primary.control_unavailable{color:#ffe8a3;border-color:#7b6420;background:#33280c}.primary.failed{color:#ffd7df;border-color:var(--bad);background:#3b1721}
     #alert{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid var(--bad);background:#3b1721;color:#ffd7df;white-space:pre-wrap}#toast{display:none;margin-bottom:14px;padding:11px 13px;border-radius:9px;border:1px solid #27775e;background:#0c3329;color:#c9ffe9}
-    #login{position:fixed;inset:0;background:#02070bd9;display:none;place-items:center;padding:20px}.login-card{width:min(380px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;display:grid;gap:11px}.login-card input{padding:9px;background:#07131d;border:1px solid var(--line);border-radius:8px;color:var(--text)}
-    .sidebar-footer{margin-top:auto}.primary-detail{display:inline-block;margin-top:7px}.login-error{color:var(--bad)}
+    #login{position:fixed;inset:0;background:#02070bd9;display:grid;place-items:center;padding:20px}.login-card{width:min(430px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px;display:grid;gap:13px}.login-card h2{margin:0;font-size:19px}.login-card p{margin:0}.login-card .submit{padding:11px 16px;font-weight:700}.login-help{border-top:1px solid var(--line);padding-top:11px;color:var(--muted);font-size:11px;line-height:1.65}
+    .sidebar-footer{margin-top:auto}.primary-detail{display:inline-block;margin-top:7px}.login-error{min-height:1.5em;color:var(--bad);white-space:pre-wrap}.logout{display:block;width:100%;margin-top:10px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#0c202c;color:var(--text);cursor:pointer}.logout:hover{border-color:#2589b4}.logout[hidden]{display:none}
     @media(max-width:760px){.shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line)}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:16px}}
   </style>
 </head>
@@ -27,7 +27,7 @@
     <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
     <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
     <nav id="nav" aria-label="节点页面"></nav>
-    <div class="sidebar-footer muted"><span id="primary-status" class="primary">--</span><br><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span></div>
+    <div class="sidebar-footer muted"><span id="primary-status" class="primary">--</span><br><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span><button id="logout" class="logout" type="button" hidden>退出所有者会话</button></div>
   </aside>
   <main>
     <div class="top">
@@ -41,12 +41,11 @@
 </div>
 <div id="login" role="dialog" aria-modal="true" aria-labelledby="login-title">
   <form class="login-card" id="login-form">
-    <h2 id="login-title">WebUI 认证</h2>
-    <div class="muted">HTTP 契约要求 Bearer Token，页面不会静默降级为未认证访问。</div>
-    <input id="username" autocomplete="username" placeholder="用户名" required>
-    <input id="password" type="password" autocomplete="current-password" placeholder="密码" required>
-    <button class="submit" type="submit">登录并加载契约</button>
-    <div id="login-error" class="login-error"></div>
+    <h2 id="login-title">节点所有者登录</h2>
+    <p class="muted">使用已注册的 Passkey 验证节点所有者身份。会话只保存在 HttpOnly、SameSite=Strict Cookie 中，页面不读取或持久化访问令牌。</p>
+    <button class="submit" id="login-passkey" type="submit">使用 Passkey 登录</button>
+    <div id="login-error" class="login-error" role="status" aria-live="polite"></div>
+    <div class="login-help">Passkey 验证需要受信任的 HTTPS 地址，或本机 <code>http://localhost</code>。如果全部 Passkey 已丢失，只能在节点所在设备上执行本地恢复。</div>
   </form>
 </div>
 <script src="/assets/node_ui.js"></script>
@@ -54,7 +53,6 @@
 (() => {
   "use strict";
   const ui = window.FuckIPV6NodeUi;
-  const tokenKey = "fuckipv6_control_token";
   const state = {
     manifest: null,
     snapshot: null,
@@ -67,12 +65,6 @@
   let eventSocket = null;
   const $ = (id) => document.getElementById(id);
 
-  function token() { return localStorage.getItem(tokenKey) || ""; }
-  function authHeaders(extra) {
-    const headers = new Headers(extra || {});
-    if (token()) headers.set("Authorization", "Bearer " + token());
-    return headers;
-  }
   function showAlert(message) {
     $("alert").textContent = message;
     $("alert").style.display = message ? "block" : "none";
@@ -85,6 +77,20 @@
   function showLogin(message) {
     $("login-error").textContent = message || "";
     $("login").style.display = "grid";
+    $("logout").hidden = true;
+  }
+  function showApp() {
+    $("login").style.display = "none";
+    $("login-error").textContent = "";
+    $("logout").hidden = false;
+  }
+  function passkeyErrorMessage(error) {
+    if (!error) return "Passkey 验证失败";
+    if (error.name === "NotAllowedError") return "Passkey 验证已取消或超时，请重试。";
+    if (error.name === "SecurityError") return "当前地址不是受信任的 WebAuthn 安全上下文。请使用 HTTPS 或 http://localhost。";
+    if (error.name === "NotSupportedError") return "当前浏览器或平台不支持所需的 Passkey 能力。";
+    if (error.name === "InvalidStateError") return "该 Passkey 已在此设备注册，请改用其他设备或凭据。";
+    return error.message || "Passkey 验证失败";
   }
   class AuthenticationError extends Error {}
   function isCurrent(generation) {
@@ -111,7 +117,7 @@
     socket.onerror = null;
     try { socket.close(); } catch (_) {}
   }
-  function expireSession() {
+  function expireSession(message) {
     state.generation += 1;
     state.manifest = null;
     state.snapshot = null;
@@ -120,7 +126,7 @@
     clearSurface();
     showAlert("");
     $("refresh").disabled = false;
-    showLogin("控制面认证失败，请输入凭据。");
+    showLogin(message || "所有者会话已过期，请使用 Passkey 重新验证。");
   }
   function failClosed(error) {
     if (state.failedClosed) return;
@@ -133,6 +139,7 @@
     clearSurface();
     $("refresh").disabled = true;
     $("login").style.display = "none";
+    $("logout").hidden = true;
     $("page-title").textContent = "契约不兼容";
     $("page-subtitle").textContent = "manifest/snapshot 校验失败，已停止所有读取、事件流和命令写入";
     showAlert("共享契约不兼容，已失败关闭：\n" + (error && error.message ? error.message : String(error || "未知错误")));
@@ -156,7 +163,11 @@
       .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
   }
   async function requestJson(path, options) {
-    const response = await fetch(path, Object.assign({}, options, { headers: authHeaders(options && options.headers) }));
+    const request = Object.assign({}, options, { cache: "no-store", credentials: "same-origin" });
+    const headers = new Headers((options && options.headers) || {});
+    if (request.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    request.headers = headers;
+    const response = await fetch(path, request);
     let payload = null;
     try { payload = await response.json(); } catch (_) {}
     if (response.status === 401) {
@@ -186,7 +197,7 @@
       state.snapshot = snapshot;
       if (!state.manifest.pages.some((page) => page.id === state.pageId)) state.pageId = state.manifest.pages[0].id;
       state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
-      $("login").style.display = "none";
+      showApp();
       showAlert("");
       render();
       connectEvents();
@@ -211,7 +222,7 @@
       if (!isCurrent(generation)) return;
       state.snapshot = snapshot;
       state.selectedNetwork = ui.defaultNetworkName(state.snapshot, state.selectedNetwork);
-      $("login").style.display = "none";
+      showApp();
       showAlert("");
       render();
     } catch (error) {
@@ -339,8 +350,7 @@
     if (eventSocket && eventSocket.readyState <= 1) return;
     const generation = state.generation;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const query = "schema_version=1" + (token() ? "&token=" + encodeURIComponent(token()) : "");
-    const socket = new WebSocket(`${scheme}://${location.host}/api/node/events?${query}`);
+    const socket = new WebSocket(`${scheme}://${location.host}/api/node/events?schema_version=1`);
     eventSocket = socket;
     socket.onmessage = (message) => {
       if (!isCurrent(generation) || eventSocket !== socket) return;
@@ -381,25 +391,87 @@
     };
   }
   $("refresh").addEventListener("click", refreshSnapshot);
-  $("login-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
+  async function checkOwnerSession() {
+    const button = $("login-passkey");
+    button.disabled = true;
+    $("login-error").textContent = "正在检查所有者会话…";
     try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: $("username").value, password: $("password").value }),
-      });
-      const payload = await response.json();
-      if (!response.ok || !payload.success || !payload.token) throw new Error(payload.error || "登录失败");
-      localStorage.setItem(tokenKey, payload.token);
-      $("login").style.display = "none";
+      const result = await requestJson("/api/v1/auth/session");
+      if (!result.response.ok) {
+        throw new Error(ui.httpErrorText(result.payload, "所有者会话状态读取失败"));
+      }
+      if (!result.payload || result.payload.authenticated !== true) {
+        $("login-error").textContent = "";
+        showLogin("");
+        return;
+      }
       await loadContract();
     } catch (error) {
-      $("login-error").textContent = error.message;
+      if (error instanceof AuthenticationError) {
+        showLogin("所有者会话已过期，请使用 Passkey 重新验证。");
+      } else {
+        showLogin("无法读取所有者会话：" + passkeyErrorMessage(error));
+      }
+    } finally {
+      button.disabled = false;
     }
-  });
-  loadContract();
+  }
+  async function loginWithPasskey(event) {
+    event.preventDefault();
+    const button = $("login-passkey");
+    if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials) {
+      $("login-error").textContent = "当前浏览器不支持安全 WebAuthn。请使用 HTTPS 公网地址或 http://localhost，并使用现代浏览器。";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "正在等待 Passkey 授权…";
+    $("login-error").textContent = "";
+    try {
+      const start = await requestJson("/api/v1/auth/passkey/authentication/start", { method: "POST" });
+      if (!start.response.ok) {
+        throw new Error(ui.httpErrorText(start.payload, "无法开始 Passkey 登录"));
+      }
+      const credential = await navigator.credentials.get(ui.decodeRequestOptions(start.payload));
+      if (!credential) throw new Error("Passkey 验证已取消");
+      const finish = await requestJson("/api/v1/auth/passkey/authentication/finish", {
+        method: "POST",
+        body: JSON.stringify({ credential: ui.encodeAuthenticationCredential(credential) }),
+      });
+      if (!finish.response.ok) {
+        throw new Error(ui.httpErrorText(finish.payload, "Passkey 登录失败"));
+      }
+      await loadContract();
+    } catch (error) {
+      if (error instanceof AuthenticationError) {
+        showLogin("所有者会话已过期，请使用 Passkey 重新验证。");
+      } else {
+        $("login-error").textContent = passkeyErrorMessage(error);
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = "使用 Passkey 登录";
+    }
+  }
+  async function logout() {
+    const button = $("logout");
+    button.disabled = true;
+    try {
+      const result = await requestJson("/api/v1/auth/passkey/logout", { method: "POST" });
+      if (!result.response.ok && result.response.status !== 401) {
+        throw new Error(ui.httpErrorText(result.payload, "退出登录失败"));
+      }
+      expireSession("已退出所有者会话。");
+    } catch (error) {
+      showAlert("退出登录失败：" + passkeyErrorMessage(error));
+    } finally {
+      button.disabled = false;
+    }
+  }
+  $("login-form").addEventListener("submit", loginWithPasskey);
+  $("logout").addEventListener("click", logout);
+  checkOwnerSession();
   setInterval(() => {
-    if (!state.failedClosed && state.snapshot && $("login").style.display !== "grid") refreshSnapshot();
+    if (!state.failedClosed && state.snapshot) refreshSnapshot();
   }, 4000);
 })();
 </script>

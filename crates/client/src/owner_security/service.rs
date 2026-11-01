@@ -1021,6 +1021,51 @@ impl OwnerSecurityService {
         self.finish_with_passkey(passkey, channel)
     }
 
+    /// Issue a valid owner session without a hardware WebAuthn ceremony.
+    /// This is test-only setup for route middleware; production tokens can only
+    /// be minted after a successful Passkey authentication.
+    #[cfg(test)]
+    pub(crate) fn issue_session_for_test(
+        &self,
+        channel: OwnerBootstrapChannel,
+    ) -> ServiceResult<IssuedOwnerSession> {
+        let store = self.load_complete()?;
+        let credential = store
+            .active_credentials()
+            .into_iter()
+            .next()
+            .ok_or(OwnerSecurityError::NotInitialized)?;
+        let credential_id = PasskeyCredentialId::from_public_key(credential.cred_id());
+        let webauthn = self.webauthn_for(channel)?;
+        let created_at_unix_ms = unix_time_ms()?;
+        let expires_at_unix_ms = created_at_unix_ms
+            .checked_add(duration_millis(OWNER_SESSION_TTL)?)
+            .context("所有者会话过期时间溢出")?;
+        let (token, reference) = generate_session_token()?;
+        let stored = StoredSession {
+            reference: reference.clone(),
+            credential_id: credential_id.clone(),
+            channel: session_channel(channel),
+            rp_id: webauthn.rp_id().to_string(),
+            origin: webauthn.origin().to_string(),
+            created_at_unix_ms,
+            expires_at_unix_ms,
+            last_authenticated_at_unix_ms: created_at_unix_ms,
+        };
+        self.persistence
+            .update(|store| store.insert_session(stored))?;
+        Ok(IssuedOwnerSession {
+            token,
+            session: AuthenticatedOwnerSession {
+                reference,
+                credential_id,
+                channel: session_channel(channel),
+                expires_at_unix_ms,
+                last_authenticated_at_unix_ms: created_at_unix_ms,
+            },
+        })
+    }
+
     #[cfg(test)]
     fn expire_ceremony_for_test(&self) {
         let mut state = self.state.lock().expect("owner service state");

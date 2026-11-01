@@ -2034,6 +2034,109 @@
     };
   }
 
+
+  function base64urlToBuffer(value) {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error("WebAuthn 数据缺少有效的 base64url 内容");
+    }
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+    const binary = atob(normalized + padding);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes.buffer;
+  }
+
+  function bufferToBase64url(value) {
+    const bytes = new Uint8Array(value);
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function decodeRequestOptions(challenge) {
+    const options = challenge && challenge.publicKey;
+    if (!options || typeof options !== "object") {
+      throw new Error("服务端返回的 Passkey 登录参数无效");
+    }
+    const decoded = {
+      ...options,
+      challenge: base64urlToBuffer(options.challenge),
+    };
+    if (Array.isArray(options.allowCredentials)) {
+      decoded.allowCredentials = options.allowCredentials.map((credential) => ({
+        ...credential,
+        id: base64urlToBuffer(credential.id),
+      }));
+    }
+    return { publicKey: decoded };
+  }
+
+  function decodeCreationOptions(challenge) {
+    const options = challenge && challenge.publicKey;
+    if (!options || typeof options !== "object") {
+      throw new Error("服务端返回的 Passkey 注册参数无效");
+    }
+    const decoded = {
+      ...options,
+      challenge: base64urlToBuffer(options.challenge),
+      user: {
+        ...options.user,
+        id: base64urlToBuffer(options.user && options.user.id),
+      },
+    };
+    if (Array.isArray(options.excludeCredentials)) {
+      decoded.excludeCredentials = options.excludeCredentials.map((credential) => ({
+        ...credential,
+        id: base64urlToBuffer(credential.id),
+      }));
+    }
+    return { publicKey: decoded };
+  }
+
+  function encodeAuthenticationCredential(credential) {
+    const response = credential.response;
+    const encoded = {
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        authenticatorData: bufferToBase64url(response.authenticatorData),
+        clientDataJSON: bufferToBase64url(response.clientDataJSON),
+        signature: bufferToBase64url(response.signature),
+      },
+      clientExtensionResults: credential.getClientExtensionResults
+        ? credential.getClientExtensionResults()
+        : {},
+    };
+    if (response.userHandle) {
+      encoded.response.userHandle = bufferToBase64url(response.userHandle);
+    }
+    return encoded;
+  }
+
+  function encodeRegistrationCredential(credential) {
+    const response = credential.response;
+    const transports = typeof response.getTransports === "function" ? response.getTransports() : undefined;
+    return {
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        attestationObject: bufferToBase64url(response.attestationObject),
+        clientDataJSON: bufferToBase64url(response.clientDataJSON),
+        ...(Array.isArray(transports) ? { transports } : {}),
+      },
+      clientExtensionResults: credential.getClientExtensionResults
+        ? credential.getClientExtensionResults()
+        : {},
+    };
+  }
+
   return Object.freeze({
     HTTP_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -2058,5 +2161,11 @@
     outcomeErrorText,
     outcomeSummary,
     projectPage,
+    base64urlToBuffer,
+    bufferToBase64url,
+    decodeRequestOptions,
+    decodeCreationOptions,
+    encodeAuthenticationCredential,
+    encodeRegistrationCredential,
   });
 });

@@ -261,6 +261,10 @@ describe("React WebUI shell", () => {
       value: {
         ...snapshot,
         lifecycle: { ...snapshot.lifecycle, phase: "running" as const },
+        permissions: {
+          access_model: "trusted_control_plane",
+          permissions: ["view_state", "manage_networks", "stop_node"],
+        },
       },
       action: "stop_node",
     },
@@ -282,7 +286,7 @@ describe("React WebUI shell", () => {
   ])(
     "opens the real primary action for $status",
     async ({ value, action }) => {
-      authenticate(value);
+      authenticate(value as NodeSnapshot);
       const user = userEvent.setup();
       renderApp();
 
@@ -303,6 +307,42 @@ describe("React WebUI shell", () => {
       expect(panel.querySelector(".action-form")).toBeInTheDocument();
     },
   );
+
+  it("hides a primary action that the owner cannot execute", async () => {
+    authenticate({
+      ...snapshot,
+      permissions: {
+        access_model: "trusted_control_plane",
+        permissions: ["view_state"],
+      },
+    });
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    expect(
+      document.querySelector(".overview-primary-action"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows compact network paths without generic metric cards or live charts", async () => {
+    if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
+    window.FuckIPV6I18n.tr = (_locale, key, params) =>
+      `translated:${key}:${JSON.stringify(params ?? {})}`;
+    authenticate(populatedSnapshot);
+    const { container } = renderApp();
+
+    const networks = await screen.findByTestId("overview-networks");
+    const home = within(networks)
+      .getByText("home")
+      .closest(".overview-network-row");
+    expect(home).toHaveTextContent("translated:overview.network.detail");
+    expect(home).toHaveTextContent("translated:overview.network.path");
+    expect(home).toHaveTextContent('"routing":"translated:choice.routing.bypass_mainland"');
+    expect(home).toHaveTextContent('"exit":"translated:overview.exit.selected');
+    expect(container.querySelector(".overview-stack .metric-card")).not.toBeInTheDocument();
+    expect(container.querySelector(".overview-stack [data-chart]")).not.toBeInTheDocument();
+    expect(container.querySelector(".overview-stack canvas")).not.toBeInTheDocument();
+  });
 
   it("shows at most three deduplicated operational issues", async () => {
     if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");

@@ -2354,6 +2354,27 @@ mod tests {
         assert_eq!(overview.networks.len(), 1);
         assert_eq!(overview.networks[0].name, "home");
         assert_eq!(overview.networks[0].peer_count, 1);
+        assert_eq!(overview.networks[0].tun_name, "fk-home");
+        assert_eq!(
+            overview.networks[0].routing,
+            t(Locale::ZhCn, "choice.routing.mesh_only")
+        );
+        assert!(overview.networks[0].exit.contains("peer-1"));
+        assert_eq!(
+            overview.networks[0].roles,
+            vec![
+                t(Locale::ZhCn, "choice.role.member").to_string(),
+                t(Locale::ZhCn, "choice.role.exit_node").to_string(),
+            ]
+        );
+        assert_eq!(
+            overview
+                .shortcuts
+                .iter()
+                .map(|shortcut| shortcut.id.as_str())
+                .collect::<Vec<_>>(),
+            ["create_network", "discover_networks", "join_network"]
+        );
     }
 
     #[test]

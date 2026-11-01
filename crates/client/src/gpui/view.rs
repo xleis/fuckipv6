@@ -65,6 +65,25 @@ fn app_region_id(region: AppRegion) -> SharedString {
     SharedString::from(format!("gpui-region-{}", region.name()))
 }
 
+fn visible_overview_primary_action<'a>(
+    overview: &'a OverviewModel,
+    manifest: Option<&NodeUiManifest>,
+    snapshot: &NodeSnapshot,
+    selected_network: Option<&str>,
+) -> Option<&'a str> {
+    let action_id = overview.primary_action.as_deref()?;
+    let action = manifest?
+        .pages
+        .iter()
+        .find(|page| page.id == "overview")?
+        .actions
+        .iter()
+        .find(|action| action.id == action_id)?;
+    action_block_reason(action, snapshot, selected_network)
+        .is_none()
+        .then_some(action_id)
+}
+
 struct GpuiShell {
     commands: NodeCommandBus,
     configs: ConfigManager,
@@ -1334,7 +1353,14 @@ impl GpuiShell {
                     ))),
             );
 
-        if let Some(action_id) = overview.primary_action.clone() {
+        if let Some(action_id) = visible_overview_primary_action(
+            overview,
+            self.manifest.as_ref(),
+            &self.snapshot,
+            self.selected_network.as_deref(),
+        )
+        .map(str::to_string)
+        {
             let target = action_id.clone();
             primary_card = primary_card.child(
                 button(
@@ -2705,6 +2731,28 @@ mod tests {
             assert!(!status.label_zh().is_empty());
             assert!(!semantic.label_key().is_empty());
         }
+    }
+
+    #[test]
+    fn overview_hides_a_primary_action_without_permission() {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let manifest = crate::node::node_ui_manifest();
+        let model = build_page_model(&manifest, &fixture.snapshot, "overview", Locale::En)
+            .expect("overview page model");
+        let overview = model.overview.as_ref().expect("overview projection");
+
+        assert_eq!(
+            visible_overview_primary_action(overview, Some(&manifest), &fixture.snapshot, None,),
+            Some("stop_node")
+        );
+
+        let mut denied = fixture.snapshot;
+        denied.permissions.permissions.clear();
+        assert_eq!(
+            visible_overview_primary_action(overview, Some(&manifest), &denied, None),
+            None
+        );
     }
 
     #[gpui::test]

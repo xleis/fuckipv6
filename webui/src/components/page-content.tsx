@@ -38,7 +38,11 @@ import type {
   NodeSnapshot,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
-import { label, primaryStatus } from "../contract/invariants";
+import {
+  executionBlockReason,
+  label,
+  primaryStatus,
+} from "../contract/invariants";
 import { t, tr } from "../i18n";
 
 type PageContentProps = {
@@ -277,6 +281,7 @@ function Overview({
   page,
   snapshot,
   locale,
+  selectedNetwork,
   onSelectNetwork,
   onNavigate,
   onRequestAction,
@@ -295,6 +300,11 @@ function Overview({
   const requestedPrimaryAction = primaryAction
     ? availableActions.get(primaryAction.id)
     : undefined;
+  const executablePrimaryAction =
+    requestedPrimaryAction &&
+    !executionBlockReason(requestedPrimaryAction, snapshot, selectedNetwork)
+      ? requestedPrimaryAction
+      : undefined;
   const shortcut = (actionId: string) => {
     onNavigate("networks");
     onRequestAction(actionId);
@@ -319,13 +329,13 @@ function Overview({
             <strong>{status.label}</strong> · {status.detail}
           </p>
         </div>
-        {requestedPrimaryAction ? (
+        {executablePrimaryAction ? (
           <button
             className="primary-button overview-primary-action"
             type="button"
-            onClick={() => onRequestAction(requestedPrimaryAction.id)}
+            onClick={() => onRequestAction(executablePrimaryAction.id)}
           >
-            {label(locale, requestedPrimaryAction.label_key)}
+            {label(locale, executablePrimaryAction.label_key)}
           </button>
         ) : null}
       </section>

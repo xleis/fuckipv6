@@ -1,58 +1,68 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>fuckipv6 · 本地所有者恢复</title>
+  <title data-i18n="owner_auth.recovery.page_title">Local owner recovery</title>
   <link rel="stylesheet" href="/assets/recovery.css">
 </head>
 <body data-recovery-ticket="__RECOVERY_TICKET__" data-recovery-origin="__RECOVERY_ORIGIN__">
   <div class="shell">
     <section class="panel" aria-labelledby="page-title">
       <header>
-        <div class="brand">fuckipv6</div>
-        <h1 id="page-title" class="title">本地所有者恢复</h1>
-        <p class="sub">本机终端已校验恢复码。请注册新的 Passkey，并离线保存随后生成的新恢复码。</p>
+        <div class="topline">
+          <div class="brand">fuckipv6</div>
+          <label class="language">
+            <span data-i18n="common.language">Language</span>
+            <select id="language-preference" data-i18n-aria-label="common.language">
+              <option value="system" data-i18n="lang.system">System</option>
+              <option value="zh-CN" data-i18n="lang.zh_cn">Simplified Chinese</option>
+              <option value="en" data-i18n="lang.en">English</option>
+            </select>
+          </label>
+        </div>
+        <h1 id="page-title" class="title" data-i18n="owner_auth.recovery.page_title">Local owner recovery</h1>
+        <p class="sub" data-i18n="owner_auth.recovery.description">The terminal verified the recovery code.</p>
       </header>
       <main>
         <section id="step-intro" class="step active" aria-labelledby="intro-title">
-          <div class="step-head"><span class="step-no">1</span><span id="intro-title" class="step-title">确认恢复影响</span></div>
-          <div class="warning">恢复完成后，现有全部 Passkey 和登录会话都会立即失效。此操作不会创建公网找回入口。</div>
-          <p class="hint">恢复服务只监听本机回环地址，并在完成或取消后自动关闭。恢复凭据不会写入 URL、浏览器存储或审计日志。</p>
+          <div class="step-head"><span class="step-no">1</span><span id="intro-title" class="step-title" data-i18n="owner_auth.recovery.impact_title">Review the recovery impact</span></div>
+          <div class="warning" data-i18n="owner_auth.recovery.impact_warning">Existing passkeys and sessions will be invalidated.</div>
+          <p class="hint" data-i18n="owner_auth.recovery.impact_hint">The recovery service listens only on loopback.</p>
           <div class="actions">
-            <button id="begin-recovery" type="button">注册新 Passkey</button>
-            <button id="cancel-recovery" class="secondary" type="button">取消恢复</button>
+            <button id="begin-recovery" type="button" data-i18n="owner_auth.recovery.begin">Register new passkey</button>
+            <button id="cancel-recovery" class="secondary" type="button" data-i18n="owner_auth.recovery.cancel">Cancel recovery</button>
           </div>
         </section>
 
         <section id="step-recovery" class="step" aria-labelledby="recovery-title">
-          <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title">离线保存新恢复码</span></div>
-          <div id="recovery-warning" class="warning">新恢复码只显示这一次。请在下方的确认框勾选前，将它保存到离线安全位置。</div>
-          <label for="recovery-code">新恢复码</label>
+          <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title" data-i18n="owner_auth.recovery.new_code_title">Save the new recovery code offline</span></div>
+          <div id="recovery-warning" class="warning" data-i18n="owner_auth.recovery.new_code_warning">The new recovery code is shown only once.</div>
+          <label for="recovery-code" data-i18n="owner_auth.recovery.new_code_label">New recovery code</label>
           <div class="recovery">
             <code id="recovery-code" class="code" tabindex="0"></code>
-            <button id="copy-recovery" class="secondary" type="button">复制</button>
+            <button id="copy-recovery" class="secondary" type="button" data-i18n="common.copy">Copy</button>
           </div>
-          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox"><span id="recovery-confirmation">我已离线保存新恢复码，并确认旧 Passkey 与会话将全部失效。</span></label>
+          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox"><span id="recovery-confirmation" data-i18n="owner_auth.recovery.new_code_confirmation">I saved the new recovery code offline.</span></label>
           <div class="actions">
-            <button id="confirm-recovery" type="button" disabled>完成本地恢复</button>
-            <button id="cancel-after-registration" class="secondary" type="button">取消恢复</button>
+            <button id="confirm-recovery" type="button" disabled data-i18n="owner_auth.recovery.complete_button">Complete local recovery</button>
+            <button id="cancel-after-registration" class="secondary" type="button" data-i18n="owner_auth.recovery.cancel">Cancel recovery</button>
           </div>
         </section>
 
         <section id="step-complete" class="step" aria-labelledby="complete-title">
-          <div class="step-head"><span class="step-no">✓</span><span id="complete-title" class="step-title">本地恢复已关闭</span></div>
+          <div class="step-head"><span class="step-no">✓</span><span id="complete-title" class="step-title" data-i18n="owner_auth.recovery.closed_title">Local recovery closed</span></div>
           <p id="complete-message" class="hint"></p>
-          <div class="actions"><button id="close-window" class="secondary" type="button">关闭窗口</button></div>
+          <div class="actions"><button id="close-window" class="secondary" type="button" data-i18n="owner_auth.recovery.close">Close window</button></div>
         </section>
 
         <div id="status" class="status" role="status" aria-live="polite"></div>
       </main>
-      <footer><span class="dot"></span><span>仅本机回环 · WebAuthn 来源校验 · 一次性恢复会话</span></footer>
+      <footer><span class="dot"></span><span data-i18n="owner_auth.recovery.footer">Loopback only · WebAuthn origin check · one-time recovery session</span></footer>
     </section>
   </div>
-  <script src="/assets/owner_auth_copy.js"></script>
+  <script src="/assets/i18n.js"></script>
   <script src="/assets/recovery.js"></script>
 </body>
 </html>

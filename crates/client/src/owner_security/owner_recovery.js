@@ -1,60 +1,112 @@
 "use strict";
 
 (() => {
-  const authCopy = Object.assign({
-    secureContextRequirements: "当前页面不是受信任的 WebAuthn 安全上下文。请使用配置的 HTTPS 公网地址或 http://localhost；证书或域名错误必须先修复，不能跳过校验。",
-    passkeyUnsupported: "当前浏览器或平台不支持所需的 Passkey 能力。请使用支持 WebAuthn 的现代浏览器和系统认证器。",
-    originMismatchTemplate: "WebAuthn 地址不匹配。预期 {expected}，当前 {actual}。请使用 {expected} 打开；若浏览器报告证书错误，必须先修复证书，不能跳过校验。",
-    recoveryCodeWarning: "恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据，请立即保存到离线安全位置。",
-    recoveryCodeConfirmation: "我已将恢复码保存到离线安全位置，并确认页面关闭后无法再次查看。",
-  }, window.FuckIPV6OwnerAuthCopy || {});
+  const i18n = window.FuckIPV6I18n;
+  if (!i18n) throw new Error("recovery-contract: shared i18n runtime is missing");
+
+  const ERROR_KEYS = Object.freeze({
+    forbidden: "owner_auth.recovery.error.forbidden",
+    invalid_ticket: "owner_auth.recovery.error.invalid_ticket",
+    query_not_allowed: "owner_auth.recovery.error.query_not_allowed",
+    recovery_conflict: "owner_auth.recovery.error.state_changed",
+    already_running: "owner_auth.recovery.error.already_running",
+    complete: "owner_auth.recovery.error.complete",
+    cancelled: "owner_auth.recovery.error.cancelled",
+    registration_missing: "owner_auth.recovery.error.registration_missing",
+    registration_failed: "owner_auth.recovery.error.registration_failed",
+    internal_error: "owner_auth.recovery.error.internal",
+    recovery_completed_audit_failed: "owner_auth.recovery.error.committed_audit_failed",
+    state_changed: "owner_auth.recovery.error.state_changed",
+    save_not_confirmed: "owner_auth.recovery.error.save_not_confirmed",
+    no_pending_result: "owner_auth.recovery.error.no_pending_result",
+  });
+
+  const $ = (id) => document.getElementById(id);
   const ticket = document.body.dataset.recoveryTicket || "";
   const expectedOrigin = document.body.dataset.recoveryOrigin || "";
-  const introStep = document.getElementById("step-intro");
-  const recoveryStep = document.getElementById("step-recovery");
-  const completeStep = document.getElementById("step-complete");
-  const completeMessage = document.getElementById("complete-message");
-  const beginButton = document.getElementById("begin-recovery");
-  const cancelButton = document.getElementById("cancel-recovery");
-  const cancelAfterRegistrationButton = document.getElementById("cancel-after-registration");
-  const recoveryCodeElement = document.getElementById("recovery-code");
-  const copyButton = document.getElementById("copy-recovery");
-  const savedCheckbox = document.getElementById("recovery-saved");
-  const confirmButton = document.getElementById("confirm-recovery");
-  const closeButton = document.getElementById("close-window");
-  const statusBox = document.getElementById("status");
+  const introStep = $("step-intro");
+  const recoveryStep = $("step-recovery");
+  const completeStep = $("step-complete");
+  const completeMessage = $("complete-message");
+  const beginButton = $("begin-recovery");
+  const cancelButton = $("cancel-recovery");
+  const cancelAfterRegistrationButton = $("cancel-after-registration");
+  const recoveryCodeElement = $("recovery-code");
+  const copyButton = $("copy-recovery");
+  const savedCheckbox = $("recovery-saved");
+  const confirmButton = $("confirm-recovery");
+  const closeButton = $("close-window");
+  const statusBox = $("status");
+  const languageSelect = $("language-preference");
 
   let currentRecoveryCode = "";
+  let languagePreference = "system";
+  let locale = i18n.resolveLocale(languagePreference);
+  let statusState = null;
+  let completeKey = "";
+  let beginActionKey = "owner_auth.recovery.begin";
+  let confirmSubmitting = false;
 
-  function applyAuthCopy() {
-    document.getElementById("recovery-warning").textContent = authCopy.recoveryCodeWarning;
-    document.getElementById("recovery-confirmation").textContent = authCopy.recoveryCodeConfirmation;
+  function hasKey(key) {
+    const messages = i18n.catalog && i18n.catalog.messages && i18n.catalog.messages[locale];
+    return Boolean(key && messages && Object.prototype.hasOwnProperty.call(messages, key));
   }
 
-  function formatCopy(template, values) {
-    return Object.entries(values).reduce(
-      (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
-      String(template || ""),
-    );
+  function t(key) {
+    return i18n.t(locale, key);
   }
 
-  function webAuthnIssue(expected) {
-    if (!window.isSecureContext) return authCopy.secureContextRequirements;
-    if (!window.PublicKeyCredential || !navigator.credentials) return authCopy.passkeyUnsupported;
-    if (expected && window.origin !== expected) {
-      return formatCopy(authCopy.originMismatchTemplate, { expected, actual: window.origin });
+  function tr(key, params) {
+    return i18n.tr(locale, key, params);
+  }
+
+  function localizedError(key, params, payload) {
+    const error = new Error(key);
+    error.key = key;
+    error.params = params || {};
+    error.payload = payload || null;
+    return error;
+  }
+
+  function payloadErrorKey(payload) {
+    const explicit = payload && typeof payload.message_key === "string" ? payload.message_key : "";
+    if (hasKey(explicit)) return explicit;
+    const code = payload && typeof payload.code === "string" ? payload.code : "";
+    return ERROR_KEYS[code] || "";
+  }
+
+  function errorPresentation(error, fallbackKey) {
+    const explicitKey = error && error.key && hasKey(error.key) ? error.key : "";
+    const responseKey = error && error.payload ? payloadErrorKey(error.payload) : "";
+    return {
+      key: explicitKey || responseKey || fallbackKey,
+      params: (error && error.params) || {},
+    };
+  }
+
+  function showStatusKey(key, kind = "", params = {}) {
+    statusState = { key, kind, params };
+    renderStatus();
+  }
+
+  function showError(error, fallbackKey) {
+    const presentation = errorPresentation(error, fallbackKey);
+    showStatusKey(presentation.key, "error", presentation.params);
+  }
+
+  function renderStatus() {
+    if (!statusState || !hasKey(statusState.key)) {
+      statusBox.textContent = "";
+      statusBox.className = "status";
+      return;
     }
-    return "";
-  }
-
-  function showStatus(message, kind = "") {
-    statusBox.textContent = message;
-    statusBox.className = `status show ${kind}`.trim();
+    statusBox.textContent = tr(statusState.key, statusState.params);
+    statusBox.className = `status show ${statusState.kind}`.trim();
   }
 
   function clearStatus() {
-    statusBox.textContent = "";
-    statusBox.className = "status";
+    statusState = null;
+    renderStatus();
   }
 
   function showStep(step) {
@@ -63,9 +115,49 @@
     }
   }
 
+  function renderDynamicText() {
+    document.title = `fuckipv6 · ${t("owner_auth.recovery.page_title")}`;
+    beginButton.textContent = tr(beginActionKey);
+    confirmButton.textContent = tr(
+      confirmSubmitting
+        ? "owner_auth.recovery.status.submitting"
+        : "owner_auth.recovery.complete_button",
+    );
+    completeMessage.textContent = completeKey && hasKey(completeKey) ? t(completeKey) : "";
+  }
+
+  function applyLanguage() {
+    locale = i18n.resolveLocale(languagePreference);
+    languageSelect.value = languagePreference;
+    i18n.applyDocument(document, locale);
+    renderDynamicText();
+    renderStatus();
+  }
+
+  function webAuthnIssue(expected) {
+    if (!window.isSecureContext) return { key: "owner_auth.issue.secure_context", params: {} };
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      return { key: "owner_auth.issue.passkey_unsupported", params: {} };
+    }
+    if (expected && window.origin !== expected) {
+      return {
+        key: "owner_auth.issue.origin_mismatch",
+        params: { expected, actual: window.origin },
+      };
+    }
+    return null;
+  }
+
+  function showWebAuthnIssue(expected) {
+    const issue = webAuthnIssue(expected);
+    if (!issue) return false;
+    showStatusKey(issue.key, "error", issue.params);
+    return true;
+  }
+
   function base64urlToBuffer(value) {
     if (typeof value !== "string" || value.length === 0) {
-      throw new Error("WebAuthn challenge 缺少有效的 base64url 数据");
+      throw localizedError("owner_auth.recovery.status.invalid_challenge");
     }
     const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
     const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
@@ -89,7 +181,7 @@
   function decodeCreationOptions(challenge) {
     const options = challenge && challenge.publicKey;
     if (!options || typeof options !== "object") {
-      throw new Error("服务端返回的 Passkey 注册参数无效");
+      throw localizedError("owner_auth.recovery.status.invalid_server_options");
     }
     const decoded = {
       ...options,
@@ -142,11 +234,12 @@
       try {
         payload = JSON.parse(text);
       } catch (_error) {
-        throw new Error(`服务端返回了无效响应（HTTP ${response.status}）`);
+        throw localizedError("owner_auth.request.invalid_json", { status: response.status });
       }
     }
     if (!response.ok) {
-      throw new Error((payload && payload.error) || `请求失败（HTTP ${response.status}）`);
+      const key = payloadErrorKey(payload) || "owner_auth.request.failed";
+      throw localizedError(key, { status: response.status }, payload);
     }
     return payload;
   }
@@ -161,27 +254,26 @@
   }
 
   async function beginRecovery() {
-    const issue = webAuthnIssue(expectedOrigin);
-    if (issue) {
-      showStatus(issue, "error");
-      return;
-    }
+    if (showWebAuthnIssue(expectedOrigin)) return;
 
     clearStatus();
     beginButton.disabled = true;
     cancelButton.disabled = true;
-    beginButton.textContent = "正在准备...";
+    beginActionKey = "owner_auth.recovery.status.waiting";
+    renderDynamicText();
     try {
       const challenge = await requestJson("/api/recovery/start", {
         method: "POST",
         body: JSON.stringify({ ticket }),
       });
-      beginButton.textContent = "等待 Passkey 授权...";
+      beginActionKey = "owner_auth.recovery.status.waiting";
+      renderDynamicText();
       const credential = await navigator.credentials.create(decodeCreationOptions(challenge));
       if (!credential) {
-        throw new Error("Passkey 注册已取消");
+        throw localizedError("owner_auth.recovery.status.cancelled_registration");
       }
-      beginButton.textContent = "正在验证新 Passkey...";
+      beginActionKey = "owner_auth.recovery.status.verifying";
+      renderDynamicText();
       const result = await requestJson("/api/recovery/finish", {
         method: "POST",
         body: JSON.stringify({
@@ -190,41 +282,39 @@
         }),
       });
       if (!result || typeof result.recovery_code !== "string" || result.recovery_code.length < 20) {
-        throw new Error("服务端未返回有效的新恢复码");
+        throw localizedError("owner_auth.recovery.status.missing_new_code");
       }
       currentRecoveryCode = result.recovery_code;
       recoveryCodeElement.textContent = currentRecoveryCode;
       showStep(recoveryStep);
-      showStatus("新 Passkey 已验证。提交前现有凭据尚未改变。", "ok");
+      showStatusKey("owner_auth.recovery.status.verified", "ok");
       recoveryCodeElement.focus();
     } catch (error) {
-      showStatus(error && error.message ? error.message : "Passkey 注册失败", "error");
+      showError(error, "owner_auth.recovery.status.registration_failed");
       beginButton.disabled = false;
       cancelButton.disabled = false;
     } finally {
-      beginButton.textContent = "注册新 Passkey";
+      beginActionKey = "owner_auth.recovery.begin";
+      renderDynamicText();
     }
   }
 
   async function copyRecoveryCode() {
-    if (!currentRecoveryCode) {
-      return;
-    }
+    if (!currentRecoveryCode) return;
     try {
       await navigator.clipboard.writeText(currentRecoveryCode);
-      showStatus("新恢复码已复制。请立即存入离线安全位置。", "ok");
+      showStatusKey("owner_auth.recovery.status.copied", "ok");
     } catch (_error) {
-      showStatus("浏览器拒绝剪贴板访问，请手动复制新恢复码。", "warn");
+      showStatusKey("owner_auth.recovery.status.clipboard_denied", "warn");
     }
   }
 
   async function confirmRecovery() {
-    if (!savedCheckbox.checked || !currentRecoveryCode) {
-      return;
-    }
+    if (!savedCheckbox.checked || !currentRecoveryCode) return;
     clearStatus();
     setRecoveryButtonsDisabled(true);
-    confirmButton.textContent = "正在提交...";
+    confirmSubmitting = true;
+    renderDynamicText();
     try {
       await requestJson("/api/recovery/confirm", {
         method: "POST",
@@ -232,13 +322,16 @@
       });
       currentRecoveryCode = "";
       recoveryCodeElement.textContent = "";
+      completeKey = "owner_auth.recovery.status.completed";
       showStep(completeStep);
-      completeMessage.textContent = "本地所有者恢复已完成：旧 Passkey 和旧登录会话均已失效。临时恢复服务已经关闭。";
+      renderDynamicText();
       closeButton.focus();
     } catch (error) {
-      showStatus(error && error.message ? error.message : "本地恢复提交失败", "error");
+      showError(error, "owner_auth.recovery.status.submit_failed");
       setRecoveryButtonsDisabled(false);
-      confirmButton.textContent = "完成本地恢复";
+    } finally {
+      confirmSubmitting = false;
+      renderDynamicText();
     }
   }
 
@@ -252,28 +345,20 @@
       });
       currentRecoveryCode = "";
       recoveryCodeElement.textContent = "";
+      completeKey = "owner_auth.recovery.status.cancelled";
       showStep(completeStep);
-      completeMessage.textContent = "本地恢复已取消，现有 Passkey 和登录会话没有改变。临时恢复服务已经关闭。";
+      renderDynamicText();
       closeButton.focus();
     } catch (error) {
-      showStatus(error && error.message ? error.message : "取消本地恢复失败", "error");
+      showError(error, "owner_auth.recovery.status.cancel_failed");
       setRecoveryButtonsDisabled(false);
     }
   }
 
-  applyAuthCopy();
-  const issue = webAuthnIssue(expectedOrigin);
-  if (issue) {
-    showStatus(issue, "error");
-    setRecoveryButtonsDisabled(true);
-    return;
-  }
-  if (!ticket || !expectedOrigin) {
-    showStatus("恢复页面缺少一次性安全上下文。请关闭本页并从终端重新启动恢复。", "error");
-    setRecoveryButtonsDisabled(true);
-    return;
-  }
-
+  languageSelect.addEventListener("change", () => {
+    languagePreference = languageSelect.value;
+    applyLanguage();
+  });
   beginButton.addEventListener("click", beginRecovery);
   cancelButton.addEventListener("click", cancelRecovery);
   cancelAfterRegistrationButton.addEventListener("click", cancelRecovery);
@@ -283,4 +368,12 @@
   });
   confirmButton.addEventListener("click", confirmRecovery);
   closeButton.addEventListener("click", () => window.close());
+
+  applyLanguage();
+  if (showWebAuthnIssue(expectedOrigin) || !ticket || !expectedOrigin) {
+    if (!ticket || !expectedOrigin) {
+      showStatusKey("owner_auth.recovery.status.missing_context", "error");
+    }
+    setRecoveryButtonsDisabled(true);
+  }
 })();

@@ -295,8 +295,23 @@ for (const relative of [
   "crates/client/src/owner_security/owner_recovery.html",
 ]) {
   const surface = readFileSync(path.join(root, relative), "utf8");
-  assert.match(surface, /<script src="\/assets\/owner_auth_copy\.js"><\/script>/);
+  assert.match(surface, /<script src="\/assets\/i18n\.js"><\/script>/);
+  assert.match(surface, /data-i18n="common\.language"/);
   assert.doesNotMatch(surface, /localStorage|sessionStorage|Authorization|Bearer /);
 }
+
+const recoveryAssets = [
+  "crates/client/src/owner_security/owner_recovery.html",
+  "crates/client/src/owner_security/owner_recovery.js",
+].map((relative) => readFileSync(path.join(root, relative), "utf8"));
+for (const asset of recoveryAssets) {
+  assert.doesNotMatch(asset, /\p{Script=Han}/u, "recovery assets must not hard-code Chinese copy");
+}
+const recoveryScript = recoveryAssets[1];
+assert.match(recoveryScript, /FuckIPV6I18n/);
+assert.match(recoveryScript, /applyDocument/);
+assert.match(recoveryScript, /resolveLocale/);
+assert.match(recoveryScript, /statusState/);
+assert.doesNotMatch(recoveryScript, /payload\.error/);
 
 console.log("test_webui_node_ui: passed");

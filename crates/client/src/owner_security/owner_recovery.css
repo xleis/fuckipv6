@@ -27,6 +27,9 @@ body{
   box-shadow:0 24px 80px #0008;
   overflow:hidden;
 }
+.topline{display:flex;justify-content:space-between;align-items:center;gap:16px}
+.language{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px}
+.language select{border:1px solid var(--line);border-radius:7px;background:#07131d;color:var(--text);padding:5px 7px;font:inherit}
 header{
   padding:26px 28px 20px;
   border-bottom:1px solid var(--line);

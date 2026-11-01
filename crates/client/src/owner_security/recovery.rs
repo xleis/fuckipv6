@@ -20,6 +20,7 @@ use axum::{
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::NodeId;
+use fuckipv6_common::i18n_browser;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -504,7 +505,7 @@ fn recovery_router(recovery: Arc<LocalRecovery>) -> Router {
         .route("/", get(handle_recovery_page))
         .route("/assets/recovery.css", get(handle_recovery_css))
         .route("/assets/recovery.js", get(handle_recovery_js))
-        .route("/assets/owner_auth_copy.js", get(handle_owner_auth_copy_js))
+        .route("/assets/i18n.js", get(handle_i18n_js))
         .route("/api/recovery/start", post(handle_recovery_start))
         .route("/api/recovery/finish", post(handle_recovery_finish))
         .route("/api/recovery/confirm", post(handle_recovery_confirm))
@@ -567,7 +568,7 @@ async fn handle_recovery_js(
     }
 }
 
-async fn handle_owner_auth_copy_js(
+async fn handle_i18n_js(
     State(recovery): State<Arc<LocalRecovery>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     OriginalUri(uri): OriginalUri,
@@ -583,17 +584,13 @@ async fn handle_owner_auth_copy_js(
                     ),
                     (header::CACHE_CONTROL, "no-store"),
                 ],
-                crate::owner_security::ui_copy::browser_script(),
+                i18n_browser::browser_runtime_script(),
             )
                 .into_response(),
         ),
-        Err(error) => recovery_error_response(
-            &recovery,
-            remote.ip(),
-            "GET",
-            "/assets/owner_auth_copy.js",
-            error,
-        ),
+        Err(error) => {
+            recovery_error_response(&recovery, remote.ip(), "GET", "/assets/i18n.js", error)
+        }
     }
 }
 
@@ -1087,7 +1084,7 @@ mod tests {
         assert!(RECOVERY_HTML.contains("__RECOVERY_ORIGIN__"));
         assert!(RECOVERY_HTML.contains("/assets/recovery.css"));
         assert!(RECOVERY_HTML.contains("/assets/recovery.js"));
-        assert!(RECOVERY_HTML.contains("/assets/owner_auth_copy.js"));
+        assert!(RECOVERY_HTML.contains("/assets/i18n.js"));
     }
 
     #[test]

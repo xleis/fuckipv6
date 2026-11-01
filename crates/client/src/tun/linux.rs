@@ -6,8 +6,14 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::time::{timeout, Instant};
+
+const TUN_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const TUN_ADDRESS_DELETE_TIMEOUT: Duration = Duration::from_millis(250);
+const TUN_DELETE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct LinuxTun {
     reader: Arc<AsyncFd<tun::platform::posix::Reader>>,
@@ -33,27 +39,47 @@ impl LinkLifetime {
             deletion_started: AtomicBool::new(false),
         }
     }
+}
 
-    fn begin_deletion(&self) -> bool {
-        self.deletion_started
+struct DeletionClaim<'a> {
+    started: &'a AtomicBool,
+    completed: bool,
+}
+
+impl<'a> DeletionClaim<'a> {
+    fn acquire(started: &'a AtomicBool) -> Option<Self> {
+        started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .ok()
+            .map(|_| Self {
+                started,
+                completed: false,
+            })
+    }
+
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for DeletionClaim<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.started.store(false, Ordering::Release);
+        }
     }
 }
 
 impl Drop for LinkLifetime {
     fn drop(&mut self) {
-        if !self.begin_deletion() {
+        let Some(_claim) = DeletionClaim::acquire(&self.deletion_started) else {
             return;
-        }
+        };
 
         tracing::info!("正在释放 TUN 网卡资源: {}", self.name);
-        let name = self.name.clone();
-        std::thread::spawn(move || {
-            let _ = std::process::Command::new("ip")
-                .args(["link", "delete", &name])
-                .status();
-        });
+        if let Err(error) = delete_link_sync_bounded(&self.name, TUN_DELETE_TIMEOUT) {
+            tracing::warn!(%error, "释放 TUN 网卡资源失败: {}", self.name);
+        }
     }
 }
 
@@ -318,31 +344,34 @@ impl LinuxTun {
         }
 
         tracing::info!("正在删除 TUN 设备: {}", self.lifetime.name);
+        let Some(claim) = DeletionClaim::acquire(&self.lifetime.deletion_started) else {
+            tracing::debug!("TUN 设备删除已启动: {}", self.lifetime.name);
+            return Ok(());
+        };
+        let deadline = Instant::now() + TUN_DELETE_TIMEOUT;
 
         if let Some(ipv6) = self.lifetime.virtual_ips.ipv6 {
             let addr_cmd = format!("{}/128", ipv6);
-            let _ = tokio::process::Command::new("ip")
+            let mut command = tokio::process::Command::new("ip");
+            command
                 .args(["-6", "addr", "del", &addr_cmd, "dev", &self.lifetime.name])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
+                .stderr(std::process::Stdio::null());
+            let time_limit = command_time_remaining(deadline).min(TUN_ADDRESS_DELETE_TIMEOUT);
+            let _ = run_command_async_bounded(command, time_limit).await;
         }
 
         if let Some(ipv4) = self.lifetime.virtual_ips.ipv4 {
             let addr_cmd = format!("{}/32", ipv4);
-            let _ = tokio::process::Command::new("ip")
+            let mut command = tokio::process::Command::new("ip");
+            command
                 .args(["addr", "del", &addr_cmd, "dev", &self.lifetime.name])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
+                .stderr(std::process::Stdio::null());
+            let time_limit = command_time_remaining(deadline).min(TUN_ADDRESS_DELETE_TIMEOUT);
+            let _ = run_command_async_bounded(command, time_limit).await;
         }
 
-        if !self.lifetime.begin_deletion() {
-            tracing::debug!("TUN 设备删除已启动: {}", self.lifetime.name);
-            return Ok(());
-        }
-
-        delete_link(&self.lifetime.name).await?;
+        delete_link_with_timeout(&self.lifetime.name, command_time_remaining(deadline)).await?;
+        claim.complete();
         tracing::info!("TUN 设备已删除");
 
         Ok(())
@@ -674,25 +703,83 @@ async fn open_tun_device(name: &str) -> Result<tun::platform::Device> {
     .context("打开 TUN 设备失败")
 }
 
-async fn delete_link(name: &str) -> Result<()> {
-    let output = tokio::process::Command::new("ip")
-        .args(["link", "delete", name])
-        .output()
+fn command_time_remaining(deadline: Instant) -> Duration {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .min(TUN_COMMAND_TIMEOUT)
+}
+
+async fn run_command_async_bounded(
+    mut command: tokio::process::Command,
+    time_limit: Duration,
+) -> Result<std::process::Output> {
+    command.kill_on_drop(true);
+    timeout(time_limit, command.output())
         .await
-        .context("执行 ip link delete 命令失败")?;
+        .map_err(|_| anyhow::anyhow!("命令在 {time_limit:?} 内未完成，已强制终止"))?
+        .context("执行命令失败")
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let lower = stderr.to_ascii_lowercase();
-        if lower.contains("cannot find device") || lower.contains("does not exist") {
-            tracing::debug!("TUN 设备已不存在: {}", name);
-            return Ok(());
+fn run_command_sync_bounded(
+    mut command: std::process::Command,
+    time_limit: Duration,
+) -> Result<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().context("启动子进程失败")?;
+    let deadline = StdInstant::now() + time_limit;
+    loop {
+        if child.try_wait().context("读取子进程状态失败")?.is_some() {
+            return child.wait_with_output().context("收集子进程输出失败");
         }
+        if StdInstant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("命令在 {time_limit:?} 内未完成，已强制终止");
+        }
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+}
 
-        anyhow::bail!("删除 TUN 设备失败：{}", stderr.trim());
+fn validate_delete_link_output(name: &str, output: &std::process::Output) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
     }
 
-    Ok(())
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("cannot find device") || lower.contains("does not exist") {
+        tracing::debug!("TUN 设备已不存在: {}", name);
+        return Ok(());
+    }
+
+    anyhow::bail!("删除 TUN 设备失败：{}", stderr.trim())
+}
+
+async fn delete_link_with_timeout(name: &str, time_limit: Duration) -> Result<()> {
+    if time_limit.is_zero() {
+        anyhow::bail!("删除 TUN 设备超过总期限");
+    }
+    let mut command = tokio::process::Command::new("ip");
+    command.args(["link", "delete", name]);
+    let output = run_command_async_bounded(command, time_limit)
+        .await
+        .context("执行 ip link delete 命令失败")?;
+    validate_delete_link_output(name, &output)
+}
+
+async fn delete_link(name: &str) -> Result<()> {
+    delete_link_with_timeout(name, TUN_DELETE_TIMEOUT).await
+}
+
+fn delete_link_sync_bounded(name: &str, time_limit: Duration) -> Result<()> {
+    let mut command = std::process::Command::new("ip");
+    command.args(["link", "delete", name]);
+    let output = run_command_sync_bounded(command, time_limit)
+        .with_context(|| format!("执行 ip link delete {name} 命令失败"))?;
+    validate_delete_link_output(name, &output)
 }
 
 #[cfg(test)]
@@ -831,7 +918,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&clone), 1);
         assert_eq!(deletions.load(Ordering::SeqCst), 0);
         assert!(!clone.deletion_started.load(Ordering::Acquire));
-        if request_link_close(&clone) && clone.begin_deletion() {
+        if request_link_close(&clone) && DeletionClaim::acquire(&clone.deletion_started).is_some() {
             deletions.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -848,8 +935,9 @@ mod tests {
         let deletions = AtomicUsize::new(0);
 
         for _ in 0..3 {
-            if lifetime.begin_deletion() {
+            if let Some(claim) = DeletionClaim::acquire(&lifetime.deletion_started) {
                 deletions.fetch_add(1, Ordering::SeqCst);
+                claim.complete();
             }
         }
 

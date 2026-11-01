@@ -38,6 +38,21 @@ const FAST_PROBE_ATTEMPTS: usize = 20;
 const FAST_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const SECURE_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum P2pShutdownError {
+    #[error("{0}")]
+    Failed(String),
+    #[error("{0}")]
+    Deferred(String),
+}
+
+impl P2pShutdownError {
+    pub(crate) fn is_timed_out(&self) -> bool {
+        matches!(self, Self::Deferred(_))
+    }
+}
 
 fn validate_inbound_queue_capacity(capacity: usize) -> Result<()> {
     if capacity == 0 || capacity > MAX_INBOUND_QUEUE_CAPACITY {
@@ -1653,44 +1668,85 @@ impl P2pEngine {
     /// Stop the UDP receiver and all P2P background tasks, wait for them to
     /// release the socket, and make later sends fail explicitly.
     pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown_bounded(SHUTDOWN_TIMEOUT)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) async fn shutdown_bounded(
+        &self,
+        total_timeout: Duration,
+    ) -> std::result::Result<(), P2pShutdownError> {
+        let deadline = Instant::now() + total_timeout;
         let first_shutdown = !self.shutdown_started.swap(true, Ordering::AcqRel);
         if first_shutdown {
             let _ = self.shutdown.send(true);
         }
 
-        let receiver = self
-            .receiver_task
-            .lock()
-            .expect("P2P receiver task slot poisoned")
-            .take();
         let mut failures = Vec::new();
-        if let Some(mut task) = receiver {
-            match tokio::time::timeout(Duration::from_secs(1), &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    failures.push(format!("UDP 接收任务异常退出: {error}"));
-                }
-                Err(_) => {
-                    task.abort();
-                    let _ = task.await;
-                    failures.push("UDP 接收任务未在期限内停止，已中止".to_string());
-                }
+        let mut timed_out = false;
+
+        // Keep every unfinished handle in its registry. A timeout is not proof
+        // that cancellation has completed, so dropping the handle here would
+        // permanently lose the only safe retry owner.
+        let mut receiver = {
+            let mut slot = self
+                .receiver_task
+                .lock()
+                .expect("P2P receiver task slot poisoned");
+            slot.take()
+        };
+        if let Some(task) = receiver.as_mut() {
+            if wait_for_p2p_task(task, deadline, "UDP 接收任务", &mut failures).await {
+                receiver = None;
+            } else {
+                task.abort();
+                timed_out = true;
             }
         }
 
-        let child_tasks = self
-            .child_tasks
-            .lock()
-            .expect("P2P child task registry poisoned")
-            .drain(..)
-            .collect::<Vec<_>>();
-        for task in child_tasks {
+        let child_tasks = {
+            let mut tasks = self
+                .child_tasks
+                .lock()
+                .expect("P2P child task registry poisoned");
+            std::mem::take(&mut *tasks)
+        };
+        for task in &child_tasks {
             task.abort();
-            if let Err(error) = task.await {
-                if !error.is_cancelled() {
-                    failures.push(format!("P2P 子任务异常退出: {error}"));
-                }
+        }
+        let mut unfinished_tasks = Vec::new();
+        for mut task in child_tasks {
+            if !wait_for_p2p_task(&mut task, deadline, "P2P 子任务", &mut failures).await {
+                unfinished_tasks.push(task);
+                timed_out = true;
             }
+        }
+
+        {
+            let mut slot = self
+                .receiver_task
+                .lock()
+                .expect("P2P receiver task slot poisoned");
+            debug_assert!(slot.is_none(), "P2P shutdown owns receiver slot");
+            *slot = receiver;
+        }
+        {
+            let mut tasks = self
+                .child_tasks
+                .lock()
+                .expect("P2P child task registry poisoned");
+            debug_assert!(tasks.is_empty(), "P2P shutdown owns child registry");
+            *tasks = unfinished_tasks;
+        }
+
+        if !failures.is_empty() {
+            let message = failures.join("; ");
+            return if timed_out {
+                Err(P2pShutdownError::Deferred(message))
+            } else {
+                Err(P2pShutdownError::Failed(message))
+            };
         }
 
         self.connections.write().await.clear();
@@ -1699,10 +1755,32 @@ impl P2pEngine {
         self.quic_mesh.write().await.take();
         self.socket.lock().expect("P2P socket slot poisoned").take();
 
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            anyhow::bail!("{}", failures.join("; "))
+        Ok(())
+    }
+}
+
+async fn wait_for_p2p_task(
+    task: &mut JoinHandle<()>,
+    deadline: Instant,
+    label: &str,
+    failures: &mut Vec<String>,
+) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        failures.push(format!("{label}清理超过总期限，句柄已保留"));
+        return false;
+    }
+
+    match tokio::time::timeout(remaining, &mut *task).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) if error.is_cancelled() => true,
+        Ok(Err(error)) => {
+            failures.push(format!("{label}异常退出: {error}"));
+            true
+        }
+        Err(_) => {
+            failures.push(format!("{label}未在期限内停止，句柄已保留"));
+            false
         }
     }
 }
@@ -4396,6 +4474,56 @@ mod tests {
 
         let rebound = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).await?;
         assert_eq!(rebound.local_addr()?.port(), port);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_preserves_task_owner_and_retry_succeeds() -> Result<()> {
+        let engine = P2pEngine::new(0).await?;
+        let release = Arc::new(AtomicBool::new(false));
+        let blocking_release = release.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            while !blocking_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        engine.register_child_task(task);
+
+        let error = engine
+            .shutdown_bounded(Duration::from_millis(100))
+            .await
+            .expect_err("an uncooperative task must exceed the shutdown deadline");
+        assert!(error.is_timed_out());
+        assert!(error.to_string().contains("句柄已保留"));
+        assert_eq!(
+            engine
+                .child_tasks
+                .lock()
+                .expect("child task registry poisoned")
+                .len(),
+            1
+        );
+        assert!(
+            engine
+                .socket
+                .lock()
+                .expect("P2P socket slot poisoned")
+                .is_some(),
+            "a timed-out shutdown must not discard the socket owner"
+        );
+
+        release.store(true, Ordering::Release);
+        engine.shutdown().await?;
+        assert!(engine
+            .child_tasks
+            .lock()
+            .expect("child task registry poisoned")
+            .is_empty());
+        assert!(engine
+            .socket
+            .lock()
+            .expect("P2P socket slot poisoned")
+            .is_none());
         Ok(())
     }
 

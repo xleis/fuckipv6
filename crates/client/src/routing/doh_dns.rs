@@ -14,13 +14,14 @@ use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, Instant};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.2:53";
 const DEFAULT_UPSTREAMS: &str = "https://1.1.1.1/dns-query,https://8.8.8.8/dns-query";
@@ -28,6 +29,7 @@ const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 const LOCK_PATH: &str = "/run/fuckipv6-dns.lock";
 const BACKUP_PATH: &str = "/run/fuckipv6-resolv.conf.backup";
 const DNS_MESSAGE_LIMIT: usize = 65_535;
+const DNS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Owns the loopback DoH bridge and the temporary resolv.conf override.
 #[derive(Debug)]
@@ -35,6 +37,9 @@ pub(crate) struct DohDnsGuard {
     previous_resolv_conf: Vec<u8>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
+    restored: bool,
+    resolv_conf_path: PathBuf,
+    backup_path: PathBuf,
     _lock: File,
 }
 
@@ -95,6 +100,9 @@ impl DohDnsGuard {
             previous_resolv_conf,
             shutdown,
             tasks,
+            restored: false,
+            resolv_conf_path: PathBuf::from(RESOLV_CONF_PATH),
+            backup_path: PathBuf::from(BACKUP_PATH),
             _lock: lock,
         }))
     }
@@ -103,37 +111,85 @@ impl DohDnsGuard {
     /// restore the original resolver config. Errors keep the guard owned by the
     /// route manager so cleanup can be retried.
     pub(crate) async fn shutdown(&mut self) -> Result<()> {
+        self.shutdown_with_paths(DNS_SHUTDOWN_TIMEOUT).await
+    }
+
+    async fn shutdown_with_paths(&mut self, total_timeout: Duration) -> Result<()> {
+        if self.restored && self.tasks.is_empty() {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + total_timeout;
         let _ = self.shutdown.send(true);
         let mut failures = Vec::new();
-        for task in self.tasks.drain(..) {
+        for task in &self.tasks {
             task.abort();
-            if let Err(error) = task.await {
-                if !error.is_cancelled() {
+        }
+        while !self.tasks.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                failures.push("等待 DoH DNS 任务退出超过总期限".to_string());
+                break;
+            }
+            match timeout(remaining, &mut self.tasks[0]).await {
+                Ok(Ok(())) => {
+                    self.tasks.remove(0);
+                }
+                Ok(Err(error)) if error.is_cancelled() => {
+                    self.tasks.remove(0);
+                }
+                Ok(Err(error)) => {
                     failures.push(format!("DoH DNS 任务异常退出: {error}"));
+                    self.tasks.remove(0);
+                }
+                Err(_) => {
+                    failures.push("等待 DoH DNS 任务退出超过总期限".to_string());
+                    break;
                 }
             }
         }
 
-        if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &self.previous_resolv_conf) {
-            failures.push(format!("恢复 /etc/resolv.conf 失败: {error}"));
-        } else if let Err(error) = std::fs::remove_file(BACKUP_PATH) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                failures.push(format!("删除 DNS 配置备份失败: {error}"));
+        if failures.is_empty() {
+            let Some(remaining) = remaining_before(deadline) else {
+                failures.push("恢复 DNS 配置超过总期限".to_string());
+                return finish_shutdown(failures);
+            };
+            match timeout(
+                remaining,
+                tokio::fs::write(&self.resolv_conf_path, &self.previous_resolv_conf),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(format!("恢复 /etc/resolv.conf 失败: {error}")),
+                Err(_) => failures.push("恢复 /etc/resolv.conf 超过总期限".to_string()),
             }
-        } else {
-            tracing::info!("已恢复原 DNS 解析配置");
         }
 
         if failures.is_empty() {
-            Ok(())
-        } else {
-            anyhow::bail!("{}", failures.join("; "))
+            let Some(remaining) = remaining_before(deadline) else {
+                failures.push("删除 DNS 配置备份超过总期限".to_string());
+                return finish_shutdown(failures);
+            };
+            match timeout(remaining, tokio::fs::remove_file(&self.backup_path)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Err(error)) => failures.push(format!("删除 DNS 配置备份失败: {error}")),
+                Err(_) => failures.push("删除 DNS 配置备份超过总期限".to_string()),
+            }
         }
+
+        if failures.is_empty() {
+            self.restored = true;
+            tracing::info!("已恢复原 DNS 解析配置");
+        }
+
+        finish_shutdown(failures)
     }
 
     fn abort_tasks(&mut self) {
         let _ = self.shutdown.send(true);
-        for task in self.tasks.drain(..) {
+        for task in &self.tasks {
             task.abort();
         }
     }
@@ -141,12 +197,31 @@ impl DohDnsGuard {
 
 impl Drop for DohDnsGuard {
     fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
         self.abort_tasks();
-        if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &self.previous_resolv_conf) {
+        if let Err(error) = std::fs::write(&self.resolv_conf_path, &self.previous_resolv_conf) {
             tracing::warn!("恢复 /etc/resolv.conf 失败: {error:#}");
         } else {
-            let _ = std::fs::remove_file(BACKUP_PATH);
+            let _ = std::fs::remove_file(&self.backup_path);
+            self.restored = true;
         }
+    }
+}
+
+fn remaining_before(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(remaining)
+}
+
+fn finish_shutdown(mut failures: Vec<String>) -> Result<()> {
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        failures.sort();
+        failures.dedup();
+        anyhow::bail!("{}", failures.join("; "))
     }
 }
 
@@ -395,6 +470,48 @@ fn servfail_response(query: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn test_paths(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, File) {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-doh-dns-{name}-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let resolv_conf = directory.join("resolv.conf");
+        let backup = directory.join("resolv.conf.backup");
+        let lock_path = directory.join("dns.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open test lock");
+        (directory, resolv_conf, backup, lock_path, lock)
+    }
+
+    fn pending_guard(
+        previous: &[u8],
+        resolv_conf: PathBuf,
+        backup: PathBuf,
+        lock: File,
+    ) -> DohDnsGuard {
+        let (shutdown, _) = watch::channel(false);
+        DohDnsGuard {
+            previous_resolv_conf: previous.to_vec(),
+            shutdown,
+            tasks: vec![tokio::spawn(std::future::pending())],
+            restored: false,
+            resolv_conf_path: resolv_conf,
+            backup_path: backup,
+            _lock: lock,
+        }
+    }
 
     #[test]
     fn managed_resolv_conf_replaces_only_nameservers() {
@@ -426,5 +543,57 @@ mod tests {
         let valid = reqwest::Url::parse("https://1.1.1.1/dns-query").unwrap();
         assert_eq!(valid.scheme(), "https");
         assert!(valid.host_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn shutdown_restores_resolver_files_and_joins_aborted_tasks() {
+        let previous = b"nameserver 9.9.9.9\n";
+        let (directory, resolv_conf, backup, _lock_path, lock) = test_paths("success");
+        std::fs::write(&resolv_conf, b"nameserver 127.0.0.2\n").expect("write managed resolver");
+        std::fs::write(&backup, previous).expect("write resolver backup");
+        let mut guard = pending_guard(previous, resolv_conf.clone(), backup.clone(), lock);
+
+        guard
+            .shutdown_with_paths(Duration::from_secs(1))
+            .await
+            .expect("bounded shutdown must restore DNS state");
+
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read restored resolver"),
+            previous
+        );
+        assert!(!backup.exists());
+        assert!(guard.tasks.is_empty());
+        assert!(guard.restored);
+        drop(guard);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_retains_guard_and_original_resolver_untouched() {
+        let previous = b"nameserver 9.9.9.9\n";
+        let managed = b"nameserver 127.0.0.2\n";
+        let (directory, resolv_conf, backup, _lock_path, lock) = test_paths("timeout");
+        std::fs::write(&resolv_conf, managed).expect("write managed resolver");
+        std::fs::write(&backup, previous).expect("write resolver backup");
+        let mut guard = pending_guard(previous, resolv_conf.clone(), backup.clone(), lock);
+
+        guard
+            .shutdown_with_paths(Duration::ZERO)
+            .await
+            .expect_err("an exhausted shutdown deadline must fail");
+
+        assert!(!guard.restored);
+        assert!(!guard.tasks.is_empty());
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read managed resolver"),
+            managed
+        );
+        drop(guard);
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read drop-restored resolver"),
+            previous
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
@@ -48,6 +48,10 @@ const TUN_BUFFER_ALLOCATION_SIZE: usize = TUN_PACKET_BUFFER_SIZE + DATA_HEADER_L
 const TUN_BUFFER_POOL_SIZE: usize = 64;
 const DATA_PLANE_BATCH_SIZE: usize = 32;
 const QUIC_RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+const RELAY_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const OUTBOUND_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const RUNTIME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 
 /// Owns a fixed-size TUN read buffer while carrying the number of valid bytes.
@@ -284,6 +288,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
     pub(crate) tun_reader_task: Option<JoinHandle<()>>,
+    pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
 }
 
 impl ClientRuntime {
@@ -309,6 +314,7 @@ impl Drop for ClientRuntime {
         abort_task(&self.ipc_task);
         abort_task(&self.config_reload_task);
         abort_task(&self.tun_reader_task);
+        abort_task(&self.relay_reconnect_task);
     }
 }
 
@@ -457,7 +463,9 @@ pub(crate) async fn prepare_client_runtime_ext(
         relay_state,
     );
     if let Some(relay) = relay {
-        let _ = outbound.install_relay(relay).await;
+        if let Err(relay) = outbound.install_relay(relay).await {
+            relay.close().await;
+        }
     }
     let (control_tx, control_rx) = mpsc::unbounded_channel();
 
@@ -511,6 +519,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         ipc_task: Some(tasks.ipc_task),
         config_reload_task: Some(tasks.config_reload_task),
         tun_reader_task: Some(tasks.tun_reader_task),
+        relay_reconnect_task: None,
     })
 }
 
@@ -913,13 +922,21 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
 
             // 定期心跳与 QUIC 中继自愈检测
             _ = runtime.heartbeat_interval.tick() => {
+                if runtime
+                    .relay_reconnect_task
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished)
+                {
+                    runtime.relay_reconnect_task.take();
+                    runtime.outbound.finish_relay_reconnect();
+                }
                 if runtime.signaling.send_heartbeat().is_ok() {
                     runtime.stats.record_signaling_sent().await;
                 }
                 if runtime.outbound.relay_handle().await.is_none()
                     && runtime.outbound.begin_relay_reconnect().await
                 {
-                    spawn_relay_reconnect(runtime);
+                    runtime.relay_reconnect_task = Some(spawn_relay_reconnect(runtime));
                 }
             }
 
@@ -1502,7 +1519,7 @@ fn abort_task(task: &Option<JoinHandle<()>>) {
     }
 }
 
-async fn stop_runtime_task(task: &mut Option<JoinHandle<()>>) -> CleanupStatus {
+async fn stop_runtime_task(task: &mut Option<JoinHandle<()>>, deadline: Instant) -> CleanupStatus {
     let Some(handle) = task.as_mut() else {
         return CleanupStatus::NotOwned;
     };
@@ -1510,7 +1527,11 @@ async fn stop_runtime_task(task: &mut Option<JoinHandle<()>>) -> CleanupStatus {
     // Request cancellation first, then join the handle so the task can release
     // cloned TUN/socket ownership before the corresponding device is removed.
     handle.abort();
-    match tokio::time::timeout(Duration::from_secs(2), &mut *handle).await {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return CleanupStatus::Deferred("任务取消超过总期限，句柄已保留".into());
+    }
+    match tokio::time::timeout(remaining, &mut *handle).await {
         Ok(Ok(())) => {
             *task = None;
             CleanupStatus::Removed
@@ -1523,75 +1544,130 @@ async fn stop_runtime_task(task: &mut Option<JoinHandle<()>>) -> CleanupStatus {
             *task = None;
             CleanupStatus::Failed(error.to_string())
         }
-        Err(_) => CleanupStatus::Deferred("任务在取消后 2 秒内仍未退出".into()),
+        Err(_) => CleanupStatus::Deferred("任务在取消后未于总期限内退出，句柄已保留".into()),
     }
 }
 
+fn cleanup_status_from_result(result: Result<()>) -> CleanupStatus {
+    match result {
+        Ok(()) => CleanupStatus::Removed,
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("保留")
+                || message.contains("总期限")
+                || message.contains("未完成")
+                || message.contains("状态未知")
+            {
+                CleanupStatus::Deferred(message)
+            } else {
+                CleanupStatus::Failed(message)
+            }
+        }
+    }
+}
+
+fn phase_timeout(deadline: Instant, maximum: Duration) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then(|| remaining.min(maximum))
+}
+
+fn cleanup_deadline_exhausted() -> CleanupStatus {
+    CleanupStatus::Deferred("运行时清理总期限已耗尽，资源仍由运行时持有".into())
+}
+
+// Resource teardown is ordered by dependency: producers -> transport clients
+// -> workers -> P2P socket -> host routes -> TUN. Every phase uses a budget and
+// the global deadline stays below runtime_control::STOP_TIMEOUT so the caller
+// can retain the runtime for a safe retry instead of timing out opaquely.
 async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome {
     let mut outcome = RuntimeCleanupOutcome::default();
+    let deadline = Instant::now() + RUNTIME_CLEANUP_TIMEOUT;
+    let task_deadline = deadline.min(Instant::now() + TASK_STOP_TIMEOUT);
 
     // TUN reader owns a device handle and must be joined before delete(). The
-    // config watcher and private IPC listener are stopped under the same bound.
-    let (ipc, config_reload, tun_reader) = tokio::join!(
-        stop_runtime_task(&mut runtime.ipc_task),
-        stop_runtime_task(&mut runtime.config_reload_task),
-        stop_runtime_task(&mut runtime.tun_reader_task),
+    // config watcher, private IPC listener and relay reconnect are stopped
+    // under one shared deadline. A task that cannot be joined remains in its
+    // owning Option so a later cleanup retry can still observe it.
+    let (ipc, config_reload, tun_reader, relay_reconnect) = tokio::join!(
+        stop_runtime_task(&mut runtime.ipc_task, task_deadline),
+        stop_runtime_task(&mut runtime.config_reload_task, task_deadline),
+        stop_runtime_task(&mut runtime.tun_reader_task, task_deadline),
+        stop_runtime_task(&mut runtime.relay_reconnect_task, task_deadline),
     );
     outcome.record("控制监听任务", ipc);
     outcome.record("配置监听任务", config_reload);
     outcome.record("TUN 读取任务", tun_reader);
+    outcome.record("中继重连任务", relay_reconnect);
 
-    match runtime.signaling.close().await {
-        Ok(()) => outcome.record("信令连接", CleanupStatus::Removed),
-        Err(error) => outcome.record("信令连接", CleanupStatus::Failed(format!("{error:#}"))),
-    }
+    let signaling = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+        Some(timeout) => match runtime.signaling.close_bounded(timeout).await {
+            Ok(()) => CleanupStatus::Removed,
+            Err(error) if error.is_timed_out() => CleanupStatus::Deferred(error.to_string()),
+            Err(error) => CleanupStatus::Failed(error.to_string()),
+        },
+        None => cleanup_deadline_exhausted(),
+    };
+    outcome.record("信令连接", signaling);
 
-    let relay = runtime.outbound.close_relay().await;
+    let relay = match phase_timeout(deadline, RELAY_CLOSE_TIMEOUT) {
+        Some(timeout) => runtime.outbound.close_relay(timeout).await,
+        None => cleanup_deadline_exhausted(),
+    };
     outcome.record("QUIC 中继", relay);
 
-    match runtime.p2p.shutdown().await {
-        Ok(()) => outcome.record("P2P UDP 监听与子任务", CleanupStatus::Removed),
-        Err(error) => outcome.record(
-            "P2P UDP 监听与子任务",
-            CleanupStatus::Failed(format!("{error:#}")),
-        ),
-    }
+    let workers = match phase_timeout(deadline, OUTBOUND_CLOSE_TIMEOUT) {
+        Some(timeout) => runtime.outbound.close_workers(timeout).await,
+        None => cleanup_deadline_exhausted(),
+    };
+    outcome.record("出站 worker", workers);
+
+    let p2p = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+        Some(timeout) => match runtime.p2p.shutdown_bounded(timeout).await {
+            Ok(()) => CleanupStatus::Removed,
+            Err(error) if error.is_timed_out() => CleanupStatus::Deferred(error.to_string()),
+            Err(error) => CleanupStatus::Failed(error.to_string()),
+        },
+        None => cleanup_deadline_exhausted(),
+    };
+    outcome.record("P2P UDP 监听与子任务", p2p);
 
     #[cfg(target_os = "linux")]
     {
-        if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
-            match forwarder.rollback() {
-                Ok(()) => {
-                    runtime.exit_forwarder = None;
-                    outcome.record("Exit 转发规则", CleanupStatus::Removed);
+        let exit = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+            Some(timeout) => match runtime.exit_forwarder.as_mut() {
+                Some(forwarder) => {
+                    let status =
+                        cleanup_status_from_result(forwarder.rollback_within(timeout).await);
+                    if status.is_clean() {
+                        runtime.exit_forwarder = None;
+                    }
+                    status
                 }
-                Err(error) => {
-                    outcome.record("Exit 转发规则", CleanupStatus::Failed(format!("{error:#}")))
-                }
+                None => CleanupStatus::NotOwned,
+            },
+            None if runtime.exit_forwarder.is_some() => cleanup_deadline_exhausted(),
+            None => CleanupStatus::NotOwned,
+        };
+        outcome.record("Exit 转发规则", exit);
+
+        let routes = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+            Some(timeout) => {
+                cleanup_status_from_result(runtime.route_manager.rollback_within(timeout).await)
             }
-        } else {
-            outcome.record("Exit 转发规则", CleanupStatus::NotOwned);
-        }
-        match tokio::time::timeout(Duration::from_secs(5), runtime.route_manager.rollback()).await {
-            Ok(Ok(())) => outcome.record("路由与 DNS", CleanupStatus::Removed),
-            Ok(Err(error)) => {
-                outcome.record("路由与 DNS", CleanupStatus::Failed(format!("{error:#}")))
-            }
-            Err(_) => outcome.record(
-                "路由与 DNS",
-                CleanupStatus::Deferred("回滚在 5 秒内未完成".into()),
-            ),
-        }
+            None => cleanup_deadline_exhausted(),
+        };
+        outcome.record("路由与 DNS", routes);
     }
 
-    match tokio::time::timeout(Duration::from_secs(2), runtime.tun.delete()).await {
-        Ok(Ok(())) => outcome.record("TUN 设备", CleanupStatus::Removed),
-        Ok(Err(error)) => outcome.record("TUN 设备", CleanupStatus::Failed(format!("{error:#}"))),
-        Err(_) => outcome.record(
-            "TUN 设备",
-            CleanupStatus::Deferred("删除在 2 秒内未完成".into()),
-        ),
-    }
+    let tun = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+        Some(timeout) => match tokio::time::timeout(timeout, runtime.tun.delete()).await {
+            Ok(Ok(())) => CleanupStatus::Removed,
+            Ok(Err(error)) => cleanup_status_from_result(Err(error)),
+            Err(_) => CleanupStatus::Deferred("TUN 删除超过总期限，资源仍由运行时持有".into()),
+        },
+        None => cleanup_deadline_exhausted(),
+    };
+    outcome.record("TUN 设备", tun);
 
     outcome
 }
@@ -2126,6 +2202,7 @@ struct RelayState {
     slot: Arc<RwLock<Option<RelayHandle>>>,
     next_generation: Arc<AtomicU64>,
     reconnecting: Arc<AtomicBool>,
+    closing: Arc<AtomicBool>,
 }
 
 impl RelayState {
@@ -2133,12 +2210,19 @@ impl RelayState {
         self.slot.read().await.clone()
     }
 
-    async fn install_relay(&self, client: QuicRelayClient) -> Option<RelayHandle> {
+    async fn install_relay(
+        &self,
+        client: QuicRelayClient,
+    ) -> std::result::Result<Option<RelayHandle>, QuicRelayClient> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(client);
+        }
         let generation = self.next_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.slot
-            .write()
-            .await
-            .replace(RelayHandle { generation, client })
+        let mut slot = self.slot.write().await;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(client);
+        }
+        Ok(slot.replace(RelayHandle { generation, client }))
     }
 
     async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
@@ -2153,11 +2237,10 @@ impl RelayState {
         }
     }
 
-    async fn take_relay(&self) -> Option<RelayHandle> {
-        self.slot.write().await.take()
-    }
-
     async fn begin_reconnect(&self) -> bool {
+        if self.closing.load(Ordering::Acquire) {
+            return false;
+        }
         if self.slot.read().await.is_some() {
             return false;
         }
@@ -2168,6 +2251,10 @@ impl RelayState {
 
     fn finish_reconnect(&self) {
         self.reconnecting.store(false, Ordering::Release);
+    }
+
+    fn mark_closing(&self) {
+        self.closing.store(true, Ordering::Release);
     }
 }
 
@@ -2180,7 +2267,13 @@ impl RelayState {
 pub(crate) struct OutboundDispatcher {
     transport: Arc<dyn OutboundTransport>,
     relay_state: RelayState,
-    workers: Arc<Mutex<HashMap<IpAddr, mpsc::Sender<OutboundPacket>>>>,
+    workers: Arc<Mutex<HashMap<IpAddr, OutboundWorker>>>,
+    shutdown_started: Arc<AtomicBool>,
+}
+
+struct OutboundWorker {
+    sender: Option<mpsc::Sender<OutboundPacket>>,
+    task: JoinHandle<()>,
 }
 
 impl OutboundDispatcher {
@@ -2189,6 +2282,7 @@ impl OutboundDispatcher {
             transport,
             relay_state,
             workers: Arc::new(Mutex::new(HashMap::new())),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2203,9 +2297,15 @@ impl OutboundDispatcher {
             .workers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Serialize this check with close_workers() taking the registry.
+        // Otherwise submit could observe the old flag and install a worker
+        // after shutdown has captured the registry.
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return OutboundSubmitOutcome::WorkerUnavailable;
+        }
         let sender = workers
             .get(&dst_ip)
-            .cloned()
+            .and_then(|worker| worker.sender.clone())
             .unwrap_or_else(|| self.spawn_worker(&mut workers, dst_ip));
 
         match sender.try_send(packet) {
@@ -2228,21 +2328,95 @@ impl OutboundDispatcher {
 
     fn spawn_worker(
         &self,
-        workers: &mut HashMap<IpAddr, mpsc::Sender<OutboundPacket>>,
+        workers: &mut HashMap<IpAddr, OutboundWorker>,
         dst_ip: IpAddr,
     ) -> mpsc::Sender<OutboundPacket> {
         let (sender, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
         let transport = self.transport.clone();
-        tokio::spawn(run_outbound_worker(dst_ip, receiver, transport));
-        workers.insert(dst_ip, sender.clone());
+        let task = tokio::spawn(run_outbound_worker(dst_ip, receiver, transport));
+        workers.insert(
+            dst_ip,
+            OutboundWorker {
+                sender: Some(sender.clone()),
+                task,
+            },
+        );
         sender
+    }
+
+    async fn close_workers(&self, total_timeout: Duration) -> CleanupStatus {
+        self.shutdown_started.store(true, Ordering::Release);
+        let workers = {
+            let mut registry = self
+                .workers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *registry)
+        };
+        if workers.is_empty() {
+            return CleanupStatus::NotOwned;
+        }
+
+        let deadline = Instant::now() + total_timeout;
+        let mut tasks = Vec::with_capacity(workers.len());
+        for (dst_ip, mut worker) in workers {
+            // Dropping the last sender closes the receiver queue. Abort also
+            // interrupts a worker currently blocked in its transport send.
+            worker.sender.take();
+            worker.task.abort();
+            tasks.push((dst_ip, worker.task));
+        }
+
+        let mut unfinished = HashMap::new();
+        let mut failed = false;
+        for (dst_ip, mut task) in tasks {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                unfinished.insert(dst_ip, OutboundWorker { sender: None, task });
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_cancelled() => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%dst_ip, %error, "出站 worker 异常退出");
+                    failed = true;
+                }
+                Err(_) => {
+                    task.abort();
+                    unfinished.insert(dst_ip, OutboundWorker { sender: None, task });
+                }
+            }
+        }
+
+        let remaining = unfinished.len();
+        {
+            let mut registry = self
+                .workers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *registry = unfinished;
+        }
+
+        if remaining > 0 {
+            CleanupStatus::Deferred(format!(
+                "{remaining} 个出站 worker 未在期限内退出，句柄已保留"
+            ))
+        } else if failed {
+            CleanupStatus::Failed("出站 worker 异常退出".into())
+        } else {
+            CleanupStatus::Removed
+        }
     }
 
     async fn relay_handle(&self) -> Option<RelayHandle> {
         self.relay_state.relay_handle().await
     }
 
-    async fn install_relay(&self, relay: QuicRelayClient) -> Option<RelayHandle> {
+    async fn install_relay(
+        &self,
+        relay: QuicRelayClient,
+    ) -> std::result::Result<Option<RelayHandle>, QuicRelayClient> {
         self.relay_state.install_relay(relay).await
     }
 
@@ -2250,13 +2424,24 @@ impl OutboundDispatcher {
         self.relay_state.clear_relay(generation).await
     }
 
-    async fn close_relay(&self) -> CleanupStatus {
-        match self.relay_state.take_relay().await {
-            Some(relay) => {
-                relay.client.close().await;
-                CleanupStatus::Removed
+    async fn close_relay(&self, total_timeout: Duration) -> CleanupStatus {
+        self.relay_state.mark_closing();
+        let Some(relay) = self.relay_state.relay_handle().await else {
+            return CleanupStatus::NotOwned;
+        };
+        let generation = relay.generation;
+        match tokio::time::timeout(total_timeout, relay.client.close()).await {
+            Ok(()) => {}
+            Err(_) => {
+                return CleanupStatus::Deferred(format!(
+                    "QUIC 中继关闭超过 {total_timeout:?}，句柄已保留"
+                ));
             }
-            None => CleanupStatus::NotOwned,
+        }
+        if self.relay_state.clear_relay(generation).await.is_some() {
+            CleanupStatus::Removed
+        } else {
+            CleanupStatus::Deferred("QUIC 中继句柄在关闭期间被替换，新句柄仍受管理".into())
         }
     }
 
@@ -2428,7 +2613,7 @@ impl OutboundTransport for P2pOutboundTransport {
     }
 }
 
-fn spawn_relay_reconnect(runtime: &ClientRuntime) {
+fn spawn_relay_reconnect(runtime: &ClientRuntime) -> JoinHandle<()> {
     let signaling = runtime.signaling.clone();
     let identity = runtime.identity.clone();
     let assigned_ip = runtime.assigned_ip;
@@ -2437,12 +2622,14 @@ fn spawn_relay_reconnect(runtime: &ClientRuntime) {
     tokio::spawn(async move {
         let relay = connect_quic_relay(signaling.as_ref(), &identity, assigned_ip).await;
         if let Some(relay) = relay {
-            if let Some(previous) = outbound.install_relay(relay).await {
-                previous.client.close().await;
+            match outbound.install_relay(relay).await {
+                Ok(Some(previous)) => previous.client.close().await,
+                Ok(None) => {}
+                Err(relay) => relay.close().await,
             }
         }
         outbound.finish_relay_reconnect();
-    });
+    })
 }
 
 fn should_forward_tun_destination(dst_ip: IpAddr) -> bool {
@@ -4569,6 +4756,63 @@ mod tests {
         );
 
         gate.notify_waiters();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbound_worker_timeout_preserves_owner_and_retry_succeeds() {
+        let dispatcher = OutboundDispatcher::for_test(Arc::new(RecordingTransport {
+            completed_tx: mpsc::unbounded_channel().0,
+        }));
+        let peer = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            // Blocking inside a poll cannot be interrupted by JoinHandle::abort,
+            // which lets this test exercise timeout ownership retention.
+            let _ = release_rx.recv();
+        });
+        started_rx.await.expect("worker must start");
+        dispatcher
+            .workers
+            .lock()
+            .expect("outbound worker registry poisoned")
+            .insert(IpAddr::V6(peer), OutboundWorker { sender: None, task });
+
+        let first = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatcher.close_workers(Duration::from_millis(25)),
+        )
+        .await
+        .expect("bounded close must return before the test timeout");
+        release_tx.send(()).expect("worker must still own receiver");
+        assert!(matches!(first, CleanupStatus::Deferred(_)));
+        assert_eq!(
+            dispatcher
+                .workers
+                .lock()
+                .expect("outbound worker registry poisoned")
+                .len(),
+            1,
+            "a timed-out worker must remain owned for retry"
+        );
+
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatcher.close_workers(Duration::from_secs(1)),
+        )
+        .await
+        .expect("retry must be bounded");
+        assert_eq!(
+            second,
+            CleanupStatus::Removed,
+            "released worker must be joined on retry"
+        );
+        assert!(dispatcher
+            .workers
+            .lock()
+            .expect("outbound worker registry poisoned")
+            .is_empty());
     }
 
     struct TempPath(PathBuf);

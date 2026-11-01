@@ -13,12 +13,16 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{timeout, Instant};
 
 const ROUTE_PROTOCOL: &str = "99";
 const IPTABLES_WAIT_SECONDS: &str = "5";
 const MAX_STALE_JUMP_RULES: usize = 32;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(4);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IptablesRule {
     program: &'static str,
     table: Option<&'static str>,
@@ -54,10 +58,13 @@ struct SystemCommandRunner;
 impl ExitCommandRunner for SystemCommandRunner {
     fn run(&self, invocation: CommandInvocation) -> CommandFuture<'_> {
         Box::pin(async move {
-            let output = tokio::process::Command::new(&invocation.program)
-                .args(&invocation.args)
-                .output()
+            let mut command = tokio::process::Command::new(&invocation.program);
+            command.args(&invocation.args).kill_on_drop(true);
+            let output = timeout(COMMAND_TIMEOUT, command.output())
                 .await
+                .map_err(|_| {
+                    anyhow::anyhow!("{} 执行超过 {:?}", invocation.program, COMMAND_TIMEOUT)
+                })?
                 .with_context(|| format!("无法执行 {}", invocation.program))?;
             Ok(CommandResult {
                 success: output.status.success(),
@@ -68,9 +75,9 @@ impl ExitCommandRunner for SystemCommandRunner {
     }
 
     fn run_sync(&self, invocation: CommandInvocation) -> Result<CommandResult> {
-        let output = std::process::Command::new(&invocation.program)
-            .args(&invocation.args)
-            .output()
+        let mut command = std::process::Command::new(&invocation.program);
+        command.args(&invocation.args);
+        let output = run_sync_command(command)
             .with_context(|| format!("无法执行 {}", invocation.program))?;
         Ok(CommandResult {
             success: output.status.success(),
@@ -88,11 +95,32 @@ impl ExitCommandRunner for SystemCommandRunner {
     }
 }
 
+fn run_sync_command(mut command: std::process::Command) -> Result<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().context("启动子进程失败")?;
+    let deadline = StdInstant::now() + COMMAND_TIMEOUT;
+    loop {
+        if child.try_wait().context("读取子进程状态失败")?.is_some() {
+            return child.wait_with_output().context("收集子进程输出失败");
+        }
+        if StdInstant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("子进程超过 {:?}", COMMAND_TIMEOUT);
+        }
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+}
+
 #[derive(Debug)]
 struct ClientForwardState {
     addresses: HashSet<IpAddr>,
     owned_routes: Vec<IpAddr>,
     rules: Vec<IptablesRule>,
+    authorized: bool,
 }
 
 /// Owns forwarding, NAT and return-route resources for one Exit Node process.
@@ -172,7 +200,7 @@ impl LinuxExitForwarder {
 
     async fn install_resources(&mut self) -> Result<()> {
         if let Err(error) = self.install_forwarding().await {
-            if let Err(cleanup_error) = self.rollback() {
+            if let Err(cleanup_error) = self.rollback_async().await {
                 tracing::warn!("Exit Node 安装失败后的清理未完成，将继续重试: {cleanup_error:#}");
             }
             return Err(error);
@@ -200,7 +228,7 @@ impl LinuxExitForwarder {
         .collect();
 
         if let Some(existing) = self.clients.get(client_id) {
-            if existing.addresses == addresses {
+            if existing.authorized && existing.addresses == addresses {
                 return Ok(());
             }
             self.remove_client(client_id).await?;
@@ -210,6 +238,7 @@ impl LinuxExitForwarder {
             addresses: addresses.clone(),
             owned_routes: Vec::new(),
             rules: Vec::new(),
+            authorized: false,
         };
 
         let result = async {
@@ -246,11 +275,25 @@ impl LinuxExitForwarder {
         .await;
 
         if let Err(error) = result {
-            rollback_client_state_for_tun(self.runner.as_ref(), &self.tun_name, &mut state).await;
+            let cleanup_deadline = Instant::now() + ROLLBACK_TIMEOUT;
+            if let Err(cleanup_error) = rollback_client_state_for_tun(
+                self.runner.as_ref(),
+                &self.tun_name,
+                &mut state,
+                cleanup_deadline,
+            )
+            .await
+            {
+                tracing::warn!("撤销未完成授权的 Exit 资源失败: {cleanup_error:#}");
+            }
+            if !state.rules.is_empty() || !state.owned_routes.is_empty() {
+                self.clients.insert(client_id.to_string(), state);
+            }
             return Err(error)
                 .with_context(|| format!("无法为客户端 {client_id} 安装 Exit Node 转发资源"));
         }
 
+        state.authorized = true;
         self.clients.insert(client_id.to_string(), state);
         tracing::info!(
             "Exit Node 已授权客户端 {}: {:?}",
@@ -268,7 +311,18 @@ impl LinuxExitForwarder {
         let Some(mut state) = self.clients.remove(client_id) else {
             return Ok(());
         };
-        rollback_client_state_for_tun(self.runner.as_ref(), &self.tun_name, &mut state).await;
+        let deadline = Instant::now() + ROLLBACK_TIMEOUT;
+        if let Err(error) = rollback_client_state_for_tun(
+            self.runner.as_ref(),
+            &self.tun_name,
+            &mut state,
+            deadline,
+        )
+        .await
+        {
+            self.clients.insert(client_id.to_string(), state);
+            return Err(error);
+        }
         tracing::info!("Exit Node 已撤销客户端 {} 的转发资源", client_id);
         Ok(())
     }
@@ -442,7 +496,112 @@ impl LinuxExitForwarder {
         Ok(())
     }
 
-    /// Remove every resource owned by this manager. Safe to call twice.
+    /// Remove every resource owned by this manager with a hard deadline.
+    ///
+    /// Ownership of each rule, route, chain and sysctl override is retained
+    /// until its cleanup operation has completed successfully. If this future
+    /// is cancelled by the caller, the same manager can safely retry.
+    pub async fn rollback_async(&mut self) -> Result<()> {
+        self.rollback_async_bounded(ROLLBACK_TIMEOUT).await
+    }
+
+    pub(crate) async fn rollback_within(&mut self, total_timeout: Duration) -> Result<()> {
+        self.rollback_async_bounded(total_timeout).await
+    }
+
+    async fn rollback_async_bounded(&mut self, total_timeout: Duration) -> Result<()> {
+        if self.cleaned {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + total_timeout;
+        let mut failures = Vec::new();
+        let client_ids = self.clients.keys().cloned().collect::<Vec<_>>();
+        for client_id in client_ids {
+            let Some(state) = self.clients.get_mut(&client_id) else {
+                continue;
+            };
+            if let Err(error) =
+                rollback_client_state_for_tun(self.runner.as_ref(), &self.tun_name, state, deadline)
+                    .await
+            {
+                failures.push(format!(
+                    "删除 Exit 客户端 {client_id} 转发资源失败: {error:#}"
+                ));
+            }
+            if state.rules.is_empty() && state.owned_routes.is_empty() {
+                self.clients.remove(&client_id);
+            }
+        }
+
+        let mut chains = vec![
+            ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
+            ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
+        ];
+        if self.external_v6_interface.is_some() {
+            chains.extend([
+                (
+                    "ip6tables",
+                    "filter",
+                    "FORWARD",
+                    self.forward_chain.as_str(),
+                ),
+                ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
+            ]);
+        }
+        for (program, table, builtin, chain) in chains {
+            if rollback_remaining(deadline).is_none() {
+                failures.push("Exit 防火墙清理超过总期限，剩余资源已保留".to_string());
+                break;
+            }
+            if let Err(error) = cleanup_iptables_chain_bounded(
+                self.runner.as_ref(),
+                program,
+                table,
+                builtin,
+                chain,
+                deadline,
+            )
+            .await
+            {
+                failures.push(format!("清理 {program} 链 {chain} 失败: {error:#}"));
+            }
+        }
+
+        if self.ipv4_forward_changed && rollback_remaining(deadline).is_some() {
+            match restore_sysctl(self.runner.as_ref(), "/proc/sys/net/ipv4/ip_forward") {
+                Ok(()) => self.ipv4_forward_changed = false,
+                Err(error) => failures.push(format!("恢复 IPv4 转发开关失败: {error:#}")),
+            }
+        } else if self.ipv4_forward_changed {
+            failures.push("恢复 IPv4 转发开关超过总期限，状态已保留".to_string());
+        }
+        if self.ipv6_forward_changed && rollback_remaining(deadline).is_some() {
+            match restore_sysctl(
+                self.runner.as_ref(),
+                "/proc/sys/net/ipv6/conf/all/forwarding",
+            ) {
+                Ok(()) => self.ipv6_forward_changed = false,
+                Err(error) => failures.push(format!("恢复 IPv6 转发开关失败: {error:#}")),
+            }
+        } else if self.ipv6_forward_changed {
+            failures.push("恢复 IPv6 转发开关超过总期限，状态已保留".to_string());
+        }
+
+        if failures.is_empty() {
+            self.cleaned = true;
+            Ok(())
+        } else {
+            failures.sort();
+            failures.dedup();
+            Err(anyhow::anyhow!("{}", failures.join("; ")))
+        }
+    }
+
+    /// Synchronous last-resort cleanup used by `Drop` and legacy callers.
+    ///
+    /// Runtime shutdown uses [`rollback_async`](Self::rollback_async), which
+    /// also applies one overall deadline instead of one deadline per command.
     pub fn rollback(&mut self) -> Result<()> {
         if self.cleaned {
             return Ok(());
@@ -570,20 +729,62 @@ async fn rollback_client_state_for_tun(
     runner: &dyn ExitCommandRunner,
     tun_name: &str,
     state: &mut ClientForwardState,
-) {
-    for rule in state.rules.iter().rev() {
-        if let Err(error) = run_iptables_delete(runner, rule).await {
-            tracing::warn!("删除 Exit Node iptables 规则失败: {error:#}");
-        }
-    }
-    state.rules.clear();
+    deadline: Instant,
+) -> Result<()> {
+    let mut failures = Vec::new();
 
-    for address in state.owned_routes.iter().rev() {
-        if let Err(error) = remove_return_route(runner, tun_name, *address).await {
-            tracing::warn!("删除 Exit Node 回程路由失败: {error:#}");
+    for rule in state.rules.clone().into_iter().rev() {
+        let Some(remaining) = rollback_remaining(deadline) else {
+            failures.push("清理 Exit 客户端 iptables 超过总期限，剩余规则已保留".to_string());
+            break;
+        };
+        match timeout(
+            remaining.min(COMMAND_TIMEOUT),
+            run_iptables_delete(runner, &rule),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                state.rules.retain(|installed| installed != &rule);
+            }
+            Ok(Err(error)) if is_missing_firewall_resource(&error) => {
+                state.rules.retain(|installed| installed != &rule);
+            }
+            Ok(Err(error)) => {
+                failures.push(format!("删除 Exit Node iptables 规则失败: {error:#}"));
+            }
+            Err(_) => failures.push("删除 Exit Node iptables 规则超过期限".to_string()),
         }
     }
-    state.owned_routes.clear();
+
+    for address in state.owned_routes.clone().into_iter().rev() {
+        let Some(remaining) = rollback_remaining(deadline) else {
+            failures.push("清理 Exit 客户端回程路由超过总期限，剩余路由已保留".to_string());
+            break;
+        };
+        match timeout(
+            remaining.min(COMMAND_TIMEOUT),
+            remove_return_route(runner, tun_name, address),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                state.owned_routes.retain(|installed| *installed != address);
+            }
+            Ok(Err(error)) => {
+                failures.push(format!(
+                    "删除 Exit Node 回程路由失败 ({address}): {error:#}"
+                ));
+            }
+            Err(_) => failures.push(format!("删除 Exit Node 回程路由超过期限 ({address})")),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("{}", failures.join("; ")))
+    }
 }
 
 async fn default_route_interface(runner: &dyn ExitCommandRunner, ipv6: bool) -> Result<String> {
@@ -708,6 +909,11 @@ fn host_prefix(address: IpAddr) -> Result<String> {
         IpAddr::V4(address) => Ok(format!("{address}/32")),
         IpAddr::V6(address) => Ok(format!("{address}/128")),
     }
+}
+
+fn rollback_remaining(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(remaining)
 }
 
 fn ip_invocation(ipv6: bool, args: &[&str]) -> CommandInvocation {
@@ -870,6 +1076,67 @@ async fn purge_iptables_chain(
     Ok(())
 }
 
+async fn cleanup_iptables_chain_bounded(
+    runner: &dyn ExitCommandRunner,
+    program: &str,
+    table: &str,
+    builtin: &str,
+    chain: &str,
+    deadline: Instant,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for _ in 0..MAX_STALE_JUMP_RULES {
+        match run_iptables_with_deadline(
+            runner,
+            program,
+            Some(table),
+            &["-D", builtin, "-j", chain],
+            deadline,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(error) if is_missing_firewall_resource(&error) => break,
+            Err(error) => {
+                failures.push(format!("删除跳转规则失败: {error:#}"));
+                break;
+            }
+        }
+    }
+
+    for args in [["-F", chain], ["-X", chain]] {
+        match run_iptables_with_deadline(runner, program, Some(table), &args, deadline).await {
+            Ok(()) => {}
+            Err(error) if is_missing_firewall_resource(&error) => {}
+            Err(error) => failures.push(format!("{} {} 失败: {error:#}", args[0], chain)),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("{}", failures.join("; ")))
+    }
+}
+
+async fn run_iptables_with_deadline(
+    runner: &dyn ExitCommandRunner,
+    program: &str,
+    table: Option<&str>,
+    args: &[&str],
+    deadline: Instant,
+) -> Result<()> {
+    let Some(remaining) = rollback_remaining(deadline) else {
+        anyhow::bail!("防火墙清理超过总期限");
+    };
+    timeout(
+        remaining.min(COMMAND_TIMEOUT),
+        run_iptables(runner, program, table, args),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("{program} {} 超过期限", args.join(" ")))?
+}
+
 fn cleanup_iptables_chain_sync(
     runner: &dyn ExitCommandRunner,
     program: &str,
@@ -1014,7 +1281,8 @@ mod tests {
         async_runs: Mutex<Vec<CommandInvocation>>,
         sync_runs: Mutex<Vec<CommandInvocation>>,
         files: Mutex<HashMap<String, String>>,
-        async_failures: Mutex<HashSet<CommandInvocation>>,
+        async_failures: Mutex<HashMap<CommandInvocation, Vec<u8>>>,
+        async_hangs: Mutex<HashSet<CommandInvocation>>,
         sync_failures: Mutex<HashSet<CommandInvocation>>,
     }
 
@@ -1038,6 +1306,20 @@ mod tests {
             self.async_failures
                 .lock()
                 .expect("async failures lock")
+                .insert(invocation, b"injected command failure".to_vec());
+        }
+
+        fn fail_async_with(&self, invocation: CommandInvocation, stderr: &str) {
+            self.async_failures
+                .lock()
+                .expect("async failures lock")
+                .insert(invocation, stderr.as_bytes().to_vec());
+        }
+
+        fn hang_async(&self, invocation: CommandInvocation) {
+            self.async_hangs
+                .lock()
+                .expect("async hangs lock")
                 .insert(invocation);
         }
 
@@ -1065,19 +1347,23 @@ mod tests {
                     .lock()
                     .expect("async runs lock")
                     .push(invocation.clone());
-                let failed = self
+                if self
+                    .async_hangs
+                    .lock()
+                    .expect("async hangs lock")
+                    .contains(&invocation)
+                {
+                    std::future::pending::<()>().await;
+                }
+                let failure = self
                     .async_failures
                     .lock()
                     .expect("async failures lock")
                     .remove(&invocation);
                 Ok(CommandResult {
-                    success: !failed,
+                    success: failure.is_none(),
                     stdout: Vec::new(),
-                    stderr: if failed {
-                        b"injected command failure".to_vec()
-                    } else {
-                        Vec::new()
-                    },
+                    stderr: failure.unwrap_or_default(),
                 })
             })
         }
@@ -1322,7 +1608,7 @@ mod tests {
             .expect_err("injected NAT chain creation failure must abort installation");
         assert!(format!("{error:#}").contains("injected command failure"));
 
-        let sync_runs = runner.sync_runs();
+        let async_runs = runner.async_runs();
         for expected in [
             iptables_invocation(
                 "iptables",
@@ -1348,7 +1634,7 @@ mod tests {
             iptables_invocation("iptables", Some("nat"), &["-X", &forwarder.nat_chain]),
         ] {
             assert!(
-                sync_runs.contains(&expected),
+                async_runs.contains(&expected),
                 "missing rollback command: {expected:?}"
             );
         }
@@ -1357,9 +1643,143 @@ mod tests {
             Some("0\n")
         );
 
-        let cleanup_count = sync_runs.len();
-        forwarder.rollback().expect("rollback loopback forwarder");
-        assert_eq!(runner.sync_runs().len(), cleanup_count);
+        let cleanup_count = async_runs.len();
+        forwarder
+            .rollback_async()
+            .await
+            .expect("completed rollback must be idempotent");
+        assert_eq!(runner.async_runs().len(), cleanup_count);
+    }
+
+    #[tokio::test]
+    async fn exit_rollback_failure_preserves_ownership_and_can_be_retried() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        let rule = IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: client_forward_rules(
+                &forwarder.forward_chain,
+                &forwarder.tun_name,
+                "10.8.0.2/32",
+            )[0]
+            .clone(),
+        };
+        let delete_args = iptables_delete_args(&rule);
+        let delete_refs = delete_args.iter().map(String::as_str).collect::<Vec<_>>();
+        runner.fail_async(iptables_invocation(
+            "iptables",
+            Some("filter"),
+            &delete_refs,
+        ));
+        forwarder.clients.insert(
+            "peer-1".to_string(),
+            ClientForwardState {
+                addresses: HashSet::from(["10.8.0.2".parse().expect("valid IPv4")]),
+                owned_routes: Vec::new(),
+                rules: vec![rule.clone()],
+                authorized: true,
+            },
+        );
+
+        forwarder
+            .rollback_async()
+            .await
+            .expect_err("injected rule deletion failure must retain ownership");
+        let retained = forwarder
+            .clients
+            .get("peer-1")
+            .expect("failed rule must remain owned");
+        assert_eq!(retained.rules, vec![rule]);
+        assert!(!forwarder.cleaned);
+
+        forwarder
+            .rollback_async()
+            .await
+            .expect("a later rollback must retry retained resources");
+        assert!(forwarder.clients.is_empty());
+        assert!(forwarder.cleaned);
+    }
+
+    #[tokio::test]
+    async fn exit_rollback_timeout_preserves_ownership() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        let rule = IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: client_forward_rules(
+                &forwarder.forward_chain,
+                &forwarder.tun_name,
+                "10.8.0.2/32",
+            )[0]
+            .clone(),
+        };
+        let delete_args = iptables_delete_args(&rule);
+        let delete_refs = delete_args.iter().map(String::as_str).collect::<Vec<_>>();
+        runner.hang_async(iptables_invocation(
+            "iptables",
+            Some("filter"),
+            &delete_refs,
+        ));
+        forwarder.clients.insert(
+            "peer-1".to_string(),
+            ClientForwardState {
+                addresses: HashSet::from(["10.8.0.2".parse().expect("valid IPv4")]),
+                owned_routes: Vec::new(),
+                rules: vec![rule.clone()],
+                authorized: true,
+            },
+        );
+
+        forwarder
+            .rollback_async_bounded(Duration::from_millis(50))
+            .await
+            .expect_err("a hung deletion must hit the rollback deadline");
+        let retained = forwarder
+            .clients
+            .get("peer-1")
+            .expect("timed-out rule must remain owned");
+        assert_eq!(retained.rules, vec![rule]);
+        assert!(!forwarder.cleaned);
+    }
+
+    #[tokio::test]
+    async fn exit_rollback_treats_missing_firewall_resources_as_removed() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        let rule = IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: client_forward_rules(
+                &forwarder.forward_chain,
+                &forwarder.tun_name,
+                "10.8.0.2/32",
+            )[0]
+            .clone(),
+        };
+        let delete_args = iptables_delete_args(&rule);
+        let delete_refs = delete_args.iter().map(String::as_str).collect::<Vec<_>>();
+        runner.fail_async_with(
+            iptables_invocation("iptables", Some("filter"), &delete_refs),
+            "Bad rule (does a matching rule exist in that chain?).",
+        );
+        forwarder.clients.insert(
+            "peer-1".to_string(),
+            ClientForwardState {
+                addresses: HashSet::from(["10.8.0.2".parse().expect("valid IPv4")]),
+                owned_routes: Vec::new(),
+                rules: vec![rule],
+                authorized: true,
+            },
+        );
+
+        forwarder
+            .rollback_async()
+            .await
+            .expect("an already-missing firewall rule must not block cleanup");
+        assert!(forwarder.clients.is_empty());
+        assert!(forwarder.cleaned);
     }
 
     #[tokio::test]

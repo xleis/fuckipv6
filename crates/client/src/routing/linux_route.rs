@@ -8,8 +8,12 @@ use anyhow::{Context, Result};
 use fuckipv6_common::{RoutingMode, VirtualIps};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::time::{timeout, Instant};
 
 use super::doh_dns::DohDnsGuard;
 
@@ -19,6 +23,38 @@ const DYNAMIC_PREFERENCE_START: u32 = 20_000;
 const CATCH_ALL_PREFERENCE: u32 = 32_000;
 const TABLE_ID_BASE: u32 = 10_000;
 const MAIN_TABLE_ID: u32 = 254;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(4);
+const SYNC_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+
+type RouteCommandFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+trait RouteDeleteRunner: Send + Sync {
+    fn delete_rule<'a>(&'a self, rule: &'a RuleSpec) -> RouteCommandFuture<'a>;
+    fn delete_table_route<'a>(
+        &'a self,
+        family: Family,
+        table_id: u32,
+        tun_name: &'a str,
+    ) -> RouteCommandFuture<'a>;
+}
+
+struct SystemRouteDeleteRunner;
+
+impl RouteDeleteRunner for SystemRouteDeleteRunner {
+    fn delete_rule<'a>(&'a self, rule: &'a RuleSpec) -> RouteCommandFuture<'a> {
+        Box::pin(run_ip_rule("del", rule))
+    }
+
+    fn delete_table_route<'a>(
+        &'a self,
+        family: Family,
+        table_id: u32,
+        tun_name: &'a str,
+    ) -> RouteCommandFuture<'a> {
+        Box::pin(remove_table_route(family, table_id, tun_name))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Family {
@@ -432,67 +468,130 @@ impl LinuxRouteManager {
     /// Remove only routes, rules and DNS resources owned by this manager.
     /// Failed resources are retained so a later call can retry them.
     pub async fn rollback(&mut self) -> Result<()> {
-        self.rollback_checked().await
+        self.rollback_with_runner(&SystemRouteDeleteRunner, ROLLBACK_TIMEOUT)
+            .await
+    }
+
+    pub(crate) async fn rollback_within(&mut self, total_timeout: Duration) -> Result<()> {
+        self.rollback_with_runner(&SystemRouteDeleteRunner, total_timeout)
+            .await
     }
 
     async fn rollback_checked(&mut self) -> Result<()> {
-        let rules = std::mem::take(&mut self.installed_rules);
-        let mut failed_rules = Vec::new();
-        let mut first_error = None;
-        for rule in rules.iter().rev() {
-            if let Err(error) = run_ip_rule("del", rule).await {
-                tracing::warn!("回滚策略规则失败 (pref={}): {error:#}", rule.preference);
-                failed_rules.push(rule.clone());
-                first_error.get_or_insert(error);
-            }
-        }
-        failed_rules.reverse();
-        self.installed_rules = failed_rules;
+        self.rollback_with_runner(&SystemRouteDeleteRunner, ROLLBACK_TIMEOUT)
+            .await
+    }
 
-        let table_routes = std::mem::take(&mut self.installed_table_routes);
-        let mut failed_table_routes = Vec::new();
-        for family in table_routes.into_iter().rev() {
-            if let Err(error) = self.remove_table_route(family).await {
-                tracing::warn!("回滚代理路由表失败: {error:#}");
-                failed_table_routes.push(family);
-                first_error.get_or_insert(error);
-            }
-        }
-        failed_table_routes.reverse();
-        self.installed_table_routes = failed_table_routes;
+    /// Roll back with a bounded command executor while only removing an owned
+    /// spec after its deletion has completed. If this future is cancelled by a
+    /// caller timeout, all unfinished specs remain in the manager for retry.
+    async fn rollback_with_runner(
+        &mut self,
+        runner: &dyn RouteDeleteRunner,
+        total_timeout: Duration,
+    ) -> Result<()> {
+        let deadline = Instant::now() + total_timeout;
+        let mut failures = Vec::new();
 
-        self.dynamic_rules.clear();
-        self.dynamic_references.clear();
-        self.peer_bypasses.clear();
-        self.active_families.clear();
-        self.static_bypasses.clear();
-
-        let dns_error = if let Some(mut guard) = self.dns_guard.take() {
-            match guard.shutdown().await {
-                Ok(()) => None,
-                Err(error) => {
-                    self.dns_guard = Some(guard);
-                    Some(error)
+        for rule in self.installed_rules.clone().into_iter().rev() {
+            let Some(remaining) = rollback_remaining(deadline) else {
+                failures.push("策略路由规则回滚超过总期限，剩余规则已保留".to_string());
+                break;
+            };
+            match timeout(remaining.min(COMMAND_TIMEOUT), runner.delete_rule(&rule)).await {
+                Ok(Ok(())) => {
+                    self.installed_rules.retain(|installed| installed != &rule);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!("回滚策略规则失败 (pref={}): {error:#}", rule.preference);
+                    failures.push(format!(
+                        "策略路由规则 pref={} 回滚失败: {error:#}",
+                        rule.preference
+                    ));
+                }
+                Err(_) => {
+                    failures.push(format!(
+                        "策略路由规则 pref={} 删除超过 {:?}",
+                        rule.preference, COMMAND_TIMEOUT
+                    ));
                 }
             }
-        } else {
-            None
-        };
+        }
 
-        match (first_error, dns_error) {
-            (None, None) => {
-                self.plan = None;
-                Ok(())
+        for family in self.installed_table_routes.clone().into_iter().rev() {
+            let Some(remaining) = rollback_remaining(deadline) else {
+                failures.push("代理路由表回滚超过总期限，剩余路由已保留".to_string());
+                break;
+            };
+            match timeout(
+                remaining.min(COMMAND_TIMEOUT),
+                runner.delete_table_route(family, self.table_id, &self.tun_name),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    if let Some(index) = self
+                        .installed_table_routes
+                        .iter()
+                        .position(|installed| *installed == family)
+                    {
+                        self.installed_table_routes.remove(index);
+                    }
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!("回滚代理路由表失败 ({family:?}): {error:#}");
+                    failures.push(format!("代理路由表 {family:?} 回滚失败: {error:#}"));
+                }
+                Err(_) => failures.push(format!(
+                    "代理路由表 {family:?} 删除超过 {:?}",
+                    COMMAND_TIMEOUT
+                )),
             }
-            (Some(route_error), None) => {
-                Err(route_error).context("部分策略路由未能回滚，失败资源已保留以便重试")
+        }
+
+        if self.dns_guard.is_some() {
+            match rollback_remaining(deadline) {
+                None => failures.push("DoH DNS 恢复超过总期限，guard 已保留".to_string()),
+                Some(remaining) => {
+                    let result = timeout(remaining, async {
+                        self.dns_guard
+                            .as_mut()
+                            .expect("DNS guard checked above")
+                            .shutdown()
+                            .await
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {
+                            self.dns_guard = None;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!("恢复 DoH DNS 配置失败: {error:#}");
+                            failures.push(format!("DNS 配置恢复失败: {error:#}"));
+                        }
+                        Err(_) => {
+                            failures.push("DoH DNS 恢复在期限内未完成，guard 已保留".to_string())
+                        }
+                    }
+                }
             }
-            (None, Some(dns_error)) => {
-                Err(dns_error).context("策略路由已回滚，但 DNS 配置恢复失败，将在重试时继续恢复")
-            }
-            (Some(route_error), Some(dns_error)) => Err(anyhow::anyhow!(
-                "部分策略路由未能回滚: {route_error:#}; DNS 配置恢复失败: {dns_error:#}"
-            )),
+        }
+
+        if failures.is_empty() {
+            self.dynamic_rules.clear();
+            self.dynamic_references.clear();
+            self.peer_bypasses.clear();
+            self.active_families.clear();
+            self.static_bypasses.clear();
+            self.plan = None;
+            Ok(())
+        } else {
+            failures.sort();
+            failures.dedup();
+            Err(anyhow::anyhow!(
+                "{}；失败资源已保留以便重试",
+                failures.join("; ")
+            ))
         }
     }
 
@@ -530,25 +629,9 @@ impl LinuxRouteManager {
             &self.tun_name,
             source,
         ));
-        run_command(command, "添加代理默认路由").await?;
+        run_command(command, "添加代理默认路由", false).await?;
         self.installed_table_routes.push(family);
         Ok(())
-    }
-
-    async fn remove_table_route(&self, family: Family) -> Result<()> {
-        let mut command = family_command(family);
-        command.args([
-            "route",
-            "del",
-            "table",
-            &self.table_id.to_string(),
-            "default",
-            "dev",
-            &self.tun_name,
-            "proto",
-            ROUTE_PROTOCOL,
-        ]);
-        run_command(command, "删除代理默认路由").await
     }
 
     async fn install_rule(&mut self, rule: &RuleSpec) -> Result<()> {
@@ -759,6 +842,11 @@ fn family_command(family: Family) -> Command {
     command
 }
 
+fn rollback_remaining(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(remaining)
+}
+
 async fn run_ip_rule(action: &str, rule: &RuleSpec) -> Result<()> {
     let mut command = family_command(rule.family);
     command.args(["rule", action]);
@@ -773,7 +861,7 @@ async fn run_ip_rule(action: &str, rule: &RuleSpec) -> Result<()> {
         "protocol",
         ROUTE_PROTOCOL,
     ]);
-    run_command(command, "更新策略路由规则").await
+    run_command(command, "更新策略路由规则", action == "del").await
 }
 
 fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
@@ -793,7 +881,23 @@ fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
         "protocol",
         ROUTE_PROTOCOL,
     ]);
-    run_sync_command(command, "回滚策略路由规则")
+    run_sync_command(command, "回滚策略路由规则", action == "del")
+}
+
+async fn remove_table_route(family: Family, table_id: u32, tun_name: &str) -> Result<()> {
+    let mut command = family_command(family);
+    command.args([
+        "route",
+        "del",
+        "table",
+        &table_id.to_string(),
+        "default",
+        "dev",
+        tun_name,
+        "proto",
+        ROUTE_PROTOCOL,
+    ]);
+    run_command(command, "删除代理默认路由", true).await
 }
 
 fn remove_table_route_sync(family: Family, table_id: u32, tun_name: &str) -> Result<()> {
@@ -812,41 +916,166 @@ fn remove_table_route_sync(family: Family, table_id: u32, tun_name: &str) -> Res
         "proto",
         ROUTE_PROTOCOL,
     ]);
-    run_sync_command(command, "回滚代理路由表")
+    run_sync_command(command, "回滚代理路由表", true)
 }
 
-async fn run_command(mut command: Command, operation: &str) -> Result<()> {
-    let output = command
-        .output()
+async fn run_command(mut command: Command, operation: &str, missing_ok: bool) -> Result<()> {
+    command.kill_on_drop(true);
+    let output = timeout(COMMAND_TIMEOUT, command.output())
         .await
+        .map_err(|_| anyhow::anyhow!("{operation}超过 {:?}", COMMAND_TIMEOUT))?
         .with_context(|| format!("{operation}: 无法执行 ip 命令"))?;
     if output.status.success() {
         return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if missing_ok && ip_resource_is_missing(&stderr) {
+        return Ok(());
+    }
     anyhow::bail!("{operation}失败: {}", stderr.trim())
 }
 
-fn run_sync_command(mut command: std::process::Command, operation: &str) -> Result<()> {
-    let output = command
-        .output()
+fn run_sync_command(
+    mut command: std::process::Command,
+    operation: &str,
+    missing_ok: bool,
+) -> Result<()> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
         .with_context(|| format!("{operation}: 无法执行 ip 命令"))?;
-    if output.status.success() {
+    let deadline = StdInstant::now() + SYNC_COMMAND_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("{operation}: 无法读取进程状态"))?
+        {
+            break status;
+        }
+        if StdInstant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{operation}超过 {:?}", SYNC_COMMAND_TIMEOUT);
+        }
+        std::thread::sleep(StdDuration::from_millis(10));
+    };
+    if status.success() {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    if missing_ok && ip_resource_is_missing(&stderr) {
+        return Ok(());
+    }
     anyhow::bail!("{operation}失败: {}", stderr.trim())
+}
+
+fn ip_resource_is_missing(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("no such process")
+        || lower.contains("cannot find device")
+        || lower.contains("does not exist")
+        || lower.contains("no such file or directory")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future;
     use std::net::Ipv4Addr;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeDeleteRunner {
+        failed_rules: Mutex<HashSet<u32>>,
+        failed_routes: Mutex<HashSet<Family>>,
+        hanging_rules: Mutex<HashSet<u32>>,
+    }
+
+    impl RouteDeleteRunner for FakeDeleteRunner {
+        fn delete_rule<'a>(&'a self, rule: &'a RuleSpec) -> RouteCommandFuture<'a> {
+            Box::pin(async move {
+                if self
+                    .hanging_rules
+                    .lock()
+                    .expect("hanging rules lock")
+                    .contains(&rule.preference)
+                {
+                    future::pending::<()>().await;
+                }
+                if self
+                    .failed_rules
+                    .lock()
+                    .expect("failed rules lock")
+                    .remove(&rule.preference)
+                {
+                    anyhow::bail!("injected rule deletion failure");
+                }
+                Ok(())
+            })
+        }
+
+        fn delete_table_route<'a>(
+            &'a self,
+            family: Family,
+            _table_id: u32,
+            _tun_name: &'a str,
+        ) -> RouteCommandFuture<'a> {
+            Box::pin(async move {
+                if self
+                    .failed_routes
+                    .lock()
+                    .expect("failed routes lock")
+                    .remove(&family)
+                {
+                    anyhow::bail!("injected table route deletion failure");
+                }
+                Ok(())
+            })
+        }
+    }
 
     fn dual_stack_ips() -> VirtualIps {
         VirtualIps::dual_stack(Ipv4Addr::new(10, 8, 0, 2), "fd00::1002".parse().unwrap())
+    }
+
+    fn manager_with_owned_resources() -> LinuxRouteManager {
+        let rule = RuleSpec {
+            family: Family::V4,
+            destination: Some("203.0.113.0/24".parse().unwrap()),
+            lookup: MAIN_TABLE_ID,
+            preference: 20_000,
+        };
+        LinuxRouteManager {
+            tun_name: "fuckipv6".to_string(),
+            table_id: 12345,
+            active_families: [Family::V4, Family::V6].into_iter().collect(),
+            static_bypasses: ["10.0.0.0/8".parse().unwrap()].into_iter().collect(),
+            installed_rules: vec![rule],
+            installed_table_routes: vec![Family::V4, Family::V6],
+            dynamic_rules: HashMap::new(),
+            dynamic_references: HashMap::new(),
+            peer_bypasses: HashMap::new(),
+            next_v4_preference: DYNAMIC_PREFERENCE_START,
+            next_v6_preference: DYNAMIC_PREFERENCE_START,
+            dns_guard: None,
+            plan: Some(RoutePlan {
+                mode: RoutingMode::GlobalProxy,
+                tun_name: "fuckipv6".to_string(),
+                assigned_ips: dual_stack_ips(),
+                virtual_cidrs: Vec::new(),
+                direct_cidrs: Vec::new(),
+                control_endpoints: Vec::new(),
+            }),
+        }
     }
 
     #[test]
@@ -1014,5 +1243,83 @@ mod tests {
         assert!(
             (TABLE_ID_BASE..=TABLE_ID_BASE + 39_999).contains(&table_id_for_interface("fuckipv6"))
         );
+    }
+
+    #[tokio::test]
+    async fn rollback_removes_owners_only_after_successful_deletion() {
+        let runner = FakeDeleteRunner::default();
+        let mut manager = manager_with_owned_resources();
+
+        manager
+            .rollback_with_runner(&runner, Duration::from_secs(1))
+            .await
+            .expect("all fake deletions must succeed");
+
+        assert!(manager.installed_rules.is_empty());
+        assert!(manager.installed_table_routes.is_empty());
+        assert!(manager.static_bypasses.is_empty());
+        assert!(manager.active_families.is_empty());
+        assert!(manager.plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_deletion_retains_owner_and_can_be_retried() {
+        let runner = FakeDeleteRunner::default();
+        runner
+            .failed_rules
+            .lock()
+            .expect("failed rules lock")
+            .insert(20_000);
+        let mut manager = manager_with_owned_resources();
+
+        manager
+            .rollback_with_runner(&runner, Duration::from_secs(1))
+            .await
+            .expect_err("injected rule failure must be reported");
+        assert_eq!(manager.installed_rules.len(), 1);
+        assert!(manager.plan.is_some());
+
+        manager
+            .rollback_with_runner(&runner, Duration::from_secs(1))
+            .await
+            .expect("the retained rule must be retryable");
+        assert!(manager.installed_rules.is_empty());
+        assert!(manager.installed_table_routes.is_empty());
+        assert!(manager.plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn hanging_deletion_hits_deadline_and_retains_owner() {
+        let runner = FakeDeleteRunner::default();
+        runner
+            .hanging_rules
+            .lock()
+            .expect("hanging rules lock")
+            .insert(20_000);
+        let mut manager = manager_with_owned_resources();
+        let started = Instant::now();
+
+        manager
+            .rollback_with_runner(&runner, Duration::from_millis(25))
+            .await
+            .expect_err("a hanging deletion must fail bounded");
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(manager.installed_rules.len(), 1);
+        assert_eq!(manager.installed_table_routes.len(), 2);
+        assert!(manager.plan.is_some());
+    }
+
+    #[test]
+    fn missing_ip_resources_are_complete_deletions() {
+        for stderr in [
+            "RTNETLINK answers: No such process",
+            "Cannot find device \"fuckipv6\"",
+            "object does not exist",
+            "No such file or directory",
+        ] {
+            assert!(ip_resource_is_missing(stderr), "not recognized: {stderr}");
+        }
+        assert!(!ip_resource_is_missing("Operation not permitted"));
     }
 }

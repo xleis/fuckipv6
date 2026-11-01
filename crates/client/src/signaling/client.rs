@@ -17,6 +17,21 @@ use tokio_tungstenite::{
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SignalingCloseError {
+    #[error("信令连接任务异常退出: {0}")]
+    TaskFailed(#[source] tokio::task::JoinError),
+    #[error("信令连接任务未在期限内退出，句柄已保留")]
+    TimedOut,
+}
+
+impl SignalingCloseError {
+    pub(crate) fn is_timed_out(&self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
 
 fn signaling_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
@@ -196,23 +211,31 @@ impl SignalingClient {
 
     /// 关闭信令连接，并等待连接任务退出。
     pub async fn close(&self) -> Result<()> {
+        self.close_bounded(CLOSE_TIMEOUT).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn close_bounded(
+        &self,
+        total_timeout: Duration,
+    ) -> std::result::Result<(), SignalingCloseError> {
         tracing::info!("正在关闭信令连接...");
         let _ = self.shutdown_tx.send(true);
-        let Some(mut task) = self
-            .task
-            .lock()
-            .expect("signaling task slot poisoned")
-            .take()
-        else {
+        let mut task = {
+            let mut slot = self.task.lock().expect("signaling task slot poisoned");
+            slot.take()
+        };
+        let Some(mut task) = task.take() else {
             return Ok(());
         };
-        match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+        match tokio::time::timeout(total_timeout, &mut task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => anyhow::bail!("信令连接任务异常退出: {error}"),
+            Ok(Err(error)) if error.is_cancelled() => Ok(()),
+            Ok(Err(error)) => Err(SignalingCloseError::TaskFailed(error)),
             Err(_) => {
                 task.abort();
-                let _ = task.await;
-                anyhow::bail!("信令连接任务未在期限内退出，已中止")
+                *self.task.lock().expect("signaling task slot poisoned") = Some(task);
+                Err(SignalingCloseError::TimedOut)
             }
         }
     }
@@ -741,8 +764,63 @@ pub enum SignalingEvent {
 mod tests {
     use super::*;
     use futures::SinkExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    #[tokio::test]
+    async fn close_timeout_preserves_task_owner_and_retry_succeeds() -> Result<()> {
+        let (tx, _) = mpsc::unbounded_channel::<SignalingMessage>();
+        let (_, event_rx) = mpsc::unbounded_channel::<SignalingEvent>();
+        let (_, assigned_ip_rx) = watch::channel::<Option<Ipv6Addr>>(None);
+        let (_, assigned_virtual_ips_rx) = watch::channel::<Option<VirtualIps>>(None);
+        let (_, relay_endpoint_rx) = watch::channel::<Option<RelayEndpoint>>(None);
+        let (_, relay_endpoints_rx) = watch::channel::<Vec<RelayEndpoint>>(Vec::new());
+        let (_, known_peers_rx) = watch::channel::<Vec<PeerInfo>>(Vec::new());
+        let (shutdown_tx, _) = watch::channel(false);
+
+        let release = Arc::new(AtomicBool::new(false));
+        let blocking_release = release.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            while !blocking_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let client = SignalingClient {
+            tx,
+            event_rx: Arc::new(RwLock::new(event_rx)),
+            assigned_ip_rx,
+            assigned_virtual_ips_rx,
+            relay_endpoint_rx,
+            relay_endpoints_rx,
+            known_peers_rx,
+            shutdown_tx,
+            task: StdMutex::new(Some(task)),
+        };
+
+        let error = client
+            .close_bounded(Duration::from_millis(100))
+            .await
+            .expect_err("an uncooperative task must exceed the close deadline");
+        assert!(error.is_timed_out());
+        assert!(
+            client
+                .task
+                .lock()
+                .expect("signaling task slot poisoned")
+                .is_some(),
+            "a timed-out close must retain the task owner"
+        );
+
+        release.store(true, Ordering::Release);
+        client.close().await?;
+        assert!(client
+            .task
+            .lock()
+            .expect("signaling task slot poisoned")
+            .is_none());
+        Ok(())
+    }
 
     #[test]
     fn register_message_has_valid_signature() -> Result<()> {

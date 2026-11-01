@@ -6,6 +6,7 @@
 //! external host, HTTPS scheme, origin, and client address. Ambiguous forwarding
 //! headers fail closed instead of being interpreted.
 
+use super::tls::ENV_WEBUI_TLS_CERT;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use ipnet::IpNet;
 use std::net::IpAddr;
@@ -16,11 +17,17 @@ pub(super) const ENV_WEBUI_PUBLIC_ORIGIN: &str = "FUCKIPV6_WEBUI_PUBLIC_ORIGIN";
 pub(super) const ENV_WEBUI_TRUSTED_PROXY_CIDRS: &str = "FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS";
 
 #[derive(Clone, Debug)]
+enum PublicClaimExposure {
+    ReverseProxy(Vec<IpNet>),
+    DirectTls,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct PublicClaimConfig {
     origin: Url,
     origin_string: String,
     authority: String,
-    trusted_proxies: Vec<IpNet>,
+    exposure: PublicClaimExposure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,9 +52,20 @@ impl PublicClaimRejection {
 }
 
 impl PublicClaimConfig {
-    pub(super) fn from_process_env() -> anyhow::Result<Option<Self>> {
+    pub(super) fn from_process_env(direct_tls: bool) -> anyhow::Result<Option<Self>> {
         let origin = optional_env(ENV_WEBUI_PUBLIC_ORIGIN)?;
         let trusted_proxies = optional_env(ENV_WEBUI_TRUSTED_PROXY_CIDRS)?;
+        if direct_tls {
+            let Some(origin) = origin else {
+                anyhow::bail!("{ENV_WEBUI_TLS_CERT} 已启用，但 {ENV_WEBUI_PUBLIC_ORIGIN} 未设置");
+            };
+            if trusted_proxies.is_some() {
+                anyhow::bail!(
+                    "直接 TLS 与 {ENV_WEBUI_TRUSTED_PROXY_CIDRS} 不能同时设置，传输边界必须唯一"
+                );
+            }
+            return Self::new_direct_tls(&origin).map(Some);
+        }
         match (origin, trusted_proxies) {
             (None, None) => Ok(None),
             (None, Some(_)) => anyhow::bail!(
@@ -61,29 +79,7 @@ impl PublicClaimConfig {
     }
 
     pub(super) fn new(origin: &str, trusted_proxies: &str) -> anyhow::Result<Self> {
-        let origin =
-            Url::parse(origin).map_err(|error| anyhow::anyhow!("公网 origin 无效: {error}"))?;
-        if origin.scheme() != "https" {
-            anyhow::bail!("公网 origin 必须使用 https");
-        }
-        if !origin.username().is_empty() || origin.password().is_some() {
-            anyhow::bail!("公网 origin 不能包含用户信息");
-        }
-        if origin.query().is_some() || origin.fragment().is_some() {
-            anyhow::bail!("公网 origin 不能包含 query 或 fragment");
-        }
-        if origin.path() != "/" {
-            anyhow::bail!("公网 origin 不能包含路径");
-        }
-        let host = origin
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("公网 origin 缺少主机名"))?;
-        if host.eq_ignore_ascii_case("localhost") || IpAddr::from_str(host).is_ok() {
-            anyhow::bail!("公网 origin 必须使用可验证的 DNS 主机名");
-        }
-        let origin_string = origin.origin().ascii_serialization();
-        let authority = authority_for(&origin, host)?;
-
+        let (origin, origin_string, authority) = parse_origin(origin)?;
         let trusted_proxies = trusted_proxies
             .split(',')
             .map(str::trim)
@@ -105,7 +101,17 @@ impl PublicClaimConfig {
             origin,
             origin_string,
             authority,
-            trusted_proxies,
+            exposure: PublicClaimExposure::ReverseProxy(trusted_proxies),
+        })
+    }
+
+    pub(super) fn new_direct_tls(origin: &str) -> anyhow::Result<Self> {
+        let (origin, origin_string, authority) = parse_origin(origin)?;
+        Ok(Self {
+            origin,
+            origin_string,
+            authority,
+            exposure: PublicClaimExposure::DirectTls,
         })
     }
 
@@ -117,40 +123,74 @@ impl PublicClaimConfig {
         &self.origin
     }
 
+    pub(super) fn host(&self) -> &str {
+        self.origin
+            .host_str()
+            .expect("validated public claim origin")
+    }
+
+    pub(super) fn direct_tls(&self) -> bool {
+        matches!(self.exposure, PublicClaimExposure::DirectTls)
+    }
+
     pub(super) fn authorize(
         &self,
         peer: IpAddr,
         method: &Method,
         headers: &HeaderMap,
     ) -> Result<IpAddr, PublicClaimRejection> {
-        if !self
-            .trusted_proxies
-            .iter()
-            .any(|network| network.contains(&peer))
-        {
-            return Err(PublicClaimRejection::Forbidden(
-                "公网认领仅允许受信反向代理访问",
-            ));
-        }
+        match &self.exposure {
+            PublicClaimExposure::ReverseProxy(trusted_proxies) => {
+                if !trusted_proxies
+                    .iter()
+                    .any(|network| network.contains(&peer))
+                {
+                    return Err(PublicClaimRejection::Forbidden(
+                        "公网认领仅允许受信反向代理访问",
+                    ));
+                }
 
-        if headers.contains_key("forwarded") || headers.contains_key("x-real-ip") {
-            return Err(PublicClaimRejection::BadRequest(
-                "检测到歧义的代理转发头，拒绝公网认领",
-            ));
-        }
+                if headers.contains_key("forwarded") || headers.contains_key("x-real-ip") {
+                    return Err(PublicClaimRejection::BadRequest(
+                        "检测到歧义的代理转发头，拒绝公网认领",
+                    ));
+                }
 
-        let forwarded_proto = single_header(headers, "x-forwarded-proto")?;
-        if !forwarded_proto.eq_ignore_ascii_case("https") {
-            return Err(PublicClaimRejection::Forbidden(
-                "公网认领必须由受信代理声明原始请求为 HTTPS",
-            ));
-        }
+                let forwarded_proto = single_header(headers, "x-forwarded-proto")?;
+                if !forwarded_proto.eq_ignore_ascii_case("https") {
+                    return Err(PublicClaimRejection::Forbidden(
+                        "公网认领必须由受信代理声明原始请求为 HTTPS",
+                    ));
+                }
 
-        let forwarded_host = single_header(headers, "x-forwarded-host")?;
-        if !forwarded_host.eq_ignore_ascii_case(&self.authority) {
-            return Err(PublicClaimRejection::Forbidden(
-                "公网 Host 与配置的 HTTPS origin 不匹配",
-            ));
+                let forwarded_host = single_header(headers, "x-forwarded-host")?;
+                if !forwarded_host.eq_ignore_ascii_case(&self.authority) {
+                    return Err(PublicClaimRejection::Forbidden(
+                        "公网 Host 与配置的 HTTPS origin 不匹配",
+                    ));
+                }
+            }
+            PublicClaimExposure::DirectTls => {
+                if [
+                    "forwarded",
+                    "x-forwarded-for",
+                    "x-forwarded-host",
+                    "x-forwarded-proto",
+                    "x-real-ip",
+                ]
+                .iter()
+                .any(|name| headers.contains_key(*name))
+                {
+                    return Err(PublicClaimRejection::BadRequest(
+                        "直接 HTTPS 模式拒绝代理转发头",
+                    ));
+                }
+                if peer.is_unspecified() {
+                    return Err(PublicClaimRejection::Forbidden(
+                        "直接 HTTPS 请求缺少有效客户端地址",
+                    ));
+                }
+            }
         }
 
         let host = single_header(headers, header::HOST.as_str())?;
@@ -160,15 +200,22 @@ impl PublicClaimConfig {
             ));
         }
 
-        let forwarded_for = single_header(headers, "x-forwarded-for")?;
-        if forwarded_for.contains(',') {
-            return Err(PublicClaimRejection::BadRequest(
-                "X-Forwarded-For 必须是受信代理覆盖后的单个客户端 IP",
-            ));
-        }
-        let client_ip = IpAddr::from_str(forwarded_for).map_err(|_| {
-            PublicClaimRejection::BadRequest("X-Forwarded-For 必须是受信代理覆盖后的单个客户端 IP")
-        })?;
+        let client_ip = match &self.exposure {
+            PublicClaimExposure::ReverseProxy(_) => {
+                let forwarded_for = single_header(headers, "x-forwarded-for")?;
+                if forwarded_for.contains(',') {
+                    return Err(PublicClaimRejection::BadRequest(
+                        "X-Forwarded-For 必须是受信代理覆盖后的单个客户端 IP",
+                    ));
+                }
+                IpAddr::from_str(forwarded_for).map_err(|_| {
+                    PublicClaimRejection::BadRequest(
+                        "X-Forwarded-For 必须是受信代理覆盖后的单个客户端 IP",
+                    )
+                })?
+            }
+            PublicClaimExposure::DirectTls => peer,
+        };
 
         if matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS) {
             return Ok(client_ip);
@@ -200,6 +247,32 @@ fn optional_env(name: &str) -> anyhow::Result<Option<String>> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} 必须是有效的 UTF-8"),
     }
+}
+
+fn parse_origin(origin: &str) -> anyhow::Result<(Url, String, String)> {
+    let origin =
+        Url::parse(origin).map_err(|error| anyhow::anyhow!("公网 origin 无效: {error}"))?;
+    if origin.scheme() != "https" {
+        anyhow::bail!("公网 origin 必须使用 https");
+    }
+    if !origin.username().is_empty() || origin.password().is_some() {
+        anyhow::bail!("公网 origin 不能包含用户信息");
+    }
+    if origin.query().is_some() || origin.fragment().is_some() {
+        anyhow::bail!("公网 origin 不能包含 query 或 fragment");
+    }
+    if origin.path() != "/" {
+        anyhow::bail!("公网 origin 不能包含路径");
+    }
+    let host = origin
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("公网 origin 缺少主机名"))?;
+    if host.eq_ignore_ascii_case("localhost") || IpAddr::from_str(host).is_ok() {
+        anyhow::bail!("公网 origin 必须使用可验证的 DNS 主机名");
+    }
+    let origin_string = origin.origin().ascii_serialization();
+    let authority = authority_for(&origin, host)?;
+    Ok((origin, origin_string, authority))
 }
 
 fn authority_for(origin: &Url, host: &str) -> anyhow::Result<String> {
@@ -321,6 +394,47 @@ mod tests {
         assert!(config
             .authorize("127.0.0.1".parse().unwrap(), &Method::POST, &cross_site)
             .is_err());
+    }
+
+    #[test]
+    fn direct_tls_uses_peer_address_and_rejects_proxy_headers() {
+        let config = PublicClaimConfig::new_direct_tls("https://relay.xlei.cc")
+            .expect("valid direct TLS claim config");
+        let peer: IpAddr = "203.0.113.9".parse().unwrap();
+        let mut direct = HeaderMap::new();
+        direct.insert(header::HOST, "relay.xlei.cc".parse().unwrap());
+        direct.insert(header::ORIGIN, "https://relay.xlei.cc".parse().unwrap());
+        direct.insert("sec-fetch-site", "same-origin".parse().unwrap());
+
+        assert_eq!(
+            config
+                .authorize(peer, &Method::POST, &direct)
+                .expect("direct TLS claim authorization"),
+            peer
+        );
+
+        let mut proxied = direct.clone();
+        proxied.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
+        assert_eq!(
+            config.authorize(peer, &Method::POST, &proxied),
+            Err(PublicClaimRejection::BadRequest(
+                "直接 HTTPS 模式拒绝代理转发头"
+            ))
+        );
+
+        let mut wrong_origin = direct.clone();
+        wrong_origin.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        assert!(matches!(
+            config.authorize(peer, &Method::POST, &wrong_origin),
+            Err(PublicClaimRejection::Forbidden(_))
+        ));
+
+        let mut cross_site = direct;
+        cross_site.insert("sec-fetch-site", "cross-site".parse().unwrap());
+        assert!(matches!(
+            config.authorize(peer, &Method::POST, &cross_site),
+            Err(PublicClaimRejection::Forbidden(_))
+        ));
     }
 
     #[test]

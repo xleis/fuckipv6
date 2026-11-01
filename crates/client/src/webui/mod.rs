@@ -3,6 +3,7 @@ mod node_surface;
 mod owner_bootstrap;
 mod public_claim;
 pub mod security;
+mod tls;
 
 use crate::config_manager::ConfigManager;
 use crate::node::{NodeHttpAdapter, NodeProblem, NodeProblemCode};
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use tls::WebUiTlsConfig;
 use webauthn_rs::prelude::RegisterPublicKeyCredential;
 
 pub use security::{
@@ -102,6 +104,9 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
     public_claim: Option<Arc<PublicClaimConfig>>,
 ) -> Router {
     let auth = Arc::new(auth);
+    let direct_tls = public_claim
+        .as_ref()
+        .is_some_and(|claim| claim.direct_tls());
     let node_manifest_surface = node_adapter.is_some();
     let protected = Router::new()
         .route("/api/status", get(handle_status))
@@ -131,7 +136,10 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
         None => protected,
     };
     let protected = protected.route_layer(middleware::from_fn_with_state(
-        auth.clone(),
+        ApiAuthState {
+            auth: auth.clone(),
+            direct_tls,
+        },
         require_api_auth,
     ));
 
@@ -152,6 +160,7 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
     app.layer(Extension(auth)).layer(Extension(WebUiSurface {
         node_manifest_surface,
         owner_security,
+        direct_tls,
     }))
 }
 
@@ -162,19 +171,43 @@ pub async fn start_app_webui_with_node(
     controller: Arc<AppController>,
     node_adapter: NodeHttpAdapter,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let config = WebUiConfig::from_process_env(port)?;
-    config.validate_runtime_exposure()?;
-    let public_claim = PublicClaimConfig::from_process_env()?.map(Arc::new);
-    if public_claim.is_some() && config.is_remote() {
+    let tls_config = WebUiTlsConfig::from_process_env()?;
+    let direct_tls = tls_config.is_some();
+    let config = WebUiConfig::from_process_env_with_direct_tls(port, direct_tls)?;
+    let public_claim = PublicClaimConfig::from_process_env(direct_tls)?.map(Arc::new);
+    if public_claim
+        .as_ref()
+        .is_some_and(|claim| !claim.direct_tls())
+        && config.is_remote()
+    {
         anyhow::bail!(
-            "公网认领当前只允许由受信 HTTPS 反向代理转发到回环监听；禁止让 WebUI 直接以明文 HTTP 监听公网"
+            "反向代理公网认领只允许转发到回环监听；禁止让 WebUI 直接以明文 HTTP 监听公网"
         );
     }
+    config.validate_runtime_exposure()?;
+    let rustls_config = match (&tls_config, &public_claim) {
+        (Some(tls), Some(claim)) => Some(
+            tls.rustls_config(claim.host())
+                .await
+                .context("WebUI 直接 HTTPS 配置失败")?,
+        ),
+        (Some(_), None) => unreachable!("direct TLS requires a validated public origin"),
+        (None, _) => None,
+    };
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("WebUI 无法监听 {addr}"))?;
     let local_addr = listener.local_addr().context("读取 WebUI 监听地址失败")?;
+    let (http_listener, https_server) = match rustls_config {
+        Some(rustls_config) => {
+            let listener = listener.into_std().context("转换为 HTTPS 监听器失败")?;
+            let server = axum_server::from_tcp_rustls(listener, rustls_config)
+                .context("创建 WebUI HTTPS 服务失败")?;
+            (None, Some(server))
+        }
+        None => (Some(listener), None),
+    };
     let owner_config = ConfigManager::new().context("无法读取节点所有者配置目录")?;
     let (owner_security, bootstrap_code) = OwnerSecurityService::from_config_with_public_origin(
         &owner_config,
@@ -186,9 +219,7 @@ pub async fn start_app_webui_with_node(
         write_bootstrap_code_to_terminal(
             bootstrap_code.as_str(),
             local_addr.port(),
-            public_claim
-                .as_deref()
-                .map(PublicClaimConfig::origin_string),
+            public_claim.as_deref(),
         )?;
     }
     let app = create_app_web_router_with_auth_node_owner_and_public_claim(
@@ -199,13 +230,18 @@ pub async fn start_app_webui_with_node(
         public_claim.clone(),
     );
 
+    let displayed_url = public_claim
+        .as_ref()
+        .map(|claim| claim.origin_string().to_string())
+        .unwrap_or_else(|| http_url(local_addr));
     tracing::info!(
         listen = %local_addr,
         remote = config.is_remote(),
         authentication = if config.auth().is_required() { "required" } else { "disabled" },
-        public_claim = public_claim.as_ref().map(|_| "verified-reverse-proxy"),
-        "fuckipv6 统一控制台已启动: {}",
-        http_url(local_addr)
+        public_claim = public_claim
+            .as_ref()
+            .map(|claim| if claim.direct_tls() { "direct-https" } else { "verified-reverse-proxy" }),
+        "fuckipv6 统一控制台已启动: {displayed_url}"
     );
 
     // 定期刷新在线 Peers 状态
@@ -218,12 +254,20 @@ pub async fn start_app_webui_with_node(
     });
 
     let handle = tokio::spawn(async move {
-        if let Err(err) = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        {
+        let result = match (http_listener, https_server) {
+            (Some(listener), None) => axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(|error| error.to_string()),
+            (None, Some(server)) => server
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .map_err(|error| error.to_string()),
+            _ => Err("WebUI 监听器配置无效".to_string()),
+        };
+        if let Err(err) = result {
             tracing::error!("WebUI 服务发生错误: {err}");
         }
     });
@@ -235,7 +279,7 @@ pub async fn start_app_webui_with_node(
 fn write_bootstrap_code_to_terminal(
     code: &str,
     port: u16,
-    public_origin: Option<&str>,
+    public_claim: Option<&PublicClaimConfig>,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -261,12 +305,23 @@ fn write_bootstrap_code_to_terminal(
     .context("无法向本机控制终端显示初始化说明")?;
     writeln!(terminal, "🔐 本机所有者初始化码（仅显示一次）: {code}")
         .context("无法向本机控制终端显示初始化码")?;
-    writeln!(terminal, "本机初始化: http://localhost:{port}/")
-        .context("无法向本机控制终端显示初始化地址")?;
-    if let Some(public_origin) = public_origin {
+    if public_claim.is_some_and(PublicClaimConfig::direct_tls) {
+        writeln!(terminal, "所有者初始化: 使用公网 HTTPS 地址")
+            .context("无法向本机控制终端显示初始化地址")?;
+    } else {
+        writeln!(terminal, "本机初始化: http://localhost:{port}/")
+            .context("无法向本机控制终端显示初始化地址")?;
+    }
+    if let Some(public_claim) = public_claim {
+        let transport = if public_claim.direct_tls() {
+            "节点直接提供 HTTPS"
+        } else {
+            "仅通过受信 HTTPS 反向代理"
+        };
         writeln!(
             terminal,
-            "公网认领: {public_origin}/（仅通过受信 HTTPS 反向代理）"
+            "公网认领: {}/（{transport}）",
+            public_claim.origin_string()
         )
         .context("无法向本机控制终端显示公网初始化地址")?;
     }
@@ -282,7 +337,7 @@ fn write_bootstrap_code_to_terminal(
 fn write_bootstrap_code_to_terminal(
     code: &str,
     port: u16,
-    public_origin: Option<&str>,
+    public_claim: Option<&PublicClaimConfig>,
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
 
@@ -298,11 +353,21 @@ fn write_bootstrap_code_to_terminal(
         "------------------------------------------------------------------------"
     )?;
     writeln!(terminal, "🔐 本机所有者初始化码（仅显示一次）: {code}")?;
-    writeln!(terminal, "本机初始化: http://localhost:{port}/")?;
-    if let Some(public_origin) = public_origin {
+    if public_claim.is_some_and(PublicClaimConfig::direct_tls) {
+        writeln!(terminal, "所有者初始化: 使用上方公网 HTTPS 地址")?;
+    } else {
+        writeln!(terminal, "本机初始化: http://localhost:{port}/")?;
+    }
+    if let Some(public_claim) = public_claim {
+        let transport = if public_claim.direct_tls() {
+            "节点直接提供 HTTPS"
+        } else {
+            "仅通过受信 HTTPS 反向代理"
+        };
         writeln!(
             terminal,
-            "公网认领: {public_origin}/（仅通过受信 HTTPS 反向代理）"
+            "公网认领: {}/（{transport}）",
+            public_claim.origin_string()
         )?;
     }
     writeln!(
@@ -313,17 +378,29 @@ fn write_bootstrap_code_to_terminal(
     Ok(())
 }
 
+#[derive(Clone)]
+struct ApiAuthState {
+    auth: Arc<WebUiAuth>,
+    direct_tls: bool,
+}
+
 async fn require_api_auth(
-    State(auth): State<Arc<WebUiAuth>>,
+    State(state): State<ApiAuthState>,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    let auth = &state.auth;
     if !auth.is_required() {
         // A TLS-terminating reverse proxy reaches a loopback-only WebUI
         // listener with forwarding headers. Until Passkey sessions are wired
         // into the remote management API, never let that external path inherit
         // the loopback-only anonymous development policy.
-        if request_has_forwarding_headers(&request) {
+        let remote_direct_tls = state.direct_tls
+            && request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .is_none_or(|ConnectInfo(remote)| !remote.ip().is_loopback());
+        if request_has_forwarding_headers(&request) || remote_direct_tls {
             return unauthorized_response("公网管理 API 需要所有者认证");
         }
         return next.run(request).await;
@@ -383,6 +460,7 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
 struct WebUiSurface {
     node_manifest_surface: bool,
     owner_security: Option<Arc<OwnerSecurityService>>,
+    direct_tls: bool,
 }
 
 async fn handle_index(Extension(surface): Extension<WebUiSurface>, headers: HeaderMap) -> Response {
@@ -401,8 +479,10 @@ async fn handle_index(Extension(surface): Extension<WebUiSurface>, headers: Head
             }
         };
         if !status.initialized {
-            if let Some(redirect) = localhost_redirect(&headers) {
-                return with_no_store(redirect.into_response());
+            if !surface.direct_tls {
+                if let Some(redirect) = localhost_redirect(&headers) {
+                    return with_no_store(redirect.into_response());
+                }
             }
             return with_no_store(Html(owner_bootstrap::OWNER_BOOTSTRAP_HTML).into_response());
         }
@@ -4129,6 +4209,35 @@ mod tests {
         }
     }
 
+    fn direct_tls_public_owner_app_fixture(port: u16) -> OwnerAppFixture {
+        let config_dir = unique_test_dir("direct-tls-owner");
+        let config = ConfigManager::new_for_dir(config_dir.clone()).expect("owner test config");
+        let public_claim = Arc::new(
+            PublicClaimConfig::new_direct_tls("https://relay.xlei.cc")
+                .expect("direct TLS claim config"),
+        );
+        let (service, code) = OwnerSecurityService::from_config_with_public_origin(
+            &config,
+            port,
+            Some(public_claim.origin()),
+        )
+        .expect("direct TLS owner service");
+        let service = Arc::new(service);
+        let app = create_app_web_router_with_auth_node_owner_and_public_claim(
+            Arc::new(AppController::new()),
+            WebUiAuth::disabled(),
+            None,
+            Some(service.clone()),
+            Some(public_claim),
+        );
+        OwnerAppFixture {
+            app,
+            service,
+            code: code.expect("uninitialized owner bootstrap code"),
+            config_dir,
+        }
+    }
+
     fn request_from(mut request: Request<Body>, source_ip: IpAddr) -> Request<Body> {
         request
             .extensions_mut()
@@ -4154,6 +4263,23 @@ mod tests {
             .body(Body::from(body.to_string()))
             .expect("verified public request");
         request_from(request, IpAddr::V4(Ipv4Addr::LOCALHOST))
+    }
+
+    fn direct_tls_public_request(method: &str, uri: &str, body: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "relay.xlei.cc");
+        if method != "GET" && method != "HEAD" && method != "OPTIONS" {
+            builder = builder
+                .header(header::ORIGIN, "https://relay.xlei.cc")
+                .header("sec-fetch-site", "same-origin")
+                .header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.to_string()))
+            .expect("direct TLS public request");
+        request_from(request, "203.0.113.9".parse().unwrap())
     }
 
     #[derive(Clone)]
@@ -4355,6 +4481,76 @@ mod tests {
             .await
             .expect("legacy owner API response");
         assert_eq!(legacy_owner_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn direct_tls_public_owner_bootstrap_works_but_regular_api_fails_closed() {
+        let fixture = direct_tls_public_owner_app_fixture(8080);
+
+        let page = fixture
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request("GET", "/", ""))
+            .await
+            .expect("direct TLS bootstrap page");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_no_store(&page);
+        assert_eq!(
+            response_text(page).await,
+            owner_bootstrap::OWNER_BOOTSTRAP_HTML
+        );
+
+        let status = fixture
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request(
+                "GET",
+                "/api/v1/auth/bootstrap",
+                "",
+            ))
+            .await
+            .expect("direct TLS bootstrap status");
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_no_store(&status);
+        let payload = response_json(status).await;
+        assert_eq!(payload["initialized"], false);
+        assert_eq!(payload["origin"], "https://relay.xlei.cc");
+
+        let verify = fixture
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request(
+                "POST",
+                "/api/v1/auth/bootstrap/verify",
+                &serde_json::json!({ "code": fixture.code.as_str() }).to_string(),
+            ))
+            .await
+            .expect("direct TLS bootstrap verification");
+        assert_eq!(verify.status(), StatusCode::OK);
+        assert_no_store(&verify);
+        assert!(!response_text(verify).await.contains(fixture.code.as_str()));
+
+        let protected = fixture
+            .app
+            .clone()
+            .oneshot(direct_tls_public_request("GET", "/api/status", ""))
+            .await
+            .expect("direct TLS protected API");
+        assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&protected);
+
+        let no_peer = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .expect("missing peer request"),
+            )
+            .await
+            .expect("missing peer response");
+        assert_eq!(no_peer.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

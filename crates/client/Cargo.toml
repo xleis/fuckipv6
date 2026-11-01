@@ -39,6 +39,10 @@ sha2 = { workspace = true }
 zeroize = { workspace = true }
 
 axum = { workspace = true, features = ["ws"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { workspace = true }
+rustls-pemfile = "2"
+x509-parser = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
@@ -59,6 +63,9 @@ subtle = "2"
 
 # GPUI is a native desktop dependency. Unsupported targets keep the capability
 # disabled instead of reporting a browser-hosted surface as GPUI.
+[dev-dependencies]
+rcgen = { workspace = true }
+
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), windows, target_os = "macos"))'.dependencies]
 gpui = { workspace = true, optional = true }
 

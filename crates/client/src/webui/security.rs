@@ -334,11 +334,19 @@ pub struct WebUiConfig {
     bind: IpAddr,
     port: u16,
     allow_remote: bool,
+    direct_tls_bootstrap: bool,
     auth: WebUiAuth,
 }
 
 impl WebUiConfig {
     pub fn from_process_env(port: u16) -> Result<Self> {
+        Self::from_process_env_with_direct_tls(port, false)
+    }
+
+    pub(crate) fn from_process_env_with_direct_tls(
+        port: u16,
+        direct_tls_bootstrap: bool,
+    ) -> Result<Self> {
         let bind = match std::env::var(ENV_WEBUI_BIND) {
             Ok(value) if value.is_empty() => anyhow::bail!("{ENV_WEBUI_BIND} 不能为空"),
             Ok(value) => value
@@ -350,7 +358,13 @@ impl WebUiConfig {
             }
         };
         let allow_remote = parse_bool_env(ENV_WEBUI_ALLOW_REMOTE)?;
-        Self::new(bind, port, allow_remote, WebUiAuth::from_process_env()?)
+        Self::new_inner(
+            bind,
+            port,
+            allow_remote,
+            direct_tls_bootstrap,
+            WebUiAuth::from_process_env()?,
+        )
     }
 
     pub fn from_env(bind: IpAddr, port: u16, allow_remote: bool) -> Result<Self> {
@@ -358,12 +372,22 @@ impl WebUiConfig {
     }
 
     pub fn new(bind: IpAddr, port: u16, allow_remote: bool, auth: WebUiAuth) -> Result<Self> {
+        Self::new_inner(bind, port, allow_remote, false, auth)
+    }
+
+    fn new_inner(
+        bind: IpAddr,
+        port: u16,
+        allow_remote: bool,
+        direct_tls_bootstrap: bool,
+        auth: WebUiAuth,
+    ) -> Result<Self> {
         if !bind.is_loopback() && !allow_remote {
             anyhow::bail!(
                 "拒绝监听非回环地址 {bind}:{port}；远程 WebUI/API 必须显式设置 {ENV_WEBUI_ALLOW_REMOTE}=1"
             );
         }
-        if !bind.is_loopback() && !auth.is_required() {
+        if !bind.is_loopback() && !auth.is_required() && !direct_tls_bootstrap {
             anyhow::bail!(
                 "拒绝启动远程 WebUI/API：{bind}:{port} 不是回环地址，但未配置认证；请设置 {ENV_WEBUI_PASSWORD}（可选 {ENV_WEBUI_USERNAME}）"
             );
@@ -372,6 +396,7 @@ impl WebUiConfig {
             bind,
             port,
             allow_remote,
+            direct_tls_bootstrap,
             auth,
         })
     }
@@ -381,6 +406,7 @@ impl WebUiConfig {
             bind: DEFAULT_WEBUI_BIND,
             port,
             allow_remote: false,
+            direct_tls_bootstrap: false,
             auth: WebUiAuth::disabled(),
         }
     }
@@ -415,14 +441,15 @@ impl WebUiConfig {
             if !self.allow_remote {
                 anyhow::bail!("远程 WebUI/API 缺少显式危险开关，拒绝启动");
             }
-            if !self.auth.is_required() {
+            if !self.auth.is_required() && !self.direct_tls_bootstrap {
                 anyhow::bail!("远程 WebUI/API 未配置认证，拒绝启动");
             }
             tracing::warn!(
                 listen = %addr,
-                authentication = "required",
+                authentication = if self.auth.is_required() { "required" } else { "bootstrap-only" },
+                direct_tls_bootstrap = self.direct_tls_bootstrap,
                 dangerous_remote_bind = true,
-                "危险：WebUI/API 正在监听非回环地址；远程控制面仅允许持有有效 Bearer Token 的管理员访问"
+                "危险：WebUI/API 正在监听非回环地址；远程匿名访问仅开放一次性所有者初始化"
             );
         } else {
             tracing::info!(
@@ -448,6 +475,7 @@ impl fmt::Debug for WebUiConfig {
             .field("bind", &self.bind)
             .field("port", &self.port)
             .field("allow_remote", &self.allow_remote)
+            .field("direct_tls_bootstrap", &self.direct_tls_bootstrap)
             .field("auth", &self.auth)
             .finish()
     }

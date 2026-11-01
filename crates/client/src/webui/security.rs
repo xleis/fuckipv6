@@ -22,6 +22,10 @@ const LOGIN_BASE_BACKOFF: Duration = Duration::from_secs(1);
 const LOGIN_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const LOGIN_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
 const LOGIN_MAX_ENTRIES: usize = 4_096;
+const MUTATION_BURST: u32 = 20;
+const MUTATION_REFILL_INTERVAL: Duration = Duration::from_millis(200);
+const MUTATION_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
+const MUTATION_MAX_ENTRIES: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LoginThrottlePolicy {
@@ -178,6 +182,126 @@ impl LoginThrottle {
         let mut entries = self.entries.lock().expect("login throttle state");
         self.prune_expired_at(&mut entries, now);
         entries.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MutationRateLimitPolicy {
+    burst: u32,
+    refill_interval: Duration,
+    entry_ttl: Duration,
+    max_entries: usize,
+}
+
+impl Default for MutationRateLimitPolicy {
+    fn default() -> Self {
+        Self {
+            burst: MUTATION_BURST,
+            refill_interval: MUTATION_REFILL_INTERVAL,
+            entry_ttl: MUTATION_ENTRY_TTL,
+            max_entries: MUTATION_MAX_ENTRIES,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MutationRateState {
+    tokens: u32,
+    last_refill: Instant,
+    last_seen: Instant,
+}
+
+/// Bounded per-source token bucket for authenticated state-changing requests.
+///
+/// Login failures have their own username-aware throttle. This limiter is
+/// deliberately separate so a valid session cannot bypass command backpressure
+/// and a command flood cannot consume login retry state.
+#[derive(Debug)]
+pub(crate) struct MutationRateLimiter {
+    policy: MutationRateLimitPolicy,
+    entries: Mutex<BTreeMap<IpAddr, MutationRateState>>,
+}
+
+impl Default for MutationRateLimiter {
+    fn default() -> Self {
+        Self::new(MutationRateLimitPolicy::default())
+    }
+}
+
+impl MutationRateLimiter {
+    fn new(policy: MutationRateLimitPolicy) -> Self {
+        Self {
+            policy,
+            entries: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_policy_for_test(
+        burst: u32,
+        refill_interval: Duration,
+        entry_ttl: Duration,
+        max_entries: usize,
+    ) -> Self {
+        Self::new(MutationRateLimitPolicy {
+            burst,
+            refill_interval,
+            entry_ttl,
+            max_entries,
+        })
+    }
+
+    pub(crate) fn check(&self, source_ip: IpAddr) -> std::result::Result<(), Duration> {
+        self.check_at(source_ip, Instant::now())
+    }
+
+    fn check_at(&self, source_ip: IpAddr, now: Instant) -> std::result::Result<(), Duration> {
+        let mut entries = self.entries.lock().expect("mutation rate limiter state");
+        self.prune_expired_at(&mut entries, now);
+
+        if !entries.contains_key(&source_ip) && entries.len() >= self.policy.max_entries.max(1) {
+            // Never evict a live source entry. Eviction under a source-IP flood
+            // would let an attacker reset another source's bucket and bypass
+            // command backpressure. Expired entries are already pruned above.
+            return Err(Duration::from_secs(1));
+        }
+
+        let burst = self.policy.burst.max(1);
+        let refill_interval = self.policy.refill_interval.max(Duration::from_millis(1));
+        let state = entries.entry(source_ip).or_insert(MutationRateState {
+            tokens: burst,
+            last_refill: now,
+            last_seen: now,
+        });
+        state.last_seen = now;
+
+        let elapsed = now.saturating_duration_since(state.last_refill);
+        let refill_count = (elapsed.as_millis() / refill_interval.as_millis().max(1)) as u32;
+        if refill_count > 0 {
+            state.tokens = state.tokens.saturating_add(refill_count).min(burst);
+            state.last_refill = now;
+        }
+
+        if state.tokens == 0 {
+            let elapsed = now.saturating_duration_since(state.last_refill);
+            return Err(refill_interval.saturating_sub(elapsed));
+        }
+
+        state.tokens -= 1;
+        Ok(())
+    }
+
+    fn prune_expired_at(&self, entries: &mut BTreeMap<IpAddr, MutationRateState>, now: Instant) {
+        let entry_ttl = self.policy.entry_ttl.max(Duration::from_secs(1));
+        entries.retain(|_, state| now.saturating_duration_since(state.last_seen) < entry_ttl);
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.entries
+            .lock()
+            .expect("mutation rate limiter state")
+            .len()
     }
 }
 
@@ -809,6 +933,68 @@ mod tests {
             throttle.evaluate_at(blocked, now + Duration::from_secs(5), || true),
             Ok(())
         );
+    }
+
+    #[test]
+    fn mutation_rate_limiter_enforces_per_source_burst_and_refill() {
+        let limiter = MutationRateLimiter::new(MutationRateLimitPolicy {
+            burst: 2,
+            refill_interval: Duration::from_secs(1),
+            entry_ttl: Duration::from_secs(60),
+            max_entries: 16,
+        });
+        let now = Instant::now();
+        let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
+        assert_eq!(limiter.check_at(source, now), Ok(()));
+        assert_eq!(limiter.check_at(source, now), Ok(()));
+        assert_eq!(limiter.check_at(source, now), Err(Duration::from_secs(1)));
+        assert_eq!(
+            limiter.check_at(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)), now),
+            Ok(())
+        );
+        assert_eq!(
+            limiter.check_at(source, now + Duration::from_millis(999)),
+            Err(Duration::from_millis(1))
+        );
+        assert_eq!(
+            limiter.check_at(source, now + Duration::from_secs(1)),
+            Ok(())
+        );
+        assert_eq!(
+            limiter.check_at(source, now + Duration::from_secs(2)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn mutation_rate_limiter_expires_and_bounds_source_entries() {
+        let limiter = MutationRateLimiter::new(MutationRateLimitPolicy {
+            burst: 1,
+            refill_interval: Duration::from_secs(1),
+            entry_ttl: Duration::from_secs(5),
+            max_entries: 2,
+        });
+        let now = Instant::now();
+        let first = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let second = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let third = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+
+        assert_eq!(limiter.check_at(first, now), Ok(()));
+        assert_eq!(
+            limiter.check_at(second, now + Duration::from_millis(1)),
+            Ok(())
+        );
+        assert_eq!(
+            limiter.check_at(third, now + Duration::from_millis(2)),
+            Err(Duration::from_secs(1))
+        );
+        assert_eq!(limiter.entry_count(), 2);
+        assert_eq!(
+            limiter.check_at(first, now + Duration::from_secs(6)),
+            Ok(())
+        );
+        assert_eq!(limiter.entry_count(), 1);
     }
 
     #[test]

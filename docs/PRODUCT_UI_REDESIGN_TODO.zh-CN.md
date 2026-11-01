@@ -49,7 +49,7 @@
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
-| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复已完成；W3-06 会话/Web 安全收口和 W3-07 认证管理 UI 仍待完成 |
+| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全已完成；W3-07 认证管理 UI 仍待完成 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
@@ -562,14 +562,26 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`node --check crates/client/src/owner_security/owner_recovery.js`、`node scripts/test_webui_node_ui.mjs`、`cargo fmt --all -- --check` 与 `git diff --check` 均通过；
 - 本项完成自动化实现与事务边界验收；真实浏览器硬件 Passkey、平台兼容性及完整认证生命周期仍由 W3-04 的实机验收覆盖。
 
-### W3-06 会话与 Web 安全 `[ ]`
+### W3-06 会话与 Web 安全 `[x]`
 
-- [ ] CSRF 防护；
-- [ ] 安全 Cookie 或等价会话机制；
-- [ ] CSP、X-Frame-Options/框架策略；
-- [ ] 登录和命令限流；
-- [ ] 不使用 query string 传 Bearer Token；
-- [ ] 公网安全测试。
+- [x] CSRF 防护；
+- [x] 安全 Cookie 或等价会话机制；
+- [x] CSP、X-Frame-Options/框架策略；
+- [x] 登录和命令限流；
+- [x] 不使用 query string 传 Bearer Token；
+- [x] 公网安全测试。
+
+完成证据（本轮提交）：
+
+- 所有受保护 API 的非只读请求先完成认证，再执行同源校验；浏览器所有者会话要求唯一的 `Origin` 与配置的公网 origin 或当前 local `Host` 的 scheme/host/port 完全一致，`Sec-Fetch-Site` 存在时必须为 `same-origin`，缺失或重复 `Origin` 失败关闭；
+- 公网路径继续由 `PublicClaimConfig::authorize` 校验受信反向代理/直接 TLS、单一转发客户端地址、固定 `Host`/`Origin` 和跨站 Fetch Metadata 后才接受所有者 Cookie；显式 Bearer 认证按非浏览器调用处理，不依赖 Cookie 同源边界；
+- 所有者会话 Cookie 使用 `HttpOnly`、`SameSite=Strict`、`Path=/` 和 12 小时过期，公网通道额外设置 `Secure`；CSP 使用逐响应 nonce 和 `frame-ancestors 'none'`，HTTPS 响应同时设置 HSTS、`X-Frame-Options: DENY`、`nosniff`、`no-referrer`、Permissions Policy 与同源隔离头；
+- 登录失败使用独立的重试退避；已认证状态变更使用按来源 IP 的独立 token bucket，默认突发 20 次、每 200ms 恢复 1 次、条目 15 分钟过期且最多 4096 个来源。限流表满时不淘汰活跃来源，拒绝结果带 `Cache-Control: no-store` 和 `Retry-After`；
+- 认证中间件拒绝 query string 中的 Token，只接受 `Authorization: Bearer` 或同源所有者 Cookie；新增测试覆盖跨站/缺失 Origin、`Sec-Fetch-Site`、Cookie/Bearer 边界、按来源命令限流与登录/命令限流状态隔离；
+- `cargo test -p fuckipv6-client --no-default-features webui::`：71 passed、1 ignored（需显式启用的真实浏览器 Passkey 生命周期）；
+- `cargo test -p fuckipv6-client --no-default-features`：单元测试 530 passed、3 ignored；集成测试 9 passed、1 ignored（特权 lifecycle 测试按设计忽略）；
+- `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`node scripts/test_webui_node_ui.mjs`、`cargo fmt --all -- --check` 与 `git diff --check` 均通过；
+- 公网项完成的是受信反向代理和直接 TLS 安全边界的自动化测试，不等同于已在真实外部公网、真实证书链、真实代理和全部浏览器组合上完成部署实测。
 
 ### W3-07 认证 UI `[ ]`
 

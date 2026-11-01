@@ -36,13 +36,14 @@ use fuckipv6_coordinator::webui::{
     UpdateNetworkConfigRequest,
 };
 use public_claim::PublicClaimConfig;
-use security::{http_url, WebUiAuth, WebUiConfig, WebUiLoginError};
+use security::{http_url, MutationRateLimiter, WebUiAuth, WebUiConfig, WebUiLoginError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tls::WebUiTlsConfig;
-use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
+use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential, Url};
 
 pub use security::{
     DEFAULT_WEBUI_BIND, DEFAULT_WEBUI_PORT, ENV_WEBUI_ALLOW_REMOTE, ENV_WEBUI_BIND,
@@ -106,6 +107,24 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
     owner_security: Option<Arc<OwnerSecurityService>>,
     public_claim: Option<Arc<PublicClaimConfig>>,
 ) -> Router {
+    create_app_web_router_with_mutation_limiter(
+        controller,
+        auth,
+        node_adapter,
+        owner_security,
+        public_claim,
+        Arc::new(MutationRateLimiter::default()),
+    )
+}
+
+fn create_app_web_router_with_mutation_limiter(
+    controller: Arc<AppController>,
+    auth: WebUiAuth,
+    node_adapter: Option<NodeHttpAdapter>,
+    owner_security: Option<Arc<OwnerSecurityService>>,
+    public_claim: Option<Arc<PublicClaimConfig>>,
+    mutation_limiter: Arc<MutationRateLimiter>,
+) -> Router {
     let auth = Arc::new(auth);
     let direct_tls = public_claim
         .as_ref()
@@ -144,6 +163,7 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
             direct_tls,
             owner: owner_security.clone(),
             public_claim: public_claim.clone(),
+            mutation_limiter,
         },
         require_api_auth,
     ));
@@ -398,6 +418,7 @@ struct ApiAuthState {
     direct_tls: bool,
     owner: Option<Arc<OwnerSecurityService>>,
     public_claim: Option<Arc<PublicClaimConfig>>,
+    mutation_limiter: Arc<MutationRateLimiter>,
 }
 
 async fn require_api_auth(
@@ -412,6 +433,7 @@ async fn require_api_auth(
     let has_forwarding = request_has_forwarding_headers(&request);
     let is_public =
         has_forwarding || (state.direct_tls && connect_ip.is_none_or(|ip| !ip.is_loopback()));
+    let is_mutation = request_is_mutation(&request);
 
     if is_public {
         let Some(public_claim) = &state.public_claim else {
@@ -420,12 +442,10 @@ async fn require_api_auth(
         let Some(peer) = connect_ip else {
             return unauthorized_response("公网管理 API 缺少可信来源");
         };
-        if public_claim
-            .authorize(peer, request.method(), request.headers())
-            .is_err()
-        {
-            return unauthorized_response("公网管理 API 来源校验失败");
-        }
+        let client_ip = match public_claim.authorize(peer, request.method(), request.headers()) {
+            Ok(client_ip) => client_ip,
+            Err(_) => return unauthorized_response("公网管理 API 来源校验失败"),
+        };
         let Some(owner) = &state.owner else {
             return unauthorized_response("公网管理 API 需要节点所有者 Passkey 会话");
         };
@@ -438,31 +458,99 @@ async fn require_api_auth(
         {
             return unauthorized_response("节点所有者 Passkey 会话无效或已过期");
         }
-        return next.run(request).await;
-    }
-
-    if let (Some(owner), Some(token)) = (&state.owner, owner_session_cookie(request.headers())) {
-        if owner
-            .authenticate_session(OwnerBootstrapChannel::Local, token)
-            .is_ok()
-        {
-            return next.run(request).await;
+        if is_mutation {
+            if let Err(retry_after) = state.mutation_limiter.check(client_ip) {
+                return mutation_rate_limited_response(retry_after);
+            }
         }
-    }
-
-    if !state.auth.is_required() {
         return next.run(request).await;
     }
 
+    let owner_authenticated = match (&state.owner, owner_session_cookie(request.headers())) {
+        (Some(owner), Some(token)) => owner
+            .authenticate_session(OwnerBootstrapChannel::Local, token)
+            .is_ok(),
+        _ => false,
+    };
     // Browser WebSocket clients authenticate with the same-origin owner cookie
     // checked above. Never accept credentials in URL query strings because they
     // leak into access logs, browser history, and proxy traces.
-    match authorization_bearer_token(&request) {
-        Some(token) if state.auth.verify(token).is_ok() => next.run(request).await,
-        _ => unauthorized_response(
+    let bearer_authenticated = state.auth.is_required()
+        && authorization_bearer_token(&request)
+            .is_some_and(|token| state.auth.verify(token).is_ok());
+
+    if state.auth.is_required() && !owner_authenticated && !bearer_authenticated {
+        return unauthorized_response(
             "控制面认证失败：请使用 Passkey 登录或通过 /api/auth/login 获取 Bearer Token",
-        ),
+        );
     }
+
+    if is_mutation && !bearer_authenticated && !local_mutation_has_same_origin(&state, &request) {
+        return forbidden_response("拒绝跨站状态变更请求：Origin 或 Sec-Fetch-Site 校验失败");
+    }
+
+    if is_mutation {
+        let source_ip = connect_ip.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        if let Err(retry_after) = state.mutation_limiter.check(source_ip) {
+            return mutation_rate_limited_response(retry_after);
+        }
+    }
+
+    next.run(request).await
+}
+
+fn request_is_mutation(request: &axum::extract::Request) -> bool {
+    !matches!(
+        request.method(),
+        &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS
+    )
+}
+
+fn local_mutation_has_same_origin(state: &ApiAuthState, request: &axum::extract::Request) -> bool {
+    let headers = request.headers();
+    let Some(origin) = single_header_value(headers, header::ORIGIN.as_str()) else {
+        return false;
+    };
+    let Ok(origin) = Url::parse(origin) else {
+        return false;
+    };
+    if !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || origin.path() != "/"
+    {
+        return false;
+    }
+
+    let expected_origin = if state.direct_tls {
+        let Some(public_claim) = &state.public_claim else {
+            return false;
+        };
+        public_claim.origin().origin().ascii_serialization()
+    } else {
+        let Some(host) = single_header_value(headers, header::HOST.as_str()) else {
+            return false;
+        };
+        let Ok(expected) = Url::parse(&format!("http://{host}")) else {
+            return false;
+        };
+        expected.origin().ascii_serialization()
+    };
+    if origin.origin().ascii_serialization() != expected_origin {
+        return false;
+    }
+
+    match single_header_value(headers, "sec-fetch-site") {
+        Some(value) => value.eq_ignore_ascii_case("same-origin"),
+        None => true,
+    }
+}
+
+fn single_header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?.trim();
+    (!value.is_empty() && values.next().is_none()).then_some(value)
 }
 
 const OWNER_SESSION_COOKIE: &str = "fuckipv6_owner_session";
@@ -512,6 +600,41 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
         ],
         Json(ApiError {
             error: message.into(),
+            problem: None,
+        }),
+    )
+        .into_response()
+}
+
+fn forbidden_response(message: impl Into<String>) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ApiError {
+            error: message.into(),
+            problem: None,
+        }),
+    )
+        .into_response()
+}
+
+fn mutation_rate_limited_response(retry_after: Duration) -> Response {
+    let retry_after_secs = retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+        .max(1);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [
+            (
+                header::RETRY_AFTER,
+                HeaderValue::from_str(&retry_after_secs.to_string())
+                    .expect("retry-after seconds are a valid header value"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
+        Json(ApiError {
+            error: "控制命令过于频繁，请稍后重试".to_string(),
             problem: None,
         }),
     )
@@ -4579,7 +4702,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
 
     static TEST_DIR_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -4611,6 +4734,29 @@ mod tests {
 
     fn owner_app_fixture(port: u16) -> OwnerAppFixture {
         owner_node_app_fixture(port, None)
+    }
+
+    fn initialize_owner_and_issue_local_cookie(fixture: &OwnerAppFixture) -> String {
+        fixture
+            .service
+            .start_registration(fixture.code.as_str())
+            .expect("owner registration start");
+        fixture
+            .service
+            .finish_registration_for_test(fixture_passkey())
+            .expect("owner registration finish");
+        fixture
+            .service
+            .confirm_recovery(true)
+            .expect("owner recovery confirmation");
+        let issued = fixture
+            .service
+            .issue_session_for_test(OwnerBootstrapChannel::Local)
+            .expect("owner test session");
+        owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local)
+            .to_str()
+            .expect("owner session cookie")
+            .to_string()
     }
 
     fn owner_node_app_fixture(port: u16, node_adapter: Option<NodeHttpAdapter>) -> OwnerAppFixture {
@@ -4812,6 +4958,32 @@ mod tests {
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::from(body.to_string()))
             .expect("authorized request")
+    }
+
+    fn local_browser_mutation_request(
+        uri: &str,
+        body: &str,
+        cookie: Option<&str>,
+        origin: Option<&str>,
+        sec_fetch_site: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        if let Some(sec_fetch_site) = sec_fetch_site {
+            builder = builder.header("sec-fetch-site", sec_fetch_site);
+        }
+        builder
+            .body(Body::from(body.to_string()))
+            .expect("local browser mutation request")
     }
 
     async fn response_text(response: axum::response::Response) -> String {
@@ -5868,27 +6040,7 @@ mod tests {
     async fn owner_cookie_authorizes_node_api_and_websocket_upgrade() {
         let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
         let fixture = owner_node_app_fixture(8080, Some(adapter));
-        fixture
-            .service
-            .start_registration(fixture.code.as_str())
-            .expect("owner registration start");
-        fixture
-            .service
-            .finish_registration_for_test(fixture_passkey())
-            .expect("owner registration finish");
-        fixture
-            .service
-            .confirm_recovery(true)
-            .expect("owner recovery confirmation");
-        let issued = fixture
-            .service
-            .issue_session_for_test(OwnerBootstrapChannel::Local)
-            .expect("owner test session");
-        let cookie =
-            owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local)
-                .to_str()
-                .expect("owner session cookie")
-                .to_string();
+        let cookie = initialize_owner_and_issue_local_cookie(&fixture);
 
         let session = fixture
             .app
@@ -6046,6 +6198,211 @@ mod tests {
         assert_eq!(payload["result"]["request_id"], 9);
         assert_eq!(payload["result"]["outcome"]["status"], "completed");
         assert_eq!(command_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn local_mutation_csrf_accepts_same_origin_owner_cookie_and_rejects_cross_site() {
+        let (adapter, command_count) = node_adapter_fixture(node_ui_manifest());
+        let fixture = owner_node_app_fixture(8080, Some(adapter));
+        let cookie = initialize_owner_and_issue_local_cookie(&fixture);
+        let body =
+            r#"{"schema_version":1,"request":{"request_id":31,"command":{"command":"shutdown"}}}"#;
+
+        let accepted = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    Some(cookie.as_str()),
+                    Some("http://127.0.0.1:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("same-origin owner cookie command");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+
+        let cross_origin = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    Some(cookie.as_str()),
+                    Some("https://evil.example"),
+                    Some("cross-site"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("cross-origin owner cookie command");
+        assert_eq!(cross_origin.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&cross_origin);
+
+        let cross_site_fetch = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    Some(cookie.as_str()),
+                    Some("http://127.0.0.1:8080"),
+                    Some("cross-site"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("cross-site fetch metadata command");
+        assert_eq!(cross_site_fetch.status(), StatusCode::FORBIDDEN);
+
+        let missing_origin = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    Some(cookie.as_str()),
+                    None,
+                    None,
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("origin-less cookie command");
+        assert_eq!(missing_origin.status(), StatusCode::FORBIDDEN);
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn anonymous_local_mutations_still_require_same_origin() {
+        let (adapter, command_count) = node_adapter_fixture(node_ui_manifest());
+        let app = create_app_web_router_with_auth_and_node(
+            Arc::new(AppController::new()),
+            WebUiAuth::disabled(),
+            Some(adapter),
+        );
+        let body =
+            r#"{"schema_version":1,"request":{"request_id":41,"command":{"command":"shutdown"}}}"#;
+
+        let accepted = app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    None,
+                    Some("http://127.0.0.1:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("same-origin anonymous command");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+
+        let rejected = app
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/node/commands",
+                    body,
+                    None,
+                    Some("https://evil.example"),
+                    Some("cross-site"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("cross-origin anonymous command");
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn authenticated_command_rate_limit_is_per_source_and_independent_from_login() {
+        let auth = test_auth();
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("login token");
+        let (adapter, command_count) = node_adapter_fixture(node_ui_manifest());
+        let limiter = Arc::new(MutationRateLimiter::with_policy_for_test(
+            2,
+            Duration::from_secs(3600),
+            Duration::from_secs(3600),
+            16,
+        ));
+        let app = create_app_web_router_with_mutation_limiter(
+            Arc::new(AppController::new()),
+            auth,
+            Some(adapter),
+            None,
+            None,
+            limiter,
+        );
+        let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let command_body = |request_id: u64| {
+            format!(
+                r#"{{"schema_version":1,"request":{{"request_id":{request_id},"command":{{"command":"shutdown"}}}}}}"#
+            )
+        };
+
+        for request_id in 1..=2 {
+            let response = app
+                .clone()
+                .oneshot(request_from(
+                    bearer_request(
+                        "POST",
+                        "/api/node/commands",
+                        &token,
+                        &command_body(request_id),
+                    ),
+                    source,
+                ))
+                .await
+                .expect("rate-limited command response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let limited = app
+            .clone()
+            .oneshot(request_from(
+                bearer_request("POST", "/api/node/commands", &token, &command_body(3)),
+                source,
+            ))
+            .await
+            .expect("command rate limit response");
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_no_store(&limited);
+        let retry_after = response_header(&limited, header::RETRY_AFTER.as_str())
+            .parse::<u64>()
+            .expect("numeric retry-after");
+        assert!(retry_after > 0);
+        assert_eq!(command_count.load(Ordering::SeqCst), 2);
+
+        let other_source = app
+            .clone()
+            .oneshot(request_from(
+                bearer_request("POST", "/api/node/commands", &token, &command_body(4)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            ))
+            .await
+            .expect("command from independent source");
+        assert_eq!(other_source.status(), StatusCode::OK);
+
+        let login = app
+            .oneshot(login_request(
+                r#"{"username":"admin","password":"secret"}"#,
+                source,
+            ))
+            .await
+            .expect("login after command rate limit");
+        assert_eq!(login.status(), StatusCode::OK);
     }
 
     #[tokio::test]

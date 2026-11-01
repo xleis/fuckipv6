@@ -8,18 +8,19 @@ mod tls;
 use crate::config_manager::ConfigManager;
 use crate::node::{NodeHttpAdapter, NodeProblem, NodeProblemCode};
 use crate::owner_security::service::{
-    OwnerBootstrapChannel, OwnerSecurityError, OwnerSecurityService,
+    AuthenticatedOwnerSession, IssuedOwnerSession, OwnerBootstrapChannel, OwnerSecurityError,
+    OwnerSecurityService,
 };
 use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Extension, Query, State,
+        ConnectInfo, Extension, Path as AxumPath, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Redirect, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -28,6 +29,7 @@ pub use controller::{
     CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
     UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
+use fuckipv6_common::domain::PasskeyCredentialId;
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
 use fuckipv6_coordinator::webui::{
     BlacklistActionRequest, BlacklistActionResponse, NetworkConfigApiResponse, NetworkConfigDto,
@@ -40,7 +42,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tls::WebUiTlsConfig;
-use webauthn_rs::prelude::RegisterPublicKeyCredential;
+use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
 pub use security::{
     DEFAULT_WEBUI_BIND, DEFAULT_WEBUI_PORT, ENV_WEBUI_ALLOW_REMOTE, ENV_WEBUI_BIND,
@@ -140,6 +142,8 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
         ApiAuthState {
             auth: auth.clone(),
             direct_tls,
+            owner: owner_security.clone(),
+            public_claim: public_claim.clone(),
         },
         require_api_auth,
     ));
@@ -392,6 +396,8 @@ fn write_bootstrap_code_to_terminal(
 struct ApiAuthState {
     auth: Arc<WebUiAuth>,
     direct_tls: bool,
+    owner: Option<Arc<OwnerSecurityService>>,
+    public_claim: Option<Arc<PublicClaimConfig>>,
 }
 
 async fn require_api_auth(
@@ -399,20 +405,52 @@ async fn require_api_auth(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let auth = &state.auth;
-    if !auth.is_required() {
-        // A TLS-terminating reverse proxy reaches a loopback-only WebUI
-        // listener with forwarding headers. Until Passkey sessions are wired
-        // into the remote management API, never let that external path inherit
-        // the loopback-only anonymous development policy.
-        let remote_direct_tls = state.direct_tls
-            && request
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .is_none_or(|ConnectInfo(remote)| !remote.ip().is_loopback());
-        if request_has_forwarding_headers(&request) || remote_direct_tls {
-            return unauthorized_response("公网管理 API 需要所有者认证");
+    let connect_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(remote)| remote.ip());
+    let has_forwarding = request_has_forwarding_headers(&request);
+    let is_public =
+        has_forwarding || (state.direct_tls && connect_ip.is_none_or(|ip| !ip.is_loopback()));
+
+    if is_public {
+        let Some(public_claim) = &state.public_claim else {
+            return unauthorized_response("公网管理 API 需要已验证的 HTTPS 边界和所有者认证");
+        };
+        let Some(peer) = connect_ip else {
+            return unauthorized_response("公网管理 API 缺少可信来源");
+        };
+        if public_claim
+            .authorize(peer, request.method(), request.headers())
+            .is_err()
+        {
+            return unauthorized_response("公网管理 API 来源校验失败");
         }
+        let Some(owner) = &state.owner else {
+            return unauthorized_response("公网管理 API 需要节点所有者 Passkey 会话");
+        };
+        let Some(token) = owner_session_cookie(request.headers()) else {
+            return unauthorized_response("公网管理 API 需要节点所有者 Passkey 会话");
+        };
+        if owner
+            .authenticate_session(OwnerBootstrapChannel::Public, token)
+            .is_err()
+        {
+            return unauthorized_response("节点所有者 Passkey 会话无效或已过期");
+        }
+        return next.run(request).await;
+    }
+
+    if let (Some(owner), Some(token)) = (&state.owner, owner_session_cookie(request.headers())) {
+        if owner
+            .authenticate_session(OwnerBootstrapChannel::Local, token)
+            .is_ok()
+        {
+            return next.run(request).await;
+        }
+    }
+
+    if !state.auth.is_required() {
         return next.run(request).await;
     }
 
@@ -432,9 +470,35 @@ async fn require_api_auth(
     });
 
     match token {
-        Some(token) if auth.verify(token).is_ok() => next.run(request).await,
-        _ => unauthorized_response("控制面认证失败：请通过 /api/auth/login 获取 Bearer Token"),
+        Some(token) if state.auth.verify(token).is_ok() => next.run(request).await,
+        _ => unauthorized_response(
+            "控制面认证失败：请使用 Passkey 登录或通过 /api/auth/login 获取 Bearer Token",
+        ),
     }
+}
+
+const OWNER_SESSION_COOKIE: &str = "fuckipv6_owner_session";
+
+fn owner_session_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == OWNER_SESSION_COOKIE && !value.is_empty()).then_some(value)
+        })
+}
+
+fn owner_session_cookie_header(token: &str, channel: OwnerBootstrapChannel) -> HeaderValue {
+    let secure = matches!(channel, OwnerBootstrapChannel::Public)
+        .then_some("; Secure")
+        .unwrap_or_default();
+    HeaderValue::from_str(&format!(
+        "{OWNER_SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{secure}"
+    ))
+    .expect("owner session token is cookie-safe")
 }
 
 fn authorization_bearer_token(request: &axum::extract::Request) -> Option<&str> {
@@ -680,6 +744,37 @@ fn owner_security_router(
             "/api/v1/auth/bootstrap/recovery-confirm",
             post(handle_bootstrap_recovery_confirm),
         )
+        .route(
+            "/api/v1/auth/passkey/authentication/start",
+            post(handle_owner_authentication_start),
+        )
+        .route(
+            "/api/v1/auth/passkey/authentication/finish",
+            post(handle_owner_authentication_finish),
+        )
+        .route(
+            "/api/v1/auth/passkey/reauth/start",
+            post(handle_owner_reauthentication_start),
+        )
+        .route(
+            "/api/v1/auth/passkey/reauth/finish",
+            post(handle_owner_reauthentication_finish),
+        )
+        .route("/api/v1/auth/session", get(handle_owner_session_status))
+        .route("/api/v1/auth/passkey/logout", post(handle_owner_logout))
+        .route("/api/v1/auth/passkeys", get(handle_owner_passkeys))
+        .route(
+            "/api/v1/auth/passkeys/registration/start",
+            post(handle_owner_passkey_registration_start),
+        )
+        .route(
+            "/api/v1/auth/passkeys/registration/finish",
+            post(handle_owner_passkey_registration_finish),
+        )
+        .route(
+            "/api/v1/auth/passkeys/{credential_id}",
+            delete(handle_owner_passkey_revoke),
+        )
         .with_state(owner)
         .route_layer(middleware::from_fn_with_state(
             access,
@@ -760,7 +855,7 @@ async fn authorize_owner_access(
             }
         };
         match access.owner.status_for(OwnerBootstrapChannel::Public) {
-            Ok(status) if status.initialized => {
+            Ok(status) if status.initialized && path.starts_with("/api/v1/auth/bootstrap") => {
                 return finish_owner_response(
                     &access,
                     Some(client_ip),
@@ -882,8 +977,19 @@ fn owner_service_error(error: OwnerSecurityError) -> Response {
         }
         OwnerSecurityError::InvalidBootstrapCode => StatusCode::UNAUTHORIZED,
         OwnerSecurityError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-        OwnerSecurityError::CeremonyMissing => StatusCode::NOT_FOUND,
-        OwnerSecurityError::RecoveryNotConfirmed => StatusCode::BAD_REQUEST,
+        OwnerSecurityError::CeremonyMissing
+        | OwnerSecurityError::AuthenticationCeremonyMissing
+        | OwnerSecurityError::PasskeyNotFound => StatusCode::NOT_FOUND,
+        OwnerSecurityError::InvalidSession => StatusCode::UNAUTHORIZED,
+        OwnerSecurityError::RecentAuthenticationRequired => StatusCode::FORBIDDEN,
+        OwnerSecurityError::PasskeyAlreadyExists
+        | OwnerSecurityError::PasskeyAlreadyRevoked
+        | OwnerSecurityError::PasskeyLimitReached
+        | OwnerSecurityError::LastPasskey => StatusCode::CONFLICT,
+        OwnerSecurityError::InvalidPasskeyLabel => StatusCode::BAD_REQUEST,
+        OwnerSecurityError::NotInitialized | OwnerSecurityError::RecoveryNotConfirmed => {
+            StatusCode::BAD_REQUEST
+        }
         OwnerSecurityError::CorruptState | OwnerSecurityError::Internal(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -992,6 +1098,249 @@ async fn handle_bootstrap_recovery_confirm(
 ) -> Response {
     match owner.confirm_recovery_for(channel, request.confirmed) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct WebauthnAuthenticationFinishRequest {
+    credential: PublicKeyCredential,
+}
+
+#[derive(Deserialize)]
+struct PasskeyRegistrationStartRequest {
+    label: String,
+}
+
+#[derive(Serialize)]
+struct OwnerSessionStatusResponse {
+    authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_authenticated_at_unix_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct PasskeyListResponse {
+    passkeys: Vec<fuckipv6_common::domain::PasskeyCredentialRef>,
+}
+
+#[derive(Serialize)]
+struct NewPasskeyResponse {
+    passkey: fuckipv6_common::domain::PasskeyCredentialRef,
+}
+
+#[derive(Serialize)]
+struct RevokedPasskeyResponse {
+    passkey: fuckipv6_common::domain::PasskeyCredentialRef,
+    current_session_revoked: bool,
+}
+
+fn owner_session_status(session: Option<&AuthenticatedOwnerSession>) -> OwnerSessionStatusResponse {
+    match session {
+        Some(session) => OwnerSessionStatusResponse {
+            authenticated: true,
+            credential_id: Some(session.credential_id.as_str().to_string()),
+            channel: Some(session.channel.as_str().to_string()),
+            expires_at_unix_ms: Some(session.expires_at_unix_ms),
+            last_authenticated_at_unix_ms: Some(session.last_authenticated_at_unix_ms),
+        },
+        None => OwnerSessionStatusResponse {
+            authenticated: false,
+            credential_id: None,
+            channel: None,
+            expires_at_unix_ms: None,
+            last_authenticated_at_unix_ms: None,
+        },
+    }
+}
+
+fn issued_owner_session_response(
+    channel: OwnerBootstrapChannel,
+    issued: IssuedOwnerSession,
+) -> Response {
+    let cookie = owner_session_cookie_header(issued.token.as_str(), channel);
+    let body = owner_session_status(Some(&issued.session));
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response
+}
+
+fn clear_owner_session_cookie(response: &mut Response, channel: OwnerBootstrapChannel) {
+    let secure = matches!(channel, OwnerBootstrapChannel::Public)
+        .then_some("; Secure")
+        .unwrap_or_default();
+    let cookie = HeaderValue::from_str(&format!(
+        "{OWNER_SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}"
+    ))
+    .expect("owner session clear cookie is valid");
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+}
+
+async fn handle_owner_authentication_start(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+) -> Response {
+    match owner.start_authentication(channel) {
+        Ok(challenge) => (StatusCode::OK, Json(challenge)).into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_authentication_finish(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    Json(request): Json<WebauthnAuthenticationFinishRequest>,
+) -> Response {
+    match owner.finish_authentication(channel, &request.credential) {
+        Ok(issued) => issued_owner_session_response(channel, issued),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_reauthentication_start(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    match owner.start_reauthentication(channel, token) {
+        Ok(challenge) => (StatusCode::OK, Json(challenge)).into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_reauthentication_finish(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+    Json(request): Json<WebauthnAuthenticationFinishRequest>,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    if let Err(error) = owner.authenticate_session(channel, token) {
+        return owner_service_error(error);
+    }
+    match owner.finish_authentication(channel, &request.credential) {
+        Ok(issued) => issued_owner_session_response(channel, issued),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_session_status(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+) -> Response {
+    let session = owner_session_cookie(&headers)
+        .and_then(|token| owner.authenticate_session(channel, token).ok());
+    (StatusCode::OK, Json(owner_session_status(session.as_ref()))).into_response()
+}
+
+async fn handle_owner_logout(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+) -> Response {
+    let result = owner_session_cookie(&headers)
+        .map(|token| owner.logout(channel, token))
+        .transpose();
+    match result {
+        Ok(_) => {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            clear_owner_session_cookie(&mut response, channel);
+            response
+        }
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_passkeys(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    match owner.list_passkeys(channel, token) {
+        Ok(passkeys) => (StatusCode::OK, Json(PasskeyListResponse { passkeys })).into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_passkey_registration_start(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+    Json(request): Json<PasskeyRegistrationStartRequest>,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    match owner.start_passkey_registration(channel, token, &request.label) {
+        Ok(challenge) => (StatusCode::OK, Json(challenge)).into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_passkey_registration_finish(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+    Json(request): Json<WebauthnRegistrationFinishRequest>,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    match owner.finish_passkey_registration(channel, token, &request.credential) {
+        Ok(issued) => (
+            StatusCode::CREATED,
+            Json(NewPasskeyResponse {
+                passkey: issued.passkey,
+            }),
+        )
+            .into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_passkey_revoke(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    AxumPath(credential_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential_id = match PasskeyCredentialId::parse(credential_id) {
+        Ok(credential_id) => credential_id,
+        Err(_) => return owner_api_error(StatusCode::BAD_REQUEST, "Passkey 凭据 ID 无效"),
+    };
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    match owner.revoke_passkey(channel, token, &credential_id) {
+        Ok((passkey, current_session_revoked)) => {
+            let mut response = (
+                StatusCode::OK,
+                Json(RevokedPasskeyResponse {
+                    passkey,
+                    current_session_revoked,
+                }),
+            )
+                .into_response();
+            if current_session_revoked {
+                clear_owner_session_cookie(&mut response, channel);
+            }
+            response
+        }
         Err(error) => owner_service_error(error),
     }
 }
@@ -6083,5 +6432,23 @@ mod tests {
             .expect("read network allocation");
         assert_eq!(fetched.mode, fuckipv6_common::NetworkMode::Ipv4Only);
         assert_eq!(fetched.ipv4_pool, "192.168.100.0/24");
+    }
+
+    #[test]
+    fn owner_session_cookie_is_http_only_strict_and_secure_on_public_channel() {
+        let local = owner_session_cookie_header("fv1_local", OwnerBootstrapChannel::Local);
+        let local = local.to_str().expect("local cookie header");
+        assert!(local.contains("HttpOnly"));
+        assert!(local.contains("SameSite=Strict"));
+        assert!(local.contains("Path=/"));
+        assert!(local.contains("Max-Age=43200"));
+        assert!(!local.contains("Secure"));
+
+        let public = owner_session_cookie_header("fv1_public", OwnerBootstrapChannel::Public);
+        let public = public.to_str().expect("public cookie header");
+        assert!(public.contains("HttpOnly"));
+        assert!(public.contains("SameSite=Strict"));
+        assert!(public.contains("Max-Age=43200"));
+        assert!(public.contains("; Secure"));
     }
 }

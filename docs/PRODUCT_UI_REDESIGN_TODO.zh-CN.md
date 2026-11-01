@@ -689,14 +689,25 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `cargo test --workspace`：958 passed、0 failed、4 ignored；`cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
 - 对应提交：`871060e`（错误模型主体）与 `24e97d7`（授权错误脱敏及回归测试）。
 
-### W4-05 服务端权限校验 `[ ]`
+### W4-05 服务端权限校验 `[x]`
 
-- [ ] 所有命令重新校验角色、ACL、状态和能力；
-- [ ] 不信任 UI 的权限预判；
-- [ ] 本地所有权边界；
-- [ ] 临时 Coordinator 禁写；
-- [ ] 审计 actor 和原因；
-- [ ] 添加越权测试。
+- [x] 所有命令重新校验角色、ACL、状态和能力；
+- [x] 不信任 UI 的权限预判；
+- [x] 本地所有权边界；
+- [x] 临时 Coordinator 禁写；
+- [x] 审计 actor 和原因；
+- [x] 添加越权测试。
+
+**实现与测试证据（2026-11-01）**
+
+- `NodeCommandBus::execute` 在任何 handler 分派前调用同一授权入口；请求 JSON 和 UI capability/availability 声明不参与可信上下文构造，未认证传输返回 `permission.authentication_required` 且不会触达 handler；
+- `NodeCommandContext` 的字段保持私有，只能由本地 owner、已验证 owner session、本地 owner snapshot 或认证适配器构造；网络会话由适配器提供逐网络 `NetworkCommandScope`，命令载荷中的网络名只能缩小到该可信作用域，越界、`All` 和空目标全部失败关闭；
+- 每条网络命令同时检查能力、成员状态、角色上限、本地策略和网络策略。成员只有 `Active`/`Degraded` 可访问网络资源；本地层与网络层都必须存在匹配 allow，任一层 deny 优先；显式 allow 不能突破角色上限；
+- 节点级快照、UI manifest、诊断、创建/加入网络、节点启停、残留清理和关停保持 local-owner-only；临时 Coordinator 可以读取其网络范围，但任何写命令返回 `permission.temporary_coordinator_read_only`；
+- 审计记录 actor、认证来源、命令 kind、request ID、逐网络角色、network ID、结果和授权原因，不记录邀请票据或其它命令载荷；拒绝结果对 UI 只暴露稳定的 `authorization_code`，详细原因保留在服务端审计中；
+- `node::authorization::tests` 的 10 个测试覆盖未认证、非活动成员、缺能力、owner-only、scope 越界/All、双层 deny 优先、缺少任一 allow、组选择、重认证时效、角色上限、跨网络条件和临时 Coordinator 只读；`node::command::tests` 的 12 个测试覆盖分派前拒绝、审计关联及载荷秘密不进入审计；
+- `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 全部通过；
+- 对应提交：`605a9c0`（可信传输上下文与命令总线入口）与 `0dc1214`（逐网络双策略授权、临时 Coordinator 禁写和越权回归）。
 
 ### W4-06 生成客户端与漂移检查 `[ ]`
 

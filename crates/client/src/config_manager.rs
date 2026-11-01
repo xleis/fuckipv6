@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fuckipv6_common::i18n::LanguagePreference;
 use fuckipv6_common::{ClientConfig, Identity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +46,8 @@ pub struct NetworkList {
 struct NodeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    #[serde(default)]
+    language: LanguagePreference,
 }
 
 /// 配置管理器
@@ -156,31 +159,47 @@ impl ConfigManager {
         Identity::load_or_generate(self.node_identity_path()).context("无法加载节点身份")
     }
 
-    /// Load the optional display name from node-wide metadata.
-    pub(crate) fn node_display_name(&self) -> Result<Option<String>> {
+    fn load_node_metadata(&self) -> Result<NodeMetadata> {
         let metadata_path = self.config_dir.join(NODE_METADATA_FILE);
         if !metadata_path.exists() {
-            return Ok(None);
+            return Ok(NodeMetadata::default());
         }
-
         let content = std::fs::read_to_string(&metadata_path)
             .with_context(|| format!("无法读取节点元数据: {}", metadata_path.display()))?;
-        let metadata: NodeMetadata = serde_json::from_str(&content)
-            .with_context(|| format!("无法解析节点元数据: {}", metadata_path.display()))?;
-        normalize_display_name(metadata.display_name)
+        serde_json::from_str(&content)
+            .with_context(|| format!("无法解析节点元数据: {}", metadata_path.display()))
+    }
+
+    fn save_node_metadata(&self, metadata: &NodeMetadata) -> Result<()> {
+        let metadata_path = self.config_dir.join(NODE_METADATA_FILE);
+        let content = serde_json::to_string_pretty(metadata).context("无法序列化节点元数据")?;
+        std::fs::write(&metadata_path, content)
+            .with_context(|| format!("无法写入节点元数据: {}", metadata_path.display()))
+    }
+
+    /// Load the optional display name from node-wide metadata.
+    pub(crate) fn node_display_name(&self) -> Result<Option<String>> {
+        normalize_display_name(self.load_node_metadata()?.display_name)
     }
 
     /// Persist a node-wide display name. Empty or whitespace-only values clear it.
     #[cfg(test)]
     pub(crate) fn set_node_display_name(&self, display_name: Option<&str>) -> Result<()> {
-        let metadata = NodeMetadata {
-            display_name: normalize_display_name(display_name.map(str::to_string))?,
-        };
-        let metadata_path = self.config_dir.join(NODE_METADATA_FILE);
-        let content = serde_json::to_string_pretty(&metadata).context("无法序列化节点元数据")?;
-        std::fs::write(&metadata_path, content)
-            .with_context(|| format!("无法写入节点元数据: {}", metadata_path.display()))?;
-        Ok(())
+        let mut metadata = self.load_node_metadata()?;
+        metadata.display_name = normalize_display_name(display_name.map(str::to_string))?;
+        self.save_node_metadata(&metadata)
+    }
+
+    /// Node-local language choice. This is deliberately not synchronized as
+    /// network state: each owner controls their own interface language.
+    pub(crate) fn node_language_preference(&self) -> Result<LanguagePreference> {
+        Ok(self.load_node_metadata()?.language)
+    }
+
+    pub(crate) fn set_node_language_preference(&self, language: LanguagePreference) -> Result<()> {
+        let mut metadata = self.load_node_metadata()?;
+        metadata.language = language;
+        self.save_node_metadata(&metadata)
     }
 
     /// 加载网络列表
@@ -640,6 +659,34 @@ mod tests {
         manager.set_node_display_name(Some("gateway"))?;
         manager.set_node_display_name(Some("   "))?;
         assert_eq!(manager.node_display_name()?, None);
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn language_preference_defaults_for_legacy_metadata_and_persists() -> anyhow::Result<()> {
+        let dir = temp_config_dir("language-preference");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        std::fs::write(
+            dir.join(NODE_METADATA_FILE),
+            r#"{"display_name":"legacy-node"}"#,
+        )?;
+
+        assert_eq!(
+            manager.node_language_preference()?,
+            LanguagePreference::System
+        );
+        manager.set_node_display_name(Some("gateway"))?;
+        manager.set_node_language_preference(LanguagePreference::ZhCn)?;
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        assert_eq!(reopened.node_display_name()?, Some("gateway".into()));
+        assert_eq!(
+            reopened.node_language_preference()?,
+            LanguagePreference::ZhCn
+        );
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

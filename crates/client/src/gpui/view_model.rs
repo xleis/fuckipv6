@@ -168,13 +168,15 @@ pub enum ActionBlockReason {
 }
 
 impl ActionBlockReason {
-    pub fn message(self) -> &'static str {
+    /// Stable catalog key. Adapters must translate this at the presentation
+    /// boundary instead of treating UI copy as a business identifier.
+    pub const fn message_key(self) -> &'static str {
         match self {
-            Self::NodeNotRunning => "节点尚未运行",
-            Self::NoOnlineNetwork => "没有在线网络",
-            Self::NoNetworkSelected => "请先选择网络",
-            Self::PermissionDenied => "共享权限快照未授予此动作",
-            Self::ExitNodeUnsupported => "当前平台或主机不满足 Exit Node 能力要求",
+            Self::NodeNotRunning => "blocked.node_not_running",
+            Self::NoOnlineNetwork => "blocked.no_online_network",
+            Self::NoNetworkSelected => "blocked.no_network_selected",
+            Self::PermissionDenied => "blocked.permission_denied",
+            Self::ExitNodeUnsupported => "blocked.exit_node_unsupported",
         }
     }
 }

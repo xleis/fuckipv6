@@ -54,11 +54,11 @@ pub enum CapabilityVisual {
     Unsupported,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CapabilityItem<'a> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityItem {
     pub capability: Capability,
     pub visual: CapabilityVisual,
-    pub label: &'a str,
+    pub label: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +334,7 @@ pub fn status_badge(label: impl Into<SharedString>, state: SemanticState) -> Div
 
 /// Native capability adapter. Segments are backed by the shared capability
 /// colors and every segment also has a visible text legend.
-pub fn capability_ring(items: &[CapabilityItem<'_>]) -> Div {
+pub fn capability_ring(items: &[CapabilityItem]) -> Div {
     let colors = DARK_THEME.colors;
     let segments = items.iter().map(|item| {
         let segment_color = match item.visual {
@@ -358,7 +358,7 @@ pub fn capability_ring(items: &[CapabilityItem<'_>]) -> Div {
                 div()
                     .text_size(px(TYPOGRAPHY.xs.size_px as f32))
                     .text_color(rgba(colors.text_muted.rgba_hex()))
-                    .child(item.label.to_string()),
+                    .child(item.label.clone()),
             )
             .into_any_element()
     });

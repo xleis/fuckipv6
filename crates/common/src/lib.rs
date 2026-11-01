@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod design_tokens;
 pub mod dht;
 pub mod domain;
+pub mod i18n;
 pub mod logging;
 pub mod onion;
 pub mod protocol;

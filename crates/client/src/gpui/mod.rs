@@ -5,6 +5,7 @@ pub mod view_model;
 
 use anyhow::{bail, Result};
 
+use crate::config_manager::ConfigManager;
 use crate::ui::DisplayEnvironment;
 
 pub use session::NativeNodeSession;
@@ -39,7 +40,8 @@ pub fn run(options: crate::cli::commands::RuntimeOptions) -> Result<()> {
     let session = NativeNodeSession::start(options)?;
     let state = session.state();
     let commands = session.commands();
-    let window_result = view::run_window(state, commands);
+    let configs = ConfigManager::new()?;
+    let window_result = view::run_window(state, commands, configs);
     session.shutdown();
     window_result
 }

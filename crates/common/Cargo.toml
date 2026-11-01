@@ -32,6 +32,8 @@ x509-parser = { workspace = true }
 ipnet = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
+sys-locale = "0.3"
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -733,7 +733,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 并发限制；
 - [x] 登录/命令限流；
 - [x] 可信代理；
-- [ ] 审计关联；
+- [x] 审计关联；
 - [ ] 公网攻击面测试。
 
 **已实现与测试证据（2026-11-01）**
@@ -743,6 +743,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `webui::security` 的退避、成功解锁、TTL/容量边界、token bucket 和来源隔离测试通过；`webui::public_claim` 的伪造代理、重复头、Host/Origin 注入、直连 TLS 与不受信代理测试通过；`webui` 路由测试覆盖登录端点限流和认证命令按来源限流。
 - 旧版 `/api/node/commands` 与 v1 `/api/v1/commands` 在 JSON 反序列化前统一限制请求体为 256 KiB，超限返回 HTTP 413、稳定 `payload_too_large` / `error.payload_too_large` 和 `limit_bytes` 参数；回归测试同时覆盖两个入口，确保超限请求不会进入命令解析与分派。
 - 两个命令入口共享每个适配器 32 个并发执行槽，耗尽时立即返回 HTTP 429、`Retry-After: 1` 和稳定 `rate_limited` / `error.rate_limited` 契约，不排队也不进入命令总线；成功和拒绝路径都会释放 permit，超限响应包含实际的 `concurrency_limit` 参数。针对性测试覆盖双入口快速失败、总线隔离、可重试语义和 permit 回收。
+- HTTP 适配器创建写操作后，将服务端生成的 operation ID 附加到可信 `NodeCommandContext`，命令审计再写入 `AuditEntry.operation_id`；该关联不读取请求 JSON 中的不可信字段。测试覆盖命令总线关联以及 v1 HTTP 操作完成后的 request ID、operation ID、actor/source、role 和 outcome 一致性，并验证邀请票据秘密不会进入审计详情。
 
 ## 8. W5：共享设计系统
 

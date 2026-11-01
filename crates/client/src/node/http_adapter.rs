@@ -803,6 +803,7 @@ impl NodeHttpAdapter {
             self.publish_operation(&snapshot.operation);
             let adapter = self.clone();
             let operation_id = snapshot.operation.operation_id.clone();
+            let context = context.with_audit_operation_id(operation_id.clone());
             tokio::spawn(async move {
                 adapter.run_operation(operation_id, context, request).await;
             });
@@ -2428,7 +2429,8 @@ mod tests {
     use super::*;
     use crate::node::{
         node_ui_manifest, NodeCommandFuture, NodeCommandHandler, NodeCommandResult,
-        NodeNetworkSnapshot, NodeNetworkStatus, NodeProblemCode, NodeTrafficSnapshot,
+        NodeJoinNetworkCommand, NodeNetworkSnapshot, NodeNetworkStatus, NodeProblemCode,
+        NodeTrafficSnapshot,
     };
 
     #[derive(Clone)]
@@ -2957,6 +2959,63 @@ mod tests {
             result.outcome,
             NodeCommandOutcome::Completed { .. }
         ));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn v1_operation_audit_links_request_operation_actor_and_outcome() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let invitation = "fk://owner-secret-invitation@example.test:6666";
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(
+                77,
+                NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                    target: invitation.into(),
+                    network_name: Some("home".into()),
+                    start: false,
+                }),
+            ),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"audit-operation-link")),
+        };
+
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let submitted: NodeApiCommandResponse = json_body(response).await;
+        let operation_id = submitted
+            .operation
+            .expect("submitted operation")
+            .operation
+            .operation_id;
+        let completed = wait_for_terminal_operation(&adapter, operation_id.as_str()).await;
+        assert_eq!(
+            completed.operation.operation.state,
+            OperationState::Succeeded
+        );
+
+        let audit = adapter.commands.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].outcome,
+            fuckipv6_common::domain::AuditOutcome::Succeeded
+        );
+        assert_eq!(
+            audit[0].operation_id.as_ref().map(|id| id.as_str()),
+            Some(operation_id.as_str())
+        );
+        assert_eq!(
+            audit[0].actor,
+            NodeId::from_public_key(b"fuckipv6-command-bus-test-owner")
+        );
+        assert_eq!(audit[0].details["request_id"], "77");
+        assert_eq!(audit[0].details["actor_source"], "test");
+        assert_eq!(audit[0].details["role"], "owner");
+        assert_eq!(audit[0].details["command"], "join_network");
+        assert!(!format!("{:?}", audit[0]).contains("owner-secret-invitation"));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
 

@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use fuckipv6_common::domain::{
     evaluate_permissions, role_ceiling_allows, AccessContext, GroupId, MembershipState, NetworkId,
-    NetworkRole, PermissionDecision, PermissionRequest, PermissionRule, PolicyAction, ResourceKind,
-    ResourceRef,
+    NetworkRole, OperationId, PermissionDecision, PermissionRequest, PermissionRule, PolicyAction,
+    ResourceKind, ResourceRef,
 };
 
 use super::command::{NodeCommand, NodeCommandKind};
@@ -28,6 +28,7 @@ pub struct NodeCommandContext {
     recent_reauthentication: bool,
     local_owner: bool,
     authenticated: bool,
+    audit_operation_id: Option<OperationId>,
 }
 
 /// One network membership resolved by the authenticated transport.
@@ -87,6 +88,7 @@ impl NodeCommandContext {
             recent_reauthentication: true,
             local_owner: true,
             authenticated: true,
+            audit_operation_id: None,
         }
     }
 
@@ -124,6 +126,7 @@ impl NodeCommandContext {
             recent_reauthentication: recently_reauthenticated,
             local_owner: false,
             authenticated: true,
+            audit_operation_id: None,
         }
     }
 
@@ -149,7 +152,19 @@ impl NodeCommandContext {
             recent_reauthentication: false,
             local_owner: false,
             authenticated: false,
+            audit_operation_id: None,
         }
+    }
+
+    /// Associate a trusted transport-created operation with the execution
+    /// audit record. This value must never be sourced from request JSON.
+    pub(crate) fn with_audit_operation_id(mut self, operation_id: OperationId) -> Self {
+        self.audit_operation_id = Some(operation_id);
+        self
+    }
+
+    pub(crate) fn audit_operation_id(&self) -> Option<&OperationId> {
+        self.audit_operation_id.as_ref()
     }
 
     pub fn actor(&self) -> &fuckipv6_common::domain::NodeId {

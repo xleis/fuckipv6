@@ -823,7 +823,7 @@ impl CommandAuditTrail {
         };
         let entry = AuditEntry {
             audit_id,
-            operation_id: None,
+            operation_id: context.audit_operation_id().cloned(),
             actor: context.actor().clone(),
             network_id,
             action: action.into(),
@@ -1519,6 +1519,28 @@ mod tests {
         assert_eq!(audit[0].outcome, AuditOutcome::Succeeded);
         assert_eq!(audit[0].details["command"], "join_network");
         assert!(!format!("{:?}", audit[0]).contains("owner-secret-invitation"));
+    }
+
+    #[tokio::test]
+    async fn audit_records_transport_owned_operation_id() {
+        let operation_id =
+            fuckipv6_common::domain::OperationId::from_public_key(b"transport-operation");
+        let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
+        let context = test_owner_context().with_audit_operation_id(operation_id.clone());
+
+        bus.execute(
+            context,
+            NodeCommandRequest::new(54, NodeCommand::GetSnapshot),
+        )
+        .await
+        .expect("authorized command result");
+
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].operation_id.as_ref(), Some(&operation_id));
+        assert_eq!(audit[0].details["request_id"], "54");
+        assert_eq!(audit[0].details["actor_source"], "test");
+        assert_eq!(audit[0].outcome, AuditOutcome::Succeeded);
     }
 
     fn actor() -> NodeId {

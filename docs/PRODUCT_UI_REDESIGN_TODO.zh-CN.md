@@ -49,7 +49,7 @@
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
-| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-05 本地所有者恢复、Passkey 注册、恢复码确认、原子 owner 提交、限流和失败关闭已完成；完整 Passkey 生命周期与浏览器/平台验收仍待完成 |
+| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复已完成；W3-06 会话/Web 安全收口和 W3-07 认证管理 UI 仍待完成 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
@@ -520,14 +520,26 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings` 与 `git diff --check` 通过；
 - 真实公网证书、真实反向代理和浏览器 CSP 加载尚未在外部网络实测；本项完成的是实现与自动化验收，不据此宣称真实公网部署已验收。
 
-### W3-04 Passkey/WebAuthn `[ ]`
+### W3-04 Passkey/WebAuthn `[x]`
 
-- [ ] 注册、登录、撤销多个 Passkey；
-- [ ] 绑定 RP ID 和 origin；
-- [ ] 防重放和凭据替换；
-- [ ] 会话过期；
-- [ ] 高风险操作近期重认证；
-- [ ] 添加浏览器与平台测试。
+- [x] 注册、登录、撤销多个 Passkey；
+- [x] 绑定 RP ID 和 origin；
+- [x] 防重放和凭据替换；
+- [x] 会话过期；
+- [x] 高风险操作近期重认证；
+- [x] 添加浏览器与平台测试。
+
+完成证据（本轮提交）：
+
+- 新增真实浏览器验收脚本 `scripts/test_webui_webauthn_browser.mjs`，由忽略型 Rust 集成入口在随机 `127.0.0.1` 端口启动隔离 WebUI fixture，再通过 Chrome DevTools Protocol 驱动真实 `navigator.credentials.create/get`；测试不启动 TUN、不修改默认路由；
+- Chrome 使用 `internal`、`usb`、`ble` 三个虚拟认证器覆盖首个 Passkey 初始化、恢复码确认、第二/第三个 Passkey 注册、退出后使用新 Passkey 登录、撤销以及禁止撤销最后一个 Passkey；
+- `excludeCredentials` 验证已有驻留凭据不能被替换；重认证 finish 的请求体重放被拒绝，重认证后 Cookie 轮换且旧 Cookie 返回 `401`；
+- RP ID/origin 绑定、会话过期、错误 origin/节点绑定失败关闭和最近五分钟重认证由 `owner_security::` 服务测试覆盖；浏览器 Cookie 验证为 HttpOnly/SameSite 会话机制，Token 不进入 URL；
+- `cargo test -p fuckipv6-client --no-default-features webui::tests::passkey_browser_lifecycle_uses_real_webauthn_api -- --ignored --nocapture`：1 passed；
+- `cargo test -p fuckipv6-client --no-default-features owner_security::`：26 passed；`webui::`：66 passed、1 ignored（即上述需显式启用的浏览器测试）；
+- `cargo test -p fuckipv6-client --no-default-features`：525 passed、3 ignored；另有集成测试 9 passed、1 ignored；
+- `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 和 Node 脚本检查均通过；
+- 本项是 Chrome 虚拟认证器自动化验收，不等同于已覆盖所有物理安全密钥、Touch ID/Windows Hello、Android 和跨平台浏览器组合。
 
 ### W3-05 本地恢复 `[x]`
 

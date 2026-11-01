@@ -5980,6 +5980,41 @@ mod tests {
         assert_eq!(response_json(revoked).await["authenticated"], false);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Chrome/Chromium and runs the virtual-authenticator browser lifecycle"]
+    async fn passkey_browser_lifecycle_uses_real_webauthn_api() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let port = listener.local_addr()?.port();
+        let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
+        let fixture = owner_node_app_fixture(port, Some(adapter));
+        let app = fixture.app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test_webui_webauthn_browser.mjs");
+        let output = tokio::process::Command::new("node")
+            .arg(script)
+            .env("FUCKIPV6_E2E_URL", format!("http://localhost:{port}"))
+            .env("FUCKIPV6_E2E_BOOTSTRAP_CODE", fixture.code.as_str())
+            .output()
+            .await?;
+        server.abort();
+
+        assert!(
+            output.status.success(),
+            "WebAuthn browser test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn node_commands_are_executed_through_the_shared_command_bus() {
         let auth = test_auth();

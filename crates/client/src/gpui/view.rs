@@ -4172,11 +4172,13 @@ mod tests {
 
     struct SnapshotCommandHandler {
         state: NodeStateStore,
+        configs: ConfigManager,
     }
 
     impl NodeCommandHandler for SnapshotCommandHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
             let state = self.state.clone();
+            let configs = self.configs.clone();
             Box::pin(async move {
                 let request_id = request.request_id;
                 match request.command {
@@ -4186,6 +4188,32 @@ mod tests {
                     NodeCommand::GetUiManifest => {
                         NodeCommandResult::ui_manifest(request_id, crate::node::node_ui_manifest())
                     }
+                    NodeCommand::GetConfiguration => match configs.configuration_document() {
+                        Ok(document) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::Configuration(document),
+                        ),
+                        Err(error) => NodeCommandResult::rejected(
+                            request_id,
+                            crate::node::NodeProblem::new(
+                                crate::node::NodeProblemCode::Internal,
+                                format!("读取配置失败: {error:#}"),
+                            ),
+                        ),
+                    },
+                    NodeCommand::GetConfigurationHistory => match configs.configuration_history() {
+                        Ok(history) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::ConfigurationHistory(history),
+                        ),
+                        Err(error) => NodeCommandResult::rejected(
+                            request_id,
+                            crate::node::NodeProblem::new(
+                                crate::node::NodeProblemCode::Internal,
+                                format!("读取配置历史失败: {error:#}"),
+                            ),
+                        ),
+                    },
                     command => panic!("unexpected GPUI test command: {command:?}"),
                 }
             })
@@ -4205,21 +4233,22 @@ mod tests {
             .build()
             .expect("temporary Tokio runtime");
         let runtime_guard = runtime.enter();
-        let bus = NodeCommandBus::spawn(
-            Arc::new(SnapshotCommandHandler {
-                state: state.clone(),
-            }),
-            NodeEventBus::default(),
-            4,
-        );
-        drop(runtime_guard);
-        drop(runtime);
         let config_dir = std::env::temp_dir().join(format!(
             "fuckipv6-gpui-test-{}-{}",
             std::process::id(),
             NEXT_CONFIG_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         let configs = ConfigManager::new_for_dir(config_dir).expect("temporary config directory");
+        let bus = NodeCommandBus::spawn(
+            Arc::new(SnapshotCommandHandler {
+                state: state.clone(),
+                configs: configs.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        drop(runtime_guard);
+        drop(runtime);
         let window = cx.open_window(size(px(width), px(WINDOW_HEIGHT)), move |_, cx| {
             GpuiShell::new(state, bus, configs, cx)
         });
@@ -4556,19 +4585,20 @@ mod tests {
             .expect("visual-test Tokio runtime");
         runtime.block_on(state.replace_authoritative(fixture.snapshot));
         let _runtime_guard = runtime.enter();
-        let bus = NodeCommandBus::spawn(
-            Arc::new(SnapshotCommandHandler {
-                state: state.clone(),
-            }),
-            NodeEventBus::default(),
-            4,
-        );
         let config_dir =
             std::env::temp_dir().join(format!("fuckipv6-gpui-visual-{}", std::process::id()));
         let configs = ConfigManager::new_for_dir(config_dir).expect("temporary config directory");
         configs
             .set_node_language_preference(LanguagePreference::En)
             .expect("fixture language preference");
+        let bus = NodeCommandBus::spawn(
+            Arc::new(SnapshotCommandHandler {
+                state: state.clone(),
+                configs: configs.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
         let text_system = Arc::new(gpui_wgpu::CosmicTextSystem::new("Inter"));
         let mut cx = gpui::HeadlessAppContext::with_platform(
             text_system,

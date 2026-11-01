@@ -49,7 +49,7 @@
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
-| W3 所有者安全 | `[ ]` | P0 | W2 | Passkey、HTTPS、初始化码、恢复 |
+| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、Passkey 注册、恢复码确认、原子 owner 提交及失败关闭已完成；公网认领、HTTPS、完整 Passkey 生命周期和恢复仍待完成 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
@@ -455,14 +455,26 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 目标：公网无头 WebUI 只能由单一所有者安全访问。
 
-### W3-01 本地首次初始化 `[ ]`
+### W3-01 本地首次初始化 `[x]`
 
-- [ ] 生成一次性初始化上下文；
-- [ ] 注册 Passkey；
-- [ ] 恢复码仅显示一次并确认保存；
-- [ ] 原子创建 owner；
-- [ ] 中断后从安全状态继续；
-- [ ] 禁止产生两个 owner。
+- [x] 生成一次性初始化上下文；
+- [x] 注册 Passkey；
+- [x] 恢复码仅显示一次并确认保存；
+- [x] 原子创建 owner；
+- [x] 中断后从安全状态继续；
+- [x] 禁止产生两个 owner。
+
+完成证据（实现提交 `c4764f8fa92c9a148ed114184d9e574cf92c5659`）：
+
+- `cargo test -p fuckipv6-client --no-default-features owner_security::`：10 passed；
+- `cargo test -p fuckipv6-client --no-default-features webui::tests::owner_`：5 passed；
+- 初始化码仅保存 SHA-256 验证器，明文只通过本机终端显示；恢复码只在完成 Passkey 注册后返回一次，确认保存前不提交 owner；
+- `full_local_bootstrap_is_atomic_and_recovery_is_single_use` 覆盖完整流程、恢复码单次性及初始化码/恢复码不落盘；
+- `interrupted_or_expired_ceremonies_do_not_create_an_owner` 和 `completed_owner_survives_restart_and_permanently_closes_initialization` 覆盖中断、过期及重启后继续状态；
+- `concurrent_recovery_confirmation_commits_exactly_once`、`commit_is_atomic_private_and_exactly_once` 和 `incomplete_owner_directory_fails_closed` 覆盖并发单 owner、原子提交和损坏状态失败关闭；
+- `owner_bootstrap_completion_closes_initialization_and_unlocks_product_ui` 覆盖 WebUI 初始化接口完成后永久关闭入口。
+
+真实浏览器硬件 Passkey、平台兼容性和公网 HTTPS 认领不属于 W3-01 的本机自动化验收证据，分别由 W3-04 与 W3-02/W3-03 验证。
 
 ### W3-02 公网首次认领 `[ ]`
 

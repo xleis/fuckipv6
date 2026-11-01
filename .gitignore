@@ -40,6 +40,7 @@ __pycache__/
 
 # Local release binaries
 /release/fuckipv6-linux-*
+/release/fuckipv6-*-linux-*
 
 # Fuzzing build and generated corpus
 /fuzz/target/

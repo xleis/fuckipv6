@@ -141,6 +141,402 @@
       ],
       "type": "string"
     },
+    "NodeApiCommandResponse": {
+      "description": "Versioned command result returned by `POST /api/v1/commands`.",
+      "properties": {
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "result": {
+          "$ref": "#/$defs/NodeCommandResult"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "server_time",
+        "result"
+      ],
+      "type": "object"
+    },
+    "NodeApiErrorResponse": {
+      "description": "Versioned error response. The `problem` payload is optional because some\ntransport-level failures do not originate from a node command.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/NodeHttpErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requested_schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string"
+        },
+        "supported_schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "server_time",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "NodeApiEvent": {
+      "description": "JSON payload carried by `/api/v1/events` Server-Sent Events. The stream\nbegins with a canonical snapshot and then carries ordered node events.",
+      "oneOf": [
+        {
+          "properties": {
+            "request_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "schema_version": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "server_time": {
+              "type": "string"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/NodeSnapshot"
+            },
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "schema_version",
+            "request_id",
+            "server_time",
+            "snapshot"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/NodeEvent"
+            },
+            "request_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "schema_version": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "server_time": {
+              "type": "string"
+            },
+            "type": {
+              "const": "event",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "schema_version",
+            "request_id",
+            "server_time",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "latest_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "requested_after": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "schema_version": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "server_time": {
+              "type": "string"
+            },
+            "type": {
+              "const": "resync_required",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "schema_version",
+            "request_id",
+            "server_time",
+            "latest_sequence"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NodeApiManifestResponse": {
+      "description": "Versioned UI-manifest response used by `GET /api/v1/manifest`.",
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/NodeUiManifest"
+        },
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "server_time",
+        "manifest"
+      ],
+      "type": "object"
+    },
+    "NodeApiObject": {
+      "description": "A single canonical object fetched by kind and ID. Objects are projections of\nthe authoritative snapshot, never independently maintained UI state.",
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "identity": {
+              "$ref": "#/$defs/NodeIdentitySnapshot"
+            },
+            "kind": {
+              "const": "node",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "identity"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "network",
+              "type": "string"
+            },
+            "network": {
+              "$ref": "#/$defs/NodeNetworkSnapshot"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "network"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "peer",
+              "type": "string"
+            },
+            "peer": {
+              "$ref": "#/$defs/NodePeerSnapshot"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "peer"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "embedded_service",
+              "type": "string"
+            },
+            "service": {
+              "$ref": "#/$defs/NodeEmbeddedServiceSnapshot"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "service"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "configuration": {
+              "$ref": "#/$defs/NodeNetworkConfigSnapshot"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "network_configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "configuration"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NodeApiObjectResponse": {
+      "description": "Versioned object response used by `GET /api/v1/objects/<kind>/<id>`.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/NodeApiObject"
+        },
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "server_time",
+        "object"
+      ],
+      "type": "object"
+    },
+    "NodeApiSnapshotResponse": {
+      "description": "Versioned snapshot response used by `GET /api/v1/snapshot`.",
+      "properties": {
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/NodeSnapshot"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "server_time",
+        "snapshot"
+      ],
+      "type": "object"
+    },
     "NodeBlacklistSnapshot": {
       "properties": {
         "changed": {
@@ -1322,6 +1718,8 @@
       "enum": [
         "schema_version_mismatch",
         "invalid_request",
+        "not_found",
+        "resync_required",
         "backend_rejected",
         "backend_unavailable",
         "contract_violation"
@@ -2803,6 +3201,24 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Schema-only envelope for the complete HTTP/WebSocket surface. It is never\nserialized on the wire; it exists so one root schema can reference every\nversioned HTTP DTO from the same Rust definitions used at runtime.",
   "properties": {
+    "api_command_response": {
+      "$ref": "#/$defs/NodeApiCommandResponse"
+    },
+    "api_error_response": {
+      "$ref": "#/$defs/NodeApiErrorResponse"
+    },
+    "api_event": {
+      "$ref": "#/$defs/NodeApiEvent"
+    },
+    "api_manifest_response": {
+      "$ref": "#/$defs/NodeApiManifestResponse"
+    },
+    "api_object_response": {
+      "$ref": "#/$defs/NodeApiObjectResponse"
+    },
+    "api_snapshot_response": {
+      "$ref": "#/$defs/NodeApiSnapshotResponse"
+    },
     "command_request": {
       "$ref": "#/$defs/NodeCommandHttpRequest"
     },
@@ -2828,7 +3244,13 @@
     "manifest_response",
     "snapshot_response",
     "error_response",
-    "websocket_message"
+    "websocket_message",
+    "api_snapshot_response",
+    "api_manifest_response",
+    "api_command_response",
+    "api_object_response",
+    "api_error_response",
+    "api_event"
   ],
   "title": "NodeHttpContract",
   "type": "object",

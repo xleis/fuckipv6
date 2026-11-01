@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ExitNodeCapabilities", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -371,6 +371,8 @@ public final class NodeContractV1 {
     public enum NodeHttpErrorCode {
         SCHEMA_VERSION_MISMATCH("schema_version_mismatch"),
         INVALID_REQUEST("invalid_request"),
+        NOT_FOUND("not_found"),
+        RESYNC_REQUIRED("resync_required"),
         BACKEND_REJECTED("backend_rejected"),
         BACKEND_UNAVAILABLE("backend_unavailable"),
         CONTRACT_VIOLATION("contract_violation");
@@ -825,6 +827,89 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeApiCommandResponse. */
+    public static final class NodeApiCommandResponse {
+        public final Long request_id;
+        public final NodeCommandResult result;
+        public final Integer schema_version;
+        public final String server_time;
+
+        public NodeApiCommandResponse(Long request_id, NodeCommandResult result, Integer schema_version, String server_time) {
+            this.request_id = request_id;
+            this.result = result;
+            this.schema_version = schema_version;
+            this.server_time = server_time;
+        }
+    }
+
+    /** DTO for NodeApiErrorResponse. */
+    public static final class NodeApiErrorResponse {
+        public final NodeHttpErrorCode code;
+        public final String message;
+        public final NodeProblem problem;
+        public final Long request_id;
+        public final Integer requested_schema_version;
+        public final Integer schema_version;
+        public final String server_time;
+        public final Integer supported_schema_version;
+
+        public NodeApiErrorResponse(NodeHttpErrorCode code, String message, NodeProblem problem, Long request_id, Integer requested_schema_version, Integer schema_version, String server_time, Integer supported_schema_version) {
+            this.code = code;
+            this.message = message;
+            this.problem = problem;
+            this.request_id = request_id;
+            this.requested_schema_version = requested_schema_version;
+            this.schema_version = schema_version;
+            this.server_time = server_time;
+            this.supported_schema_version = supported_schema_version;
+        }
+    }
+
+    /** DTO for NodeApiManifestResponse. */
+    public static final class NodeApiManifestResponse {
+        public final NodeUiManifest manifest;
+        public final Long request_id;
+        public final Integer schema_version;
+        public final String server_time;
+
+        public NodeApiManifestResponse(NodeUiManifest manifest, Long request_id, Integer schema_version, String server_time) {
+            this.manifest = manifest;
+            this.request_id = request_id;
+            this.schema_version = schema_version;
+            this.server_time = server_time;
+        }
+    }
+
+    /** DTO for NodeApiObjectResponse. */
+    public static final class NodeApiObjectResponse {
+        public final NodeApiObject object;
+        public final Long request_id;
+        public final Integer schema_version;
+        public final String server_time;
+
+        public NodeApiObjectResponse(NodeApiObject object, Long request_id, Integer schema_version, String server_time) {
+            this.object = object;
+            this.request_id = request_id;
+            this.schema_version = schema_version;
+            this.server_time = server_time;
+        }
+    }
+
+    /** DTO for NodeApiSnapshotResponse. */
+    public static final class NodeApiSnapshotResponse {
+        public final Long request_id;
+        public final Integer schema_version;
+        public final String server_time;
+        public final NodeSnapshot snapshot;
+
+        public NodeApiSnapshotResponse(Long request_id, Integer schema_version, String server_time, NodeSnapshot snapshot) {
+            this.request_id = request_id;
+            this.schema_version = schema_version;
+            this.server_time = server_time;
+            this.snapshot = snapshot;
+        }
+    }
+
     /** DTO for NodeBlacklistSnapshot. */
     public static final class NodeBlacklistSnapshot {
         public final Boolean changed;
@@ -1023,6 +1108,12 @@ public final class NodeContractV1 {
 
     /** DTO for NodeHttpContract. */
     public static final class NodeHttpContract {
+        public final NodeApiCommandResponse api_command_response;
+        public final NodeApiErrorResponse api_error_response;
+        public final NodeApiEvent api_event;
+        public final NodeApiManifestResponse api_manifest_response;
+        public final NodeApiObjectResponse api_object_response;
+        public final NodeApiSnapshotResponse api_snapshot_response;
         public final NodeCommandHttpRequest command_request;
         public final NodeCommandHttpResponse command_response;
         public final NodeHttpErrorResponse error_response;
@@ -1030,7 +1121,13 @@ public final class NodeContractV1 {
         public final NodeSnapshotResponse snapshot_response;
         public final NodeWsMessage websocket_message;
 
-        public NodeHttpContract(NodeCommandHttpRequest command_request, NodeCommandHttpResponse command_response, NodeHttpErrorResponse error_response, NodeManifestResponse manifest_response, NodeSnapshotResponse snapshot_response, NodeWsMessage websocket_message) {
+        public NodeHttpContract(NodeApiCommandResponse api_command_response, NodeApiErrorResponse api_error_response, NodeApiEvent api_event, NodeApiManifestResponse api_manifest_response, NodeApiObjectResponse api_object_response, NodeApiSnapshotResponse api_snapshot_response, NodeCommandHttpRequest command_request, NodeCommandHttpResponse command_response, NodeHttpErrorResponse error_response, NodeManifestResponse manifest_response, NodeSnapshotResponse snapshot_response, NodeWsMessage websocket_message) {
+            this.api_command_response = api_command_response;
+            this.api_error_response = api_error_response;
+            this.api_event = api_event;
+            this.api_manifest_response = api_manifest_response;
+            this.api_object_response = api_object_response;
+            this.api_snapshot_response = api_snapshot_response;
             this.command_request = command_request;
             this.command_response = command_response;
             this.error_response = error_response;
@@ -1573,6 +1670,126 @@ public final class NodeContractV1 {
             this.effective = effective;
             this.gpui_available = gpui_available;
             this.requested = requested;
+        }
+    }
+
+    /** Tagged union DTO for NodeApiEvent. */
+    public abstract static class NodeApiEvent {
+        public final String type;
+
+        private NodeApiEvent(String type) {
+            this.type = type;
+        }
+
+        public static final class Snapshot extends NodeApiEvent {
+            public final Long request_id;
+            public final Integer schema_version;
+            public final String server_time;
+            public final NodeSnapshot snapshot;
+
+            public Snapshot(Long request_id, Integer schema_version, String server_time, NodeSnapshot snapshot) {
+                super("snapshot");
+                this.request_id = request_id;
+                this.schema_version = schema_version;
+                this.server_time = server_time;
+                this.snapshot = snapshot;
+            }
+        }
+
+        public static final class Event extends NodeApiEvent {
+            public final NodeEvent event;
+            public final Long request_id;
+            public final Integer schema_version;
+            public final String server_time;
+
+            public Event(NodeEvent event, Long request_id, Integer schema_version, String server_time) {
+                super("event");
+                this.event = event;
+                this.request_id = request_id;
+                this.schema_version = schema_version;
+                this.server_time = server_time;
+            }
+        }
+
+        public static final class ResyncRequired extends NodeApiEvent {
+            public final Long latest_sequence;
+            public final Long request_id;
+            public final Long requested_after;
+            public final Integer schema_version;
+            public final String server_time;
+
+            public ResyncRequired(Long latest_sequence, Long request_id, Long requested_after, Integer schema_version, String server_time) {
+                super("resync_required");
+                this.latest_sequence = latest_sequence;
+                this.request_id = request_id;
+                this.requested_after = requested_after;
+                this.schema_version = schema_version;
+                this.server_time = server_time;
+            }
+        }
+    }
+
+    /** Tagged union DTO for NodeApiObject. */
+    public abstract static class NodeApiObject {
+        public final String kind;
+
+        private NodeApiObject(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class Node extends NodeApiObject {
+            public final String id;
+            public final NodeIdentitySnapshot identity;
+
+            public Node(String id, NodeIdentitySnapshot identity) {
+                super("node");
+                this.id = id;
+                this.identity = identity;
+            }
+        }
+
+        public static final class Network extends NodeApiObject {
+            public final String id;
+            public final NodeNetworkSnapshot network;
+
+            public Network(String id, NodeNetworkSnapshot network) {
+                super("network");
+                this.id = id;
+                this.network = network;
+            }
+        }
+
+        public static final class Peer extends NodeApiObject {
+            public final String id;
+            public final NodePeerSnapshot peer;
+
+            public Peer(String id, NodePeerSnapshot peer) {
+                super("peer");
+                this.id = id;
+                this.peer = peer;
+            }
+        }
+
+        public static final class EmbeddedService extends NodeApiObject {
+            public final String id;
+            public final NodeEmbeddedServiceSnapshot service;
+
+            public EmbeddedService(String id, NodeEmbeddedServiceSnapshot service) {
+                super("embedded_service");
+                this.id = id;
+                this.service = service;
+            }
+        }
+
+        public static final class NetworkConfiguration extends NodeApiObject {
+            public final NodeNetworkConfigSnapshot configuration;
+            public final String id;
+
+            public NetworkConfiguration(NodeNetworkConfigSnapshot configuration, String id) {
+                super("network_configuration");
+                this.configuration = configuration;
+                this.id = id;
+            }
         }
     }
 

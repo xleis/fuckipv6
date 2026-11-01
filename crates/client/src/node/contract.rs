@@ -10,9 +10,11 @@ use schemars::{generate::SchemaSettings, JsonSchema};
 use serde_json::{json, Value};
 
 use super::{
-    NodeCommand, NodeCommandHttpRequest, NodeCommandHttpResponse, NodeCommandKind,
-    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeHttpErrorResponse, NodeManifestResponse,
-    NodeSnapshotResponse, NodeUiManifest, NodeWsMessage,
+    NodeApiCommandResponse, NodeApiErrorResponse, NodeApiEvent, NodeApiManifestResponse,
+    NodeApiObjectResponse, NodeApiSnapshotResponse, NodeCommand, NodeCommandHttpRequest,
+    NodeCommandHttpResponse, NodeCommandKind, NodeCommandRequest, NodeCommandResult, NodeEvent,
+    NodeHttpErrorResponse, NodeManifestResponse, NodeSnapshotResponse, NodeUiManifest,
+    NodeWsMessage,
 };
 
 /// Wire-contract version shared by every generated node artifact.
@@ -36,6 +38,12 @@ struct NodeHttpContract {
     snapshot_response: NodeSnapshotResponse,
     error_response: NodeHttpErrorResponse,
     websocket_message: NodeWsMessage,
+    api_snapshot_response: NodeApiSnapshotResponse,
+    api_manifest_response: NodeApiManifestResponse,
+    api_command_response: NodeApiCommandResponse,
+    api_object_response: NodeApiObjectResponse,
+    api_error_response: NodeApiErrorResponse,
+    api_event: NodeApiEvent,
 }
 
 /// All checked-in schema artifacts keyed by filename. The returned JSON values

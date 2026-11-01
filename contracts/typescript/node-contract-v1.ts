@@ -35,6 +35,88 @@ export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
 
 export type NodeAccessModel = "trusted_control_plane";
 
+export type NodeApiCommandResponse = {
+  "request_id": number;
+  "result": NodeCommandResult;
+  "schema_version": number;
+  "server_time": string;
+};
+
+export type NodeApiErrorResponse = {
+  "code": NodeHttpErrorCode;
+  "message": string;
+  "problem"?: NodeProblem | null;
+  "request_id": number;
+  "requested_schema_version"?: number | null;
+  "schema_version": number;
+  "server_time": string;
+  "supported_schema_version"?: number | null;
+};
+
+export type NodeApiEvent = {
+  "request_id": number;
+  "schema_version": number;
+  "server_time": string;
+  "snapshot": NodeSnapshot;
+  "type": "snapshot";
+} | {
+  "event": NodeEvent;
+  "request_id": number;
+  "schema_version": number;
+  "server_time": string;
+  "type": "event";
+} | {
+  "latest_sequence": number;
+  "request_id": number;
+  "requested_after"?: number | null;
+  "schema_version": number;
+  "server_time": string;
+  "type": "resync_required";
+};
+
+export type NodeApiManifestResponse = {
+  "manifest": NodeUiManifest;
+  "request_id": number;
+  "schema_version": number;
+  "server_time": string;
+};
+
+export type NodeApiObject = {
+  "id": string;
+  "identity": NodeIdentitySnapshot;
+  "kind": "node";
+} | {
+  "id": string;
+  "kind": "network";
+  "network": NodeNetworkSnapshot;
+} | {
+  "id": string;
+  "kind": "peer";
+  "peer": NodePeerSnapshot;
+} | {
+  "id": string;
+  "kind": "embedded_service";
+  "service": NodeEmbeddedServiceSnapshot;
+} | {
+  "configuration": NodeNetworkConfigSnapshot;
+  "id": string;
+  "kind": "network_configuration";
+};
+
+export type NodeApiObjectResponse = {
+  "object": NodeApiObject;
+  "request_id": number;
+  "schema_version": number;
+  "server_time": string;
+};
+
+export type NodeApiSnapshotResponse = {
+  "request_id": number;
+  "schema_version": number;
+  "server_time": string;
+  "snapshot": NodeSnapshot;
+};
+
 export type NodeBlacklistSnapshot = {
   "changed": boolean;
   "clients": Array<string>;
@@ -293,6 +375,12 @@ export type NodeEventKind = {
 };
 
 export type NodeHttpContract = {
+  "api_command_response": NodeApiCommandResponse;
+  "api_error_response": NodeApiErrorResponse;
+  "api_event": NodeApiEvent;
+  "api_manifest_response": NodeApiManifestResponse;
+  "api_object_response": NodeApiObjectResponse;
+  "api_snapshot_response": NodeApiSnapshotResponse;
   "command_request": NodeCommandHttpRequest;
   "command_response": NodeCommandHttpResponse;
   "error_response": NodeHttpErrorResponse;
@@ -301,7 +389,7 @@ export type NodeHttpContract = {
   "websocket_message": NodeWsMessage;
 };
 
-export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "backend_rejected" | "backend_unavailable" | "contract_violation";
+export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "not_found" | "resync_required" | "backend_rejected" | "backend_unavailable" | "contract_violation";
 
 export type NodeHttpErrorResponse = {
   "code": NodeHttpErrorCode;

@@ -3,19 +3,26 @@
 //! The adapter only projects the shared command bus, state store and event bus
 //! onto HTTP/WebSocket. It never owns a node or network state machine.
 
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{
+        rejection::{JsonRejection, QueryRejection},
         ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path, Query, State,
     },
     http::StatusCode,
-    response::{IntoResponse, Json, Response},
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse, Json, Response,
+    },
     routing::{get, post},
     Router,
 };
+use chrono::{SecondsFormat, Utc};
 use futures::SinkExt as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,6 +40,129 @@ pub const NODE_HTTP_SCHEMA_VERSION: u16 = 1;
 
 /// Stable path prefix for the shared node control adapter.
 pub const NODE_HTTP_API_PREFIX: &str = "/api/node";
+
+/// Stable prefix for the versioned control API. The legacy `/api/node` routes
+/// remain available while UI adapters migrate, but new clients must use v1.
+pub const NODE_HTTP_V1_API_PREFIX: &str = "/api/v1";
+
+/// Metadata carried by every v1 success and error response.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiResponseMeta {
+    pub schema_version: u16,
+    pub request_id: u64,
+    pub server_time: String,
+}
+
+impl NodeApiResponseMeta {
+    fn new(request_id: u64) -> Self {
+        Self {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request_id,
+            server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        }
+    }
+}
+
+/// Versioned snapshot response used by `GET /api/v1/snapshot`.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiSnapshotResponse {
+    #[serde(flatten)]
+    pub meta: NodeApiResponseMeta,
+    pub snapshot: NodeSnapshot,
+}
+
+/// Versioned UI-manifest response used by `GET /api/v1/manifest`.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiManifestResponse {
+    #[serde(flatten)]
+    pub meta: NodeApiResponseMeta,
+    pub manifest: NodeUiManifest,
+}
+
+/// Versioned command result returned by `POST /api/v1/commands`.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiCommandResponse {
+    #[serde(flatten)]
+    pub meta: NodeApiResponseMeta,
+    pub result: NodeCommandResult,
+}
+
+/// A single canonical object fetched by kind and ID. Objects are projections of
+/// the authoritative snapshot, never independently maintained UI state.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeApiObject {
+    Node {
+        id: String,
+        identity: super::NodeIdentitySnapshot,
+    },
+    Network {
+        id: String,
+        network: super::NodeNetworkSnapshot,
+    },
+    Peer {
+        id: String,
+        peer: super::NodePeerSnapshot,
+    },
+    EmbeddedService {
+        id: String,
+        service: super::NodeEmbeddedServiceSnapshot,
+    },
+    NetworkConfiguration {
+        id: String,
+        configuration: super::NodeNetworkConfigSnapshot,
+    },
+}
+
+/// Versioned object response used by `GET /api/v1/objects/<kind>/<id>`.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiObjectResponse {
+    #[serde(flatten)]
+    pub meta: NodeApiResponseMeta,
+    pub object: NodeApiObject,
+}
+
+/// Versioned error response. The `problem` payload is optional because some
+/// transport-level failures do not originate from a node command.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApiErrorResponse {
+    #[serde(flatten)]
+    pub meta: NodeApiResponseMeta,
+    pub code: NodeHttpErrorCode,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_schema_version: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_schema_version: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<NodeProblem>,
+}
+
+/// JSON payload carried by `/api/v1/events` Server-Sent Events. The stream
+/// begins with a canonical snapshot and then carries ordered node events.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NodeApiEvent {
+    Snapshot {
+        schema_version: u16,
+        request_id: u64,
+        server_time: String,
+        snapshot: Box<NodeSnapshot>,
+    },
+    Event {
+        schema_version: u16,
+        request_id: u64,
+        server_time: String,
+        event: NodeEvent,
+    },
+    ResyncRequired {
+        schema_version: u16,
+        request_id: u64,
+        server_time: String,
+        requested_after: Option<u64>,
+        latest_sequence: u64,
+    },
+}
 
 /// Versioned DTO returned by the snapshot endpoint.
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -72,6 +202,8 @@ pub struct NodeCommandHttpResponse {
 pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
     InvalidRequest,
+    NotFound,
+    ResyncRequired,
     BackendRejected,
     BackendUnavailable,
     ContractViolation,
@@ -300,6 +432,30 @@ impl NodeHttpAdapter {
                 &format!("{NODE_HTTP_API_PREFIX}/commands"),
                 post(handle_command),
             )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/snapshot"),
+                get(handle_v1_snapshot),
+            )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/manifest"),
+                get(handle_v1_manifest),
+            )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/commands"),
+                post(handle_v1_command),
+            )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/operations/{{id}}"),
+                get(handle_v1_operation),
+            )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/objects/{{kind}}/{{id}}"),
+                get(handle_v1_object),
+            )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/events"),
+                get(handle_v1_events),
+            )
             .with_state(self)
     }
 
@@ -324,6 +480,10 @@ impl NodeHttpAdapter {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         self.execute(NodeCommandRequest::new(request_id, command))
             .await
+    }
+
+    fn allocate_request_id(&self) -> u64 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Fetch the latest snapshot through `NodeCommand::GetSnapshot`; the
@@ -408,6 +568,316 @@ fn status_for_problem(code: NodeProblemCode) -> StatusCode {
         NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
         NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NodeApiQuery {
+    schema_version: Option<u16>,
+    after: Option<u64>,
+}
+
+fn validate_api_query(query: &NodeApiQuery, request_id: u64) -> Result<(), Box<HttpApiError>> {
+    let version = query.schema_version.unwrap_or(NODE_HTTP_SCHEMA_VERSION);
+    if version != NODE_HTTP_SCHEMA_VERSION {
+        return Err(Box::new(HttpApiError::schema_version_mismatch(
+            request_id,
+            version,
+            NODE_HTTP_SCHEMA_VERSION,
+        )));
+    }
+    Ok(())
+}
+
+async fn handle_v1_command(
+    State(adapter): State<NodeHttpAdapter>,
+    payload: Result<Json<NodeCommandHttpRequest>, JsonRejection>,
+) -> Response {
+    let payload = match payload {
+        Ok(Json(payload)) => payload,
+        Err(error) => {
+            let request_id = adapter.allocate_request_id();
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    let request_id = payload.request.request_id;
+    if payload.schema_version != NODE_HTTP_SCHEMA_VERSION {
+        return HttpApiError::schema_version_mismatch(
+            request_id,
+            payload.schema_version,
+            NODE_HTTP_SCHEMA_VERSION,
+        )
+        .into_response();
+    }
+    if request_id == 0 {
+        return HttpApiError::invalid_request(request_id, "request_id 必须大于 0").into_response();
+    }
+
+    match adapter.execute(payload.request).await {
+        Ok(result) => {
+            let result = result_for_control_client(result);
+            let status = status_for_command_result(&result);
+            (
+                status,
+                Json(NodeApiCommandResponse {
+                    meta: NodeApiResponseMeta::new(request_id),
+                    result,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => HttpApiError::from_adapter(request_id, error).into_response(),
+    }
+}
+
+async fn handle_v1_snapshot(
+    State(adapter): State<NodeHttpAdapter>,
+    query: Result<Query<NodeApiQuery>, QueryRejection>,
+) -> Response {
+    let request_id = adapter.allocate_request_id();
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(error) => {
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    if let Err(error) = validate_api_query(&query, request_id) {
+        return (*error).into_response();
+    }
+
+    match adapter.snapshot().await {
+        Ok(snapshot) => Json(NodeApiSnapshotResponse {
+            meta: NodeApiResponseMeta::new(request_id),
+            snapshot: snapshot_for_control_client(snapshot),
+        })
+        .into_response(),
+        Err(error) => HttpApiError::from_adapter(request_id, error).into_response(),
+    }
+}
+
+async fn handle_v1_manifest(
+    State(adapter): State<NodeHttpAdapter>,
+    query: Result<Query<NodeApiQuery>, QueryRejection>,
+) -> Response {
+    let request_id = adapter.allocate_request_id();
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(error) => {
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    if let Err(error) = validate_api_query(&query, request_id) {
+        return (*error).into_response();
+    }
+
+    match adapter.manifest().await {
+        Ok(manifest) => Json(NodeApiManifestResponse {
+            meta: NodeApiResponseMeta::new(request_id),
+            manifest,
+        })
+        .into_response(),
+        Err(error) => HttpApiError::from_adapter(request_id, error).into_response(),
+    }
+}
+
+async fn handle_v1_operation(
+    State(adapter): State<NodeHttpAdapter>,
+    Path(id): Path<String>,
+    query: Result<Query<NodeApiQuery>, QueryRejection>,
+) -> Response {
+    let request_id = adapter.allocate_request_id();
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(error) => {
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    if let Err(error) = validate_api_query(&query, request_id) {
+        return (*error).into_response();
+    }
+
+    // Operation lifecycle and persistence are implemented by W4-02. Until an
+    // operation registry exists, returning a stable 404 is the only truthful
+    // response; a placeholder "unavailable" operation would hide a contract
+    // that the backend cannot yet satisfy.
+    HttpApiError::not_found(request_id, format!("operation not found: {id}")).into_response()
+}
+
+async fn handle_v1_object(
+    State(adapter): State<NodeHttpAdapter>,
+    Path((kind, id)): Path<(String, String)>,
+    query: Result<Query<NodeApiQuery>, QueryRejection>,
+) -> Response {
+    let request_id = adapter.allocate_request_id();
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(error) => {
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    if let Err(error) = validate_api_query(&query, request_id) {
+        return (*error).into_response();
+    }
+
+    let snapshot = match adapter.snapshot().await {
+        Ok(snapshot) => snapshot_for_control_client(snapshot),
+        Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
+    };
+    let object = match kind.as_str() {
+        "node" => snapshot
+            .identity
+            .clone()
+            .filter(|identity| identity.node_id == id)
+            .map(|identity| NodeApiObject::Node {
+                id: id.clone(),
+                identity,
+            }),
+        "network" => snapshot
+            .networks
+            .into_iter()
+            .find(|network| network.name == id)
+            .map(|network| NodeApiObject::Network {
+                id: id.clone(),
+                network,
+            }),
+        "peer" => snapshot
+            .peers
+            .into_iter()
+            .find(|peer| peer.peer_id == id)
+            .map(|peer| NodeApiObject::Peer {
+                id: id.clone(),
+                peer,
+            }),
+        "embedded_service" => snapshot
+            .embedded_services
+            .into_iter()
+            .find(|service| service.network_name == id)
+            .map(|service| NodeApiObject::EmbeddedService {
+                id: id.clone(),
+                service,
+            }),
+        "network_configuration" => snapshot
+            .configuration
+            .networks
+            .into_iter()
+            .find(|configuration| configuration.network_name == id)
+            .map(|configuration| NodeApiObject::NetworkConfiguration {
+                id: id.clone(),
+                configuration,
+            }),
+        _ => None,
+    };
+
+    match object {
+        Some(object) => Json(NodeApiObjectResponse {
+            meta: NodeApiResponseMeta::new(request_id),
+            object,
+        })
+        .into_response(),
+        None => HttpApiError::not_found(request_id, format!("object not found: {kind}/{id}"))
+            .into_response(),
+    }
+}
+
+struct NodeApiEventStreamState {
+    receiver: broadcast::Receiver<NodeEvent>,
+    initial: Option<NodeApiEvent>,
+    request_id: u64,
+    events: NodeEventBus,
+}
+
+async fn handle_v1_events(
+    State(adapter): State<NodeHttpAdapter>,
+    query: Result<Query<NodeApiQuery>, QueryRejection>,
+) -> Response {
+    let request_id = adapter.allocate_request_id();
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(error) => {
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    if let Err(error) = validate_api_query(&query, request_id) {
+        return (*error).into_response();
+    }
+
+    // Subscribe before reading the snapshot so events published during the
+    // read are queued for this stream. Full replay/reconnect semantics remain
+    // W4-03; a cursor that does not match the retained boundary is rejected
+    // explicitly instead of silently skipping an event gap.
+    let (receiver, boundary) = adapter.events.subscribe_with_sequence();
+    if query.after.is_some_and(|after| after != boundary) {
+        return HttpApiError::resync_required(request_id, query.after, boundary).into_response();
+    }
+
+    let snapshot = match adapter.snapshot().await {
+        Ok(snapshot) => snapshot_for_control_client(snapshot),
+        Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
+    };
+    let initial = NodeApiEvent::Snapshot {
+        schema_version: NODE_HTTP_SCHEMA_VERSION,
+        request_id,
+        server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        snapshot: Box::new(snapshot),
+    };
+    let state = NodeApiEventStreamState {
+        receiver,
+        initial: Some(initial),
+        request_id,
+        events: adapter.events,
+    };
+    let stream = futures::stream::unfold(state, move |mut state| async move {
+        if let Some(initial) = state.initial.take() {
+            return Some((
+                Ok::<_, Infallible>(sse_event(initial, Some(boundary))),
+                state,
+            ));
+        }
+
+        match state.receiver.recv().await {
+            Ok(event) => {
+                let sequence = event.sequence;
+                let message = NodeApiEvent::Event {
+                    schema_version: NODE_HTTP_SCHEMA_VERSION,
+                    request_id: state.request_id,
+                    server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                    event,
+                };
+                Some((Ok(sse_event(message, Some(sequence))), state))
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let message = NodeApiEvent::ResyncRequired {
+                    schema_version: NODE_HTTP_SCHEMA_VERSION,
+                    request_id: state.request_id,
+                    server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                    requested_after: None,
+                    latest_sequence: state.events.latest_sequence(),
+                };
+                Some((Ok(sse_event(message, None)), state))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+fn sse_event(message: NodeApiEvent, id: Option<u64>) -> SseEvent {
+    let event_name = match &message {
+        NodeApiEvent::Snapshot { .. } => "snapshot",
+        NodeApiEvent::Event { .. } => "node",
+        NodeApiEvent::ResyncRequired { .. } => "resync_required",
+    };
+    let payload = serde_json::to_string(&message).expect("node API event is serializable");
+    let event = SseEvent::default().event(event_name).data(payload);
+    match id {
+        Some(id) => event.id(id.to_string()),
+        None => event,
     }
 }
 
@@ -652,6 +1122,122 @@ impl IntoResponse for HttpAdapterError {
     }
 }
 
+#[derive(Debug)]
+struct HttpApiError {
+    status: StatusCode,
+    body: NodeApiErrorResponse,
+}
+
+impl HttpApiError {
+    fn invalid_request(request_id: u64, message: impl Into<String>) -> Self {
+        Self::new(
+            request_id,
+            StatusCode::BAD_REQUEST,
+            NodeHttpErrorCode::InvalidRequest,
+            message,
+        )
+    }
+
+    fn not_found(request_id: u64, message: impl Into<String>) -> Self {
+        Self::new(
+            request_id,
+            StatusCode::NOT_FOUND,
+            NodeHttpErrorCode::NotFound,
+            message,
+        )
+    }
+
+    fn resync_required(request_id: u64, requested_after: Option<u64>, latest: u64) -> Self {
+        let requested = requested_after
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".into());
+        let mut error = Self::new(
+            request_id,
+            StatusCode::CONFLICT,
+            NodeHttpErrorCode::ResyncRequired,
+            format!(
+                "事件 cursor 已失效: requested_after={requested}, latest_sequence={latest}; 请重新读取快照"
+            ),
+        );
+        error.body.requested_schema_version = None;
+        error.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+        error
+    }
+
+    fn schema_version_mismatch(request_id: u64, requested: u16, supported: u16) -> Self {
+        let mut error = Self::new(
+            request_id,
+            StatusCode::BAD_REQUEST,
+            NodeHttpErrorCode::SchemaVersionMismatch,
+            format!("节点 HTTP schema 版本不兼容: requested={requested}, supported={supported}"),
+        );
+        error.body.requested_schema_version = Some(requested);
+        error.body.supported_schema_version = Some(supported);
+        error
+    }
+
+    fn from_adapter(request_id: u64, error: NodeHttpAdapterError) -> Self {
+        let (status, code, problem) = match &error {
+            NodeHttpAdapterError::SchemaVersionMismatch { .. } => (
+                StatusCode::BAD_REQUEST,
+                NodeHttpErrorCode::SchemaVersionMismatch,
+                None,
+            ),
+            NodeHttpAdapterError::Command(NodeCommandBusError::Invalid(problem)) => (
+                StatusCode::BAD_REQUEST,
+                NodeHttpErrorCode::InvalidRequest,
+                Some(problem.clone()),
+            ),
+            NodeHttpAdapterError::Command(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                NodeHttpErrorCode::BackendUnavailable,
+                None,
+            ),
+            NodeHttpAdapterError::Rejected(problem) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                NodeHttpErrorCode::BackendRejected,
+                Some(problem.clone()),
+            ),
+            NodeHttpAdapterError::UnexpectedOutcome(_)
+            | NodeHttpAdapterError::ManifestSchemaMismatch { .. }
+            | NodeHttpAdapterError::InvalidManifest { .. } => (
+                StatusCode::BAD_GATEWAY,
+                NodeHttpErrorCode::ContractViolation,
+                None,
+            ),
+        };
+        let mut error = Self::new(request_id, status, code, error.to_string());
+        error.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+        error.body.problem = problem;
+        error
+    }
+
+    fn new(
+        request_id: u64,
+        status: StatusCode,
+        code: NodeHttpErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            body: NodeApiErrorResponse {
+                meta: NodeApiResponseMeta::new(request_id),
+                code,
+                message: message.into(),
+                requested_schema_version: None,
+                supported_schema_version: None,
+                problem: None,
+            },
+        }
+    }
+}
+
+impl IntoResponse for HttpApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body)).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -668,7 +1254,8 @@ mod tests {
 
     use super::*;
     use crate::node::{
-        node_ui_manifest, NodeCommandFuture, NodeCommandHandler, NodeCommandResult, NodeProblemCode,
+        node_ui_manifest, NodeCommandFuture, NodeCommandHandler, NodeCommandResult,
+        NodeNetworkSnapshot, NodeNetworkStatus, NodeProblemCode, NodeTrafficSnapshot,
     };
 
     #[derive(Clone)]
@@ -745,6 +1332,25 @@ mod tests {
             .expect("command response")
     }
 
+    async fn post_v1_command(
+        adapter: NodeHttpAdapter,
+        payload: &NodeCommandHttpRequest,
+    ) -> Response {
+        let body = serde_json::to_vec(payload).expect("serialize command request");
+        adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/commands")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("v1 command request"),
+            )
+            .await
+            .expect("v1 command response")
+    }
+
     #[tokio::test]
     async fn snapshot_and_manifest_success_are_versioned_and_forwarded() {
         let (adapter, state, _events) = adapter_fixture(node_ui_manifest());
@@ -792,6 +1398,238 @@ mod tests {
             NODE_UI_MANIFEST_SCHEMA_VERSION
         );
         assert_eq!(manifest.manifest.pages.len(), 11);
+    }
+
+    #[tokio::test]
+    async fn v1_snapshot_and_manifest_carry_meta_and_authoritative_payload() {
+        let (adapter, state, _events) = adapter_fixture(node_ui_manifest());
+        state.update(|snapshot| snapshot.revision = 8).await;
+
+        let snapshot_response = adapter
+            .clone()
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/snapshot?schema_version=1")
+                    .body(Body::empty())
+                    .expect("v1 snapshot request"),
+            )
+            .await
+            .expect("v1 snapshot response");
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+        let snapshot: NodeApiSnapshotResponse = json_body(snapshot_response).await;
+        assert_eq!(snapshot.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        assert!(snapshot.meta.request_id > 0);
+        chrono::DateTime::parse_from_rfc3339(&snapshot.meta.server_time)
+            .expect("snapshot server time is RFC3339");
+        assert_eq!(snapshot.snapshot.revision, 9);
+        assert_eq!(
+            snapshot.snapshot.control_health,
+            NodeControlHealth::Available
+        );
+
+        let manifest_response = adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/manifest?schema_version=1")
+                    .body(Body::empty())
+                    .expect("v1 manifest request"),
+            )
+            .await
+            .expect("v1 manifest response");
+        assert_eq!(manifest_response.status(), StatusCode::OK);
+        let manifest: NodeApiManifestResponse = json_body(manifest_response).await;
+        assert_eq!(manifest.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        assert!(manifest.meta.request_id > snapshot.meta.request_id);
+        assert_eq!(manifest.manifest.pages.len(), 11);
+    }
+
+    #[tokio::test]
+    async fn v1_command_echoes_request_id_and_preserves_command_result() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(51, NodeCommand::GetSnapshot),
+        };
+
+        let response = post_v1_command(adapter, &payload).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: NodeApiCommandResponse = json_body(response).await;
+        assert_eq!(body.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        assert_eq!(body.meta.request_id, 51);
+        chrono::DateTime::parse_from_rfc3339(&body.meta.server_time)
+            .expect("command server time is RFC3339");
+        assert_eq!(body.result.request_id, 51);
+        assert!(matches!(
+            body.result.outcome,
+            NodeCommandOutcome::Snapshot(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn v1_operation_route_returns_stable_not_found_envelope() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let response = adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/operations/op_missing?schema_version=1")
+                    .body(Body::empty())
+                    .expect("operation request"),
+            )
+            .await
+            .expect("operation response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: NodeApiErrorResponse = json_body(response).await;
+        assert_eq!(body.code, NodeHttpErrorCode::NotFound);
+        assert!(body.meta.request_id > 0);
+        assert_eq!(body.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        chrono::DateTime::parse_from_rfc3339(&body.meta.server_time)
+            .expect("error server time is RFC3339");
+    }
+
+    #[tokio::test]
+    async fn v1_object_reads_are_projected_from_the_canonical_snapshot() {
+        let (adapter, state, _events) = adapter_fixture(node_ui_manifest());
+        state
+            .update(|snapshot| {
+                snapshot.networks.push(NodeNetworkSnapshot {
+                    name: "home".into(),
+                    tun_name: "tun0".into(),
+                    status: NodeNetworkStatus::Online,
+                    assigned_ipv6: None,
+                    assigned_ipv4: None,
+                    p2p_listen_addr: None,
+                    uptime_secs: 12,
+                    roles: Vec::new(),
+                    peer_count: 0,
+                    traffic: NodeTrafficSnapshot::default(),
+                });
+            })
+            .await;
+
+        let response = adapter
+            .clone()
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/objects/network/home?schema_version=1")
+                    .body(Body::empty())
+                    .expect("object request"),
+            )
+            .await
+            .expect("object response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: NodeApiObjectResponse = json_body(response).await;
+        assert_eq!(body.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
+        assert!(matches!(
+            body.object,
+            NodeApiObject::Network { id, network }
+                if id == "home" && network.name == "home" && network.uptime_secs == 12
+        ));
+
+        let missing = adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/objects/network/missing?schema_version=1")
+                    .body(Body::empty())
+                    .expect("missing object request"),
+            )
+            .await
+            .expect("missing object response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let missing: NodeApiErrorResponse = json_body(missing).await;
+        assert_eq!(missing.code, NodeHttpErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn v1_events_stream_starts_with_snapshot_and_rejects_stale_cursor() {
+        let (adapter, _state, events) = adapter_fixture(node_ui_manifest());
+        let response = adapter
+            .clone()
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events?schema_version=1")
+                    .body(Body::empty())
+                    .expect("event stream request"),
+            )
+            .await
+            .expect("event stream response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let mut body = response.into_body().into_data_stream();
+        let chunk = timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("initial SSE event timeout")
+            .expect("initial SSE event")
+            .expect("valid SSE chunk");
+        let text = String::from_utf8(chunk.to_vec()).expect("SSE chunk is UTF-8");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE data line");
+        let initial: NodeApiEvent = serde_json::from_str(data).expect("decode initial SSE event");
+        assert!(
+            matches!(initial, NodeApiEvent::Snapshot { snapshot, .. } if snapshot.revision == 0)
+        );
+
+        events.publish(NodeEventKind::StateChanged { revision: 1 });
+        let stale = adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events?schema_version=1&after=0")
+                    .body(Body::empty())
+                    .expect("stale cursor request"),
+            )
+            .await
+            .expect("stale cursor response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let stale: NodeApiErrorResponse = json_body(stale).await;
+        assert_eq!(stale.code, NodeHttpErrorCode::ResyncRequired);
+    }
+
+    #[tokio::test]
+    async fn v1_routes_reject_schema_mismatch_with_meta_envelope() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        for path in [
+            "/api/v1/snapshot?schema_version=2",
+            "/api/v1/manifest?schema_version=2",
+            "/api/v1/operations/op?schema_version=2",
+            "/api/v1/objects/network/home?schema_version=2",
+            "/api/v1/events?schema_version=2",
+        ] {
+            let response = adapter
+                .clone()
+                .router()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("v1 version mismatch request"),
+                )
+                .await
+                .expect("v1 version mismatch response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            let body: NodeApiErrorResponse = json_body(response).await;
+            assert_eq!(body.code, NodeHttpErrorCode::SchemaVersionMismatch);
+            assert_eq!(body.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
+            assert!(body.meta.request_id > 0);
+            assert_eq!(body.requested_schema_version, Some(2));
+            assert_eq!(
+                body.supported_schema_version,
+                Some(NODE_HTTP_SCHEMA_VERSION)
+            );
+        }
     }
 
     #[tokio::test]

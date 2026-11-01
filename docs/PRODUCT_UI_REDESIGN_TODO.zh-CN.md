@@ -50,7 +50,7 @@
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
 | W3 所有者安全 | `[x]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全、W3-07 认证管理 UI 已完成；自动化边界与未做的真实公网/硬件认证器实测见各分项证据 |
-| W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
+| W4 控制 API | `[~]` | P0 | W1,W2 | W4-01 的 v1 路径、统一响应元数据、对象投影与基础 SSE 已完成；operation 生命周期、完整重连/错误模型和权限校验待后续项 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
 | W7 节点页 | `[ ]` | P1 | W2,W4,W5 | 启停、接口、身份、诊断 |
@@ -611,14 +611,25 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 目标：所有控制台只依据权威快照、操作和事件行动。
 
-### W4-01 API 版本与路径 `[ ]`
+### W4-01 API 版本与路径 `[x]`
 
-- [ ] 建立 `/api/v1/snapshot`；
-- [ ] 建立 `/api/v1/commands`；
-- [ ] 建立 `/api/v1/operations/<id>`；
-- [ ] 建立 `/api/v1/events`；
-- [ ] 建立对象按需读取；
-- [ ] 定义 schema version 和 request ID。
+- [x] 建立 `/api/v1/snapshot`；
+- [x] 建立 `/api/v1/commands`；
+- [x] 建立 `/api/v1/operations/<id>`；
+- [x] 建立 `/api/v1/events`；
+- [x] 建立对象按需读取；
+- [x] 定义 schema version 和 request ID。
+
+**实现与测试证据（2026-11-01）**
+
+- v1 路由保留 `/api/node/*` 迁移兼容；`/api/v1/snapshot`、`/api/v1/manifest`、`/api/v1/commands`、`/api/v1/operations/<id>`、`/api/v1/objects/<kind>/<id>` 和 `/api/v1/events` 均由同一 `NodeHttpAdapter` 投影共享命令总线、状态存储和事件总线，没有复制业务状态机；
+- 所有 v1 成功和错误响应包含 `schema_version`、`request_id`、RFC3339 `server_time`；命令响应回显客户端命令 `request_id`，读请求使用适配器单调分配的内部请求 ID；
+- 对象读取仅从权威 `NodeSnapshot` 投影 `node`、`network`、`peer`、`embedded_service`、`network_configuration`，不存在或未知对象统一返回稳定 `not_found`；
+- `/api/v1/events` 为 SSE，首个事件是权威快照；cursor 与服务端当前边界不一致时返回 `resync_required`。完整历史回放、断线恢复和缺口修复仍属于 W4-03，未提前勾选；
+- `/api/v1/operations/<id>` 已建立并受契约约束，但在 W4-02 建立真实 operation 注册表前，对任何 ID 返回稳定 404，不伪造生命周期或永久 `unavailable` 状态；
+- 新 DTO 已加入 `NodeHttpContract`，重新生成 JSON Schema、TypeScript 与 Android 绑定；`scripts/generate-contracts.sh` 的生成、校验和 7 个 Rust 契约测试通过，`node scripts/test_contract_bindings.mjs` 通过；
+- `cargo test -p fuckipv6-client --no-default-features`：库测试 540 passed、3 ignored；集成测试 1 passed（`register_check`）与 8 passed（`w2_runtime`）；特权 lifecycle 集成测试 1 ignored；
+- `cargo test -p fuckipv6-client gpui::view_model`：17 passed；两套目标的 `cargo clippy --all-targets -- -D warnings` 均通过。
 
 ### W4-02 Operation 生命周期 `[ ]`
 

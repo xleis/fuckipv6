@@ -1792,6 +1792,14 @@ mod tests {
     };
     use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
 
+    const PRODUCT_VISUAL_SNAPSHOT_FIXTURE: &str =
+        include_str!("../../../../contracts/typescript/fixtures/product-visual-snapshot.json");
+
+    #[derive(serde::Deserialize)]
+    struct ProductVisualFixture {
+        snapshot: NodeSnapshot,
+    }
+
     struct SnapshotCommandHandler {
         state: NodeStateStore,
     }
@@ -2093,12 +2101,16 @@ mod tests {
             return;
         };
 
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let expected_revision = fixture.snapshot.revision;
         let state = NodeStateStore::new();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .expect("visual-test Tokio runtime");
+        runtime.block_on(state.replace_authoritative(fixture.snapshot));
         let _runtime_guard = runtime.enter();
         let bus = NodeCommandBus::spawn(
             Arc::new(SnapshotCommandHandler {
@@ -2110,6 +2122,9 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("fuckipv6-gpui-visual-{}", std::process::id()));
         let configs = ConfigManager::new_for_dir(config_dir).expect("temporary config directory");
+        configs
+            .set_node_language_preference(LanguagePreference::En)
+            .expect("fixture language preference");
         let text_system = Arc::new(gpui_wgpu::CosmicTextSystem::new("Inter"));
         let mut cx = gpui::HeadlessAppContext::with_platform(
             text_system,
@@ -2129,6 +2144,8 @@ mod tests {
                     .read(app)
                     .map(|shell| {
                         shell.manifest.is_some()
+                            && shell.snapshot.revision == expected_revision
+                            && shell.locale == Locale::En
                             && shell.pending_commands == 0
                             && shell.error.is_none()
                     })
@@ -2143,6 +2160,14 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        cx.update(|app| {
+            window
+                .update(app, |shell, _, cx| {
+                    shell.notice = None;
+                    cx.notify();
+                })
+                .expect("clear GPUI visual-test notice");
+        });
         cx.run_until_parked();
         let image = cx
             .capture_screenshot(window.into())

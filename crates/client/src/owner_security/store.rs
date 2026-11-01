@@ -4,6 +4,7 @@ use base64::Engine;
 use fs2::FileExt;
 use fuckipv6_common::domain::{
     NodeId, NodeOwner, PasskeyCredentialId, PasskeyCredentialRef, RecoveryState, SecretRef,
+    SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,9 +12,10 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use subtle::ConstantTimeEq;
-use webauthn_rs::prelude::Passkey;
+use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 
-const OWNER_SCHEMA_VERSION: u32 = 1;
+const OWNER_SCHEMA_VERSION: u32 = 2;
+const MAX_OWNER_SESSIONS: usize = 64;
 const OWNER_DIR: &str = "owner";
 const OWNER_FILE: &str = "owner.json";
 const RECOVERY_VERIFIER_FILE: &str = "recovery.verifier";
@@ -28,12 +30,51 @@ pub(crate) struct StoredPasskey {
     pub(crate) credential: Passkey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionChannel {
+    Local,
+    Public,
+}
+
+impl SessionChannel {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// Authenticated owner session metadata. The bearer token is deliberately not
+/// representable here: `reference` is derived from the token and is the only
+/// session identifier persisted on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredSession {
+    pub(crate) reference: SessionRef,
+    pub(crate) credential_id: PasskeyCredentialId,
+    pub(crate) channel: SessionChannel,
+    pub(crate) rp_id: String,
+    pub(crate) origin: String,
+    pub(crate) created_at_unix_ms: u64,
+    pub(crate) expires_at_unix_ms: u64,
+    pub(crate) last_authenticated_at_unix_ms: u64,
+}
+
+impl StoredSession {
+    pub(crate) fn recently_authenticated(&self, now_unix_ms: u64) -> bool {
+        now_unix_ms.saturating_sub(self.last_authenticated_at_unix_ms) <= 5 * 60 * 1000
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwnerStore {
     pub(crate) schema_version: u32,
     pub(crate) owner: NodeOwner,
     pub(crate) passkeys: Vec<StoredPasskey>,
+    pub(crate) sessions: Vec<StoredSession>,
 }
 
 impl OwnerStore {
@@ -72,6 +113,7 @@ impl OwnerStore {
                 reference,
                 credential,
             }],
+            sessions: Vec::new(),
         };
         store.validate()?;
         Ok(store)
@@ -86,6 +128,12 @@ impl OwnerStore {
             .context("owner domain validation failed")?;
         if self.passkeys.len() != self.owner.passkeys.len() {
             anyhow::bail!("owner passkey references do not match stored credentials");
+        }
+        if self.sessions.len() != self.owner.sessions.len() {
+            anyhow::bail!("owner session references do not match session records");
+        }
+        if self.sessions.len() > MAX_OWNER_SESSIONS {
+            anyhow::bail!("too many owner sessions");
         }
 
         let mut seen = std::collections::HashSet::new();
@@ -103,12 +151,222 @@ impl OwnerStore {
             }
         }
 
+        let mut seen_sessions = std::collections::HashSet::new();
+        for (stored, reference) in self.sessions.iter().zip(&self.owner.sessions) {
+            if &stored.reference != reference || !seen_sessions.insert(&stored.reference) {
+                anyhow::bail!("owner session reference mismatch");
+            }
+            if stored.expires_at_unix_ms <= stored.created_at_unix_ms
+                || stored.last_authenticated_at_unix_ms < stored.created_at_unix_ms
+                || stored.last_authenticated_at_unix_ms > stored.expires_at_unix_ms
+            {
+                anyhow::bail!("owner session timestamps are invalid");
+            }
+            if stored.rp_id.is_empty()
+                || stored.rp_id.len() > 253
+                || stored.origin.is_empty()
+                || stored.origin.len() > 512
+            {
+                anyhow::bail!("owner session origin binding is invalid");
+            }
+            let Some(passkey) = self
+                .passkeys
+                .iter()
+                .find(|passkey| passkey.reference.credential_id == stored.credential_id)
+            else {
+                anyhow::bail!("owner session references an unknown credential");
+            };
+            if !passkey.reference.is_active() {
+                anyhow::bail!("owner session references a revoked credential");
+            }
+        }
+
         match &self.owner.recovery {
             RecoveryState::Configured { secret_ref, .. }
                 if secret_ref.as_str() == RECOVERY_SECRET_REF => {}
             _ => anyhow::bail!("owner recovery verifier reference is invalid"),
         }
         Ok(())
+    }
+
+    pub(crate) fn active_credentials(&self) -> Vec<Passkey> {
+        self.passkeys
+            .iter()
+            .filter(|passkey| passkey.reference.is_active())
+            .map(|passkey| passkey.credential.clone())
+            .collect()
+    }
+
+    pub(crate) fn all_credentials(&self) -> Vec<Passkey> {
+        self.passkeys
+            .iter()
+            .map(|passkey| passkey.credential.clone())
+            .collect()
+    }
+
+    pub(crate) fn active_credential(&self, credential_id: &PasskeyCredentialId) -> Option<Passkey> {
+        self.passkeys
+            .iter()
+            .find(|passkey| {
+                &passkey.reference.credential_id == credential_id && passkey.reference.is_active()
+            })
+            .map(|passkey| passkey.credential.clone())
+    }
+
+    pub(crate) fn add_passkey(
+        &mut self,
+        credential: Passkey,
+        label: String,
+        backup_eligible: bool,
+        backup_state: bool,
+        created_at_unix_ms: u64,
+    ) -> Result<PasskeyCredentialRef> {
+        if label.is_empty() || label.len() > 80 {
+            anyhow::bail!("Passkey 名称无效");
+        }
+        if self.passkeys.len() >= 16 {
+            anyhow::bail!("Passkey 数量已达到上限");
+        }
+        let credential_id = PasskeyCredentialId::from_public_key(credential.cred_id());
+        if self
+            .passkeys
+            .iter()
+            .any(|passkey| passkey.reference.credential_id == credential_id)
+        {
+            anyhow::bail!("Passkey 凭据已存在，拒绝替换");
+        }
+        let reference = PasskeyCredentialRef {
+            credential_id,
+            label,
+            created_at_unix_ms,
+            last_used_at_unix_ms: None,
+            revoked_at_unix_ms: None,
+            backup_eligible,
+            backup_state,
+        };
+        self.owner.passkeys.push(reference.clone());
+        self.passkeys.push(StoredPasskey {
+            reference: reference.clone(),
+            credential,
+        });
+        Ok(reference)
+    }
+
+    pub(crate) fn record_authentication(
+        &mut self,
+        result: &AuthenticationResult,
+        authenticated_at_unix_ms: u64,
+    ) -> Result<PasskeyCredentialId> {
+        if !result.user_verified() {
+            anyhow::bail!("Passkey 认证未完成用户验证");
+        }
+        let credential_id = PasskeyCredentialId::from_public_key(result.cred_id());
+        let updated_reference = {
+            let stored = self
+                .passkeys
+                .iter_mut()
+                .find(|passkey| passkey.reference.credential_id == credential_id)
+                .ok_or_else(|| anyhow::anyhow!("Passkey 凭据不存在"))?;
+            if !stored.reference.is_active() {
+                anyhow::bail!("Passkey 凭据已撤销");
+            }
+            if stored.credential.update_credential(result).is_none() {
+                anyhow::bail!("Passkey 凭据替换被拒绝");
+            }
+            stored.reference.last_used_at_unix_ms = Some(authenticated_at_unix_ms);
+            stored.reference.backup_eligible = result.backup_eligible();
+            stored.reference.backup_state = result.backup_state();
+            stored.reference.clone()
+        };
+        let owner_reference = self
+            .owner
+            .passkeys
+            .iter_mut()
+            .find(|passkey| passkey.credential_id == credential_id)
+            .ok_or_else(|| anyhow::anyhow!("Passkey 凭据不存在"))?;
+        *owner_reference = updated_reference;
+        Ok(credential_id)
+    }
+
+    pub(crate) fn insert_session(&mut self, session: StoredSession) -> Result<()> {
+        if self.sessions.len() >= MAX_OWNER_SESSIONS {
+            anyhow::bail!("所有者会话数量已达到上限");
+        }
+        if self
+            .sessions
+            .iter()
+            .any(|existing| existing.reference == session.reference)
+        {
+            anyhow::bail!("所有者会话标识重复");
+        }
+        let credential_active = self.passkeys.iter().any(|passkey| {
+            passkey.reference.credential_id == session.credential_id
+                && passkey.reference.is_active()
+        });
+        if !credential_active {
+            anyhow::bail!("所有者会话凭据已失效");
+        }
+        self.owner.sessions.push(session.reference.clone());
+        self.sessions.push(session);
+        Ok(())
+    }
+
+    pub(crate) fn session(&self, reference: &SessionRef) -> Option<&StoredSession> {
+        self.sessions
+            .iter()
+            .find(|session| &session.reference == reference)
+    }
+
+    pub(crate) fn remove_session(&mut self, reference: &SessionRef) -> bool {
+        let previous = self.sessions.len();
+        self.sessions
+            .retain(|session| &session.reference != reference);
+        self.owner.sessions.retain(|session| session != reference);
+        self.sessions.len() != previous
+    }
+
+    pub(crate) fn revoke_passkey(
+        &mut self,
+        credential_id: &PasskeyCredentialId,
+        revoked_at_unix_ms: u64,
+    ) -> Result<PasskeyCredentialRef> {
+        if self
+            .owner
+            .passkeys
+            .iter()
+            .filter(|passkey| passkey.is_active())
+            .count()
+            <= 1
+        {
+            anyhow::bail!("不能撤销最后一个可用 Passkey");
+        }
+        let reference = self
+            .owner
+            .passkeys
+            .iter_mut()
+            .find(|passkey| &passkey.credential_id == credential_id)
+            .ok_or_else(|| anyhow::anyhow!("Passkey 凭据不存在"))?;
+        if !reference.is_active() {
+            anyhow::bail!("Passkey 凭据已撤销");
+        }
+        reference.revoked_at_unix_ms = Some(revoked_at_unix_ms);
+        let revoked = reference.clone();
+        let stored = self
+            .passkeys
+            .iter_mut()
+            .find(|passkey| passkey.reference.credential_id == *credential_id)
+            .ok_or_else(|| anyhow::anyhow!("Passkey 凭据不存在"))?;
+        stored.reference = revoked.clone();
+
+        self.sessions
+            .retain(|session| &session.credential_id != credential_id);
+        self.owner.sessions.clear();
+        self.owner.sessions.extend(
+            self.sessions
+                .iter()
+                .map(|session| session.reference.clone()),
+        );
+        Ok(revoked)
     }
 }
 
@@ -248,6 +506,36 @@ impl OwnerPersistence {
             (Ok(outcome), Ok(())) => Ok(outcome),
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error).context("无法释放所有者初始化锁"),
+        }
+    }
+
+    /// Atomically mutate an initialized owner record while preserving the
+    /// recovery verifier. The lock covers the fresh read, mutation, validation
+    /// and durable replacement so concurrent catalog/session operations cannot
+    /// overwrite each other with stale snapshots.
+    pub(crate) fn update<T>(&self, mutate: impl FnOnce(&mut OwnerStore) -> Result<T>) -> Result<T> {
+        let lock_path = self.config_dir.join(INIT_LOCK_FILE);
+        let lock = open_private_file(&lock_path, true, true)?;
+        FileExt::lock_exclusive(&lock).context("无法锁定所有者更新事务")?;
+        let result = (|| -> Result<T> {
+            let mut store = match self.load()? {
+                OwnerLoad::Complete(store) => store,
+                OwnerLoad::Uninitialized => anyhow::bail!("所有者尚未初始化"),
+                OwnerLoad::Corrupt(reason) => anyhow::bail!("所有者状态损坏: {reason}"),
+            };
+            let value = mutate(&mut store)?;
+            store.validate()?;
+            let owner_json = serde_json::to_vec_pretty(&store).context("无法序列化所有者记录")?;
+            let owner_dir = self.config_dir.join(OWNER_DIR);
+            write_private_file_atomic(&owner_dir.join(OWNER_FILE), &owner_json)?;
+            sync_directory(&owner_dir)?;
+            Ok(value)
+        })();
+        let unlock = FileExt::unlock(&lock);
+        match (result, unlock) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error).context("无法释放所有者更新锁"),
         }
     }
 
@@ -401,9 +689,17 @@ pub(crate) fn fixture_passkey() -> Passkey {
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_passkey_with_id(id: &[u8]) -> Passkey {
+    let mut value = serde_json::to_value(fixture_passkey()).expect("fixture passkey json");
+    value["cred"]["cred_id"] = serde_json::Value::String(URL_SAFE_NO_PAD.encode(id));
+    serde_json::from_value(value).expect("fixture passkey with id")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
+    use std::sync::{Arc, Barrier};
 
     fn node_id() -> NodeId {
         NodeId::from_public_key(b"owner-store-test")
@@ -482,6 +778,95 @@ mod tests {
             persistence.load()?,
             OwnerLoad::Corrupt("owner_file_missing")
         ));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn passkey_limit_duplicate_and_revocation_are_enforced() -> Result<()> {
+        let mut store = fixture_store();
+        let first_id = store.owner.passkeys[0].credential_id.clone();
+        assert!(store.revoke_passkey(&first_id, 1_700_000_000_001).is_err());
+
+        let second = store.add_passkey(
+            fixture_passkey_with_id(b"store-test-secondary-passkey"),
+            "备用 Passkey".to_string(),
+            false,
+            false,
+            1_700_000_000_002,
+        )?;
+        assert!(store
+            .add_passkey(
+                fixture_passkey_with_id(b"store-test-secondary-passkey"),
+                "重复 Passkey".to_string(),
+                false,
+                false,
+                1_700_000_000_003,
+            )
+            .is_err());
+
+        let session_reference = SessionRef::new([9u8; 32]);
+        store.insert_session(StoredSession {
+            reference: session_reference.clone(),
+            credential_id: second.credential_id.clone(),
+            channel: SessionChannel::Local,
+            rp_id: "localhost".to_string(),
+            origin: "http://localhost:8080".to_string(),
+            created_at_unix_ms: 1_700_000_000_400,
+            expires_at_unix_ms: 1_700_000_000_900,
+            last_authenticated_at_unix_ms: 1_700_000_000_400,
+        })?;
+
+        let revoked = store.revoke_passkey(&second.credential_id, 1_700_000_000_500)?;
+        assert!(revoked.revoked_at_unix_ms.is_some());
+        assert!(store.session(&session_reference).is_none());
+        assert!(store.owner.sessions.is_empty());
+        store.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_updates_do_not_lose_passkeys() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-owner-concurrent-update-{}-{}",
+            std::process::id(),
+            random_suffix()
+        ));
+        let persistence = OwnerPersistence::new(dir.clone())?;
+        persistence.commit(&fixture_store(), &[7u8; 32])?;
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [
+            (b"store-concurrent-passkey-a".as_slice(), "并发 A"),
+            (b"store-concurrent-passkey-b".as_slice(), "并发 B"),
+        ]
+        .into_iter()
+        .map(|(id, label)| {
+            let persistence = persistence.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                persistence.update(|store| {
+                    store.add_passkey(
+                        fixture_passkey_with_id(id),
+                        label.to_string(),
+                        false,
+                        false,
+                        1_700_000_000_600,
+                    )?;
+                    Ok(())
+                })
+            })
+        })
+        .collect();
+
+        for handle in handles {
+            handle.join().expect("owner update thread")?;
+        }
+        let OwnerLoad::Complete(store) = persistence.load()? else {
+            panic!("owner must remain complete");
+        };
+        assert_eq!(store.passkeys.len(), 3);
+        store.validate()?;
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

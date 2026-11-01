@@ -1,11 +1,13 @@
 use super::audit::OwnerSecurityAudit;
-use super::store::{CommitOutcome, OwnerLoad, OwnerPersistence, OwnerStore};
+use super::store::{
+    CommitOutcome, OwnerLoad, OwnerPersistence, OwnerStore, SessionChannel, StoredSession,
+};
 use super::webauthn::OwnerWebauthn;
 use crate::config_manager::ConfigManager;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use fuckipv6_common::domain::NodeId;
+use fuckipv6_common::domain::{NodeId, PasskeyCredentialId, PasskeyCredentialRef, SessionRef};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
@@ -13,11 +15,16 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, Passkey, PasskeyRegistration, RegisterPublicKeyCredential, Url,
+    AuthenticationResult, CreationChallengeResponse, Passkey, PasskeyAuthentication,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse, Url,
 };
 use zeroize::Zeroizing;
 
 const CEREMONY_TTL: Duration = Duration::from_secs(5 * 60);
+const OWNER_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const RECENT_AUTHENTICATION_TTL: Duration = Duration::from_secs(5 * 60);
+const OWNER_SESSION_TOKEN_PREFIX: &str = "fv1_";
 const MAX_BOOTSTRAP_FAILURES: u32 = 5;
 const BOOTSTRAP_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BOOTSTRAP_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -71,6 +78,26 @@ pub(crate) enum OwnerSecurityError {
     CeremonyInProgress,
     #[error("Passkey 注册流程已过期或不存在")]
     CeremonyMissing,
+    #[error("Passkey 认证流程已过期或不存在")]
+    AuthenticationCeremonyMissing,
+    #[error("节点所有者尚未初始化")]
+    NotInitialized,
+    #[error("所有者会话无效或已过期")]
+    InvalidSession,
+    #[error("该操作需要最近五分钟内完成 Passkey 重认证")]
+    RecentAuthenticationRequired,
+    #[error("Passkey 凭据不存在")]
+    PasskeyNotFound,
+    #[error("Passkey 凭据已存在，拒绝替换")]
+    PasskeyAlreadyExists,
+    #[error("Passkey 凭据已撤销")]
+    PasskeyAlreadyRevoked,
+    #[error("Passkey 数量已达到上限")]
+    PasskeyLimitReached,
+    #[error("Passkey 名称无效")]
+    InvalidPasskeyLabel,
+    #[error("不能撤销最后一个可用 Passkey")]
+    LastPasskey,
     #[error("必须先确认已离线保存恢复码")]
     RecoveryNotConfirmed,
     #[error("所有者安全状态失败关闭")]
@@ -102,6 +129,59 @@ enum State {
     Complete,
 }
 
+enum AuthenticationPurpose {
+    Login,
+    Reauthenticate(SessionRef),
+}
+
+struct AuthenticationCeremony {
+    authentication: PasskeyAuthentication,
+    channel: OwnerBootstrapChannel,
+    purpose: AuthenticationPurpose,
+    started_at: Instant,
+}
+
+struct PasskeyRegistrationCeremony {
+    registration: PasskeyRegistration,
+    channel: OwnerBootstrapChannel,
+    session_reference: SessionRef,
+    label: String,
+    started_at: Instant,
+}
+
+#[derive(Default)]
+struct OwnerCeremonies {
+    authentication: Option<AuthenticationCeremony>,
+    passkey_registration: Option<PasskeyRegistrationCeremony>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AuthenticatedOwnerSession {
+    pub(crate) reference: SessionRef,
+    pub(crate) credential_id: PasskeyCredentialId,
+    pub(crate) channel: SessionChannel,
+    pub(crate) expires_at_unix_ms: u64,
+    pub(crate) last_authenticated_at_unix_ms: u64,
+}
+
+impl AuthenticatedOwnerSession {
+    pub(crate) fn recently_authenticated(&self, now_unix_ms: u64) -> bool {
+        now_unix_ms.saturating_sub(self.last_authenticated_at_unix_ms)
+            <= RECENT_AUTHENTICATION_TTL.as_millis() as u64
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct IssuedOwnerSession {
+    pub(crate) token: Zeroizing<String>,
+    pub(crate) session: AuthenticatedOwnerSession,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IssuedPasskey {
+    pub(crate) passkey: PasskeyCredentialRef,
+}
+
 pub(crate) struct OwnerSecurityService {
     persistence: OwnerPersistence,
     audit: OwnerSecurityAudit,
@@ -110,6 +190,7 @@ pub(crate) struct OwnerSecurityService {
     node_id: NodeId,
     display_name: String,
     state: Mutex<State>,
+    ceremonies: Mutex<OwnerCeremonies>,
     attempts: Mutex<AttemptState>,
 }
 
@@ -173,6 +254,7 @@ impl OwnerSecurityService {
                 node_id,
                 display_name,
                 state: Mutex::new(state),
+                ceremonies: Mutex::new(OwnerCeremonies::default()),
                 attempts: Mutex::new(AttemptState {
                     failures: 0,
                     blocked_until: None,
@@ -312,7 +394,8 @@ impl OwnerSecurityService {
             OwnerLoad::Corrupt(_) => return Err(OwnerSecurityError::CorruptState),
         }
         self.check_bootstrap_code_locked(code)?;
-        let (challenge, registration) = webauthn.start(&self.node_id, &self.display_name)?;
+        let (challenge, registration) =
+            webauthn.start_registration(&self.node_id, &self.display_name, &[])?;
         *state = State::AwaitingPasskey {
             registration,
             channel,
@@ -351,7 +434,7 @@ impl OwnerSecurityService {
         };
         let passkey = self
             .webauthn_for(channel)?
-            .finish(response, &registration)?;
+            .finish_registration(response, &registration)?;
         self.finish_with_passkey(passkey, channel)
     }
 
@@ -438,6 +521,410 @@ impl OwnerSecurityService {
         match outcome {
             CommitOutcome::Committed => Ok(()),
             CommitOutcome::AlreadyInitialized => Err(OwnerSecurityError::AlreadyInitialized),
+        }
+    }
+
+    pub(crate) fn start_authentication(
+        &self,
+        channel: OwnerBootstrapChannel,
+    ) -> ServiceResult<RequestChallengeResponse> {
+        let webauthn = self.webauthn_for(channel)?;
+        let store = self.load_complete()?;
+        let credentials = store.active_credentials();
+        let (challenge, authentication) = webauthn.start_authentication(&credentials)?;
+        let mut ceremonies = self
+            .ceremonies
+            .lock()
+            .map_err(|_| OwnerSecurityError::CorruptState)?;
+        if ceremonies
+            .authentication
+            .as_ref()
+            .is_some_and(|ceremony| ceremony.started_at.elapsed() < CEREMONY_TTL)
+        {
+            return Err(OwnerSecurityError::CeremonyInProgress);
+        }
+        ceremonies.authentication = Some(AuthenticationCeremony {
+            authentication,
+            channel,
+            purpose: AuthenticationPurpose::Login,
+            started_at: Instant::now(),
+        });
+        Ok(challenge)
+    }
+
+    pub(crate) fn start_reauthentication(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+    ) -> ServiceResult<RequestChallengeResponse> {
+        let now = unix_time_ms()?;
+        let session = self.authenticate_session_at(channel, session_token, now)?;
+        let webauthn = self.webauthn_for(channel)?;
+        let store = self.load_complete()?;
+        let credential = store
+            .active_credential(&session.credential_id)
+            .ok_or(OwnerSecurityError::InvalidSession)?;
+        let (challenge, authentication) =
+            webauthn.start_authentication(std::slice::from_ref(&credential))?;
+        let mut ceremonies = self
+            .ceremonies
+            .lock()
+            .map_err(|_| OwnerSecurityError::CorruptState)?;
+        if ceremonies
+            .authentication
+            .as_ref()
+            .is_some_and(|ceremony| ceremony.started_at.elapsed() < CEREMONY_TTL)
+        {
+            return Err(OwnerSecurityError::CeremonyInProgress);
+        }
+        ceremonies.authentication = Some(AuthenticationCeremony {
+            authentication,
+            channel,
+            purpose: AuthenticationPurpose::Reauthenticate(session.reference),
+            started_at: Instant::now(),
+        });
+        Ok(challenge)
+    }
+
+    pub(crate) fn finish_authentication(
+        &self,
+        channel: OwnerBootstrapChannel,
+        response: &PublicKeyCredential,
+    ) -> ServiceResult<IssuedOwnerSession> {
+        let ceremony = {
+            let mut ceremonies = self
+                .ceremonies
+                .lock()
+                .map_err(|_| OwnerSecurityError::CorruptState)?;
+            let Some(ceremony) = ceremonies.authentication.take() else {
+                return Err(OwnerSecurityError::AuthenticationCeremonyMissing);
+            };
+            if ceremony.channel != channel || ceremony.started_at.elapsed() >= CEREMONY_TTL {
+                return Err(OwnerSecurityError::AuthenticationCeremonyMissing);
+            }
+            ceremony
+        };
+
+        let result = self
+            .webauthn_for(channel)?
+            .finish_authentication(response, &ceremony.authentication)?;
+        let now = unix_time_ms()?;
+        let (token, reference) = generate_session_token()?;
+        let webauthn = self.webauthn_for(channel)?;
+
+        match ceremony.purpose {
+            AuthenticationPurpose::Login => {
+                let expires_at_unix_ms = now
+                    .checked_add(duration_millis(OWNER_SESSION_TTL)?)
+                    .context("所有者会话过期时间溢出")?;
+                let stored = build_session(
+                    reference.clone(),
+                    &result,
+                    channel,
+                    webauthn,
+                    now,
+                    expires_at_unix_ms,
+                )?;
+                self.persistence.update(|store| {
+                    store.record_authentication(&result, now)?;
+                    store.insert_session(stored)?;
+                    Ok(())
+                })?;
+                Ok(IssuedOwnerSession {
+                    token,
+                    session: AuthenticatedOwnerSession {
+                        reference,
+                        credential_id: PasskeyCredentialId::from_public_key(result.cred_id()),
+                        channel: session_channel(channel),
+                        expires_at_unix_ms,
+                        last_authenticated_at_unix_ms: now,
+                    },
+                })
+            }
+            AuthenticationPurpose::Reauthenticate(previous_reference) => {
+                let store = self.load_complete()?;
+                let previous = store
+                    .session(&previous_reference)
+                    .cloned()
+                    .ok_or(OwnerSecurityError::InvalidSession)?;
+                validate_session_in_store(
+                    &store,
+                    &previous,
+                    channel,
+                    webauthn.rp_id(),
+                    webauthn.origin(),
+                    now,
+                )?;
+                if previous.credential_id != PasskeyCredentialId::from_public_key(result.cred_id())
+                {
+                    return Err(OwnerSecurityError::InvalidSession);
+                }
+                let rp_id = webauthn.rp_id().to_string();
+                let origin = webauthn.origin().to_string();
+                let stored = build_session(
+                    reference.clone(),
+                    &result,
+                    channel,
+                    webauthn,
+                    now,
+                    previous.expires_at_unix_ms,
+                )?;
+                self.persistence.update(|store| {
+                    let current = store
+                        .session(&previous_reference)
+                        .cloned()
+                        .ok_or(OwnerSecurityError::InvalidSession)?;
+                    validate_session_in_store(store, &current, channel, &rp_id, &origin, now)?;
+                    store.remove_session(&previous_reference);
+                    store.record_authentication(&result, now)?;
+                    store.insert_session(stored)?;
+                    Ok(())
+                })?;
+                Ok(IssuedOwnerSession {
+                    token,
+                    session: AuthenticatedOwnerSession {
+                        reference,
+                        credential_id: PasskeyCredentialId::from_public_key(result.cred_id()),
+                        channel: session_channel(channel),
+                        expires_at_unix_ms: previous.expires_at_unix_ms,
+                        last_authenticated_at_unix_ms: now,
+                    },
+                })
+            }
+        }
+    }
+
+    pub(crate) fn authenticate_session(
+        &self,
+        channel: OwnerBootstrapChannel,
+        token: &str,
+    ) -> ServiceResult<AuthenticatedOwnerSession> {
+        self.authenticate_session_at(channel, token, unix_time_ms()?)
+    }
+
+    fn authenticate_session_at(
+        &self,
+        channel: OwnerBootstrapChannel,
+        token: &str,
+        now_unix_ms: u64,
+    ) -> ServiceResult<AuthenticatedOwnerSession> {
+        let reference =
+            session_reference_from_token(token).map_err(|_| OwnerSecurityError::InvalidSession)?;
+        let store = self.load_complete()?;
+        let session = store
+            .session(&reference)
+            .cloned()
+            .ok_or(OwnerSecurityError::InvalidSession)?;
+        if session.channel != session_channel(channel) || now_unix_ms >= session.expires_at_unix_ms
+        {
+            if now_unix_ms >= session.expires_at_unix_ms {
+                let expired = reference.clone();
+                self.persistence
+                    .update(|store| {
+                        store.remove_session(&expired);
+                        Ok(())
+                    })
+                    .map_err(OwnerSecurityError::Internal)?;
+            }
+            return Err(OwnerSecurityError::InvalidSession);
+        }
+        let webauthn = self.webauthn_for(channel)?;
+        if session.rp_id != webauthn.rp_id() || session.origin != webauthn.origin() {
+            return Err(OwnerSecurityError::InvalidSession);
+        }
+        if store.active_credential(&session.credential_id).is_none() {
+            return Err(OwnerSecurityError::InvalidSession);
+        }
+        Ok(authenticated_session(session))
+    }
+
+    pub(crate) fn list_passkeys(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+    ) -> ServiceResult<Vec<PasskeyCredentialRef>> {
+        self.authenticate_session(channel, session_token)?;
+        let store = self.load_complete()?;
+        Ok(store.owner.passkeys.clone())
+    }
+
+    pub(crate) fn logout(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+    ) -> ServiceResult<bool> {
+        let reference = session_reference_from_token(session_token)
+            .map_err(|_| OwnerSecurityError::InvalidSession)?;
+        let store = self.load_complete()?;
+        let Some(session) = store.session(&reference) else {
+            return Ok(false);
+        };
+        if session.channel != session_channel(channel) {
+            return Ok(false);
+        }
+        self.persistence
+            .update(|store| Ok(store.remove_session(&reference)))?;
+        Ok(true)
+    }
+
+    pub(crate) fn start_passkey_registration(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+        label: &str,
+    ) -> ServiceResult<CreationChallengeResponse> {
+        let label = label.trim();
+        if label.is_empty() || label.len() > 80 {
+            return Err(OwnerSecurityError::InvalidPasskeyLabel);
+        }
+        let now = unix_time_ms()?;
+        let session = self.authenticate_session_at(channel, session_token, now)?;
+        if !session.recently_authenticated(now) {
+            return Err(OwnerSecurityError::RecentAuthenticationRequired);
+        }
+        let store = self.load_complete()?;
+        let (challenge, registration) = self.webauthn_for(channel)?.start_registration(
+            &self.node_id,
+            &self.display_name,
+            &store.all_credentials(),
+        )?;
+        let mut ceremonies = self
+            .ceremonies
+            .lock()
+            .map_err(|_| OwnerSecurityError::CorruptState)?;
+        if ceremonies
+            .passkey_registration
+            .as_ref()
+            .is_some_and(|ceremony| ceremony.started_at.elapsed() < CEREMONY_TTL)
+        {
+            return Err(OwnerSecurityError::CeremonyInProgress);
+        }
+        ceremonies.passkey_registration = Some(PasskeyRegistrationCeremony {
+            registration,
+            channel,
+            session_reference: session.reference,
+            label: label.to_string(),
+            started_at: Instant::now(),
+        });
+        Ok(challenge)
+    }
+
+    pub(crate) fn finish_passkey_registration(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+        response: &RegisterPublicKeyCredential,
+    ) -> ServiceResult<IssuedPasskey> {
+        let ceremony = {
+            let mut ceremonies = self
+                .ceremonies
+                .lock()
+                .map_err(|_| OwnerSecurityError::CorruptState)?;
+            let Some(ceremony) = ceremonies.passkey_registration.take() else {
+                return Err(OwnerSecurityError::CeremonyMissing);
+            };
+            if ceremony.channel != channel || ceremony.started_at.elapsed() >= CEREMONY_TTL {
+                return Err(OwnerSecurityError::CeremonyMissing);
+            }
+            ceremony
+        };
+        let now = unix_time_ms()?;
+        let session = self.authenticate_session_at(channel, session_token, now)?;
+        if session.reference != ceremony.session_reference {
+            return Err(OwnerSecurityError::InvalidSession);
+        }
+        let passkey = self
+            .webauthn_for(channel)?
+            .finish_registration(response, &ceremony.registration)?;
+        let flags = passkey_flags(&passkey)?;
+        let passkey_id = PasskeyCredentialId::from_public_key(passkey.cred_id());
+        let passkey = self
+            .persistence
+            .update(|store| {
+                if store.passkeys.len() >= 16 {
+                    return Err(OwnerSecurityError::PasskeyLimitReached.into());
+                }
+                if store
+                    .owner
+                    .passkeys
+                    .iter()
+                    .any(|existing| existing.credential_id == passkey_id)
+                {
+                    return Err(OwnerSecurityError::PasskeyAlreadyExists.into());
+                }
+                let reference = store
+                    .add_passkey(
+                        passkey,
+                        ceremony.label,
+                        flags.backup_eligible,
+                        flags.backup_state,
+                        now,
+                    )
+                    .map_err(OwnerSecurityError::Internal)?;
+                Ok(reference)
+            })
+            .map_err(map_owner_update_error)?;
+        Ok(IssuedPasskey { passkey })
+    }
+
+    pub(crate) fn revoke_passkey(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+        credential_id: &PasskeyCredentialId,
+    ) -> ServiceResult<(PasskeyCredentialRef, bool)> {
+        let session_reference = session_reference_from_token(session_token)
+            .map_err(|_| OwnerSecurityError::InvalidSession)?;
+        let now = unix_time_ms()?;
+        let webauthn = self.webauthn_for(channel)?;
+        let rp_id = webauthn.rp_id().to_string();
+        let origin = webauthn.origin().to_string();
+        self.persistence
+            .update(|store| {
+                let session = store
+                    .session(&session_reference)
+                    .cloned()
+                    .ok_or(OwnerSecurityError::InvalidSession)?;
+                validate_session_in_store(store, &session, channel, &rp_id, &origin, now)?;
+                if !session.recently_authenticated(now) {
+                    return Err(OwnerSecurityError::RecentAuthenticationRequired.into());
+                }
+                let existing = store
+                    .owner
+                    .passkeys
+                    .iter()
+                    .find(|passkey| &passkey.credential_id == credential_id)
+                    .ok_or(OwnerSecurityError::PasskeyNotFound)?;
+                if !existing.is_active() {
+                    return Err(OwnerSecurityError::PasskeyAlreadyRevoked.into());
+                }
+                if store
+                    .owner
+                    .passkeys
+                    .iter()
+                    .filter(|passkey| passkey.is_active())
+                    .count()
+                    <= 1
+                {
+                    return Err(OwnerSecurityError::LastPasskey.into());
+                }
+                let current_revoked = session.credential_id == *credential_id;
+                let passkey = store
+                    .revoke_passkey(credential_id, now)
+                    .map_err(OwnerSecurityError::Internal)?;
+                Ok((passkey, current_revoked))
+            })
+            .map_err(map_owner_update_error)
+    }
+
+    fn load_complete(&self) -> ServiceResult<OwnerStore> {
+        match self.persistence.load()? {
+            OwnerLoad::Complete(store) => {
+                validate_owner_node(&store, &self.node_id)?;
+                Ok(store)
+            }
+            OwnerLoad::Uninitialized => Err(OwnerSecurityError::NotInitialized),
+            OwnerLoad::Corrupt(_) => Err(OwnerSecurityError::CorruptState),
         }
     }
 
@@ -615,10 +1102,110 @@ fn unix_time_ms() -> Result<u64> {
     u64::try_from(millis).context("系统时间超出范围")
 }
 
+fn duration_millis(duration: Duration) -> Result<u64> {
+    u64::try_from(duration.as_millis()).context("时间间隔超出范围")
+}
+
+fn generate_session_token() -> Result<(Zeroizing<String>, SessionRef)> {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    getrandom::fill(bytes.as_mut()).context("无法生成所有者会话令牌")?;
+    let token = Zeroizing::new(format!(
+        "{OWNER_SESSION_TOKEN_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(bytes.as_ref())
+    ));
+    let reference = session_reference_from_token(token.as_str())?;
+    Ok((token, reference))
+}
+
+fn session_reference_from_token(token: &str) -> Result<SessionRef> {
+    let encoded = token
+        .strip_prefix(OWNER_SESSION_TOKEN_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("所有者会话令牌格式无效"))?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("所有者会话令牌格式无效")?;
+    if decoded.len() != 32 {
+        anyhow::bail!("所有者会话令牌格式无效");
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"fuckipv6-owner-session-v1");
+    digest.update(token.as_bytes());
+    Ok(SessionRef::new(digest.finalize().into()))
+}
+
+fn session_channel(channel: OwnerBootstrapChannel) -> SessionChannel {
+    match channel {
+        OwnerBootstrapChannel::Local => SessionChannel::Local,
+        OwnerBootstrapChannel::Public => SessionChannel::Public,
+    }
+}
+
+fn build_session(
+    reference: SessionRef,
+    result: &AuthenticationResult,
+    channel: OwnerBootstrapChannel,
+    webauthn: &OwnerWebauthn,
+    created_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+) -> Result<StoredSession> {
+    if !result.user_verified() {
+        anyhow::bail!("Passkey 认证未完成用户验证");
+    }
+    if expires_at_unix_ms <= created_at_unix_ms {
+        anyhow::bail!("所有者会话过期时间无效");
+    }
+    Ok(StoredSession {
+        reference,
+        credential_id: PasskeyCredentialId::from_public_key(result.cred_id()),
+        channel: session_channel(channel),
+        rp_id: webauthn.rp_id().to_string(),
+        origin: webauthn.origin().to_string(),
+        created_at_unix_ms,
+        expires_at_unix_ms,
+        last_authenticated_at_unix_ms: created_at_unix_ms,
+    })
+}
+
+fn authenticated_session(session: StoredSession) -> AuthenticatedOwnerSession {
+    AuthenticatedOwnerSession {
+        reference: session.reference,
+        credential_id: session.credential_id,
+        channel: session.channel,
+        expires_at_unix_ms: session.expires_at_unix_ms,
+        last_authenticated_at_unix_ms: session.last_authenticated_at_unix_ms,
+    }
+}
+
+fn validate_session_in_store(
+    store: &OwnerStore,
+    session: &StoredSession,
+    channel: OwnerBootstrapChannel,
+    rp_id: &str,
+    origin: &str,
+    now_unix_ms: u64,
+) -> ServiceResult<()> {
+    if session.channel != session_channel(channel)
+        || session.rp_id != rp_id
+        || session.origin != origin
+        || now_unix_ms >= session.expires_at_unix_ms
+        || store.active_credential(&session.credential_id).is_none()
+    {
+        return Err(OwnerSecurityError::InvalidSession);
+    }
+    Ok(())
+}
+
+fn map_owner_update_error(error: anyhow::Error) -> OwnerSecurityError {
+    match error.downcast::<OwnerSecurityError>() {
+        Ok(error) => error,
+        Err(error) => OwnerSecurityError::Internal(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::owner_security::store::fixture_passkey;
+    use crate::owner_security::store::{fixture_passkey, fixture_passkey_with_id};
     use fuckipv6_common::Identity;
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
@@ -643,12 +1230,69 @@ mod tests {
             node_id: NodeId::from_public_key(b"owner-service-test"),
             display_name: "Owner".to_string(),
             state: Mutex::new(State::NoOwner),
+            ceremonies: Mutex::new(OwnerCeremonies::default()),
             attempts: Mutex::new(AttemptState {
                 failures: 0,
                 blocked_until: None,
             }),
         };
         Ok((service, code, dir))
+    }
+
+    fn initialized_service(suffix: &str) -> Result<(OwnerSecurityService, PathBuf)> {
+        let (service, code, dir) = service(suffix)?;
+        service.start_registration(&code)?;
+        service.finish_registration_for_test(fixture_passkey())?;
+        service.confirm_recovery(true)?;
+        Ok((service, dir))
+    }
+
+    fn reopen_service(dir: &std::path::Path) -> Result<OwnerSecurityService> {
+        Ok(OwnerSecurityService {
+            persistence: OwnerPersistence::new(dir.to_path_buf())?,
+            audit: OwnerSecurityAudit::new(dir)?,
+            local_webauthn: OwnerWebauthn::new(8080)?,
+            public_webauthn: None,
+            node_id: NodeId::from_public_key(b"owner-service-test"),
+            display_name: "Owner".to_string(),
+            state: Mutex::new(State::NoOwner),
+            ceremonies: Mutex::new(OwnerCeremonies::default()),
+            attempts: Mutex::new(AttemptState {
+                failures: 0,
+                blocked_until: None,
+            }),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_manual_session(
+        service: &OwnerSecurityService,
+        token: &str,
+        channel: SessionChannel,
+        rp_id: &str,
+        origin: &str,
+        created_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        last_authenticated_at_unix_ms: u64,
+    ) -> Result<SessionRef> {
+        let reference = session_reference_from_token(token)?;
+        let credential_id = service.load_complete()?.owner.passkeys[0]
+            .credential_id
+            .clone();
+        service.persistence.update(|store| {
+            store.insert_session(StoredSession {
+                reference: reference.clone(),
+                credential_id,
+                channel,
+                rp_id: rp_id.to_string(),
+                origin: origin.to_string(),
+                created_at_unix_ms,
+                expires_at_unix_ms,
+                last_authenticated_at_unix_ms,
+            })?;
+            Ok(())
+        })?;
+        Ok(reference)
     }
 
     #[test]
@@ -710,6 +1354,184 @@ mod tests {
                 entry.display()
             );
         }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn session_token_is_not_persisted_and_survives_restart() -> Result<()> {
+        let (service, dir) = initialized_service("session-restart")?;
+        let (token, _) = generate_session_token()?;
+        let now = unix_time_ms()?;
+        insert_manual_session(
+            &service,
+            token.as_str(),
+            SessionChannel::Local,
+            "localhost",
+            "http://localhost:8080",
+            now,
+            now + 60_000,
+            now,
+        )?;
+
+        let session = service.authenticate_session(OwnerBootstrapChannel::Local, token.as_str())?;
+        assert_eq!(session.channel, SessionChannel::Local);
+        for entry in walkdir_files(&dir) {
+            let bytes = std::fs::read(&entry)?;
+            assert!(
+                !contains_subslice(&bytes, token.as_bytes()),
+                "owner session token was persisted in {}",
+                entry.display()
+            );
+        }
+
+        drop(service);
+        let reopened = reopen_service(&dir)?;
+        reopened.authenticate_session(OwnerBootstrapChannel::Local, token.as_str())?;
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn expired_and_misbound_sessions_fail_closed() -> Result<()> {
+        let (service, dir) = initialized_service("session-binding")?;
+        let now = unix_time_ms()?;
+
+        let (expired_token, _) = generate_session_token()?;
+        insert_manual_session(
+            &service,
+            expired_token.as_str(),
+            SessionChannel::Local,
+            "localhost",
+            "http://localhost:8080",
+            now.saturating_sub(2_000),
+            now.saturating_sub(1_000),
+            now.saturating_sub(2_000),
+        )?;
+        assert!(matches!(
+            service.authenticate_session(OwnerBootstrapChannel::Local, expired_token.as_str()),
+            Err(OwnerSecurityError::InvalidSession)
+        ));
+        assert!(service.load_complete()?.sessions.is_empty());
+
+        let (wrong_rp_token, _) = generate_session_token()?;
+        insert_manual_session(
+            &service,
+            wrong_rp_token.as_str(),
+            SessionChannel::Local,
+            "other.example",
+            "http://localhost:8080",
+            now,
+            now + 60_000,
+            now,
+        )?;
+        assert!(matches!(
+            service.authenticate_session(OwnerBootstrapChannel::Local, wrong_rp_token.as_str()),
+            Err(OwnerSecurityError::InvalidSession)
+        ));
+
+        let (wrong_channel_token, _) = generate_session_token()?;
+        insert_manual_session(
+            &service,
+            wrong_channel_token.as_str(),
+            SessionChannel::Public,
+            "localhost",
+            "http://localhost:8080",
+            now,
+            now + 60_000,
+            now,
+        )?;
+        assert!(matches!(
+            service
+                .authenticate_session(OwnerBootstrapChannel::Local, wrong_channel_token.as_str()),
+            Err(OwnerSecurityError::InvalidSession)
+        ));
+
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn passkey_management_requires_recent_auth_and_revokes_bound_sessions() -> Result<()> {
+        let (service, dir) = initialized_service("passkey-revoke")?;
+        let first_id = service.load_complete()?.owner.passkeys[0]
+            .credential_id
+            .clone();
+        service.persistence.update(|store| {
+            store.add_passkey(
+                fixture_passkey_with_id(b"service-secondary-passkey"),
+                "备用 Passkey".to_string(),
+                false,
+                false,
+                unix_time_ms()?,
+            )?;
+            Ok(())
+        })?;
+
+        let now = unix_time_ms()?;
+        let six_minutes_ago = now.saturating_sub(6 * 60 * 1000);
+        let (stale_token, _) = generate_session_token()?;
+        insert_manual_session(
+            &service,
+            stale_token.as_str(),
+            SessionChannel::Local,
+            "localhost",
+            "http://localhost:8080",
+            six_minutes_ago,
+            now + 60_000,
+            six_minutes_ago,
+        )?;
+        assert!(matches!(
+            service.revoke_passkey(
+                OwnerBootstrapChannel::Local,
+                stale_token.as_str(),
+                &first_id
+            ),
+            Err(OwnerSecurityError::RecentAuthenticationRequired)
+        ));
+        assert!(matches!(
+            service.start_passkey_registration(
+                OwnerBootstrapChannel::Local,
+                stale_token.as_str(),
+                "另一个 Passkey"
+            ),
+            Err(OwnerSecurityError::RecentAuthenticationRequired)
+        ));
+
+        let (fresh_token, _) = generate_session_token()?;
+        insert_manual_session(
+            &service,
+            fresh_token.as_str(),
+            SessionChannel::Local,
+            "localhost",
+            "http://localhost:8080",
+            now,
+            now + 60_000,
+            now,
+        )?;
+        let (revoked, current_session_revoked) = service.revoke_passkey(
+            OwnerBootstrapChannel::Local,
+            fresh_token.as_str(),
+            &first_id,
+        )?;
+        assert_eq!(revoked.credential_id, first_id);
+        assert!(current_session_revoked);
+        assert!(matches!(
+            service.authenticate_session(OwnerBootstrapChannel::Local, fresh_token.as_str()),
+            Err(OwnerSecurityError::InvalidSession)
+        ));
+        let store = service.load_complete()?;
+        assert_eq!(store.passkeys.len(), 2);
+        assert_eq!(
+            store
+                .passkeys
+                .iter()
+                .filter(|passkey| passkey.reference.is_active())
+                .count(),
+            1
+        );
+        assert!(store.sessions.is_empty());
+
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

@@ -510,6 +510,37 @@ impl GpuiShell {
                     ],
                 ));
             }
+            NodeCommandOutcome::Configuration(_) => {
+                self.notice = Some(t(self.locale, "gpui.configuration_loaded").to_string());
+            }
+            NodeCommandOutcome::ConfigurationPreview(preview) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.configuration_previewed",
+                    &[
+                        ("diffs", &preview.diffs.len().to_string()),
+                        ("errors", &preview.validation_errors.len().to_string()),
+                    ],
+                ));
+            }
+            NodeCommandOutcome::ConfigurationApplied(result) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.configuration_applied",
+                    &[
+                        ("previous", &result.previous_revision.to_string()),
+                        ("revision", &result.revision.to_string()),
+                        ("no_op", &result.no_op.to_string()),
+                    ],
+                ));
+            }
+            NodeCommandOutcome::ConfigurationHistory(history) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.configuration_history_loaded",
+                    &[("count", &history.len().to_string())],
+                ));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
                     self.locale,
@@ -2380,6 +2411,11 @@ fn action_label(locale: Locale, id: &str) -> String {
         "stop_node" => "action.stop_node",
         "restart_node" => "action.restart_node",
         "cleanup_node_residuals" => "action.cleanup_node_residuals",
+        "get_configuration" => "action.get_configuration",
+        "preview_configuration" => "action.preview_configuration",
+        "apply_configuration" => "action.apply_configuration",
+        "rollback_configuration" => "action.rollback_configuration",
+        "get_configuration_history" => "action.get_configuration_history",
         "shutdown_node" => "action.shutdown_node",
         _ => "common.unknown_action",
     };
@@ -2407,6 +2443,8 @@ fn placeholder_for(
         NodeUiInputKind::PeerTarget => t(locale, "placeholder.peer_target").into(),
         NodeUiInputKind::Port => "1-65535".into(),
         NodeUiInputKind::TimeoutMs => "1500".into(),
+        NodeUiInputKind::Revision => t(locale, "placeholder.revision").into(),
+        NodeUiInputKind::ConfigurationJson => t(locale, "placeholder.configuration_json").into(),
         _ if matches!(
             action_id,
             "stop_networks" | "restart_networks" | "cleanup_node_residuals"

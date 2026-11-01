@@ -114,6 +114,261 @@
         }
       ]
     },
+    "ConfigurationApplyResult": {
+      "properties": {
+        "audit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfigurationHistoryEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/ConfigurationDiffEntry"
+          },
+          "type": "array"
+        },
+        "document": {
+          "$ref": "#/$defs/ConfigurationDocument"
+        },
+        "no_op": {
+          "type": "boolean"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "previous_revision",
+        "revision",
+        "no_op",
+        "document",
+        "diffs"
+      ],
+      "type": "object"
+    },
+    "ConfigurationChangeAction": {
+      "enum": [
+        "apply",
+        "rollback"
+      ],
+      "type": "string"
+    },
+    "ConfigurationDiffEntry": {
+      "properties": {
+        "after": true,
+        "before": true,
+        "impact": {
+          "$ref": "#/$defs/ConfigurationImpact"
+        },
+        "path": {
+          "description": "Unambiguous JSON Pointer rooted at the configuration document.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "before",
+        "after",
+        "impact"
+      ],
+      "type": "object"
+    },
+    "ConfigurationDocument": {
+      "description": "Complete, redacted configuration document returned to every UI adapter.",
+      "properties": {
+        "networks": {
+          "additionalProperties": true,
+          "description": "Network name to complete TOML-equivalent JSON object.",
+          "type": "object"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "revision",
+        "networks"
+      ],
+      "type": "object"
+    },
+    "ConfigurationHistoryEntry": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ConfigurationChangeAction"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "changed_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "occurred_at": {
+          "type": "string"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transaction_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "revision",
+        "previous_revision",
+        "action",
+        "actor",
+        "source",
+        "occurred_at",
+        "changed_paths"
+      ],
+      "type": "object"
+    },
+    "ConfigurationImpact": {
+      "oneOf": [
+        {
+          "const": "immediate",
+          "description": "The running data plane consumes this change without a process restart.",
+          "type": "string"
+        },
+        {
+          "const": "restart_required",
+          "description": "Persisted now; the affected network process must restart to consume it.",
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigurationPreview": {
+      "properties": {
+        "can_apply": {
+          "type": "boolean"
+        },
+        "candidate": {
+          "$ref": "#/$defs/ConfigurationDocument"
+        },
+        "candidate_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current": {
+          "$ref": "#/$defs/ConfigurationDocument"
+        },
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/ConfigurationDiffEntry"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "has_changes": {
+          "type": "boolean"
+        },
+        "revision_conflict": {
+          "type": "boolean"
+        },
+        "validation_errors": {
+          "items": {
+            "$ref": "#/$defs/ConfigurationValidationIssue"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "current_revision",
+        "candidate_revision",
+        "revision_conflict",
+        "current",
+        "candidate",
+        "diffs",
+        "validation_errors",
+        "has_changes",
+        "can_apply"
+      ],
+      "type": "object"
+    },
+    "ConfigurationValidationCode": {
+      "enum": [
+        "invalid_type",
+        "missing_required",
+        "unknown_network",
+        "missing_network",
+        "invalid_value",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "ConfigurationValidationIssue": {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ConfigurationValidationCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
     "DisplayEnvironment": {
       "enum": [
         "linux_x11",
@@ -765,6 +1020,24 @@
       ],
       "type": "object"
     },
+    "NodeApplyConfigurationCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networks": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "networks"
+      ],
+      "type": "object"
+    },
     "NodeBlacklistSnapshot": {
       "properties": {
         "changed": {
@@ -1279,6 +1552,83 @@
             "command"
           ],
           "type": "object"
+        },
+        {
+          "description": "Complete redacted configuration for every configured network.",
+          "properties": {
+            "command": {
+              "const": "get_configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Validate an imported complete configuration without writing it.",
+          "properties": {
+            "command": {
+              "const": "preview_configuration",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodePreviewConfigurationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Persist all network configurations under one revision transaction.",
+          "properties": {
+            "command": {
+              "const": "apply_configuration",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeApplyConfigurationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Restore a previous revision as a new auditable revision.",
+          "properties": {
+            "command": {
+              "const": "rollback_configuration",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRollbackConfigurationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Append-only configuration revision history, newest first.",
+          "properties": {
+            "command": {
+              "const": "get_configuration_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1452,6 +1802,73 @@
             },
             "status": {
               "const": "network_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigurationDocument"
+            },
+            "status": {
+              "const": "configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigurationPreview"
+            },
+            "status": {
+              "const": "configuration_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigurationApplyResult"
+            },
+            "status": {
+              "const": "configuration_applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "items": {
+                "$ref": "#/$defs/ConfigurationHistoryEntry"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "configuration_history",
               "type": "string"
             }
           },
@@ -2805,6 +3222,25 @@
       ],
       "type": "string"
     },
+    "NodePreviewConfigurationCommand": {
+      "description": "Complete document imported by an owner for preview or atomic apply.\nActor and request source are intentionally absent: the command bus supplies\nthem from the authenticated transport context.",
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networks": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "networks"
+      ],
+      "type": "object"
+    },
     "NodeProbePeerCommand": {
       "properties": {
         "network_name": {
@@ -2834,6 +3270,16 @@
         },
         "code": {
           "$ref": "#/$defs/NodeProblemCode"
+        },
+        "details": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblemDetails"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "message": {
           "type": "string"
@@ -2899,6 +3345,34 @@
         }
       ]
     },
+    "NodeProblemDetails": {
+      "description": "Stable machine-readable error details. Human-readable messages remain in\n`NodeProblem::message`, while these fields are safe for adapters to use for\nfield highlighting and revision conflict recovery.",
+      "properties": {
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "validation_issues": {
+          "items": {
+            "$ref": "#/$defs/NodeValidationIssue"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "NodeResidualCleanupResult": {
       "description": "Partial-success aware result for explicit residual cleanup.",
       "properties": {
@@ -2922,6 +3396,25 @@
         "cleaned_networks",
         "failed_networks",
         "residue"
+      ],
+      "type": "object"
+    },
+    "NodeRollbackConfigurationCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_revision"
       ],
       "type": "object"
     },
@@ -3266,6 +3759,11 @@
             "stop_node",
             "restart_node",
             "cleanup_node_residuals",
+            "get_configuration",
+            "preview_configuration",
+            "apply_configuration",
+            "rollback_configuration",
+            "get_configuration_history",
             "shutdown"
           ],
           "type": "string"
@@ -3406,12 +3904,14 @@
       "enum": [
         "boolean",
         "client_id",
+        "configuration_json",
         "external_host",
         "network_mode",
         "network_name",
         "network_selection",
         "peer_target",
         "port",
+        "revision",
         "role",
         "routing_mode",
         "url_or_ticket",
@@ -3478,7 +3978,9 @@
         "network_selection",
         "role",
         "routing_mode",
-        "positive_timeout"
+        "positive_timeout",
+        "revision",
+        "configuration_json"
       ],
       "type": "string"
     },
@@ -3519,6 +4021,26 @@
         "network_name",
         "mode",
         "is_exit_node"
+      ],
+      "type": "object"
+    },
+    "NodeValidationIssue": {
+      "description": "Structured field-level validation issue carried by a command error.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "code",
+        "message"
       ],
       "type": "object"
     },

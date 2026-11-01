@@ -279,7 +279,10 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
     match command {
         NodeCommandKind::GetSnapshot
         | NodeCommandKind::GetUiManifest
-        | NodeCommandKind::GetDiagnostics => NodeUiAudit::none(),
+        | NodeCommandKind::GetDiagnostics
+        | NodeCommandKind::GetConfiguration
+        | NodeCommandKind::PreviewConfiguration
+        | NodeCommandKind::GetConfigurationHistory => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
@@ -299,6 +302,8 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::StopNode => NodeUiAudit::record("node.stop"),
         NodeCommandKind::RestartNode => NodeUiAudit::record("node.restart"),
         NodeCommandKind::CleanupResiduals => NodeUiAudit::record("node.cleanup_residuals"),
+        NodeCommandKind::ApplyConfiguration => NodeUiAudit::record("configuration.apply"),
+        NodeCommandKind::RollbackConfiguration => NodeUiAudit::record("configuration.rollback"),
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
 }
@@ -326,12 +331,14 @@ pub enum NodeUiAvailability {
 pub enum NodeUiInputKind {
     Boolean,
     ClientId,
+    ConfigurationJson,
     ExternalHost,
     NetworkMode,
     NetworkName,
     NetworkSelection,
     PeerTarget,
     Port,
+    Revision,
     Role,
     RoutingMode,
     UrlOrTicket,
@@ -351,6 +358,8 @@ pub enum NodeUiValidation {
     Role,
     RoutingMode,
     PositiveTimeout,
+    Revision,
+    ConfigurationJson,
 }
 
 pub fn node_ui_manifest() -> NodeUiManifest {
@@ -908,6 +917,109 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             "confirm.update_network_allocation.consequence",
                             false,
                         )),
+                    ),
+                    action(
+                        "get_configuration",
+                        "action.get_configuration",
+                        NodeCommandKind::GetConfiguration,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "preview_configuration",
+                        "action.preview_configuration",
+                        NodeCommandKind::PreviewConfiguration,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "networks",
+                                "field.configuration_networks",
+                                NodeUiInputKind::ConfigurationJson,
+                                true,
+                                NodeUiValidation::ConfigurationJson,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "apply_configuration",
+                        "action.apply_configuration",
+                        NodeCommandKind::ApplyConfiguration,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "networks",
+                                "field.configuration_networks",
+                                NodeUiInputKind::ConfigurationJson,
+                                true,
+                                NodeUiValidation::ConfigurationJson,
+                            ),
+                        ],
+                        Some(confirmation(
+                            "confirm.apply_configuration.title",
+                            "confirm.apply_configuration.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "rollback_configuration",
+                        "action.rollback_configuration",
+                        NodeCommandKind::RollbackConfiguration,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "target_revision",
+                                "field.target_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                        ],
+                        Some(confirmation(
+                            "confirm.rollback_configuration.title",
+                            "confirm.rollback_configuration.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "get_configuration_history",
+                        "action.get_configuration_history",
+                        NodeCommandKind::GetConfigurationHistory,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
                     ),
                     action(
                         "shutdown_node",

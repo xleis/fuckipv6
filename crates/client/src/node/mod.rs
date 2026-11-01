@@ -21,13 +21,14 @@ pub(crate) fn test_owner_context() -> NodeCommandContext {
     )
 }
 pub use command::{
-    validate_network_name, NodeBlacklistSnapshot, NodeCleanupFailureReason,
-    NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot, NodeCleanupStepStatus,
-    NodeClientBlacklistCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
-    NodeCommandFuture, NodeCommandHandler, NodeCommandKind, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeCreateNetworkCommand, NodeCreatedNetwork, NodeDiagnosticsSnapshot,
-    NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkAllocationSnapshot,
-    NodePeerProbeSnapshot, NodeProbePeerCommand, NodeResidualCleanupResult,
+    validate_network_name, NodeApplyConfigurationCommand, NodeBlacklistSnapshot,
+    NodeCleanupFailureReason, NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot,
+    NodeCleanupStepStatus, NodeClientBlacklistCommand, NodeCommand, NodeCommandBus,
+    NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
+    NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeCreateNetworkCommand,
+    NodeCreatedNetwork, NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodeNetworkAllocation,
+    NodeNetworkAllocationSnapshot, NodePeerProbeSnapshot, NodePreviewConfigurationCommand,
+    NodeProbePeerCommand, NodeResidualCleanupResult, NodeRollbackConfigurationCommand,
     NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand,
     NodeUpdateRoutingCommand,
 };
@@ -57,8 +58,8 @@ pub use state::{
     NodeEmbeddedServiceStatus, NodeErrorCategory, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
     NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
     NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission, NodePermissionSnapshot,
-    NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore,
-    NodeTrafficSnapshot,
+    NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeProblemDetails, NodeRoutingMode,
+    NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
 };
 pub use ui_manifest::{
     audit_for_command, node_ui_manifest, NodeUiAction, NodeUiAudit, NodeUiAuditPolicy,

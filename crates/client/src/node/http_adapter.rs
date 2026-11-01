@@ -1161,6 +1161,10 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::NetworkAllocation(_)
         | NodeCommandOutcome::Probe(_)
         | NodeCommandOutcome::NetworkCreated(_)
+        | NodeCommandOutcome::Configuration(_)
+        | NodeCommandOutcome::ConfigurationPreview(_)
+        | NodeCommandOutcome::ConfigurationApplied(_)
+        | NodeCommandOutcome::ConfigurationHistory(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
     }
 }
@@ -1227,6 +1231,8 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
             OperationKind::ClientBlacklistUpdate
         }
         NodeCommand::UpdateNetworkAllocation(_) => OperationKind::NetworkAllocationUpdate,
+        NodeCommand::ApplyConfiguration(_) => OperationKind::PolicyApply,
+        NodeCommand::RollbackConfiguration(_) => OperationKind::PolicyRollback,
         // Read-only commands never enter the operation registry. Keeping a
         // total mapping avoids a panic if a future caller violates that
         // invariant before the command is rejected by `submit_operation`.
@@ -1235,7 +1241,10 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::GetDiagnostics
         | NodeCommand::GetBlacklist { .. }
         | NodeCommand::GetNetworkAllocation { .. }
-        | NodeCommand::ProbePeer(_) => OperationKind::PolicyTest,
+        | NodeCommand::ProbePeer(_)
+        | NodeCommand::GetConfiguration
+        | NodeCommand::PreviewConfiguration(_)
+        | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
 
@@ -1274,6 +1283,11 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::StopNode
         | NodeCommand::RestartNode
         | NodeCommand::CleanupResiduals { .. }
+        | NodeCommand::GetConfiguration
+        | NodeCommand::PreviewConfiguration(_)
+        | NodeCommand::ApplyConfiguration(_)
+        | NodeCommand::RollbackConfiguration(_)
+        | NodeCommand::GetConfigurationHistory
         | NodeCommand::Shutdown => node_target(),
     }
 }
@@ -2031,6 +2045,7 @@ fn sanitize_problem_for_client(mut problem: NodeProblem) -> NodeProblem {
         .into();
         problem.params = Box::default();
         problem.network_name = None;
+        problem.details = None;
     }
     problem
 }

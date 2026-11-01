@@ -40,7 +40,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 68,
+                NodeContractV1.DTO_CLASS_NAMES.length == 79,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -115,6 +115,26 @@ public final class NodeContractV1Test {
                 NodeCommandKind.CLEANUP_NODE_RESIDUALS,
                 NodeCommandKind.fromWireName("cleanup_node_residuals"),
                 "runtime cleanup command");
+        assertSame(
+                NodeCommandKind.GET_CONFIGURATION,
+                NodeCommandKind.fromWireName("get_configuration"),
+                "configuration read command");
+        assertSame(
+                NodeCommandKind.PREVIEW_CONFIGURATION,
+                NodeCommandKind.fromWireName("preview_configuration"),
+                "configuration preview command");
+        assertSame(
+                NodeCommandKind.APPLY_CONFIGURATION,
+                NodeCommandKind.fromWireName("apply_configuration"),
+                "configuration apply command");
+        assertSame(
+                NodeCommandKind.ROLLBACK_CONFIGURATION,
+                NodeCommandKind.fromWireName("rollback_configuration"),
+                "configuration rollback command");
+        assertSame(
+                NodeCommandKind.GET_CONFIGURATION_HISTORY,
+                NodeCommandKind.fromWireName("get_configuration_history"),
+                "configuration history command");
         expectIllegalArgument(
                 () -> NodeCommandKind.fromWireName("not_a_command"),
                 "unknown command");
@@ -165,6 +185,12 @@ public final class NodeContractV1Test {
         assertTrue(
                 NodeContractV1.isManifestAction(NodeCommandKind.CLEANUP_NODE_RESIDUALS),
                 "cleanup_node_residuals must be a visible action");
+        assertTrue(
+                NodeContractV1.isManifestAction(NodeCommandKind.GET_CONFIGURATION),
+                "get_configuration must be a visible action");
+        assertTrue(
+                NodeContractV1.isManifestAction(NodeCommandKind.APPLY_CONFIGURATION),
+                "apply_configuration must be a visible action");
 
         CommandEnvelope envelope = NodeContractV1.commandEnvelope(1, 7, "get_snapshot");
         assertTrue(envelope.requestId == 7, "request id must be preserved");
@@ -239,6 +265,10 @@ public final class NodeContractV1Test {
         new NodeContractV1.NodeCommandOutcome.Diagnostics(null);
         new NodeContractV1.NodeCommandOutcome.Cleanup(null);
         new NodeContractV1.NodeCommandOutcome.Probe(null);
+        new NodeContractV1.NodeCommandOutcome.Configuration(null);
+        new NodeContractV1.NodeCommandOutcome.ConfigurationPreview(null);
+        new NodeContractV1.NodeCommandOutcome.ConfigurationApplied(null);
+        new NodeContractV1.NodeCommandOutcome.ConfigurationHistory(null);
         new NodeContractV1.NodeCommandOutcome.Accepted(null);
         new NodeContractV1.NodeCommandOutcome.Rejected(null);
 

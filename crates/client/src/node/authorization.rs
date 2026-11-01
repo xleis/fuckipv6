@@ -410,7 +410,10 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::GetUiManifest
         | NodeCommandKind::GetDiagnostics
         | NodeCommandKind::GetBlacklist
-        | NodeCommandKind::GetNetworkAllocation => NodePermission::ViewState,
+        | NodeCommandKind::GetNetworkAllocation
+        | NodeCommandKind::GetConfiguration
+        | NodeCommandKind::PreviewConfiguration
+        | NodeCommandKind::GetConfigurationHistory => NodePermission::ViewState,
         NodeCommandKind::UpdateRouting => NodePermission::ChangeRouting,
         NodeCommandKind::SetNetworkRole => NodePermission::ManageRoles,
         NodeCommandKind::ProbePeer => NodePermission::ProbePeers,
@@ -425,7 +428,9 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::StartNode
         | NodeCommandKind::RestartNode
-        | NodeCommandKind::CleanupResiduals => NodePermission::ManageNetworks,
+        | NodeCommandKind::CleanupResiduals
+        | NodeCommandKind::ApplyConfiguration
+        | NodeCommandKind::RollbackConfiguration => NodePermission::ManageNetworks,
     }
 }
 
@@ -442,6 +447,11 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::RestartNode
             | NodeCommandKind::CleanupResiduals
             | NodeCommandKind::Shutdown
+            | NodeCommandKind::GetConfiguration
+            | NodeCommandKind::PreviewConfiguration
+            | NodeCommandKind::ApplyConfiguration
+            | NodeCommandKind::RollbackConfiguration
+            | NodeCommandKind::GetConfigurationHistory
     )
 }
 
@@ -452,6 +462,11 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::GetDiagnostics
         | NodeCommandKind::GetBlacklist
         | NodeCommandKind::GetNetworkAllocation => (PolicyAction::Read, ResourceKind::Network),
+        NodeCommandKind::GetConfiguration
+        | NodeCommandKind::PreviewConfiguration
+        | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
+        NodeCommandKind::ApplyConfiguration => (PolicyAction::Update, ResourceKind::Keys),
+        NodeCommandKind::RollbackConfiguration => (PolicyAction::Recover, ResourceKind::Keys),
         NodeCommandKind::StartNetworks => (PolicyAction::Enable, ResourceKind::Network),
         NodeCommandKind::StopNetworks => (PolicyAction::Disable, ResourceKind::Network),
         NodeCommandKind::RestartNetworks
@@ -491,7 +506,12 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::StartNode
         | NodeCommand::StopNode
         | NodeCommand::RestartNode
-        | NodeCommand::Shutdown => NetworkTargets::None,
+        | NodeCommand::Shutdown
+        | NodeCommand::GetConfiguration
+        | NodeCommand::PreviewConfiguration(_)
+        | NodeCommand::ApplyConfiguration(_)
+        | NodeCommand::RollbackConfiguration(_)
+        | NodeCommand::GetConfigurationHistory => NetworkTargets::None,
         NodeCommand::StartNetworks { selection } => match selection {
             super::NodeNetworkSelection::Named(names) => NetworkTargets::Named(names.clone()),
             super::NodeNetworkSelection::None => NetworkTargets::None,

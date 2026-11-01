@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -113,6 +113,82 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown CapabilityState wire value: " + value);
+        }
+    }
+
+    public enum ConfigurationChangeAction {
+        APPLY("apply"),
+        ROLLBACK("rollback");
+
+        private final String wireName;
+
+        ConfigurationChangeAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ConfigurationChangeAction fromWireName(String value) {
+            for (ConfigurationChangeAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ConfigurationChangeAction wire value: " + value);
+        }
+    }
+
+    public enum ConfigurationImpact {
+        IMMEDIATE("immediate"),
+        RESTART_REQUIRED("restart_required");
+
+        private final String wireName;
+
+        ConfigurationImpact(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ConfigurationImpact fromWireName(String value) {
+            for (ConfigurationImpact candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ConfigurationImpact wire value: " + value);
+        }
+    }
+
+    public enum ConfigurationValidationCode {
+        INVALID_TYPE("invalid_type"),
+        MISSING_REQUIRED("missing_required"),
+        UNKNOWN_NETWORK("unknown_network"),
+        MISSING_NETWORK("missing_network"),
+        INVALID_VALUE("invalid_value"),
+        UNSUPPORTED("unsupported");
+
+        private final String wireName;
+
+        ConfigurationValidationCode(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ConfigurationValidationCode fromWireName(String value) {
+            for (ConfigurationValidationCode candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ConfigurationValidationCode wire value: " + value);
         }
     }
 
@@ -299,18 +375,23 @@ public final class NodeContractV1 {
     }
 
     public enum NodeCommandKind {
+        APPLY_CONFIGURATION("apply_configuration"),
         BAN_CLIENT("ban_client"),
         CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
         CREATE_NETWORK("create_network"),
         GET_BLACKLIST("get_blacklist"),
+        GET_CONFIGURATION("get_configuration"),
+        GET_CONFIGURATION_HISTORY("get_configuration_history"),
         GET_NETWORK_ALLOCATION("get_network_allocation"),
         GET_NODE_DIAGNOSTICS("get_node_diagnostics"),
         GET_SNAPSHOT("get_snapshot"),
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
+        PREVIEW_CONFIGURATION("preview_configuration"),
         PROBE_PEER("probe_peer"),
         RESTART_NETWORKS("restart_networks"),
         RESTART_NODE("restart_node"),
+        ROLLBACK_CONFIGURATION("rollback_configuration"),
         SET_NETWORK_ROLE("set_network_role"),
         SHUTDOWN("shutdown"),
         START_NETWORKS("start_networks"),
@@ -759,12 +840,14 @@ public final class NodeContractV1 {
     public enum NodeUiInputKind {
         BOOLEAN("boolean"),
         CLIENT_ID("client_id"),
+        CONFIGURATION_JSON("configuration_json"),
         EXTERNAL_HOST("external_host"),
         NETWORK_MODE("network_mode"),
         NETWORK_NAME("network_name"),
         NETWORK_SELECTION("network_selection"),
         PEER_TARGET("peer_target"),
         PORT("port"),
+        REVISION("revision"),
         ROLE("role"),
         ROUTING_MODE("routing_mode"),
         URL_OR_TICKET("url_or_ticket"),
@@ -800,7 +883,9 @@ public final class NodeContractV1 {
         NETWORK_SELECTION("network_selection"),
         ROLE("role"),
         ROUTING_MODE("routing_mode"),
-        POSITIVE_TIMEOUT("positive_timeout");
+        POSITIVE_TIMEOUT("positive_timeout"),
+        REVISION("revision"),
+        CONFIGURATION_JSON("configuration_json");
 
         private final String wireName;
 
@@ -1038,6 +1123,118 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for ConfigurationApplyResult. */
+    public static final class ConfigurationApplyResult {
+        public final ConfigurationHistoryEntry audit;
+        public final List<ConfigurationDiffEntry> diffs;
+        public final ConfigurationDocument document;
+        public final Boolean no_op;
+        public final Long previous_revision;
+        public final Long revision;
+
+        public ConfigurationApplyResult(ConfigurationHistoryEntry audit, List<ConfigurationDiffEntry> diffs, ConfigurationDocument document, Boolean no_op, Long previous_revision, Long revision) {
+            this.audit = audit;
+            this.diffs = diffs;
+            this.document = document;
+            this.no_op = no_op;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+        }
+    }
+
+    /** DTO for ConfigurationDiffEntry. */
+    public static final class ConfigurationDiffEntry {
+        public final Object after;
+        public final Object before;
+        public final String impact;
+        public final String path;
+
+        public ConfigurationDiffEntry(Object after, Object before, String impact, String path) {
+            this.after = after;
+            this.before = before;
+            this.impact = impact;
+            this.path = path;
+        }
+    }
+
+    /** DTO for ConfigurationDocument. */
+    public static final class ConfigurationDocument {
+        public final Map<String, Object> networks;
+        public final Long revision;
+        public final Integer schema_version;
+
+        public ConfigurationDocument(Map<String, Object> networks, Long revision, Integer schema_version) {
+            this.networks = networks;
+            this.revision = revision;
+            this.schema_version = schema_version;
+        }
+    }
+
+    /** DTO for ConfigurationHistoryEntry. */
+    public static final class ConfigurationHistoryEntry {
+        public final ConfigurationChangeAction action;
+        public final String actor;
+        public final List<String> changed_paths;
+        public final String occurred_at;
+        public final Long previous_revision;
+        public final Long revision;
+        public final String source;
+        public final Long target_revision;
+        public final String transaction_id;
+
+        public ConfigurationHistoryEntry(ConfigurationChangeAction action, String actor, List<String> changed_paths, String occurred_at, Long previous_revision, Long revision, String source, Long target_revision, String transaction_id) {
+            this.action = action;
+            this.actor = actor;
+            this.changed_paths = changed_paths;
+            this.occurred_at = occurred_at;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+            this.source = source;
+            this.target_revision = target_revision;
+            this.transaction_id = transaction_id;
+        }
+    }
+
+    /** DTO for ConfigurationPreview. */
+    public static final class ConfigurationPreview {
+        public final Boolean can_apply;
+        public final ConfigurationDocument candidate;
+        public final Long candidate_revision;
+        public final ConfigurationDocument current;
+        public final Long current_revision;
+        public final List<ConfigurationDiffEntry> diffs;
+        public final Long expected_revision;
+        public final Boolean has_changes;
+        public final Boolean revision_conflict;
+        public final List<ConfigurationValidationIssue> validation_errors;
+
+        public ConfigurationPreview(Boolean can_apply, ConfigurationDocument candidate, Long candidate_revision, ConfigurationDocument current, Long current_revision, List<ConfigurationDiffEntry> diffs, Long expected_revision, Boolean has_changes, Boolean revision_conflict, List<ConfigurationValidationIssue> validation_errors) {
+            this.can_apply = can_apply;
+            this.candidate = candidate;
+            this.candidate_revision = candidate_revision;
+            this.current = current;
+            this.current_revision = current_revision;
+            this.diffs = diffs;
+            this.expected_revision = expected_revision;
+            this.has_changes = has_changes;
+            this.revision_conflict = revision_conflict;
+            this.validation_errors = validation_errors;
+        }
+    }
+
+    /** DTO for ConfigurationValidationIssue. */
+    public static final class ConfigurationValidationIssue {
+        public final ConfigurationValidationCode code;
+        public final String message;
+        public final String path;
+
+        public ConfigurationValidationIssue(ConfigurationValidationCode code, String message, String path) {
+            this.code = code;
+            this.message = message;
+            this.path = path;
+        }
+    }
+
     /** DTO for DomainActorRef. */
     public static final class DomainActorRef {
         public final String display;
@@ -1198,6 +1395,17 @@ public final class NodeContractV1 {
             this.schema_version = schema_version;
             this.server_time = server_time;
             this.snapshot = snapshot;
+        }
+    }
+
+    /** DTO for NodeApplyConfigurationCommand. */
+    public static final class NodeApplyConfigurationCommand {
+        public final Long expected_revision;
+        public final Map<String, Object> networks;
+
+        public NodeApplyConfigurationCommand(Long expected_revision, Map<String, Object> networks) {
+            this.expected_revision = expected_revision;
+            this.networks = networks;
         }
     }
 
@@ -1745,6 +1953,17 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodePreviewConfigurationCommand. */
+    public static final class NodePreviewConfigurationCommand {
+        public final Long expected_revision;
+        public final Map<String, Object> networks;
+
+        public NodePreviewConfigurationCommand(Long expected_revision, Map<String, Object> networks) {
+            this.expected_revision = expected_revision;
+            this.networks = networks;
+        }
+    }
+
     /** DTO for NodeProbePeerCommand. */
     public static final class NodeProbePeerCommand {
         public final String network_name;
@@ -1762,6 +1981,7 @@ public final class NodeContractV1 {
     public static final class NodeProblem {
         public final NodeErrorCategory category;
         public final String code;
+        public final NodeProblemDetails details;
         public final String message;
         public final String message_key;
         public final String network_name;
@@ -1769,15 +1989,29 @@ public final class NodeContractV1 {
         public final OperationRecovery recovery;
         public final Boolean retryable;
 
-        public NodeProblem(NodeErrorCategory category, String code, String message, String message_key, String network_name, Map<String, Object> params, OperationRecovery recovery, Boolean retryable) {
+        public NodeProblem(NodeErrorCategory category, String code, NodeProblemDetails details, String message, String message_key, String network_name, Map<String, Object> params, OperationRecovery recovery, Boolean retryable) {
             this.category = category;
             this.code = code;
+            this.details = details;
             this.message = message;
             this.message_key = message_key;
             this.network_name = network_name;
             this.params = params;
             this.recovery = recovery;
             this.retryable = retryable;
+        }
+    }
+
+    /** DTO for NodeProblemDetails. */
+    public static final class NodeProblemDetails {
+        public final Long current_revision;
+        public final Long expected_revision;
+        public final List<NodeValidationIssue> validation_issues;
+
+        public NodeProblemDetails(Long current_revision, Long expected_revision, List<NodeValidationIssue> validation_issues) {
+            this.current_revision = current_revision;
+            this.expected_revision = expected_revision;
+            this.validation_issues = validation_issues;
         }
     }
 
@@ -1791,6 +2025,17 @@ public final class NodeContractV1 {
             this.cleaned_networks = cleaned_networks;
             this.failed_networks = failed_networks;
             this.residue = residue;
+        }
+    }
+
+    /** DTO for NodeRollbackConfigurationCommand. */
+    public static final class NodeRollbackConfigurationCommand {
+        public final Long expected_revision;
+        public final Long target_revision;
+
+        public NodeRollbackConfigurationCommand(Long expected_revision, Long target_revision) {
+            this.expected_revision = expected_revision;
+            this.target_revision = target_revision;
         }
     }
 
@@ -2018,6 +2263,19 @@ public final class NodeContractV1 {
             this.is_exit_node = is_exit_node;
             this.mode = mode;
             this.network_name = network_name;
+        }
+    }
+
+    /** DTO for NodeValidationIssue. */
+    public static final class NodeValidationIssue {
+        public final String code;
+        public final String message;
+        public final String path;
+
+        public NodeValidationIssue(String code, String message, String path) {
+            this.code = code;
+            this.message = message;
+            this.path = path;
         }
     }
 
@@ -2421,6 +2679,45 @@ public final class NodeContractV1 {
                 super(NodeCommandKind.SHUTDOWN);
             }
         }
+
+        public static final class GetConfiguration extends NodeCommand {
+            public GetConfiguration() {
+                super(NodeCommandKind.GET_CONFIGURATION);
+            }
+        }
+
+        public static final class PreviewConfiguration extends NodeCommand {
+            public final NodePreviewConfigurationCommand payload;
+
+            public PreviewConfiguration(NodePreviewConfigurationCommand payload) {
+                super(NodeCommandKind.PREVIEW_CONFIGURATION);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ApplyConfiguration extends NodeCommand {
+            public final NodeApplyConfigurationCommand payload;
+
+            public ApplyConfiguration(NodeApplyConfigurationCommand payload) {
+                super(NodeCommandKind.APPLY_CONFIGURATION);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RollbackConfiguration extends NodeCommand {
+            public final NodeRollbackConfigurationCommand payload;
+
+            public RollbackConfiguration(NodeRollbackConfigurationCommand payload) {
+                super(NodeCommandKind.ROLLBACK_CONFIGURATION);
+                this.payload = payload;
+            }
+        }
+
+        public static final class GetConfigurationHistory extends NodeCommand {
+            public GetConfigurationHistory() {
+                super(NodeCommandKind.GET_CONFIGURATION_HISTORY);
+            }
+        }
     }
 
     /** Tagged union DTO for NodeCommandOutcome. */
@@ -2499,6 +2796,42 @@ public final class NodeContractV1 {
 
             public NetworkCreated(NodeCreatedNetwork data) {
                 super("network_created");
+                this.data = data;
+            }
+        }
+
+        public static final class Configuration extends NodeCommandOutcome {
+            public final ConfigurationDocument data;
+
+            public Configuration(ConfigurationDocument data) {
+                super("configuration");
+                this.data = data;
+            }
+        }
+
+        public static final class ConfigurationPreview extends NodeCommandOutcome {
+            public final ConfigurationPreview data;
+
+            public ConfigurationPreview(ConfigurationPreview data) {
+                super("configuration_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class ConfigurationApplied extends NodeCommandOutcome {
+            public final ConfigurationApplyResult data;
+
+            public ConfigurationApplied(ConfigurationApplyResult data) {
+                super("configuration_applied");
+                this.data = data;
+            }
+        }
+
+        public static final class ConfigurationHistory extends NodeCommandOutcome {
+            public final List<ConfigurationHistoryEntry> data;
+
+            public ConfigurationHistory(List<ConfigurationHistoryEntry> data) {
+                super("configuration_history");
                 this.data = data;
             }
         }
@@ -2851,17 +3184,22 @@ public final class NodeContractV1 {
     }
 
     public static boolean isManifestAction(NodeCommandKind command) {
-        return             command == NodeCommandKind.BAN_CLIENT ||
+        return             command == NodeCommandKind.APPLY_CONFIGURATION ||
+            command == NodeCommandKind.BAN_CLIENT ||
             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
             command == NodeCommandKind.CREATE_NETWORK ||
             command == NodeCommandKind.GET_BLACKLIST ||
+            command == NodeCommandKind.GET_CONFIGURATION ||
+            command == NodeCommandKind.GET_CONFIGURATION_HISTORY ||
             command == NodeCommandKind.GET_NETWORK_ALLOCATION ||
             command == NodeCommandKind.GET_NODE_DIAGNOSTICS ||
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
+            command == NodeCommandKind.PREVIEW_CONFIGURATION ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.RESTART_NODE ||
+            command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SHUTDOWN ||
             command == NodeCommandKind.START_NETWORKS ||

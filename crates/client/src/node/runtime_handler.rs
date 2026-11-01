@@ -3,9 +3,12 @@ use std::time::Duration;
 
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
-    NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodePeerProbeSnapshot, NodeProblem, NodeProblemCode, NodeStateStore,
+    NodeCommandContext, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome,
+    NodeCommandRequest, NodeCommandResult, NodePeerProbeSnapshot, NodeProblem, NodeProblemCode,
+    NodeStateStore, NodeValidationIssue,
 };
+use crate::config_manager::ConfigManager;
+use crate::config_transaction::{ConfigurationTransactionError, ConfigurationValidationCode};
 use crate::ipc::MultiNetworkRegistry;
 use crate::symmetric::EmbeddedServiceManager;
 
@@ -19,6 +22,7 @@ pub struct NodeRuntimeHandler {
     registry: MultiNetworkRegistry,
     services: EmbeddedServiceManager,
     runtime: Option<NetworkRuntimeManager>,
+    configs: Option<ConfigManager>,
 }
 
 impl NodeRuntimeHandler {
@@ -36,6 +40,7 @@ impl NodeRuntimeHandler {
             registry,
             services,
             runtime: None,
+            configs: None,
         }
     }
 
@@ -44,22 +49,27 @@ impl NodeRuntimeHandler {
         registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
         runtime: NetworkRuntimeManager,
+        configs: ConfigManager,
     ) -> Self {
         Self {
             state,
             registry,
             services,
             runtime: Some(runtime),
+            configs: Some(configs),
         }
     }
-}
 
-impl NodeCommandHandler for NodeRuntimeHandler {
-    fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+    fn execute(
+        &self,
+        actor: Option<(String, String)>,
+        request: NodeCommandRequest,
+    ) -> NodeCommandFuture {
         let state = self.state.clone();
         let registry = self.registry.clone();
         let services = self.services.clone();
         let runtime = self.runtime.clone();
+        let configs = self.configs.clone();
 
         Box::pin(async move {
             let request_id = request.request_id;
@@ -74,6 +84,56 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 super::NodeCommand::GetUiManifest => {
                     NodeCommandResult::ui_manifest(request_id, super::node_ui_manifest())
                 }
+                super::NodeCommand::GetConfiguration => match configs {
+                    Some(configs) => configuration_document(&configs, request_id).await,
+                    None => unavailable(request_id, "读取配置需要节点配置管理器"),
+                },
+                super::NodeCommand::PreviewConfiguration(command) => match configs {
+                    Some(configs) => {
+                        preview_configuration(
+                            &configs,
+                            request_id,
+                            command.expected_revision,
+                            command.networks,
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "配置预览需要节点配置管理器"),
+                },
+                super::NodeCommand::ApplyConfiguration(command) => match (configs, actor) {
+                    (Some(configs), Some((actor, source))) => {
+                        apply_configuration(
+                            &configs,
+                            request_id,
+                            command.expected_revision,
+                            command.networks,
+                            actor,
+                            source,
+                        )
+                        .await
+                    }
+                    (None, _) => unavailable(request_id, "配置应用需要节点配置管理器"),
+                    (_, None) => unavailable(request_id, "配置应用缺少受信任的认证上下文"),
+                },
+                super::NodeCommand::RollbackConfiguration(command) => match (configs, actor) {
+                    (Some(configs), Some((actor, source))) => {
+                        rollback_configuration(
+                            &configs,
+                            request_id,
+                            command.expected_revision,
+                            command.target_revision,
+                            actor,
+                            source,
+                        )
+                        .await
+                    }
+                    (None, _) => unavailable(request_id, "配置回滚需要节点配置管理器"),
+                    (_, None) => unavailable(request_id, "配置回滚缺少受信任的认证上下文"),
+                },
+                super::NodeCommand::GetConfigurationHistory => match configs {
+                    Some(configs) => configuration_history(&configs, request_id).await,
+                    None => unavailable(request_id, "读取配置历史需要节点配置管理器"),
+                },
                 super::NodeCommand::GetDiagnostics => match runtime {
                     Some(runtime) => diagnostics_runtime(&runtime, request_id).await,
                     None => {
@@ -260,6 +320,171 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 }
             }
         })
+    }
+}
+
+impl NodeCommandHandler for NodeRuntimeHandler {
+    fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+        self.execute(None, request)
+    }
+
+    fn handle_authorized(
+        &self,
+        context: NodeCommandContext,
+        request: NodeCommandRequest,
+    ) -> NodeCommandFuture {
+        self.execute(
+            Some((
+                context.actor().as_str().to_owned(),
+                context.source().to_owned(),
+            )),
+            request,
+        )
+    }
+}
+
+async fn configuration_document(configs: &ConfigManager, request_id: u64) -> NodeCommandResult {
+    let configs = configs.clone();
+    match tokio::task::spawn_blocking(move || configs.configuration_document()).await {
+        Ok(Ok(document)) => {
+            NodeCommandResult::completed(request_id, NodeCommandOutcome::Configuration(document))
+        }
+        Ok(Err(_)) => configuration_io_rejection(request_id, "读取配置失败"),
+        Err(_) => configuration_io_rejection(request_id, "读取配置任务异常终止"),
+    }
+}
+
+async fn preview_configuration(
+    configs: &ConfigManager,
+    request_id: u64,
+    expected_revision: u64,
+    networks: std::collections::BTreeMap<String, serde_json::Value>,
+) -> NodeCommandResult {
+    let configs = configs.clone();
+    match tokio::task::spawn_blocking(move || {
+        configs.preview_configuration(expected_revision, networks)
+    })
+    .await
+    {
+        Ok(Ok(preview)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::ConfigurationPreview(Box::new(preview)),
+        ),
+        Ok(Err(_)) => configuration_io_rejection(request_id, "配置预览失败"),
+        Err(_) => configuration_io_rejection(request_id, "配置预览任务异常终止"),
+    }
+}
+
+async fn apply_configuration(
+    configs: &ConfigManager,
+    request_id: u64,
+    expected_revision: u64,
+    networks: std::collections::BTreeMap<String, serde_json::Value>,
+    actor: String,
+    source: String,
+) -> NodeCommandResult {
+    let configs = configs.clone();
+    match tokio::task::spawn_blocking(move || {
+        configs.apply_configuration(expected_revision, networks, &actor, &source)
+    })
+    .await
+    {
+        Ok(Ok(result)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::ConfigurationApplied(Box::new(result)),
+        ),
+        Ok(Err(error)) => {
+            NodeCommandResult::rejected(request_id, configuration_transaction_problem(error))
+        }
+        Err(_) => configuration_io_rejection(request_id, "配置应用任务异常终止"),
+    }
+}
+
+async fn rollback_configuration(
+    configs: &ConfigManager,
+    request_id: u64,
+    expected_revision: u64,
+    target_revision: u64,
+    actor: String,
+    source: String,
+) -> NodeCommandResult {
+    let configs = configs.clone();
+    match tokio::task::spawn_blocking(move || {
+        configs.rollback_configuration(expected_revision, target_revision, &actor, &source)
+    })
+    .await
+    {
+        Ok(Ok(result)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::ConfigurationApplied(Box::new(result)),
+        ),
+        Ok(Err(error)) => {
+            NodeCommandResult::rejected(request_id, configuration_transaction_problem(error))
+        }
+        Err(_) => configuration_io_rejection(request_id, "配置回滚任务异常终止"),
+    }
+}
+
+async fn configuration_history(configs: &ConfigManager, request_id: u64) -> NodeCommandResult {
+    let configs = configs.clone();
+    match tokio::task::spawn_blocking(move || configs.configuration_history()).await {
+        Ok(Ok(history)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::ConfigurationHistory(history),
+        ),
+        Ok(Err(_)) => configuration_io_rejection(request_id, "读取配置历史失败"),
+        Err(_) => configuration_io_rejection(request_id, "读取配置历史任务异常终止"),
+    }
+}
+
+fn configuration_io_rejection(request_id: u64, message: &str) -> NodeCommandResult {
+    NodeCommandResult::rejected(
+        request_id,
+        NodeProblem::new(NodeProblemCode::Internal, message),
+    )
+}
+
+fn configuration_transaction_problem(error: ConfigurationTransactionError) -> NodeProblem {
+    match error {
+        ConfigurationTransactionError::RevisionConflict { expected, current } => {
+            NodeProblem::new(NodeProblemCode::Conflict, "配置已被其他操作修改")
+                .with_param("expected_revision", expected.to_string())
+                .with_param("current_revision", current.to_string())
+                .with_revision_conflict(expected, current)
+        }
+        ConfigurationTransactionError::InvalidCandidate(preview) => {
+            let issues = preview
+                .validation_errors
+                .into_iter()
+                .map(|issue| NodeValidationIssue {
+                    path: issue.path,
+                    code: validation_code_name(issue.code).into(),
+                    message: issue.message,
+                })
+                .collect::<Vec<_>>();
+            NodeProblem::new(NodeProblemCode::InvalidRequest, "配置校验失败")
+                .with_param("candidate_revision", preview.candidate_revision.to_string())
+                .with_validation_issues(issues)
+        }
+        ConfigurationTransactionError::RevisionNotFound(revision) => {
+            NodeProblem::new(NodeProblemCode::NotFound, "目标配置 revision 不存在")
+                .with_param("target_revision", revision.to_string())
+        }
+        ConfigurationTransactionError::Persistence(_) => NodeProblem::new(
+            NodeProblemCode::Internal,
+            "配置持久化失败，旧 revision 保持不变",
+        ),
+    }
+}
+
+fn validation_code_name(code: ConfigurationValidationCode) -> &'static str {
+    match code {
+        ConfigurationValidationCode::InvalidType => "invalid_type",
+        ConfigurationValidationCode::MissingRequired => "missing_required",
+        ConfigurationValidationCode::UnknownNetwork => "unknown_network",
+        ConfigurationValidationCode::MissingNetwork => "missing_network",
+        ConfigurationValidationCode::InvalidValue => "invalid_value",
+        ConfigurationValidationCode::Unsupported => "unsupported",
     }
 }
 
@@ -722,8 +947,10 @@ pub(crate) fn spawn_command_bus_with_runtime(
     events: super::NodeEventBus,
     services: EmbeddedServiceManager,
     runtime: NetworkRuntimeManager,
+    configs: ConfigManager,
 ) -> super::NodeCommandBus {
-    let handler = NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime);
+    let handler =
+        NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
     super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
 }
 

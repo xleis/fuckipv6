@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
 use fuckipv6_common::i18n::{t, tr, Locale};
@@ -6,12 +6,14 @@ use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase, NodePrimaryStatus,
-    NodeProbePeerCommand, NodeRoutingMode, NodeSetNetworkRoleCommand, NodeSnapshot, NodeUiAction,
-    NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
-    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
+    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand,
+    NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePrimaryStatus,
+    NodeProbePeerCommand, NodeRollbackConfigurationCommand, NodeRoutingMode,
+    NodeSetNetworkRoleCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus,
+    NodeUiManifest, NodeUiPage, NodeUiPermission, NodeUpdateNetworkAllocationCommand,
+    NodeUpdateRoutingCommand,
 };
 use crate::ui::{DisplayEnvironment, UiMode};
 
@@ -107,11 +109,16 @@ pub enum ActionBinding {
     StopNode,
     RestartNode,
     CleanupResiduals,
+    GetConfiguration,
+    PreviewConfiguration,
+    ApplyConfiguration,
+    RollbackConfiguration,
+    GetConfigurationHistory,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 26] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -132,6 +139,11 @@ impl ActionBinding {
         Self::StopNode,
         Self::RestartNode,
         Self::CleanupResiduals,
+        Self::GetConfiguration,
+        Self::PreviewConfiguration,
+        Self::ApplyConfiguration,
+        Self::RollbackConfiguration,
+        Self::GetConfigurationHistory,
         Self::ShutdownNode,
     ];
 
@@ -157,6 +169,11 @@ impl ActionBinding {
             Self::StopNode => "stop_node",
             Self::RestartNode => "restart_node",
             Self::CleanupResiduals => "cleanup_node_residuals",
+            Self::GetConfiguration => "get_configuration",
+            Self::PreviewConfiguration => "preview_configuration",
+            Self::ApplyConfiguration => "apply_configuration",
+            Self::RollbackConfiguration => "rollback_configuration",
+            Self::GetConfigurationHistory => "get_configuration_history",
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -683,6 +700,26 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::CleanupResiduals,
             NodeCommandKind::CleanupResiduals,
         ),
+        "get_configuration" => (
+            ActionBinding::GetConfiguration,
+            NodeCommandKind::GetConfiguration,
+        ),
+        "preview_configuration" => (
+            ActionBinding::PreviewConfiguration,
+            NodeCommandKind::PreviewConfiguration,
+        ),
+        "apply_configuration" => (
+            ActionBinding::ApplyConfiguration,
+            NodeCommandKind::ApplyConfiguration,
+        ),
+        "rollback_configuration" => (
+            ActionBinding::RollbackConfiguration,
+            NodeCommandKind::RollbackConfiguration,
+        ),
+        "get_configuration_history" => (
+            ActionBinding::GetConfigurationHistory,
+            NodeCommandKind::GetConfigurationHistory,
+        ),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -772,6 +809,11 @@ pub fn default_form_values(
                 ("update_network_allocation", "mode") => "dual_stack".into(),
                 ("update_network_allocation", "ipv4_pool") => "10.8.0.0/24".into(),
                 ("update_network_allocation", "ipv6_pool") => "fd00::/120".into(),
+                ("preview_configuration" | "apply_configuration", "expected_revision") => {
+                    "0".into()
+                }
+                ("preview_configuration" | "apply_configuration", "networks") => "{}".into(),
+                ("rollback_configuration", "expected_revision" | "target_revision") => "0".into(),
                 ("set_exit_node_role", "role") => "exit_node".into(),
                 ("set_relay_role", "role") => "relay".into(),
                 (_, "enabled") => "true".into(),
@@ -888,6 +930,42 @@ pub fn build_command(
             networks: split_names(&field("networks")),
             all: parse_bool(action, "all", &field("all"))?,
         }),
+        Ok(ActionBinding::GetConfiguration) => Ok(NodeCommand::GetConfiguration),
+        Ok(ActionBinding::PreviewConfiguration) => Ok(NodeCommand::PreviewConfiguration(
+            NodePreviewConfigurationCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                networks: parse_configuration_networks(action, "networks", &required("networks")?)?,
+            },
+        )),
+        Ok(ActionBinding::ApplyConfiguration) => Ok(NodeCommand::ApplyConfiguration(
+            NodeApplyConfigurationCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                networks: parse_configuration_networks(action, "networks", &required("networks")?)?,
+            },
+        )),
+        Ok(ActionBinding::RollbackConfiguration) => Ok(NodeCommand::RollbackConfiguration(
+            NodeRollbackConfigurationCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                target_revision: parse_number(
+                    action,
+                    "target_revision",
+                    &required("target_revision")?,
+                )?,
+            },
+        )),
+        Ok(ActionBinding::GetConfigurationHistory) => Ok(NodeCommand::GetConfigurationHistory),
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -927,6 +1005,11 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "set_exit_node_role" | "set_relay_role" => {
             HashSet::from(["network_name", "role", "enabled"])
         }
+        "get_configuration" | "get_configuration_history" => HashSet::from([]),
+        "preview_configuration" | "apply_configuration" => {
+            HashSet::from(["expected_revision", "networks"])
+        }
+        "rollback_configuration" => HashSet::from(["expected_revision", "target_revision"]),
         "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
     };
@@ -943,6 +1026,45 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             action.id
         ))
     }
+}
+
+fn parse_configuration_networks(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<BTreeMap<String, serde_json::Value>, CommandBuildError> {
+    let value: serde_json::Value =
+        serde_json::from_str(value).map_err(|_| CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: field_id.into(),
+            value: value.into(),
+        })?;
+    let networks = value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("networks")
+                .and_then(serde_json::Value::as_object)
+                .or(Some(object))
+        })
+        .ok_or_else(|| CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: field_id.into(),
+            value: String::new(),
+        })?;
+    networks
+        .iter()
+        .map(|(name, config)| {
+            if !config.is_object() {
+                return Err(CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: field_id.into(),
+                    value: name.clone(),
+                });
+            }
+            Ok((name.clone(), config.clone()))
+        })
+        .collect()
 }
 
 fn parse_number<T>(

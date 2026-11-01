@@ -94,7 +94,7 @@ impl MultiNetworkSupervisor {
         let services = EmbeddedServiceManager::spawn_with_config(8, configs.clone());
         let lifecycle = NodeLifecycle::new();
         let runtimes = NetworkRuntimeManager::spawn(
-            configs,
+            configs.clone(),
             options.clone(),
             state.clone(),
             events.clone(),
@@ -108,6 +108,7 @@ impl MultiNetworkSupervisor {
             events.clone(),
             services.clone(),
             runtimes.clone(),
+            configs,
         );
         Ok(Self {
             registry,

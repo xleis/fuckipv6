@@ -607,6 +607,27 @@ pub struct NodeLogEntry {
     pub message: String,
 }
 
+/// Structured field-level validation issue carried by a command error.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeValidationIssue {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// Stable machine-readable error details. Human-readable messages remain in
+/// `NodeProblem::message`, while these fields are safe for adapters to use for
+/// field highlighting and revision conflict recovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeProblemDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_issues: Vec<NodeValidationIssue>,
+}
+
 /// UI- and transport-neutral error returned by every node command adapter.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeProblem {
@@ -620,6 +641,8 @@ pub struct NodeProblem {
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery: Option<Box<OperationRecovery>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<NodeProblemDetails>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -713,6 +736,7 @@ impl NodeProblem {
             network_name: None,
             retryable: false,
             recovery,
+            details: None,
         }
     }
 
@@ -728,6 +752,24 @@ impl NodeProblem {
 
     pub fn retryable(mut self, retryable: bool) -> Self {
         self.retryable = retryable;
+        self
+    }
+
+    pub fn with_revision_conflict(mut self, expected: u64, current: u64) -> Self {
+        let mut details = self.details.take().unwrap_or_default();
+        details.expected_revision = Some(expected);
+        details.current_revision = Some(current);
+        self.details = Some(details);
+        self
+    }
+
+    pub fn with_validation_issues(
+        mut self,
+        issues: impl IntoIterator<Item = NodeValidationIssue>,
+    ) -> Self {
+        let mut details = self.details.take().unwrap_or_default();
+        details.validation_issues.extend(issues);
+        self.details = Some(details);
         self
     }
 }

@@ -804,7 +804,25 @@
       "settings.advanced.log_retention.detail": "日志保留周期、远程日志和隐私脱敏策略尚未接入。",
       "settings.advanced.metrics.detail": "指标端点尚未接入；不暴露伪指标地址。",
       "settings.advanced.updates.detail": "更新通道、代理、签名校验与回滚尚未接入。",
-      "settings.advanced.maintenance.detail": "计划维护窗口尚未接入。"
+      "settings.advanced.maintenance.detail": "计划维护窗口尚未接入。",
+      "action.get_configuration": "读取完整配置",
+      "action.preview_configuration": "预览配置变更",
+      "action.apply_configuration": "原子应用配置",
+      "action.rollback_configuration": "回滚配置",
+      "action.get_configuration_history": "读取配置历史",
+      "field.expected_revision": "期望 revision",
+      "field.target_revision": "目标 revision",
+      "field.configuration_networks": "完整网络配置 JSON",
+      "placeholder.configuration_json": "{\"networks\": {\"home\": { ... }}}",
+      "placeholder.revision": "0",
+      "confirm.apply_configuration.title": "应用配置",
+      "confirm.apply_configuration.consequence": "将完整网络配置作为一个 revision 原子提交；校验失败时不会写入任何网络",
+      "confirm.rollback_configuration.title": "回滚配置",
+      "confirm.rollback_configuration.consequence": "目标 revision 会作为新的可审计 revision 恢复，不会改写已有历史",
+      "gpui.configuration_loaded": "完整配置已加载",
+      "gpui.configuration_previewed": "配置预览完成：{diffs} 项差异，{errors} 个校验问题",
+      "gpui.configuration_applied": "配置已应用：revision {previous} → {revision}（no_op={no_op}）",
+      "gpui.configuration_history_loaded": "配置历史已加载：{count} 条"
     },
     "en": {
       "nav.overview": "Overview",
@@ -1608,7 +1626,25 @@
       "settings.advanced.log_retention.detail": "Log retention, remote shipping, and privacy redaction policy are not connected.",
       "settings.advanced.metrics.detail": "The metrics endpoint is not connected; no placeholder address is exposed.",
       "settings.advanced.updates.detail": "Update channels, proxies, signature verification, and rollback are not connected.",
-      "settings.advanced.maintenance.detail": "Scheduled maintenance windows are not connected."
+      "settings.advanced.maintenance.detail": "Scheduled maintenance windows are not connected.",
+      "action.get_configuration": "Load complete configuration",
+      "action.preview_configuration": "Preview configuration changes",
+      "action.apply_configuration": "Atomically apply configuration",
+      "action.rollback_configuration": "Roll back configuration",
+      "action.get_configuration_history": "Load configuration history",
+      "field.expected_revision": "Expected revision",
+      "field.target_revision": "Target revision",
+      "field.configuration_networks": "Complete network configuration JSON",
+      "placeholder.configuration_json": "{\"networks\": {\"home\": { ... }}}",
+      "placeholder.revision": "0",
+      "confirm.apply_configuration.title": "Apply configuration",
+      "confirm.apply_configuration.consequence": "Commits all network configuration atomically as one revision; no network is written if validation fails",
+      "confirm.rollback_configuration.title": "Roll back configuration",
+      "confirm.rollback_configuration.consequence": "The target revision is restored as a new auditable revision without rewriting history",
+      "gpui.configuration_loaded": "Complete configuration loaded",
+      "gpui.configuration_previewed": "Configuration preview complete: {diffs} changes, {errors} validation issues",
+      "gpui.configuration_applied": "Configuration applied: revision {previous} → {revision} (no_op={no_op})",
+      "gpui.configuration_history_loaded": "Configuration history loaded: {count} entries"
     }
   }
 }

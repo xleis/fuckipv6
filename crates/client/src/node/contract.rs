@@ -216,8 +216,9 @@ fn enum_string_values(value: &Value, key: &str, output: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::node::{
-        NodeClientBlacklistCommand, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
-        NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection, NodeProbePeerCommand,
+        NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateNetworkCommand,
+        NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection,
+        NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
         NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use fuckipv6_common::NetworkMode;
@@ -296,6 +297,20 @@ mod tests {
                 networks: vec!["home".into()],
                 all: false,
             },
+            NodeCommand::GetConfiguration,
+            NodeCommand::PreviewConfiguration(NodePreviewConfigurationCommand {
+                expected_revision: 0,
+                networks: std::collections::BTreeMap::new(),
+            }),
+            NodeCommand::ApplyConfiguration(NodeApplyConfigurationCommand {
+                expected_revision: 0,
+                networks: std::collections::BTreeMap::new(),
+            }),
+            NodeCommand::RollbackConfiguration(NodeRollbackConfigurationCommand {
+                expected_revision: 0,
+                target_revision: 0,
+            }),
+            NodeCommand::GetConfigurationHistory,
             NodeCommand::Shutdown,
         ]
     }

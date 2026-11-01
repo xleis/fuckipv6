@@ -49,6 +49,14 @@ mod tests {
     fn stable_manifest_fixture_matches_the_canonical_manifest_exactly() {
         let canonical =
             serde_json::to_value(node_ui_manifest()).expect("serialize canonical manifest");
+        if std::env::var_os("UPDATE_CONTRACT").is_some() {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/typescript/fixtures/node-manifest.json");
+            let mut encoded = serde_json::to_string_pretty(&canonical)
+                .expect("serialize canonical manifest fixture");
+            encoded.push('\n');
+            std::fs::write(&path, encoded).expect("write canonical manifest fixture");
+        }
         assert_eq!(fixture_manifest(), canonical);
         assert_eq!(
             canonical["pages"].as_array().expect("manifest pages").len(),

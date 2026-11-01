@@ -20,6 +20,24 @@
         }
       ]
     },
+    "NodeApplyConfigurationCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networks": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "networks"
+      ],
+      "type": "object"
+    },
     "NodeClientBlacklistCommand": {
       "properties": {
         "client_id": {
@@ -420,6 +438,83 @@
             "command"
           ],
           "type": "object"
+        },
+        {
+          "description": "Complete redacted configuration for every configured network.",
+          "properties": {
+            "command": {
+              "const": "get_configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Validate an imported complete configuration without writing it.",
+          "properties": {
+            "command": {
+              "const": "preview_configuration",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodePreviewConfigurationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Persist all network configurations under one revision transaction.",
+          "properties": {
+            "command": {
+              "const": "apply_configuration",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeApplyConfigurationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Restore a previous revision as a new auditable revision.",
+          "properties": {
+            "command": {
+              "const": "rollback_configuration",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRollbackConfigurationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Append-only configuration revision history, newest first.",
+          "properties": {
+            "command": {
+              "const": "get_configuration_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -541,6 +636,25 @@
         }
       ]
     },
+    "NodePreviewConfigurationCommand": {
+      "description": "Complete document imported by an owner for preview or atomic apply.\nActor and request source are intentionally absent: the command bus supplies\nthem from the authenticated transport context.",
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networks": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "networks"
+      ],
+      "type": "object"
+    },
     "NodeProbePeerCommand": {
       "properties": {
         "network_name": {
@@ -559,6 +673,25 @@
         "network_name",
         "target",
         "timeout_ms"
+      ],
+      "type": "object"
+    },
+    "NodeRollbackConfigurationCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_revision"
       ],
       "type": "object"
     },

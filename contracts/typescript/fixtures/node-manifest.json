@@ -666,6 +666,129 @@
           }
         },
         {
+          "id": "get_configuration",
+          "label_key": "action.get_configuration",
+          "command": "get_configuration",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "preview_configuration",
+          "label_key": "action.preview_configuration",
+          "command": "preview_configuration",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "networks",
+              "label_key": "field.configuration_networks",
+              "input": "configuration_json",
+              "required": true,
+              "validation": "configuration_json"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "apply_configuration",
+          "label_key": "action.apply_configuration",
+          "command": "apply_configuration",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "configuration.apply"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "networks",
+              "label_key": "field.configuration_networks",
+              "input": "configuration_json",
+              "required": true,
+              "validation": "configuration_json"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.apply_configuration.title",
+            "consequence_key": "confirm.apply_configuration.consequence",
+            "destructive": false
+          }
+        },
+        {
+          "id": "rollback_configuration",
+          "label_key": "action.rollback_configuration",
+          "command": "rollback_configuration",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "configuration.rollback"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "target_revision",
+              "label_key": "field.target_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.rollback_configuration.title",
+            "consequence_key": "confirm.rollback_configuration.consequence",
+            "destructive": true
+          }
+        },
+        {
+          "id": "get_configuration_history",
+          "label_key": "action.get_configuration_history",
+          "command": "get_configuration_history",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
           "id": "shutdown_node",
           "label_key": "action.shutdown_node",
           "command": "shutdown",

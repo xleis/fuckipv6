@@ -46,6 +46,11 @@
             "stop_node",
             "restart_node",
             "cleanup_node_residuals",
+            "get_configuration",
+            "preview_configuration",
+            "apply_configuration",
+            "rollback_configuration",
+            "get_configuration_history",
             "shutdown"
           ],
           "type": "string"
@@ -186,12 +191,14 @@
       "enum": [
         "boolean",
         "client_id",
+        "configuration_json",
         "external_host",
         "network_mode",
         "network_name",
         "network_selection",
         "peer_target",
         "port",
+        "revision",
         "role",
         "routing_mode",
         "url_or_ticket",
@@ -236,7 +243,9 @@
         "network_selection",
         "role",
         "routing_mode",
-        "positive_timeout"
+        "positive_timeout",
+        "revision",
+        "configuration_json"
       ],
       "type": "string"
     }

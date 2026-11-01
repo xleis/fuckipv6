@@ -4251,6 +4251,7 @@ mod tests {
             harness.events.clone(),
             harness.services.clone(),
             harness.runtime.clone(),
+            harness.configs.clone(),
         );
 
         let result = bus
@@ -4370,6 +4371,7 @@ mod tests {
             harness.events.clone(),
             harness.services.clone(),
             harness.runtime.clone(),
+            harness.configs.clone(),
         );
 
         let result = bus
@@ -4526,6 +4528,7 @@ mod tests {
             harness.events.clone(),
             harness.services.clone(),
             harness.runtime.clone(),
+            harness.configs.clone(),
         );
         let invalid = bus
             .execute_test(NodeCommandRequest::new(

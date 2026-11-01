@@ -1,3 +1,7 @@
+use crate::config_transaction::{
+    ConfigurationApplyResult, ConfigurationDocument, ConfigurationHistoryEntry,
+    ConfigurationPreview,
+};
 use fuckipv6_common::domain::{ActivityEntry, AuditEntry, AuditOutcome};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
@@ -69,11 +73,16 @@ pub enum NodeCommandKind {
     RestartNode,
     #[serde(rename = "cleanup_node_residuals")]
     CleanupResiduals,
+    GetConfiguration,
+    PreviewConfiguration,
+    ApplyConfiguration,
+    RollbackConfiguration,
+    GetConfigurationHistory,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 26] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -94,12 +103,17 @@ impl NodeCommandKind {
         Self::StopNode,
         Self::RestartNode,
         Self::CleanupResiduals,
+        Self::GetConfiguration,
+        Self::PreviewConfiguration,
+        Self::ApplyConfiguration,
+        Self::RollbackConfiguration,
+        Self::GetConfigurationHistory,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 20] = [
+    pub const ACTIONS: [Self; 25] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -119,6 +133,11 @@ impl NodeCommandKind {
         Self::StopNode,
         Self::RestartNode,
         Self::CleanupResiduals,
+        Self::GetConfiguration,
+        Self::PreviewConfiguration,
+        Self::ApplyConfiguration,
+        Self::RollbackConfiguration,
+        Self::GetConfigurationHistory,
         Self::Shutdown,
     ];
 
@@ -145,6 +164,11 @@ impl NodeCommandKind {
             Self::RestartNode => "restart_node",
             Self::CleanupResiduals => "cleanup_node_residuals",
             Self::Shutdown => "shutdown",
+            Self::GetConfiguration => "get_configuration",
+            Self::PreviewConfiguration => "preview_configuration",
+            Self::ApplyConfiguration => "apply_configuration",
+            Self::RollbackConfiguration => "rollback_configuration",
+            Self::GetConfigurationHistory => "get_configuration_history",
         }
     }
 
@@ -169,6 +193,8 @@ impl NodeCommandKind {
                 | Self::RestartNode
                 | Self::CleanupResiduals
                 | Self::Shutdown
+                | Self::ApplyConfiguration
+                | Self::RollbackConfiguration
         )
     }
 }
@@ -228,6 +254,16 @@ pub enum NodeCommand {
         all: bool,
     },
     Shutdown,
+    /// Complete redacted configuration for every configured network.
+    GetConfiguration,
+    /// Validate an imported complete configuration without writing it.
+    PreviewConfiguration(NodePreviewConfigurationCommand),
+    /// Persist all network configurations under one revision transaction.
+    ApplyConfiguration(NodeApplyConfigurationCommand),
+    /// Restore a previous revision as a new auditable revision.
+    RollbackConfiguration(NodeRollbackConfigurationCommand),
+    /// Append-only configuration revision history, newest first.
+    GetConfigurationHistory,
 }
 
 impl NodeCommand {
@@ -254,6 +290,11 @@ impl NodeCommand {
             Self::RestartNode => NodeCommandKind::RestartNode,
             Self::CleanupResiduals { .. } => NodeCommandKind::CleanupResiduals,
             Self::Shutdown => NodeCommandKind::Shutdown,
+            Self::GetConfiguration => NodeCommandKind::GetConfiguration,
+            Self::PreviewConfiguration(_) => NodeCommandKind::PreviewConfiguration,
+            Self::ApplyConfiguration(_) => NodeCommandKind::ApplyConfiguration,
+            Self::RollbackConfiguration(_) => NodeCommandKind::RollbackConfiguration,
+            Self::GetConfigurationHistory => NodeCommandKind::GetConfigurationHistory,
         }
     }
 
@@ -265,7 +306,9 @@ impl NodeCommand {
             | Self::StartNode
             | Self::StopNode
             | Self::RestartNode
-            | Self::Shutdown => Ok(()),
+            | Self::Shutdown
+            | Self::GetConfiguration
+            | Self::GetConfigurationHistory => Ok(()),
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
                 if *all {
@@ -319,7 +362,49 @@ impl NodeCommand {
             Self::BanClient(command) | Self::UnbanClient(command) => command.validate(),
             Self::UpdateNetworkAllocation(command) => command.validate(),
             Self::ProbePeer(command) => command.validate(),
+            Self::PreviewConfiguration(command) => command.validate(),
+            Self::ApplyConfiguration(command) => command.validate(),
+            Self::RollbackConfiguration(command) => command.validate(),
         }
+    }
+}
+
+/// Complete document imported by an owner for preview or atomic apply.
+/// Actor and request source are intentionally absent: the command bus supplies
+/// them from the authenticated transport context.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewConfigurationCommand {
+    pub expected_revision: u64,
+    pub networks: BTreeMap<String, serde_json::Value>,
+}
+
+impl NodePreviewConfigurationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApplyConfigurationCommand {
+    pub expected_revision: u64,
+    pub networks: BTreeMap<String, serde_json::Value>,
+}
+
+impl NodeApplyConfigurationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRollbackConfigurationCommand {
+    pub expected_revision: u64,
+    pub target_revision: u64,
+}
+
+impl NodeRollbackConfigurationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
     }
 }
 
@@ -761,6 +846,10 @@ pub enum NodeCommandOutcome {
     NetworkAllocation(NodeNetworkAllocationSnapshot),
     Probe(NodePeerProbeSnapshot),
     NetworkCreated(NodeCreatedNetwork),
+    Configuration(ConfigurationDocument),
+    ConfigurationPreview(Box<ConfigurationPreview>),
+    ConfigurationApplied(Box<ConfigurationApplyResult>),
+    ConfigurationHistory(Vec<ConfigurationHistoryEntry>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -771,9 +860,21 @@ pub type NodeCommandFuture = Pin<Box<dyn Future<Output = NodeCommandResult> + Se
 /// UI adapters implement no business logic; they only submit commands here.
 pub trait NodeCommandHandler: Send + Sync + 'static {
     fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture;
+
+    /// Trusted execution context supplied by the command bus. Handlers that
+    /// need the authenticated actor/source override this method; adapters that
+    /// only proxy commands preserve the original behavior.
+    fn handle_authorized(
+        &self,
+        _context: NodeCommandContext,
+        request: NodeCommandRequest,
+    ) -> NodeCommandFuture {
+        self.handle(request)
+    }
 }
 
 struct CommandEnvelope {
+    context: NodeCommandContext,
     request: NodeCommandRequest,
     response: oneshot::Sender<NodeCommandResult>,
 }
@@ -916,7 +1017,9 @@ impl NodeCommandBus {
                         let events = events.clone();
                         in_flight.spawn(async move {
                             let request_id = envelope.request.request_id;
-                            let result = handler.handle(envelope.request).await;
+                            let result = handler
+                                .handle_authorized(envelope.context, envelope.request)
+                                .await;
                             events.publish(NodeEventKind::CommandCompleted {
                                 request_id,
                                 success: result.is_success(),
@@ -968,7 +1071,11 @@ impl NodeCommandBus {
         let audit_request = request.clone();
         if self
             .sender
-            .send(CommandEnvelope { request, response })
+            .send(CommandEnvelope {
+                context: context.clone(),
+                request,
+                response,
+            })
             .await
             .is_err()
         {
@@ -1141,6 +1248,20 @@ mod tests {
                 networks: vec!["home".into()],
                 all: false,
             },
+            NodeCommand::GetConfiguration,
+            NodeCommand::PreviewConfiguration(NodePreviewConfigurationCommand {
+                expected_revision: 0,
+                networks: BTreeMap::new(),
+            }),
+            NodeCommand::ApplyConfiguration(NodeApplyConfigurationCommand {
+                expected_revision: 0,
+                networks: BTreeMap::new(),
+            }),
+            NodeCommand::RollbackConfiguration(NodeRollbackConfigurationCommand {
+                expected_revision: 0,
+                target_revision: 0,
+            }),
+            NodeCommand::GetConfigurationHistory,
             NodeCommand::Shutdown,
         ]
     }
@@ -1406,6 +1527,9 @@ mod tests {
             NodeCommandKind::GetBlacklist,
             NodeCommandKind::GetNetworkAllocation,
             NodeCommandKind::ProbePeer,
+            NodeCommandKind::GetConfiguration,
+            NodeCommandKind::PreviewConfiguration,
+            NodeCommandKind::GetConfigurationHistory,
         ] {
             assert!(!kind.is_write(), "{kind:?}");
         }
@@ -1418,6 +1542,9 @@ mod tests {
                     | NodeCommandKind::GetBlacklist
                     | NodeCommandKind::GetNetworkAllocation
                     | NodeCommandKind::ProbePeer
+                    | NodeCommandKind::GetConfiguration
+                    | NodeCommandKind::PreviewConfiguration
+                    | NodeCommandKind::GetConfigurationHistory
             ) {
                 assert!(kind.is_write(), "{kind:?}");
             }

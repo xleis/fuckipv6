@@ -731,10 +731,16 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 - [ ] 请求大小限制；
 - [ ] 并发限制；
-- [ ] 登录/命令限流；
-- [ ] 可信代理；
+- [x] 登录/命令限流；
+- [x] 可信代理；
 - [ ] 审计关联；
 - [ ] 公网攻击面测试。
+
+**已实现与测试证据（2026-11-01）**
+
+- 登录失败按来源 IP 与用户名分别累计，连续失败后指数退避；认证成功会清除失败状态，活跃退避项不会被来源洪泛驱逐，条目有 TTL 和容量上限。认证后的状态变更请求另有按来源 IP 的 token bucket，登录限流与命令限流互不消耗；
+- 可信代理只接受显式 CIDR allowlist 内的连接，并严格校验单一 `X-Forwarded-For`、`X-Forwarded-Host`、`X-Forwarded-Proto: https`、`Host` 和 `Origin`；拒绝 `Forwarded`、`X-Real-IP`、重复或不明确的转发头。直连 TLS 模式使用对端地址且拒绝所有代理转发头；
+- `webui::security` 的退避、成功解锁、TTL/容量边界、token bucket 和来源隔离测试通过；`webui::public_claim` 的伪造代理、重复头、Host/Origin 注入、直连 TLS 与不受信代理测试通过；`webui` 路由测试覆盖登录端点限流和认证命令按来源限流。
 
 ## 8. W5：共享设计系统
 

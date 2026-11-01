@@ -96,6 +96,7 @@ async function main() {
     "--disable-default-apps",
     "--disable-sync",
     "--no-first-run",
+    "--lang=en-US",
     "--remote-debugging-port=0",
     `--user-data-dir=${userDataDir}`,
     "about:blank",
@@ -189,8 +190,24 @@ async function main() {
       "!!document.querySelector('#step-recovery.active') || document.querySelector('#status.error')?.textContent.length > 0",
       "initial Passkey registration",
     );
-    const bootstrapStatus = await evaluate("document.querySelector('#status').textContent");
-    assert.match(bootstrapStatus, /Passkey 已注册/);
+    const languageSwitch = await evaluate(`(() => {
+      const select = document.querySelector('#language-preference');
+      const snapshot = () => ({
+        locale: document.documentElement.lang,
+        title: document.querySelector('#page-title').textContent,
+        status: document.querySelector('#status').textContent,
+      });
+      const before = snapshot();
+      select.value = 'zh-CN';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return { before, after: snapshot(), preference: localStorage.getItem('fuckipv6.language-preference') };
+    })()`);
+    assert.equal(languageSwitch.before.locale, "en");
+    assert.match(languageSwitch.before.status, /Passkey registered/);
+    assert.equal(languageSwitch.after.locale, "zh-CN");
+    assert.match(languageSwitch.after.title, /本机所有者初始化/);
+    assert.match(languageSwitch.after.status, /Passkey 已注册/);
+    assert.equal(languageSwitch.preference, "zh-CN");
     const recoveryCode = await evaluate("document.querySelector('#recovery-code').textContent.trim()");
     assert.ok(recoveryCode.length >= 20, "recovery code must be displayed once");
 
@@ -203,6 +220,7 @@ async function main() {
       "document.readyState === 'complete' && !!globalThis.FuckIPV6NodeUi && !document.querySelector('#bootstrap-code')",
       "authenticated product page shell",
     );
+    assert.equal(await evaluate("document.documentElement.lang"), "zh-CN");
 
     async function loginWithCurrentAuthenticator() {
       return evaluate(`(async () => {

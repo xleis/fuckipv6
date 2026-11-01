@@ -1,15 +1,9 @@
 "use strict";
 
 (() => {
-  const authCopy = Object.assign({
-    bootstrapDescription: "这个节点只属于一位所有者。请使用节点所有者可访问终端中显示的一次性初始化码注册 Passkey，并离线保存随后生成的恢复码。",
-    bootstrapCodeHelp: "初始化码只通过节点所有者可访问的终端显示，不会写入 URL、日志或磁盘明文。",
-    secureContextRequirements: "当前页面不是受信任的 WebAuthn 安全上下文。请使用配置的 HTTPS 公网地址或 http://localhost；证书或域名错误必须先修复，不能跳过校验。",
-    passkeyUnsupported: "当前浏览器或平台不支持所需的 Passkey 能力。请使用支持 WebAuthn 的现代浏览器和系统认证器。",
-    originMismatchTemplate: "WebAuthn 地址不匹配。预期 {expected}，当前 {actual}。请使用 {expected} 打开；若浏览器报告证书错误，必须先修复证书，不能跳过校验。",
-    recoveryCodeWarning: "恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据，请立即保存到离线安全位置。",
-    recoveryCodeConfirmation: "我已将恢复码保存到离线安全位置，并确认页面关闭后无法再次查看。",
-  }, window.FuckIPV6OwnerAuthCopy || {});
+  const i18n = window.FuckIPV6I18n;
+  if (!i18n) throw new Error("owner-bootstrap-contract: shared i18n runtime is missing");
+  const LANGUAGE_STORAGE_KEY = "fuckipv6.language-preference";
   const $ = (id) => document.getElementById(id);
   const codeStep = $("step-code");
   const recoveryStep = $("step-recovery");
@@ -22,46 +16,141 @@
   const statusBox = $("status");
   const pageTitle = $("page-title");
   const footer = $("bootstrap-footer");
+  const languageSelect = $("language-preference");
 
   let currentRecoveryCode = "";
   let currentExpectedOrigin = "";
+  let languagePreference = readLanguagePreference();
+  let locale = i18n.resolveLocale(languagePreference);
+  let statusState = null;
+  let primaryAction = { key: "owner_auth.bootstrap.verify_button", params: {} };
 
-  function applyAuthCopy() {
-    $("bootstrap-description").textContent = authCopy.bootstrapDescription;
-    $("bootstrap-code-help").textContent = authCopy.bootstrapCodeHelp;
-    $("recovery-warning").textContent = authCopy.recoveryCodeWarning;
-    $("recovery-confirmation").textContent = authCopy.recoveryCodeConfirmation;
+  function readLanguagePreference() {
+    try {
+      const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+      if (stored === "system" || stored === "zh-CN" || stored === "en") return stored;
+    } catch (_error) {
+      // Storage may be unavailable in hardened browsers; system detection still works.
+    }
+    return "system";
   }
 
-  function formatCopy(template, values) {
-    return Object.entries(values).reduce(
-      (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
-      String(template || ""),
+  function saveLanguagePreference(preference) {
+    try {
+      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, preference);
+    } catch (_error) {
+      // The current page still switches even when persistence is unavailable.
+    }
+  }
+
+  function hasKey(key) {
+    const messages = i18n.catalog && i18n.catalog.messages && i18n.catalog.messages[locale];
+    return Boolean(key && messages && Object.prototype.hasOwnProperty.call(messages, key));
+  }
+
+  function t(key) {
+    return i18n.t(locale, key);
+  }
+
+  function tr(key, params) {
+    return i18n.tr(locale, key, params);
+  }
+
+  function localizedError(key, params, payload) {
+    const error = new Error(key);
+    error.key = key;
+    error.params = params || {};
+    error.payload = payload || null;
+    return error;
+  }
+
+  function apiErrorKey(payload, fallbackKey) {
+    const candidate = payload && typeof payload.message_key === "string" ? payload.message_key : "";
+    return hasKey(candidate) ? candidate : fallbackKey;
+  }
+
+  function errorPresentation(error, fallbackKey) {
+    const explicitKey = error && error.key && hasKey(error.key) ? error.key : "";
+    const payloadKey = error && error.payload ? apiErrorKey(error.payload, "") : "";
+    const key = explicitKey || payloadKey || fallbackKey;
+    return { key, params: (error && error.params) || {} };
+  }
+
+  function showStatusKey(key, kind = "", params = {}) {
+    statusState = { key, kind, params };
+    renderStatus();
+  }
+
+  function showError(error, fallbackKey) {
+    const presentation = errorPresentation(error, fallbackKey);
+    showStatusKey(presentation.key, "error", presentation.params);
+  }
+
+  function renderStatus() {
+    if (!statusState || !hasKey(statusState.key)) {
+      statusBox.textContent = "";
+      statusBox.className = "status";
+      return;
+    }
+    statusBox.textContent = tr(statusState.key, statusState.params);
+    statusBox.className = `status show ${statusState.kind}`.trim();
+  }
+
+  function clearStatus() {
+    statusState = null;
+    renderStatus();
+  }
+
+  function setPrimaryAction(key, params = {}) {
+    primaryAction = { key, params };
+    startButton.textContent = tr(key, params);
+  }
+
+  function applySurfaceMode(origin) {
+    const publicClaim = window.location.protocol === "https:";
+    const titleKey = publicClaim
+      ? "owner_auth.bootstrap.public_title"
+      : "owner_auth.bootstrap.local_title";
+    const title = t(titleKey);
+    document.title = `fuckipv6 · ${title}`;
+    pageTitle.textContent = title;
+    footer.textContent = tr(
+      publicClaim
+        ? "owner_auth.bootstrap.footer_public"
+        : "owner_auth.bootstrap.footer_local",
+      { origin: origin || window.origin },
     );
   }
 
+  function applyLanguage() {
+    locale = i18n.resolveLocale(languagePreference);
+    languageSelect.value = languagePreference;
+    i18n.applyDocument(document, locale);
+    applySurfaceMode(currentExpectedOrigin);
+    renderStatus();
+    startButton.textContent = tr(primaryAction.key, primaryAction.params);
+    if (confirmButton.disabled) {
+      confirmButton.textContent = tr("owner_auth.bootstrap.complete_button");
+    }
+  }
+
   function webAuthnIssue(expectedOrigin) {
-    if (!window.isSecureContext) return authCopy.secureContextRequirements;
-    if (!window.PublicKeyCredential || !navigator.credentials) return authCopy.passkeyUnsupported;
+    if (!window.isSecureContext) return t("owner_auth.issue.secure_context");
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      return t("owner_auth.issue.passkey_unsupported");
+    }
     if (expectedOrigin && window.origin !== expectedOrigin) {
-      return formatCopy(authCopy.originMismatchTemplate, { expected: expectedOrigin, actual: window.origin });
+      return tr("owner_auth.issue.origin_mismatch", {
+        expected: expectedOrigin,
+        actual: window.origin,
+      });
     }
     return "";
   }
 
-  function showStatus(message, kind = "") {
-    statusBox.textContent = message;
-    statusBox.className = `status show ${kind}`.trim();
-  }
-
-  function clearStatus() {
-    statusBox.textContent = "";
-    statusBox.className = "status";
-  }
-
   function base64urlToBuffer(value) {
     if (typeof value !== "string" || value.length === 0) {
-      throw new Error("WebAuthn challenge 缺少有效的 base64url 数据");
+      throw localizedError("owner_auth.request.invalid_challenge");
     }
     const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
     const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
@@ -85,7 +174,7 @@
   function decodeCreationOptions(challenge) {
     const options = challenge && challenge.publicKey;
     if (!options || typeof options !== "object") {
-      throw new Error("服务端返回的 Passkey 注册参数无效");
+      throw localizedError("owner_auth.request.invalid_creation_options");
     }
     const decoded = {
       ...options,
@@ -138,27 +227,17 @@
       try {
         payload = JSON.parse(text);
       } catch (_error) {
-        throw new Error(`服务端返回了无效响应（HTTP ${response.status}）`);
+        throw localizedError("owner_auth.request.invalid_json", { status: response.status });
       }
     }
     if (!response.ok) {
-      throw new Error((payload && payload.error) || `请求失败（HTTP ${response.status}）`);
+      throw localizedError("owner_auth.request.failed", { status: response.status }, payload);
     }
     return payload;
   }
 
-  function applySurfaceMode(origin) {
-    const publicClaim = window.location.protocol === "https:";
-    const title = publicClaim ? "公网所有者认领" : "本机所有者初始化";
-    document.title = `fuckipv6 · ${title}`;
-    pageTitle.textContent = title;
-    footer.textContent = publicClaim
-      ? `HTTPS 公网认领 · Origin ${origin} · 来源校验、限流与审计已启用`
-      : `本机回环初始化 · WebAuthn origin ${origin}`;
-  }
-
   async function verifyBootstrapSurface() {
-    applyAuthCopy();
+    applyLanguage();
     try {
       const status = await requestJson("/api/v1/auth/bootstrap", { method: "GET" });
       if (status.initialized) {
@@ -169,13 +248,13 @@
       applySurfaceMode(currentExpectedOrigin);
       const issue = webAuthnIssue(currentExpectedOrigin);
       if (issue) {
-        showStatus(issue, "error");
+        showStatusKey("owner_auth.issue.secure_context", "error");
         startButton.disabled = true;
         return false;
       }
       return true;
     } catch (error) {
-      showStatus(error && error.message ? error.message : "无法读取所有者初始化状态", "error");
+      showError(error, "owner_auth.bootstrap.status.read_failed");
       startButton.disabled = true;
       return false;
     }
@@ -184,74 +263,70 @@
   async function beginRegistration() {
     const code = codeInput.value.trim();
     if (code.length < 20) {
-      showStatus("请输入终端中完整的一次性初始化码。", "error");
+      showStatusKey("owner_auth.bootstrap.status.code_required", "error");
       codeInput.focus();
       return;
     }
     const issue = webAuthnIssue(currentExpectedOrigin);
     if (issue) {
-      showStatus(issue, "error");
+      showStatusKey("owner_auth.issue.secure_context", "error");
       return;
     }
 
     clearStatus();
     startButton.disabled = true;
-    startButton.textContent = "正在验证...";
+    setPrimaryAction("owner_auth.bootstrap.status.verifying");
     try {
       await requestJson("/api/v1/auth/bootstrap/verify", {
         method: "POST",
         body: JSON.stringify({ code }),
       });
-      startButton.textContent = "等待 Passkey 授权...";
+      setPrimaryAction("owner_auth.bootstrap.status.waiting_passkey");
       const challenge = await requestJson("/api/v1/auth/webauthn/registration/start", {
         method: "POST",
         body: JSON.stringify({ code }),
       });
       const credential = await navigator.credentials.create(decodeCreationOptions(challenge));
       if (!credential) {
-        throw new Error("Passkey 注册已取消");
+        throw localizedError("owner_auth.request.registration_cancelled");
       }
-      startButton.textContent = "正在完成注册...";
+      setPrimaryAction("owner_auth.bootstrap.status.finishing");
       const result = await requestJson("/api/v1/auth/webauthn/registration/finish", {
         method: "POST",
         body: JSON.stringify({ credential: encodeRegistrationCredential(credential) }),
       });
       if (!result || typeof result.recovery_code !== "string" || result.recovery_code.length < 20) {
-        throw new Error("服务端未返回有效恢复码");
+        throw localizedError("owner_auth.request.missing_recovery_code");
       }
       codeInput.value = "";
       currentRecoveryCode = result.recovery_code;
       recoveryCode.textContent = currentRecoveryCode;
       codeStep.classList.remove("active");
       recoveryStep.classList.add("active");
-      showStatus("Passkey 已注册。请先离线保存恢复码，再完成初始化。", "ok");
+      showStatusKey("owner_auth.bootstrap.status.registered", "ok");
       recoveryCode.focus();
     } catch (error) {
-      showStatus(error && error.message ? error.message : "Passkey 注册失败", "error");
+      showError(error, "owner_auth.bootstrap.status.registration_failed");
     } finally {
       startButton.disabled = Boolean(webAuthnIssue(currentExpectedOrigin));
-      startButton.textContent = "验证并注册 Passkey";
+      setPrimaryAction("owner_auth.bootstrap.verify_button");
     }
   }
 
   async function copyRecoveryCode() {
-    if (!currentRecoveryCode) {
-      return;
-    }
+    if (!currentRecoveryCode) return;
     try {
       await navigator.clipboard.writeText(currentRecoveryCode);
-      showStatus("恢复码已复制。请立即存入离线安全位置。", "ok");
+      showStatusKey("owner_auth.recovery.code_copied", "ok");
     } catch (_error) {
-      showStatus("浏览器拒绝剪贴板访问，请手动复制恢复码。", "warn");
+      showStatusKey("owner_auth.recovery.clipboard_denied", "warn");
     }
   }
 
   async function confirmRecovery() {
-    if (!savedCheckbox.checked || !currentRecoveryCode) {
-      return;
-    }
+    if (!savedCheckbox.checked || !currentRecoveryCode) return;
     confirmButton.disabled = true;
-    confirmButton.textContent = "正在提交...";
+    confirmButton.textContent = tr("owner_auth.bootstrap.status.submitting");
     try {
       await requestJson("/api/v1/auth/bootstrap/recovery-confirm", {
         method: "POST",
@@ -259,17 +334,21 @@
       });
       currentRecoveryCode = "";
       recoveryCode.textContent = "";
-      showStatus("所有者初始化完成，正在进入控制台...", "ok");
+      showStatusKey("owner_auth.bootstrap.status.complete", "ok");
       window.setTimeout(() => window.location.replace("/"), 400);
     } catch (error) {
-      showStatus(error && error.message ? error.message : "初始化提交失败", "error");
+      showError(error, "owner_auth.bootstrap.status.submit_failed");
       confirmButton.disabled = false;
-      confirmButton.textContent = "完成所有者初始化";
+      confirmButton.textContent = tr("owner_auth.bootstrap.complete_button");
     }
   }
 
+  languageSelect.addEventListener("change", () => {
+    languagePreference = languageSelect.value;
+    saveLanguagePreference(languagePreference);
+    applyLanguage();
+  });
   startButton.addEventListener("click", beginRegistration);
-  verifyBootstrapSurface();
   copyButton.addEventListener("click", copyRecoveryCode);
   savedCheckbox.addEventListener("change", () => {
     confirmButton.disabled = !savedCheckbox.checked;
@@ -281,4 +360,5 @@
       beginRegistration();
     }
   });
+  verifyBootstrapSurface();
 })();

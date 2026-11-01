@@ -1,14 +1,14 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>fuckipv6 · 所有者初始化</title>
+  <title>fuckipv6 · Owner setup</title>
   <style nonce="__CSP_NONCE__">
     :root{color-scheme:dark;--bg:#061018;--panel:#0c1c27;--panel-2:#102736;--line:#1b4356;--text:#d9eef7;--muted:#83a7b7;--accent:#38bdf8;--ok:#34d399;--bad:#fb7185;--warn:#fbbf24}
     *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 72% 0,#10374c 0,var(--bg) 44%);color:var(--text);font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .shell{min-height:100vh;display:grid;place-items:center;padding:28px}.panel{width:min(680px,100%);border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#0e202c,#091720);box-shadow:0 24px 80px #0008;overflow:hidden}
+    .topline{display:flex;justify-content:space-between;align-items:center;gap:16px}.language{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px}.language select{border:1px solid var(--line);border-radius:7px;background:#07131d;color:var(--text);padding:5px 7px;font:inherit}.shell{min-height:100vh;display:grid;place-items:center;padding:28px}.panel{width:min(680px,100%);border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#0e202c,#091720);box-shadow:0 24px 80px #0008;overflow:hidden}
     header{padding:26px 28px 20px;border-bottom:1px solid var(--line);background:linear-gradient(110deg,#0c2a3b,#0b1a24)}.brand{color:var(--accent);font-weight:800;letter-spacing:.11em}.title{font-size:25px;line-height:1.25;margin:13px 0 7px}.sub{color:var(--muted);margin:0;max-width:56ch}
     main{padding:25px 28px 29px}.step{display:none}.step.active{display:block}.step-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}.step-no{display:grid;place-items:center;width:27px;height:27px;border:1px solid #2589b4;border-radius:50%;color:var(--accent);font-weight:800}.step-title{font-size:16px;font-weight:800}.hint{color:var(--muted);margin:0 0 17px}
     label{display:block;color:var(--muted);font-size:11px;letter-spacing:.04em;margin-bottom:6px}.code,input{width:100%;border:1px solid var(--line);border-radius:10px;background:#06121b;color:var(--text);padding:12px;font:inherit;outline:none}.code:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px #38bdf822}
@@ -23,37 +23,37 @@
   <div class="shell">
     <section class="panel" aria-labelledby="page-title">
       <header>
-        <div class="brand">fuckipv6</div>
-        <h1 id="page-title" class="title">所有者初始化</h1>
-        <p id="bootstrap-description" class="sub">这个节点只属于一位所有者。请使用节点所有者可访问终端中显示的一次性初始化码注册 Passkey，并离线保存随后生成的恢复码。</p>
+        <div class="topline"><div class="brand">fuckipv6</div><label class="language"><span data-i18n="common.language">Language</span><select id="language-preference" data-i18n-aria-label="common.language"><option value="system" data-i18n="lang.system">System</option><option value="zh-CN" data-i18n="lang.zh_cn">简体中文</option><option value="en" data-i18n="lang.en">English</option></select></label></div>
+        <h1 id="page-title" class="title" data-i18n="owner_auth.bootstrap.local_title">Local owner setup</h1>
+        <p id="bootstrap-description" class="sub" data-i18n="owner_auth.bootstrap.description">This node has exactly one owner.</p>
       </header>
       <main>
         <section id="step-code" class="step active" aria-labelledby="code-title">
-          <div class="step-head"><span class="step-no">1</span><span id="code-title" class="step-title">验证一次性初始化码</span></div>
-          <p id="bootstrap-code-help" class="hint">初始化码只通过节点所有者可访问的终端显示，不会写入 URL、日志或磁盘明文。</p>
-          <label for="bootstrap-code">初始化码</label>
-          <input id="bootstrap-code" class="code" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴终端中的初始化码">
-          <div class="actions"><button id="start-passkey" type="button">验证并注册 Passkey</button></div>
+          <div class="step-head"><span class="step-no">1</span><span id="code-title" class="step-title" data-i18n="owner_auth.bootstrap.verify_title">Verify the one-time bootstrap code</span></div>
+          <p id="bootstrap-code-help" class="hint" data-i18n="owner_auth.bootstrap.code_help">The bootstrap code is shown only in an owner-accessible terminal.</p>
+          <label for="bootstrap-code" data-i18n="owner_auth.bootstrap.code_label">Bootstrap code</label>
+          <input id="bootstrap-code" class="code" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" data-i18n-placeholder="owner_auth.bootstrap.code_placeholder" placeholder="Paste the bootstrap code from the terminal">
+          <div class="actions"><button id="start-passkey" type="button" data-i18n="owner_auth.bootstrap.verify_button">Verify and register passkey</button></div>
         </section>
 
         <section id="step-recovery" class="step" aria-labelledby="recovery-title">
-          <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title">离线保存恢复码</span></div>
-          <div id="recovery-warning" class="warning">恢复码只显示这一次。全部 Passkey 丢失时，它是本机恢复的唯一凭据。</div>
-          <label for="recovery-code">恢复码</label>
+          <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title" data-i18n="owner_auth.bootstrap.recovery_title">Save the recovery code offline</span></div>
+          <div id="recovery-warning" class="warning" data-i18n="owner_auth.recovery.warning">This recovery code is shown only once.</div>
+          <label for="recovery-code" data-i18n="owner_auth.bootstrap.recovery_label">Recovery code</label>
           <div class="recovery">
             <code id="recovery-code" class="code" tabindex="0"></code>
-            <button id="copy-recovery" class="secondary" type="button">复制</button>
+            <button id="copy-recovery" class="secondary" type="button" data-i18n="common.copy">Copy</button>
           </div>
-          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox"><span id="recovery-confirmation">我已将恢复码保存到离线安全位置，并确认无法再次查看。</span></label>
-          <div class="actions"><button id="confirm-recovery" type="button" disabled>完成所有者初始化</button></div>
+          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox"><span id="recovery-confirmation" data-i18n="owner_auth.recovery.confirmation">I saved the recovery code offline.</span></label>
+          <div class="actions"><button id="confirm-recovery" type="button" disabled data-i18n="owner_auth.bootstrap.complete_button">Complete owner setup</button></div>
         </section>
 
         <div id="status" class="status" role="status" aria-live="polite"></div>
       </main>
-      <footer><span class="dot"></span><span id="bootstrap-footer">初始化 API 受来源校验、限流与安全审计保护 · WebAuthn origin 由服务端校验</span></footer>
+      <footer><span class="dot"></span><span id="bootstrap-footer">WebAuthn origin is verified by the server.</span></footer>
     </section>
   </div>
-  <script src="/assets/owner_auth_copy.js"></script>
+  <script src="/assets/i18n.js"></script>
   <script src="/assets/owner_bootstrap.js"></script>
 </body>
 </html>

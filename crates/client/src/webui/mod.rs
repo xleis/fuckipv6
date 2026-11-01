@@ -32,6 +32,7 @@ pub use controller::{
     UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
 use fuckipv6_common::domain::PasskeyCredentialId;
+use fuckipv6_common::i18n::{LanguagePreference, Locale};
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
 use fuckipv6_coordinator::webui::{
     BlacklistActionRequest, BlacklistActionResponse, NetworkConfigApiResponse, NetworkConfigDto,
@@ -116,6 +117,7 @@ fn create_app_web_router_with_auth_node_owner_and_public_claim(
         owner_security,
         public_claim,
         Arc::new(MutationRateLimiter::default()),
+        None,
     )
 }
 
@@ -126,6 +128,7 @@ fn create_app_web_router_with_mutation_limiter(
     owner_security: Option<Arc<OwnerSecurityService>>,
     public_claim: Option<Arc<PublicClaimConfig>>,
     mutation_limiter: Arc<MutationRateLimiter>,
+    language_config: Option<ConfigManager>,
 ) -> Router {
     let auth = Arc::new(auth);
     let direct_tls = public_claim
@@ -160,6 +163,15 @@ fn create_app_web_router_with_mutation_limiter(
         Some(adapter) => protected.merge(adapter.router()),
         None => protected,
     };
+    let protected = match language_config {
+        Some(config) => protected
+            .route(
+                "/api/v1/settings/language",
+                get(handle_get_language_settings).put(handle_put_language_settings),
+            )
+            .layer(Extension(config)),
+        None => protected,
+    };
     let protected = protected.route_layer(middleware::from_fn_with_state(
         ApiAuthState {
             auth: auth.clone(),
@@ -179,6 +191,7 @@ fn create_app_web_router_with_mutation_limiter(
     let mut app = Router::new()
         .route("/", get(handle_index))
         .route("/assets/webui.css", get(handle_webui_css))
+        .route("/assets/i18n.js", get(handle_i18n_js))
         .route("/assets/ui-components.js", get(handle_ui_components_js))
         .route("/assets/node_ui.js", get(handle_node_ui_js))
         .route("/assets/owner_bootstrap.js", get(handle_owner_bootstrap_js))
@@ -262,12 +275,14 @@ pub async fn start_app_webui_with_node(
             public_claim.as_deref(),
         )?;
     }
-    let app = create_app_web_router_with_auth_node_owner_and_public_claim(
+    let app = create_app_web_router_with_mutation_limiter(
         controller.clone(),
         config.auth().clone(),
         Some(node_adapter),
         Some(Arc::new(owner_security)),
         public_claim.clone(),
+        Arc::new(MutationRateLimiter::default()),
+        Some(owner_config),
     );
 
     let displayed_url = public_claim
@@ -859,6 +874,65 @@ fn with_no_store(mut response: Response) -> Response {
     response
 }
 
+#[derive(Debug, Serialize)]
+struct LanguageSettingsResponse {
+    preference: LanguagePreference,
+    supported_preferences: [LanguagePreference; 3],
+    supported_locales: [Locale; 2],
+}
+
+impl LanguageSettingsResponse {
+    fn new(preference: LanguagePreference) -> Self {
+        Self {
+            preference,
+            supported_preferences: LanguagePreference::ALL,
+            supported_locales: Locale::ALL,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LanguageSettingsRequest {
+    preference: LanguagePreference,
+}
+
+async fn handle_get_language_settings(Extension(config): Extension<ConfigManager>) -> Response {
+    match config.node_language_preference() {
+        Ok(preference) => Json(LanguageSettingsResponse::new(preference)).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "读取节点语言偏好失败");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "code": "language_persistence_failed",
+                    "message_key": "error.language_persistence_failed",
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_put_language_settings(
+    Extension(config): Extension<ConfigManager>,
+    Json(request): Json<LanguageSettingsRequest>,
+) -> Response {
+    match config.set_node_language_preference(request.preference) {
+        Ok(()) => Json(LanguageSettingsResponse::new(request.preference)).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "保存节点语言偏好失败");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "code": "language_persistence_failed",
+                    "message_key": "error.language_persistence_failed",
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn handle_node_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -890,6 +964,16 @@ async fn handle_webui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         fuckipv6_common::ui_components::complete_webui_css(),
+    )
+}
+
+async fn handle_i18n_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        fuckipv6_common::i18n_browser::browser_runtime_script(),
     )
 }
 
@@ -6588,6 +6672,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn language_settings_require_auth_and_persist_node_preference() -> anyhow::Result<()> {
+        let config_dir = unique_test_dir("language-settings");
+        let config = ConfigManager::new_for_dir(config_dir.clone())?;
+        let auth = test_auth();
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("language settings token");
+        let app = create_app_web_router_with_mutation_limiter(
+            Arc::new(AppController::new()),
+            auth,
+            None,
+            None,
+            None,
+            Arc::new(MutationRateLimiter::default()),
+            Some(config.clone()),
+        );
+        let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(request_from(
+                json_request("GET", "/api/v1/settings/language", ""),
+                source,
+            ))
+            .await
+            .expect("unauthorized language settings response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let initial = app
+            .clone()
+            .oneshot(request_from(
+                bearer_request("GET", "/api/v1/settings/language", &token, ""),
+                source,
+            ))
+            .await
+            .expect("initial language settings response");
+        assert_eq!(initial.status(), StatusCode::OK);
+        let initial_body = to_bytes(initial.into_body(), usize::MAX).await?;
+        let initial_json: serde_json::Value = serde_json::from_slice(&initial_body)?;
+        assert_eq!(initial_json["preference"], "system");
+        assert_eq!(
+            initial_json["supported_preferences"],
+            serde_json::json!(["system", "zh-CN", "en"])
+        );
+        assert_eq!(
+            initial_json["supported_locales"],
+            serde_json::json!(["zh-CN", "en"])
+        );
+
+        let updated = app
+            .oneshot(request_from(
+                bearer_request(
+                    "PUT",
+                    "/api/v1/settings/language",
+                    &token,
+                    r#"{"preference":"zh-CN"}"#,
+                ),
+                source,
+            ))
+            .await
+            .expect("updated language settings response");
+        assert_eq!(updated.status(), StatusCode::OK);
+        let updated_body = to_bytes(updated.into_body(), usize::MAX).await?;
+        let updated_json: serde_json::Value = serde_json::from_slice(&updated_body)?;
+        assert_eq!(updated_json["preference"], "zh-CN");
+        assert_eq!(config.node_language_preference()?, LanguagePreference::ZhCn);
+        let reopened = ConfigManager::new_for_dir(config_dir.clone())?;
+        assert_eq!(
+            reopened.node_language_preference()?,
+            LanguagePreference::ZhCn
+        );
+
+        let _ = std::fs::remove_dir_all(config_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn authenticated_command_rate_limit_is_per_source_and_independent_from_login() {
         let auth = test_auth();
         let token = auth
@@ -6607,6 +6768,7 @@ mod tests {
             None,
             None,
             limiter,
+            None,
         );
         let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
         let command_body = |request_id: u64| {

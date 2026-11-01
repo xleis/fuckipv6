@@ -8,6 +8,7 @@ pub mod design_tokens;
 pub mod dht;
 pub mod domain;
 pub mod i18n;
+pub mod i18n_browser;
 pub mod logging;
 pub mod onion;
 pub mod protocol;

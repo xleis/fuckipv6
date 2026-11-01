@@ -49,7 +49,7 @@
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
-| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、Passkey 注册、恢复码确认、原子 owner 提交及失败关闭已完成；公网认领、HTTPS、完整 Passkey 生命周期和恢复仍待完成 |
+| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、Passkey 注册、恢复码确认、原子 owner 提交、限流和失败关闭已完成；直接 HTTPS、完整 Passkey 生命周期和本地恢复仍待完成 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
@@ -476,14 +476,28 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 真实浏览器硬件 Passkey、平台兼容性和公网 HTTPS 认领不属于 W3-01 的本机自动化验收证据，分别由 W3-04 与 W3-02/W3-03 验证。
 
-### W3-02 公网首次认领 `[ ]`
+### W3-02 公网首次认领 `[x]`
 
-- [ ] 有效 HTTPS 才开放公网认领；
-- [ ] 首个访问者输入一次性初始化码；
-- [ ] 并发认领只有一个事务成功；
-- [ ] 成功后永久关闭认领入口；
-- [ ] 失败限流和审计；
-- [ ] 初始化码不进入 URL/日志。
+- [x] 有效 HTTPS 才开放公网认领；
+- [x] 首个访问者输入一次性初始化码；
+- [x] 并发认领只有一个事务成功；
+- [x] 成功后永久关闭认领入口；
+- [x] 失败限流和审计；
+- [x] 初始化码不进入 URL/日志。
+
+完成证据（实现提交 `df23a79a8162117070548269cce8d41874b5a0bd`）：
+
+- 公网认领入口仅在显式配置的可信 HTTPS 反向代理后开放，并校验协议、来源和单一转发客户端地址；直接 HTTP 或不受信代理不会解锁公网写路径；
+- `cargo test -p fuckipv6-client --no-default-features owner_security::`：15 passed；
+- `cargo test -p fuckipv6-client --no-default-features webui::tests::owner_`：6 passed；
+- `cargo test -p fuckipv6-client --no-default-features webui::tests::public_owner`：2 passed；
+- 公网/local 并发认领测试验证只有一个事务成功；成功后入口返回 `410 permanently_closed`，不能再次认领；
+- 连续 5 次错误初始化码后第 6 次返回 `429`，审计分别记录 `invalid_code` 和 `rate_limited`；
+- 审计文件使用 `0600` 权限和 append-only 语义，每行同步落盘；审计只记录固定请求元数据、最终状态和结果，不记录 body、headers、初始化码、恢复码或 Passkey；
+- 初始化页面只在请求 body 中提交初始化码，不把初始化码放入 URL；审计与日志脱敏测试验证秘密不落盘；
+- 审计写入失败时控制面返回 `500` 并失败关闭。
+
+真实公网 TLS、浏览器硬件 Passkey 与平台兼容性仍需 W3-03/W3-04 的实机证据，本项完成声明不代替上述验收。
 
 ### W3-03 HTTPS 与反向代理 `[ ]`
 

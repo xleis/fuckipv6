@@ -797,10 +797,8 @@ pub(crate) async fn run_local_recovery() -> Result<()> {
     let app = recovery_router(recovery.clone());
 
     println!("本机所有者恢复仅监听 {url}");
-    println!("请在浏览器中完成新 Passkey 注册并保存新的恢复码。关闭终端不会更改现有凭据。");
-    if crate::ui::DisplayEnvironment::detect().has_desktop() {
-        crate::ui::launch_webui_window(&url);
-    }
+    println!("请在浏览器中打开上述地址，完成新 Passkey 注册并保存新的恢复码。");
+    println!("该恢复流程不会自动启动浏览器；关闭终端不会更改现有凭据。");
 
     axum::serve(
         listener,

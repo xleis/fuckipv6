@@ -2107,24 +2107,6 @@ fn project_identity(
                 t(locale, "gpui.empty.identity_config"),
                 config_rows,
             ),
-            section(
-                t(locale, "owner_auth.identity.section_title"),
-                t(locale, "owner_auth.identity.section_empty"),
-                vec![
-                    row(
-                        t(locale, "owner_auth.local_identity.title"),
-                        t(locale, "owner_auth.local_identity.detail"),
-                    ),
-                    row(
-                        t(locale, "owner_auth.web_identity.title"),
-                        t(locale, "owner_auth.web_identity.detail"),
-                    ),
-                    row(
-                        t(locale, "owner_auth.recovery_row.title"),
-                        t(locale, "owner_auth.passkey_recovery.help"),
-                    ),
-                ],
-            ),
         ],
     )
 }
@@ -2308,51 +2290,6 @@ fn advanced_setting_groups(snapshot: &NodeSnapshot, locale: Locale) -> Vec<Advan
             ],
         },
         AdvancedSettingGroup {
-            title: t(locale, "settings.section.web_security").to_string(),
-            rows: vec![
-                advanced_setting_row(
-                    locale,
-                    "webui-listener",
-                    "settings.row.webui_listener",
-                    t(locale, "settings.advanced.webui_listener.detail"),
-                    AdvancedSettingState::Managed,
-                    "webui listen bind origin proxy public exposure",
-                ),
-                advanced_setting_row(
-                    locale,
-                    "webui-session",
-                    "settings.row.webui_session",
-                    t(locale, "settings.advanced.webui_session.detail"),
-                    AdvancedSettingState::ReadOnly,
-                    "session cookie passkey expiry httponly samesite login",
-                ),
-                advanced_setting_row(
-                    locale,
-                    "webui-rate-limit",
-                    "settings.row.webui_rate_limit",
-                    t(locale, "settings.advanced.webui_rate_limit.detail"),
-                    AdvancedSettingState::ReadOnly,
-                    "rate limit login mutation brute force",
-                ),
-                advanced_setting_row(
-                    locale,
-                    "hsts",
-                    "settings.row.hsts",
-                    t(locale, "settings.advanced.hsts.detail"),
-                    AdvancedSettingState::Managed,
-                    "hsts https certificate tls header security",
-                ),
-                advanced_setting_row(
-                    locale,
-                    "trusted-proxy",
-                    "settings.row.trusted_proxy",
-                    t(locale, "settings.advanced.trusted_proxy.detail"),
-                    AdvancedSettingState::Managed,
-                    "trusted proxy forwarded origin ip",
-                ),
-            ],
-        },
-        AdvancedSettingGroup {
             title: t(locale, "settings.section.observability_maintenance").to_string(),
             rows: vec![
                 advanced_setting_row(
@@ -2449,14 +2386,6 @@ fn project_settings(
                 granted_permissions
             },
         ),
-        row(
-            t(locale, "settings.row.web_authentication"),
-            t(locale, "settings.web_session.detail"),
-        ),
-        row(
-            t(locale, "settings.row.owner_recovery"),
-            t(locale, "settings.owner_recovery.detail"),
-        ),
     ];
     let remote_rows = vec![
         row(
@@ -2474,14 +2403,6 @@ fn project_settings(
                 .as_ref()
                 .map(|mode| t(locale, display_environment_key(mode.display)))
                 .unwrap_or_else(|| t(locale, "common.unknown")),
-        ),
-        row(
-            t(locale, "settings.row.webui_configuration"),
-            t(locale, "settings.webui_configuration.detail"),
-        ),
-        row(
-            t(locale, "settings.row.session_security"),
-            t(locale, "settings.web_session.detail"),
         ),
     ];
     let mut service_rows = snapshot
@@ -3056,7 +2977,6 @@ mod tests {
                 t(Locale::ZhCn, "settings.section.network_listeners"),
                 t(Locale::ZhCn, "settings.section.dns_privacy"),
                 t(Locale::ZhCn, "settings.section.transport_limits"),
-                t(Locale::ZhCn, "settings.section.web_security"),
                 t(Locale::ZhCn, "settings.section.observability_maintenance"),
             ]
         );
@@ -3124,17 +3044,37 @@ mod tests {
                     .contains(t(Locale::ZhCn, "settings.advanced.state.managed"))
         }));
         assert!(model.sections[8].rows.iter().any(|row| {
-            row.title == t(Locale::ZhCn, "settings.row.webui_session")
-                && row
-                    .detail
-                    .contains(t(Locale::ZhCn, "settings.advanced.state.read_only"))
-        }));
-        assert!(model.sections[9].rows.iter().any(|row| {
             row.title == t(Locale::ZhCn, "settings.row.metrics")
                 && row
                     .detail
                     .contains(t(Locale::ZhCn, "settings.advanced.state.unsupported"))
         }));
+        let rendered = model
+            .sections
+            .iter()
+            .flat_map(|section| {
+                std::iter::once(section.title.as_str()).chain(
+                    section
+                        .rows
+                        .iter()
+                        .flat_map(|row| [row.title.as_str(), row.detail.as_str()]),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for removed in [
+            "settings.section.web_security",
+            "settings.row.web_authentication",
+            "settings.row.owner_recovery",
+            "settings.row.webui_configuration",
+            "settings.row.session_security",
+            "settings.row.webui_listener",
+        ] {
+            assert!(
+                !rendered.contains(t(Locale::ZhCn, removed)),
+                "desktop settings must not expose WebUI-only authentication surface: {removed}"
+            );
+        }
     }
 
     #[test]
@@ -3277,7 +3217,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_explains_local_gpui_and_webui_authentication_boundaries() {
+    fn desktop_identity_surface_trusts_the_os_session_without_web_authentication() {
         let manifest = node_ui_manifest();
         let page = manifest
             .pages
@@ -3286,25 +3226,33 @@ mod tests {
             .expect("identity page");
         let model = build_page_model_for_page(page, &populated_snapshot(), Locale::ZhCn)
             .expect("identity model");
-        let section = model
+        assert_eq!(model.sections.len(), 2);
+        let rendered = model
             .sections
             .iter()
-            .find(|section| section.title == t(Locale::ZhCn, "owner_auth.identity.section_title"))
-            .expect("authentication boundary section");
-        assert_eq!(section.rows.len(), 3);
-        assert_eq!(
-            section.rows[0].detail,
-            t(Locale::ZhCn, "owner_auth.local_identity.detail")
-        );
-        assert_eq!(
-            section.rows[1].detail,
-            t(Locale::ZhCn, "owner_auth.web_identity.detail")
-        );
-        assert!(section.rows[2].detail.contains("recover-owner"));
-        assert!(!section
-            .rows
-            .iter()
-            .any(|row| row.detail.contains("已登录 WebUI")));
+            .flat_map(|section| {
+                std::iter::once(section.title.as_str()).chain(
+                    section
+                        .rows
+                        .iter()
+                        .flat_map(|row| [row.title.as_str(), row.detail.as_str()]),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for removed in [
+            "owner_auth.identity.section_title",
+            "owner_auth.local_identity.title",
+            "owner_auth.web_identity.title",
+            "owner_auth.recovery_row.title",
+            "owner_auth.passkey_recovery.help",
+        ] {
+            assert!(
+                !rendered.contains(t(Locale::ZhCn, removed)),
+                "desktop identity must not expose WebUI-only authentication surface: {removed}"
+            );
+        }
+        assert!(!rendered.contains("recover-owner"));
     }
 
     #[test]

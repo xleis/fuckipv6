@@ -502,12 +502,33 @@ async fn require_api_auth(
         return next.run(request).await;
     }
 
-    let owner_authenticated = match (&state.owner, owner_session_cookie(request.headers())) {
-        (Some(owner), Some(token)) => owner
+    // Production WebUI routers always carry an owner security service. Once it
+    // exists, every protected control-plane request must present a valid Local
+    // owner session, including requests received over loopback. There is no
+    // anonymous loopback, legacy bearer, or trusted-network shortcut.
+    if let Some(owner) = &state.owner {
+        let Some(token) = owner_session_cookie(request.headers()) else {
+            return unauthorized_response("控制面认证失败：请使用节点所有者 Passkey 登录");
+        };
+        if owner
             .authenticate_session(OwnerBootstrapChannel::Local, token)
-            .is_ok(),
-        _ => false,
-    };
+            .is_err()
+        {
+            return unauthorized_response("节点所有者会话无效或已过期");
+        }
+        if is_mutation && !local_mutation_has_same_origin(&state, &request) {
+            return forbidden_response("拒绝跨站状态变更请求：Origin 或 Sec-Fetch-Site 校验失败");
+        }
+        if is_mutation {
+            let source_ip = connect_ip.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            if let Err(retry_after) = state.mutation_limiter.check(source_ip) {
+                return mutation_rate_limited_response(retry_after);
+            }
+        }
+        attach_owner_command_context(&state, &mut request, "webui_local_owner").await;
+        return next.run(request).await;
+    }
+
     // Browser WebSocket clients authenticate with the same-origin owner cookie
     // checked above. Never accept credentials in URL query strings because they
     // leak into access logs, browser history, and proxy traces.
@@ -516,10 +537,8 @@ async fn require_api_auth(
     let bearer_authenticated = state.auth.is_required()
         && bearer_token.is_some_and(|token| state.auth.verify(token).is_ok());
 
-    if state.auth.is_required() && !owner_authenticated && !bearer_authenticated {
-        return unauthorized_response(
-            "控制面认证失败：请使用 Passkey 登录或通过 /api/auth/login 获取 Bearer Token",
-        );
+    if state.auth.is_required() && !bearer_authenticated {
+        return unauthorized_response("控制面认证失败：请通过 /api/auth/login 获取 Bearer Token");
     }
 
     if is_mutation && !bearer_authenticated && !local_mutation_has_same_origin(&state, &request) {
@@ -533,9 +552,7 @@ async fn require_api_auth(
         }
     }
 
-    let source = if owner_authenticated {
-        "webui_local_owner"
-    } else if bearer_authenticated {
+    let source = if bearer_authenticated {
         "webui_bearer_owner"
     } else {
         "webui_loopback_owner"
@@ -4145,6 +4162,93 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let payload = response_json(response).await;
         assert_eq!(payload["auth_required"], false);
+    }
+
+    #[tokio::test]
+    async fn owner_router_requires_a_local_session_even_over_loopback() {
+        let fixture = owner_app_fixture(8080);
+        let anonymous = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .expect("anonymous status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("anonymous status response");
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        initialize_owner(&fixture);
+        let unauthenticated = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .expect("unauthenticated status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("unauthenticated status response");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_cookie = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/status")
+                    .header(header::COOKIE, format!("{OWNER_SESSION_COOKIE}=invalid"))
+                    .body(Body::empty())
+                    .expect("invalid-cookie status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("invalid-cookie status response");
+        assert_eq!(invalid_cookie.status(), StatusCode::UNAUTHORIZED);
+
+        let bearer_without_owner_cookie = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/status")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("bearer-without-owner-cookie status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("bearer-without-owner-cookie status response");
+        assert_eq!(
+            bearer_without_owner_cookie.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let issued = fixture
+            .service
+            .issue_session_for_test(OwnerBootstrapChannel::Local)
+            .expect("owner local session");
+        let cookie =
+            owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local);
+        let authenticated = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/status")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("authenticated status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("authenticated status response");
+        assert_eq!(authenticated.status(), StatusCode::OK);
     }
 
     #[tokio::test]

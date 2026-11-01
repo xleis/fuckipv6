@@ -14,7 +14,7 @@
 
 角色属于“节点在某个网络中的成员状态”，不属于二进制类型、系统用户或权限等级。
 
-桌面环境可运行顶层 `fuckipv6 --gpui` 启动真实 GPUI 原生外壳，无桌面环境使用 `--headless` WebUI。GPUI 已接通共享 manifest、状态和命令总线，并完成 11 页真实快照投影与 manifest 动作接线；完整对等测试、IME/无障碍和跨平台实机仍待完成；`--webui` 仍是浏览器托管路径，不能与 GPUI 混称。
+桌面环境只允许顶层 `fuckipv6 --gpui` 启动真实 GPUI 原生外壳，无桌面环境才允许 `--headless`/`--webui`。桌面会话中的 `--headless` 与 `--webui` 会被拒绝；GPUI 不可用时进程失败关闭，不能回退到 WebUI。GPUI 信任操作系统登录用户，不提供应用内登录、Passkey 会话或 WebUI 恢复入口；这些认证能力只属于可公网开放的 WebUI，且 WebUI 的受控 API 无论来自公网还是回环都要求所有者会话。GPUI 已接通共享 manifest、状态和命令总线，并完成 11 页真实快照投影与 manifest 动作接线；完整对等测试、IME/无障碍和跨平台实机仍待完成。
 
 ## 目录
 
@@ -145,8 +145,9 @@ sudo fuckipv6 host \
 | `--port 6666` | WebSocket 信令监听端口 |
 | `--relay-port 6667` | QUIC 中继 UDP 端口 |
 | `--external-host` | 写入邀请票据、其他节点可达的域名或地址 |
-| `--headless` | 使用 WebUI，不尝试桌面界面 |
-| `--gpui` | 在支持的桌面显示环境中启动真实 GPUI 原生外壳 |
+| `--headless` | 仅在无桌面环境使用 WebUI；桌面会话中拒绝启动 |
+| `--webui` | 仅在无桌面环境使用浏览器托管的 WebUI；桌面会话中拒绝启动 |
+| `--gpui` | 在支持的桌面显示环境中启动真实 GPUI 原生外壳；不启动 WebUI |
 | `--webui-port 8080` | 本地 WebUI 监听端口 |
 
 当前 `host` 默认让本节点自动加入所创建网络。CLI 尚不能通过 `--auto-connect=false` 关闭这一行为；需要纯网络服务角色时，应等待运行时监督器完成该配置语义，不要把当前限制描述成最终设计。
@@ -213,7 +214,7 @@ fuckipv6 leave home
 
 ## 运行 WebUI
 
-headless 节点默认只在本机回环地址提供 WebUI：
+只有无桌面节点会启动 WebUI；桌面节点必须使用 GPUI。headless WebUI 默认只在本机回环地址监听。完成所有者初始化后，回环请求与公网请求都要求有效的节点所有者会话，不存在匿名回环捷径。WebUI 地址：
 
 ```text
 http://127.0.0.1:8080
@@ -283,7 +284,7 @@ export FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 
 本地 IPC 默认监听 `127.0.0.1:6668`，可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。由于 IPC 尚无认证握手，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 只表示显式确认危险意图，非回环地址仍会拒绝启动；远程操作请使用 SSH 隧道。
 
-当前 WebUI 是功能较完整的无头界面。GPUI 已实现真实原生外壳、11 页真实快照投影和 manifest 动作接线，并消费同一命令和状态契约；完整交互、IME/无障碍、跨平台实机与自动对等测试仍未完成。
+当前 WebUI 是功能较完整的无头界面，也是唯一使用应用内所有权认证与 Passkey 的产品表面。GPUI 已实现真实原生外壳、11 页真实快照投影和 manifest 动作接线，并消费同一命令和状态契约；GPUI 不启动 WebUI，也不包含应用内登录/Passkey/恢复入口，而是信任操作系统登录会话。完整交互、IME/无障碍、跨平台实机与自动对等测试仍未完成。
 
 ---
 

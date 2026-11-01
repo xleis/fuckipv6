@@ -1022,11 +1022,11 @@ mod tests {
         let resolution = crate::ui::resolve_ui_mode(
             crate::ui::UiModeRequest::WebUi,
             crate::ui::UiCapabilities {
-                display: crate::ui::DisplayEnvironment::LinuxWayland,
+                display: crate::ui::DisplayEnvironment::Headless,
                 gpui_available: false,
             },
         )
-        .expect("desktop WebUI should resolve");
+        .expect("headless WebUI should resolve");
         let state = NodeStateStore::with_events_identity_and_ui(
             NodeEventBus::default(),
             None,

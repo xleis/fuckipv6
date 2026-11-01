@@ -4,10 +4,9 @@ use std::fmt;
 
 /// The actual control surface selected for this node process.
 ///
-/// `WebUi` is the browser-hosted control plane. It remains available on
-/// headless hosts as a server-only surface; the display environment only
-/// decides whether a browser window can also be opened. `WebUi` must never be
-/// represented as the native `Gpui` surface.
+/// `WebUi` is the browser-hosted control plane for headless hosts. A process
+/// with a desktop session must use `Gpui`; it must not expose the WebUI as a
+/// second desktop surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiMode {
@@ -29,10 +28,9 @@ impl UiMode {
         matches!(self, Self::WebUi)
     }
 
-    /// Whether this mode can own a desktop window when a display is available.
-    /// A WebUI server without a display is still valid and useful.
+    /// Whether this mode owns a native desktop window.
     pub fn is_desktop_surface(self) -> bool {
-        matches!(self, Self::Gpui | Self::WebUi)
+        matches!(self, Self::Gpui)
     }
 
     /// Compatibility name retained for existing adapters. Callers should use
@@ -68,19 +66,6 @@ impl DisplayEnvironment {
     }
 
     fn detect_with(mut get_var: impl FnMut(&str) -> Option<String>) -> Self {
-        let enabled = |value: Option<String>| {
-            value
-                .map(|value| {
-                    let value = value.trim();
-                    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-                })
-                .unwrap_or(false)
-        };
-
-        if enabled(get_var("FUCKIPV6_HEADLESS")) {
-            return Self::Headless;
-        }
-
         #[cfg(target_os = "linux")]
         {
             if get_var("WAYLAND_DISPLAY")
@@ -186,6 +171,8 @@ pub enum UiModeError {
     ConflictingFlags,
     GpuiUnavailable,
     DisplayUnavailable,
+    WebUiRequiresHeadless,
+    HeadlessRequiresNoDesktop,
 }
 
 impl fmt::Display for UiModeError {
@@ -200,6 +187,12 @@ impl fmt::Display for UiModeError {
             Self::DisplayUnavailable => {
                 formatter.write_str("the requested desktop UI has no display environment")
             }
+            Self::WebUiRequiresHeadless => formatter.write_str(
+                "WebUI is only available without a desktop session; use GPUI on desktop hosts",
+            ),
+            Self::HeadlessRequiresNoDesktop => formatter.write_str(
+                "headless node control is only available without a desktop session; use GPUI on desktop hosts",
+            ),
         }
     }
 }
@@ -213,8 +206,9 @@ pub fn request_from_legacy_flags(
     match (cli_headless, cli_gui) {
         (true, true) => Err(UiModeError::ConflictingFlags),
         (true, false) => Ok(UiModeRequest::Headless),
-        // The legacy `--gui` flag launches the browser-hosted surface.
-        (false, true) => Ok(UiModeRequest::WebUi),
+        // The legacy `--gui` name means a desktop GUI, never the browser-hosted
+        // WebUI that is reserved for headless hosts.
+        (false, true) => Ok(UiModeRequest::Gpui),
         (false, false) => Ok(UiModeRequest::Auto),
     }
 }
@@ -224,20 +218,32 @@ pub fn resolve_ui_mode(
     capabilities: UiCapabilities,
 ) -> Result<UiModeResolution, UiModeError> {
     let effective = match requested {
-        UiModeRequest::Headless => UiMode::Headless,
+        // Browser-hosted and explicitly headless control are allowed only on a
+        // host without a desktop session. A desktop host always uses GPUI.
+        UiModeRequest::WebUi if capabilities.display.has_desktop() => {
+            return Err(UiModeError::WebUiRequiresHeadless);
+        }
+        UiModeRequest::Headless if capabilities.display.has_desktop() => {
+            return Err(UiModeError::HeadlessRequiresNoDesktop);
+        }
+        UiModeRequest::Auto | UiModeRequest::Gpui if capabilities.display.has_desktop() => {
+            if !capabilities.gpui_available {
+                return Err(UiModeError::GpuiUnavailable);
+            }
+            UiMode::Gpui
+        }
+        UiModeRequest::Auto => UiMode::Headless,
         UiModeRequest::WebUi => UiMode::WebUi,
-        UiModeRequest::Gpui if !capabilities.gpui_available => {
-            return Err(UiModeError::GpuiUnavailable);
+        UiModeRequest::Headless => UiMode::Headless,
+        UiModeRequest::Gpui => {
+            if !capabilities.display.has_desktop() {
+                return Err(UiModeError::DisplayUnavailable);
+            }
+            if !capabilities.gpui_available {
+                return Err(UiModeError::GpuiUnavailable);
+            }
+            UiMode::Gpui
         }
-        UiModeRequest::Gpui if !capabilities.display.has_desktop() => {
-            return Err(UiModeError::DisplayUnavailable);
-        }
-        UiModeRequest::Gpui => UiMode::Gpui,
-        // The top-level runtime serves WebUI in headless mode, but must not
-        // select a desktop surface or launch a browser without a display.
-        UiModeRequest::Auto if !capabilities.display.has_desktop() => UiMode::Headless,
-        UiModeRequest::Auto if capabilities.gpui_available => UiMode::Gpui,
-        UiModeRequest::Auto => UiMode::WebUi,
     };
 
     Ok(UiModeResolution {
@@ -254,15 +260,38 @@ pub fn resolve_legacy_ui_mode(
     cli_headless: bool,
     cli_gui: bool,
 ) -> Result<UiModeResolution, UiModeError> {
-    let mut requested = request_from_legacy_flags(cli_headless, cli_gui)?;
-    if requested == UiModeRequest::Auto {
-        if environment_enabled("FUCKIPV6_HEADLESS") {
-            requested = UiModeRequest::Headless;
-        } else if environment_enabled("FUCKIPV6_GUI") {
-            requested = UiModeRequest::WebUi;
-        }
-    }
+    let requested = apply_environment_request(request_from_legacy_flags(cli_headless, cli_gui)?)?;
     resolve_ui_mode(requested, UiCapabilities::detect())
+}
+
+/// Apply legacy process-level UI overrides without changing the detected
+/// display environment. An override may request a mode, but it can never make
+/// a desktop host look headless or turn that host into a WebUI process.
+pub fn apply_environment_request(requested: UiModeRequest) -> Result<UiModeRequest, UiModeError> {
+    if requested != UiModeRequest::Auto {
+        if environment_enabled("FUCKIPV6_HEADLESS") || environment_enabled("FUCKIPV6_GUI") {
+            return Err(UiModeError::ConflictingFlags);
+        }
+        return Ok(requested);
+    }
+
+    let headless = environment_enabled("FUCKIPV6_HEADLESS");
+    let gpui = environment_enabled("FUCKIPV6_GUI");
+    match (headless, gpui) {
+        (true, true) => Err(UiModeError::ConflictingFlags),
+        (true, false) => Ok(UiModeRequest::Headless),
+        (false, true) => Ok(UiModeRequest::Gpui),
+        (false, false) => Ok(UiModeRequest::Auto),
+    }
+}
+
+/// Resolve a parsed request after applying process-level compatibility
+/// overrides, then enforce the desktop/headless surface policy.
+pub fn resolve_ui_request(
+    requested: UiModeRequest,
+    capabilities: UiCapabilities,
+) -> Result<UiModeResolution, UiModeError> {
+    resolve_ui_mode(apply_environment_request(requested)?, capabilities)
 }
 
 fn environment_enabled(key: &str) -> bool {
@@ -293,16 +322,19 @@ mod tests {
     };
 
     #[test]
-    fn legacy_gui_flag_resolves_to_webui_not_gpui() {
+    fn legacy_gui_flag_resolves_to_native_gpui_not_webui() {
         let resolution = resolve_ui_mode(
             request_from_legacy_flags(false, true).expect("legacy GUI request"),
-            DESKTOP,
+            UiCapabilities {
+                display: DisplayEnvironment::LinuxWayland,
+                gpui_available: true,
+            },
         )
-        .expect("desktop web UI should resolve");
+        .expect("desktop GPUI should resolve");
 
-        assert_eq!(resolution.effective, UiMode::WebUi);
-        assert!(resolution.effective.is_web_ui());
-        assert!(!resolution.effective.is_gpui());
+        assert_eq!(resolution.effective, UiMode::Gpui);
+        assert!(resolution.effective.is_gpui());
+        assert!(!resolution.effective.is_web_ui());
     }
 
     #[test]
@@ -351,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_selects_gpui_only_when_both_capabilities_are_available() {
+    fn desktop_auto_mode_never_falls_back_to_webui() {
         for display in [
             DisplayEnvironment::LinuxX11,
             DisplayEnvironment::LinuxWayland,
@@ -377,10 +409,8 @@ mod tests {
                         display,
                         gpui_available: false,
                     },
-                )
-                .expect("desktop WebUI fallback")
-                .effective,
-                UiMode::WebUi
+                ),
+                Err(UiModeError::GpuiUnavailable)
             );
         }
         assert_eq!(
@@ -392,6 +422,34 @@ mod tests {
                 },
             )
             .expect("headless auto resolves without a desktop surface")
+            .effective,
+            UiMode::Headless
+        );
+    }
+
+    #[test]
+    fn explicit_webui_is_rejected_on_a_desktop_host() {
+        assert_eq!(
+            resolve_ui_mode(UiModeRequest::WebUi, DESKTOP),
+            Err(UiModeError::WebUiRequiresHeadless)
+        );
+    }
+
+    #[test]
+    fn explicit_headless_is_rejected_on_a_desktop_host() {
+        assert_eq!(
+            resolve_ui_mode(UiModeRequest::Headless, DESKTOP),
+            Err(UiModeError::HeadlessRequiresNoDesktop)
+        );
+        assert_eq!(
+            resolve_ui_mode(
+                UiModeRequest::Headless,
+                UiCapabilities {
+                    display: DisplayEnvironment::Headless,
+                    gpui_available: false,
+                },
+            )
+            .expect("headless host should resolve headless control")
             .effective,
             UiMode::Headless
         );
@@ -484,12 +542,16 @@ mod tests {
             DisplayEnvironment::Headless
         );
 
-        let forced_headless = DisplayEnvironment::detect_with(|key| match key {
-            "DISPLAY" => Some(":0".into()),
-            "FUCKIPV6_HEADLESS" => Some("true".into()),
-            _ => None,
-        });
-        assert_eq!(forced_headless, DisplayEnvironment::Headless);
+        let headless_environment_variable_cannot_mask_desktop =
+            DisplayEnvironment::detect_with(|key| match key {
+                "DISPLAY" => Some(":0".into()),
+                "FUCKIPV6_HEADLESS" => Some("true".into()),
+                _ => None,
+            });
+        assert_eq!(
+            headless_environment_variable_cannot_mask_desktop,
+            DisplayEnvironment::LinuxX11
+        );
     }
 
     #[cfg(windows)]
@@ -510,12 +572,18 @@ mod tests {
 
     #[test]
     fn mode_status_uses_stable_wire_values() {
-        let resolution =
-            resolve_ui_mode(UiModeRequest::WebUi, DESKTOP).expect("desktop web UI should resolve");
+        let resolution = resolve_ui_mode(
+            UiModeRequest::WebUi,
+            UiCapabilities {
+                display: DisplayEnvironment::Headless,
+                gpui_available: false,
+            },
+        )
+        .expect("headless web UI should resolve");
         let encoded = serde_json::to_value(resolution).expect("serialize UI mode status");
         assert_eq!(encoded["requested"], "web_ui");
         assert_eq!(encoded["effective"], "web_ui");
-        assert_eq!(encoded["display"], "linux_wayland");
+        assert_eq!(encoded["display"], "headless");
         assert_eq!(encoded["gpui_available"], false);
     }
 }

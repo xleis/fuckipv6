@@ -79,18 +79,18 @@ impl MultiNetworkSupervisor {
         options: RuntimeOptions,
         configs: ConfigManager,
     ) -> Result<Self> {
-        let ui_mode = crate::ui::resolve_legacy_ui_mode(options.headless, options.gui)?;
+        // UI policy belongs to the foreground entrypoint. The detached node may
+        // run inside the same desktop session as a GPUI client and must never
+        // reinterpret its headless transport flag as a request for WebUI.
+        let ui_mode = options.ui_mode;
         let events = NodeEventBus::default();
         let registry = MultiNetworkRegistry::new();
         let identity = runtime_metadata::identity_snapshot(
             &configs.load_node_identity()?,
             configs.node_display_name()?,
         );
-        let state = NodeStateStore::with_events_identity_and_ui(
-            events.clone(),
-            Some(identity),
-            Some(ui_mode),
-        );
+        let state =
+            NodeStateStore::with_events_identity_and_ui(events.clone(), Some(identity), ui_mode);
         let services = EmbeddedServiceManager::spawn_with_config(8, configs.clone());
         let lifecycle = NodeLifecycle::new();
         let runtimes = NetworkRuntimeManager::spawn(
@@ -481,6 +481,36 @@ mod tests {
         restarted.runtimes.shutdown().await?;
         let _ = restarted.services.shutdown().await;
 
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_gpui_node_does_not_reinterpret_headless_transport_flag() -> Result<()> {
+        let dir = temp_config_dir("desktop-gpui-ui-mode");
+        let _ = std::fs::remove_dir_all(&dir);
+        let configs = ConfigManager::new_for_dir(dir.clone())?;
+        let ui_mode = crate::ui::UiModeResolution {
+            requested: crate::ui::UiModeRequest::Gpui,
+            effective: crate::ui::UiMode::Gpui,
+            display: crate::ui::DisplayEnvironment::LinuxX11,
+            gpui_available: true,
+        };
+        let supervisor = MultiNetworkSupervisor::new_with_config_manager(
+            RuntimeOptions {
+                // The detached node has no window of its own. This legacy bit
+                // must not be treated as a fresh headless UI request.
+                headless: true,
+                ui_mode: Some(ui_mode),
+                ..RuntimeOptions::default()
+            },
+            configs,
+        )?;
+
+        assert_eq!(supervisor.state().snapshot().await.ui_mode, Some(ui_mode));
+
+        supervisor.runtimes.shutdown().await?;
+        let _ = supervisor.services.shutdown().await;
         let _ = std::fs::remove_dir_all(dir);
         Ok(())
     }

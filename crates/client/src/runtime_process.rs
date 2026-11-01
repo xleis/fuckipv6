@@ -129,6 +129,7 @@ struct InternalOptions {
     exit_node: Option<String>,
     is_exit_node: Option<bool>,
     webui_port: u16,
+    ui_mode: Option<crate::ui::UiModeResolution>,
 }
 
 impl From<&RuntimeOptions> for InternalOptions {
@@ -138,6 +139,7 @@ impl From<&RuntimeOptions> for InternalOptions {
             exit_node: options.exit_node.clone(),
             is_exit_node: options.is_exit_node,
             webui_port: options.webui_port,
+            ui_mode: options.ui_mode,
         }
     }
 }
@@ -153,6 +155,7 @@ impl InternalOptions {
             // owns any public surface added in later work.
             gui: false,
             webui_port: 0,
+            ui_mode: self.ui_mode,
         }
     }
 
@@ -164,6 +167,7 @@ impl InternalOptions {
             headless: true,
             gui: false,
             webui_port: self.webui_port,
+            ui_mode: self.ui_mode,
         }
     }
 
@@ -278,6 +282,7 @@ pub(crate) fn service_options_json(webui_port: u16) -> Result<String> {
         exit_node: None,
         is_exit_node: None,
         webui_port,
+        ui_mode: None,
     }
     .encode()
 }
@@ -945,6 +950,12 @@ mod tests {
 
     #[test]
     fn launch_options_round_trip_without_promoting_ui_mode() {
+        let ui_mode = crate::ui::UiModeResolution {
+            requested: crate::ui::UiModeRequest::Gpui,
+            effective: crate::ui::UiMode::Gpui,
+            display: crate::ui::DisplayEnvironment::LinuxX11,
+            gpui_available: true,
+        };
         let runtime = RuntimeOptions {
             routing_mode: Some("global-proxy".into()),
             exit_node: Some("exit-a".into()),
@@ -952,6 +963,7 @@ mod tests {
             headless: false,
             gui: true,
             webui_port: 8080,
+            ui_mode: Some(ui_mode),
         };
         let encoded = InternalOptions::from(&runtime).encode().unwrap();
         let decoded = InternalOptions::decode(&encoded).unwrap();
@@ -962,6 +974,7 @@ mod tests {
         assert!(node.headless);
         assert!(!node.gui);
         assert_eq!(node.webui_port, 0);
+        assert_eq!(node.ui_mode, Some(ui_mode));
     }
 
     #[test]

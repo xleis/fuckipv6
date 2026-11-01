@@ -124,6 +124,9 @@ pub struct RuntimeOptions {
     pub headless: bool,
     pub gui: bool,
     pub webui_port: u16,
+    /// Resolved once by the foreground entrypoint and carried across the
+    /// detached control/node boundary. `None` means no UI owns this node.
+    pub ui_mode: Option<crate::ui::UiModeResolution>,
 }
 
 /// Legacy config-file launch is intentionally no longer a separate runtime
@@ -2740,6 +2743,11 @@ pub(crate) async fn cli_node_session() -> Result<RemoteNodeSession> {
     RemoteNodeSession::start_with_role_async(
         RuntimeOptions {
             headless: true,
+            ui_mode: crate::ui::resolve_ui_request(
+                crate::ui::UiModeRequest::Auto,
+                crate::ui::UiCapabilities::detect(),
+            )
+            .ok(),
             ..RuntimeOptions::default()
         },
         IpcRole::Cli,

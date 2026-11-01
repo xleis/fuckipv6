@@ -2,7 +2,7 @@
 
 基于 IPv4/IPv6 双栈虚拟地址的组网软件，当前可直接用于受控环境组网。洋葱路由、Kademlia DHT 与分块传输已作为 P2P 基础设施接入，但尚未形成完整的用户产品流程。
 
-产品层只有一种身份：**节点**。只发布一个 `fuckipv6` 程序；创建、加入、托管网络、中继和 Exit Node 都是节点在某网络中的能力，不是“客户端/服务端”两种程序。目标形态是桌面环境使用 GPUI 原生界面，无桌面环境使用 WebUI，两者共享同一命令层、状态模型、校验和错误语义。当前已完成单二进制入口收敛，并由 `NodeRuntimeHandler` 接通动态启动、创建、加入、按网络停止与关闭。顶层桌面入口已接入真实 GPUI 原生窗口；11 个 manifest 页面已投影真实 `NodeSnapshot` 字段，10 个 manifest 动作均映射为类型化 `NodeCommand` 并只经 `NodeCommandBus` 提交。当前仍是功能垂直切片：正式 IME/无障碍、跨平台实机、WebUI manifest 迁移、路由/角色后端闭环和 GPUI/WebUI 自动语义对等门禁尚未完成。
+产品层只有一种身份：**节点**。只发布一个 `fuckipv6` 程序；创建、加入、托管网络、中继和 Exit Node 都是节点在某网络中的能力，不是“客户端/服务端”两种程序。控制界面严格按运行环境二选一：有桌面会话只允许 GPUI，无桌面会话才允许 headless WebUI；桌面上的显式 `--webui`/`--headless` 会被拒绝，GPUI 不可用时失败关闭而不会回退 WebUI。GPUI 信任当前操作系统登录会话，不设置应用内登录或 Passkey；应用内所有者认证只属于可能公网开放的 WebUI，且回环访问同样必须持有有效所有者会话。当前已完成单二进制入口收敛，并由 `NodeRuntimeHandler` 接通动态启动、创建、加入、按网络停止与关闭。顶层桌面入口已接入真实 GPUI 原生窗口；11 个 manifest 页面已投影真实 `NodeSnapshot` 字段，10 个 manifest 动作均映射为类型化 `NodeCommand` 并只经 `NodeCommandBus` 提交。当前仍是功能垂直切片：正式 IME/无障碍、跨平台实机、WebUI manifest 迁移、路由/角色后端闭环和 GPUI/WebUI 自动语义对等门禁尚未完成。
 
 ## ✨ 核心能力
 
@@ -10,7 +10,7 @@
 - 🔄 **Multi-Relay 与连接时择优**: 并发探测多个候选中继并按 RTT/握手耗时选择；目前不是持续迁移或动态负载均衡
 - 🛡️ **安全与 ACL 策略**: Secure Session v2 classic 使用临时 X25519 + Ed25519、双向 key confirmation、计数 Nonce 与 4096 包重放窗口保护 UDP/TUN 数据；QUIC 与中继仅承载同一 v2 密文。QUIC 中继当前强制 Ed25519 客户端证书，并将证书 SPKI、Relay Register 应用身份、双 pin 与 TLS exporter 绑定，生产配置禁用 0-RTT；Coordinator 运行期黑名单已在 relay 注册和双向转发路径强制执行，但证书层 CA/allowlist/CRL/OCSP 与网络级授权仍未实现。该 profile 尚未完成独立密码学审计；可选 `pq` feature 已实现 X-Wing draft-11、Ed25519 + ML-DSA-65 复合身份和实验性两消息混合 `HELLO/ACCEPT`，但尚未接入生产控制通道或数据面，且上游后量子 crate 未独立审计，不能据此宣称已具备后量子安全或超越 WireGuard。另有声明式入出站 ACL 与 Coordinator 准入黑名单
 - 🔌 **进阶 NAT 穿透**: RFC 5780 NAT 类型检测 + RFC 6886 NAT-PMP + UPnP IGD 自动端口映射
-- 🔒 **身份与鉴权**: Ed25519 签名验证；网络服务 Web/API 可配置 JWT；节点本地 WebUI/API 默认只监听回环，远程监听必须显式开启危险开关并配置认证，无认证的远程 IPC 始终拒绝启动
+- 🔒 **身份与鉴权**: Ed25519 签名验证；GPUI 信任操作系统登录用户，不叠加应用内认证；WebUI 使用节点所有者 Passkey 会话保护所有受控 API（包括回环请求），公网监听必须显式开启危险开关并配置 TLS/可信代理，无认证的远程 IPC 始终拒绝启动
 - 🌐 **跨平台 TUN**: Linux TUN、macOS utun、Windows 内嵌 WinTun + 纯 Rust IP Helper API（仍需目标平台实机验证）
 - 📊 **可观测性**: 节点 WebUI、网络服务管理面板、实时拓扑、流量监控、本地 IPC 控制台，以及带 11 个 manifest 页面和类型化动作接线的 GPUI 原生应用（IME、无障碍与完整对等仍在完善）
 
@@ -347,17 +347,17 @@ python3 scripts/release-gate.py run --platform linux --toolchain stable \
 
 ### 本地控制面安全
 
-WebUI/API 与 IPC 默认都只监听回环地址，回环 WebUI 默认免密。远程 WebUI/API 必须同时显式设置危险开关和认证配置，否则节点拒绝启动：
+GPUI 不启动 WebUI，也不做应用内授权验证，而是信任当前操作系统登录用户。WebUI/API 与 IPC 默认监听回环地址；WebUI 回环不是匿名捷径，所有者初始化完成后，受控 API 和 WebSocket 都要求有效的 HttpOnly 同源所有者会话，Passkey 仅属于 WebUI。公网 WebUI 必须同时显式设置危险开关和 TLS/可信代理边界，并通过节点所有者认领与 Passkey 登录：
 
 ```bash
 export FUCKIPV6_WEBUI_BIND=0.0.0.0
 export FUCKIPV6_WEBUI_ALLOW_REMOTE=1
-export FUCKIPV6_WEBUI_USERNAME=admin
-export FUCKIPV6_WEBUI_PASSWORD='使用足够长的随机密码'
-export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
+export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://node.example.com
+export FUCKIPV6_WEBUI_TLS_CERT=/etc/fuckipv6/tls/fullchain.pem
+export FUCKIPV6_WEBUI_TLS_KEY=/etc/fuckipv6/tls/privkey.pem
 ```
 
-远程控制面没有内置 TLS，只能部署在受控管理网或 TLS 反向代理之后，不应直接暴露到公网。REST API 使用 `Authorization: Bearer <token>`，浏览器 WebSocket 使用 `/ws?token=<token>`；其他静态页面和 `/api/auth/login` 可匿名访问。IPC 尚无认证协议，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会放行非回环监听，请使用 SSH 隧道。
+禁止把明文 WebUI 直接暴露到公网。IPC 尚无认证协议，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会放行非回环监听，请使用 SSH 隧道。
 
 ## FAQ
 

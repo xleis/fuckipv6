@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::logging;
-use crate::ui::{resolve_ui_mode, UiCapabilities, UiMode, UiModeError, UiModeRequest};
+use crate::ui::{
+    resolve_ui_mode, resolve_ui_request, UiCapabilities, UiMode, UiModeError, UiModeRequest,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "fuckipv6 - 全能对等网络与智能分流控制中心", long_about = None)]
@@ -41,16 +43,16 @@ pub struct Cli {
     #[arg(long, default_value_t = true)]
     pub auto_connect: bool,
 
-    /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+    /// 仅无桌面环境使用无头 WebUI 服务；桌面环境拒绝启动
     #[arg(long, conflicts_with_all = ["webui", "gpui"])]
     pub headless: bool,
 
-    /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
-    #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+    /// 仅无桌面环境使用浏览器托管的 WebUI；桌面环境拒绝启动
+    #[arg(long, conflicts_with_all = ["headless", "gpui"])]
     pub webui: bool,
 
-    /// 使用原生 GPUI 桌面界面
-    #[arg(long, conflicts_with_all = ["headless", "webui"])]
+    /// 使用原生 GPUI 桌面界面（`--gui` 为兼容别名）
+    #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
     pub gpui: bool,
 
     /// 统一控制中心 WebUI 监听端口 (默认 8080)
@@ -94,16 +96,16 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        /// 仅无桌面环境使用无头 WebUI 服务；桌面环境拒绝启动
         #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
-        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        /// 仅无桌面环境使用浏览器托管的 WebUI；桌面环境拒绝启动
+        #[arg(long, conflicts_with_all = ["headless", "gpui"])]
         webui: bool,
 
-        /// 使用原生 GPUI 桌面界面
-        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        /// 使用原生 GPUI 桌面界面（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
         gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
@@ -136,16 +138,16 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        /// 仅无桌面环境使用无头 WebUI 服务；桌面环境拒绝启动
         #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
-        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        /// 仅无桌面环境使用浏览器托管的 WebUI；桌面环境拒绝启动
+        #[arg(long, conflicts_with_all = ["headless", "gpui"])]
         webui: bool,
 
-        /// 使用原生 GPUI 桌面界面
-        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        /// 使用原生 GPUI 桌面界面（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
         gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
@@ -179,16 +181,16 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        /// 仅无桌面环境使用无头 WebUI 服务；桌面环境拒绝启动
         #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
-        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        /// 仅无桌面环境使用浏览器托管的 WebUI；桌面环境拒绝启动
+        #[arg(long, conflicts_with_all = ["headless", "gpui"])]
         webui: bool,
 
-        /// 使用原生 GPUI 桌面界面
-        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        /// 使用原生 GPUI 桌面界面（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
         gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
@@ -218,16 +220,16 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        /// 仅无桌面环境使用无头 WebUI 服务；桌面环境拒绝启动
         #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
-        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        /// 仅无桌面环境使用浏览器托管的 WebUI；桌面环境拒绝启动
+        #[arg(long, conflicts_with_all = ["headless", "gpui"])]
         webui: bool,
 
-        /// 使用原生 GPUI 桌面界面
-        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        /// 使用原生 GPUI 桌面界面（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
         gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
@@ -279,16 +281,16 @@ pub enum Commands {
         #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", require_equals = true)]
         is_exit_node: Option<bool>,
 
-        /// 强制无头模式（不打开桌面窗口，WebUI 服务仍然监听）
+        /// 仅无桌面环境使用无头 WebUI 服务；桌面环境拒绝启动
         #[arg(long, conflicts_with_all = ["webui", "gpui"])]
         headless: bool,
 
-        /// 使用浏览器托管的 WebUI（`--gui` 为兼容别名）
-        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "gpui"])]
+        /// 仅无桌面环境使用浏览器托管的 WebUI；桌面环境拒绝启动
+        #[arg(long, conflicts_with_all = ["headless", "gpui"])]
         webui: bool,
 
-        /// 使用原生 GPUI 桌面界面
-        #[arg(long, conflicts_with_all = ["headless", "webui"])]
+        /// 使用原生 GPUI 桌面界面（`--gui` 为兼容别名）
+        #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
         gpui: bool,
 
         /// WebUI 监听端口 (默认 8080)
@@ -492,7 +494,8 @@ fn runtime_options_with_capabilities(
     capabilities: UiCapabilities,
 ) -> Result<commands::RuntimeOptions> {
     let requested = requested_ui_mode(headless, webui, gpui)?;
-    let effective = resolve_ui_mode(requested, capabilities)?.effective;
+    let resolution = resolve_ui_mode(requested, capabilities)?;
+    let effective = resolution.effective;
 
     let (headless, gui) = match effective {
         UiMode::Headless => (true, false),
@@ -510,6 +513,7 @@ fn runtime_options_with_capabilities(
         headless,
         gui,
         webui_port,
+        ui_mode: Some(resolution),
     })
 }
 
@@ -621,8 +625,8 @@ pub fn run_entrypoint() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(intent) = cli.command.as_ref().and_then(command_ui_intent) {
-        let effective = resolve_ui_mode(intent.requested, UiCapabilities::detect())?.effective;
-        if effective.is_gpui() {
+        let resolution = resolve_ui_request(intent.requested, UiCapabilities::detect())?;
+        if resolution.effective.is_gpui() {
             let command = cli
                 .command
                 .expect("command UI intent requires a parsed subcommand");
@@ -632,17 +636,18 @@ pub fn run_entrypoint() -> Result<()> {
                 headless: false,
                 gui: false,
                 webui_port: 0,
+                ui_mode: Some(resolution),
                 ..commands::RuntimeOptions::default()
             });
         }
     } else if cli.command.is_none() {
         let requested_ui = requested_ui_mode(cli.headless, cli.webui, cli.gpui)?;
-        let effective = resolve_ui_mode(requested_ui, UiCapabilities::detect())?.effective;
-        if effective.is_gpui() {
+        let resolution = resolve_ui_request(requested_ui, UiCapabilities::detect())?;
+        if resolution.effective.is_gpui() {
             if cli.host {
-                async_runtime()?.block_on(run_top_level_host_prelude(&cli))?;
+                async_runtime()?.block_on(run_top_level_host_prelude(&cli, resolution))?;
             }
-            return run_native_app(native_runtime_options(cli.is_exit_node));
+            return run_native_app(native_runtime_options(cli.is_exit_node, resolution));
         }
     }
 
@@ -660,7 +665,7 @@ async fn run_parsed(cli: Cli) -> Result<()> {
     if let Some(command) = cli.command {
         let command_ui = command_ui_intent(&command)
             .map(|intent| {
-                resolve_ui_mode(intent.requested, UiCapabilities::detect())
+                resolve_ui_request(intent.requested, UiCapabilities::detect())
                     .map(|resolution| (intent, resolution.effective))
             })
             .transpose()?;
@@ -692,7 +697,7 @@ async fn run_parsed(cli: Cli) -> Result<()> {
     }
 }
 
-async fn run_top_level_host_prelude(cli: &Cli) -> Result<()> {
+async fn run_top_level_host_prelude(cli: &Cli, ui_mode: crate::ui::UiModeResolution) -> Result<()> {
     network_commands::host(
         &cli.host_name,
         cli.host_port,
@@ -704,13 +709,17 @@ async fn run_top_level_host_prelude(cli: &Cli) -> Result<()> {
             headless: false,
             gui: false,
             webui_port: 0,
+            ui_mode: Some(ui_mode),
             ..commands::RuntimeOptions::default()
         },
     )
     .await
 }
 
-fn native_runtime_options(is_exit_node: Option<bool>) -> commands::RuntimeOptions {
+fn native_runtime_options(
+    is_exit_node: Option<bool>,
+    ui_mode: crate::ui::UiModeResolution,
+) -> commands::RuntimeOptions {
     commands::RuntimeOptions {
         is_exit_node,
         headless: false,
@@ -718,6 +727,7 @@ fn native_runtime_options(is_exit_node: Option<bool>) -> commands::RuntimeOption
         // future shared runtime plan from implicitly opening WebUI.
         gui: false,
         webui_port: 0,
+        ui_mode: Some(ui_mode),
         ..commands::RuntimeOptions::default()
     }
 }
@@ -760,7 +770,7 @@ pub async fn run_default_app(
     is_exit_node: Option<bool>,
 ) -> Result<()> {
     logging::init_default()?;
-    let ui_mode = resolve_ui_mode(requested_ui, UiCapabilities::detect())?;
+    let ui_mode = resolve_ui_request(requested_ui, UiCapabilities::detect())?;
     let shutdown = crate::runtime_process::ShutdownSignal::register()?;
 
     if ui_mode.effective.is_gpui() {
@@ -775,6 +785,7 @@ pub async fn run_default_app(
             headless: ui_mode.effective.is_headless(),
             gui: false,
             webui_port: port,
+            ui_mode: Some(ui_mode),
         },
         crate::local_ipc::IpcRole::WebUi,
     )
@@ -1211,15 +1222,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_explicit_webui_alias_and_gpui_modes() {
+    fn parses_explicit_webui_and_legacy_gui_modes() {
         let webui = Cli::try_parse_from(["fuckipv6", "--webui"]).unwrap();
         assert!(webui.webui);
         assert!(!webui.headless);
         assert!(!webui.gpui);
 
         let legacy_alias = Cli::try_parse_from(["fuckipv6", "--gui"]).unwrap();
-        assert!(legacy_alias.webui);
-        assert!(!legacy_alias.gpui);
+        assert!(!legacy_alias.webui);
+        assert!(legacy_alias.gpui);
 
         let gpui = Cli::try_parse_from(["fuckipv6", "--gpui"]).unwrap();
         assert!(gpui.gpui);
@@ -1232,7 +1243,7 @@ mod tests {
             ["fuckipv6", "--headless", "--webui"],
             ["fuckipv6", "--headless", "--gpui"],
             ["fuckipv6", "--webui", "--gpui"],
-            ["fuckipv6", "--gui", "--gpui"],
+            ["fuckipv6", "--headless", "--gui"],
         ] {
             let error = Cli::try_parse_from(args).expect_err("conflicting modes must fail");
             assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
@@ -1317,36 +1328,18 @@ mod tests {
 
     #[test]
     fn command_ui_intents_share_the_top_level_policy() {
-        for (display, gpui_available, expected) in [
-            (crate::ui::DisplayEnvironment::LinuxX11, true, UiMode::Gpui),
-            (
-                crate::ui::DisplayEnvironment::LinuxWayland,
-                true,
-                UiMode::Gpui,
-            ),
-            (
-                crate::ui::DisplayEnvironment::Headless,
-                true,
-                UiMode::Headless,
-            ),
-            (
-                crate::ui::DisplayEnvironment::LinuxX11,
-                false,
-                UiMode::WebUi,
-            ),
-            (
-                crate::ui::DisplayEnvironment::Headless,
-                false,
-                UiMode::Headless,
-            ),
+        for (display, gpui_available) in [
+            (crate::ui::DisplayEnvironment::LinuxX11, true),
+            (crate::ui::DisplayEnvironment::LinuxWayland, true),
+            (crate::ui::DisplayEnvironment::Headless, true),
+            (crate::ui::DisplayEnvironment::LinuxX11, false),
+            (crate::ui::DisplayEnvironment::Headless, false),
         ] {
             let capabilities = UiCapabilities {
                 display,
                 gpui_available,
             };
-            let top_level = resolve_ui_mode(UiModeRequest::Auto, capabilities)
-                .expect("top-level automatic mode");
-            assert_eq!(top_level.effective, expected);
+            let top_level = resolve_ui_mode(UiModeRequest::Auto, capabilities);
 
             for args in [
                 vec!["fuckipv6", "host"],
@@ -1361,20 +1354,30 @@ mod tests {
                     .as_ref()
                     .and_then(command_ui_intent)
                     .expect("command must carry a UI intent");
-                let command_mode =
-                    resolve_ui_mode(intent.requested, capabilities).expect("command UI mode");
-                assert_eq!(command_mode.effective, top_level.effective);
+                let command_mode = resolve_ui_mode(intent.requested, capabilities);
+                assert_eq!(command_mode, top_level);
             }
         }
     }
 
     #[test]
-    fn legacy_gui_maps_to_webui_runtime_options() {
-        let capabilities = UiCapabilities {
-            display: crate::ui::DisplayEnvironment::LinuxX11,
+    fn headless_webui_maps_to_webui_runtime_options_but_desktop_rejects_it() {
+        let headless = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::Headless,
             gpui_available: false,
         };
-        let options = runtime_options_with_capabilities(
+        let options =
+            runtime_options_with_capabilities(None, None, None, false, true, false, 8080, headless)
+                .expect("headless WebUI should resolve");
+        assert!(!options.headless);
+        assert!(options.gui);
+        assert_eq!(options.webui_port, 8080);
+
+        let capabilities = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::LinuxX11,
+            gpui_available: true,
+        };
+        let error = runtime_options_with_capabilities(
             None,
             None,
             None,
@@ -1384,10 +1387,8 @@ mod tests {
             8080,
             capabilities,
         )
-        .expect("legacy GUI should map to WebUI");
-        assert!(!options.headless);
-        assert!(options.gui);
-        assert_eq!(options.webui_port, 8080);
+        .expect_err("desktop WebUI must fail closed");
+        assert!(error.to_string().contains("without a desktop"));
     }
 
     #[test]

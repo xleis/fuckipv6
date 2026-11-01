@@ -4339,7 +4339,7 @@
       "type": "string"
     },
     "UiMode": {
-      "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane. It remains available on\nheadless hosts as a server-only surface; the display environment only\ndecides whether a browser window can also be opened. `WebUi` must never be\nrepresented as the native `Gpui` surface.",
+      "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane for headless hosts. A process\nwith a desktop session must use `Gpui`; it must not expose the WebUI as a\nsecond desktop surface.",
       "enum": [
         "gpui",
         "web_ui",

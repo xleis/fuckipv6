@@ -761,6 +761,7 @@ pub async fn run_default_app(
 ) -> Result<()> {
     logging::init_default()?;
     let ui_mode = resolve_ui_mode(requested_ui, UiCapabilities::detect())?;
+    let shutdown = crate::runtime_process::ShutdownSignal::register()?;
 
     if ui_mode.effective.is_gpui() {
         anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过 `fuckipv6 --gpui` 运行");
@@ -820,19 +821,7 @@ pub async fn run_default_app(
     }
 
     println!("按 Ctrl+C 退出程序");
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = signal(SignalKind::terminate())?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {},
-            _ = term.recv() => {},
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await?;
-    }
+    shutdown.wait().await;
     tracing::info!("接收到退出信号，正在关闭 WebUI；节点网络与控制面保持运行...");
     server_handle.abort();
     let _ = server_handle.await;

@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../contracts/typescript/fixtures/node-manifest.json";
+import productFixture from "../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   ActivityEntry,
   NodeSnapshot,
@@ -37,6 +38,7 @@ vi.mock("./api/session", async (importOriginal) => {
 });
 
 const manifest = manifestFixture as NodeUiManifest;
+const populatedSnapshot = productFixture.snapshot as NodeSnapshot;
 
 const snapshot: NodeSnapshot = {
   revision: 11,
@@ -168,6 +170,70 @@ describe("React WebUI shell", () => {
     expect(content).toBeInTheDocument();
     expect(actionPanel).toBeInTheDocument();
     expect(content?.nextElementSibling).toBe(actionPanel);
+  });
+
+  it("searches objects locally and navigates with network context", async () => {
+    authenticate(populatedSnapshot);
+    const user = userEvent.setup();
+    renderApp();
+
+    const search = await screen.findByRole("textbox", {
+      name: "translated:common.search",
+    });
+    await user.type(search, "home");
+    const results = screen.getByRole("list", {
+      name: "translated:common.search_results",
+    });
+    expect(within(results).getAllByRole("listitem").length).toBeGreaterThan(1);
+
+    await user.click(
+      within(results).getByRole("button", {
+        name: /translated:search\.kind\.network · home/,
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.networks" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("translated:common.current_network")).toHaveValue(
+      "home",
+    );
+    expect(search).toHaveValue("");
+
+    await user.type(search, "peer-tokyo");
+    await user.click(
+      screen.getByRole("button", {
+        name: /translated:search\.kind\.peer · peer-tokyo/,
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.peers" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("translated:common.current_network")).toHaveValue(
+      "home",
+    );
+  });
+
+  it("supports global search keyboard focus, empty state, and clearing", async () => {
+    authenticate(populatedSnapshot);
+    const user = userEvent.setup();
+    renderApp();
+
+    const search = await screen.findByRole("textbox", {
+      name: "translated:common.search",
+    });
+    await user.keyboard("{Control>}k{/Control}");
+    expect(search).toHaveFocus();
+
+    await user.type(search, "no-such-object");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "translated:common.search_no_results",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.search_clear" }),
+    );
+    expect(search).toHaveValue("");
+    expect(search).toHaveFocus();
+    expect(screen.queryByRole("list", { name: "translated:common.search_results" })).toBeNull();
   });
 
   it("uses the shared shell and action-panel tokens", () => {

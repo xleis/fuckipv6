@@ -17,12 +17,14 @@ import {
   Network as NetworkIcon,
   RefreshCw,
   RotateCcw,
+  Search as SearchIcon,
   ServerCog,
   Settings as SettingsIcon,
   ShieldAlert,
   Wifi,
+  X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type {
   NodeCommandOutcome,
   NodeSnapshot,
@@ -63,6 +65,12 @@ import {
   validateSnapshot,
   type ActionValues,
 } from "./contract/invariants";
+import {
+  searchElementId,
+  searchKindKey,
+  searchNodeSnapshot,
+  type SearchResult,
+} from "./search";
 
 type ModuleDefinition = {
   id: string;
@@ -379,15 +387,34 @@ function AppShell({
     manifest.pages.find((page) => page.id === "overview") ?? manifest.pages[0];
   const [pageId, setPageId] = useState(initialPage?.id ?? "overview");
   const [selectedNetworkState, setSelectedNetworkState] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [requestedActionId, setRequestedActionId] = useState<string | null>(
     null,
   );
   const [refreshError, setRefreshError] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const activePage =
     manifest.pages.find((page) => page.id === pageId) ?? initialPage;
   const activeModule = moduleForPage(activePage?.id ?? "overview");
   const selectedNetwork = defaultNetworkName(snapshot, selectedNetworkState);
+  const searchResults = useMemo(
+    () => searchNodeSnapshot(manifest, snapshot, searchQuery, locale),
+    [locale, manifest, searchQuery, snapshot],
+  );
+  const searchOpen = searchQuery.trim().length > 0;
+
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k") {
+        return;
+      }
+      event.preventDefault();
+      searchInputRef.current?.focus();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
 
   const languageMutation = useMutation({
     mutationFn: saveLanguagePreference,
@@ -447,11 +474,27 @@ function AppShell({
     }
   }
 
-  function navigate(nextPage: string): void {
+  function navigate(nextPage: string, networkName?: string): void {
     if (!manifest.pages.some((page) => page.id === nextPage)) return;
+    if (
+      networkName &&
+      snapshot.networks.some((network) => network.name === networkName)
+    ) {
+      setSelectedNetworkState(networkName);
+    }
     setRequestedActionId(null);
     setPageId(nextPage);
+    setSearchQuery("");
     document.getElementById("page-content")?.focus();
+  }
+
+  function navigateToSearchResult(result: SearchResult): void {
+    navigate(result.pageId, result.networkName);
+  }
+
+  function clearSearch(focusInput = false): void {
+    setSearchQuery("");
+    if (focusInput) searchInputRef.current?.focus();
   }
 
   function requestAction(actionId: string): void {
@@ -466,7 +509,10 @@ function AppShell({
           manifest.pages.some((page) => page.id === id),
       ) ??
       module.pages.find((id) => manifest.pages.some((page) => page.id === id));
-    if (next) setPageId(next);
+    if (next) {
+      setPageId(next);
+      setSearchQuery("");
+    }
   }
 
   const subpages = activeModule.pages
@@ -574,39 +620,111 @@ function AppShell({
           </div>
         </header>
 
-        <div className="local-toolbar">
-          <div
-            className="page-tabs"
-            role="tablist"
-            aria-label={label(locale, "common.page_sections")}
-          >
-            {subpages.map((page) => (
-              <button
-                key={page.id}
-                type="button"
-                role="tab"
-                aria-selected={page.id === activePage?.id}
-                className={
-                  page.id === activePage?.id ? "page-tab selected" : "page-tab"
-                }
-                onClick={() => navigate(page.id)}
-              >
-                {label(locale, page.nav_label_key)}
-              </button>
-            ))}
+        <div className="secondary-shell">
+          <div className="local-toolbar">
+            <div
+              className="page-tabs"
+              role="tablist"
+              aria-label={label(locale, "common.page_sections")}
+            >
+              {subpages.map((page) => (
+                <button
+                  key={page.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={page.id === activePage?.id}
+                  className={
+                    page.id === activePage?.id ? "page-tab selected" : "page-tab"
+                  }
+                  onClick={() => navigate(page.id)}
+                >
+                  {label(locale, page.nav_label_key)}
+                </button>
+              ))}
+            </div>
+            <div className="local-toolbar-actions">
+              <div className="global-search">
+                <SearchIcon
+                  className="global-search-icon"
+                  size={15}
+                  aria-hidden="true"
+                />
+                <input
+                  ref={searchInputRef}
+                  id="global-search-input"
+                  type="text"
+                  value={searchQuery}
+                  aria-label={label(locale, "common.search")}
+                  aria-controls={searchOpen ? "global-search-results" : undefined}
+                  aria-expanded={searchOpen}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={label(locale, "common.search_placeholder")}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") clearSearch(true);
+                  }}
+                />
+                {searchOpen ? (
+                  <button
+                    className="global-search-clear"
+                    type="button"
+                    aria-label={label(locale, "common.search_clear")}
+                    onClick={() => clearSearch(true)}
+                  >
+                    <X size={14} />
+                  </button>
+                ) : null}
+              </div>
+              {stale ? (
+                <span className="sync-badge">
+                  {label(locale, "common.syncing")}
+                </span>
+              ) : null}
+            </div>
           </div>
-          {stale ? (
-            <span className="sync-badge">
-              {label(locale, "common.syncing")}
-            </span>
+
+          {searchOpen ? (
+            <div className="global-search-panel" id="global-search-results">
+              {searchResults.length === 0 ? (
+                <div className="global-search-empty" role="status">
+                  {label(locale, "common.search_no_results")}
+                </div>
+              ) : (
+                <ul
+                  className="global-search-results"
+                  role="list"
+                  aria-label={label(locale, "common.search_results")}
+                >
+                  {searchResults.map((result) => (
+                    <li id={searchElementId(result)} key={result.id}>
+                      <button
+                        className="global-search-result"
+                        type="button"
+                        aria-label={`${label(locale, searchKindKey(result.kind))} · ${result.title} · ${result.detail}`}
+                        onClick={() => navigateToSearchResult(result)}
+                      >
+                        <span className="global-search-result-copy">
+                          <strong>{result.title}</strong>
+                          <span>{result.detail}</span>
+                        </span>
+                        <span className="global-search-result-kind">
+                          {label(locale, searchKindKey(result.kind))}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+
+          {refreshError ? (
+            <div className="app-banner danger" role="alert">
+              {refreshError}
+            </div>
           ) : null}
         </div>
-
-        {refreshError ? (
-          <div className="app-banner danger" role="alert">
-            {refreshError}
-          </div>
-        ) : null}
         <main className="workspace" id="page-content" tabIndex={-1}>
           {activePage ? (
             <>

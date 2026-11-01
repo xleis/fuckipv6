@@ -56,6 +56,60 @@ const TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESTART_BACKOFF_MIN: Duration = Duration::from_millis(250);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
+/// Shutdown listeners are registered before any long-running service becomes
+/// visible to callers. In particular, binding the WebUI socket before polling
+/// `ctrl_c()` creates a window where the OS default action still terminates the
+/// process for SIGTERM instead of allowing graceful cleanup.
+pub(crate) struct ShutdownSignal {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl ShutdownSignal {
+    pub(crate) fn register() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt()).context("注册 SIGINT 处理器失败")?,
+                terminate: signal(SignalKind::terminate()).context("注册 SIGTERM 处理器失败")?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c().context("注册 Ctrl+C 处理器失败")?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    pub(crate) async fn wait(mut self) {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.interrupt.recv() => {}
+                _ = self.terminate.recv() => {}
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = self.ctrl_c.recv().await;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 /// Stable process exit codes for internal roles and service managers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -238,6 +292,7 @@ fn run_runtime(run: impl FnOnce(&tokio::runtime::Runtime) -> Result<()>) -> Resu
 
 async fn run_node(options: InternalOptions) -> Result<()> {
     logging::init_default()?;
+    let shutdown = ShutdownSignal::register()?;
     let _lock = acquire_instance_lock("node")?.context("另一个节点进程已经持有本地实例锁")?;
     // The previous node may have been SIGKILLed after binding. Holding the node
     // instance lock proves that no peer owns this endpoint, so stale Unix socket
@@ -310,7 +365,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     let (command_stop_tx, mut command_stop_rx) = tokio::sync::mpsc::unbounded_channel();
     supervisor.registry().set_stop_sender(command_stop_tx);
 
-    let mut signal = Box::pin(wait_for_shutdown_signal());
+    let mut signal = Box::pin(shutdown.wait());
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
     refresh.tick().await;
@@ -385,6 +440,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
 
 async fn run_control(options: InternalOptions) -> Result<()> {
     logging::init_default()?;
+    let shutdown = ShutdownSignal::register()?;
     let Some(_lock) = acquire_instance_lock("control")? else {
         // A concurrent UI launch may have won the race. It is successful only if
         // the already-running control plane actually brings up the node.
@@ -392,7 +448,7 @@ async fn run_control(options: InternalOptions) -> Result<()> {
         return Ok(());
     };
 
-    run_control_loop(options, wait_for_shutdown_signal()).await
+    run_control_loop(options, shutdown.wait()).await
 }
 
 async fn run_service(
@@ -403,6 +459,7 @@ async fn run_service(
     if options.webui_port == 0 {
         bail!("服务模式要求非零 WebUI 监听端口");
     }
+    let shutdown = ShutdownSignal::register()?;
 
     // The service process must own the control lease. If another control already
     // exists, failing closed avoids a unit that appears healthy while its stop
@@ -446,7 +503,7 @@ async fn run_service(
         crate::windows_service::report_running();
 
         let exit_result = tokio::select! {
-            _ = wait_for_service_shutdown(windows_shutdown.clone()) => Ok(()),
+            _ = wait_for_service_shutdown(windows_shutdown.clone(), shutdown) => Ok(()),
             result = control.as_mut().expect("control task is live") => {
                 control = None;
                 match result {
@@ -840,53 +897,23 @@ async fn request_node_stop() -> bool {
     )
 }
 
-async fn wait_for_service_shutdown(mut windows_shutdown: Option<watch::Receiver<bool>>) {
-    let Some(mut shutdown) = windows_shutdown.take() else {
-        wait_for_shutdown_signal().await;
+async fn wait_for_service_shutdown(
+    mut windows_shutdown: Option<watch::Receiver<bool>>,
+    shutdown: ShutdownSignal,
+) {
+    let Some(mut windows_shutdown) = windows_shutdown.take() else {
+        shutdown.wait().await;
         return;
     };
     tokio::select! {
-        _ = wait_for_shutdown_signal() => {}
+        _ = shutdown.wait() => {}
         _ = async {
-            while !*shutdown.borrow() {
-                if shutdown.changed().await.is_err() {
+            while !*windows_shutdown.borrow() {
+                if windows_shutdown.changed().await.is_err() {
                     std::future::pending::<()>().await;
                 }
             }
         } => {}
-    }
-}
-
-async fn wait_for_shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::warn!(%error, "监听 Ctrl+C 失败");
-            std::future::pending::<()>().await;
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let terminate = async {
-            match signal(SignalKind::terminate()) {
-                Ok(mut stream) => {
-                    stream.recv().await;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "监听 SIGTERM 失败");
-                    std::future::pending::<()>().await;
-                }
-            }
-        };
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = terminate => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        ctrl_c.await;
     }
 }
 

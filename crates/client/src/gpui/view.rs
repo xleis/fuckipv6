@@ -23,7 +23,8 @@ use super::components::{
 use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values, network_status_key,
-    validate_manifest_bindings, ActionBinding, OverviewModel, PageKind, RowModel, SectionModel,
+    search_node_snapshot, validate_manifest_bindings, ActionBinding, OverviewModel, PageKind,
+    RowModel, SearchResult, SectionModel,
 };
 use crate::config_manager::ConfigManager;
 use crate::node::{
@@ -46,7 +47,7 @@ const COLOR_MUTED: u32 = DARK_THEME.colors.text_muted.rgba_hex();
 const COLOR_ACCENT: u32 = DARK_THEME.colors.accent.rgba_hex();
 const COLOR_WARNING: u32 = DARK_THEME.colors.warning.rgba_hex();
 
-actions!(fuckipv6_shell, [RefreshSnapshot, Quit]);
+actions!(fuckipv6_shell, [RefreshSnapshot, FocusSearch, Quit]);
 
 const A11Y_ROOT_ROLE: Role = Role::Application;
 const A11Y_NAVIGATION_ROLE: Role = Role::Navigation;
@@ -77,7 +78,10 @@ struct GpuiShell {
     expanded_actions: HashMap<String, bool>,
     form_values: HashMap<String, String>,
     text_inputs: HashMap<String, Entity<NativeTextInput>>,
+    search_query: String,
+    search_input: Option<Entity<NativeTextInput>>,
     focus_handle: FocusHandle,
+    content_focus_handle: FocusHandle,
     pending_commands: u32,
     next_request_id: u64,
     error: Option<String>,
@@ -114,7 +118,10 @@ impl GpuiShell {
             expanded_actions: HashMap::new(),
             form_values: HashMap::new(),
             text_inputs: HashMap::new(),
+            search_query: String::new(),
+            search_input: None,
             focus_handle: cx.focus_handle(),
+            content_focus_handle: cx.focus_handle(),
             pending_commands: 0,
             next_request_id: 1,
             error: None,
@@ -122,6 +129,25 @@ impl GpuiShell {
             language_menu_open: false,
             network_menu_open: false,
         };
+
+        let search_input = cx.new(|cx| {
+            NativeTextInput::new(
+                "global-search-input",
+                t(locale, "common.search"),
+                t(locale, "common.search_placeholder"),
+                "",
+                cx,
+            )
+        });
+        cx.subscribe(
+            &search_input,
+            |shell: &mut Self, _, event: &TextInputEvent, cx| {
+                shell.search_query = event.value.clone();
+                cx.notify();
+            },
+        )
+        .detach();
+        shell.search_input = Some(search_input);
 
         shell.watch_state(updates, cx);
         shell.submit_raw(NodeCommand::GetUiManifest, cx);
@@ -156,6 +182,15 @@ impl GpuiShell {
         self.language_preference = preference;
         self.locale = preference.resolve(detect_system_locale());
         set_shell_menus(cx, self.locale);
+        if let Some(input) = &self.search_input {
+            input.update(cx, |input, cx| {
+                input.set_accessibility_copy(
+                    t(self.locale, "common.search"),
+                    t(self.locale, "common.search_placeholder"),
+                    cx,
+                );
+            });
+        }
         if let Err(error) = self.configs.set_node_language_preference(preference) {
             self.error = Some(tr(
                 self.locale,
@@ -1016,6 +1051,31 @@ impl GpuiShell {
                 })
             })
             .unwrap_or_default();
+        let search_input = self
+            .search_input
+            .as_ref()
+            .map(|input| input.clone().into_any_element());
+        let clear_search = (!self.search_query.trim().is_empty()).then(|| {
+            button(
+                SharedString::from("clear-global-search"),
+                "×",
+                ButtonVariant::Ghost,
+                false,
+            )
+            .w(px(34.0))
+            .h(px(34.0))
+            .px_0()
+            .aria_label(t(self.locale, "common.search_clear").to_string())
+            .on_click(cx.listener(|shell, _, _, cx| shell.clear_search(cx)))
+        });
+        let search_control = div()
+            .id("global-search")
+            .flex()
+            .items_center()
+            .gap_1()
+            .w(px(320.0))
+            .children(search_input)
+            .children(clear_search);
 
         div()
             .id("local-toolbar")
@@ -1037,12 +1097,119 @@ impl GpuiShell {
                     .gap_1()
                     .children(page_tabs),
             )
-            .children((self.pending_commands > 0).then(|| {
-                sync_badge(
-                    "snapshot-syncing",
-                    t(self.locale, "common.syncing").to_string(),
-                )
-            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(search_control)
+                    .children((self.pending_commands > 0).then(|| {
+                        sync_badge(
+                            "snapshot-syncing",
+                            t(self.locale, "common.syncing").to_string(),
+                        )
+                    })),
+            )
+    }
+
+    fn search_results_panel(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.search_query.trim().is_empty() {
+            return None;
+        }
+
+        let results = self.search_results();
+        let body = if results.is_empty() {
+            div()
+                .id("global-search-empty")
+                .role(Role::Status)
+                .px_4()
+                .py_3()
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "common.search_no_results").to_string())
+                .into_any_element()
+        } else {
+            div()
+                .id("global-search-results")
+                .role(Role::List)
+                .aria_label(t(self.locale, "common.search_results").to_string())
+                .flex()
+                .flex_col()
+                .children(results.into_iter().map(|result| {
+                    let result_id = result.element_id();
+                    let button_id = format!("{result_id}-button");
+                    let kind_label = t(self.locale, result.kind.label_key()).to_string();
+                    let aria_label = format!("{kind_label} · {} · {}", result.title, result.detail);
+                    let result_for_click = result.clone();
+                    div()
+                        .id(result_id)
+                        .role(Role::ListItem)
+                        .w_full()
+                        .child(
+                            div()
+                                .id(button_id)
+                                .role(Role::Button)
+                                .aria_label(aria_label)
+                                .focusable()
+                                .tab_stop(true)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .w_full()
+                                .px_4()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(rgba(COLOR_BORDER))
+                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                    shell.navigate_to_search_result(
+                                        result_for_click.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w(px(0.0))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight(600.0))
+                                                .text_color(rgba(COLOR_TEXT))
+                                                .child(result.title.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgba(COLOR_MUTED))
+                                                .child(result.detail.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgba(COLOR_ACCENT))
+                                        .child(kind_label.clone()),
+                                ),
+                        )
+                        .into_any_element()
+                }))
+                .into_any_element()
+        };
+
+        Some(
+            div()
+                .id("global-search-panel")
+                .max_h(px(360.0))
+                .overflow_y_scroll()
+                .border_b_1()
+                .border_color(rgba(COLOR_BORDER))
+                .bg(rgba(COLOR_PANEL))
+                .child(body)
+                .into_any_element(),
+        )
     }
 
     fn open_action(&mut self, page_id: &str, action_id: &str, cx: &mut Context<Self>) {
@@ -1060,6 +1227,62 @@ impl GpuiShell {
         self.pending_confirmation = None;
         self.expanded_actions.insert(action_id.to_string(), true);
         cx.notify();
+    }
+
+    fn search_results(&self) -> Vec<SearchResult> {
+        let Some(manifest) = self.manifest.as_ref() else {
+            return Vec::new();
+        };
+        search_node_snapshot(manifest, &self.snapshot, &self.search_query, self.locale)
+    }
+
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_query.clear();
+        if let Some(input) = &self.search_input {
+            input.update(cx, |input, cx| input.set_value("", cx));
+        }
+        cx.notify();
+    }
+
+    fn navigate_to_search_result(
+        &mut self,
+        result: SearchResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page_exists = self
+            .manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.pages.iter().any(|page| page.id == result.page_id));
+        if !page_exists {
+            return;
+        }
+
+        self.selected_page = result.page_id;
+        if let Some(network_name) = result.network_name {
+            if self
+                .snapshot
+                .networks
+                .iter()
+                .any(|network| network.name == network_name)
+            {
+                self.selected_network = Some(network_name);
+                self.fill_empty_network_fields();
+                self.sync_text_inputs(cx);
+            }
+        }
+        self.pending_confirmation = None;
+        self.language_menu_open = false;
+        self.network_menu_open = false;
+        self.clear_search(cx);
+        self.content_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.search_input {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        }
     }
 
     fn overview_content(
@@ -1398,6 +1621,7 @@ impl GpuiShell {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
                 .id(app_region_id(AppRegion::Content))
+                .track_focus(&self.content_focus_handle)
                 .flex_1()
                 .min_w(px(0.0))
                 .child(loading_skeleton())
@@ -1409,6 +1633,7 @@ impl GpuiShell {
                 Err(error) => {
                     return div()
                         .id(app_region_id(AppRegion::Content))
+                        .track_focus(&self.content_focus_handle)
                         .flex_1()
                         .min_w(px(0.0))
                         .child(component_error_state(
@@ -1430,6 +1655,7 @@ impl GpuiShell {
 
         let mut content = div()
             .id(app_region_id(AppRegion::Content))
+            .track_focus(&self.content_focus_handle)
             .role(Role::Article)
             .aria_label(page_title.clone())
             .flex()
@@ -1879,6 +2105,10 @@ impl Render for GpuiShell {
 
         main = main.child(self.local_tabs(cx));
 
+        if let Some(search_panel) = self.search_results_panel(cx) {
+            main = main.child(search_panel);
+        }
+
         if self.error.is_some() {
             main = main.child(self.error_banner(cx));
         }
@@ -1891,6 +2121,7 @@ impl Render for GpuiShell {
             .aria_label("fuckipv6")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::refresh_snapshot))
+            .on_action(cx.listener(Self::focus_search))
             .flex()
             .w_full()
             .h_full()
@@ -2165,6 +2396,8 @@ fn bind_shell_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-r", RefreshSnapshot, None),
         KeyBinding::new("cmd-r", RefreshSnapshot, None),
+        KeyBinding::new("ctrl-k", FocusSearch, None),
+        KeyBinding::new("cmd-k", FocusSearch, None),
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
@@ -2244,7 +2477,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::gpui::view_model::ActionBlockReason;
+    use crate::gpui::view_model::{ActionBlockReason, SearchResultKind};
     use crate::node::{
         NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult, NodeEventBus,
         NodeUiValidation,
@@ -2475,7 +2708,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shell_keymap_binds_refresh_and_quit(cx: &mut TestAppContext) {
+    fn shell_keymap_binds_refresh_search_and_quit(cx: &mut TestAppContext) {
         cx.update(bind_shell_keys);
         assert_eq!(
             bound_keystrokes(cx, &RefreshSnapshot),
@@ -2485,12 +2718,63 @@ mod tests {
             ]
         );
         assert_eq!(
+            bound_keystrokes(cx, &FocusSearch),
+            [
+                (true, false, "k".to_string()),
+                (false, true, "k".to_string())
+            ]
+        );
+        assert_eq!(
             bound_keystrokes(cx, &Quit),
             [
                 (true, false, "q".to_string()),
                 (false, true, "q".to_string())
             ]
         );
+    }
+
+    #[gpui::test]
+    fn search_results_navigate_to_network_and_peer_context(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let window = open_shell_window(cx, 1280.0);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.selected_page = "overview".into();
+                shell.selected_network = Some("studio".into());
+
+                let network = shell
+                    .manifest
+                    .as_ref()
+                    .and_then(|manifest| {
+                        search_node_snapshot(manifest, &shell.snapshot, "home", Locale::En)
+                            .into_iter()
+                            .find(|result| result.kind == SearchResultKind::Network)
+                    })
+                    .expect("home network search result");
+                shell.navigate_to_search_result(network, window, cx);
+                assert_eq!(shell.selected_page, "networks");
+                assert_eq!(shell.selected_network.as_deref(), Some("home"));
+                assert!(shell.search_query.is_empty());
+
+                shell.selected_network = Some("studio".into());
+                let peer = shell
+                    .manifest
+                    .as_ref()
+                    .and_then(|manifest| {
+                        search_node_snapshot(manifest, &shell.snapshot, "peer-tokyo", Locale::En)
+                            .into_iter()
+                            .find(|result| result.kind == SearchResultKind::Peer)
+                    })
+                    .expect("peer search result");
+                shell.navigate_to_search_result(peer, window, cx);
+                assert_eq!(shell.selected_page, "peers");
+                assert_eq!(shell.selected_network.as_deref(), Some("home"));
+                assert!(shell.search_query.is_empty());
+            })
+            .expect("update shell");
     }
 
     #[gpui::test]

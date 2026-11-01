@@ -112,6 +112,23 @@ impl NativeTextInput {
         &self.content
     }
 
+    /// Update localized accessibility copy without changing the value or
+    /// emitting a change event.
+    pub fn set_accessibility_copy(
+        &mut self,
+        aria_label: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.aria_label = aria_label.into();
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+    }
+
     /// Replace the value from application state. This intentionally does not
     /// emit a change event, avoiding a parent/child update loop.
     pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -694,6 +711,7 @@ impl Render for NativeTextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .flex()
             .items_center()
+            .w_full()
             .min_h(px(DIMENSIONS.control_md_px as f32))
             .px(px(SPACING_PX[3] as f32))
             .py(px(SPACING_PX[2] as f32))

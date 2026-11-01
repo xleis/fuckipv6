@@ -49,7 +49,7 @@
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
 | W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
-| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、Passkey 注册、恢复码确认、原子 owner 提交、限流和失败关闭已完成；完整 Passkey 生命周期和本地恢复仍待完成 |
+| W3 所有者安全 | `[~]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-05 本地所有者恢复、Passkey 注册、恢复码确认、原子 owner 提交、限流和失败关闭已完成；完整 Passkey 生命周期与浏览器/平台验收仍待完成 |
 | W4 控制 API | `[ ]` | P0 | W1,W2 | operation、SSE、错误和生成类型 |
 | W5 设计系统 | `[ ]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[ ]` | P1 | W4,W5 | 五导航、单一主状态、设置 |
@@ -529,14 +529,26 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [ ] 高风险操作近期重认证；
 - [ ] 添加浏览器与平台测试。
 
-### W3-05 本地恢复 `[ ]`
+### W3-05 本地恢复 `[x]`
 
-- [ ] 全部 Passkey 丢失后只能本地系统权限恢复；
-- [ ] 撤销旧会话；
-- [ ] 注册新 Passkey；
-- [ ] 记录高风险审计；
-- [ ] 不提供公网找回；
-- [ ] 添加旧设备失效测试。
+- [x] 全部 Passkey 丢失后只能本地系统权限恢复；
+- [x] 撤销旧会话；
+- [x] 注册新 Passkey；
+- [x] 记录高风险审计；
+- [x] 不提供公网找回；
+- [x] 添加旧设备失效测试。
+
+完成证据（实现提交 `d5b81bc`）：
+
+- `fuckipv6 recover-owner` 从终端隐藏输入恢复码，不提供命令行参数，避免恢复码进入 shell history 或进程参数；恢复服务只绑定随机端口的 `127.0.0.1`，不开放公网入口；
+- 恢复流程使用独立进程锁、10 分钟 TTL 和仅存在于 POST body/页面 DOM 的一次性随机 ticket；严格校验 `Host`、`Origin`、`Sec-Fetch-Site` 并拒绝 query string，ticket 不进入 URL、`localStorage` 或 `sessionStorage`；
+- 新 Passkey 注册完成后只暂存 owner；用户确认后才原子撤销全部旧 Passkey 和旧会话、提交新 owner 并轮换恢复码，旧浏览器会话随即失效；
+- 错误恢复码、取消、过期、并发恢复和审计失败路径都不会替换现有 owner；恢复已提交但事后审计失败时返回独立错误，不误报为“旧凭据仍有效”；
+- 高风险审计只记录固定事件元数据和真实回环来源，不记录恢复码、Passkey ID 或 ticket；
+- `cargo test -p fuckipv6-client --no-default-features owner_security::`：24 passed；
+- 全量单元测试 527 个，525 passed、2 ignored；集成测试 9 passed、1 ignored（特权 lifecycle 测试按设计忽略）；
+- `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`node --check crates/client/src/owner_security/owner_recovery.js`、`node scripts/test_webui_node_ui.mjs`、`cargo fmt --all -- --check` 与 `git diff --check` 均通过；
+- 本项完成自动化实现与事务边界验收；真实浏览器硬件 Passkey、平台兼容性及完整认证生命周期仍由 W3-04 的实机验收覆盖。
 
 ### W3-06 会话与 Web 安全 `[ ]`
 

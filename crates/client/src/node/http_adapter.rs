@@ -412,7 +412,11 @@ impl NodeErrorDetails {
                 problem.message.clone()
             },
             message_key: problem.message_key.clone(),
-            params: (*problem.params).clone(),
+            params: if hide_object {
+                BTreeMap::new()
+            } else {
+                (*problem.params).clone()
+            },
             object: if hide_object { None } else { object.cloned() },
             retryable: problem.retryable,
             recovery: problem.recovery.as_deref().cloned().or_else(|| {
@@ -788,22 +792,25 @@ impl NodeHttpAdapter {
         self.progress_operation(&operation_id, "executing");
         let result = self.commands.execute(request).await;
         match result {
-            Ok(result) => match result.outcome.clone() {
-                NodeCommandOutcome::Rejected(problem)
-                    if problem.code == NodeProblemCode::Cancelled =>
-                {
-                    self.cancel_operation(&operation_id, problem, result);
+            Ok(result) => {
+                let result = result_for_control_client(result);
+                match result.outcome.clone() {
+                    NodeCommandOutcome::Rejected(problem)
+                        if problem.code == NodeProblemCode::Cancelled =>
+                    {
+                        self.cancel_operation(&operation_id, problem, result);
+                    }
+                    NodeCommandOutcome::Rejected(problem)
+                        if problem.code == NodeProblemCode::TimedOut =>
+                    {
+                        self.fail_operation(&operation_id, problem, result, true);
+                    }
+                    NodeCommandOutcome::Rejected(problem) => {
+                        self.fail_operation(&operation_id, problem, result, false);
+                    }
+                    _ => self.succeed_operation(&operation_id, result),
                 }
-                NodeCommandOutcome::Rejected(problem)
-                    if problem.code == NodeProblemCode::TimedOut =>
-                {
-                    self.fail_operation(&operation_id, problem, result, true);
-                }
-                NodeCommandOutcome::Rejected(problem) => {
-                    self.fail_operation(&operation_id, problem, result, false);
-                }
-                _ => self.succeed_operation(&operation_id, result),
-            },
+            }
             Err(error) => {
                 let problem = NodeProblem::new(NodeProblemCode::Internal, error.to_string());
                 self.fail_operation(
@@ -1883,10 +1890,36 @@ fn snapshot_for_control_client(mut snapshot: NodeSnapshot) -> NodeSnapshot {
 }
 
 fn result_for_control_client(mut result: NodeCommandResult) -> NodeCommandResult {
-    if let NodeCommandOutcome::Snapshot(snapshot) = &mut result.outcome {
-        snapshot.control_health = NodeControlHealth::Available;
+    match &mut result.outcome {
+        NodeCommandOutcome::Snapshot(snapshot) => {
+            snapshot.control_health = NodeControlHealth::Available;
+        }
+        NodeCommandOutcome::Rejected(problem) => {
+            *problem = sanitize_problem_for_client(problem.clone());
+        }
+        _ => {}
     }
     result
+}
+
+/// Authentication and authorization failures must be indistinguishable from
+/// an inaccessible object, including parameters and network labels. The
+/// stable code/key still lets clients choose a recovery action.
+fn sanitize_problem_for_client(mut problem: NodeProblem) -> NodeProblem {
+    if matches!(
+        problem.category,
+        NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
+    ) {
+        problem.message = match problem.category {
+            NodeErrorCategory::Authentication => "需要重新进行身份认证",
+            NodeErrorCategory::Authorization => "无权执行此操作",
+            _ => unreachable!("guarded by authentication/authorization check"),
+        }
+        .into();
+        problem.params = Box::default();
+        problem.network_name = None;
+    }
+    problem
 }
 
 async fn send_ws_message(socket: &mut WebSocket, message: &NodeWsMessage) -> bool {
@@ -2675,6 +2708,80 @@ mod tests {
         let body: NodeApiErrorResponse = json_body(conflict_response).await;
         assert_eq!(body.error.code, NodeHttpErrorCode::OperationConflict);
         assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn authorization_errors_do_not_reveal_protected_objects_or_parameters() {
+        let protected_network = "owners-only-network";
+        let protected_object = "protected-node-id";
+        let problem = NodeProblem::new(
+            NodeProblemCode::PermissionDenied,
+            "object protected-node-id exists in owners-only-network",
+        )
+        .for_network(protected_network)
+        .with_param("object_id", protected_object);
+        let (adapter, _state, _events, _writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Rejected(problem),
+            Duration::ZERO,
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(59, NodeCommand::StartNode),
+            idempotency_key: None,
+        };
+
+        let response = post_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let raw: serde_json::Value = json_body(response).await;
+        let serialized = raw.to_string();
+        assert!(
+            !serialized.contains(protected_network),
+            "response leaked network: {serialized}"
+        );
+        assert!(!serialized.contains(protected_object));
+        assert!(!serialized.contains("protected-node-id exists"));
+        let body: NodeCommandHttpResponse = serde_json::from_value(raw).expect("decode response");
+        let NodeCommandOutcome::Rejected(problem) = body.result.outcome else {
+            panic!("expected a rejected command");
+        };
+        assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
+        assert_eq!(problem.category, NodeErrorCategory::Authorization);
+        assert_eq!(problem.message_key, "error.operation_permission_denied");
+        assert_eq!(problem.message, "无权执行此操作");
+        assert!(problem.params.is_empty());
+        assert!(problem.network_name.is_none());
+
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(60, NodeCommand::StartNode),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"authorization-redaction")),
+        };
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let submitted: NodeApiCommandResponse = json_body(response).await;
+        let operation_id = submitted
+            .operation
+            .expect("submitted operation")
+            .operation
+            .operation_id;
+        let failed = wait_for_terminal_operation(&adapter, operation_id.as_str()).await;
+        let error = failed
+            .operation
+            .operation
+            .error
+            .expect("failed operation carries a stable error");
+        assert!(error.object.is_none());
+        assert!(error.params.is_empty());
+        assert_eq!(error.code, "operation.permission_denied");
+        assert_eq!(error.message_key, "error.operation_permission_denied");
+        let result = failed.operation.result.expect("failed operation result");
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected a rejected operation result");
+        };
+        assert_eq!(problem.message, "无权执行此操作");
+        assert!(problem.params.is_empty());
+        assert!(problem.network_name.is_none());
     }
 
     #[tokio::test]

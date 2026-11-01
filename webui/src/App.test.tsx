@@ -5,7 +5,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../contracts/typescript/fixtures/node-manifest.json";
-import type { NodeSnapshot, NodeUiManifest } from "../../contracts/typescript/node-contract-v1";
+import type {
+  ActivityEntry,
+  NodeSnapshot,
+  NodeUiManifest,
+} from "../../contracts/typescript/node-contract-v1";
 import { App } from "./App";
 import { loadManifest, loadSnapshot } from "./api/client";
 import { loadLanguagePreference, loadOwnerSession } from "./api/session";
@@ -81,6 +85,29 @@ function renderApp() {
   );
 }
 
+function authenticate(snapshotValue: NodeSnapshot = snapshot): void {
+  vi.mocked(loadOwnerSession).mockResolvedValue({ authenticated: true });
+  vi.mocked(loadLanguagePreference).mockResolvedValue("zh-CN");
+  vi.mocked(loadManifest).mockResolvedValue(manifest);
+  vi.mocked(loadSnapshot).mockResolvedValue(snapshotValue);
+}
+
+function activityAt(index: number): ActivityEntry {
+  return {
+    audit_id: `audit-${index}`,
+    actor: "node-owner",
+    action: "network.create",
+    resource: `resource-${index}`,
+    outcome: "succeeded",
+    occurred_at_unix_ms: index * 1000,
+    summary: `raw-summary-${index}`,
+    details: {
+      command: `command-${index}`,
+      token: `secret-${index}`,
+    },
+  };
+}
+
 async function expectModuleTabs(module: string, tabs: string[]): Promise<void> {
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: `translated:nav.${module}` }));
@@ -113,10 +140,7 @@ describe("React WebUI shell", () => {
   });
 
   it("renders five modules and all eleven manifest-backed secondary pages", async () => {
-    vi.mocked(loadOwnerSession).mockResolvedValue({ authenticated: true });
-    vi.mocked(loadLanguagePreference).mockResolvedValue("zh-CN");
-    vi.mocked(loadManifest).mockResolvedValue(manifest);
-    vi.mocked(loadSnapshot).mockResolvedValue(snapshot);
+    authenticate();
     renderApp();
 
     expect(await screen.findByRole("heading", { name: "translated:page.overview" })).toBeInTheDocument();
@@ -130,10 +154,7 @@ describe("React WebUI shell", () => {
   });
 
   it("exposes the shared four-region shell with a persistent action panel", async () => {
-    vi.mocked(loadOwnerSession).mockResolvedValue({ authenticated: true });
-    vi.mocked(loadLanguagePreference).mockResolvedValue("zh-CN");
-    vi.mocked(loadManifest).mockResolvedValue(manifest);
-    vi.mocked(loadSnapshot).mockResolvedValue(snapshot);
+    authenticate();
     const { container } = renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
@@ -161,5 +182,142 @@ describe("React WebUI shell", () => {
     );
     expect(styles).not.toContain("--sidebar-width");
     expect(styles).not.toContain("--topbar-height");
+  });
+
+  it.each([
+    {
+      status: "uninitialized",
+      value: snapshot,
+      action: "start_node",
+    },
+    {
+      status: "running",
+      value: {
+        ...snapshot,
+        lifecycle: { ...snapshot.lifecycle, phase: "running" as const },
+      },
+      action: "stop_node",
+    },
+    {
+      status: "degraded",
+      value: {
+        ...snapshot,
+        lifecycle: { ...snapshot.lifecycle, phase: "running" as const },
+        last_error: {
+          code: "unavailable" as const,
+          category: "dependency" as const,
+          message: "raw backend summary",
+          message_key: "error.operation_unavailable",
+          retryable: true,
+        },
+      },
+      action: "get_node_diagnostics",
+    },
+  ])(
+    "opens the real primary action for $status",
+    async ({ value, action }) => {
+      authenticate(value);
+      const user = userEvent.setup();
+      renderApp();
+
+      const panel = await screen.findByRole("complementary", {
+        name: "translated:common.shared_actions",
+      });
+      const primaryAction = screen
+        .getAllByRole("button", { name: `translated:action.${action}` })
+        .find((button) => button.classList.contains("overview-primary-action"));
+      if (!primaryAction) throw new Error("overview primary action is missing");
+      await user.click(primaryAction);
+
+      expect(
+        within(panel).getByRole("button", {
+          name: `translated:action.${action}`,
+        }),
+      ).toHaveAttribute("aria-expanded", "true");
+      expect(panel.querySelector(".action-form")).toBeInTheDocument();
+    },
+  );
+
+  it("shows at most three deduplicated operational issues", async () => {
+    if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
+    window.FuckIPV6I18n.tr = (_locale, key, params) =>
+      `translated:${key}:${JSON.stringify(params ?? {})}`;
+    authenticate({
+      ...snapshot,
+      lifecycle: {
+        ...snapshot.lifecycle,
+        failed_networks: ["home", "home", "office", "lab"],
+      },
+    });
+    renderApp();
+
+    const issues = await screen.findByTestId("overview-issues");
+    expect(within(issues).getAllByRole("paragraph")).toHaveLength(3);
+    expect(issues).toHaveTextContent('"network":"home"');
+    expect(issues).toHaveTextContent('"network":"office"');
+    expect(issues).toHaveTextContent('"network":"lab"');
+  });
+
+  it("sorts, truncates, and sanitizes recent overview activity", async () => {
+    authenticate({
+      ...snapshot,
+      recent_activity: [3, 6, 1, 5, 2, 4].map(activityAt),
+    });
+    renderApp();
+
+    const activity = await screen.findByTestId("overview-activity");
+    const rows = activity.querySelectorAll(".overview-activity-row");
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toHaveTextContent("command-6");
+    expect(rows[4]).toHaveTextContent("command-2");
+    expect(activity).not.toHaveTextContent("raw-summary");
+    expect(activity).not.toHaveTextContent("secret-");
+  });
+
+  it.each(["create_network", "join_network"])(
+    "navigates from the %s shortcut to its real network action",
+    async (action) => {
+      authenticate();
+      const user = userEvent.setup();
+      renderApp();
+
+      await user.click(
+        await screen.findByRole("button", {
+          name: `translated:action.${action}`,
+        }),
+      );
+
+      expect(
+        await screen.findByRole("heading", { name: "translated:page.networks" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("tab", { name: "translated:nav.networks" }),
+      ).toHaveAttribute("aria-selected", "true");
+      const panel = screen.getByRole("complementary", {
+        name: "translated:common.shared_actions",
+      });
+      expect(
+        within(panel).getByRole("button", {
+          name: `translated:action.${action}`,
+        }),
+      ).toHaveAttribute("aria-expanded", "true");
+    },
+  );
+
+  it("explains why network discovery is unavailable", async () => {
+    authenticate();
+    renderApp();
+
+    const discovery = await screen.findByRole("button", {
+      name: /translated:shortcut\.discover_networks/,
+    });
+    expect(discovery).toBeDisabled();
+    expect(discovery).toHaveAttribute(
+      "title",
+      "translated:shortcut.discovery_unavailable",
+    );
+    expect(discovery).toHaveTextContent(
+      "translated:shortcut.discovery_unavailable",
+    );
   });
 });

@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { AlertTriangle, ChevronRight, ShieldAlert, X } from "lucide-react";
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import type {
   NodeCommandOutcome,
   NodeSnapshot,
@@ -23,13 +23,26 @@ type ActionPanelProps = {
   selectedNetwork: string;
   locale: Locale;
   pendingAction: string | null;
-  onSubmit(action: NodeUiAction, values: ActionValues): Promise<NodeCommandOutcome>;
+  requestedActionId: string | null;
+  onRequestedActionOpened(): void;
+  onSubmit(
+    action: NodeUiAction,
+    values: ActionValues,
+  ): Promise<NodeCommandOutcome>;
 };
 
 const numberInputs = new Set(["port", "timeout_ms"]);
-const selectInputs = new Set(["network_mode", "network_selection", "role", "routing_mode"]);
+const selectInputs = new Set([
+  "network_mode",
+  "network_selection",
+  "role",
+  "routing_mode",
+]);
 
-function selectOptions(field: NodeUiField, snapshot: NodeSnapshot): Array<{ value: string; text: string }> {
+function selectOptions(
+  field: NodeUiField,
+  snapshot: NodeSnapshot,
+): Array<{ value: string; text: string }> {
   if (field.input === "network_mode") {
     return [
       { value: "dual_stack", text: "dual_stack" },
@@ -38,16 +51,25 @@ function selectOptions(field: NodeUiField, snapshot: NodeSnapshot): Array<{ valu
     ];
   }
   if (field.input === "role") {
-    return ["member", "discovery", "relay", "exit_node"].map((value) => ({ value, text: value }));
+    return ["member", "discovery", "relay", "exit_node"].map((value) => ({
+      value,
+      text: value,
+    }));
   }
   if (field.input === "routing_mode") {
-    return ["mesh_only", "bypass_mainland", "global_proxy"].map((value) => ({ value, text: value }));
+    return ["mesh_only", "bypass_mainland", "global_proxy"].map((value) => ({
+      value,
+      text: value,
+    }));
   }
   return [
     { value: "default", text: "default" },
     { value: "all", text: "all" },
     { value: "none", text: "none" },
-    ...snapshot.networks.map((network) => ({ value: network.name, text: network.name })),
+    ...snapshot.networks.map((network) => ({
+      value: network.name,
+      text: network.name,
+    })),
   ];
 }
 
@@ -83,7 +105,11 @@ function FieldControl({
     return (
       <label className="form-field" htmlFor={id}>
         <span>{fieldLabel}</span>
-        <select id={id} value={String(value)} onChange={(event) => onChange(event.target.value)}>
+        <select
+          id={id}
+          value={String(value)}
+          onChange={(event) => onChange(event.target.value)}
+        >
           {selectOptions(field, snapshot).map((option) => (
             <option key={option.value} value={option.value}>
               {option.text}
@@ -98,10 +124,22 @@ function FieldControl({
       <span>{fieldLabel}</span>
       <input
         id={id}
-        type={numberInputs.has(field.input) ? "number" : field.input === "url_or_ticket" ? "url" : "text"}
+        type={
+          numberInputs.has(field.input)
+            ? "number"
+            : field.input === "url_or_ticket"
+              ? "url"
+              : "text"
+        }
         value={String(value)}
         required={field.required}
-        min={field.input === "port" ? 1 : field.input === "timeout_ms" ? 1 : undefined}
+        min={
+          field.input === "port"
+            ? 1
+            : field.input === "timeout_ms"
+              ? 1
+              : undefined
+        }
         inputMode={numberInputs.has(field.input) ? "numeric" : undefined}
         autoComplete="off"
         onChange={(event) => onChange(event.target.value)}
@@ -116,6 +154,8 @@ function ActionCard({
   selectedNetwork,
   locale,
   pending,
+  requested,
+  onRequestedActionOpened,
   onSubmit,
 }: {
   action: NodeUiAction;
@@ -123,9 +163,14 @@ function ActionCard({
   selectedNetwork: string;
   locale: Locale;
   pending: boolean;
-  onSubmit(action: NodeUiAction, values: ActionValues): Promise<NodeCommandOutcome>;
+  requested: boolean;
+  onRequestedActionOpened(): void;
+  onSubmit(
+    action: NodeUiAction,
+    values: ActionValues,
+  ): Promise<NodeCommandOutcome>;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(requested);
   const [confirming, setConfirming] = useState(false);
   const [values, setValues] = useState<ActionValues>(() =>
     initialActionValues(action, snapshot, selectedNetwork),
@@ -134,6 +179,17 @@ function ActionCard({
   const [result, setResult] = useState("");
   const [failure, setFailure] = useState("");
   const blocked = executionBlockReason(action, snapshot, selectedNetwork);
+  const [previousRequested, setPreviousRequested] = useState(requested);
+
+  if (requested !== previousRequested) {
+    setPreviousRequested(requested);
+    if (requested) setOpen(true);
+  }
+
+  useEffect(() => {
+    if (!requested) return;
+    onRequestedActionOpened();
+  }, [requested, onRequestedActionOpened]);
 
   async function submit(): Promise<void> {
     const validation = validateActionValues(action, values, locale);
@@ -176,7 +232,10 @@ function ActionCard({
         onClick={() => setOpen((current) => !current)}
       >
         <span>{label(locale, action.label_key)}</span>
-        <ChevronRight className={open ? "action-chevron open" : "action-chevron"} size={16} />
+        <ChevronRight
+          className={open ? "action-chevron open" : "action-chevron"}
+          size={16}
+        />
       </button>
       {open ? (
         <form className="action-form" onSubmit={handleSubmit}>
@@ -193,7 +252,9 @@ function ActionCard({
               locale={locale}
               snapshot={snapshot}
               value={values[field.id] ?? ""}
-              onChange={(value) => setValues((current) => ({ ...current, [field.id]: value }))}
+              onChange={(value) =>
+                setValues((current) => ({ ...current, [field.id]: value }))
+              }
             />
           ))}
           {errors.length > 0 ? (
@@ -203,10 +264,24 @@ function ActionCard({
               ))}
             </ul>
           ) : null}
-          {failure ? <p className="form-error" role="alert">{failure}</p> : null}
-          {result ? <p className="form-success" role="status">{result}</p> : null}
-          <button className="primary-button" type="submit" disabled={Boolean(blocked) || pending}>
-            {pending ? label(locale, "common.operation_in_progress") : label(locale, "common.execute")}
+          {failure ? (
+            <p className="form-error" role="alert">
+              {failure}
+            </p>
+          ) : null}
+          {result ? (
+            <p className="form-success" role="status">
+              {result}
+            </p>
+          ) : null}
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={Boolean(blocked) || pending}
+          >
+            {pending
+              ? label(locale, "common.operation_in_progress")
+              : label(locale, "common.execute")}
           </button>
         </form>
       ) : null}
@@ -216,22 +291,43 @@ function ActionCard({
           <Dialog.Overlay className="dialog-overlay" />
           <Dialog.Content className="dialog-content confirm-dialog">
             <div className="dialog-heading">
-              <div className={action.confirmation?.destructive ? "dialog-icon danger" : "dialog-icon"}>
+              <div
+                className={
+                  action.confirmation?.destructive
+                    ? "dialog-icon danger"
+                    : "dialog-icon"
+                }
+              >
                 <AlertTriangle size={20} />
               </div>
               <div>
-                <Dialog.Title>{label(locale, action.confirmation?.title_key ?? "common.confirm_again")}</Dialog.Title>
+                <Dialog.Title>
+                  {label(
+                    locale,
+                    action.confirmation?.title_key ?? "common.confirm_again",
+                  )}
+                </Dialog.Title>
                 <Dialog.Description>
-                  {label(locale, action.confirmation?.consequence_key ?? "common.ready_to_submit")}
+                  {label(
+                    locale,
+                    action.confirmation?.consequence_key ??
+                      "common.ready_to_submit",
+                  )}
                 </Dialog.Description>
               </div>
             </div>
             <div className="dialog-actions">
               <Dialog.Close asChild>
-                <button className="secondary-button" type="button">{label(locale, "common.cancel")}</button>
+                <button className="secondary-button" type="button">
+                  {label(locale, "common.cancel")}
+                </button>
               </Dialog.Close>
               <button
-                className={action.confirmation?.destructive ? "danger-button" : "primary-button"}
+                className={
+                  action.confirmation?.destructive
+                    ? "danger-button"
+                    : "primary-button"
+                }
                 type="button"
                 disabled={pending}
                 onClick={() => {
@@ -243,7 +339,11 @@ function ActionCard({
               </button>
             </div>
             <Dialog.Close asChild>
-              <button className="icon-button dialog-close" type="button" aria-label={label(locale, "common.close")}>
+              <button
+                className="icon-button dialog-close"
+                type="button"
+                aria-label={label(locale, "common.close")}
+              >
                 <X size={17} />
               </button>
             </Dialog.Close>
@@ -263,8 +363,12 @@ export function ActionPanel(props: ActionPanelProps) {
         data-ui-region="action-panel"
         aria-label={label(locale, "common.shared_actions")}
       >
-        <div className="panel-title">{label(locale, "common.shared_actions")}</div>
-        <p className="empty-copy">{label(locale, "common.page_actions_empty")}</p>
+        <div className="panel-title">
+          {label(locale, "common.shared_actions")}
+        </div>
+        <p className="empty-copy">
+          {label(locale, "common.page_actions_empty")}
+        </p>
       </aside>
     );
   }
@@ -274,7 +378,9 @@ export function ActionPanel(props: ActionPanelProps) {
       data-ui-region="action-panel"
       aria-label={label(locale, "common.shared_actions")}
     >
-      <div className="panel-title">{label(locale, "common.shared_actions")}</div>
+      <div className="panel-title">
+        {label(locale, "common.shared_actions")}
+      </div>
       <div className="action-list">
         {actions.map((action) => (
           <ActionCard
@@ -284,6 +390,8 @@ export function ActionPanel(props: ActionPanelProps) {
             selectedNetwork={props.selectedNetwork}
             locale={locale}
             pending={pendingAction === action.id}
+            requested={props.requestedActionId === action.id}
+            onRequestedActionOpened={props.onRequestedActionOpened}
             onSubmit={onSubmit}
           />
         ))}

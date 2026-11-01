@@ -1,5 +1,10 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import {
   Activity as ActivityIcon,
   AlertCircle,
@@ -25,7 +30,14 @@ import type {
   NodeUiManifest,
   NodeUiPage,
 } from "../../contracts/typescript/node-contract-v1";
-import { AuthenticationError, loadManifest, loadSnapshot, newIdempotencyKey, nextRequestId, sendCommand } from "./api/client";
+import {
+  AuthenticationError,
+  loadManifest,
+  loadSnapshot,
+  newIdempotencyKey,
+  nextRequestId,
+  sendCommand,
+} from "./api/client";
 import {
   loadLanguagePreference,
   loadOwnerSession,
@@ -36,7 +48,11 @@ import {
 } from "./api/session";
 import { webAuthnIssue } from "./auth/webauthn";
 import { tr } from "./i18n";
-import { NAVIGATION_MODULES, navigationModuleForPage, type NavigationModuleContract } from "./navigation";
+import {
+  NAVIGATION_MODULES,
+  navigationModuleForPage,
+  type NavigationModuleContract,
+} from "./navigation";
 import { ActionPanel } from "./components/action-panel";
 import { PageContent } from "./components/page-content";
 import {
@@ -64,13 +80,15 @@ const MODULE_ICONS: Record<string, typeof Globe2> = {
   settings: SettingsIcon,
 };
 
-const MODULES: ModuleDefinition[] = NAVIGATION_MODULES.map((module: NavigationModuleContract) => ({
-  id: module.id,
-  labelKey: module.labelKey,
-  defaultPageId: module.defaultPageId,
-  pages: module.pageIds,
-  icon: MODULE_ICONS[module.id] ?? Globe2,
-}));
+const MODULES: ModuleDefinition[] = NAVIGATION_MODULES.map(
+  (module: NavigationModuleContract) => ({
+    id: module.id,
+    labelKey: module.labelKey,
+    defaultPageId: module.defaultPageId,
+    pages: module.pageIds,
+    icon: MODULE_ICONS[module.id] ?? Globe2,
+  }),
+);
 
 const SESSION_QUERY_KEY = ["owner-session"] as const;
 const LANGUAGE_QUERY_KEY = ["language-preference"] as const;
@@ -92,7 +110,10 @@ function resolveLocale(preference: LanguagePreference | undefined): Locale {
   return runtime.resolveLocale(preference ?? "system", navigator.language);
 }
 
-function useNodeEvents(authenticated: boolean, queryClient: QueryClient): boolean {
+function useNodeEvents(
+  authenticated: boolean,
+  queryClient: QueryClient,
+): boolean {
   const [stale, setStale] = useState(false);
 
   useEffect(() => {
@@ -109,12 +130,20 @@ function useNodeEvents(authenticated: boolean, queryClient: QueryClient): boolea
     const connect = () => {
       if (stopped) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${window.location.host}/api/node/events?schema_version=1`);
+      socket = new WebSocket(
+        `${protocol}//${window.location.host}/api/node/events?schema_version=1`,
+      );
       socket.addEventListener("open", () => setStale(false));
       socket.addEventListener("message", (event) => {
         try {
-          const message = JSON.parse(String(event.data)) as Record<string, unknown>;
-          if (message.schema_version !== 1 || typeof message.type !== "string") {
+          const message = JSON.parse(String(event.data)) as Record<
+            string,
+            unknown
+          >;
+          if (
+            message.schema_version !== 1 ||
+            typeof message.type !== "string"
+          ) {
             queueResync();
             return;
           }
@@ -125,7 +154,9 @@ function useNodeEvents(authenticated: boolean, queryClient: QueryClient): boolea
             return;
           }
           if (message.type === "event") {
-            void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
+            void queryClient.invalidateQueries({
+              queryKey: SNAPSHOT_QUERY_KEY,
+            });
             return;
           }
           if (message.type === "error") queueResync();
@@ -154,7 +185,9 @@ function useNodeEvents(authenticated: boolean, queryClient: QueryClient): boolea
 function LoadingScreen({ locale }: { locale: Locale }): JSX.Element {
   return (
     <main className="centered-shell" aria-busy="true">
-      <div className="loading-mark"><LoaderCircle className="spin" size={30} /></div>
+      <div className="loading-mark">
+        <LoaderCircle className="spin" size={30} />
+      </div>
       <h1>{label(locale, "owner_auth.session.checking")}</h1>
     </main>
   );
@@ -173,7 +206,9 @@ function FatalScreen({
 }): JSX.Element {
   return (
     <main className="centered-shell">
-      <div className="state-icon danger"><AlertCircle size={28} /></div>
+      <div className="state-icon danger">
+        <AlertCircle size={28} />
+      </div>
       <h1>{title}</h1>
       <p>{detail}</p>
       {onRetry ? (
@@ -190,14 +225,17 @@ function LoginScreen({ locale }: { locale: Locale }): JSX.Element {
   const issue = webAuthnIssue();
   const login = useMutation({
     mutationFn: loginWithPasskey,
-    onSuccess: (session) => queryClient.setQueryData(SESSION_QUERY_KEY, session),
+    onSuccess: (session) =>
+      queryClient.setQueryData(SESSION_QUERY_KEY, session),
   });
   const [failure, setFailure] = useState("");
 
   return (
     <main className="auth-shell">
       <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-emblem"><ShieldAlert size={32} /></div>
+        <div className="auth-emblem">
+          <ShieldAlert size={32} />
+        </div>
         <span className="eyebrow">fuckipv6</span>
         <h1 id="auth-title">{label(locale, "owner_auth.login.title")}</h1>
         <p>{label(locale, "owner_auth.login.description")}</p>
@@ -207,17 +245,27 @@ function LoginScreen({ locale }: { locale: Locale }): JSX.Element {
             <span>{issue}</span>
           </div>
         ) : null}
-        {failure ? <div className="inline-notice danger" role="alert">{failure}</div> : null}
+        {failure ? (
+          <div className="inline-notice danger" role="alert">
+            {failure}
+          </div>
+        ) : null}
         <button
           className="primary-button auth-submit"
           type="button"
           disabled={Boolean(issue) || login.isPending}
           onClick={() => {
             setFailure("");
-            login.mutate(undefined, { onError: (error) => setFailure(errorMessage(error)) });
+            login.mutate(undefined, {
+              onError: (error) => setFailure(errorMessage(error)),
+            });
           }}
         >
-          {login.isPending ? <LoaderCircle className="spin" size={18} /> : <KeyRound size={18} />}
+          {login.isPending ? (
+            <LoaderCircle className="spin" size={18} />
+          ) : (
+            <KeyRound size={18} />
+          )}
           {login.isPending
             ? label(locale, "owner_auth.passkey.waiting")
             : label(locale, "owner_auth.passkey.login_button")}
@@ -228,11 +276,19 @@ function LoginScreen({ locale }: { locale: Locale }): JSX.Element {
   );
 }
 
-function TopStatus({ snapshot, locale }: { snapshot: NodeSnapshot; locale: Locale }): JSX.Element {
+function TopStatus({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}): JSX.Element {
   const status = primaryStatus(snapshot, locale);
   const healthy = status.id === "running";
   return (
-    <div className={`top-status ${healthy ? "good" : status.id === "degraded" || status.id === "control_unavailable" ? "warn" : "bad"}`}>
+    <div
+      className={`top-status ${healthy ? "good" : status.id === "degraded" || status.id === "control_unavailable" ? "warn" : "bad"}`}
+    >
       <span className="top-status-dot" aria-hidden="true" />
       <div>
         <strong>{status.label}</strong>
@@ -261,22 +317,40 @@ function LanguageMenu({
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button className="toolbar-button" type="button" disabled={disabled} aria-label={label(locale, "common.language")}>
+        <button
+          className="toolbar-button"
+          type="button"
+          disabled={disabled}
+          aria-label={label(locale, "common.language")}
+        >
           <Globe2 size={16} />
-          <span>{choices.find((choice) => choice.value === preference)?.title ?? preference}</span>
+          <span>
+            {choices.find((choice) => choice.value === preference)?.title ??
+              preference}
+          </span>
           <ChevronDown size={14} />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content className="dropdown-content" align="end" sideOffset={8}>
-          <DropdownMenu.Label className="dropdown-label">{label(locale, "common.language")}</DropdownMenu.Label>
+        <DropdownMenu.Content
+          className="dropdown-content"
+          align="end"
+          sideOffset={8}
+        >
+          <DropdownMenu.Label className="dropdown-label">
+            {label(locale, "common.language")}
+          </DropdownMenu.Label>
           {choices.map((choice) => (
             <DropdownMenu.Item
               className="dropdown-item"
               key={choice.value}
               onSelect={() => onChange(choice.value)}
             >
-              {choice.value === preference ? <CheckCircle2 size={15} /> : <span className="menu-spacer" />}
+              {choice.value === preference ? (
+                <CheckCircle2 size={15} />
+              ) : (
+                <span className="menu-spacer" />
+              )}
               {choice.title}
             </DropdownMenu.Item>
           ))}
@@ -301,12 +375,17 @@ function AppShell({
   stale: boolean;
   queryClient: QueryClient;
 }): JSX.Element {
-  const initialPage = manifest.pages.find((page) => page.id === "overview") ?? manifest.pages[0];
+  const initialPage =
+    manifest.pages.find((page) => page.id === "overview") ?? manifest.pages[0];
   const [pageId, setPageId] = useState(initialPage?.id ?? "overview");
   const [selectedNetworkState, setSelectedNetworkState] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [requestedActionId, setRequestedActionId] = useState<string | null>(
+    null,
+  );
   const [refreshError, setRefreshError] = useState("");
-  const activePage = manifest.pages.find((page) => page.id === pageId) ?? initialPage;
+  const activePage =
+    manifest.pages.find((page) => page.id === pageId) ?? initialPage;
   const activeModule = moduleForPage(activePage?.id ?? "overview");
   const selectedNetwork = defaultNetworkName(snapshot, selectedNetworkState);
 
@@ -318,7 +397,8 @@ function AppShell({
   });
   const logoutMutation = useMutation({
     mutationFn: logoutOwnerSession,
-    onSuccess: () => queryClient.setQueryData(SESSION_QUERY_KEY, { authenticated: false }),
+    onSuccess: () =>
+      queryClient.setQueryData(SESSION_QUERY_KEY, { authenticated: false }),
   });
 
   async function refresh(): Promise<void> {
@@ -335,11 +415,23 @@ function AppShell({
     }
   }
 
-  async function submitAction(action: NodeUiAction, values: ActionValues): Promise<NodeCommandOutcome> {
+  async function submitAction(
+    action: NodeUiAction,
+    values: ActionValues,
+  ): Promise<NodeCommandOutcome> {
     setPendingAction(action.id);
     try {
-      const response = await sendCommand(commandEnvelope(nextRequestId(), action, values, locale, newIdempotencyKey()));
-      if (!response.result) throw new Error(label(locale, "common.operation_failed"));
+      const response = await sendCommand(
+        commandEnvelope(
+          nextRequestId(),
+          action,
+          values,
+          locale,
+          newIdempotencyKey(),
+        ),
+      );
+      if (!response.result)
+        throw new Error(label(locale, "common.operation_failed"));
       const outcome = response.result.outcome;
       if (outcome.status === "snapshot") {
         queryClient.setQueryData(SNAPSHOT_QUERY_KEY, outcome.data);
@@ -357,15 +449,23 @@ function AppShell({
 
   function navigate(nextPage: string): void {
     if (!manifest.pages.some((page) => page.id === nextPage)) return;
+    setRequestedActionId(null);
     setPageId(nextPage);
     document.getElementById("page-content")?.focus();
+  }
+
+  function requestAction(actionId: string): void {
+    setRequestedActionId(actionId);
   }
 
   function selectModule(module: ModuleDefinition): void {
     const next =
       module.pages.find(
-        (id) => id === module.defaultPageId && manifest.pages.some((page) => page.id === id),
-      ) ?? module.pages.find((id) => manifest.pages.some((page) => page.id === id));
+        (id) =>
+          id === module.defaultPageId &&
+          manifest.pages.some((page) => page.id === id),
+      ) ??
+      module.pages.find((id) => manifest.pages.some((page) => page.id === id));
     if (next) setPageId(next);
   }
 
@@ -375,15 +475,22 @@ function AppShell({
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#page-content">{label(locale, "common.skip_content")}</a>
+      <a className="skip-link" href="#page-content">
+        {label(locale, "common.skip_content")}
+      </a>
       <aside
         className="primary-nav"
         data-ui-region="sidebar"
         aria-label={label(locale, "common.main_navigation")}
       >
         <div className="brand-lockup">
-          <div className="brand-mark"><Wifi size={22} /></div>
-          <div><span>fuckipv6</span><strong>{label(locale, "common.node_contract")}</strong></div>
+          <div className="brand-mark">
+            <Wifi size={22} />
+          </div>
+          <div>
+            <span>fuckipv6</span>
+            <strong>{label(locale, "common.node_contract")}</strong>
+          </div>
         </div>
         <nav className="module-list">
           {MODULES.map((module) => {
@@ -393,7 +500,9 @@ function AppShell({
               <button
                 key={module.id}
                 type="button"
-                className={selected ? "module-button selected" : "module-button"}
+                className={
+                  selected ? "module-button selected" : "module-button"
+                }
                 aria-current={selected ? "page" : undefined}
                 onClick={() => selectModule(module)}
               >
@@ -404,9 +513,14 @@ function AppShell({
           })}
         </nav>
         <div className="nav-footer">
-          <span>{label(locale, "common.snapshot")} #{snapshot.revision}</span>
-          <span className={stale ? "stale-indicator active" : "stale-indicator"}>
-            <span aria-hidden="true" /> {stale ? label(locale, "common.syncing") : "Live"}
+          <span>
+            {label(locale, "common.snapshot")} #{snapshot.revision}
+          </span>
+          <span
+            className={stale ? "stale-indicator active" : "stale-indicator"}
+          >
+            <span aria-hidden="true" />{" "}
+            {stale ? label(locale, "common.syncing") : "Live"}
           </span>
         </div>
       </aside>
@@ -418,9 +532,20 @@ function AppShell({
           </div>
           <label className="network-picker">
             <span>{label(locale, "common.current_network")}</span>
-            <select value={selectedNetwork} onChange={(event) => setSelectedNetworkState(event.target.value)}>
-              {snapshot.networks.length === 0 ? <option value="">{label(locale, "common.no_running_networks")}</option> : null}
-              {snapshot.networks.map((network) => <option value={network.name} key={network.name}>{network.name}</option>)}
+            <select
+              value={selectedNetwork}
+              onChange={(event) => setSelectedNetworkState(event.target.value)}
+            >
+              {snapshot.networks.length === 0 ? (
+                <option value="">
+                  {label(locale, "common.no_running_networks")}
+                </option>
+              ) : null}
+              {snapshot.networks.map((network) => (
+                <option value={network.name} key={network.name}>
+                  {network.name}
+                </option>
+              ))}
             </select>
           </label>
           <div className="global-actions">
@@ -430,34 +555,58 @@ function AppShell({
               disabled={languageMutation.isPending}
               onChange={(preference) => languageMutation.mutate(preference)}
             />
-            <button className="icon-button" type="button" onClick={() => void refresh()} aria-label={label(locale, "common.refresh")}>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => void refresh()}
+              aria-label={label(locale, "common.refresh")}
+            >
               <RefreshCw size={17} />
             </button>
-            <button className="icon-button" type="button" onClick={() => logoutMutation.mutate()} aria-label={label(locale, "owner_auth.session.logout")}>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => logoutMutation.mutate()}
+              aria-label={label(locale, "owner_auth.session.logout")}
+            >
               <LogOut size={17} />
             </button>
           </div>
         </header>
 
         <div className="local-toolbar">
-          <div className="page-tabs" role="tablist" aria-label={label(locale, "common.page_sections")}>
+          <div
+            className="page-tabs"
+            role="tablist"
+            aria-label={label(locale, "common.page_sections")}
+          >
             {subpages.map((page) => (
               <button
                 key={page.id}
                 type="button"
                 role="tab"
                 aria-selected={page.id === activePage?.id}
-                className={page.id === activePage?.id ? "page-tab selected" : "page-tab"}
+                className={
+                  page.id === activePage?.id ? "page-tab selected" : "page-tab"
+                }
                 onClick={() => navigate(page.id)}
               >
                 {label(locale, page.nav_label_key)}
               </button>
             ))}
           </div>
-          {stale ? <span className="sync-badge">{label(locale, "common.syncing")}</span> : null}
+          {stale ? (
+            <span className="sync-badge">
+              {label(locale, "common.syncing")}
+            </span>
+          ) : null}
         </div>
 
-        {refreshError ? <div className="app-banner danger" role="alert">{refreshError}</div> : null}
+        {refreshError ? (
+          <div className="app-banner danger" role="alert">
+            {refreshError}
+          </div>
+        ) : null}
         <main className="workspace" id="page-content" tabIndex={-1}>
           {activePage ? (
             <>
@@ -468,6 +617,7 @@ function AppShell({
                 selectedNetwork={selectedNetwork}
                 onSelectNetwork={setSelectedNetworkState}
                 onNavigate={navigate}
+                onRequestAction={requestAction}
               />
               <ActionPanel
                 actions={activePage.actions}
@@ -475,11 +625,15 @@ function AppShell({
                 selectedNetwork={selectedNetwork}
                 locale={locale}
                 pendingAction={pendingAction}
+                requestedActionId={requestedActionId}
+                onRequestedActionOpened={() => setRequestedActionId(null)}
                 onSubmit={submitAction}
               />
             </>
           ) : (
-            <div className="empty-state">{label(locale, "common.manifest_not_loaded")}</div>
+            <div className="empty-state">
+              {label(locale, "common.manifest_not_loaded")}
+            </div>
           )}
         </main>
       </div>
@@ -522,7 +676,10 @@ export function App(): JSX.Element {
   );
 
   if (sessionQuery.isPending) return <LoadingScreen locale={locale} />;
-  if (sessionQuery.error instanceof AuthenticationError || sessionQuery.data?.authenticated === false) {
+  if (
+    sessionQuery.error instanceof AuthenticationError ||
+    sessionQuery.data?.authenticated === false
+  ) {
     return <LoginScreen locale={locale} />;
   }
   if (sessionQuery.error) {
@@ -535,8 +692,12 @@ export function App(): JSX.Element {
       />
     );
   }
-  if (manifestQuery.isPending || snapshotQuery.isPending) return <LoadingScreen locale={locale} />;
-  if (manifestQuery.error instanceof AuthenticationError || snapshotQuery.error instanceof AuthenticationError) {
+  if (manifestQuery.isPending || snapshotQuery.isPending)
+    return <LoadingScreen locale={locale} />;
+  if (
+    manifestQuery.error instanceof AuthenticationError ||
+    snapshotQuery.error instanceof AuthenticationError
+  ) {
     return <LoginScreen locale={locale} />;
   }
   if (manifestQuery.error || snapshotQuery.error) {

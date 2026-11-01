@@ -22,8 +22,8 @@ use super::components::{
 };
 use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
-    action_block_reason, build_command, build_page_model, default_form_values,
-    validate_manifest_bindings, ActionBinding, PageKind, RowModel, SectionModel,
+    action_block_reason, build_command, build_page_model, default_form_values, network_status_key,
+    validate_manifest_bindings, ActionBinding, OverviewModel, PageKind, RowModel, SectionModel,
 };
 use crate::config_manager::ConfigManager;
 use crate::node::{
@@ -1045,7 +1045,356 @@ impl GpuiShell {
             }))
     }
 
-    fn page_content(&self) -> gpui::AnyElement {
+    fn open_action(&mut self, page_id: &str, action_id: &str, cx: &mut Context<Self>) {
+        let exists = self.manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .pages
+                .iter()
+                .find(|page| page.id == page_id)
+                .is_some_and(|page| page.actions.iter().any(|action| action.id == action_id))
+        });
+        if !exists {
+            return;
+        }
+        self.selected_page = page_id.to_string();
+        self.pending_confirmation = None;
+        self.expanded_actions.insert(action_id.to_string(), true);
+        cx.notify();
+    }
+
+    fn overview_content(
+        &self,
+        overview: &OverviewModel,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let palette = semantic_palette(primary_status_semantic(overview.primary_status));
+        let mut primary_card = div()
+            .id("overview-primary-status")
+            .role(Role::Status)
+            .aria_label(format!(
+                "{} · {}",
+                overview.node_name,
+                t(self.locale, overview.primary_status.label_key())
+            ))
+            .flex()
+            .items_center()
+            .gap_4()
+            .p_5()
+            .rounded_lg()
+            .bg(rgba(palette.background.rgba_hex()))
+            .border_1()
+            .border_color(rgba(palette.border.rgba_hex()))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(palette.foreground.rgba_hex()))
+                            .child(t(self.locale, "common.primary_status").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(overview.node_name.clone()),
+                    )
+                    .child(div().text_sm().text_color(rgba(COLOR_MUTED)).child(format!(
+                        "{} · {}",
+                        t(self.locale, overview.primary_status.label_key()),
+                        t(self.locale, overview.primary_status.detail_key())
+                    ))),
+            );
+
+        if let Some(action_id) = overview.primary_action.clone() {
+            let target = action_id.clone();
+            primary_card = primary_card.child(
+                button(
+                    SharedString::from("overview-primary-action"),
+                    action_label(self.locale, &action_id),
+                    ButtonVariant::Primary,
+                    false,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.open_action("overview", &target, cx);
+                })),
+            );
+        }
+
+        let mut stack = div()
+            .id("overview-stack")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .max_w(px(980.0))
+            .child(primary_card);
+
+        if !overview.issues.is_empty() {
+            stack = stack.child(
+                div()
+                    .id("overview-issues")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                    .border_1()
+                    .border_color(rgba(DARK_THEME.colors.warning.rgba_hex()))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "overview.need_attention").to_string()),
+                    )
+                    .children(overview.issues.iter().map(|issue| {
+                        div()
+                            .flex()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(rgba(COLOR_BORDER))
+                            .pt_2()
+                            .text_sm()
+                            .text_color(rgba(COLOR_WARNING))
+                            .child("!")
+                            .child(issue.clone())
+                    })),
+            );
+        }
+
+        let network_rows = if overview.networks.is_empty() {
+            vec![div()
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "common.no_running_networks").to_string())
+                .into_any_element()]
+        } else {
+            overview
+                .networks
+                .iter()
+                .map(|network| {
+                    let network_palette = semantic_palette(match network.status {
+                        NodeNetworkStatus::Online => SemanticState::Success,
+                        NodeNetworkStatus::Degraded | NodeNetworkStatus::Connecting => {
+                            SemanticState::Warning
+                        }
+                        NodeNetworkStatus::Failed => SemanticState::Danger,
+                        NodeNetworkStatus::Offline | NodeNetworkStatus::Stopping => {
+                            SemanticState::Neutral
+                        }
+                    });
+                    div()
+                        .id(SharedString::from(format!(
+                            "overview-network-{}",
+                            network.name
+                        )))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_2()
+                        .border_t_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_TEXT))
+                                        .child(network.name.clone()),
+                                )
+                                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                                    self.locale,
+                                    "overview.network.detail",
+                                    &[
+                                        ("peers", &network.peer_count.to_string()),
+                                        ("tun", &network.tun_name),
+                                    ],
+                                )))
+                                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                                    self.locale,
+                                    "overview.network.path",
+                                    &[("routing", &network.routing), ("exit", &network.exit)],
+                                )))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(network.roles.join(" · ")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .rounded_full()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgba(network_palette.foreground.rgba_hex()))
+                                .bg(rgba(network_palette.background.rgba_hex()))
+                                .child(
+                                    t(self.locale, network_status_key(network.status)).to_string(),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        };
+        stack = stack.child(
+            div()
+                .id("overview-networks")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_4()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .text_base()
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(t(self.locale, "overview.networks_title").to_string())
+                        .child(overview.networks.len().to_string()),
+                )
+                .children(network_rows),
+        );
+
+        let activity_rows = if overview.activity.is_empty() {
+            vec![div()
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "overview.activity.empty").to_string())
+                .into_any_element()]
+        } else {
+            overview
+                .activity
+                .iter()
+                .map(|activity| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .py_2()
+                        .border_t_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(activity.action.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(activity.detail.clone()),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        };
+        stack = stack.child(
+            div()
+                .id("overview-activity")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_4()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .text_base()
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(t(self.locale, "overview.activity_title").to_string()),
+                )
+                .children(activity_rows),
+        );
+
+        let shortcut_cards = overview
+            .shortcuts
+            .iter()
+            .map(|shortcut| {
+                let mut card = div()
+                    .id(SharedString::from(format!(
+                        "overview-shortcut-{}",
+                        shortcut.id
+                    )))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .min_h(px(52.0))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .text_sm()
+                    .text_color(rgba(if shortcut.action_id.is_some() {
+                        COLOR_TEXT
+                    } else {
+                        COLOR_MUTED
+                    }))
+                    .child(shortcut.label.clone());
+                if let Some(reason) = &shortcut.unavailable_reason {
+                    card = card.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(reason.clone()),
+                    );
+                }
+                if let Some(action_id) = shortcut.action_id.clone() {
+                    card = card.on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.open_action("networks", &action_id, cx);
+                    }));
+                }
+                card.into_any_element()
+            })
+            .collect::<Vec<_>>();
+        stack = stack.child(
+            div()
+                .id("overview-shortcuts")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_4()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .text_base()
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(t(self.locale, "overview.shortcuts").to_string()),
+                )
+                .child(div().flex().gap_2().children(shortcut_cards)),
+        );
+
+        stack.into_any_element()
+    }
+
+    fn page_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
                 .id(app_region_id(AppRegion::Content))
@@ -1129,6 +1478,12 @@ impl GpuiShell {
                             )),
                     ),
             );
+
+        if let Some(overview) = model.overview.as_ref() {
+            return content
+                .child(self.overview_content(overview, cx))
+                .into_any_element();
+        }
 
         if !model.metrics.is_empty() {
             content = content.child(
@@ -1478,7 +1833,7 @@ impl Render for GpuiShell {
         debug_assert_eq!(APP_REGION_ORDER, AppRegion::ALL);
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
         let presentation = ActionPanelPresentation::for_layout(layout);
-        let content = self.page_content();
+        let content = self.page_content(cx);
         let action_panel = self.action_panel(layout, cx);
         let workspace = if presentation == ActionPanelPresentation::Stacked {
             div()

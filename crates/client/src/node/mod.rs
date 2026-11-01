@@ -11,13 +11,15 @@ mod state;
 mod ui_manifest;
 
 pub use command::{
-    validate_network_name, NodeCleanupFailureReason, NodeCleanupFailureSnapshot,
-    NodeCleanupStepSnapshot, NodeCleanupStepStatus, NodeCommand, NodeCommandBus,
-    NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
-    NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeCreateNetworkCommand,
-    NodeCreatedNetwork, NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodePeerProbeSnapshot,
-    NodeProbePeerCommand, NodeResidualCleanupResult, NodeRuntimeResidueSnapshot,
-    NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
+    validate_network_name, NodeBlacklistSnapshot, NodeCleanupFailureReason,
+    NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot, NodeCleanupStepStatus,
+    NodeClientBlacklistCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
+    NodeCommandFuture, NodeCommandHandler, NodeCommandKind, NodeCommandOutcome, NodeCommandRequest,
+    NodeCommandResult, NodeCreateNetworkCommand, NodeCreatedNetwork, NodeDiagnosticsSnapshot,
+    NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkAllocationSnapshot,
+    NodePeerProbeSnapshot, NodeProbePeerCommand, NodeResidualCleanupResult,
+    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand,
+    NodeUpdateRoutingCommand,
 };
 pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
 pub use http_adapter::{

@@ -290,6 +290,28 @@ impl GpuiShell {
                     summary
                 ));
             }
+            NodeCommandOutcome::Blacklist(snapshot) => {
+                self.notice = Some(format!(
+                    "网络 [{}] 黑名单已同步：{} 个客户端{}",
+                    snapshot.network_name,
+                    snapshot.clients.len(),
+                    if snapshot.changed {
+                        "，状态已变更"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            NodeCommandOutcome::NetworkAllocation(snapshot) => {
+                self.notice = Some(format!(
+                    "网络 [{}] 地址分配已同步：{:?}，IPv4={}，IPv6={}，持久化={}",
+                    snapshot.network_name,
+                    snapshot.allocation.mode,
+                    snapshot.allocation.ipv4_pool,
+                    snapshot.allocation.ipv6_pool,
+                    snapshot.config_saved
+                ));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(format!("命令已接受: {operation_id}"));
             }
@@ -1191,6 +1213,11 @@ fn action_label(id: &str) -> &'static str {
         "stop_networks" => "停止网络",
         "restart_networks" => "重启网络",
         "probe_peer" => "探测 Peer",
+        "get_blacklist" => "读取节点黑名单",
+        "ban_client" => "封禁节点",
+        "unban_client" => "解除节点封禁",
+        "get_network_allocation" => "读取地址池",
+        "update_network_allocation" => "更新地址池",
         "update_routing" => "更新路由",
         "set_exit_node_role" => "设置 Exit Node 角色",
         "set_relay_role" => "设置 Relay 角色",
@@ -1217,6 +1244,10 @@ fn field_label(key: &str) -> &'static str {
         "field.all_networks" => "全部网络",
         "field.peer_target" => "Peer 目标",
         "field.timeout_ms" => "超时（毫秒）",
+        "field.client_id" => "节点标识",
+        "field.network_mode" => "地址族模式",
+        "field.ipv4_pool" => "IPv4 地址池",
+        "field.ipv6_pool" => "IPv6 地址池",
         "field.routing_mode" => "路由模式",
         "field.exit_node" => "Exit Node",
         "field.is_exit_node" => "本节点作为 Exit Node",

@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ExitNodeCapabilities", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ExitNodeCapabilities", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "UiModeResolution", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -274,8 +274,11 @@ public final class NodeContractV1 {
     }
 
     public enum NodeCommandKind {
+        BAN_CLIENT("ban_client"),
         CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
         CREATE_NETWORK("create_network"),
+        GET_BLACKLIST("get_blacklist"),
+        GET_NETWORK_ALLOCATION("get_network_allocation"),
         GET_NODE_DIAGNOSTICS("get_node_diagnostics"),
         GET_SNAPSHOT("get_snapshot"),
         GET_UI_MANIFEST("get_ui_manifest"),
@@ -289,6 +292,8 @@ public final class NodeContractV1 {
         START_NODE("start_node"),
         STOP_NETWORKS("stop_networks"),
         STOP_NODE("stop_node"),
+        UNBAN_CLIENT("unban_client"),
+        UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
         UPDATE_ROUTING("update_routing");
 
         private final String wireName;
@@ -658,7 +663,9 @@ public final class NodeContractV1 {
 
     public enum NodeUiInputKind {
         BOOLEAN("boolean"),
+        CLIENT_ID("client_id"),
         EXTERNAL_HOST("external_host"),
+        NETWORK_MODE("network_mode"),
         NETWORK_NAME("network_name"),
         NETWORK_SELECTION("network_selection"),
         PEER_TARGET("peer_target"),
@@ -694,6 +701,7 @@ public final class NodeContractV1 {
         NETWORK_NAME("network_name"),
         PORT("port"),
         DISTINCT_PORTS("distinct_ports"),
+        NETWORK_MODE("network_mode"),
         NETWORK_SELECTION("network_selection"),
         ROLE("role"),
         ROUTING_MODE("routing_mode"),
@@ -817,6 +825,19 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeBlacklistSnapshot. */
+    public static final class NodeBlacklistSnapshot {
+        public final String network_name;
+        public final List<String> clients;
+        public final Boolean changed;
+
+        public NodeBlacklistSnapshot(String network_name, List<String> clients, Boolean changed) {
+            this.network_name = network_name;
+            this.clients = clients;
+            this.changed = changed;
+        }
+    }
+
     /** DTO for NodeCapabilityRegistrySnapshot. */
     public static final class NodeCapabilityRegistrySnapshot {
         public final List<NodeCapabilitySnapshot> capabilities;
@@ -860,6 +881,17 @@ public final class NodeContractV1 {
             this.resource = resource;
             this.status = status;
             this.detail = detail;
+        }
+    }
+
+    /** DTO for NodeClientBlacklistCommand. */
+    public static final class NodeClientBlacklistCommand {
+        public final String network_name;
+        public final String client_id;
+
+        public NodeClientBlacklistCommand(String network_name, String client_id) {
+            this.network_name = network_name;
+            this.client_id = client_id;
         }
     }
 
@@ -930,6 +962,21 @@ public final class NodeContractV1 {
             this.relay_port = relay_port;
             this.external_host = external_host;
             this.auto_connect = auto_connect;
+        }
+    }
+
+    /** DTO for NodeCreatedNetwork. */
+    public static final class NodeCreatedNetwork {
+        public final String network_name;
+        public final Boolean config_saved;
+        public final Boolean started;
+        public final String invitation_ticket;
+
+        public NodeCreatedNetwork(String network_name, Boolean config_saved, Boolean started, String invitation_ticket) {
+            this.network_name = network_name;
+            this.config_saved = config_saved;
+            this.started = started;
+            this.invitation_ticket = invitation_ticket;
         }
     }
 
@@ -1076,6 +1123,32 @@ public final class NodeContractV1 {
         public NodeManifestResponse(Integer schema_version, NodeUiManifest manifest) {
             this.schema_version = schema_version;
             this.manifest = manifest;
+        }
+    }
+
+    /** DTO for NodeNetworkAllocation. */
+    public static final class NodeNetworkAllocation {
+        public final NetworkMode mode;
+        public final String ipv4_pool;
+        public final String ipv6_pool;
+
+        public NodeNetworkAllocation(NetworkMode mode, String ipv4_pool, String ipv6_pool) {
+            this.mode = mode;
+            this.ipv4_pool = ipv4_pool;
+            this.ipv6_pool = ipv6_pool;
+        }
+    }
+
+    /** DTO for NodeNetworkAllocationSnapshot. */
+    public static final class NodeNetworkAllocationSnapshot {
+        public final String network_name;
+        public final NodeNetworkAllocation allocation;
+        public final Boolean config_saved;
+
+        public NodeNetworkAllocationSnapshot(String network_name, NodeNetworkAllocation allocation, Boolean config_saved) {
+            this.network_name = network_name;
+            this.allocation = allocation;
+            this.config_saved = config_saved;
         }
     }
 
@@ -1462,6 +1535,17 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeUpdateNetworkAllocationCommand. */
+    public static final class NodeUpdateNetworkAllocationCommand {
+        public final String network_name;
+        public final NodeNetworkAllocation allocation;
+
+        public NodeUpdateNetworkAllocationCommand(String network_name, NodeNetworkAllocation allocation) {
+            this.network_name = network_name;
+            this.allocation = allocation;
+        }
+    }
+
     /** DTO for NodeUpdateRoutingCommand. */
     public static final class NodeUpdateRoutingCommand {
         public final String network_name;
@@ -1609,6 +1693,67 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class GetBlacklist extends NodeCommand {
+            public final GetBlacklistPayload payload;
+
+            public GetBlacklist(GetBlacklistPayload payload) {
+                super(NodeCommandKind.GET_BLACKLIST);
+                this.payload = payload;
+            }
+            /** DTO for GetBlacklistPayload. */
+            public static final class GetBlacklistPayload {
+                public final String network_name;
+
+                public GetBlacklistPayload(String network_name) {
+                    this.network_name = network_name;
+                }
+            }
+        }
+
+        public static final class BanClient extends NodeCommand {
+            public final NodeClientBlacklistCommand payload;
+
+            public BanClient(NodeClientBlacklistCommand payload) {
+                super(NodeCommandKind.BAN_CLIENT);
+                this.payload = payload;
+            }
+        }
+
+        public static final class UnbanClient extends NodeCommand {
+            public final NodeClientBlacklistCommand payload;
+
+            public UnbanClient(NodeClientBlacklistCommand payload) {
+                super(NodeCommandKind.UNBAN_CLIENT);
+                this.payload = payload;
+            }
+        }
+
+        public static final class GetNetworkAllocation extends NodeCommand {
+            public final GetNetworkAllocationPayload payload;
+
+            public GetNetworkAllocation(GetNetworkAllocationPayload payload) {
+                super(NodeCommandKind.GET_NETWORK_ALLOCATION);
+                this.payload = payload;
+            }
+            /** DTO for GetNetworkAllocationPayload. */
+            public static final class GetNetworkAllocationPayload {
+                public final String network_name;
+
+                public GetNetworkAllocationPayload(String network_name) {
+                    this.network_name = network_name;
+                }
+            }
+        }
+
+        public static final class UpdateNetworkAllocation extends NodeCommand {
+            public final NodeUpdateNetworkAllocationCommand payload;
+
+            public UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand payload) {
+                super(NodeCommandKind.UPDATE_NETWORK_ALLOCATION);
+                this.payload = payload;
+            }
+        }
+
         public static final class ProbePeer extends NodeCommand {
             public final NodeProbePeerCommand payload;
 
@@ -1706,11 +1851,38 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class Blacklist extends NodeCommandOutcome {
+            public final NodeBlacklistSnapshot data;
+
+            public Blacklist(NodeBlacklistSnapshot data) {
+                super("blacklist");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkAllocation extends NodeCommandOutcome {
+            public final NodeNetworkAllocationSnapshot data;
+
+            public NetworkAllocation(NodeNetworkAllocationSnapshot data) {
+                super("network_allocation");
+                this.data = data;
+            }
+        }
+
         public static final class Probe extends NodeCommandOutcome {
             public final NodePeerProbeSnapshot data;
 
             public Probe(NodePeerProbeSnapshot data) {
                 super("probe");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkCreated extends NodeCommandOutcome {
+            public final NodeCreatedNetwork data;
+
+            public NetworkCreated(NodeCreatedNetwork data) {
+                super("network_created");
                 this.data = data;
             }
         }
@@ -2030,8 +2202,11 @@ public final class NodeContractV1 {
     }
 
     public static boolean isManifestAction(NodeCommandKind command) {
-        return             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
+        return             command == NodeCommandKind.BAN_CLIENT ||
+            command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
             command == NodeCommandKind.CREATE_NETWORK ||
+            command == NodeCommandKind.GET_BLACKLIST ||
+            command == NodeCommandKind.GET_NETWORK_ALLOCATION ||
             command == NodeCommandKind.GET_NODE_DIAGNOSTICS ||
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
@@ -2044,6 +2219,8 @@ public final class NodeContractV1 {
             command == NodeCommandKind.START_NODE ||
             command == NodeCommandKind.STOP_NETWORKS ||
             command == NodeCommandKind.STOP_NODE ||
+            command == NodeCommandKind.UNBAN_CLIENT ||
+            command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||
             command == NodeCommandKind.UPDATE_ROUTING;
     }
 }

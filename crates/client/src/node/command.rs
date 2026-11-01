@@ -1,3 +1,4 @@
+use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -48,6 +49,11 @@ pub enum NodeCommandKind {
     JoinNetwork,
     UpdateRouting,
     SetNetworkRole,
+    GetBlacklist,
+    BanClient,
+    UnbanClient,
+    GetNetworkAllocation,
+    UpdateNetworkAllocation,
     ProbePeer,
     StartNode,
     StopNode,
@@ -58,7 +64,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 21] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -69,6 +75,11 @@ impl NodeCommandKind {
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
+        Self::GetBlacklist,
+        Self::BanClient,
+        Self::UnbanClient,
+        Self::GetNetworkAllocation,
+        Self::UpdateNetworkAllocation,
         Self::ProbePeer,
         Self::StartNode,
         Self::StopNode,
@@ -79,7 +90,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 15] = [
+    pub const ACTIONS: [Self; 20] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -89,6 +100,11 @@ impl NodeCommandKind {
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
+        Self::GetBlacklist,
+        Self::BanClient,
+        Self::UnbanClient,
+        Self::GetNetworkAllocation,
+        Self::UpdateNetworkAllocation,
         Self::ProbePeer,
         Self::StartNode,
         Self::StopNode,
@@ -109,6 +125,11 @@ impl NodeCommandKind {
             Self::JoinNetwork => "join_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
+            Self::GetBlacklist => "get_blacklist",
+            Self::BanClient => "ban_client",
+            Self::UnbanClient => "unban_client",
+            Self::GetNetworkAllocation => "get_network_allocation",
+            Self::UpdateNetworkAllocation => "update_network_allocation",
             Self::ProbePeer => "probe_peer",
             Self::StartNode => "start_node",
             Self::StopNode => "stop_node",
@@ -147,6 +168,15 @@ pub enum NodeCommand {
     JoinNetwork(NodeJoinNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
+    GetBlacklist {
+        network_name: String,
+    },
+    BanClient(NodeClientBlacklistCommand),
+    UnbanClient(NodeClientBlacklistCommand),
+    GetNetworkAllocation {
+        network_name: String,
+    },
+    UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand),
     ProbePeer(NodeProbePeerCommand),
     /// Start all persistently configured networks while keeping this node IPC
     /// and the control/UI processes alive.
@@ -180,6 +210,11 @@ impl NodeCommand {
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
+            Self::GetBlacklist { .. } => NodeCommandKind::GetBlacklist,
+            Self::BanClient(_) => NodeCommandKind::BanClient,
+            Self::UnbanClient(_) => NodeCommandKind::UnbanClient,
+            Self::GetNetworkAllocation { .. } => NodeCommandKind::GetNetworkAllocation,
+            Self::UpdateNetworkAllocation(_) => NodeCommandKind::UpdateNetworkAllocation,
             Self::ProbePeer(_) => NodeCommandKind::ProbePeer,
             Self::StartNode => NodeCommandKind::StartNode,
             Self::StopNode => NodeCommandKind::StopNode,
@@ -245,6 +280,11 @@ impl NodeCommand {
             Self::JoinNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
+            Self::GetBlacklist { network_name } | Self::GetNetworkAllocation { network_name } => {
+                validate_network_name(network_name)
+            }
+            Self::BanClient(command) | Self::UnbanClient(command) => command.validate(),
+            Self::UpdateNetworkAllocation(command) => command.validate(),
             Self::ProbePeer(command) => command.validate(),
         }
     }
@@ -340,6 +380,83 @@ impl NodeSetNetworkRoleCommand {
                 .for_network(self.network_name.clone()));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeClientBlacklistCommand {
+    pub network_name: String,
+    pub client_id: String,
+}
+
+impl NodeClientBlacklistCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        if self.client_id.trim().is_empty() {
+            return Err(invalid("客户端标识不能为空").for_network(self.network_name.clone()));
+        }
+        Ok(())
+    }
+
+    pub fn normalized_client_id(&self) -> String {
+        self.client_id.trim().to_string()
+    }
+}
+
+/// Transport-neutral allocation payload shared by local adapters and the
+/// node command protocol. Persistence is owned by the embedded service actor,
+/// never by a UI adapter.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkAllocation {
+    pub mode: NetworkMode,
+    pub ipv4_pool: String,
+    pub ipv6_pool: String,
+}
+
+impl NodeNetworkAllocation {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        if self.mode.is_ipv4_enabled() {
+            validate_ipv4_cidr(&self.ipv4_pool, "IPv4 网段")
+                .map_err(|error| invalid(format!("IPv4 网段无效: {error:#}")))?;
+        }
+        if self.mode.is_ipv6_enabled() {
+            validate_ipv6_cidr(&self.ipv6_pool, "IPv6 网段")
+                .map_err(|error| invalid(format!("IPv6 网段无效: {error:#}")))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn to_network_allocation(&self) -> NetworkAllocation {
+        NetworkAllocation {
+            mode: self.mode,
+            ipv4_pool: self.ipv4_pool.clone(),
+            ipv6_pool: self.ipv6_pool.clone(),
+            ip_pool: Some(self.ipv6_pool.clone()),
+        }
+    }
+
+    pub(crate) fn from_network_allocation(allocation: NetworkAllocation) -> Self {
+        let ipv6_pool = allocation.effective_ipv6_pool().to_string();
+        Self {
+            mode: allocation.mode,
+            ipv4_pool: allocation.ipv4_pool,
+            ipv6_pool,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeUpdateNetworkAllocationCommand {
+    pub network_name: String,
+    pub allocation: NodeNetworkAllocation,
+}
+
+impl NodeUpdateNetworkAllocationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        self.allocation
+            .validate()
+            .map_err(|problem| problem.for_network(self.network_name.clone()))
     }
 }
 
@@ -446,6 +563,22 @@ impl NodeCommandResult {
     pub fn is_success(&self) -> bool {
         !matches!(self.outcome, NodeCommandOutcome::Rejected(_))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeBlacklistSnapshot {
+    pub network_name: String,
+    pub clients: Vec<String>,
+    /// True when the operation changed persisted blacklist state. Queries and
+    /// idempotent mutations report false.
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkAllocationSnapshot {
+    pub network_name: String,
+    pub allocation: NodeNetworkAllocation,
+    pub config_saved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -591,6 +724,8 @@ pub enum NodeCommandOutcome {
     UiManifest(Box<NodeUiManifest>),
     Diagnostics(NodeDiagnosticsSnapshot),
     Cleanup(NodeResidualCleanupResult),
+    Blacklist(NodeBlacklistSnapshot),
+    NetworkAllocation(NodeNetworkAllocationSnapshot),
     Probe(NodePeerProbeSnapshot),
     NetworkCreated(NodeCreatedNetwork),
     Accepted { operation_id: String },
@@ -720,6 +855,28 @@ mod tests {
                 network_name: "home".into(),
                 role: NodeNetworkRole::ExitNode,
                 enabled: true,
+            }),
+            NodeCommand::GetBlacklist {
+                network_name: "home".into(),
+            },
+            NodeCommand::BanClient(NodeClientBlacklistCommand {
+                network_name: "home".into(),
+                client_id: "node-bad".into(),
+            }),
+            NodeCommand::UnbanClient(NodeClientBlacklistCommand {
+                network_name: "home".into(),
+                client_id: "node-bad".into(),
+            }),
+            NodeCommand::GetNetworkAllocation {
+                network_name: "home".into(),
+            },
+            NodeCommand::UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand {
+                network_name: "home".into(),
+                allocation: NodeNetworkAllocation {
+                    mode: NetworkMode::DualStack,
+                    ipv4_pool: "10.8.0.0/24".into(),
+                    ipv6_pool: "fd00::1000/120".into(),
+                },
             }),
             NodeCommand::ProbePeer(NodeProbePeerCommand {
                 network_name: "home".into(),
@@ -874,6 +1031,29 @@ mod tests {
                 networks: vec!["home".into(), "home".into()],
                 all: false,
             },
+            NodeCommand::GetBlacklist {
+                network_name: "../home".into(),
+            },
+            NodeCommand::BanClient(NodeClientBlacklistCommand {
+                network_name: "home".into(),
+                client_id: "   ".into(),
+            }),
+            NodeCommand::UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand {
+                network_name: "home".into(),
+                allocation: NodeNetworkAllocation {
+                    mode: NetworkMode::Ipv4Only,
+                    ipv4_pool: "not-a-cidr".into(),
+                    ipv6_pool: String::new(),
+                },
+            }),
+            NodeCommand::UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand {
+                network_name: "home".into(),
+                allocation: NodeNetworkAllocation {
+                    mode: NetworkMode::Ipv6Only,
+                    ipv4_pool: String::new(),
+                    ipv6_pool: "fd00::/129".into(),
+                },
+            }),
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
                 signaling_port: 0,

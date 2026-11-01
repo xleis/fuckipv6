@@ -341,6 +341,11 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         NodeCommandKind::GetSnapshot
         | NodeCommandKind::GetUiManifest
         | NodeCommandKind::GetDiagnostics
+        | NodeCommandKind::GetBlacklist
+        | NodeCommandKind::BanClient
+        | NodeCommandKind::UnbanClient
+        | NodeCommandKind::GetNetworkAllocation
+        | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::UpdateRouting
         | NodeCommandKind::SetNetworkRole
         | NodeCommandKind::ProbePeer => COMMAND_TIMEOUT,

@@ -193,6 +193,102 @@
       "properties": {
         "command": {
           "type": "string",
+          "const": "get_blacklist"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "network_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network_name"
+          ]
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "ban_client"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeClientBlacklistCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "unban_client"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeClientBlacklistCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "get_network_allocation"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "network_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network_name"
+          ]
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "update_network_allocation"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeUpdateNetworkAllocationCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
           "const": "probe_peer"
         },
         "payload": {
@@ -441,6 +537,76 @@
         "exit_node"
       ],
       "description": "Network roles are capabilities within a network, never product identities."
+    },
+    "NodeClientBlacklistCommand": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "client_id"
+      ]
+    },
+    "NodeUpdateNetworkAllocationCommand": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "allocation": {
+          "$ref": "#/$defs/NodeNetworkAllocation"
+        }
+      },
+      "required": [
+        "network_name",
+        "allocation"
+      ]
+    },
+    "NodeNetworkAllocation": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/NetworkMode"
+        },
+        "ipv4_pool": {
+          "type": "string"
+        },
+        "ipv6_pool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "ipv4_pool",
+        "ipv6_pool"
+      ],
+      "description": "Transport-neutral allocation payload shared by local adapters and the\nnode command protocol. Persistence is owned by the embedded service actor,\nnever by a UI adapter."
+    },
+    "NetworkMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "ipv4_only",
+          "description": "仅使用 IPv4 虚拟内网"
+        },
+        {
+          "type": "string",
+          "const": "ipv6_only",
+          "description": "仅使用 IPv6 虚拟内网"
+        },
+        {
+          "type": "string",
+          "const": "dual_stack",
+          "description": "同时支持 IPv4 和 IPv6 虚拟双栈"
+        }
+      ],
+      "description": "虚拟网络工作模式"
     },
     "NodeProbePeerCommand": {
       "type": "object",

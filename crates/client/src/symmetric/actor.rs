@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::EmbeddedCoordinator;
 use crate::config_manager::ConfigManager;
+use crate::node::{NodeBlacklistSnapshot, NodeNetworkAllocation, NodeNetworkAllocationSnapshot};
 
 /// Request to start the embedded signaling and relay services for one network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +134,16 @@ pub enum EmbeddedServiceError {
     },
     #[error("内嵌网络服务关闭未完全成功: {message}")]
     ShutdownFailed { message: String },
+    #[error("网络 [{network_name}] 的持久化管理操作失败: {message}")]
+    PersistenceFailed {
+        network_name: String,
+        message: String,
+    },
+    #[error("网络 [{network_name}] 的管理操作失败: {message}")]
+    OperationFailed {
+        network_name: String,
+        message: String,
+    },
     #[error("内嵌网络服务 actor 已关闭")]
     ActorClosed,
 }
@@ -148,6 +159,29 @@ enum EmbeddedServiceCommand {
     },
     List {
         reply: oneshot::Sender<Vec<EmbeddedServiceSnapshot>>,
+    },
+    GetBlacklist {
+        network_name: String,
+        reply: oneshot::Sender<Result<NodeBlacklistSnapshot, EmbeddedServiceError>>,
+    },
+    BanClient {
+        network_name: String,
+        client_id: String,
+        reply: oneshot::Sender<Result<NodeBlacklistSnapshot, EmbeddedServiceError>>,
+    },
+    UnbanClient {
+        network_name: String,
+        client_id: String,
+        reply: oneshot::Sender<Result<NodeBlacklistSnapshot, EmbeddedServiceError>>,
+    },
+    GetNetworkAllocation {
+        network_name: String,
+        reply: oneshot::Sender<Result<NodeNetworkAllocationSnapshot, EmbeddedServiceError>>,
+    },
+    UpdateNetworkAllocation {
+        network_name: String,
+        allocation: NodeNetworkAllocation,
+        reply: oneshot::Sender<Result<NodeNetworkAllocationSnapshot, EmbeddedServiceError>>,
     },
     Shutdown {
         reply: oneshot::Sender<Result<usize, EmbeddedServiceError>>,
@@ -220,6 +254,122 @@ impl EmbeddedServiceManager {
                         snapshots.sort_by(|a, b| a.network_name.cmp(&b.network_name));
                         let _ = reply.send(snapshots);
                     }
+                    EmbeddedServiceCommand::GetBlacklist {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => Ok(NodeBlacklistSnapshot {
+                                network_name: network_name.clone(),
+                                clients: coordinator.session_manager.get_blacklist().await,
+                                changed: false,
+                            }),
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::BanClient {
+                        network_name,
+                        client_id,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => {
+                                match coordinator.session_manager.try_ban_client(client_id).await {
+                                    Ok(changed) => Ok(blacklist_snapshot(
+                                        coordinator,
+                                        network_name.clone(),
+                                        changed,
+                                    )
+                                    .await),
+                                    Err(error) => Err(EmbeddedServiceError::OperationFailed {
+                                        network_name: network_name.clone(),
+                                        message: format!("{error:#}"),
+                                    }),
+                                }
+                            }
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::UnbanClient {
+                        network_name,
+                        client_id,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => {
+                                match coordinator
+                                    .session_manager
+                                    .try_unban_client(&client_id)
+                                    .await
+                                {
+                                    Ok(changed) => Ok(blacklist_snapshot(
+                                        coordinator,
+                                        network_name.clone(),
+                                        changed,
+                                    )
+                                    .await),
+                                    Err(error) => Err(EmbeddedServiceError::OperationFailed {
+                                        network_name: network_name.clone(),
+                                        message: format!("{error:#}"),
+                                    }),
+                                }
+                            }
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::GetNetworkAllocation {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => {
+                                let current = coordinator
+                                    .session_manager
+                                    .current_network_allocation()
+                                    .await;
+                                match coordinator.persisted_network_allocation().await {
+                                    Ok(persisted) => Ok(NodeNetworkAllocationSnapshot {
+                                        network_name: network_name.clone(),
+                                        config_saved: persisted == current,
+                                        allocation: NodeNetworkAllocation::from_network_allocation(
+                                            current,
+                                        ),
+                                    }),
+                                    Err(error) => Err(EmbeddedServiceError::PersistenceFailed {
+                                        network_name: network_name.clone(),
+                                        message: format!("{error:#}"),
+                                    }),
+                                }
+                            }
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::UpdateNetworkAllocation {
+                        network_name,
+                        allocation,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => coordinator
+                                .update_network_allocation(allocation.to_network_allocation())
+                                .await
+                                .map(|()| NodeNetworkAllocationSnapshot {
+                                    network_name: network_name.clone(),
+                                    allocation,
+                                    config_saved: true,
+                                })
+                                .map_err(|error| EmbeddedServiceError::OperationFailed {
+                                    network_name: network_name.clone(),
+                                    message: format!("{error:#}"),
+                                }),
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
                     EmbeddedServiceCommand::Shutdown { reply } => {
                         let count = services.len();
                         let mut failures = Vec::new();
@@ -287,6 +437,97 @@ impl EmbeddedServiceManager {
             .map_err(|_| EmbeddedServiceError::ActorClosed)
     }
 
+    pub async fn get_blacklist(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<NodeBlacklistSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::GetBlacklist {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn ban_client(
+        &self,
+        network_name: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Result<NodeBlacklistSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::BanClient {
+                network_name: network_name.into(),
+                client_id: client_id.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn unban_client(
+        &self,
+        network_name: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Result<NodeBlacklistSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::UnbanClient {
+                network_name: network_name.into(),
+                client_id: client_id.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn get_network_allocation(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<NodeNetworkAllocationSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::GetNetworkAllocation {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn update_network_allocation(
+        &self,
+        network_name: impl Into<String>,
+        allocation: NodeNetworkAllocation,
+    ) -> Result<NodeNetworkAllocationSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::UpdateNetworkAllocation {
+                network_name: network_name.into(),
+                allocation,
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
     pub async fn shutdown(&self) -> Result<usize, EmbeddedServiceError> {
         let (reply, response) = oneshot::channel();
         self.sender
@@ -296,6 +537,18 @@ impl EmbeddedServiceManager {
         response
             .await
             .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+}
+
+async fn blacklist_snapshot(
+    coordinator: &EmbeddedCoordinator,
+    network_name: String,
+    changed: bool,
+) -> NodeBlacklistSnapshot {
+    NodeBlacklistSnapshot {
+        network_name,
+        clients: coordinator.session_manager.get_blacklist().await,
+        changed,
     }
 }
 
@@ -353,6 +606,14 @@ mod tests {
         }
     }
 
+    fn test_manager_at(capacity: usize, config_dir: std::path::PathBuf) -> TestManager {
+        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("test config manager");
+        TestManager {
+            services: EmbeddedServiceManager::spawn_with_config(capacity, configs),
+            config_dir,
+        }
+    }
+
     fn test_manager(capacity: usize) -> TestManager {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -361,11 +622,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&config_dir);
-        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("config manager");
-        TestManager {
-            services: EmbeddedServiceManager::spawn_with_config(capacity, configs),
-            config_dir,
-        }
+        test_manager_at(capacity, config_dir)
     }
 
     #[tokio::test]
@@ -396,6 +653,95 @@ mod tests {
                 .expect_err("service already stopped"),
             EmbeddedServiceError::NotFound("lab".into())
         );
+    }
+
+    #[tokio::test]
+    async fn actor_blacklist_commands_are_authoritative_and_idempotent() {
+        let manager = test_manager(2);
+        manager
+            .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
+            .await
+            .expect("start service");
+
+        let empty = manager
+            .get_blacklist("lab")
+            .await
+            .expect("read initial blacklist");
+        assert!(empty.clients.is_empty());
+        assert!(!empty.changed);
+
+        let banned = manager
+            .ban_client("lab", "node-bad")
+            .await
+            .expect("ban client");
+        assert_eq!(banned.clients, vec!["node-bad".to_string()]);
+        assert!(banned.changed);
+
+        let repeated = manager
+            .ban_client("lab", "node-bad")
+            .await
+            .expect("idempotent ban");
+        assert_eq!(repeated.clients, vec!["node-bad".to_string()]);
+        assert!(!repeated.changed);
+
+        let unbanned = manager
+            .unban_client("lab", "node-bad")
+            .await
+            .expect("unban client");
+        assert!(unbanned.clients.is_empty());
+        assert!(unbanned.changed);
+
+        let repeated = manager
+            .unban_client("lab", "node-bad")
+            .await
+            .expect("idempotent unban");
+        assert!(repeated.clients.is_empty());
+        assert!(!repeated.changed);
+
+        assert_eq!(
+            manager
+                .ban_client("missing", "node-bad")
+                .await
+                .expect_err("unknown network"),
+            EmbeddedServiceError::NotFound("missing".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn allocation_update_is_persisted_and_loaded_after_actor_restart() {
+        let manager = test_manager(2);
+        manager
+            .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
+            .await
+            .expect("start service");
+        let updated = NodeNetworkAllocation {
+            mode: fuckipv6_common::NetworkMode::Ipv4Only,
+            ipv4_pool: "192.168.100.0/24".to_string(),
+            ipv6_pool: "fd00::1000/120".to_string(),
+        };
+        let snapshot = manager
+            .update_network_allocation("lab", updated.clone())
+            .await
+            .expect("persist allocation update");
+        assert_eq!(snapshot.allocation, updated);
+        assert!(snapshot.config_saved);
+
+        manager.shutdown().await.expect("shutdown first actor");
+        let restarted = test_manager_at(2, manager.config_dir.clone());
+        restarted
+            .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
+            .await
+            .expect("restart service from persisted config");
+        let loaded = restarted
+            .get_network_allocation("lab")
+            .await
+            .expect("read persisted allocation");
+        assert_eq!(loaded.allocation, updated);
+        assert!(loaded.config_saved);
+        restarted
+            .shutdown()
+            .await
+            .expect("shutdown restarted actor");
     }
 
     #[tokio::test]

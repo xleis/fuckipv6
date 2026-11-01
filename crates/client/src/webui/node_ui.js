@@ -40,7 +40,9 @@
   ]);
   const INPUT_KINDS = Object.freeze([
       "boolean",
+      "client_id",
       "external_host",
+      "network_mode",
       "network_name",
       "network_selection",
       "peer_target",
@@ -56,6 +58,7 @@
       "network_name",
       "port",
       "distinct_ports",
+      "network_mode",
       "network_selection",
       "role",
       "routing_mode",
@@ -93,7 +96,10 @@
     "ui_manifest",
     "diagnostics",
     "cleanup",
+    "blacklist",
+    "network_allocation",
     "probe",
+    "network_created",
     "accepted",
     "completed",
     "rejected",
@@ -461,6 +467,90 @@
                 }
               ],
               "confirmation": null
+            },
+            {
+              "id": "get_blacklist",
+              "label_key": "action.get_blacklist",
+              "command": "get_blacklist",
+              "backend_status": "implemented",
+              "permission": "view_state",
+              "audit": {
+                "policy": "none",
+                "action": null
+              },
+              "availability": "always",
+              "fields": [
+                {
+                  "id": "network_name",
+                  "label_key": "field.network_name",
+                  "input": "network_name",
+                  "required": true,
+                  "validation": "network_name"
+                }
+              ],
+              "confirmation": null
+            },
+            {
+              "id": "ban_client",
+              "label_key": "action.ban_client",
+              "command": "ban_client",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.blacklist.ban"
+              },
+              "availability": "always",
+              "fields": [
+                {
+                  "id": "network_name",
+                  "label_key": "field.network_name",
+                  "input": "network_name",
+                  "required": true,
+                  "validation": "network_name"
+                },
+                {
+                  "id": "client_id",
+                  "label_key": "field.client_id",
+                  "input": "client_id",
+                  "required": true,
+                  "validation": "non_empty"
+                }
+              ],
+              "confirmation": {
+                "title_key": "confirm.ban_client.title",
+                "consequence_key": "confirm.ban_client.consequence",
+                "destructive": false
+              }
+            },
+            {
+              "id": "unban_client",
+              "label_key": "action.unban_client",
+              "command": "unban_client",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.blacklist.unban"
+              },
+              "availability": "always",
+              "fields": [
+                {
+                  "id": "network_name",
+                  "label_key": "field.network_name",
+                  "input": "network_name",
+                  "required": true,
+                  "validation": "network_name"
+                },
+                {
+                  "id": "client_id",
+                  "label_key": "field.client_id",
+                  "input": "client_id",
+                  "required": true,
+                  "validation": "non_empty"
+                }
+              ],
+              "confirmation": null
             }
           ]
         },
@@ -642,6 +732,75 @@
           "title_key": "page.settings",
           "actions": [
             {
+              "id": "get_network_allocation",
+              "label_key": "action.get_network_allocation",
+              "command": "get_network_allocation",
+              "backend_status": "implemented",
+              "permission": "view_state",
+              "audit": {
+                "policy": "none",
+                "action": null
+              },
+              "availability": "always",
+              "fields": [
+                {
+                  "id": "network_name",
+                  "label_key": "field.network_name",
+                  "input": "network_name",
+                  "required": true,
+                  "validation": "network_name"
+                }
+              ],
+              "confirmation": null
+            },
+            {
+              "id": "update_network_allocation",
+              "label_key": "action.update_network_allocation",
+              "command": "update_network_allocation",
+              "backend_status": "implemented",
+              "permission": "manage_networks",
+              "audit": {
+                "policy": "record_outcome",
+                "action": "network.allocation.update"
+              },
+              "availability": "always",
+              "fields": [
+                {
+                  "id": "network_name",
+                  "label_key": "field.network_name",
+                  "input": "network_name",
+                  "required": true,
+                  "validation": "network_name"
+                },
+                {
+                  "id": "mode",
+                  "label_key": "field.network_mode",
+                  "input": "network_mode",
+                  "required": true,
+                  "validation": "network_mode"
+                },
+                {
+                  "id": "ipv4_pool",
+                  "label_key": "field.ipv4_pool",
+                  "input": "external_host",
+                  "required": false,
+                  "validation": "non_empty"
+                },
+                {
+                  "id": "ipv6_pool",
+                  "label_key": "field.ipv6_pool",
+                  "input": "external_host",
+                  "required": false,
+                  "validation": "non_empty"
+                }
+              ],
+              "confirmation": {
+                "title_key": "confirm.update_network_allocation.title",
+                "consequence_key": "confirm.update_network_allocation.consequence",
+                "destructive": false
+              }
+            },
+            {
               "id": "shutdown_node",
               "label_key": "action.shutdown_node",
               "command": "shutdown",
@@ -698,6 +857,11 @@
       "page.settings": "权限与设置",
       "action.refresh_snapshot": "刷新快照",
       "action.get_node_diagnostics": "查看运行时诊断",
+      "action.get_blacklist": "读取节点黑名单",
+      "action.ban_client": "封禁节点",
+      "action.unban_client": "解除封禁",
+      "action.get_network_allocation": "读取地址池",
+      "action.update_network_allocation": "更新地址池",
       "action.create_network": "创建网络",
       "action.join_network": "加入网络",
       "action.start_networks": "启动网络",
@@ -716,6 +880,10 @@
       "field.signaling_port": "信令端口",
       "field.relay_port": "中继端口",
       "field.external_host": "外部主机",
+      "field.client_id": "节点标识",
+      "field.network_mode": "地址族模式",
+      "field.ipv4_pool": "IPv4 地址池",
+      "field.ipv6_pool": "IPv6 地址池",
       "field.auto_connect": "创建后连接",
       "field.ticket_or_url": "票据或 URL",
       "field.start_after_join": "加入后启动",
@@ -739,6 +907,10 @@
       "confirm.set_exit_node_role.consequence": "角色变更会立即影响此节点在网络中的能力。",
       "confirm.set_relay_role.title": "确认角色变更",
       "confirm.set_relay_role.consequence": "角色变更会立即影响此节点在网络中的能力。",
+      "confirm.ban_client.title": "确认封禁节点",
+      "confirm.ban_client.consequence": "该节点会立即被协调端拒绝，直到管理员解除封禁。",
+      "confirm.update_network_allocation.title": "确认更新地址池",
+      "confirm.update_network_allocation.consequence": "新地址池会持久化并热应用到协调端，已有会话可能因地址变更重新分配。",
       "confirm.restart_node.title": "确认重启节点",
       "confirm.restart_node.consequence": "所有数据面和自托管服务会停止，随后按持久化配置重新启动。",
       "confirm.shutdown_node.title": "确认关闭节点",
@@ -1282,6 +1454,9 @@
     if (field.id === "enabled") return false;
     if (field.id === "network_name") return network;
     if (field.input === "network_selection") return network || "default";
+    if (field.input === "network_mode") return "dual_stack";
+    if (field.id === "ipv4_pool") return "10.8.0.0/24";
+    if (field.id === "ipv6_pool") return "fd00::/120";
     if (field.id === "mode") {
       const config = (snapshot.configuration && snapshot.configuration.networks || [])
         .find((entry) => entry.network_name === network);
@@ -1380,6 +1555,10 @@
           if (!["mesh_only", "bypass_mainland", "global_proxy"].includes(String(value))) {
             errors.push("路由模式无效");
           }
+        } else if (field.validation === "network_mode") {
+          if (!NETWORK_MODES.includes(String(value))) {
+            errors.push("地址族模式无效");
+          }
         } else if (field.validation === "positive_timeout") {
           const timeout = Number(value);
           if (!Number.isInteger(timeout) || timeout <= 0) {
@@ -1393,6 +1572,15 @@
     if (action.id === "create_network") {
       if (Number(values.signaling_port) === Number(values.relay_port)) {
         errors.push("信令端口和中继端口不能相同");
+      }
+    }
+    if (action.id === "update_network_allocation") {
+      const mode = String(values.mode || "");
+      if (["ipv4_only", "dual_stack"].includes(mode) && blank(values.ipv4_pool)) {
+        errors.push("当前地址族模式要求填写 IPv4 地址池");
+      }
+      if (["ipv6_only", "dual_stack"].includes(mode) && blank(values.ipv6_pool)) {
+        errors.push("当前地址族模式要求填写 IPv6 地址池");
       }
     }
     if ((action.id === "stop_networks" || action.id === "restart_networks" || action.id === "cleanup_node_residuals") &&
@@ -1430,6 +1618,33 @@
       case "refresh_snapshot":
       case "get_node_diagnostics":
         return { command };
+      case "get_blacklist":
+      case "get_network_allocation":
+        return {
+          command,
+          payload: { network_name: String(required(values, "network_name")).trim() },
+        };
+      case "ban_client":
+      case "unban_client":
+        return {
+          command,
+          payload: {
+            network_name: String(required(values, "network_name")).trim(),
+            client_id: String(required(values, "client_id")).trim(),
+          },
+        };
+      case "update_network_allocation":
+        return {
+          command,
+          payload: {
+            network_name: String(required(values, "network_name")).trim(),
+            allocation: {
+              mode: String(required(values, "mode")),
+              ipv4_pool: optional(values, "ipv4_pool") || "",
+              ipv6_pool: optional(values, "ipv6_pool") || "",
+            },
+          },
+        };
       case "create_network":
         return {
           command,
@@ -1555,6 +1770,31 @@
       case "cleanup":
         validateCleanupPayload(outcome.data);
         break;
+      case "blacklist":
+        assertContract(isRecord(outcome.data), "blacklist outcome is missing its data");
+        requireString(outcome.data.network_name, "blacklist network_name is missing");
+        assertContract(Array.isArray(outcome.data.clients), "blacklist clients must be an array");
+        for (const client of outcome.data.clients) {
+          requireString(client, "blacklist client id is missing");
+        }
+        requireBoolean(outcome.data.changed, "blacklist changed is missing");
+        break;
+      case "network_allocation":
+        assertContract(isRecord(outcome.data), "network allocation outcome is missing its data");
+        requireString(outcome.data.network_name, "network allocation network_name is missing");
+        assertContract(isRecord(outcome.data.allocation), "network allocation payload is missing");
+        requireEnum(outcome.data.allocation.mode, NETWORK_MODES, "unknown network allocation mode");
+        requireString(outcome.data.allocation.ipv4_pool, "network allocation ipv4_pool is missing", true);
+        requireString(outcome.data.allocation.ipv6_pool, "network allocation ipv6_pool is missing", true);
+        requireBoolean(outcome.data.config_saved, "network allocation config_saved is missing");
+        break;
+      case "network_created":
+        assertContract(isRecord(outcome.data), "network created outcome is missing its data");
+        requireString(outcome.data.network_name, "created network_name is missing");
+        requireBoolean(outcome.data.config_saved, "created config_saved is missing");
+        requireBoolean(outcome.data.started, "created started is missing");
+        requireString(outcome.data.invitation_ticket, "created invitation_ticket is missing");
+        break;
       case "rejected":
         assertContract(isRecord(outcome.data), "rejected outcome is missing its problem");
         requireEnum(outcome.data.code, PROBLEM_CODES, "unknown rejected problem code");
@@ -1619,6 +1859,20 @@
         ? "；" + outcome.data.residue.issues.join("；")
         : "；无残留问题";
       return "残留清理完成 · 成功 " + cleaned + " 个 · 失败 " + failed + " 个" + issues;
+    }
+    if (outcome.status === "blacklist") {
+      const changed = outcome.data.changed ? " · 已变更" : " · 状态未变化";
+      return "黑名单读取完成 · " + outcome.data.clients.length + " 个节点" + changed;
+    }
+    if (outcome.status === "network_allocation") {
+      return "地址池已更新 · " + outcome.data.allocation.mode +
+        " · IPv4 " + (outcome.data.allocation.ipv4_pool || "禁用") +
+        " · IPv6 " + (outcome.data.allocation.ipv6_pool || "禁用");
+    }
+    if (outcome.status === "network_created") {
+      return "网络已创建 · " + outcome.data.network_name +
+        (outcome.data.config_saved ? " · 已持久化" : " · 未持久化") +
+        (outcome.data.started ? " · 已启动" : " · 未启动");
     }
     const message = outcome.data && outcome.data.message ? " · " + outcome.data.message : "";
     return outcome.status + message;

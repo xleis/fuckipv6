@@ -292,12 +292,6 @@ fn controller_problem(error: &anyhow::Error) -> Option<NodeProblem> {
         .map(|error| error.problem().clone())
 }
 
-fn controller_error_status(error: &anyhow::Error) -> StatusCode {
-    controller_problem(error)
-        .map(|problem| status_for_node_problem(problem.code))
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 fn api_error_from_controller(
     message: impl Into<String>,
     error: &anyhow::Error,
@@ -308,6 +302,18 @@ fn api_error_from_controller(
         .map(|problem| status_for_node_problem(problem.code))
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     api_error_with_problem(status, message, problem)
+}
+
+fn api_error_from_app_controller(
+    message: impl Into<String>,
+    error: &AppControllerError,
+) -> (StatusCode, Json<ApiError>) {
+    let problem = error.problem().clone();
+    api_error_with_problem(
+        status_for_node_problem(problem.code),
+        message,
+        Some(problem),
+    )
 }
 
 fn status_for_node_problem(code: NodeProblemCode) -> StatusCode {
@@ -385,8 +391,11 @@ async fn handle_peers(State(ctrl): State<Arc<AppController>>) -> Json<Vec<PeerSn
     Json(ctrl.get_peers_snapshots().await)
 }
 
-async fn handle_get_config(State(ctrl): State<Arc<AppController>>) -> Json<NetworkConfigDto> {
-    Json(ctrl.get_network_config().await)
+async fn handle_get_config(State(ctrl): State<Arc<AppController>>) -> ApiResult<NetworkConfigDto> {
+    ctrl.get_network_config()
+        .await
+        .map(Json)
+        .map_err(|error| api_error_from_app_controller("读取网段配置失败", &error))
 }
 
 async fn handle_post_config(
@@ -403,7 +412,7 @@ async fn handle_post_config(
             }),
         ),
         Err(e) => (
-            controller_error_status(&e),
+            status_for_node_problem(e.problem().code),
             Json(NetworkConfigApiResponse {
                 success: false,
                 message: format!("更新网段失败: {e:#}"),
@@ -413,8 +422,11 @@ async fn handle_post_config(
     }
 }
 
-async fn handle_get_blacklist(State(ctrl): State<Arc<AppController>>) -> Json<Vec<String>> {
-    Json(ctrl.get_blacklist().await)
+async fn handle_get_blacklist(State(ctrl): State<Arc<AppController>>) -> ApiResult<Vec<String>> {
+    ctrl.get_blacklist()
+        .await
+        .map(Json)
+        .map_err(|error| api_error_from_app_controller("读取黑名单失败", &error))
 }
 
 type BlacklistActionHttpResult =
@@ -432,50 +444,41 @@ fn blacklist_response(
     })
 }
 
-fn blacklist_contains(blacklist: &[String], client_id: &str) -> bool {
-    blacklist
-        .iter()
-        .any(|entry| entry.trim() == client_id.trim())
-}
-
 async fn handle_blacklist_ban(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<BlacklistActionRequest>,
 ) -> BlacklistActionHttpResult {
     let client_id = payload.client_id.trim().to_string();
+    let previous = ctrl.get_blacklist().await.unwrap_or_default();
     if client_id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            blacklist_response(false, "客户端标识不能为空", ctrl.get_blacklist().await),
+            blacklist_response(false, "客户端标识不能为空", previous),
         ));
     }
 
-    if let Err(error) = ctrl.ban_client(client_id.clone()).await {
-        let message = format!("封禁失败，运行期状态未确认修改: {error:#}");
-        ctrl.log(message.clone()).await;
-        return Err((
-            controller_error_status(&error),
-            blacklist_response(false, message, ctrl.get_blacklist().await),
-        ));
+    match ctrl.ban_client(client_id.clone()).await {
+        Ok(snapshot) => {
+            let message = if snapshot.changed {
+                format!("客户端 {client_id} 已封禁加入黑名单")
+            } else {
+                format!("客户端 {client_id} 已在黑名单中，无需重复封禁")
+            };
+            Ok(blacklist_response(true, message, snapshot.clients))
+        }
+        Err(error) => {
+            let message = format!("封禁失败，运行期状态未修改: {error}");
+            ctrl.log(message.clone()).await;
+            Err((
+                status_for_node_problem(error.problem().code),
+                blacklist_response(
+                    false,
+                    message,
+                    ctrl.get_blacklist().await.unwrap_or(previous),
+                ),
+            ))
+        }
     }
-
-    let blacklist = ctrl.get_blacklist().await;
-    // AppController currently logs persistence errors internally. Confirm the
-    // requested state changed before reporting success to the WebUI/API.
-    if !blacklist_contains(&blacklist, &client_id) {
-        let message = "封禁失败，协调服务未确认客户端进入黑名单，运行期状态未修改".to_string();
-        ctrl.log(message.clone()).await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            blacklist_response(false, message, blacklist),
-        ));
-    }
-
-    Ok(blacklist_response(
-        true,
-        format!("客户端 {client_id} 已封禁加入黑名单"),
-        blacklist,
-    ))
 }
 
 async fn handle_blacklist_unban(
@@ -483,46 +486,36 @@ async fn handle_blacklist_unban(
     Json(payload): Json<BlacklistActionRequest>,
 ) -> BlacklistActionHttpResult {
     let client_id = payload.client_id.trim().to_string();
+    let previous = ctrl.get_blacklist().await.unwrap_or_default();
     if client_id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            blacklist_response(false, "客户端标识不能为空", ctrl.get_blacklist().await),
+            blacklist_response(false, "客户端标识不能为空", previous),
         ));
     }
 
-    let before = ctrl.get_blacklist().await;
-    if let Err(error) = ctrl.unban_client(&client_id).await {
-        let message = format!("解封失败，运行期状态未确认修改: {error:#}");
-        ctrl.log(message.clone()).await;
-        return Err((
-            controller_error_status(&error),
-            blacklist_response(false, message, ctrl.get_blacklist().await),
-        ));
+    match ctrl.unban_client(&client_id).await {
+        Ok(snapshot) => {
+            let message = if snapshot.changed {
+                format!("客户端 {client_id} 已解除封禁移出黑名单")
+            } else {
+                format!("客户端 {client_id} 不在黑名单中，无需解封")
+            };
+            Ok(blacklist_response(true, message, snapshot.clients))
+        }
+        Err(error) => {
+            let message = format!("解封失败，运行期状态未修改: {error}");
+            ctrl.log(message.clone()).await;
+            Err((
+                status_for_node_problem(error.problem().code),
+                blacklist_response(
+                    false,
+                    message,
+                    ctrl.get_blacklist().await.unwrap_or(previous),
+                ),
+            ))
+        }
     }
-
-    let blacklist = ctrl.get_blacklist().await;
-    if !blacklist_contains(&blacklist, &client_id) {
-        return Ok(blacklist_response(
-            true,
-            format!("客户端 {client_id} 已解除封禁移出黑名单"),
-            blacklist,
-        ));
-    }
-
-    if blacklist_contains(&before, &client_id) {
-        let message = "解封失败，协调服务未确认客户端移出黑名单，运行期状态未修改".to_string();
-        ctrl.log(message.clone()).await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            blacklist_response(false, message, blacklist),
-        ));
-    }
-
-    Ok(blacklist_response(
-        false,
-        format!("客户端 {client_id} 不在黑名单中"),
-        blacklist,
-    ))
 }
 
 #[derive(Deserialize)]
@@ -739,15 +732,9 @@ async fn handle_coordinator_ban(
 ) -> ApiResult<AppUiState> {
     let client_id = payload.client_id.trim().to_string();
     if let Err(error) = ctrl.ban_client(client_id.clone()).await {
-        let message = format!("封禁客户端失败: {error:#}");
+        let message = format!("封禁客户端失败: {error}");
         ctrl.log(message.clone()).await;
-        return Err(api_error_from_controller(message, &error));
-    }
-
-    if !blacklist_contains(&ctrl.get_blacklist().await, &client_id) {
-        let message = "封禁客户端失败，协调服务未确认运行期状态修改".to_string();
-        ctrl.log(message.clone()).await;
-        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message));
+        return Err(api_error_from_app_controller(message, &error));
     }
 
     Ok(Json(ctrl.get_state().await))
@@ -758,18 +745,10 @@ async fn handle_coordinator_unban(
     Json(payload): Json<BanRequest>,
 ) -> ApiResult<AppUiState> {
     let client_id = payload.client_id.trim().to_string();
-    let before = ctrl.get_blacklist().await;
     if let Err(error) = ctrl.unban_client(&client_id).await {
-        let message = format!("解封客户端失败: {error:#}");
+        let message = format!("解封客户端失败: {error}");
         ctrl.log(message.clone()).await;
-        return Err(api_error_from_controller(message, &error));
-    }
-
-    let after = ctrl.get_blacklist().await;
-    if blacklist_contains(&before, &client_id) && blacklist_contains(&after, &client_id) {
-        let message = "解封客户端失败，协调服务未确认运行期状态修改".to_string();
-        ctrl.log(message.clone()).await;
-        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, message));
+        return Err(api_error_from_app_controller(message, &error));
     }
 
     Ok(Json(ctrl.get_state().await))
@@ -3733,7 +3712,9 @@ mod tests {
                 .oneshot(bearer_request("GET", uri, &token, ""))
                 .await
                 .expect("authorized node read");
-            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let status = response.status();
+            let body = response_text(response).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
         }
 
         let response = app
@@ -4206,34 +4187,16 @@ mod tests {
         assert!(!UNIFIED_MASTER_HTML.contains("UDP:6667 (QUIC)"));
     }
 
-    #[test]
-    fn blacklist_contains_matches_trimmed_client_ids() {
-        let blacklist = vec![" node-bad ".to_string(), "node-other".to_string()];
-        assert!(blacklist_contains(&blacklist, "node-bad"));
-        assert!(blacklist_contains(&blacklist, " node-bad "));
-        assert!(!blacklist_contains(&blacklist, "node-missing"));
-    }
-
     #[tokio::test]
-    async fn unsupported_controller_problem_preserves_code_and_retryability() {
-        let ctrl = AppController::new();
-        let error = ctrl
-            .ban_client("node-bad".to_string())
-            .await
-            .expect_err("unsupported blacklist command must fail closed");
-        let (status, Json(body)) = api_error_from_controller("封禁客户端失败", &error);
-
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        let problem = body.problem.expect("typed node problem");
-        assert_eq!(problem.code, NodeProblemCode::Unsupported);
-        assert!(!problem.retryable);
-        assert!(problem.message.contains("尚未提供封禁操作"));
-        assert!(body.error.contains("封禁客户端失败"));
-    }
-
-    #[tokio::test]
-    async fn blacklist_mutations_fail_closed_without_coordinator() {
+    async fn management_requests_fail_closed_without_running_coordinator() {
         let ctrl = Arc::new(AppController::new());
+
+        let error = ctrl
+            .get_blacklist()
+            .await
+            .expect_err("blacklist query without a coordinator must fail");
+        assert_eq!(error.problem().code, NodeProblemCode::NotFound);
+        assert!(error.problem().message.contains("当前没有运行中的协调网络"));
 
         let ban_error = handle_blacklist_ban(
             State(ctrl.clone()),
@@ -4242,25 +4205,101 @@ mod tests {
             }),
         )
         .await
-        .expect_err("ban without an active coordinator must not report success");
+        .expect_err("ban without a running coordinator must not report success");
         let (ban_status, Json(ban_body)) = ban_error;
-        assert_eq!(ban_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ban_status, StatusCode::NOT_FOUND);
         assert!(!ban_body.success);
-        assert!(ban_body.message.contains("节点命令协议尚未提供封禁操作"));
+        assert!(ban_body.message.contains("当前没有运行中的协调网络"));
         assert!(ban_body.blacklist.is_empty());
 
         let unban_error = handle_blacklist_unban(
-            State(ctrl),
+            State(ctrl.clone()),
             Json(BlacklistActionRequest {
                 client_id: "node-bad".to_string(),
             }),
         )
         .await
-        .expect_err("unban without an active coordinator must not report success");
+        .expect_err("unban without a running coordinator must not report success");
         let (unban_status, Json(unban_body)) = unban_error;
-        assert_eq!(unban_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unban_status, StatusCode::NOT_FOUND);
         assert!(!unban_body.success);
-        assert!(unban_body.message.contains("节点命令协议尚未提供解封操作"));
+        assert!(unban_body.message.contains("当前没有运行中的协调网络"));
         assert!(unban_body.blacklist.is_empty());
+
+        let config_error = handle_get_config(State(ctrl.clone()))
+            .await
+            .expect_err("allocation query without a coordinator must fail");
+        assert_eq!(config_error.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            config_error.1.problem.as_ref().map(|problem| problem.code),
+            Some(NodeProblemCode::NotFound)
+        );
+
+        let (config_status, Json(config_body)) = handle_post_config(
+            State(ctrl),
+            Json(UpdateNetworkConfigRequest {
+                mode: fuckipv6_common::NetworkMode::DualStack,
+                ipv4_pool: "10.42.0.0/24".to_string(),
+                ipv6_pool: "fd42::1000/120".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(config_status, StatusCode::NOT_FOUND);
+        assert!(!config_body.success);
+        assert!(config_body.message.contains("当前没有运行中的协调网络"));
+    }
+
+    #[tokio::test]
+    async fn blacklist_mutations_apply_and_are_idempotent_with_running_coordinator() {
+        let ctrl = Arc::new(AppController::new_with_coordinator().await);
+
+        let created = ctrl
+            .ban_client(" node-bad ".to_string())
+            .await
+            .expect("ban client");
+        assert!(created.changed);
+        assert_eq!(created.clients, vec!["node-bad".to_string()]);
+
+        let repeated = ctrl
+            .ban_client("node-bad".to_string())
+            .await
+            .expect("repeat ban");
+        assert!(!repeated.changed);
+        assert_eq!(repeated.clients, vec!["node-bad".to_string()]);
+        assert_eq!(
+            ctrl.get_blacklist().await.expect("read blacklist"),
+            vec!["node-bad".to_string()]
+        );
+
+        let removed = ctrl.unban_client(" node-bad ").await.expect("unban client");
+        assert!(removed.changed);
+        assert!(removed.clients.is_empty());
+
+        let repeated = ctrl.unban_client("node-bad").await.expect("repeat unban");
+        assert!(!repeated.changed);
+        assert!(repeated.clients.is_empty());
+    }
+
+    #[tokio::test]
+    async fn allocation_updates_round_trip_through_running_coordinator() {
+        let ctrl = Arc::new(AppController::new_with_coordinator().await);
+        let updated = ctrl
+            .update_network_config(UpdateNetworkConfigRequest {
+                mode: fuckipv6_common::NetworkMode::Ipv4Only,
+                ipv4_pool: "192.168.100.0/24".to_string(),
+                ipv6_pool: "fd00::1000/120".to_string(),
+            })
+            .await
+            .expect("update network allocation");
+        assert_eq!(updated.mode, fuckipv6_common::NetworkMode::Ipv4Only);
+        assert_eq!(updated.ipv4_pool, "192.168.100.0/24");
+        assert_eq!(updated.ipv4_prefix, 24);
+
+        let fetched = ctrl
+            .get_network_config()
+            .await
+            .expect("read network allocation");
+        assert_eq!(fetched.mode, fuckipv6_common::NetworkMode::Ipv4Only);
+        assert_eq!(fetched.ipv4_pool, "192.168.100.0/24");
     }
 }

@@ -199,9 +199,94 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                         }
                     }
                 }
+                super::NodeCommand::GetBlacklist { network_name } => {
+                    match services.get_blacklist(network_name.clone()).await {
+                        Ok(snapshot) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::Blacklist(snapshot),
+                        ),
+                        Err(error) => embedded_service_rejection(request_id, &network_name, error),
+                    }
+                }
+                super::NodeCommand::BanClient(command) => {
+                    match services
+                        .ban_client(command.network_name.clone(), command.normalized_client_id())
+                        .await
+                    {
+                        Ok(snapshot) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::Blacklist(snapshot),
+                        ),
+                        Err(error) => {
+                            embedded_service_rejection(request_id, &command.network_name, error)
+                        }
+                    }
+                }
+                super::NodeCommand::UnbanClient(command) => {
+                    match services
+                        .unban_client(command.network_name.clone(), command.normalized_client_id())
+                        .await
+                    {
+                        Ok(snapshot) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::Blacklist(snapshot),
+                        ),
+                        Err(error) => {
+                            embedded_service_rejection(request_id, &command.network_name, error)
+                        }
+                    }
+                }
+                super::NodeCommand::GetNetworkAllocation { network_name } => {
+                    match services.get_network_allocation(network_name.clone()).await {
+                        Ok(snapshot) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::NetworkAllocation(snapshot),
+                        ),
+                        Err(error) => embedded_service_rejection(request_id, &network_name, error),
+                    }
+                }
+                super::NodeCommand::UpdateNetworkAllocation(command) => {
+                    let network_name = command.network_name.clone();
+                    match services
+                        .update_network_allocation(network_name.clone(), command.allocation)
+                        .await
+                    {
+                        Ok(snapshot) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::NetworkAllocation(snapshot),
+                        ),
+                        Err(error) => embedded_service_rejection(request_id, &network_name, error),
+                    }
+                }
             }
         })
     }
+}
+
+fn embedded_service_rejection(
+    request_id: u64,
+    network_name: &str,
+    error: crate::symmetric::EmbeddedServiceError,
+) -> NodeCommandResult {
+    use crate::symmetric::EmbeddedServiceError;
+
+    let (code, retryable) = match &error {
+        EmbeddedServiceError::InvalidRequest(_) => (NodeProblemCode::InvalidRequest, false),
+        EmbeddedServiceError::NotFound(_) => (NodeProblemCode::NotFound, false),
+        EmbeddedServiceError::PersistenceFailed { .. }
+        | EmbeddedServiceError::OperationFailed { .. }
+        | EmbeddedServiceError::ActorClosed => (NodeProblemCode::Unavailable, true),
+        EmbeddedServiceError::AlreadyRunning(_)
+        | EmbeddedServiceError::StartFailed { .. }
+        | EmbeddedServiceError::StopFailed { .. }
+        | EmbeddedServiceError::ShutdownFailed { .. } => (NodeProblemCode::Unavailable, true),
+    };
+    NodeCommandResult::rejected(
+        request_id,
+        NodeProblem::new(code, error.to_string())
+            .for_network(network_name)
+            .retryable(retryable),
+    )
 }
 
 async fn start_runtime_networks(
@@ -646,13 +731,14 @@ pub(crate) fn spawn_command_bus_with_runtime(
 mod tests {
     use super::*;
     use crate::node::{
-        NodeCommand, NodeCommandBus, NodeCreateNetworkCommand, NodeEventBus,
-        NodeJoinNetworkCommand, NodeNetworkRole, NodeProbePeerCommand, NodeRoutingMode,
-        NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
+        NodeClientBlacklistCommand, NodeCommand, NodeCommandBus, NodeCreateNetworkCommand,
+        NodeEventBus, NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole,
+        NodeProbePeerCommand, NodeRoutingMode, NodeSetNetworkRoleCommand,
+        NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use crate::symmetric::EmbeddedServiceStartRequest;
     use fuckipv6_common::{
-        ExitNodeCapabilities, ExitNodePlatform, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+        ExitNodeCapabilities, ExitNodePlatform, NetworkMode, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
     };
     use tokio::sync::mpsc;
 
@@ -734,6 +820,138 @@ mod tests {
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn management_commands_reach_the_shared_embedded_service() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-runtime-handler-management-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = crate::config_manager::ConfigManager::new_for_dir(config_dir.clone())
+            .expect("config manager");
+        let services = EmbeddedServiceManager::spawn_with_config(4, configs);
+        services
+            .start(EmbeddedServiceStartRequest::new("lab", 0, 0))
+            .await
+            .expect("start embedded service");
+        let bus = spawn_command_bus_with_services(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+            services.clone(),
+        );
+
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                70,
+                NodeCommand::GetBlacklist {
+                    network_name: "lab".into(),
+                },
+            ))
+            .await
+            .expect("get blacklist result");
+        match result.outcome {
+            NodeCommandOutcome::Blacklist(snapshot) => {
+                assert_eq!(snapshot.network_name, "lab");
+                assert!(snapshot.clients.is_empty());
+                assert!(!snapshot.changed);
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                71,
+                NodeCommand::BanClient(NodeClientBlacklistCommand {
+                    network_name: "lab".into(),
+                    client_id: " node-bad ".into(),
+                }),
+            ))
+            .await
+            .expect("ban result");
+        match result.outcome {
+            NodeCommandOutcome::Blacklist(snapshot) => {
+                assert_eq!(snapshot.clients, vec!["node-bad".to_string()]);
+                assert!(snapshot.changed);
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                72,
+                NodeCommand::UnbanClient(NodeClientBlacklistCommand {
+                    network_name: "lab".into(),
+                    client_id: "node-bad".into(),
+                }),
+            ))
+            .await
+            .expect("unban result");
+        match result.outcome {
+            NodeCommandOutcome::Blacklist(snapshot) => {
+                assert!(snapshot.clients.is_empty());
+                assert!(snapshot.changed);
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                73,
+                NodeCommand::GetNetworkAllocation {
+                    network_name: "lab".into(),
+                },
+            ))
+            .await
+            .expect("get allocation result");
+        match result.outcome {
+            NodeCommandOutcome::NetworkAllocation(snapshot) => {
+                assert_eq!(snapshot.network_name, "lab");
+                assert!(snapshot.config_saved);
+                assert_eq!(snapshot.allocation.mode, NetworkMode::DualStack);
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        let updated = NodeNetworkAllocation {
+            mode: NetworkMode::Ipv4Only,
+            ipv4_pool: "192.168.100.0/24".into(),
+            ipv6_pool: "fd00::1000/120".into(),
+        };
+        let result = bus
+            .execute(NodeCommandRequest::new(
+                74,
+                NodeCommand::UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand {
+                    network_name: "lab".into(),
+                    allocation: updated.clone(),
+                }),
+            ))
+            .await
+            .expect("update allocation result");
+        match result.outcome {
+            NodeCommandOutcome::NetworkAllocation(snapshot) => {
+                assert_eq!(snapshot.network_name, "lab");
+                assert_eq!(snapshot.allocation, updated);
+                assert!(snapshot.config_saved);
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        let problem = execute_rejected(
+            &bus,
+            75,
+            NodeCommand::GetNetworkAllocation {
+                network_name: "missing".into(),
+            },
+        )
+        .await;
+        assert_problem(&problem, NodeProblemCode::NotFound, false);
+        assert_eq!(problem.network_name.as_deref(), Some("missing"));
+
+        services.shutdown().await.expect("shutdown services");
+        let _ = std::fs::remove_dir_all(config_dir);
     }
 
     #[tokio::test]

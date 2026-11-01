@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
+use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    NodeCommand, NodeCommandKind, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
-    NodeNetworkRole, NodeNetworkSelection, NodePhase, NodeProbePeerCommand, NodeRoutingMode,
-    NodeSetNetworkRoleCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus,
-    NodeUiManifest, NodeUiPage, NodeUiPermission, NodeUpdateRoutingCommand,
+    NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeCreateNetworkCommand,
+    NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection,
+    NodePhase, NodeProbePeerCommand, NodeRoutingMode, NodeSetNetworkRoleCommand, NodeSnapshot,
+    NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
+    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 
 /// Typed views supported by the native adapter. Keeping this closed set separate
@@ -89,6 +91,11 @@ pub enum ActionBinding {
     StopNetworks,
     RestartNetworks,
     ProbePeer,
+    GetBlacklist,
+    BanClient,
+    UnbanClient,
+    GetNetworkAllocation,
+    UpdateNetworkAllocation,
     UpdateRouting,
     SetExitNodeRole,
     SetRelayRole,
@@ -100,7 +107,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 21] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -109,6 +116,11 @@ impl ActionBinding {
         Self::StopNetworks,
         Self::RestartNetworks,
         Self::ProbePeer,
+        Self::GetBlacklist,
+        Self::BanClient,
+        Self::UnbanClient,
+        Self::GetNetworkAllocation,
+        Self::UpdateNetworkAllocation,
         Self::UpdateRouting,
         Self::SetExitNodeRole,
         Self::SetRelayRole,
@@ -129,6 +141,11 @@ impl ActionBinding {
             Self::StopNetworks => "stop_networks",
             Self::RestartNetworks => "restart_networks",
             Self::ProbePeer => "probe_peer",
+            Self::GetBlacklist => "get_blacklist",
+            Self::BanClient => "ban_client",
+            Self::UnbanClient => "unban_client",
+            Self::GetNetworkAllocation => "get_network_allocation",
+            Self::UpdateNetworkAllocation => "update_network_allocation",
             Self::UpdateRouting => "update_routing",
             Self::SetExitNodeRole => "set_exit_node_role",
             Self::SetRelayRole => "set_relay_role",
@@ -341,6 +358,17 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::RestartNetworks,
         ),
         "probe_peer" => (ActionBinding::ProbePeer, NodeCommandKind::ProbePeer),
+        "get_blacklist" => (ActionBinding::GetBlacklist, NodeCommandKind::GetBlacklist),
+        "ban_client" => (ActionBinding::BanClient, NodeCommandKind::BanClient),
+        "unban_client" => (ActionBinding::UnbanClient, NodeCommandKind::UnbanClient),
+        "get_network_allocation" => (
+            ActionBinding::GetNetworkAllocation,
+            NodeCommandKind::GetNetworkAllocation,
+        ),
+        "update_network_allocation" => (
+            ActionBinding::UpdateNetworkAllocation,
+            NodeCommandKind::UpdateNetworkAllocation,
+        ),
         "update_routing" => (ActionBinding::UpdateRouting, NodeCommandKind::UpdateRouting),
         "set_exit_node_role" => (
             ActionBinding::SetExitNodeRole,
@@ -440,6 +468,9 @@ pub fn default_form_values(
                 ("cleanup_node_residuals", "all") => "false".into(),
                 ("update_routing", "mode") => "mesh_only".into(),
                 ("update_routing", "is_exit_node") => "false".into(),
+                ("update_network_allocation", "mode") => "dual_stack".into(),
+                ("update_network_allocation", "ipv4_pool") => "10.8.0.0/24".into(),
+                ("update_network_allocation", "ipv6_pool") => "fd00::/120".into(),
                 ("set_exit_node_role", "role") => "exit_node".into(),
                 ("set_relay_role", "role") => "relay".into(),
                 (_, "enabled") => "true".into(),
@@ -508,6 +539,32 @@ pub fn build_command(
             target: field("target"),
             timeout_ms: parse_number(action, "timeout_ms", &required("timeout_ms")?)?,
         })),
+        Ok(ActionBinding::GetBlacklist) => Ok(NodeCommand::GetBlacklist {
+            network_name: field("network_name"),
+        }),
+        Ok(ActionBinding::BanClient) => Ok(NodeCommand::BanClient(NodeClientBlacklistCommand {
+            network_name: field("network_name"),
+            client_id: field("client_id"),
+        })),
+        Ok(ActionBinding::UnbanClient) => {
+            Ok(NodeCommand::UnbanClient(NodeClientBlacklistCommand {
+                network_name: field("network_name"),
+                client_id: field("client_id"),
+            }))
+        }
+        Ok(ActionBinding::GetNetworkAllocation) => Ok(NodeCommand::GetNetworkAllocation {
+            network_name: field("network_name"),
+        }),
+        Ok(ActionBinding::UpdateNetworkAllocation) => Ok(NodeCommand::UpdateNetworkAllocation(
+            NodeUpdateNetworkAllocationCommand {
+                network_name: field("network_name"),
+                allocation: NodeNetworkAllocation {
+                    mode: parse_network_mode(action, "mode", &required("mode")?)?,
+                    ipv4_pool: field("ipv4_pool"),
+                    ipv6_pool: field("ipv6_pool"),
+                },
+            },
+        )),
         Ok(ActionBinding::UpdateRouting) => {
             Ok(NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: field("network_name"),
@@ -559,6 +616,12 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "restart_networks" => HashSet::from(["networks", "all"]),
         "cleanup_node_residuals" => HashSet::from(["networks", "all"]),
         "probe_peer" => HashSet::from(["network_name", "target", "timeout_ms"]),
+        "get_blacklist" => HashSet::from(["network_name"]),
+        "ban_client" | "unban_client" => HashSet::from(["network_name", "client_id"]),
+        "get_network_allocation" => HashSet::from(["network_name"]),
+        "update_network_allocation" => {
+            HashSet::from(["network_name", "mode", "ipv4_pool", "ipv6_pool"])
+        }
         "update_routing" => HashSet::from(["network_name", "mode", "exit_node", "is_exit_node"]),
         "set_exit_node_role" | "set_relay_role" => {
             HashSet::from(["network_name", "role", "enabled"])
@@ -648,6 +711,23 @@ fn parse_routing_mode(
         "mesh_only" | "mesh-only" | "mesh" => Ok(NodeRoutingMode::MeshOnly),
         "bypass_mainland" | "bypass-mainland" | "bypass" => Ok(NodeRoutingMode::BypassMainland),
         "global_proxy" | "global-proxy" | "global" => Ok(NodeRoutingMode::GlobalProxy),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: field_id.into(),
+            value: value.into(),
+        }),
+    }
+}
+
+fn parse_network_mode(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<NetworkMode, CommandBuildError> {
+    match value.trim() {
+        "ipv4_only" | "ipv4-only" | "ipv4" => Ok(NetworkMode::Ipv4Only),
+        "ipv6_only" | "ipv6-only" | "ipv6" => Ok(NetworkMode::Ipv6Only),
+        "dual_stack" | "dual-stack" | "dual" => Ok(NetworkMode::DualStack),
         _ => Err(CommandBuildError::InvalidField {
             action_id: action.id.clone(),
             field_id: field_id.into(),

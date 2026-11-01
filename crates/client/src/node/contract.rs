@@ -185,9 +185,11 @@ fn enum_string_values(value: &Value, key: &str, output: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::node::{
-        NodeCreateNetworkCommand, NodeJoinNetworkCommand, NodeNetworkRole, NodeNetworkSelection,
-        NodeProbePeerCommand, NodeSetNetworkRoleCommand, NodeUpdateRoutingCommand,
+        NodeClientBlacklistCommand, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
+        NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection, NodeProbePeerCommand,
+        NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
+    use fuckipv6_common::NetworkMode;
     use std::path::PathBuf;
 
     fn sample_commands() -> Vec<NodeCommand> {
@@ -228,6 +230,28 @@ mod tests {
                 network_name: "home".into(),
                 role: NodeNetworkRole::Relay,
                 enabled: true,
+            }),
+            NodeCommand::GetBlacklist {
+                network_name: "home".into(),
+            },
+            NodeCommand::BanClient(NodeClientBlacklistCommand {
+                network_name: "home".into(),
+                client_id: "node-a".into(),
+            }),
+            NodeCommand::UnbanClient(NodeClientBlacklistCommand {
+                network_name: "home".into(),
+                client_id: "node-a".into(),
+            }),
+            NodeCommand::GetNetworkAllocation {
+                network_name: "home".into(),
+            },
+            NodeCommand::UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand {
+                network_name: "home".into(),
+                allocation: NodeNetworkAllocation {
+                    mode: NetworkMode::DualStack,
+                    ipv4_pool: "10.8.0.0/24".into(),
+                    ipv6_pool: "fd00::/120".into(),
+                },
             }),
             NodeCommand::ProbePeer(NodeProbePeerCommand {
                 network_name: "home".into(),

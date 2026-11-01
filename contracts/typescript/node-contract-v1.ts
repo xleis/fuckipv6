@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["cleanup_node_residuals", "create_network", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
+export const NODE_COMMAND_KINDS = ["ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_routing"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["cleanup_node_residuals", "create_network", "get_node_diagnostics", "get_snapshot", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "update_routing"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "probe_peer", "restart_networks", "restart_node", "set_network_role", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_routing"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -35,6 +35,12 @@ export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
 
 export type NodeAccessModel = "trusted_control_plane";
 
+export type NodeBlacklistSnapshot = {
+  "network_name": string;
+  "clients": Array<string>;
+  "changed": boolean;
+};
+
 export type NodeCapabilityRegistrySnapshot = {
   "capabilities": Array<NodeCapabilitySnapshot>;
 };
@@ -59,6 +65,11 @@ export type NodeCleanupStepSnapshot = {
 };
 
 export type NodeCleanupStepStatus = "removed" | "not_owned" | "deferred" | "failed" | "unknown";
+
+export type NodeClientBlacklistCommand = {
+  "network_name": string;
+  "client_id": string;
+};
 
 export type NodeCommand = {
   "command": "get_snapshot";
@@ -95,6 +106,25 @@ export type NodeCommand = {
 } | {
   "command": "set_network_role";
   "payload": NodeSetNetworkRoleCommand;
+} | {
+  "command": "get_blacklist";
+  "payload": {
+  "network_name": string;
+};
+} | {
+  "command": "ban_client";
+  "payload": NodeClientBlacklistCommand;
+} | {
+  "command": "unban_client";
+  "payload": NodeClientBlacklistCommand;
+} | {
+  "command": "get_network_allocation";
+  "payload": {
+  "network_name": string;
+};
+} | {
+  "command": "update_network_allocation";
+  "payload": NodeUpdateNetworkAllocationCommand;
 } | {
   "command": "probe_peer";
   "payload": NodeProbePeerCommand;
@@ -137,8 +167,17 @@ export type NodeCommandOutcome = {
   "status": "cleanup";
   "data": NodeResidualCleanupResult;
 } | {
+  "status": "blacklist";
+  "data": NodeBlacklistSnapshot;
+} | {
+  "status": "network_allocation";
+  "data": NodeNetworkAllocationSnapshot;
+} | {
   "status": "probe";
   "data": NodePeerProbeSnapshot;
+} | {
+  "status": "network_created";
+  "data": NodeCreatedNetwork;
 } | {
   "status": "accepted";
   "data": {
@@ -176,6 +215,13 @@ export type NodeCreateNetworkCommand = {
   "relay_port": number;
   "external_host"?: string | null;
   "auto_connect": boolean;
+};
+
+export type NodeCreatedNetwork = {
+  "network_name": string;
+  "config_saved": boolean;
+  "started": boolean;
+  "invitation_ticket": string;
 };
 
 export type NodeDiagnosticsSnapshot = {
@@ -297,6 +343,18 @@ export type NodeLogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type NodeManifestResponse = {
   "schema_version": number;
   "manifest": NodeUiManifest;
+};
+
+export type NodeNetworkAllocation = {
+  "mode": NetworkMode;
+  "ipv4_pool": string;
+  "ipv6_pool": string;
+};
+
+export type NodeNetworkAllocationSnapshot = {
+  "network_name": string;
+  "allocation": NodeNetworkAllocation;
+  "config_saved": boolean;
 };
 
 export type NodeNetworkConfigSnapshot = {
@@ -457,7 +515,7 @@ export type NodeTrafficSnapshot = {
 export type NodeUiAction = {
   "id": string;
   "label_key": string;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "shutdown";
   "backend_status": NodeUiBackendStatus;
   "permission": NodePermission;
   "audit": NodeUiAudit;
@@ -491,7 +549,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "external_host" | "network_name" | "network_selection" | "peer_target" | "port" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "external_host" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "port" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
 
 export type NodeUiManifest = {
   "schema_version": number;
@@ -505,7 +563,12 @@ export type NodeUiPage = {
   "actions": Array<NodeUiAction>;
 };
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_selection" | "role" | "routing_mode" | "positive_timeout";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout";
+
+export type NodeUpdateNetworkAllocationCommand = {
+  "network_name": string;
+  "allocation": NodeNetworkAllocation;
+};
 
 export type NodeUpdateRoutingCommand = {
   "network_name": string;

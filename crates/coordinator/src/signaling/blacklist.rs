@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
-use fuckipv6_common::{BlacklistConfig, CoordinatorConfig, NetworkAuthorizationRevocation};
+use fuckipv6_common::{
+    validate_ipv4_cidr, validate_ipv6_cidr, BlacklistConfig, CoordinatorConfig, NetworkAllocation,
+    NetworkAuthorizationRevocation,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -82,6 +85,36 @@ impl CoordinatorConfigBlacklistStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Load the coordinator-owned address allocation from the same persistent
+    /// configuration used for blacklist and authorization state.
+    pub fn load_network_allocation(&self) -> Result<NetworkAllocation> {
+        self.load_existing_config()
+            .map(|config| config.network)
+            .with_context(|| format!("读取协调端地址分配失败: {}", self.path.to_string_lossy()))
+    }
+
+    /// Atomically replace the persisted network allocation while holding the
+    /// existing process-level and cross-process configuration locks.
+    pub fn save_network_allocation(&self, allocation: &NetworkAllocation) -> Result<()> {
+        if allocation.mode.is_ipv4_enabled() {
+            validate_ipv4_cidr(&allocation.ipv4_pool, "network.ipv4_pool")
+                .context("IPv4 地址池校验失败")?;
+        }
+        if allocation.mode.is_ipv6_enabled() {
+            validate_ipv6_cidr(allocation.effective_ipv6_pool(), "network.ipv6_pool")
+                .context("IPv6 地址池校验失败")?;
+        }
+        self.with_update_lock(|| {
+            let (mut config, _) = self.initialize_network_identity_locked(false)?;
+            if config.network == *allocation {
+                return Ok(());
+            }
+            config.network = allocation.clone();
+            self.save_config(&config)
+                .context("持久化协调端地址分配失败")
+        })
     }
 
     fn load_config_or_default(&self) -> Result<CoordinatorConfig> {

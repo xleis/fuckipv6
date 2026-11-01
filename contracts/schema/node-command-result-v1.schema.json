@@ -88,6 +88,38 @@
           "properties": {
             "status": {
               "type": "string",
+              "const": "blacklist"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeBlacklistSnapshot"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "network_allocation"
+            },
+            "data": {
+              "$ref": "#/$defs/NodeNetworkAllocationSnapshot"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
               "const": "probe"
             },
             "data": {
@@ -1202,6 +1234,11 @@
             "join_network",
             "update_routing",
             "set_network_role",
+            "get_blacklist",
+            "ban_client",
+            "unban_client",
+            "get_network_allocation",
+            "update_network_allocation",
             "probe_peer",
             "start_node",
             "stop_node",
@@ -1330,7 +1367,9 @@
       "type": "string",
       "enum": [
         "boolean",
+        "client_id",
         "external_host",
+        "network_mode",
         "network_name",
         "network_selection",
         "peer_target",
@@ -1349,6 +1388,7 @@
         "network_name",
         "port",
         "distinct_ports",
+        "network_mode",
         "network_selection",
         "role",
         "routing_mode",
@@ -1547,6 +1587,68 @@
         "incomplete",
         "unknown"
       ]
+    },
+    "NodeBlacklistSnapshot": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "clients": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "changed": {
+          "type": "boolean",
+          "description": "True when the operation changed persisted blacklist state. Queries and\nidempotent mutations report false."
+        }
+      },
+      "required": [
+        "network_name",
+        "clients",
+        "changed"
+      ]
+    },
+    "NodeNetworkAllocationSnapshot": {
+      "type": "object",
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "allocation": {
+          "$ref": "#/$defs/NodeNetworkAllocation"
+        },
+        "config_saved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "network_name",
+        "allocation",
+        "config_saved"
+      ]
+    },
+    "NodeNetworkAllocation": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/NetworkMode"
+        },
+        "ipv4_pool": {
+          "type": "string"
+        },
+        "ipv6_pool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "ipv4_pool",
+        "ipv6_pool"
+      ],
+      "description": "Transport-neutral allocation payload shared by local adapters and the\nnode command protocol. Persistence is owned by the embedded service actor,\nnever by a UI adapter."
     },
     "NodePeerProbeSnapshot": {
       "type": "object",

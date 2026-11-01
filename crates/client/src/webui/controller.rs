@@ -10,10 +10,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::node::{
-    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkRole,
-    NodeNetworkStatus, NodePeerProbeSnapshot, NodeProbePeerCommand, NodeProblem, NodeProblemCode,
-    NodeRoutingMode, NodeSnapshot, NodeStateStore, NodeUpdateRoutingCommand,
+    NodeBlacklistSnapshot, NodeClientBlacklistCommand, NodeCommand, NodeCommandBus,
+    NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeCreateNetworkCommand,
+    NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
+    NodeNetworkAllocationSnapshot, NodeNetworkRole, NodeNetworkStatus, NodePeerProbeSnapshot,
+    NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
+    NodeStateStore, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 #[cfg(test)]
 use crate::node::{NodeCommandFuture, NodeCommandHandler, NodeCommandResult};
@@ -91,7 +93,10 @@ pub struct AppUiState {
     pub coordinator_online_clients: usize,
     pub coordinator_traffic: Option<CoordinatorTrafficDto>,
     pub coordinator_peers: Vec<CoordinatorPeerDto>,
-    pub coordinator_blacklist: Vec<String>,
+    /// `None` means the coordinator exists but its authoritative blacklist could
+    /// not be read. An empty list is reserved for a successfully queried,
+    /// genuinely empty blacklist.
+    pub coordinator_blacklist: Option<Vec<String>>,
 
     // === 本机节点运行时状态（来自共享 NodeStateStore） ===
     #[serde(default)]
@@ -215,12 +220,16 @@ struct NodeBackend {
 #[cfg(test)]
 struct TestNodeHandler {
     state: NodeStateStore,
+    blacklist: Arc<RwLock<Vec<String>>>,
+    allocation: Arc<RwLock<NodeNetworkAllocation>>,
 }
 
 #[cfg(test)]
 impl NodeCommandHandler for TestNodeHandler {
     fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
         let state = self.state.clone();
+        let blacklist = self.blacklist.clone();
+        let allocation = self.allocation.clone();
         Box::pin(async move {
             let request_id = request.request_id;
             match request.command {
@@ -229,6 +238,63 @@ impl NodeCommandHandler for TestNodeHandler {
                 }
                 NodeCommand::GetUiManifest => {
                     NodeCommandResult::ui_manifest(request_id, crate::node::node_ui_manifest())
+                }
+                NodeCommand::GetBlacklist { network_name } => NodeCommandResult::completed(
+                    request_id,
+                    NodeCommandOutcome::Blacklist(NodeBlacklistSnapshot {
+                        network_name,
+                        clients: blacklist.read().await.clone(),
+                        changed: false,
+                    }),
+                ),
+                NodeCommand::BanClient(command) => {
+                    let mut clients = blacklist.write().await;
+                    let changed = !clients
+                        .iter()
+                        .any(|client| client.trim() == command.normalized_client_id());
+                    if changed {
+                        clients.push(command.normalized_client_id());
+                    }
+                    NodeCommandResult::completed(
+                        request_id,
+                        NodeCommandOutcome::Blacklist(NodeBlacklistSnapshot {
+                            network_name: command.network_name,
+                            clients: clients.clone(),
+                            changed,
+                        }),
+                    )
+                }
+                NodeCommand::UnbanClient(command) => {
+                    let mut clients = blacklist.write().await;
+                    let before = clients.len();
+                    clients.retain(|client| client.trim() != command.normalized_client_id());
+                    NodeCommandResult::completed(
+                        request_id,
+                        NodeCommandOutcome::Blacklist(NodeBlacklistSnapshot {
+                            network_name: command.network_name,
+                            clients: clients.clone(),
+                            changed: clients.len() != before,
+                        }),
+                    )
+                }
+                NodeCommand::GetNetworkAllocation { network_name } => NodeCommandResult::completed(
+                    request_id,
+                    NodeCommandOutcome::NetworkAllocation(NodeNetworkAllocationSnapshot {
+                        network_name,
+                        allocation: allocation.read().await.clone(),
+                        config_saved: true,
+                    }),
+                ),
+                NodeCommand::UpdateNetworkAllocation(command) => {
+                    *allocation.write().await = command.allocation.clone();
+                    NodeCommandResult::completed(
+                        request_id,
+                        NodeCommandOutcome::NetworkAllocation(NodeNetworkAllocationSnapshot {
+                            network_name: command.network_name,
+                            allocation: command.allocation,
+                            config_saved: true,
+                        }),
+                    )
                 }
                 _ => NodeCommandResult::completed(
                     request_id,
@@ -322,6 +388,50 @@ impl AppController {
         let commands = NodeCommandBus::spawn(
             Arc::new(TestNodeHandler {
                 state: state.clone(),
+                blacklist: Arc::new(RwLock::new(Vec::new())),
+                allocation: Arc::new(RwLock::new(NodeNetworkAllocation {
+                    mode: fuckipv6_common::NetworkMode::DualStack,
+                    ipv4_pool: fuckipv6_common::default_ipv4_pool(),
+                    ipv6_pool: fuckipv6_common::default_ipv6_pool(),
+                })),
+            }),
+            events,
+            8,
+        );
+        Self::from_backend(NodeBackend {
+            state,
+            commands,
+            _session: None,
+        })
+    }
+
+    /// Test controller with one running embedded coordinator so management
+    /// commands can exercise the same command-bus path as production.
+    #[cfg(test)]
+    pub async fn new_with_coordinator() -> Self {
+        let events = crate::node::NodeEventBus::new(32);
+        let state = NodeStateStore::with_events(events.clone());
+        state
+            .update(|snapshot| {
+                snapshot
+                    .embedded_services
+                    .push(crate::node::NodeEmbeddedServiceSnapshot {
+                        network_name: "managed".to_string(),
+                        status: NodeEmbeddedServiceStatus::Running,
+                        signaling_addr: None,
+                        relay_addr: None,
+                    });
+            })
+            .await;
+        let commands = NodeCommandBus::spawn(
+            Arc::new(TestNodeHandler {
+                state: state.clone(),
+                blacklist: Arc::new(RwLock::new(Vec::new())),
+                allocation: Arc::new(RwLock::new(NodeNetworkAllocation {
+                    mode: fuckipv6_common::NetworkMode::DualStack,
+                    ipv4_pool: fuckipv6_common::default_ipv4_pool(),
+                    ipv6_pool: fuckipv6_common::default_ipv6_pool(),
+                })),
             }),
             events,
             8,
@@ -359,6 +469,9 @@ impl AppController {
         let mut projected = project_node_snapshot(&snapshot, local_ticket);
         let local_logs = self.recent_logs.read().await;
         projected.logs.extend(local_logs.iter().cloned());
+        if projected.coordinator_active {
+            projected.coordinator_blacklist = self.get_blacklist().await.ok();
+        }
         projected
     }
 
@@ -582,20 +695,34 @@ impl AppController {
         Ok(())
     }
 
-    /// 协调中枢封禁客户端
-    pub async fn ban_client(&self, client_id: String) -> Result<()> {
-        Err(AppControllerError::unsupported(format!(
-            "当前节点命令协议尚未提供封禁操作，无法封禁客户端 {client_id}"
-        ))
-        .into())
+    /// 协调中枢封禁客户端。返回的是命令完成后由协调端确认的快照。
+    pub async fn ban_client(
+        &self,
+        client_id: String,
+    ) -> Result<NodeBlacklistSnapshot, AppControllerError> {
+        let network_name = self.coordinator_network_name().await?;
+        let outcome = self
+            .execute_node_command(NodeCommand::BanClient(NodeClientBlacklistCommand {
+                network_name: network_name.clone(),
+                client_id,
+            }))
+            .await?;
+        blacklist_outcome(outcome, &network_name)
     }
 
-    /// 协调中枢解封客户端
-    pub async fn unban_client(&self, client_id: &str) -> Result<bool> {
-        Err(AppControllerError::unsupported(format!(
-            "当前节点命令协议尚未提供解封操作，无法解封客户端 {client_id}"
-        ))
-        .into())
+    /// 协调中枢解封客户端。`changed=false` 表示客户端原本就不在黑名单中。
+    pub async fn unban_client(
+        &self,
+        client_id: &str,
+    ) -> Result<NodeBlacklistSnapshot, AppControllerError> {
+        let network_name = self.coordinator_network_name().await?;
+        let outcome = self
+            .execute_node_command(NodeCommand::UnbanClient(NodeClientBlacklistCommand {
+                network_name: network_name.clone(),
+                client_id: client_id.to_string(),
+            }))
+            .await?;
+        blacklist_outcome(outcome, &network_name)
     }
 
     /// 动态热更新路由分流与出口节点配置，并等待运行时确认。
@@ -684,46 +811,65 @@ impl AppController {
         }
     }
 
-    /// 查询当前专网网段与地址池配置。
-    pub async fn get_network_config(&self) -> NetworkConfigDto {
-        let snapshot = self.node.state.snapshot().await;
-        let mode = primary_network_config(&snapshot)
-            .and_then(|config| config.virtual_mode)
-            .unwrap_or(fuckipv6_common::NetworkMode::DualStack);
-        let ipv4_pool = fuckipv6_common::default_ipv4_pool();
-        let ipv6_pool = fuckipv6_common::default_ipv6_pool();
-        NetworkConfigDto {
-            mode,
-            ipv4_prefix: cidr_prefix(&ipv4_pool, 24),
-            ipv6_prefix: cidr_prefix(&ipv6_pool, 120),
-            ipv4_pool,
-            ipv6_pool,
-            config_file: None,
-        }
+    /// 查询当前运行中协调端的真实网段与地址池配置。
+    pub async fn get_network_config(&self) -> Result<NetworkConfigDto, AppControllerError> {
+        let network_name = self.coordinator_network_name().await?;
+        let outcome = self
+            .execute_node_command(NodeCommand::GetNetworkAllocation {
+                network_name: network_name.clone(),
+            })
+            .await?;
+        allocation_outcome(outcome, &network_name).map(network_config_dto)
     }
 
     /// 热更新专网网段与地址池配置。
     ///
-    /// The canonical command protocol does not expose subnet allocation
-    /// mutation yet. Reject instead of mutating a second Coordinator state.
     pub async fn update_network_config(
         &self,
         req: UpdateNetworkConfigRequest,
-    ) -> Result<NetworkConfigDto> {
-        Err(AppControllerError::unsupported(format!(
-            "当前节点命令协议尚未提供地址池热更新，未应用请求: mode={:?}, IPv4={}, IPv6={}",
-            req.mode, req.ipv4_pool, req.ipv6_pool
-        ))
-        .into())
+    ) -> Result<NetworkConfigDto, AppControllerError> {
+        let network_name = self.coordinator_network_name().await?;
+        let outcome = self
+            .execute_node_command(NodeCommand::UpdateNetworkAllocation(
+                NodeUpdateNetworkAllocationCommand {
+                    network_name: network_name.clone(),
+                    allocation: NodeNetworkAllocation {
+                        mode: req.mode,
+                        ipv4_pool: req.ipv4_pool,
+                        ipv6_pool: req.ipv6_pool,
+                    },
+                },
+            ))
+            .await?;
+        let snapshot = allocation_outcome(outcome, &network_name)?;
+        if !snapshot.config_saved {
+            return Err(AppControllerError::internal(
+                "协调端未确认地址池配置已持久化，拒绝报告更新成功",
+            ));
+        }
+        Ok(network_config_dto(snapshot))
     }
 
-    /// 获取黑名单列表。
-    ///
-    /// Blacklist mutation/query is not yet part of the canonical node command
-    /// protocol; return an empty projection rather than reading a second
-    /// Coordinator instance.
-    pub async fn get_blacklist(&self) -> Vec<String> {
-        Vec::new()
+    /// 获取运行中协调端的真实黑名单列表。
+    pub async fn get_blacklist(&self) -> Result<Vec<String>, AppControllerError> {
+        let network_name = self.coordinator_network_name().await?;
+        let outcome = self
+            .execute_node_command(NodeCommand::GetBlacklist {
+                network_name: network_name.clone(),
+            })
+            .await?;
+        blacklist_outcome(outcome, &network_name).map(|snapshot| snapshot.clients)
+    }
+
+    async fn coordinator_network_name(&self) -> Result<String, AppControllerError> {
+        let snapshot = self.node.state.snapshot().await;
+        active_coordinator_service(&snapshot)
+            .map(|service| service.network_name.clone())
+            .ok_or_else(|| {
+                AppControllerError::not_found(
+                    "当前没有运行中的协调网络，无法读取或修改协调端管理状态",
+                )
+            })
     }
 
     /// 读取系统运行日志
@@ -929,7 +1075,7 @@ fn project_node_snapshot(snapshot: &NodeSnapshot, local_ticket: Option<String>) 
         // manufacturing values from unrelated local traffic counters.
         coordinator_traffic: None,
         coordinator_peers: Vec::new(),
-        coordinator_blacklist: Vec::new(),
+        coordinator_blacklist: None,
         runtime_available: !snapshot.networks.is_empty(),
         runtime_p2p_addr: primary
             .and_then(|network| network.p2p_listen_addr)
@@ -1086,6 +1232,59 @@ fn cidr_prefix(cidr: &str, fallback: u8) -> u8 {
     cidr.rsplit_once('/')
         .and_then(|(_, prefix)| prefix.parse().ok())
         .unwrap_or(fallback)
+}
+
+fn blacklist_outcome(
+    outcome: NodeCommandOutcome,
+    network_name: &str,
+) -> Result<NodeBlacklistSnapshot, AppControllerError> {
+    match outcome {
+        NodeCommandOutcome::Blacklist(snapshot) if snapshot.network_name == network_name => {
+            Ok(snapshot)
+        }
+        NodeCommandOutcome::Blacklist(snapshot) => Err(AppControllerError::internal(format!(
+            "协调端返回了错误网络的黑名单快照: expected={network_name}, actual={}",
+            snapshot.network_name
+        ))),
+        other => Err(AppControllerError::internal(format!(
+            "协调端黑名单命令返回了意外结果: {other:?}"
+        ))),
+    }
+}
+
+fn allocation_outcome(
+    outcome: NodeCommandOutcome,
+    network_name: &str,
+) -> Result<NodeNetworkAllocationSnapshot, AppControllerError> {
+    match outcome {
+        NodeCommandOutcome::NetworkAllocation(snapshot)
+            if snapshot.network_name == network_name =>
+        {
+            Ok(snapshot)
+        }
+        NodeCommandOutcome::NetworkAllocation(snapshot) => {
+            Err(AppControllerError::internal(format!(
+                "协调端返回了错误网络的地址分配快照: expected={network_name}, actual={}",
+                snapshot.network_name
+            )))
+        }
+        other => Err(AppControllerError::internal(format!(
+            "协调端地址分配命令返回了意外结果: {other:?}"
+        ))),
+    }
+}
+
+fn network_config_dto(snapshot: NodeNetworkAllocationSnapshot) -> NetworkConfigDto {
+    let ipv4_pool = snapshot.allocation.ipv4_pool;
+    let ipv6_pool = snapshot.allocation.ipv6_pool;
+    NetworkConfigDto {
+        mode: snapshot.allocation.mode,
+        ipv4_prefix: cidr_prefix(&ipv4_pool, 24),
+        ipv6_prefix: cidr_prefix(&ipv6_pool, 120),
+        ipv4_pool,
+        ipv6_pool,
+        config_file: None,
+    }
 }
 
 #[cfg(test)]

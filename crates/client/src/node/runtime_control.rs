@@ -3400,6 +3400,18 @@ fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
         EmbeddedServiceError::ShutdownFailed { message } => {
             RuntimeControlError::Unavailable(format!("内嵌网络服务关闭未完全成功: {message}"))
         }
+        EmbeddedServiceError::PersistenceFailed {
+            network_name,
+            message,
+        } => RuntimeControlError::Unavailable(format!(
+            "网络 [{network_name}] 的持久化管理操作失败: {message}"
+        )),
+        EmbeddedServiceError::OperationFailed {
+            network_name,
+            message,
+        } => RuntimeControlError::Unavailable(format!(
+            "网络 [{network_name}] 的管理操作失败: {message}"
+        )),
         EmbeddedServiceError::ActorClosed => RuntimeControlError::ActorClosed,
     }
 }

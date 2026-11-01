@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::{CoordinatorConfig, Identity, NetworkTicket, RelayEndpoint};
+use fuckipv6_common::{
+    CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
+};
 use fuckipv6_coordinator::{
     relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
     signaling::server::SignalingServer, signaling::session::SessionManager,
@@ -26,6 +28,7 @@ pub struct EmbeddedCoordinator {
     pub signaling_addr: SocketAddr,
     pub relay_addr: SocketAddr,
     pub session_manager: Arc<SessionManager>,
+    blacklist_store: Arc<CoordinatorConfigBlacklistStore>,
     signaling_task: Option<JoinHandle<Result<()>>>,
     relay_task: Option<JoinHandle<Result<()>>>,
 }
@@ -89,12 +92,9 @@ impl EmbeddedCoordinator {
         config_manager: ConfigManager,
     ) -> Result<Self> {
         let pool = ip_pool.unwrap_or("fd00::1000/120");
-        let session_manager =
-            Arc::new(SessionManager::new(pool).context("无法初始化内嵌协调器地址池")?);
-
         let blacklist_path = config_manager
             .coordinator_config_path(network_name)
-            .context("无法确定协调端黑名单持久化路径")?;
+            .context("无法确定协调端持久化路径")?;
         let mut default_coordinator_config = CoordinatorConfig::default();
         default_coordinator_config.network.ipv6_pool = pool.to_string();
         default_coordinator_config.network.ip_pool = Some(pool.to_string());
@@ -115,8 +115,16 @@ impl EmbeddedCoordinator {
                 .save_to_file(&blacklist_path)
                 .context("无法初始化内嵌协调端持久配置")?;
         }
+        let persisted_allocation = blacklist_store
+            .load_network_allocation()
+            .context("无法加载持久化协调端地址分配")?;
+        let session_manager = Arc::new(
+            SessionManager::new_with_allocation(&persisted_allocation)
+                .context("无法初始化内嵌协调器地址池")?,
+        );
+        let blacklist_store = Arc::new(blacklist_store);
         session_manager
-            .attach_blacklist_store(Arc::new(blacklist_store))
+            .attach_blacklist_store(blacklist_store.clone())
             .await
             .context("无法加载节点持久黑名单")?;
 
@@ -165,9 +173,13 @@ impl EmbeddedCoordinator {
             format!("127.0.0.1:{actual_signaling_port}")
         };
 
-        let ticket = NetworkTicket::new(host_pubkey, ticket_endpoint, network_name)
-            .with_ipv6(pool)
-            .with_ipv4("10.8.0.0/24");
+        let mut ticket = NetworkTicket::new(host_pubkey, ticket_endpoint, network_name);
+        if persisted_allocation.mode.is_ipv4_enabled() {
+            ticket = ticket.with_ipv4(persisted_allocation.ipv4_pool.clone());
+        }
+        if persisted_allocation.mode.is_ipv6_enabled() {
+            ticket = ticket.with_ipv6(persisted_allocation.effective_ipv6_pool());
+        }
 
         let signaling_task = tokio::spawn(async move { signaling_server.run().await });
 
@@ -190,9 +202,48 @@ impl EmbeddedCoordinator {
             signaling_addr,
             relay_addr: actual_relay_addr,
             session_manager,
+            blacklist_store,
             signaling_task: Some(signaling_task),
             relay_task: Some(relay_task),
         })
+    }
+
+    pub async fn persisted_network_allocation(&self) -> Result<NetworkAllocation> {
+        let store = self.blacklist_store.clone();
+        tokio::task::spawn_blocking(move || store.load_network_allocation())
+            .await
+            .context("等待协调端地址分配读取任务失败")?
+    }
+
+    /// Persist the new allocation first, then hot-update the runtime allocator.
+    /// If the runtime rejects the update, restore the previous persisted value
+    /// and fail closed so callers never report a half-applied configuration.
+    pub async fn update_network_allocation(&self, allocation: NetworkAllocation) -> Result<()> {
+        let previous = self.session_manager.current_network_allocation().await;
+        let store = self.blacklist_store.clone();
+        let next = allocation.clone();
+        tokio::task::spawn_blocking(move || store.save_network_allocation(&next))
+            .await
+            .context("等待协调端地址分配持久化任务失败")??;
+
+        if let Err(runtime_error) = self
+            .session_manager
+            .update_network_allocation(allocation)
+            .await
+        {
+            let store = self.blacklist_store.clone();
+            let rollback =
+                tokio::task::spawn_blocking(move || store.save_network_allocation(&previous))
+                    .await
+                    .context("等待协调端地址分配回滚任务失败")?;
+            return match rollback {
+                Ok(()) => Err(runtime_error).context("运行时拒绝地址分配，持久化配置已回滚"),
+                Err(rollback_error) => Err(runtime_error).context(format!(
+                    "运行时拒绝地址分配，且持久化配置回滚失败: {rollback_error:#}"
+                )),
+            };
+        }
+        Ok(())
     }
 
     /// Stop and join both listener tasks so their TCP/UDP ports are released
@@ -236,6 +287,122 @@ impl Drop for EmbeddedCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn allocation_update_rolls_back_persistence_when_live_lease_blocks_it() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-embedded-allocation-rollback-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let mut coordinator = EmbeddedCoordinator::start_with_config_dir(
+            "rollback-mesh",
+            0,
+            0,
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("fd00::1000/120"),
+            config_dir.clone(),
+        )
+        .await
+        .expect("start embedded coordinator");
+        let previous = coordinator
+            .session_manager
+            .current_network_allocation()
+            .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        coordinator
+            .session_manager
+            .register_client(
+                "live-client".to_string(),
+                vec![7; 32],
+                "192.0.2.10:41000".parse().expect("socket address"),
+                51820,
+                fuckipv6_common::NatType::Open,
+                tx,
+            )
+            .await
+            .expect("register live client");
+
+        let error = coordinator
+            .update_network_allocation(NetworkAllocation {
+                mode: fuckipv6_common::NetworkMode::Ipv4Only,
+                ipv4_pool: "192.168.100.0/24".to_string(),
+                ipv6_pool: "fd00::1000/120".to_string(),
+                ip_pool: Some("fd00::1000/120".to_string()),
+            })
+            .await
+            .expect_err("live IPv6 lease must reject IPv4-only allocation");
+        assert!(format!("{error:#}").contains("持久化配置已回滚"));
+        assert_eq!(
+            coordinator
+                .session_manager
+                .current_network_allocation()
+                .await,
+            previous
+        );
+        assert_eq!(
+            coordinator
+                .persisted_network_allocation()
+                .await
+                .expect("read rolled back allocation"),
+            previous
+        );
+
+        coordinator.shutdown().await.expect("shutdown coordinator");
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[tokio::test]
+    async fn allocation_persistence_failure_keeps_runtime_unchanged() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-embedded-allocation-persist-failure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("config manager");
+        let config_path = configs
+            .coordinator_config_path("persist-failure-mesh")
+            .expect("coordinator config path");
+        let mut coordinator = EmbeddedCoordinator::start_with_config_dir(
+            "persist-failure-mesh",
+            0,
+            0,
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("fd00::1000/120"),
+            config_dir.clone(),
+        )
+        .await
+        .expect("start embedded coordinator");
+        let previous = coordinator
+            .session_manager
+            .current_network_allocation()
+            .await;
+        std::fs::remove_file(&config_path).expect("remove config file");
+        std::fs::create_dir_all(&config_path).expect("replace config with directory");
+
+        let error = coordinator
+            .update_network_allocation(NetworkAllocation {
+                mode: fuckipv6_common::NetworkMode::Ipv4Only,
+                ipv4_pool: "192.168.100.0/24".to_string(),
+                ipv6_pool: "fd00::1000/120".to_string(),
+                ip_pool: Some("fd00::1000/120".to_string()),
+            })
+            .await
+            .expect_err("persistence failure must reject update");
+        assert!(format!("{error:#}").contains("读取协调端持久配置失败"));
+        assert_eq!(
+            coordinator
+                .session_manager
+                .current_network_allocation()
+                .await,
+            previous
+        );
+
+        coordinator.shutdown().await.expect("shutdown coordinator");
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
 
     #[tokio::test]
     async fn test_embedded_coordinator_startup() {

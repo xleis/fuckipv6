@@ -476,9 +476,10 @@ async fn require_api_auth(
     // Browser WebSocket clients authenticate with the same-origin owner cookie
     // checked above. Never accept credentials in URL query strings because they
     // leak into access logs, browser history, and proxy traces.
+    let bearer_token = authorization_bearer_token(&request)
+        .or_else(|| websocket_subprotocol_bearer_token(request.headers()));
     let bearer_authenticated = state.auth.is_required()
-        && authorization_bearer_token(&request)
-            .is_some_and(|token| state.auth.verify(token).is_ok());
+        && bearer_token.is_some_and(|token| state.auth.verify(token).is_ok());
 
     if state.auth.is_required() && !owner_authenticated && !bearer_authenticated {
         return unauthorized_response(
@@ -595,6 +596,25 @@ fn authorization_bearer_token(request: &axum::extract::Request) -> Option<&str> 
         .eq_ignore_ascii_case("bearer")
         .then_some(token.trim())
         .filter(|token| !token.is_empty())
+}
+
+const WEBSOCKET_BEARER_PROTOCOL_PREFIX: &str = "fuckipv6.bearer.";
+
+/// Browsers cannot attach an Authorization header to `WebSocket`. Keep legacy
+/// bearer-token login usable without putting the credential in the URL by
+/// carrying it in an offered WebSocket subprotocol during the HTTP upgrade.
+fn websocket_subprotocol_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .find_map(|protocol| {
+            protocol
+                .trim()
+                .strip_prefix(WEBSOCKET_BEARER_PROTOCOL_PREFIX)
+                .filter(|token| !token.is_empty())
+        })
 }
 
 fn unauthorized_response(message: impl Into<String>) -> Response {
@@ -1922,7 +1942,8 @@ async fn handle_ws(
     State(ctrl): State<Arc<AppController>>,
     Extension(auth): Extension<Arc<WebUiAuth>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_stream(socket, ctrl, auth))
+    ws.protocols(["fuckipv6"])
+        .on_upgrade(move |socket| ws_stream(socket, ctrl, auth))
 }
 
 async fn ws_stream(mut socket: WebSocket, ctrl: Arc<AppController>, auth: Arc<WebUiAuth>) {
@@ -4394,8 +4415,8 @@ tun_name = "fuckipv6"</div>
     function connectRealtime() {
       const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const token = getAuthToken();
-      const query = token ? `?token=${encodeURIComponent(token)}` : '';
-      const socket = new WebSocket(`${scheme}://${window.location.host}/ws${query}`);
+      const protocols = token ? ['fuckipv6', `fuckipv6.bearer.${token}`] : ['fuckipv6'];
+      const socket = new WebSocket(`${scheme}://${window.location.host}/ws`, protocols);
       let fallbackTimer = null;
       const liveDot = document.getElementById('live-dot');
 
@@ -6896,6 +6917,55 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn websocket_bearer_uses_subprotocol_header_not_query_string() {
+        let auth = test_auth();
+        let token = auth
+            .login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), "admin", "secret")
+            .expect("login token");
+        let app = create_app_web_router_with_auth(Arc::new(AppController::new()), auth);
+
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ws?token={token}"))
+                    .header("connection", "Upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .header("sec-websocket-protocol", "fuckipv6")
+                    .body(Body::empty())
+                    .expect("query-token websocket request"),
+            )
+            .await
+            .expect("query-token websocket response");
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws")
+                    .header("connection", "Upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .header(
+                        "sec-websocket-protocol",
+                        format!("fuckipv6, fuckipv6.bearer.{token}"),
+                    )
+                    .body(Body::empty())
+                    .expect("subprotocol bearer websocket request"),
+            )
+            .await
+            .expect("subprotocol bearer websocket response");
+        // `tower::oneshot` does not install an upgrade transport, so axum
+        // returns 426 after authentication. Reaching that response proves the
+        // subprotocol bearer passed middleware; anonymous/query-token requests
+        // are rejected earlier with 401.
+        assert_eq!(accepted.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
     #[test]
     fn test_unified_master_html_zero_emoji_and_svg_icons() {
         // 彻底验证绝无任何 Emoji
@@ -6926,6 +6996,8 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("fuckipv6_control_token"));
         assert!(UNIFIED_MASTER_HTML.contains("/api/auth/login"));
         assert!(UNIFIED_MASTER_HTML.contains("Bearer ${token}"));
+        assert!(UNIFIED_MASTER_HTML.contains("fuckipv6.bearer.${token}"));
+        assert!(!UNIFIED_MASTER_HTML.contains("?token="));
         assert!(WEBUI_CSS.contains("--sidebar-w"));
         assert!(WEBUI_CSS.contains("--panel"));
         assert!(WEBUI_CSS.contains(".modal-wrap.active"));

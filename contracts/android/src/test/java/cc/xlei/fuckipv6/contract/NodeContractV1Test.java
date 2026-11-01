@@ -7,6 +7,7 @@ import cc.xlei.fuckipv6.contract.NodeContractV1.CapabilityState;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupFailureReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
+import cc.xlei.fuckipv6.contract.NodeContractV1.NodeEventReplayReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
 import cc.xlei.fuckipv6.contract.NodeContractV1.OperationState;
 
@@ -39,7 +40,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 66,
+                NodeContractV1.DTO_CLASS_NAMES.length == 67,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -65,6 +66,23 @@ public final class NodeContractV1Test {
         NodeContractV1.NodeApiOperationResponse.class.getDeclaredField("operation");
         NodeContractV1.NodeApiCommandResponse.class.getDeclaredField("operation");
         NodeContractV1.NodeCommandHttpRequest.class.getDeclaredField("idempotency_key");
+        for (String field : new String[] {"kind", "sequence", "snapshot_revision"}) {
+            NodeContractV1.NodeEvent.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"sequence", "snapshot_revision"}) {
+            NodeContractV1.NodeEventCursor.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeApiEvent.Snapshot.class.getDeclaredField("cursor");
+        for (String field : new String[] {
+            "latest_cursor", "reason", "requested_cursor"
+        }) {
+            NodeContractV1.NodeApiEvent.ResyncRequired.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "latest_cursor", "requested_cursor", "resync_reason"
+        }) {
+            NodeContractV1.NodeApiErrorResponse.class.getDeclaredField(field);
+        }
 
         for (String field : new String[] {
             "revision",
@@ -116,6 +134,10 @@ public final class NodeContractV1Test {
                 NodeCleanupStepStatus.DEFERRED,
                 NodeCleanupStepStatus.fromWireName("deferred"),
                 "runtime cleanup step status");
+        assertSame(
+                NodeEventReplayReason.REVISION_GAP,
+                NodeEventReplayReason.fromWireName("revision_gap"),
+                "event replay reason");
         assertSame(
                 OperationState.TIMED_OUT,
                 OperationState.fromWireName("timed_out"),

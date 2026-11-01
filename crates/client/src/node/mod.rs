@@ -21,7 +21,9 @@ pub use command::{
     NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand,
     NodeUpdateRoutingCommand,
 };
-pub use event::{NodeEvent, NodeEventBus, NodeEventKind};
+pub use event::{
+    NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,
+};
 pub use http_adapter::{
     NodeApiCommandResponse, NodeApiErrorResponse, NodeApiEvent, NodeApiManifestResponse,
     NodeApiObject, NodeApiObjectResponse, NodeApiOperationResponse, NodeApiResponseMeta,

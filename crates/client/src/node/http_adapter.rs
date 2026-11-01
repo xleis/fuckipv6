@@ -15,7 +15,7 @@ use axum::{
         ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Json, Response,
@@ -36,8 +36,9 @@ use tokio::sync::broadcast;
 
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeControlHealth, NodeEvent, NodeEventBus, NodeEventKind, NodeProblem,
-    NodeProblemCode, NodeSnapshot, NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeCommandResult, NodeControlHealth, NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind,
+    NodeEventReplay, NodeEventReplayReason, NodeProblem, NodeProblemCode, NodeSnapshot,
+    NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };
 
 /// Version of the HTTP/WebSocket envelope contract used by desktop and
@@ -164,6 +165,12 @@ pub struct NodeApiErrorResponse {
     pub supported_schema_version: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<NodeProblem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_cursor: Option<NodeEventCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_cursor: Option<NodeEventCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resync_reason: Option<NodeEventReplayReason>,
 }
 
 /// JSON payload carried by `/api/v1/events` Server-Sent Events. The stream
@@ -175,6 +182,10 @@ pub enum NodeApiEvent {
         schema_version: u16,
         request_id: u64,
         server_time: String,
+        /// Resume position for this connection. The snapshot itself is already
+        /// authoritative; replayed events after this cursor are notifications
+        /// that the client may deduplicate by sequence.
+        cursor: NodeEventCursor,
         snapshot: Box<NodeSnapshot>,
     },
     Event {
@@ -187,8 +198,9 @@ pub enum NodeApiEvent {
         schema_version: u16,
         request_id: u64,
         server_time: String,
-        requested_after: Option<u64>,
-        latest_sequence: u64,
+        requested_cursor: NodeEventCursor,
+        latest_cursor: NodeEventCursor,
+        reason: NodeEventReplayReason,
     },
 }
 
@@ -1093,7 +1105,65 @@ fn operation_error_for_problem(problem: &NodeProblem, target: &DomainObjectRef) 
 #[derive(Debug, Default, Deserialize)]
 struct NodeApiQuery {
     schema_version: Option<u16>,
-    after: Option<u64>,
+    /// SSE cursor in `sequence:snapshot_revision` form. A bare sequence is
+    /// accepted for migration and bound to the subscription's current revision.
+    after: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedNodeCursor {
+    Sequence(u64),
+    Cursor(NodeEventCursor),
+}
+
+impl RequestedNodeCursor {
+    fn bind(self, boundary: NodeEventCursor) -> NodeEventCursor {
+        match self {
+            Self::Sequence(sequence) => NodeEventCursor::new(sequence, boundary.snapshot_revision),
+            Self::Cursor(cursor) => cursor,
+        }
+    }
+}
+
+fn parse_node_cursor(value: &str) -> Option<RequestedNodeCursor> {
+    let (sequence, revision) = match value.split_once(':') {
+        Some((sequence, revision)) => (sequence, Some(revision)),
+        None => (value, None),
+    };
+    let sequence = sequence.parse::<u64>().ok()?;
+    match revision {
+        Some(revision) => Some(RequestedNodeCursor::Cursor(NodeEventCursor::new(
+            sequence,
+            revision.parse::<u64>().ok()?,
+        ))),
+        None => Some(RequestedNodeCursor::Sequence(sequence)),
+    }
+}
+
+fn requested_node_cursor(
+    headers: &HeaderMap,
+    query: &NodeApiQuery,
+    request_id: u64,
+) -> Result<Option<RequestedNodeCursor>, Box<HttpApiError>> {
+    let value = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(query.after.as_deref());
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    parse_node_cursor(value).map(Some).ok_or_else(|| {
+        Box::new(HttpApiError::invalid_request(
+            request_id,
+            "事件 cursor 无效: 应为 sequence 或 sequence:snapshot_revision",
+        ))
+    })
+}
+
+fn node_cursor_id(cursor: NodeEventCursor) -> String {
+    format!("{}:{}", cursor.sequence, cursor.snapshot_revision)
 }
 
 fn validate_api_query(query: &NodeApiQuery, request_id: u64) -> Result<(), Box<HttpApiError>> {
@@ -1349,12 +1419,17 @@ async fn handle_v1_object(
 struct NodeApiEventStreamState {
     receiver: broadcast::Receiver<NodeEvent>,
     initial: Option<NodeApiEvent>,
+    replay: std::collections::VecDeque<NodeEvent>,
     request_id: u64,
     events: NodeEventBus,
+    cursor: NodeEventCursor,
+    last_revision: u64,
+    done: bool,
 }
 
 async fn handle_v1_events(
     State(adapter): State<NodeHttpAdapter>,
+    headers: HeaderMap,
     query: Result<Query<NodeApiQuery>, QueryRejection>,
 ) -> Response {
     let request_id = adapter.allocate_request_id();
@@ -1367,63 +1442,125 @@ async fn handle_v1_events(
     if let Err(error) = validate_api_query(&query, request_id) {
         return (*error).into_response();
     }
+    let requested = match requested_node_cursor(&headers, &query, request_id) {
+        Ok(cursor) => cursor,
+        Err(error) => return error.into_response(),
+    };
 
-    // Subscribe before reading the snapshot so events published during the
-    // read are queued for this stream. Full replay/reconnect semantics remain
-    // W4-03; a cursor that does not match the retained boundary is rejected
-    // explicitly instead of silently skipping an event gap.
-    let (receiver, boundary) = adapter.events.subscribe_with_sequence();
-    if query.after.is_some_and(|after| after != boundary) {
-        return HttpApiError::resync_required(request_id, query.after, boundary).into_response();
-    }
+    // Subscribing and reading the boundary happen under the event-bus lock. Any
+    // event published after the boundary is queued for this receiver, while
+    // retained history before the boundary can be replayed exactly once.
+    let (receiver, boundary) = adapter.events.subscribe_with_cursor();
+    let requested_cursor = requested.map(|cursor| cursor.bind(boundary));
+    let replay = match requested_cursor {
+        Some(cursor) => match adapter.events.replay_after(cursor, boundary) {
+            NodeEventReplay::Events(events) => events.into(),
+            NodeEventReplay::ResyncRequired {
+                requested,
+                latest,
+                reason,
+            } => {
+                return HttpApiError::resync_required(request_id, requested, latest, reason)
+                    .into_response();
+            }
+        },
+        None => std::collections::VecDeque::new(),
+    };
 
     let snapshot = match adapter.snapshot().await {
         Ok(snapshot) => snapshot_for_control_client(snapshot),
         Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
     };
+    // The snapshot is authoritative through `snapshot.revision`. The cursor's
+    // sequence is the last event the client acknowledged, so replay can start
+    // strictly after it without regressing the client's dedupe position.
+    let resume_sequence = requested_cursor
+        .map(|cursor| cursor.sequence)
+        .unwrap_or(boundary.sequence);
+    let snapshot_cursor = NodeEventCursor::new(resume_sequence, snapshot.revision);
     let initial = NodeApiEvent::Snapshot {
         schema_version: NODE_HTTP_SCHEMA_VERSION,
         request_id,
         server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        snapshot: Box::new(snapshot),
+        cursor: snapshot_cursor,
+        snapshot: Box::new(snapshot.clone()),
     };
     let state = NodeApiEventStreamState {
         receiver,
         initial: Some(initial),
+        replay,
         request_id,
         events: adapter.events,
+        cursor: snapshot_cursor,
+        last_revision: snapshot.revision,
+        done: false,
     };
     let stream = futures::stream::unfold(state, move |mut state| async move {
+        if state.done {
+            return None;
+        }
         if let Some(initial) = state.initial.take() {
             return Some((
-                Ok::<_, Infallible>(sse_event(initial, Some(boundary))),
+                Ok::<_, Infallible>(sse_event(initial, Some(snapshot_cursor))),
                 state,
             ));
         }
 
-        match state.receiver.recv().await {
-            Ok(event) => {
-                let sequence = event.sequence;
-                let message = NodeApiEvent::Event {
-                    schema_version: NODE_HTTP_SCHEMA_VERSION,
-                    request_id: state.request_id,
-                    server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                    event,
-                };
-                Some((Ok(sse_event(message, Some(sequence))), state))
+        // A reconnect may race with a snapshot that is newer than the queued
+        // events. Discard acknowledged sequences inside the stream state so a
+        // duplicate never turns into an empty SSE chunk carrying only a
+        // comment.
+        let event = loop {
+            let event = if let Some(event) = state.replay.pop_front() {
+                event
+            } else {
+                match state.receiver.recv().await {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        state.done = true;
+                        let message = NodeApiEvent::ResyncRequired {
+                            schema_version: NODE_HTTP_SCHEMA_VERSION,
+                            request_id: state.request_id,
+                            server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                            requested_cursor: state.cursor,
+                            latest_cursor: state.events.latest_cursor(),
+                            reason: NodeEventReplayReason::Lagged,
+                        };
+                        return Some((Ok(sse_event(message, None)), state));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            };
+            if event.sequence > state.cursor.sequence {
+                break event;
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
+        };
+
+        if let NodeEventKind::StateChanged { revision } = &event.kind {
+            if *revision > state.last_revision.saturating_add(1) {
+                state.done = true;
                 let message = NodeApiEvent::ResyncRequired {
                     schema_version: NODE_HTTP_SCHEMA_VERSION,
                     request_id: state.request_id,
                     server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                    requested_after: None,
-                    latest_sequence: state.events.latest_sequence(),
+                    requested_cursor: state.cursor,
+                    latest_cursor: state.events.latest_cursor(),
+                    reason: NodeEventReplayReason::RevisionGap,
                 };
-                Some((Ok(sse_event(message, None)), state))
+                return Some((Ok(sse_event(message, None)), state));
             }
-            Err(broadcast::error::RecvError::Closed) => None,
+            state.last_revision = state.last_revision.max(*revision);
         }
+
+        let cursor = NodeEventCursor::new(event.sequence, event.snapshot_revision);
+        state.cursor = cursor;
+        let message = NodeApiEvent::Event {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request_id: state.request_id,
+            server_time: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            event,
+        };
+        Some((Ok(sse_event(message, Some(cursor))), state))
     });
     Sse::new(stream)
         .keep_alive(
@@ -1434,7 +1571,7 @@ async fn handle_v1_events(
         .into_response()
 }
 
-fn sse_event(message: NodeApiEvent, id: Option<u64>) -> SseEvent {
+fn sse_event(message: NodeApiEvent, id: Option<NodeEventCursor>) -> SseEvent {
     let event_name = match &message {
         NodeApiEvent::Snapshot { .. } => "snapshot",
         NodeApiEvent::Event { .. } => "node",
@@ -1443,7 +1580,7 @@ fn sse_event(message: NodeApiEvent, id: Option<u64>) -> SseEvent {
     let payload = serde_json::to_string(&message).expect("node API event is serializable");
     let event = SseEvent::default().event(event_name).data(payload);
     match id {
-        Some(id) => event.id(id.to_string()),
+        Some(id) => event.id(node_cursor_id(id)),
         None => event,
     }
 }
@@ -1732,20 +1869,29 @@ impl HttpApiError {
         )
     }
 
-    fn resync_required(request_id: u64, requested_after: Option<u64>, latest: u64) -> Self {
-        let requested = requested_after
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".into());
+    fn resync_required(
+        request_id: u64,
+        requested: NodeEventCursor,
+        latest: NodeEventCursor,
+        reason: NodeEventReplayReason,
+    ) -> Self {
         let mut error = Self::new(
             request_id,
             StatusCode::CONFLICT,
             NodeHttpErrorCode::ResyncRequired,
             format!(
-                "事件 cursor 已失效: requested_after={requested}, latest_sequence={latest}; 请重新读取快照"
+                "事件 cursor 已失效: requested={}:{} latest={}:{} reason={reason:?}; 请重新读取快照",
+                requested.sequence,
+                requested.snapshot_revision,
+                latest.sequence,
+                latest.snapshot_revision
             ),
         );
         error.body.requested_schema_version = None;
         error.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+        error.body.requested_cursor = Some(requested);
+        error.body.latest_cursor = Some(latest);
+        error.body.resync_reason = Some(reason);
         error
     }
 
@@ -1812,6 +1958,9 @@ impl HttpApiError {
                 requested_schema_version: None,
                 supported_schema_version: None,
                 problem: None,
+                requested_cursor: None,
+                latest_cursor: None,
+                resync_reason: None,
             },
         }
     }
@@ -1949,6 +2098,30 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("decode response body")
+    }
+
+    async fn next_sse_event<S>(body: &mut S) -> (Option<String>, NodeApiEvent)
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin,
+    {
+        let chunk = timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("SSE event timeout")
+            .expect("SSE event stream ended")
+            .expect("valid SSE chunk");
+        let text = String::from_utf8(chunk.to_vec()).expect("SSE chunk is UTF-8");
+        let id = text
+            .lines()
+            .find_map(|line| line.strip_prefix("id:"))
+            .map(str::trim)
+            .map(ToOwned::to_owned);
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .expect("SSE data line");
+        let event = serde_json::from_str(data).expect("decode SSE event");
+        (id, event)
     }
 
     async fn post_command(adapter: NodeHttpAdapter, payload: &NodeCommandHttpRequest) -> Response {
@@ -2486,14 +2659,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_events_stream_starts_with_snapshot_and_rejects_stale_cursor() {
-        let (adapter, _state, events) = adapter_fixture(node_ui_manifest());
+    async fn v1_events_reconnect_from_cursor_without_losing_or_repeating_events() {
+        let (adapter, state, _events) = adapter_fixture(node_ui_manifest());
+        state.update(|_| {}).await;
+
         let response = adapter
             .clone()
             .router()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/events?schema_version=1")
+                    .uri("/api/v1/events?schema_version=1&after=0:0")
                     .body(Body::empty())
                     .expect("event stream request"),
             )
@@ -2508,35 +2683,197 @@ mod tests {
             Some("text/event-stream")
         );
         let mut body = response.into_body().into_data_stream();
-        let chunk = timeout(Duration::from_secs(2), body.next())
-            .await
-            .expect("initial SSE event timeout")
-            .expect("initial SSE event")
-            .expect("valid SSE chunk");
-        let text = String::from_utf8(chunk.to_vec()).expect("SSE chunk is UTF-8");
-        let data = text
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .expect("SSE data line");
-        let initial: NodeApiEvent = serde_json::from_str(data).expect("decode initial SSE event");
-        assert!(
-            matches!(initial, NodeApiEvent::Snapshot { snapshot, .. } if snapshot.revision == 0)
-        );
+        let (id, initial) = next_sse_event(&mut body).await;
+        assert_eq!(id.as_deref(), Some("0:1"));
+        assert!(matches!(
+            initial,
+            NodeApiEvent::Snapshot {
+                cursor,
+                snapshot,
+                ..
+            } if cursor == NodeEventCursor::new(0, 1) && snapshot.revision == 1
+        ));
+        let (id, replayed) = next_sse_event(&mut body).await;
+        assert_eq!(id.as_deref(), Some("1:1"));
+        assert!(matches!(
+            replayed,
+            NodeApiEvent::Event {
+                event: NodeEvent {
+                    sequence: 1,
+                    snapshot_revision: 1,
+                    kind: NodeEventKind::StateChanged { revision: 1 },
+                },
+                ..
+            }
+        ));
+        drop(body);
 
-        events.publish(NodeEventKind::StateChanged { revision: 1 });
-        let stale = adapter
+        // A reconnect sends a fresh authoritative snapshot, then resumes
+        // strictly after Last-Event-ID. The already acknowledged event is not
+        // repeated.
+        state.update(|_| {}).await;
+        let response = adapter
             .router()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/events?schema_version=1&after=0")
+                    .uri("/api/v1/events?schema_version=1")
+                    .header("last-event-id", "1:1")
                     .body(Body::empty())
-                    .expect("stale cursor request"),
+                    .expect("reconnect event stream request"),
             )
             .await
-            .expect("stale cursor response");
-        assert_eq!(stale.status(), StatusCode::CONFLICT);
-        let stale: NodeApiErrorResponse = json_body(stale).await;
-        assert_eq!(stale.code, NodeHttpErrorCode::ResyncRequired);
+            .expect("reconnect event stream response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let (id, snapshot) = next_sse_event(&mut body).await;
+        assert_eq!(id.as_deref(), Some("1:2"));
+        assert!(matches!(
+            snapshot,
+            NodeApiEvent::Snapshot {
+                cursor,
+                snapshot,
+                ..
+            } if cursor == NodeEventCursor::new(1, 2) && snapshot.revision == 2
+        ));
+        // Fetching the authoritative reconnect snapshot also completes a read
+        // command, so sequence 2 is that command event. Sequence 3 is the state
+        // change that happened after the original snapshot.
+        let (id, completed) = next_sse_event(&mut body).await;
+        assert_eq!(id.as_deref(), Some("2:1"));
+        assert!(matches!(
+            completed,
+            NodeApiEvent::Event {
+                event: NodeEvent {
+                    sequence: 2,
+                    snapshot_revision: 1,
+                    kind: NodeEventKind::CommandCompleted { success: true, .. },
+                },
+                ..
+            }
+        ));
+        let (id, resumed) = next_sse_event(&mut body).await;
+        assert_eq!(id.as_deref(), Some("3:2"));
+        assert!(matches!(
+            resumed,
+            NodeApiEvent::Event {
+                event: NodeEvent {
+                    sequence: 3,
+                    snapshot_revision: 2,
+                    kind: NodeEventKind::StateChanged { revision: 2 },
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn v1_events_reject_expired_and_malformed_cursors() {
+        let (adapter, _state, events) = adapter_fixture(node_ui_manifest());
+        for revision in 1..=40 {
+            events.publish(NodeEventKind::StateChanged { revision });
+        }
+
+        let expired = adapter
+            .clone()
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events?schema_version=1&after=0:0")
+                    .body(Body::empty())
+                    .expect("expired cursor request"),
+            )
+            .await
+            .expect("expired cursor response");
+        assert_eq!(expired.status(), StatusCode::CONFLICT);
+        let expired: NodeApiErrorResponse = json_body(expired).await;
+        assert_eq!(expired.code, NodeHttpErrorCode::ResyncRequired);
+        assert_eq!(
+            expired.resync_reason,
+            Some(NodeEventReplayReason::HistoryGap)
+        );
+        assert_eq!(expired.requested_cursor, Some(NodeEventCursor::new(0, 0)));
+        assert_eq!(
+            expired.latest_cursor.map(|cursor| cursor.sequence),
+            Some(40)
+        );
+
+        let malformed = adapter
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events?schema_version=1&after=not-a-cursor")
+                    .body(Body::empty())
+                    .expect("malformed cursor request"),
+            )
+            .await
+            .expect("malformed cursor response");
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let malformed: NodeApiErrorResponse = json_body(malformed).await;
+        assert_eq!(malformed.code, NodeHttpErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn v1_events_lag_and_revision_gap_end_in_resync_required() {
+        for expected_reason in [
+            NodeEventReplayReason::RevisionGap,
+            NodeEventReplayReason::Lagged,
+        ] {
+            let (adapter, _state, events) = adapter_fixture(node_ui_manifest());
+            let response = adapter
+                .router()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/events?schema_version=1")
+                        .body(Body::empty())
+                        .expect("event stream request"),
+                )
+                .await
+                .expect("event stream response");
+            let mut body = response.into_body().into_data_stream();
+            let (_, initial) = next_sse_event(&mut body).await;
+            assert!(matches!(initial, NodeApiEvent::Snapshot { .. }));
+            let (id, completed) = next_sse_event(&mut body).await;
+            assert_eq!(id.as_deref(), Some("1:0"));
+            assert!(matches!(
+                completed,
+                NodeApiEvent::Event {
+                    event: NodeEvent {
+                        sequence: 1,
+                        snapshot_revision: 0,
+                        kind: NodeEventKind::CommandCompleted { success: true, .. },
+                    },
+                    ..
+                }
+            ));
+
+            let (latest_sequence, latest_revision) =
+                if expected_reason == NodeEventReplayReason::Lagged {
+                    for index in 1..=40 {
+                        events.publish(NodeEventKind::LogAppended {
+                            level: crate::node::NodeLogLevel::Info,
+                            message: format!("lag-{index}"),
+                        });
+                    }
+                    (41, 0)
+                } else {
+                    events.publish(NodeEventKind::StateChanged { revision: 2 });
+                    (2, 2)
+                };
+
+            let (id, event) = next_sse_event(&mut body).await;
+            assert_eq!(id, None);
+            assert!(matches!(
+                event,
+                NodeApiEvent::ResyncRequired {
+                    requested_cursor,
+                    latest_cursor,
+                    reason,
+                    ..
+                } if requested_cursor == NodeEventCursor::new(1, 0)
+                    && latest_cursor == NodeEventCursor::new(latest_sequence, latest_revision)
+                    && reason == expected_reason
+            ));
+        }
     }
 
     #[tokio::test]

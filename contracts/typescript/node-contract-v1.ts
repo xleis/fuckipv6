@@ -57,16 +57,20 @@ export type NodeApiCommandResponse = {
 
 export type NodeApiErrorResponse = {
   "code": NodeHttpErrorCode;
+  "latest_cursor"?: NodeEventCursor | null;
   "message": string;
   "problem"?: NodeProblem | null;
   "request_id": number;
+  "requested_cursor"?: NodeEventCursor | null;
   "requested_schema_version"?: number | null;
+  "resync_reason"?: NodeEventReplayReason | null;
   "schema_version": number;
   "server_time": string;
   "supported_schema_version"?: number | null;
 };
 
 export type NodeApiEvent = {
+  "cursor": NodeEventCursor;
   "request_id": number;
   "schema_version": number;
   "server_time": string;
@@ -79,9 +83,10 @@ export type NodeApiEvent = {
   "server_time": string;
   "type": "event";
 } | {
-  "latest_sequence": number;
+  "latest_cursor": NodeEventCursor;
+  "reason": NodeEventReplayReason;
   "request_id": number;
-  "requested_after"?: number | null;
+  "requested_cursor": NodeEventCursor;
   "schema_version": number;
   "server_time": string;
   "type": "resync_required";
@@ -346,6 +351,12 @@ export type NodeEmbeddedServiceStatus = "starting" | "running" | "stopping" | "s
 export type NodeEvent = {
   "kind": NodeEventKind;
   "sequence": number;
+  "snapshot_revision": number;
+};
+
+export type NodeEventCursor = {
+  "sequence": number;
+  "snapshot_revision": number;
 };
 
 export type NodeEventKind = {
@@ -401,6 +412,8 @@ export type NodeEventKind = {
 };
   "type": "operation_changed";
 };
+
+export type NodeEventReplayReason = "cursor_ahead" | "history_gap" | "snapshot_rolled_back" | "lagged" | "revision_gap";
 
 export type NodeHttpContract = {
   "api_command_response": NodeApiCommandResponse;

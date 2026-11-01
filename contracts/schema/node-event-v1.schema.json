@@ -326,10 +326,17 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "snapshot_revision": {
+      "description": "Canonical node-state revision in effect when this event was published.\nConsumers must acknowledge it together with `sequence`; an event cursor\nis not valid against a different snapshot epoch.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     }
   },
   "required": [
     "sequence",
+    "snapshot_revision",
     "kind"
   ],
   "title": "NodeEvent",

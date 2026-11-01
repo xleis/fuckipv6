@@ -715,6 +715,9 @@ impl NodeStateStore {
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
+            // Make the new canonical revision visible to unrelated events that
+            // are published between the state write and StateChanged fan-out.
+            events.advance_snapshot_revision(published.revision);
             events.publish(NodeEventKind::StateChanged {
                 revision: published.revision,
             });

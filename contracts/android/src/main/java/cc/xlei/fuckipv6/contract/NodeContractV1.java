@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -365,6 +365,33 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeEmbeddedServiceStatus wire value: " + value);
+        }
+    }
+
+    public enum NodeEventReplayReason {
+        CURSOR_AHEAD("cursor_ahead"),
+        HISTORY_GAP("history_gap"),
+        SNAPSHOT_ROLLED_BACK("snapshot_rolled_back"),
+        LAGGED("lagged"),
+        REVISION_GAP("revision_gap");
+
+        private final String wireName;
+
+        NodeEventReplayReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeEventReplayReason fromWireName(String value) {
+            for (NodeEventReplayReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeEventReplayReason wire value: " + value);
         }
     }
 
@@ -986,20 +1013,26 @@ public final class NodeContractV1 {
     /** DTO for NodeApiErrorResponse. */
     public static final class NodeApiErrorResponse {
         public final NodeHttpErrorCode code;
+        public final NodeEventCursor latest_cursor;
         public final String message;
         public final NodeProblem problem;
         public final Long request_id;
+        public final NodeEventCursor requested_cursor;
         public final Integer requested_schema_version;
+        public final NodeEventReplayReason resync_reason;
         public final Integer schema_version;
         public final String server_time;
         public final Integer supported_schema_version;
 
-        public NodeApiErrorResponse(NodeHttpErrorCode code, String message, NodeProblem problem, Long request_id, Integer requested_schema_version, Integer schema_version, String server_time, Integer supported_schema_version) {
+        public NodeApiErrorResponse(NodeHttpErrorCode code, NodeEventCursor latest_cursor, String message, NodeProblem problem, Long request_id, NodeEventCursor requested_cursor, Integer requested_schema_version, NodeEventReplayReason resync_reason, Integer schema_version, String server_time, Integer supported_schema_version) {
             this.code = code;
+            this.latest_cursor = latest_cursor;
             this.message = message;
             this.problem = problem;
             this.request_id = request_id;
+            this.requested_cursor = requested_cursor;
             this.requested_schema_version = requested_schema_version;
+            this.resync_reason = resync_reason;
             this.schema_version = schema_version;
             this.server_time = server_time;
             this.supported_schema_version = supported_schema_version;
@@ -1257,10 +1290,23 @@ public final class NodeContractV1 {
     public static final class NodeEvent {
         public final NodeEventKind kind;
         public final Long sequence;
+        public final Long snapshot_revision;
 
-        public NodeEvent(NodeEventKind kind, Long sequence) {
+        public NodeEvent(NodeEventKind kind, Long sequence, Long snapshot_revision) {
             this.kind = kind;
             this.sequence = sequence;
+            this.snapshot_revision = snapshot_revision;
+        }
+    }
+
+    /** DTO for NodeEventCursor. */
+    public static final class NodeEventCursor {
+        public final Long sequence;
+        public final Long snapshot_revision;
+
+        public NodeEventCursor(Long sequence, Long snapshot_revision) {
+            this.sequence = sequence;
+            this.snapshot_revision = snapshot_revision;
         }
     }
 
@@ -1907,13 +1953,15 @@ public final class NodeContractV1 {
         }
 
         public static final class Snapshot extends NodeApiEvent {
+            public final NodeEventCursor cursor;
             public final Long request_id;
             public final Integer schema_version;
             public final String server_time;
             public final NodeSnapshot snapshot;
 
-            public Snapshot(Long request_id, Integer schema_version, String server_time, NodeSnapshot snapshot) {
+            public Snapshot(NodeEventCursor cursor, Long request_id, Integer schema_version, String server_time, NodeSnapshot snapshot) {
                 super("snapshot");
+                this.cursor = cursor;
                 this.request_id = request_id;
                 this.schema_version = schema_version;
                 this.server_time = server_time;
@@ -1937,17 +1985,19 @@ public final class NodeContractV1 {
         }
 
         public static final class ResyncRequired extends NodeApiEvent {
-            public final Long latest_sequence;
+            public final NodeEventCursor latest_cursor;
+            public final NodeEventReplayReason reason;
             public final Long request_id;
-            public final Long requested_after;
+            public final NodeEventCursor requested_cursor;
             public final Integer schema_version;
             public final String server_time;
 
-            public ResyncRequired(Long latest_sequence, Long request_id, Long requested_after, Integer schema_version, String server_time) {
+            public ResyncRequired(NodeEventCursor latest_cursor, NodeEventReplayReason reason, Long request_id, NodeEventCursor requested_cursor, Integer schema_version, String server_time) {
                 super("resync_required");
-                this.latest_sequence = latest_sequence;
+                this.latest_cursor = latest_cursor;
+                this.reason = reason;
                 this.request_id = request_id;
-                this.requested_after = requested_after;
+                this.requested_cursor = requested_cursor;
                 this.schema_version = schema_version;
                 this.server_time = server_time;
             }

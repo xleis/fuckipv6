@@ -380,6 +380,17 @@ async function main() {
           },
           page_heading: text(document.querySelector(".workspace h1")),
           action_panel: text(document.querySelector(".actions-panel .panel-title")),
+          overview_network_rows: [...document.querySelectorAll(".compact-row")].map((element) => {
+            const bounds = element.getBoundingClientRect();
+            const cardBounds = element.closest(".surface-card")?.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return {
+              width: bounds.width,
+              card_width: cardBounds?.width ?? 0,
+              background_color: style.backgroundColor,
+              background_image: style.backgroundImage,
+            };
+          }),
           hierarchy: [...document.querySelectorAll(".primary-nav, .global-bar, .local-toolbar, .workspace > *")].map(
             (element) => ({
               tag: element.tagName.toLowerCase(),
@@ -405,6 +416,17 @@ async function main() {
       semantics.action_panel !== "Shared actions"
     ) {
       throw new Error("visual fixture did not render the expected English overview state");
+    }
+    if (semantics.overview_network_rows.length !== 2) {
+      throw new Error("overview fixture did not render both compact network rows");
+    }
+    for (const row of semantics.overview_network_rows) {
+      if (row.width < row.card_width - 40) {
+        throw new Error(`compact network row did not fill its card: ${JSON.stringify(row)}`);
+      }
+      if (row.background_color !== "rgba(0, 0, 0, 0)" || row.background_image !== "none") {
+        throw new Error(`compact network row retained native button paint: ${JSON.stringify(row)}`);
+      }
     }
 
     const imagePath = join(OUTPUT_ROOT, "overview.png");

@@ -434,7 +434,7 @@ Windows SCM 定义，安装脚本只调用该入口；`__service` 负责监督 c
 - [ ] 恢复 DNS/策略路由/路由表/TUN；
 - [x] 用户不需要手工 kill；
 - [x] 生成脱敏诊断；
-- [ ] 清理失败是发布阻断。
+- [x] 清理失败是发布阻断。
 
 **已有证据**：服务监督路径为 IPC 绑定、节点状态刷新、UI IPC 会话、WebUI 启动、
 优雅停止、强制终止和任务取消设置独立硬期限；超时不会被静默忽略，control 清理失败会
@@ -442,7 +442,10 @@ Windows SCM 定义，安装脚本只调用该入口；`__service` 负责监督 c
 `get_node_diagnostics` 返回 owner-only 运行时生命周期、保留 owner、
 cleanup 候选、会话/监听器/Peer/内嵌服务计数，以及逐项 cleanup step；不包含凭据或
 敏感配置值。GPUI/WebUI 使用共享诊断结果展示可恢复问题，WebUI 对未知 cleanup 状态和
-失败原因失败关闭。
+失败原因失败关闭。发布门禁在全部平台强制要求 `lifecycle-cleanup` 精确回归通过；
+Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit 规则清理回归通过。
+任一项缺失或失败都会使平台报告及聚合报告不可发布。该门禁目前只证明受控 fake-runner
+与临时文件路径下的清理语义，不替代 macOS/Windows 实机恢复验证。
 
 ## 6. W3：所有者认证与公网安全
 

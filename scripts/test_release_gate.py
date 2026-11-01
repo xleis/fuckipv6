@@ -84,6 +84,11 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertFalse(aggregate["release_policy"]["security_release_qualified"])
         self.assertTrue(aggregate["release_policy"]["independent_security_audit_required"])
 
+    def test_artifact_paths_outside_the_project_remain_absolute(self) -> None:
+        path = Path(tempfile.gettempdir()) / "fuckipv6-release-gate" / "linux.json"
+
+        self.assertEqual(GATE.report_path(path), str(path))
+
     def test_aggregate_rejects_missing_required_platform_check(self) -> None:
         linux = report("linux")
         linux["checks"] = [
@@ -105,6 +110,30 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn(
             "/reports/linux.json: required check "
             "cross-check-x86_64-unknown-linux-musl is missing or did not pass",
+            errors,
+        )
+
+    def test_aggregate_rejects_missing_lifecycle_cleanup_evidence(self) -> None:
+        windows = report("windows")
+        windows["checks"] = [
+            check
+            for check in windows["checks"]
+            if check["name"] != "lifecycle-cleanup"
+        ]
+
+        _, errors = GATE.aggregate_documents(
+            loaded(
+                ("linux", report("linux")),
+                ("windows", windows),
+                ("macos", report("macos")),
+            ),
+            GATE.DEFAULT_PLATFORMS,
+            COMPLETE_UPSTREAM_RESULTS,
+        )
+
+        self.assertIn(
+            "/reports/windows.json: required check lifecycle-cleanup "
+            "is missing or did not pass",
             errors,
         )
 
@@ -532,6 +561,28 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("scripts/check-docs.py", commands["docs"])
         self.assertIn("scripts/test_check_single_binary.py", commands["helper-tests"])
         self.assertIn("scripts/test_check_docs.py", commands["helper-tests"])
+        self.assertTrue(
+            any(
+                "stop_node_with_cleanup_residue" in argument
+                for argument in commands["lifecycle-cleanup"]
+            )
+        )
+        self.assertIn(
+            "routing::linux_route::tests::rollback_removes_owners_only_after_successful_deletion",
+            commands["lifecycle-cleanup-route"],
+        )
+        self.assertIn(
+            "routing::doh_dns::tests::shutdown_restores_resolver_files_and_joins_aborted_tasks",
+            commands["lifecycle-cleanup-dns"],
+        )
+        self.assertIn(
+            "tun::linux::tests::post_open_failure_deletes_link_exactly_once",
+            commands["lifecycle-cleanup-tun"],
+        )
+        self.assertIn(
+            "routing::linux_exit::tests::exit_rollback_failure_preserves_ownership_and_can_be_retried",
+            commands["lifecycle-cleanup-exit-rules"],
+        )
 
     def test_cross_targets_can_be_disabled_for_host_only_diagnostics(self) -> None:
         parser = GATE.build_parser()

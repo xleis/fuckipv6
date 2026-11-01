@@ -30,6 +30,31 @@ DEFAULT_LINUX_CROSS_TARGETS = (
     "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-gnu",
 )
+LIFECYCLE_CLEANUP_TEST = (
+    "node::runtime_control::tests::"
+    "stop_node_with_cleanup_residue_reports_a_failed_lifecycle"
+)
+LINUX_LIFECYCLE_CLEANUP_CHECKS = (
+    (
+        "lifecycle-cleanup-route",
+        "routing::linux_route::tests::"
+        "rollback_removes_owners_only_after_successful_deletion",
+    ),
+    (
+        "lifecycle-cleanup-dns",
+        "routing::doh_dns::tests::"
+        "shutdown_restores_resolver_files_and_joins_aborted_tasks",
+    ),
+    (
+        "lifecycle-cleanup-tun",
+        "tun::linux::tests::post_open_failure_deletes_link_exactly_once",
+    ),
+    (
+        "lifecycle-cleanup-exit-rules",
+        "routing::linux_exit::tests::"
+        "exit_rollback_failure_preserves_ownership_and_can_be_retried",
+    ),
+)
 COMMON_REQUIRED_CHECKS = (
     "format",
     "helper-tests",
@@ -37,6 +62,7 @@ COMMON_REQUIRED_CHECKS = (
     "docs",
     "check",
     "test",
+    "lifecycle-cleanup",
     "clippy",
     "release-build",
     "stable-source",
@@ -46,6 +72,7 @@ PLATFORM_REQUIRED_CHECKS = {
     "linux": (
         "cross-check-x86_64-unknown-linux-musl",
         "cross-check-x86_64-pc-windows-gnu",
+        *(name for name, _ in LINUX_LIFECYCLE_CLEANUP_CHECKS),
     ),
     "macos": (
         "cross-check-x86_64-apple-darwin",
@@ -89,6 +116,14 @@ def write_json(path: Path, document: dict[str, Any]) -> None:
         json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
+
+
+def report_path(path: Path) -> str:
+    """Keep artifact paths relative when possible without rejecting external reports."""
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def command_output(command: Sequence[str], *, env: dict[str, str] | None = None) -> str | None:
@@ -233,7 +268,7 @@ def run_logged(
         "status": "passed" if passed else "failed",
         "exit_code": exit_code,
         "duration_seconds": duration,
-        "log": str(log_path.relative_to(PROJECT_ROOT)),
+        "log": report_path(log_path),
     }
     if error:
         result["error"] = error
@@ -390,6 +425,10 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         },
         {"name": "test", "arguments": ["test", "--workspace", "--all-features"]},
         {
+            "name": "lifecycle-cleanup",
+            "arguments": lifecycle_cleanup_test_arguments(LIFECYCLE_CLEANUP_TEST),
+        },
+        {
             "name": "clippy",
             "arguments": [
                 "clippy",
@@ -420,6 +459,14 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
                 ],
             }
         )
+    if args.platform == "linux":
+        for name, test_name in LINUX_LIFECYCLE_CLEANUP_CHECKS:
+            commands.append(
+                {
+                    "name": name,
+                    "arguments": lifecycle_cleanup_test_arguments(test_name),
+                }
+            )
     benchmark = None
     if args.benchmark != "none":
         arguments = [
@@ -499,6 +546,19 @@ def benchmark_comparison_arguments(
         )
     )
     return arguments
+
+
+def lifecycle_cleanup_test_arguments(test_name: str) -> list[str]:
+    """Run one exact cleanup regression and fail if the test disappears."""
+    return [
+        "test",
+        "-p",
+        "fuckipv6-client",
+        "--lib",
+        test_name,
+        "--",
+        "--exact",
+    ]
 
 
 def hardware_info() -> dict[str, Any]:
@@ -582,6 +642,10 @@ def run_gate(args: argparse.Namespace) -> int:
     )
     cargo_check("test", ("test", "--workspace", "--all-features"))
     cargo_check(
+        "lifecycle-cleanup",
+        lifecycle_cleanup_test_arguments(LIFECYCLE_CLEANUP_TEST),
+    )
+    cargo_check(
         "clippy",
         (
             "clippy",
@@ -609,6 +673,9 @@ def run_gate(args: argparse.Namespace) -> int:
                 target,
             ),
         )
+    if args.platform == "linux":
+        for name, test_name in LINUX_LIFECYCLE_CLEANUP_CHECKS:
+            cargo_check(name, lifecycle_cleanup_test_arguments(test_name))
 
     benchmark: dict[str, Any] = {
         "status": "not_run",
@@ -687,8 +754,8 @@ def run_gate(args: argparse.Namespace) -> int:
                         str(Path(path).resolve())
                         for path in args.benchmark_baseline
                     ],
-                    "candidate": str(candidate_path.relative_to(PROJECT_ROOT)),
-                    "report": str(comparison_path.relative_to(PROJECT_ROOT)),
+                    "candidate": report_path(candidate_path),
+                    "report": report_path(comparison_path),
                     "command": comparison_result["command"],
                     "exit_code": comparison_result["exit_code"],
                 }

@@ -495,6 +495,10 @@ python3 scripts/release-gate.py run --platform linux --print-plan
 python3 scripts/release-gate.py run --platform linux --toolchain stable
 ```
 
+发布报告会把 `lifecycle-cleanup` 作为必需检查；Linux 还必须通过策略路由/路由表、
+DoH DNS、TUN 和 Exit 规则的有界清理回归。缺少测试或任一清理回归失败都会阻断平台
+报告和跨平台聚合，不能通过修改摘要或文案绕过。
+
 门禁通过不替代独立密码学审计、真实跨公网/跨 NAT 验证、目标平台实机验证或 WireGuard 性能对等证明。
 
 ---

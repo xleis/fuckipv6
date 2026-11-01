@@ -429,14 +429,17 @@ Windows SCM 定义，安装脚本只调用该入口；`__service` 负责监督 c
 
 ### W2-09 关闭与清理看门狗 `[~]`
 
-- [ ] 每个启动/停止步骤有硬超时：node ready、优雅停止和 IPC 服务已有超时；全步骤尚未覆盖；
+- [x] 每个启动/停止步骤有硬超时：node ready、IPC 绑定/启动、状态刷新、UI 会话/WebUI 启动、优雅停止、强制终止、任务取消和 IPC 服务均有硬超时；
 - [x] 失败后杀进程并可观察；
 - [ ] 恢复 DNS/策略路由/路由表/TUN；
 - [x] 用户不需要手工 kill；
 - [x] 生成脱敏诊断；
 - [ ] 清理失败是发布阻断。
 
-**已有证据**：`get_node_diagnostics` 返回 owner-only 运行时生命周期、保留 owner、
+**已有证据**：服务监督路径为 IPC 绑定、节点状态刷新、UI IPC 会话、WebUI 启动、
+优雅停止、强制终止和任务取消设置独立硬期限；超时不会被静默忽略，control 清理失败会
+向上返回并使服务失败关闭，无响应节点在强制终止超时后保留子进程所有权供后续重试。
+`get_node_diagnostics` 返回 owner-only 运行时生命周期、保留 owner、
 cleanup 候选、会话/监听器/Peer/内嵌服务计数，以及逐项 cleanup step；不包含凭据或
 敏感配置值。GPUI/WebUI 使用共享诊断结果展示可恢复问题，WebUI 对未知 cleanup 状态和
 失败原因失败关闭。

@@ -39,6 +39,10 @@ const CONFIG_DIR_ARGUMENT: &str = "--config-dir";
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NODE_UNHEALTHY_TIMEOUT: Duration = Duration::from_secs(20);
+const NODE_IPC_BIND_TIMEOUT: Duration = Duration::from_secs(5);
+const NODE_STATE_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_SESSION_START_TIMEOUT: Duration = Duration::from_secs(15);
+const WEBUI_START_TIMEOUT: Duration = Duration::from_secs(15);
 // The node first drains data-plane work, then drains its IPC service. Keep the
 // supervisor's grace period longer than both inner deadlines so it does not
 // SIGKILL a node that is still making legitimate shutdown progress.
@@ -47,6 +51,8 @@ const NODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(35);
 const COMMAND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SUPERVISOR_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+const FORCE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESTART_BACKOFF_MIN: Duration = Duration::from_millis(250);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
@@ -241,9 +247,13 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     let supervisor = MultiNetworkSupervisor::new(options.runtime_options())
         .context("无法初始化独立节点运行时")?;
     let endpoint = local_ipc::endpoint(EndpointRole::Node)?;
-    let server = LocalServer::bind(endpoint, EndpointRole::Node)
-        .await
-        .context("无法启动节点 IPC 服务")?;
+    let server = complete_with_timeout(
+        "节点 IPC 服务启动",
+        NODE_IPC_BIND_TIMEOUT,
+        LocalServer::bind(endpoint, EndpointRole::Node),
+    )
+    .await
+    .context("无法启动节点 IPC 服务")?;
     let commands = supervisor.commands();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut service = tokio::spawn(serve_owned_node(
@@ -283,7 +293,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
             );
         }
     }
-    supervisor.refresh_runtime_state().await;
+    refresh_node_state_bounded(&supervisor).await;
 
     println!(
         "{}",
@@ -331,7 +341,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
                 }
                 break;
             }
-            _ = refresh.tick() => supervisor.refresh_runtime_state().await,
+            _ = refresh.tick() => refresh_node_state_bounded(&supervisor).await,
         }
     }
 
@@ -356,6 +366,9 @@ async fn run_node(options: InternalOptions) -> Result<()> {
             Ok(Err(error)) => return Err(error).context("节点 IPC 服务任务关闭失败"),
             Err(_) => {
                 service.abort();
+                abort_task_with_timeout(service, "节点 IPC 服务取消", TASK_ABORT_TIMEOUT)
+                    .await
+                    .context("节点 IPC 服务取消失败")?;
                 bail!("节点 IPC 服务关闭超时")
             }
         }
@@ -402,9 +415,13 @@ async fn run_service(
     let result = async {
         wait_for_node_ready(READY_TIMEOUT).await?;
 
-        let session = crate::remote_node::RemoteNodeSession::start_with_role_async(
-            options.webui_runtime_options(),
-            IpcRole::WebUi,
+        let session = complete_with_timeout(
+            "连接节点 IPC",
+            REMOTE_SESSION_START_TIMEOUT,
+            crate::remote_node::RemoteNodeSession::start_with_role_async(
+                options.webui_runtime_options(),
+                IpcRole::WebUi,
+            ),
         )
         .await?;
         let node_http = crate::node::NodeHttpAdapter::new(
@@ -415,8 +432,12 @@ async fn run_service(
         let controller =
             std::sync::Arc::new(crate::webui::AppController::from_node_session(session));
         let mut webui = Some(
-            crate::webui::start_app_webui_with_node(options.webui_port, controller, node_http)
-                .await?,
+            complete_with_timeout(
+                "WebUI 启动",
+                WEBUI_START_TIMEOUT,
+                crate::webui::start_app_webui_with_node(options.webui_port, controller, node_http),
+            )
+            .await?,
         );
         #[cfg(windows)]
         crate::windows_service::report_running();
@@ -440,19 +461,23 @@ async fn run_service(
             }
         };
 
-        if let Some(webui) = webui.take() {
-            webui.abort();
-            let _ = webui.await;
-        }
+        let webui_cleanup = match webui.take() {
+            Some(webui) => abort_task_with_timeout(webui, "WebUI 关闭", TASK_ABORT_TIMEOUT).await,
+            None => Ok(()),
+        };
         let _ = shutdown_tx.send(true);
         let cleanup_result = stop_control_task(control.take()).await;
-        exit_result.and(cleanup_result)
+        exit_result?;
+        webui_cleanup?;
+        cleanup_result
     }
     .await;
 
     if control.is_some() {
         let _ = shutdown_tx.send(true);
-        let _ = stop_control_task(control.take()).await;
+        if let Err(error) = stop_control_task(control.take()).await {
+            tracing::warn!(%error, "服务启动失败后的 control 清理失败");
+        }
     }
     result
 }
@@ -515,8 +540,12 @@ where
             "节点 IPC 持续不可达，重启无响应的节点进程"
         );
         if let Some(mut managed) = child.take() {
-            let _ = managed.kill().await;
-            let _ = managed.wait().await;
+            if let Err(error) = terminate_child(&mut managed).await {
+                tracing::error!(%error, "无法终止无响应的节点进程，保留所有权并稍后重试");
+                child = Some(managed);
+                sleep(restart_delay).await;
+                continue;
+            }
         }
         adopted_node = false;
         unhealthy_since = None;
@@ -524,8 +553,7 @@ where
         restart_delay = (restart_delay * 2).min(RESTART_BACKOFF_MAX);
     }
 
-    stop_managed_node(child).await;
-    Ok(())
+    stop_managed_node(child).await
 }
 
 async fn wait_for_control_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -549,7 +577,7 @@ async fn stop_control_task(control: Option<tokio::task::JoinHandle<Result<()>>>)
         Ok(Err(error)) => Err(anyhow::Error::from(error).context("等待 control 关闭失败")),
         Err(_) => {
             control.abort();
-            let _ = control.await;
+            abort_task_with_timeout(control, "control 任务取消", TASK_ABORT_TIMEOUT).await?;
             bail!(
                 "control 未能在 {} 秒内关闭；服务管理器必须终止整个服务进程组",
                 SUPERVISOR_STOP_TIMEOUT.as_secs()
@@ -687,29 +715,88 @@ async fn node_ready() -> bool {
     )
 }
 
-async fn stop_managed_node(mut child: Option<Child>) {
+async fn stop_managed_node(mut child: Option<Child>) -> Result<()> {
     let accepted = request_node_stop().await;
     if let Some(managed) = child.as_mut() {
         if accepted {
             match timeout(NODE_STOP_TIMEOUT, managed.wait()).await {
-                Ok(Ok(_)) => return,
+                Ok(Ok(_)) => return Ok(()),
                 Ok(Err(error)) => tracing::warn!(%error, "等待节点退出失败"),
                 Err(_) => tracing::warn!("等待节点优雅退出超时，将强制终止"),
             }
         }
-        let _ = managed.kill().await;
-        let _ = managed.wait().await;
+        terminate_child(managed).await?;
     } else if accepted {
         let deadline = Instant::now() + NODE_STOP_TIMEOUT;
         while Instant::now() < deadline {
             if !node_ready().await {
-                return;
+                return Ok(());
             }
             sleep(READY_POLL_INTERVAL).await;
         }
-        tracing::warn!("接管节点未在期限内退出");
+        bail!("接管节点未在 {} 秒内退出", NODE_STOP_TIMEOUT.as_secs());
     }
     remove_stale_node_endpoint();
+    Ok(())
+}
+
+async fn complete_with_timeout<T, F>(stage: &'static str, limit: Duration, future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    match timeout(limit, future).await {
+        Ok(result) => result,
+        Err(_) => bail!("{stage}超过 {} 秒", limit.as_secs()),
+    }
+}
+
+async fn abort_task_with_timeout<T>(
+    mut task: tokio::task::JoinHandle<T>,
+    stage: &'static str,
+    limit: Duration,
+) -> Result<()>
+where
+    T: Send + 'static,
+{
+    task.abort();
+    match timeout(limit, &mut task).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) if error.is_cancelled() => Ok(()),
+        Ok(Err(error)) => Err(anyhow::Error::from(error)).context(stage),
+        Err(_) => bail!("{stage}超过 {} 秒", limit.as_secs()),
+    }
+}
+
+async fn terminate_child(child: &mut Child) -> Result<()> {
+    if let Err(error) = child.start_kill() {
+        if child
+            .try_wait()
+            .context("无法读取被终止子进程的状态")?
+            .is_some()
+        {
+            return Ok(());
+        }
+        return Err(error).context("无法强制终止子进程");
+    }
+    match timeout(FORCE_STOP_TIMEOUT, child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(error).context("等待被终止子进程退出失败"),
+        Err(_) => bail!(
+            "子进程强制终止后超过 {} 秒仍未退出",
+            FORCE_STOP_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+async fn refresh_node_state_bounded(supervisor: &MultiNetworkSupervisor) {
+    if let Err(error) = complete_with_timeout("节点状态刷新", NODE_STATE_REFRESH_TIMEOUT, async {
+        supervisor.refresh_runtime_state().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    {
+        tracing::warn!(%error, "节点状态刷新未完成，保留节点 IPC 可用性");
+    }
 }
 
 fn remove_stale_node_endpoint() {
@@ -866,5 +953,26 @@ mod tests {
             NODE_STOP_TIMEOUT > COMMAND_SHUTDOWN_TIMEOUT + SERVICE_SHUTDOWN_TIMEOUT,
             "node supervisor must allow data-plane and IPC shutdown to finish"
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_startup_phase_hits_its_hard_deadline() {
+        let result = complete_with_timeout("测试启动阶段", Duration::from_millis(10), async {
+            sleep(Duration::from_secs(60)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+
+        let error = result.expect_err("stalled startup must time out");
+        assert!(error.to_string().contains("测试启动阶段"));
+    }
+
+    #[tokio::test]
+    async fn aborted_task_is_joined_within_its_hard_deadline() {
+        let task = tokio::spawn(std::future::pending::<()>());
+
+        abort_task_with_timeout(task, "测试任务取消", Duration::from_millis(500))
+            .await
+            .expect("aborted task must be joined");
     }
 }

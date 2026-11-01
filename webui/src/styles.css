@@ -59,7 +59,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: var(--sidebar-width, 232px) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   height: 100vh;
   min-height: 640px;
 }
@@ -77,7 +77,7 @@ button {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  min-height: var(--topbar-height, 56px);
+  min-height: var(--topbar-h);
   padding: 0 var(--space-4);
   border-bottom: 1px solid var(--border);
 }
@@ -195,7 +195,7 @@ button {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: var(--topbar-height, 56px) auto minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
 }
 
 .global-bar {
@@ -424,7 +424,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) var(--action-panel-compact-w);
   gap: var(--space-5);
   padding: var(--space-5);
   overflow: auto;
@@ -636,8 +636,11 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+@media (min-width: 1280px) {
+  .workspace { grid-template-columns: minmax(0, 1fr) var(--action-panel-w); }
+}
+
 @media (max-width: 1240px) {
-  .workspace { grid-template-columns: minmax(0, 1fr) 300px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .network-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

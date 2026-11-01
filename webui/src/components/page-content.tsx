@@ -478,7 +478,7 @@ export function PageContent(props: PageContentProps) {
   }
   const Icon = PAGE_ICONS[page.id] ?? CircleDot;
   return (
-    <section className="page-content" aria-labelledby="page-title">
+    <section className="page-content" data-ui-region="content" aria-labelledby="page-title">
       <header className="page-heading">
         <div className="page-heading-icon"><Icon size={20} /></div>
         <div><h1 id="page-title">{label(locale, page.title_key)}</h1><p>{label(locale, "common.node_contract_description")}</p></div>

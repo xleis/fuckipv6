@@ -1,6 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../contracts/typescript/fixtures/node-manifest.json";
 import type { NodeSnapshot, NodeUiManifest } from "../../contracts/typescript/node-contract-v1";
@@ -65,14 +67,14 @@ class SilentWebSocket {
   close(): void {}
 }
 
-function renderApp(): void {
+function renderApp() {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
       mutations: { retry: false },
     },
   });
-  render(
+  return render(
     <QueryClientProvider client={queryClient}>
       <App />
     </QueryClientProvider>,
@@ -125,5 +127,39 @@ describe("React WebUI shell", () => {
     await expectModuleTabs("networks", ["networks", "topology", "exit_node", "relay"]);
     await expectModuleTabs("activity", ["traffic", "logs"]);
     await expectModuleTabs("settings", ["settings"]);
+  });
+
+  it("exposes the shared four-region shell with a persistent action panel", async () => {
+    vi.mocked(loadOwnerSession).mockResolvedValue({ authenticated: true });
+    vi.mocked(loadLanguagePreference).mockResolvedValue("zh-CN");
+    vi.mocked(loadManifest).mockResolvedValue(manifest);
+    vi.mocked(loadSnapshot).mockResolvedValue(snapshot);
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    const regions = Array.from(container.querySelectorAll<HTMLElement>("[data-ui-region]"))
+      .map((element) => element.dataset.uiRegion);
+
+    expect(regions).toEqual(["sidebar", "topbar", "content", "action-panel"]);
+    const workspace = container.querySelector<HTMLElement>(".workspace");
+    const content = workspace?.querySelector<HTMLElement>('[data-ui-region="content"]');
+    const actionPanel = workspace?.querySelector<HTMLElement>('[data-ui-region="action-panel"]');
+    expect(content).toBeInTheDocument();
+    expect(actionPanel).toBeInTheDocument();
+    expect(content?.nextElementSibling).toBe(actionPanel);
+  });
+
+  it("uses the shared shell and action-panel tokens", () => {
+    const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+    expect(styles).toContain("grid-template-columns: var(--sidebar-w) minmax(0, 1fr)");
+    expect(styles).toContain("grid-template-rows: var(--topbar-h) auto minmax(0, 1fr)");
+    expect(styles).toMatch(
+      /\.workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) var\(--action-panel-compact-w\)/s,
+    );
+    expect(styles).toMatch(
+      /@media \(min-width: 1280px\)[\s\S]*?\.workspace\s*\{[^}]*var\(--action-panel-w\)/,
+    );
+    expect(styles).not.toContain("--sidebar-width");
+    expect(styles).not.toContain("--topbar-height");
   });
 });

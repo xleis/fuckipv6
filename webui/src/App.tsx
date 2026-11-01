@@ -376,7 +376,11 @@ function AppShell({
   return (
     <div className="app-shell">
       <a className="skip-link" href="#page-content">{label(locale, "common.skip_content")}</a>
-      <aside className="primary-nav" aria-label={label(locale, "common.main_navigation")}>
+      <aside
+        className="primary-nav"
+        data-ui-region="sidebar"
+        aria-label={label(locale, "common.main_navigation")}
+      >
         <div className="brand-lockup">
           <div className="brand-mark"><Wifi size={22} /></div>
           <div><span>fuckipv6</span><strong>{label(locale, "common.node_contract")}</strong></div>
@@ -408,7 +412,7 @@ function AppShell({
       </aside>
 
       <div className="app-main">
-        <header className="global-bar">
+        <header className="global-bar" data-ui-region="topbar">
           <div className="global-context">
             <TopStatus snapshot={snapshot} locale={locale} />
           </div>

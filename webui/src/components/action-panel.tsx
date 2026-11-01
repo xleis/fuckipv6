@@ -258,14 +258,22 @@ export function ActionPanel(props: ActionPanelProps) {
   const { actions, locale, pendingAction, onSubmit } = props;
   if (actions.length === 0) {
     return (
-      <aside className="actions-panel" aria-label={label(locale, "common.shared_actions")}>
+      <aside
+        className="actions-panel"
+        data-ui-region="action-panel"
+        aria-label={label(locale, "common.shared_actions")}
+      >
         <div className="panel-title">{label(locale, "common.shared_actions")}</div>
         <p className="empty-copy">{label(locale, "common.page_actions_empty")}</p>
       </aside>
     );
   }
   return (
-    <aside className="actions-panel" aria-label={label(locale, "common.shared_actions")}>
+    <aside
+      className="actions-panel"
+      data-ui-region="action-panel"
+      aria-label={label(locale, "common.shared_actions")}
+    >
       <div className="panel-title">{label(locale, "common.shared_actions")}</div>
       <div className="action-list">
         {actions.map((action) => (

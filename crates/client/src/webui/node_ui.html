@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>fuckipv6 · node contract</title>
+  <title data-i18n="common.node_contract">fuckipv6 · node contract</title>
   <link rel="stylesheet" href="/assets/webui.css">
   <style nonce="__CSP_NONCE__">
     :root{color-scheme:dark;--bg:#071018;--panel:#0d1b26;--panel2:#102635;--line:#1d4256;--text:#d8edf6;--muted:#7fa3b3;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#fb7185;--sidebar:250px}
@@ -26,23 +26,23 @@
   </style>
 </head>
 <body>
-<a class="ui-skip-link" href="#content">跳到主要内容</a>
+<a class="ui-skip-link" href="#content" data-i18n="common.skip_content">跳到主要内容</a>
 <div class="ui-app-shell" id="app-shell">
-  <aside class="ui-sidebar sidebar" id="navigation-drawer" data-ui-region="sidebar" aria-label="节点导航">
-    <div><div class="brand">fuckipv6</div><div class="contract">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
-    <select id="network-picker" class="network-picker" aria-label="选择网络"></select>
-    <nav id="nav" aria-label="节点页面"></nav>
+  <aside class="ui-sidebar sidebar" id="navigation-drawer" data-ui-region="sidebar" aria-label="节点导航" data-i18n-aria-label="common.node_navigation">
+    <div><div class="brand">fuckipv6</div><div class="contract" data-i18n="common.node_contract_description">manifest · snapshot · NodeCommand HTTP schema v1</div></div>
+    <select id="network-picker" class="network-picker" aria-label="选择网络" data-i18n-aria-label="common.choose_network"></select>
+    <nav id="nav" aria-label="节点页面" data-i18n-aria-label="common.node_pages"></nav>
     <div class="sidebar-footer muted"><span id="primary-detail" class="primary-detail">--</span><br><span id="revision">revision --</span><button id="owner-security-button" class="owner-security-button" type="button" data-i18n="owner_auth.security.title" hidden>所有者安全</button><button id="logout" class="logout" type="button" data-i18n="owner_auth.session.logout" hidden>退出所有者会话</button></div>
   </aside>
   <div class="ui-app-main">
     <header class="ui-topbar" data-ui-region="topbar">
-      <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="navigation" aria-label="打开节点导航" aria-controls="navigation-drawer" aria-expanded="false">☰</button>
-      <div class="ui-topbar-heading"><h1 class="ui-topbar-title" id="page-title">加载共享契约…</h1><div class="ui-topbar-subtitle" id="page-subtitle">/api/node/manifest · /api/node/snapshot</div></div>
+      <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="navigation" aria-label="打开节点导航" data-i18n-aria-label="common.open_navigation" aria-controls="navigation-drawer" aria-expanded="false">☰</button>
+      <div class="ui-topbar-heading"><h1 class="ui-topbar-title" id="page-title" data-i18n="common.loading_contract">加载共享契约…</h1><div class="ui-topbar-subtitle" id="page-subtitle">/api/node/manifest · /api/node/snapshot</div></div>
       <div class="ui-topbar-actions">
         <span id="primary-status" class="primary">--</span>
-        <span id="refresh-indicator" class="ui-refresh-indicator" hidden>同步中…</span>
-        <button class="submit" id="refresh" data-ui-secondary-action>刷新快照</button>
-        <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="detail" aria-label="打开页面详情" aria-controls="detail-drawer" aria-expanded="false">详情</button>
+        <span id="refresh-indicator" class="ui-refresh-indicator" data-i18n="common.syncing" hidden>同步中…</span>
+        <button class="submit" id="refresh" data-ui-secondary-action data-i18n="action.refresh_snapshot">刷新快照</button>
+        <button class="ui-topbar-button" type="button" data-ui-drawer-toggle="detail" aria-label="打开页面详情" data-i18n-aria-label="common.open_details" aria-controls="detail-drawer" aria-expanded="false" data-i18n="common.details">详情</button>
       </div>
     </header>
     <div class="ui-workspace">
@@ -50,9 +50,9 @@
         <div class="ui-content-inner">
           <div id="alert" role="alert"></div>
           <div id="toast" role="status"></div>
-          <div class="ui-local-tabs" data-ui-local-tabs aria-label="页面区域">
-            <button class="ui-local-tab" type="button" data-ui-local-tab="data" aria-selected="true">数据 <span id="data-count"></span></button>
-            <button class="ui-local-tab" type="button" data-ui-local-tab="actions" aria-selected="false">动作 <span id="actions-count"></span></button>
+          <div class="ui-local-tabs" data-ui-local-tabs aria-label="页面区域" data-i18n-aria-label="common.page_regions">
+            <button class="ui-local-tab" type="button" data-ui-local-tab="data" aria-selected="true"><span data-i18n="common.data">数据</span> <span id="data-count"></span></button>
+            <button class="ui-local-tab" type="button" data-ui-local-tab="actions" aria-selected="false"><span data-i18n="common.actions">动作</span> <span id="actions-count"></span></button>
           </div>
           <section class="ui-page-panel" data-ui-page-panel="data" role="tabpanel">
             <div id="data-content" class="grid">
@@ -67,19 +67,19 @@
           </section>
         </div>
       </main>
-      <aside class="ui-detail" id="detail-drawer" data-ui-region="detail" aria-label="页面详情" aria-hidden="true">
-        <div class="ui-detail-header"><span class="ui-detail-title">页面详情</span><button class="ui-topbar-button" type="button" data-ui-drawer-close="detail" aria-label="关闭页面详情">×</button></div>
+      <aside class="ui-detail" id="detail-drawer" data-ui-region="detail" aria-label="页面详情" data-i18n-aria-label="common.page_details" aria-hidden="true">
+        <div class="ui-detail-header"><span class="ui-detail-title" data-i18n="common.page_details">页面详情</span><button class="ui-topbar-button" type="button" data-ui-drawer-close="detail" aria-label="关闭页面详情" data-i18n-aria-label="common.close_details">×</button></div>
         <div class="ui-detail-body">
-          <section class="ui-detail-section"><h3>当前页面</h3><div id="detail-page" class="row-detail">--</div></section>
-          <section class="ui-detail-section"><h3>当前网络</h3><div id="detail-network" class="row-detail">--</div></section>
-          <section class="ui-detail-section"><h3>运行状态</h3><div id="detail-status" class="row-detail">--</div></section>
-          <section class="ui-detail-section"><h3>快照</h3><div id="detail-revision" class="row-detail">revision --</div></section>
+          <section class="ui-detail-section"><h3 data-i18n="common.current_page">当前页面</h3><div id="detail-page" class="row-detail">--</div></section>
+          <section class="ui-detail-section"><h3 data-i18n="common.current_network">当前网络</h3><div id="detail-network" class="row-detail">--</div></section>
+          <section class="ui-detail-section"><h3 data-i18n="common.runtime_status">运行状态</h3><div id="detail-status" class="row-detail">--</div></section>
+          <section class="ui-detail-section"><h3 data-i18n="common.snapshot">快照</h3><div id="detail-revision" class="row-detail">revision --</div></section>
         </div>
       </aside>
     </div>
   </div>
-  <button class="ui-drawer-backdrop" type="button" data-ui-drawer-backdrop aria-label="关闭抽屉"></button>
-  <nav class="ui-bottom-nav" id="bottom-nav" aria-label="主导航"></nav>
+  <button class="ui-drawer-backdrop" type="button" data-ui-drawer-backdrop aria-label="关闭抽屉" data-i18n-aria-label="common.close_drawer"></button>
+  <nav class="ui-bottom-nav" id="bottom-nav" aria-label="主导航" data-i18n-aria-label="common.main_navigation"></nav>
 </div>
 <div id="login" role="dialog" aria-modal="true" aria-labelledby="login-title">
   <form class="login-card" id="login-form">
@@ -202,12 +202,12 @@
     $("detail-page").textContent = "--";
     $("detail-network").textContent = "--";
     $("detail-status").textContent = "--";
-    $("detail-revision").textContent = "revision --";
-    $("revision").textContent = "revision --";
+    $("detail-revision").textContent = tr("common.revision_value", { revision: "--" });
+    $("revision").textContent = tr("common.revision_value", { revision: "--" });
     $("primary-status").textContent = "--";
     $("primary-status").className = "primary";
     $("primary-detail").textContent = "--";
-    $("page-title").textContent = "加载共享契约…";
+    $("page-title").textContent = t("common.loading_contract");
     $("page-subtitle").textContent = "/api/node/manifest · /api/node/snapshot";
     state.refreshPending = 0;
     ui.setContentBusy(document, false);
@@ -256,9 +256,11 @@
     $("owner-security-button").hidden = true;
     $("owner-security").hidden = true;
     $("reauth").hidden = true;
-    $("page-title").textContent = "契约不兼容";
-    $("page-subtitle").textContent = "manifest/snapshot 校验失败，已停止所有读取、事件流和命令写入";
-    showAlert("共享契约不兼容，已失败关闭：\n" + (error && error.message ? error.message : String(error || "未知错误")));
+    $("page-title").textContent = t("error.contract_incompatible_title");
+    $("page-subtitle").textContent = t("error.contract_incompatible_detail");
+    showAlert(tr("error.contract_closed", {
+      details: error && error.message ? error.message : String(error || t("common.unknown")),
+    }));
   }
   function requestError(message, payload) {
     const error = new Error(message);
@@ -570,10 +572,10 @@
       ]);
       if (!isCurrent(generation)) return;
       if (!manifestResult.response.ok) {
-        throw requestError(ui.httpErrorText(manifestResult.payload, "manifest 加载失败", state.locale), manifestResult.payload);
+        throw requestError(ui.httpErrorText(manifestResult.payload, "error.manifest_load_failed", state.locale), manifestResult.payload);
       }
       if (!snapshotResult.response.ok) {
-        throw requestError(ui.httpErrorText(snapshotResult.payload, "snapshot 加载失败", state.locale), snapshotResult.payload);
+        throw requestError(ui.httpErrorText(snapshotResult.payload, "error.snapshot_load_failed", state.locale), snapshotResult.payload);
       }
       const manifest = ui.validateManifestResponse(manifestResult.payload);
       const snapshot = ui.validateSnapshotResponse(snapshotResult.payload);
@@ -606,7 +608,7 @@
       const result = await requestJson("/api/node/snapshot?schema_version=1", { cache: "no-store" });
       if (!isCurrent(generation)) return;
       if (!result.response.ok) {
-        throw requestError(ui.httpErrorText(result.payload, "快照刷新失败", state.locale), result.payload);
+        throw requestError(ui.httpErrorText(result.payload, "error.snapshot_refresh_failed", state.locale), result.payload);
       }
       const snapshot = ui.validateSnapshotResponse(result.payload);
       if (!isCurrent(generation)) return;
@@ -622,7 +624,7 @@
       }
       if (generation !== state.generation || state.failedClosed) return;
       if (contractFailure(error)) failClosed(error);
-      else showAlert("快照刷新失败：" + error.message);
+      else showAlert(tr("error.snapshot_refresh_failed_detail", { error: error.message }));
     } finally {
       state.refreshPending = Math.max(0, state.refreshPending - 1);
       if (generation === state.generation) ui.setContentBusy(document, state.refreshPending > 0);
@@ -675,9 +677,9 @@
   }
   function renderDetail(primary, page, projection) {
     $("detail-page").textContent = `${projection.title} (${page.id})`;
-    $("detail-network").textContent = state.selectedNetwork || "未选择网络";
+    $("detail-network").textContent = state.selectedNetwork || t("common.not_selected");
     $("detail-status").textContent = `${primary.label} · ${primary.detail}`;
-    $("detail-revision").textContent = `revision ${state.snapshot.revision}`;
+    $("detail-revision").textContent = tr("common.revision_value", { revision: state.snapshot.revision });
   }
   function render() {
     if (state.failedClosed || !state.manifest || !state.snapshot) return;
@@ -687,7 +689,7 @@
       state.pageId = page?.id || "overview";
     }
     if (!page) return;
-    $("revision").textContent = "revision " + state.snapshot.revision;
+    $("revision").textContent = tr("common.revision_value", { revision: state.snapshot.revision });
     const primary = ui.primaryStatusFor(state.snapshot, state.locale);
     const primaryStatus = $("primary-status");
     primaryStatus.textContent = primary.label;
@@ -696,20 +698,24 @@
     renderNavigation();
     const picker = $("network-picker");
     picker.innerHTML = state.snapshot.networks.length
-      ? state.snapshot.networks.map((network) => `<option value="${escapeHtml(network.name)}" ${network.name === state.selectedNetwork ? "selected" : ""}>${escapeHtml(network.name)} · ${escapeHtml(network.status)}</option>`).join("")
-      : '<option value="">无网络</option>';
+      ? state.snapshot.networks.map((network) => `<option value="${escapeHtml(network.name)}" ${network.name === state.selectedNetwork ? "selected" : ""}>${escapeHtml(network.name)} · ${escapeHtml(t("status.network." + network.status))}</option>`).join("")
+      : `<option value="">${escapeHtml(t("choice.network.none"))}</option>`;
     picker.onchange = () => { state.selectedNetwork = picker.value; render(); };
     const projection = ui.projectPage(page, state.snapshot, state.selectedNetwork || null, state.locale);
     $("page-title").textContent = projection.title;
-    $("page-subtitle").textContent = page.id + " · " + page.actions.length + " actions · manifest schema " + state.manifest.schema_version;
+    $("page-subtitle").textContent = tr("node_ui.page_context", {
+      page: page.id,
+      actions: i18n.formatInteger(state.locale, page.actions.length),
+      schema: state.manifest.schema_version,
+    });
     $("data-count").textContent = String(projection.rows.length);
     $("actions-count").textContent = String(page.actions.length);
-    const dataCard = `<article class="card"><h2>节点快照</h2>${projection.rows.length ? projection.rows.map((row) =>
+    const dataCard = `<article class="card"><h2>${escapeHtml(t("common.node_snapshot"))}</h2>${projection.rows.length ? projection.rows.map((row) =>
       `<div class="row"><div class="row-title">${escapeHtml(row.title)}</div><div class="row-detail">${escapeHtml(row.detail)}</div></div>`
-    ).join("") : `<div class="empty">${escapeHtml(projection.empty || "没有数据")}</div>`}</article>`;
+    ).join("") : `<div class="empty">${escapeHtml(projection.empty || t("common.no_data"))}</div>`}</article>`;
     const actionCards = page.actions.map((action) => renderAction(action, projection)).join("");
     $("data-content").innerHTML = dataCard;
-    $("actions-content").innerHTML = actionCards || '<div class="empty">此页面没有共享动作。</div>';
+    $("actions-content").innerHTML = actionCards || `<div class="empty">${escapeHtml(t("common.page_actions_empty"))}</div>`;
     for (const form of $("actions-content").querySelectorAll("form[data-action]")) {
       form.addEventListener("submit", submitAction);
     }
@@ -725,9 +731,9 @@
     }
     let control = `<input id="${id}" name="${field.id}" value="${escapeHtml(value)}" ${field.required ? "required" : ""}>`;
     if (field.input === "role") {
-      control = `<select id="${id}" name="${field.id}">${["member","discovery","relay","exit_node"].map((role) => `<option value="${role}" ${role === value ? "selected" : ""}>${role}</option>`).join("")}</select>`;
+      control = `<select id="${id}" name="${field.id}">${["member","discovery","relay","exit_node"].map((role) => `<option value="${role}" ${role === value ? "selected" : ""}>${escapeHtml(t("choice.role." + role))}</option>`).join("")}</select>`;
     } else if (field.input === "routing_mode") {
-      control = `<select id="${id}" name="${field.id}">${["mesh_only","bypass_mainland","global_proxy"].map((mode) => `<option value="${mode}" ${mode === value ? "selected" : ""}>${mode}</option>`).join("")}</select>`;
+      control = `<select id="${id}" name="${field.id}">${["mesh_only","bypass_mainland","global_proxy"].map((mode) => `<option value="${mode}" ${mode === value ? "selected" : ""}>${escapeHtml(t("choice.routing." + mode))}</option>`).join("")}</select>`;
     } else if (field.input === "port" || field.input === "timeout_ms") {
       control = `<input id="${id}" name="${field.id}" type="number" min="1" value="${escapeHtml(value)}" ${field.required ? "required" : ""}>`;
     }
@@ -736,14 +742,14 @@
   function renderAction(action) {
     const blocked = ui.executionBlockReason(action, state.snapshot, state.selectedNetwork || null);
     const statusClass = action.backend_status === "implemented" ? "implemented" : "unavailable";
-    return `<article class="card"><form data-action="${escapeHtml(action.id)}"><div class="action-head"><div><div class="action-title">${escapeHtml(ui.label(action.label_key, state.locale))}</div><div class="muted">${escapeHtml(action.id)} · ${escapeHtml(action.permission)} · ${escapeHtml(action.availability)}</div></div><span class="status ${statusClass}">${escapeHtml(action.backend_status)}</span></div><div class="fields">${action.fields.map((field) => fieldControl(action, field)).join("")}</div>${blocked ? `<div class="muted">${escapeHtml(ui.blockReasonText(blocked, state.locale))}</div>` : ""}<button class="submit" type="submit" ${blocked ? "disabled" : ""}>执行</button></form></article>`;
+    return `<article class="card"><form data-action="${escapeHtml(action.id)}"><div class="action-head"><div><div class="action-title">${escapeHtml(ui.label(action.label_key, state.locale))}</div><div class="muted">${escapeHtml(action.id)} · ${escapeHtml(t("choice.permission." + action.permission))} · ${escapeHtml(t("choice.availability." + action.availability))}</div></div><span class="status ${statusClass}">${escapeHtml(t("status.backend." + action.backend_status))}</span></div><div class="fields">${action.fields.map((field) => fieldControl(action, field)).join("")}</div>${blocked ? `<div class="muted">${escapeHtml(ui.blockReasonText(blocked, state.locale))}</div>` : ""}<button class="submit" type="submit" ${blocked ? "disabled" : ""}>${escapeHtml(t("common.execute"))}</button></form></article>`;
   }
   async function submitAction(event) {
     event.preventDefault();
     if (state.failedClosed) return;
     const form = event.currentTarget;
     const action = state.manifest.pages.flatMap((page) => page.actions).find((entry) => entry.id === form.dataset.action);
-    if (!action) return showAlert("manifest 中没有该动作，拒绝提交。");
+    if (!action) return showAlert(t("error.manifest_action_missing"));
     const values = {};
     for (const field of action.fields) {
       const element = form.elements.namedItem(field.id);
@@ -781,7 +787,11 @@
         await refreshSnapshot();
         return;
       }
-      throw requestError(ui.httpErrorText(result.payload, "命令失败 HTTP " + result.response.status, state.locale), result.payload);
+      throw requestError(ui.httpErrorText(
+        result.payload,
+        tr("error.command_failed_http", { status: result.response.status }),
+        state.locale,
+      ), result.payload);
     } catch (error) {
       if (error instanceof AuthenticationError) {
         if (generation === state.generation) expireSession();
@@ -791,7 +801,7 @@
       if (contractFailure(error)) {
         failClosed(error);
       } else {
-        showAlert("命令失败，未报告成功：" + error.message);
+        showAlert(tr("error.command_not_acknowledged", { error: error.message }));
       }
     }
   }
@@ -822,9 +832,9 @@
           refreshSnapshot();
         } else if (payload.type === "error") {
           if (payload.code === "contract_violation" || payload.code === "schema_version_mismatch") {
-            throw new Error("node-ui-contract: " + ui.httpErrorText(payload, "事件流契约错误", state.locale));
+            throw new Error("node-ui-contract: " + ui.httpErrorText(payload, "error.event_stream_contract", state.locale));
           }
-          showAlert(ui.httpErrorText(payload, "事件流错误", state.locale));
+          showAlert(ui.httpErrorText(payload, "error.event_stream", state.locale));
         } else {
           throw new Error("node-ui-contract: unknown event type " + payload.type);
         }

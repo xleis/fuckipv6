@@ -287,6 +287,11 @@ assert.doesNotMatch(html, /payload\.error\.includes/);
 assert.match(html, /last_passkey/);
 const inlineScripts = [...html.matchAll(/<script nonce="__CSP_NONCE__">([\s\S]*?)<\/script>/g)];
 assert.equal(inlineScripts.length, 1, "node UI must have one inline renderer script");
+assert.doesNotMatch(inlineScripts[0][1], /\p{Script=Han}/u, "node renderer JavaScript must not hard-code Chinese copy");
+const hardCodedStaticCopy = html
+  .split("\n")
+  .filter((line) => /\p{Script=Han}/u.test(line) && !/data-i18n(?:-|=)/.test(line));
+assert.deepEqual(hardCodedStaticCopy, [], "static Chinese copy must be declared through data-i18n attributes");
 new Function(inlineScripts[0][1]);
 
 assert.doesNotMatch(uiSource, /LABELS_BEGIN|LABELS_END|ERROR_TEXT_BEGIN|ERROR_TEXT_END/);

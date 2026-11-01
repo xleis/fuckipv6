@@ -368,6 +368,35 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NodeErrorCategory {
+        AUTHENTICATION("authentication"),
+        AUTHORIZATION("authorization"),
+        VALIDATION("validation"),
+        STATE("state"),
+        CAPABILITY("capability"),
+        DEPENDENCY("dependency"),
+        INTERNAL("internal");
+
+        private final String wireName;
+
+        NodeErrorCategory(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeErrorCategory fromWireName(String value) {
+            for (NodeErrorCategory candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeErrorCategory wire value: " + value);
+        }
+    }
+
     public enum NodeEventReplayReason {
         CURSOR_AHEAD("cursor_ahead"),
         HISTORY_GAP("history_gap"),
@@ -399,8 +428,14 @@ public final class NodeContractV1 {
         SCHEMA_VERSION_MISMATCH("schema_version_mismatch"),
         INVALID_REQUEST("invalid_request"),
         NOT_FOUND("not_found"),
+        AUTHENTICATION_REQUIRED("authentication_required"),
+        PERMISSION_DENIED("permission_denied"),
         OPERATION_CONFLICT("operation_conflict"),
+        OPERATION_CANCELLED("operation_cancelled"),
+        OPERATION_TIMED_OUT("operation_timed_out"),
         RESYNC_REQUIRED("resync_required"),
+        CAPABILITY_UNAVAILABLE("capability_unavailable"),
+        DEPENDENCY_UNAVAILABLE("dependency_unavailable"),
         BACKEND_REJECTED("backend_rejected"),
         BACKEND_UNAVAILABLE("backend_unavailable"),
         CONTRACT_VIOLATION("contract_violation"),
@@ -564,6 +599,7 @@ public final class NodeContractV1 {
     }
 
     public enum NodeProblemCode {
+        AUTHENTICATION_REQUIRED("authentication_required"),
         INVALID_REQUEST("invalid_request"),
         NOT_FOUND("not_found"),
         CONFLICT("conflict"),
@@ -1012,27 +1048,39 @@ public final class NodeContractV1 {
 
     /** DTO for NodeApiErrorResponse. */
     public static final class NodeApiErrorResponse {
+        public final NodeErrorCategory category;
         public final NodeHttpErrorCode code;
         public final NodeEventCursor latest_cursor;
         public final String message;
+        public final String message_key;
+        public final DomainObjectRef object;
+        public final Map<String, Object> params;
         public final NodeProblem problem;
+        public final OperationRecovery recovery;
         public final Long request_id;
         public final NodeEventCursor requested_cursor;
         public final Integer requested_schema_version;
         public final NodeEventReplayReason resync_reason;
+        public final Boolean retryable;
         public final Integer schema_version;
         public final String server_time;
         public final Integer supported_schema_version;
 
-        public NodeApiErrorResponse(NodeHttpErrorCode code, NodeEventCursor latest_cursor, String message, NodeProblem problem, Long request_id, NodeEventCursor requested_cursor, Integer requested_schema_version, NodeEventReplayReason resync_reason, Integer schema_version, String server_time, Integer supported_schema_version) {
+        public NodeApiErrorResponse(NodeErrorCategory category, NodeHttpErrorCode code, NodeEventCursor latest_cursor, String message, String message_key, DomainObjectRef object, Map<String, Object> params, NodeProblem problem, OperationRecovery recovery, Long request_id, NodeEventCursor requested_cursor, Integer requested_schema_version, NodeEventReplayReason resync_reason, Boolean retryable, Integer schema_version, String server_time, Integer supported_schema_version) {
+            this.category = category;
             this.code = code;
             this.latest_cursor = latest_cursor;
             this.message = message;
+            this.message_key = message_key;
+            this.object = object;
+            this.params = params;
             this.problem = problem;
+            this.recovery = recovery;
             this.request_id = request_id;
             this.requested_cursor = requested_cursor;
             this.requested_schema_version = requested_schema_version;
             this.resync_reason = resync_reason;
+            this.retryable = retryable;
             this.schema_version = schema_version;
             this.server_time = server_time;
             this.supported_schema_version = supported_schema_version;
@@ -1345,18 +1393,30 @@ public final class NodeContractV1 {
 
     /** DTO for NodeHttpErrorResponse. */
     public static final class NodeHttpErrorResponse {
+        public final NodeErrorCategory category;
         public final NodeHttpErrorCode code;
         public final String message;
+        public final String message_key;
+        public final DomainObjectRef object;
+        public final Map<String, Object> params;
         public final NodeProblem problem;
+        public final OperationRecovery recovery;
         public final Integer requested_schema_version;
+        public final Boolean retryable;
         public final Integer schema_version;
         public final Integer supported_schema_version;
 
-        public NodeHttpErrorResponse(NodeHttpErrorCode code, String message, NodeProblem problem, Integer requested_schema_version, Integer schema_version, Integer supported_schema_version) {
+        public NodeHttpErrorResponse(NodeErrorCategory category, NodeHttpErrorCode code, String message, String message_key, DomainObjectRef object, Map<String, Object> params, NodeProblem problem, OperationRecovery recovery, Integer requested_schema_version, Boolean retryable, Integer schema_version, Integer supported_schema_version) {
+            this.category = category;
             this.code = code;
             this.message = message;
+            this.message_key = message_key;
+            this.object = object;
+            this.params = params;
             this.problem = problem;
+            this.recovery = recovery;
             this.requested_schema_version = requested_schema_version;
+            this.retryable = retryable;
             this.schema_version = schema_version;
             this.supported_schema_version = supported_schema_version;
         }
@@ -1646,15 +1706,23 @@ public final class NodeContractV1 {
 
     /** DTO for NodeProblem. */
     public static final class NodeProblem {
+        public final NodeErrorCategory category;
         public final String code;
         public final String message;
+        public final String message_key;
         public final String network_name;
+        public final Map<String, Object> params;
+        public final OperationRecovery recovery;
         public final Boolean retryable;
 
-        public NodeProblem(String code, String message, String network_name, Boolean retryable) {
+        public NodeProblem(NodeErrorCategory category, String code, String message, String message_key, String network_name, Map<String, Object> params, OperationRecovery recovery, Boolean retryable) {
+            this.category = category;
             this.code = code;
             this.message = message;
+            this.message_key = message_key;
             this.network_name = network_name;
+            this.params = params;
+            this.recovery = recovery;
             this.retryable = retryable;
         }
     }
@@ -2672,14 +2740,26 @@ public final class NodeContractV1 {
         }
 
         public static final class Error extends NodeWsMessage {
+            public final NodeErrorCategory category;
             public final NodeHttpErrorCode code;
             public final String message;
+            public final String message_key;
+            public final DomainObjectRef object;
+            public final Map<String, Object> params;
+            public final OperationRecovery recovery;
+            public final Boolean retryable;
             public final Integer schema_version;
 
-            public Error(NodeHttpErrorCode code, String message, Integer schema_version) {
+            public Error(NodeErrorCategory category, NodeHttpErrorCode code, String message, String message_key, DomainObjectRef object, Map<String, Object> params, OperationRecovery recovery, Boolean retryable, Integer schema_version) {
                 super("error");
+                this.category = category;
                 this.code = code;
                 this.message = message;
+                this.message_key = message_key;
+                this.object = object;
+                this.params = params;
+                this.recovery = recovery;
+                this.retryable = retryable;
                 this.schema_version = schema_version;
             }
         }

@@ -265,7 +265,8 @@ public final class NodeContractV1Test {
         new NodeContractV1.NodeWsMessage.Snapshot(1, null);
         new NodeContractV1.NodeWsMessage.Event(null, 1);
         new NodeContractV1.NodeWsMessage.Resync(null, 1, null);
-        new NodeContractV1.NodeWsMessage.Error(null, "error", 1);
+        new NodeContractV1.NodeWsMessage.Error(
+                null, null, "error", "error.operation_internal", null, null, null, false, 1);
 
         System.out.println("NodeContractV1Test: passed");
     }

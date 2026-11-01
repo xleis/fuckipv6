@@ -36,9 +36,9 @@ use tokio::sync::broadcast;
 
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeControlHealth, NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind,
-    NodeEventReplay, NodeEventReplayReason, NodeProblem, NodeProblemCode, NodeSnapshot,
-    NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeCommandResult, NodeControlHealth, NodeErrorCategory, NodeEvent, NodeEventBus,
+    NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason, NodeProblem,
+    NodeProblemCode, NodeSnapshot, NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };
 
 /// Version of the HTTP/WebSocket envelope contract used by desktop and
@@ -157,8 +157,8 @@ pub struct NodeApiObjectResponse {
 pub struct NodeApiErrorResponse {
     #[serde(flatten)]
     pub meta: NodeApiResponseMeta,
-    pub code: NodeHttpErrorCode,
-    pub message: String,
+    #[serde(flatten)]
+    pub error: NodeErrorDetails,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_schema_version: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -248,12 +248,181 @@ pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
     InvalidRequest,
     NotFound,
+    AuthenticationRequired,
+    PermissionDenied,
     OperationConflict,
+    OperationCancelled,
+    OperationTimedOut,
     ResyncRequired,
+    CapabilityUnavailable,
+    DependencyUnavailable,
     BackendRejected,
     BackendUnavailable,
     ContractViolation,
     Internal,
+}
+
+/// Transport-neutral error metadata carried by HTTP, WebSocket and operation
+/// failures. `message` remains a human-readable fallback; clients branch on
+/// `code`, `category` and `message_key`, interpolate `params`, and use
+/// `recovery` to offer a safe next action.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeErrorDetails {
+    pub code: NodeHttpErrorCode,
+    pub category: NodeErrorCategory,
+    pub message: String,
+    pub message_key: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<DomainObjectRef>,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<OperationRecovery>,
+}
+
+impl NodeHttpErrorCode {
+    fn category(self) -> NodeErrorCategory {
+        match self {
+            Self::SchemaVersionMismatch | Self::InvalidRequest => NodeErrorCategory::Validation,
+            Self::NotFound
+            | Self::OperationConflict
+            | Self::OperationCancelled
+            | Self::ResyncRequired
+            | Self::BackendRejected => NodeErrorCategory::State,
+            Self::AuthenticationRequired => NodeErrorCategory::Authentication,
+            Self::PermissionDenied => NodeErrorCategory::Authorization,
+            Self::CapabilityUnavailable => NodeErrorCategory::Capability,
+            Self::OperationTimedOut | Self::DependencyUnavailable | Self::BackendUnavailable => {
+                NodeErrorCategory::Dependency
+            }
+            Self::ContractViolation | Self::Internal => NodeErrorCategory::Internal,
+        }
+    }
+
+    fn message_key(self) -> &'static str {
+        match self {
+            Self::SchemaVersionMismatch => "error.schema_version_mismatch",
+            Self::InvalidRequest => "error.invalid_request",
+            Self::NotFound => "error.not_found",
+            Self::AuthenticationRequired => "error.authentication_required",
+            Self::PermissionDenied => "error.permission_denied",
+            Self::OperationConflict => "error.operation_conflict",
+            Self::OperationCancelled => "error.operation_cancelled",
+            Self::OperationTimedOut => "error.operation_timed_out",
+            Self::ResyncRequired => "error.resync_required",
+            Self::CapabilityUnavailable => "error.capability_unavailable",
+            Self::DependencyUnavailable | Self::BackendUnavailable => {
+                "error.dependency_unavailable"
+            }
+            Self::BackendRejected => "error.backend_rejected",
+            Self::ContractViolation => "error.contract_violation",
+            Self::Internal => "error.internal",
+        }
+    }
+
+    fn default_message(self) -> &'static str {
+        match self {
+            Self::SchemaVersionMismatch => "请求的节点 API 版本不受支持",
+            Self::InvalidRequest => "请求无效",
+            Self::NotFound => "请求的对象不存在",
+            Self::AuthenticationRequired => "需要重新进行身份认证",
+            Self::PermissionDenied => "无权执行此操作",
+            Self::OperationConflict => "当前状态与请求冲突",
+            Self::OperationCancelled => "操作已取消",
+            Self::OperationTimedOut => "操作已超时",
+            Self::ResyncRequired => "事件流已无法安全续接，请重新读取快照",
+            Self::CapabilityUnavailable => "当前节点不支持所需能力",
+            Self::DependencyUnavailable | Self::BackendUnavailable => "依赖服务暂不可用",
+            Self::BackendRejected => "节点拒绝了请求",
+            Self::ContractViolation => "节点返回了不兼容的响应",
+            Self::Internal => "节点内部错误",
+        }
+    }
+
+    fn recovery(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::SchemaVersionMismatch | Self::InvalidRequest => {
+                Some(("edit_request", "recovery.fix_request"))
+            }
+            Self::NotFound | Self::OperationConflict | Self::ResyncRequired => {
+                Some(("refresh", "recovery.refresh_state"))
+            }
+            Self::AuthenticationRequired => Some(("reauth", "recovery.reauthenticate")),
+            Self::PermissionDenied => Some(("request_access", "recovery.request_access")),
+            Self::OperationCancelled
+            | Self::OperationTimedOut
+            | Self::DependencyUnavailable
+            | Self::BackendRejected
+            | Self::BackendUnavailable => Some(("retry", "recovery.retry")),
+            Self::CapabilityUnavailable => {
+                Some(("change_request", "recovery.use_supported_capability"))
+            }
+            Self::ContractViolation | Self::Internal => {
+                Some(("inspect_diagnostics", "recovery.inspect_diagnostics"))
+            }
+        }
+    }
+
+    fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::OperationTimedOut
+                | Self::DependencyUnavailable
+                | Self::BackendUnavailable
+                | Self::BackendRejected
+        )
+    }
+}
+
+impl NodeErrorDetails {
+    fn new(code: NodeHttpErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            category: code.category(),
+            message: message.into(),
+            message_key: code.message_key().into(),
+            params: BTreeMap::new(),
+            object: None,
+            retryable: code.retryable(),
+            recovery: code.recovery().map(|(kind, hint_key)| OperationRecovery {
+                kind: kind.into(),
+                hint_key: hint_key.into(),
+            }),
+        }
+    }
+
+    fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.params.insert(key.into(), value.into());
+        self
+    }
+
+    fn from_problem(problem: &NodeProblem, object: Option<&DomainObjectRef>) -> Self {
+        let code = code_for_problem(problem.code);
+        let hide_object = matches!(
+            problem.category,
+            NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
+        );
+        Self {
+            code,
+            category: problem.category,
+            message: if hide_object {
+                code.default_message().into()
+            } else {
+                problem.message.clone()
+            },
+            message_key: problem.message_key.clone(),
+            params: (*problem.params).clone(),
+            object: if hide_object { None } else { object.cloned() },
+            retryable: problem.retryable,
+            recovery: problem.recovery.as_deref().cloned().or_else(|| {
+                code.recovery().map(|(kind, hint_key)| OperationRecovery {
+                    kind: kind.into(),
+                    hint_key: hint_key.into(),
+                })
+            }),
+        }
+    }
 }
 
 /// Versioned HTTP error DTO. It is also used for WebSocket version mismatches
@@ -261,8 +430,8 @@ pub enum NodeHttpErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeHttpErrorResponse {
     pub schema_version: u16,
-    pub code: NodeHttpErrorCode,
-    pub message: String,
+    #[serde(flatten)]
+    pub error: NodeErrorDetails,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_schema_version: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -291,8 +460,8 @@ pub enum NodeWsMessage {
     },
     Error {
         schema_version: u16,
-        code: NodeHttpErrorCode,
-        message: String,
+        #[serde(flatten)]
+        error: NodeErrorDetails,
     },
 }
 
@@ -938,12 +1107,28 @@ fn status_for_problem(code: NodeProblemCode) -> StatusCode {
     match code {
         NodeProblemCode::InvalidRequest => StatusCode::BAD_REQUEST,
         NodeProblemCode::NotFound => StatusCode::NOT_FOUND,
+        NodeProblemCode::AuthenticationRequired => StatusCode::UNAUTHORIZED,
         NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,
         NodeProblemCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
         NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
         NodeProblemCode::TimedOut => StatusCode::GATEWAY_TIMEOUT,
         NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn code_for_problem(code: NodeProblemCode) -> NodeHttpErrorCode {
+    match code {
+        NodeProblemCode::AuthenticationRequired => NodeHttpErrorCode::AuthenticationRequired,
+        NodeProblemCode::PermissionDenied => NodeHttpErrorCode::PermissionDenied,
+        NodeProblemCode::InvalidRequest => NodeHttpErrorCode::InvalidRequest,
+        NodeProblemCode::NotFound => NodeHttpErrorCode::NotFound,
+        NodeProblemCode::Conflict => NodeHttpErrorCode::OperationConflict,
+        NodeProblemCode::Cancelled => NodeHttpErrorCode::OperationCancelled,
+        NodeProblemCode::TimedOut => NodeHttpErrorCode::OperationTimedOut,
+        NodeProblemCode::Unavailable => NodeHttpErrorCode::DependencyUnavailable,
+        NodeProblemCode::Unsupported => NodeHttpErrorCode::CapabilityUnavailable,
+        NodeProblemCode::Internal => NodeHttpErrorCode::Internal,
     }
 }
 
@@ -1032,72 +1217,46 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
 }
 
 fn operation_error_for_problem(problem: &NodeProblem, target: &DomainObjectRef) -> OperationError {
-    let (code, message_key, recovery_kind, recovery_hint) = match problem.code {
-        NodeProblemCode::InvalidRequest => (
-            "operation.invalid_request",
-            "error.operation_invalid_request",
-            "edit_request",
-            "recovery.fix_request",
-        ),
-        NodeProblemCode::NotFound => (
-            "operation.not_found",
-            "error.operation_not_found",
-            "refresh",
-            "recovery.refresh_state",
-        ),
-        NodeProblemCode::Conflict => (
-            "operation.conflict",
-            "error.operation_conflict",
-            "refresh",
-            "recovery.refresh_state",
-        ),
-        NodeProblemCode::Unavailable => (
-            "operation.unavailable",
-            "error.operation_unavailable",
-            "retry",
-            "recovery.retry",
-        ),
-        NodeProblemCode::PermissionDenied => (
-            "operation.permission_denied",
-            "error.operation_permission_denied",
-            "reauth",
-            "recovery.reauthenticate",
-        ),
-        NodeProblemCode::Cancelled => (
-            "operation.cancelled",
-            "error.operation_cancelled",
-            "retry",
-            "recovery.retry",
-        ),
-        NodeProblemCode::TimedOut => (
-            "operation.timed_out",
-            "error.operation_timed_out",
-            "retry",
-            "recovery.retry",
-        ),
-        NodeProblemCode::Unsupported => (
-            "operation.unsupported",
-            "error.operation_unsupported",
-            "change_request",
-            "recovery.use_supported_capability",
-        ),
-        NodeProblemCode::Internal => (
-            "operation.internal",
-            "error.operation_internal",
-            "inspect_diagnostics",
-            "recovery.inspect_diagnostics",
-        ),
+    let hide_object = matches!(
+        problem.category,
+        NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
+    );
+    let code = match problem.code {
+        NodeProblemCode::AuthenticationRequired => "operation.authentication_required",
+        NodeProblemCode::InvalidRequest => "operation.invalid_request",
+        NodeProblemCode::NotFound => "operation.not_found",
+        NodeProblemCode::Conflict => "operation.conflict",
+        NodeProblemCode::Unavailable => "operation.unavailable",
+        NodeProblemCode::PermissionDenied => "operation.permission_denied",
+        NodeProblemCode::Cancelled => "operation.cancelled",
+        NodeProblemCode::TimedOut => "operation.timed_out",
+        NodeProblemCode::Unsupported => "operation.unsupported",
+        NodeProblemCode::Internal => "operation.internal",
     };
+    let recovery = problem.recovery.as_deref().cloned().or_else(|| {
+        problem
+            .code
+            .recovery()
+            .map(|(kind, hint_key)| OperationRecovery {
+                kind: kind.into(),
+                hint_key: hint_key.into(),
+            })
+    });
     OperationError {
         code: code.into(),
-        message_key: message_key.into(),
-        params: BTreeMap::new(),
-        object: Some(target.clone()),
+        message_key: problem.message_key.clone(),
+        params: if hide_object {
+            BTreeMap::new()
+        } else {
+            (*problem.params).clone()
+        },
+        object: if hide_object {
+            None
+        } else {
+            Some(target.clone())
+        },
         retryable: problem.retryable,
-        recovery: Some(OperationRecovery {
-            kind: recovery_kind.into(),
-            hint_key: recovery_hint.into(),
-        }),
+        recovery,
         partial_changes: Vec::new(),
     }
 }
@@ -1657,8 +1816,10 @@ async fn run_event_socket(mut socket: WebSocket, adapter: NodeHttpAdapter) {
         Err(error) => {
             let message = NodeWsMessage::Error {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
-                code: NodeHttpErrorCode::BackendUnavailable,
-                message: error.to_string(),
+                error: NodeErrorDetails::new(
+                    NodeHttpErrorCode::BackendUnavailable,
+                    error.to_string(),
+                ),
             };
             let _ = send_ws_message(&mut socket, &message).await;
             let _ = socket.close().await;
@@ -1698,8 +1859,10 @@ async fn run_event_socket(mut socket: WebSocket, adapter: NodeHttpAdapter) {
                     Err(error) => {
                         let message = NodeWsMessage::Error {
                             schema_version: NODE_HTTP_SCHEMA_VERSION,
-                            code: NodeHttpErrorCode::ContractViolation,
-                            message: error.to_string(),
+                            error: NodeErrorDetails::new(
+                                NodeHttpErrorCode::ContractViolation,
+                                error.to_string(),
+                            ),
                         };
                         let _ = send_ws_message(&mut socket, &message).await;
                         let _ = socket.close().await;
@@ -1736,80 +1899,111 @@ async fn send_ws_message(socket: &mut WebSocket, message: &NodeWsMessage) -> boo
 #[derive(Debug)]
 struct HttpAdapterError {
     status: StatusCode,
-    body: NodeHttpErrorResponse,
+    body: Box<NodeHttpErrorResponse>,
 }
 
 impl HttpAdapterError {
     fn schema_version_mismatch(requested: u16, supported: u16) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            body: NodeHttpErrorResponse {
+            body: Box::new(NodeHttpErrorResponse {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
-                code: NodeHttpErrorCode::SchemaVersionMismatch,
-                message: format!(
-                    "节点 HTTP schema 版本不兼容: requested={requested}, supported={supported}"
-                ),
+                error: NodeErrorDetails::new(
+                    NodeHttpErrorCode::SchemaVersionMismatch,
+                    NodeHttpErrorCode::SchemaVersionMismatch.default_message(),
+                )
+                .with_param("requested", requested.to_string())
+                .with_param("supported", supported.to_string()),
                 requested_schema_version: Some(requested),
                 supported_schema_version: Some(supported),
                 problem: None,
-            },
+            }),
         }
     }
 
     fn upgrade_required() -> Self {
         Self {
             status: StatusCode::UPGRADE_REQUIRED,
-            body: NodeHttpErrorResponse {
+            body: Box::new(NodeHttpErrorResponse {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
-                code: NodeHttpErrorCode::ContractViolation,
-                message: "事件流端点需要 WebSocket Upgrade".into(),
+                error: NodeErrorDetails::new(
+                    NodeHttpErrorCode::InvalidRequest,
+                    "事件流端点需要 WebSocket Upgrade",
+                ),
                 requested_schema_version: None,
                 supported_schema_version: Some(NODE_HTTP_SCHEMA_VERSION),
                 problem: None,
-            },
+            }),
+        }
+    }
+
+    fn from_problem(status: StatusCode, problem: NodeProblem) -> Self {
+        let hide_problem = matches!(
+            problem.category,
+            NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
+        );
+        Self {
+            status,
+            body: Box::new(NodeHttpErrorResponse {
+                schema_version: NODE_HTTP_SCHEMA_VERSION,
+                error: NodeErrorDetails::from_problem(&problem, None),
+                requested_schema_version: None,
+                supported_schema_version: Some(NODE_HTTP_SCHEMA_VERSION),
+                problem: (!hide_problem).then_some(problem),
+            }),
         }
     }
 
     fn from_adapter(error: NodeHttpAdapterError) -> Self {
-        let (status, code, problem) = match &error {
-            NodeHttpAdapterError::SchemaVersionMismatch { .. } => (
-                StatusCode::BAD_REQUEST,
-                NodeHttpErrorCode::SchemaVersionMismatch,
-                None,
-            ),
-            NodeHttpAdapterError::Command(NodeCommandBusError::Invalid(problem)) => (
-                StatusCode::BAD_REQUEST,
-                NodeHttpErrorCode::InvalidRequest,
-                Some(problem.clone()),
-            ),
-            NodeHttpAdapterError::Command(_) => (
+        match &error {
+            NodeHttpAdapterError::SchemaVersionMismatch {
+                requested,
+                supported,
+            } => Self::schema_version_mismatch(*requested, *supported),
+            NodeHttpAdapterError::Command(NodeCommandBusError::Invalid(problem)) => {
+                Self::from_problem(StatusCode::BAD_REQUEST, problem.clone())
+            }
+            NodeHttpAdapterError::Rejected(problem) => {
+                Self::from_problem(status_for_problem(problem.code), problem.clone())
+            }
+            NodeHttpAdapterError::Command(error) => Self::from_code(
                 StatusCode::SERVICE_UNAVAILABLE,
-                NodeHttpErrorCode::BackendUnavailable,
-                None,
+                NodeHttpErrorCode::DependencyUnavailable,
+                error.to_string(),
             ),
-            NodeHttpAdapterError::Rejected(problem) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                NodeHttpErrorCode::BackendRejected,
-                Some(problem.clone()),
-            ),
-            NodeHttpAdapterError::UnexpectedOutcome(_)
-            | NodeHttpAdapterError::ManifestSchemaMismatch { .. }
-            | NodeHttpAdapterError::InvalidManifest { .. } => (
+            NodeHttpAdapterError::UnexpectedOutcome(detail) => Self::from_code(
                 StatusCode::BAD_GATEWAY,
                 NodeHttpErrorCode::ContractViolation,
-                None,
+                detail.clone(),
             ),
-        };
+            NodeHttpAdapterError::ManifestSchemaMismatch { current, supported } => Self::from_code(
+                StatusCode::BAD_GATEWAY,
+                NodeHttpErrorCode::ContractViolation,
+                format!("manifest schema {current} is not supported ({supported})"),
+            ),
+            NodeHttpAdapterError::InvalidManifest { violations } => Self::from_code(
+                StatusCode::BAD_GATEWAY,
+                NodeHttpErrorCode::ContractViolation,
+                format!("invalid manifest: {violations:?}"),
+            ),
+        }
+    }
+
+    fn from_code(
+        status: StatusCode,
+        code: NodeHttpErrorCode,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        tracing::warn!(diagnostic = %diagnostic.into(), ?code, "node adapter request failed");
         Self {
             status,
-            body: NodeHttpErrorResponse {
+            body: Box::new(NodeHttpErrorResponse {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
-                code,
-                message: error.to_string(),
+                error: NodeErrorDetails::new(code, code.default_message()),
                 requested_schema_version: None,
                 supported_schema_version: Some(NODE_HTTP_SCHEMA_VERSION),
-                problem,
-            },
+                problem: None,
+            }),
         }
     }
 }
@@ -1833,39 +2027,39 @@ struct HttpApiError {
 }
 
 impl HttpApiError {
-    fn invalid_request(request_id: u64, message: impl Into<String>) -> Self {
+    fn invalid_request(request_id: u64, diagnostic: impl Into<String>) -> Self {
+        tracing::debug!(diagnostic = %diagnostic.into(), "invalid node API request");
         Self::new(
             request_id,
             StatusCode::BAD_REQUEST,
             NodeHttpErrorCode::InvalidRequest,
-            message,
         )
     }
 
-    fn not_found(request_id: u64, message: impl Into<String>) -> Self {
+    fn not_found(request_id: u64, diagnostic: impl Into<String>) -> Self {
+        tracing::debug!(diagnostic = %diagnostic.into(), "node API object not found");
         Self::new(
             request_id,
             StatusCode::NOT_FOUND,
             NodeHttpErrorCode::NotFound,
-            message,
         )
     }
 
-    fn operation_conflict(request_id: u64, message: impl Into<String>) -> Self {
+    fn operation_conflict(request_id: u64, diagnostic: impl Into<String>) -> Self {
+        tracing::debug!(diagnostic = %diagnostic.into(), "node API operation conflict");
         Self::new(
             request_id,
             StatusCode::CONFLICT,
             NodeHttpErrorCode::OperationConflict,
-            message,
         )
     }
 
-    fn internal(request_id: u64, message: impl Into<String>) -> Self {
+    fn internal(request_id: u64, diagnostic: impl Into<String>) -> Self {
+        tracing::error!(diagnostic = %diagnostic.into(), "node API internal error");
         Self::new(
             request_id,
             StatusCode::INTERNAL_SERVER_ERROR,
             NodeHttpErrorCode::Internal,
-            message,
         )
     }
 
@@ -1879,14 +2073,21 @@ impl HttpApiError {
             request_id,
             StatusCode::CONFLICT,
             NodeHttpErrorCode::ResyncRequired,
-            format!(
-                "事件 cursor 已失效: requested={}:{} latest={}:{} reason={reason:?}; 请重新读取快照",
-                requested.sequence,
-                requested.snapshot_revision,
-                latest.sequence,
-                latest.snapshot_revision
-            ),
         );
+        error.body.error = error
+            .body
+            .error
+            .with_param("requested_sequence", requested.sequence.to_string())
+            .with_param(
+                "requested_snapshot_revision",
+                requested.snapshot_revision.to_string(),
+            )
+            .with_param("latest_sequence", latest.sequence.to_string())
+            .with_param(
+                "latest_snapshot_revision",
+                latest.snapshot_revision.to_string(),
+            )
+            .with_param("reason", format!("{reason:?}"));
         error.body.requested_schema_version = None;
         error.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
         error.body.requested_cursor = Some(requested);
@@ -1900,61 +2101,92 @@ impl HttpApiError {
             request_id,
             StatusCode::BAD_REQUEST,
             NodeHttpErrorCode::SchemaVersionMismatch,
-            format!("节点 HTTP schema 版本不兼容: requested={requested}, supported={supported}"),
         );
+        error.body.error = error
+            .body
+            .error
+            .with_param("requested", requested.to_string())
+            .with_param("supported", supported.to_string());
         error.body.requested_schema_version = Some(requested);
         error.body.supported_schema_version = Some(supported);
         error
     }
 
     fn from_adapter(request_id: u64, error: NodeHttpAdapterError) -> Self {
-        let (status, code, problem) = match &error {
-            NodeHttpAdapterError::SchemaVersionMismatch { .. } => (
-                StatusCode::BAD_REQUEST,
-                NodeHttpErrorCode::SchemaVersionMismatch,
-                None,
+        match &error {
+            NodeHttpAdapterError::SchemaVersionMismatch {
+                requested,
+                supported,
+            } => Self::schema_version_mismatch(request_id, *requested, *supported),
+            NodeHttpAdapterError::Command(NodeCommandBusError::Invalid(problem)) => {
+                Self::from_problem(request_id, StatusCode::BAD_REQUEST, problem.clone())
+            }
+            NodeHttpAdapterError::Rejected(problem) => Self::from_problem(
+                request_id,
+                status_for_problem(problem.code),
+                problem.clone(),
             ),
-            NodeHttpAdapterError::Command(NodeCommandBusError::Invalid(problem)) => (
-                StatusCode::BAD_REQUEST,
-                NodeHttpErrorCode::InvalidRequest,
-                Some(problem.clone()),
-            ),
-            NodeHttpAdapterError::Command(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                NodeHttpErrorCode::BackendUnavailable,
-                None,
-            ),
-            NodeHttpAdapterError::Rejected(problem) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                NodeHttpErrorCode::BackendRejected,
-                Some(problem.clone()),
-            ),
-            NodeHttpAdapterError::UnexpectedOutcome(_)
-            | NodeHttpAdapterError::ManifestSchemaMismatch { .. }
-            | NodeHttpAdapterError::InvalidManifest { .. } => (
-                StatusCode::BAD_GATEWAY,
-                NodeHttpErrorCode::ContractViolation,
-                None,
-            ),
-        };
-        let mut error = Self::new(request_id, status, code, error.to_string());
-        error.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
-        error.body.problem = problem;
-        error
+            NodeHttpAdapterError::Command(error) => 'error: {
+                tracing::warn!(diagnostic = %error, "node command backend unavailable");
+                let mut response = Self::new(
+                    request_id,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    NodeHttpErrorCode::DependencyUnavailable,
+                );
+                response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+                break 'error response;
+            }
+            NodeHttpAdapterError::UnexpectedOutcome(detail) => {
+                tracing::warn!(diagnostic = %detail, "node adapter contract violation");
+                let mut response = Self::new(
+                    request_id,
+                    StatusCode::BAD_GATEWAY,
+                    NodeHttpErrorCode::ContractViolation,
+                );
+                response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+                response
+            }
+            NodeHttpAdapterError::ManifestSchemaMismatch { current, supported } => {
+                tracing::warn!(current, supported, "node UI manifest schema mismatch");
+                let mut response = Self::new(
+                    request_id,
+                    StatusCode::BAD_GATEWAY,
+                    NodeHttpErrorCode::ContractViolation,
+                );
+                response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+                response
+            }
+            NodeHttpAdapterError::InvalidManifest { violations } => {
+                tracing::warn!(?violations, "invalid node UI manifest");
+                let mut response = Self::new(
+                    request_id,
+                    StatusCode::BAD_GATEWAY,
+                    NodeHttpErrorCode::ContractViolation,
+                );
+                response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+                response
+            }
+        }
     }
 
-    fn new(
-        request_id: u64,
-        status: StatusCode,
-        code: NodeHttpErrorCode,
-        message: impl Into<String>,
-    ) -> Self {
+    fn from_problem(request_id: u64, status: StatusCode, problem: NodeProblem) -> Self {
+        let hide_problem = matches!(
+            problem.category,
+            NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
+        );
+        let mut response = Self::new(request_id, status, code_for_problem(problem.code));
+        response.body.error = NodeErrorDetails::from_problem(&problem, None);
+        response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+        response.body.problem = (!hide_problem).then_some(problem);
+        response
+    }
+
+    fn new(request_id: u64, status: StatusCode, code: NodeHttpErrorCode) -> Self {
         Self {
             status,
             body: NodeApiErrorResponse {
                 meta: NodeApiResponseMeta::new(request_id),
-                code,
-                message: message.into(),
+                error: NodeErrorDetails::new(code, code.default_message()),
                 requested_schema_version: None,
                 supported_schema_version: None,
                 problem: None,
@@ -2322,7 +2554,7 @@ mod tests {
         let response = post_v1_command(adapter, &payload).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body: NodeApiErrorResponse = json_body(response).await;
-        assert_eq!(body.code, NodeHttpErrorCode::InvalidRequest);
+        assert_eq!(body.error.code, NodeHttpErrorCode::InvalidRequest);
         assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
 
@@ -2441,7 +2673,7 @@ mod tests {
         let conflict_response = post_v1_command(adapter, &conflict).await;
         assert_eq!(conflict_response.status(), StatusCode::CONFLICT);
         let body: NodeApiErrorResponse = json_body(conflict_response).await;
-        assert_eq!(body.code, NodeHttpErrorCode::OperationConflict);
+        assert_eq!(body.error.code, NodeHttpErrorCode::OperationConflict);
         assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
 
@@ -2596,7 +2828,7 @@ mod tests {
             .expect("operation response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body: NodeApiErrorResponse = json_body(response).await;
-        assert_eq!(body.code, NodeHttpErrorCode::NotFound);
+        assert_eq!(body.error.code, NodeHttpErrorCode::NotFound);
         assert!(body.meta.request_id > 0);
         assert_eq!(body.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
         chrono::DateTime::parse_from_rfc3339(&body.meta.server_time)
@@ -2655,7 +2887,7 @@ mod tests {
             .expect("missing object response");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         let missing: NodeApiErrorResponse = json_body(missing).await;
-        assert_eq!(missing.code, NodeHttpErrorCode::NotFound);
+        assert_eq!(missing.error.code, NodeHttpErrorCode::NotFound);
     }
 
     #[tokio::test]
@@ -2786,7 +3018,7 @@ mod tests {
             .expect("expired cursor response");
         assert_eq!(expired.status(), StatusCode::CONFLICT);
         let expired: NodeApiErrorResponse = json_body(expired).await;
-        assert_eq!(expired.code, NodeHttpErrorCode::ResyncRequired);
+        assert_eq!(expired.error.code, NodeHttpErrorCode::ResyncRequired);
         assert_eq!(
             expired.resync_reason,
             Some(NodeEventReplayReason::HistoryGap)
@@ -2809,7 +3041,7 @@ mod tests {
             .expect("malformed cursor response");
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
         let malformed: NodeApiErrorResponse = json_body(malformed).await;
-        assert_eq!(malformed.code, NodeHttpErrorCode::InvalidRequest);
+        assert_eq!(malformed.error.code, NodeHttpErrorCode::InvalidRequest);
     }
 
     #[tokio::test]
@@ -2899,7 +3131,7 @@ mod tests {
                 .expect("v1 version mismatch response");
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
             let body: NodeApiErrorResponse = json_body(response).await;
-            assert_eq!(body.code, NodeHttpErrorCode::SchemaVersionMismatch);
+            assert_eq!(body.error.code, NodeHttpErrorCode::SchemaVersionMismatch);
             assert_eq!(body.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
             assert!(body.meta.request_id > 0);
             assert_eq!(body.requested_schema_version, Some(2));
@@ -2948,7 +3180,7 @@ mod tests {
         let response = post_command(adapter, &payload).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body: NodeHttpErrorResponse = json_body(response).await;
-        assert_eq!(body.code, NodeHttpErrorCode::InvalidRequest);
+        assert_eq!(body.error.code, NodeHttpErrorCode::InvalidRequest);
         let problem = body.problem.expect("validation problem in response");
         assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
     }
@@ -2994,7 +3226,7 @@ mod tests {
         let response = post_command(adapter, &payload).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body: NodeHttpErrorResponse = json_body(response).await;
-        assert_eq!(body.code, NodeHttpErrorCode::SchemaVersionMismatch);
+        assert_eq!(body.error.code, NodeHttpErrorCode::SchemaVersionMismatch);
         assert_eq!(
             body.requested_schema_version,
             Some(NODE_HTTP_SCHEMA_VERSION + 1)
@@ -3027,7 +3259,7 @@ mod tests {
                 .expect("version mismatch response");
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
             let body: NodeHttpErrorResponse = json_body(response).await;
-            assert_eq!(body.code, NodeHttpErrorCode::SchemaVersionMismatch);
+            assert_eq!(body.error.code, NodeHttpErrorCode::SchemaVersionMismatch);
             assert_eq!(body.requested_schema_version, Some(2));
             assert_eq!(
                 body.supported_schema_version,

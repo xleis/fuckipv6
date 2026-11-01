@@ -1,11 +1,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
-use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
+use fuckipv6_common::domain::{CapabilityKind, CapabilityState, OperationRecovery};
 use fuckipv6_common::ExitNodeCapabilities;
 
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodePhase};
@@ -606,14 +606,21 @@ pub struct NodeLogEntry {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeProblem {
     pub code: NodeProblemCode,
+    pub category: NodeErrorCategory,
     pub message: String,
+    pub message_key: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: Box<BTreeMap<String, String>>,
     pub network_name: Option<String>,
     pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Box<OperationRecovery>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeProblemCode {
+    AuthenticationRequired,
     InvalidRequest,
     NotFound,
     Conflict,
@@ -626,14 +633,87 @@ pub enum NodeProblemCode {
     Internal,
 }
 
+/// Stable error domains shared by command results, HTTP responses and
+/// WebSocket failures. UI code must branch on this category rather than parse
+/// human-readable messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeErrorCategory {
+    Authentication,
+    Authorization,
+    Validation,
+    State,
+    Capability,
+    Dependency,
+    Internal,
+}
+
+impl NodeProblemCode {
+    pub const fn category(self) -> NodeErrorCategory {
+        match self {
+            Self::AuthenticationRequired => NodeErrorCategory::Authentication,
+            Self::InvalidRequest => NodeErrorCategory::Validation,
+            Self::NotFound | Self::Conflict | Self::Cancelled => NodeErrorCategory::State,
+            Self::PermissionDenied => NodeErrorCategory::Authorization,
+            Self::Unavailable | Self::TimedOut => NodeErrorCategory::Dependency,
+            Self::Unsupported => NodeErrorCategory::Capability,
+            Self::Internal => NodeErrorCategory::Internal,
+        }
+    }
+
+    pub const fn message_key(self) -> &'static str {
+        match self {
+            Self::AuthenticationRequired => "error.authentication_required",
+            Self::InvalidRequest => "error.operation_invalid_request",
+            Self::NotFound => "error.operation_not_found",
+            Self::Conflict => "error.operation_conflict",
+            Self::Unavailable => "error.operation_unavailable",
+            Self::PermissionDenied => "error.operation_permission_denied",
+            Self::Cancelled => "error.operation_cancelled",
+            Self::TimedOut => "error.operation_timed_out",
+            Self::Unsupported => "error.operation_unsupported",
+            Self::Internal => "error.operation_internal",
+        }
+    }
+
+    pub const fn recovery(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::AuthenticationRequired => Some(("reauth", "recovery.reauthenticate")),
+            Self::InvalidRequest => Some(("edit_request", "recovery.fix_request")),
+            Self::NotFound | Self::Conflict => Some(("refresh", "recovery.refresh_state")),
+            Self::Unavailable | Self::Cancelled | Self::TimedOut => {
+                Some(("retry", "recovery.retry"))
+            }
+            Self::PermissionDenied => Some(("request_access", "recovery.request_access")),
+            Self::Unsupported => Some(("change_request", "recovery.use_supported_capability")),
+            Self::Internal => Some(("inspect_diagnostics", "recovery.inspect_diagnostics")),
+        }
+    }
+}
+
 impl NodeProblem {
     pub fn new(code: NodeProblemCode, message: impl Into<String>) -> Self {
+        let recovery = code.recovery().map(|(kind, hint_key)| {
+            Box::new(OperationRecovery {
+                kind: kind.into(),
+                hint_key: hint_key.into(),
+            })
+        });
         Self {
             code,
+            category: code.category(),
             message: message.into(),
+            message_key: code.message_key().into(),
+            params: Box::default(),
             network_name: None,
             retryable: false,
+            recovery,
         }
+    }
+
+    pub fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.params.insert(key.into(), value.into());
+        self
     }
 
     pub fn for_network(mut self, network_name: impl Into<String>) -> Self {
@@ -966,12 +1046,17 @@ mod tests {
     #[test]
     fn node_problem_round_trips_with_stable_codes_and_flags() {
         let cases = [
+            (
+                NodeProblemCode::AuthenticationRequired,
+                "authentication_required",
+            ),
             (NodeProblemCode::InvalidRequest, "invalid_request"),
             (NodeProblemCode::NotFound, "not_found"),
             (NodeProblemCode::Conflict, "conflict"),
             (NodeProblemCode::Unavailable, "unavailable"),
             (NodeProblemCode::PermissionDenied, "permission_denied"),
             (NodeProblemCode::Cancelled, "cancelled"),
+            (NodeProblemCode::TimedOut, "timed_out"),
             (NodeProblemCode::Unsupported, "unsupported"),
             (NodeProblemCode::Internal, "internal"),
         ];
@@ -981,15 +1066,17 @@ mod tests {
                 .for_network("home")
                 .retryable(true);
             let encoded = serde_json::to_value(&problem).expect("serialize node problem");
+            assert_eq!(encoded["code"], wire_name);
+            assert_eq!(encoded["category"], serde_json::json!(problem.category));
+            assert_eq!(encoded["message"], "测试错误");
+            assert_eq!(encoded["message_key"], problem.message_key);
+            assert_eq!(encoded["network_name"], "home");
+            assert_eq!(encoded["retryable"], true);
             assert_eq!(
-                encoded,
-                serde_json::json!({
-                    "code": wire_name,
-                    "message": "测试错误",
-                    "network_name": "home",
-                    "retryable": true,
-                })
+                encoded["recovery"],
+                serde_json::to_value(&problem.recovery).expect("serialize recovery")
             );
+            assert!(encoded.get("params").is_none());
             let decoded: NodeProblem =
                 serde_json::from_value(encoded).expect("deserialize node problem");
             assert_eq!(decoded, problem);

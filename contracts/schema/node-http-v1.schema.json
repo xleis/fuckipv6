@@ -222,6 +222,9 @@
     "NodeApiErrorResponse": {
       "description": "Versioned error response. The `problem` payload is optional because some\ntransport-level failures do not originate from a node command.",
       "properties": {
+        "category": {
+          "$ref": "#/$defs/NodeErrorCategory"
+        },
         "code": {
           "$ref": "#/$defs/NodeHttpErrorCode"
         },
@@ -238,10 +241,39 @@
         "message": {
           "type": "string"
         },
+        "message_key": {
+          "type": "string"
+        },
+        "object": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DomainObjectRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
         "problem": {
           "anyOf": [
             {
               "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationRecovery"
             },
             {
               "type": "null"
@@ -282,6 +314,9 @@
             }
           ]
         },
+        "retryable": {
+          "type": "boolean"
+        },
         "schema_version": {
           "format": "uint16",
           "maximum": 65535,
@@ -306,7 +341,10 @@
         "request_id",
         "server_time",
         "code",
-        "message"
+        "category",
+        "message",
+        "message_key",
+        "retryable"
       ],
       "type": "object"
     },
@@ -1596,6 +1634,19 @@
       ],
       "type": "string"
     },
+    "NodeErrorCategory": {
+      "description": "Stable error domains shared by command results, HTTP responses and\nWebSocket failures. UI code must branch on this category rather than parse\nhuman-readable messages.",
+      "enum": [
+        "authentication",
+        "authorization",
+        "validation",
+        "state",
+        "capability",
+        "dependency",
+        "internal"
+      ],
+      "type": "string"
+    },
     "NodeEvent": {
       "description": "Ordered event delivered to every attached UI and control adapter.",
       "properties": {
@@ -1910,8 +1961,14 @@
         "schema_version_mismatch",
         "invalid_request",
         "not_found",
+        "authentication_required",
+        "permission_denied",
         "operation_conflict",
+        "operation_cancelled",
+        "operation_timed_out",
         "resync_required",
+        "capability_unavailable",
+        "dependency_unavailable",
         "backend_rejected",
         "backend_unavailable",
         "contract_violation",
@@ -1922,16 +1979,48 @@
     "NodeHttpErrorResponse": {
       "description": "Versioned HTTP error DTO. It is also used for WebSocket version mismatches\nso clients receive a machine-readable failure before an upgrade.",
       "properties": {
+        "category": {
+          "$ref": "#/$defs/NodeErrorCategory"
+        },
         "code": {
           "$ref": "#/$defs/NodeHttpErrorCode"
         },
         "message": {
           "type": "string"
         },
+        "message_key": {
+          "type": "string"
+        },
+        "object": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DomainObjectRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
         "problem": {
           "anyOf": [
             {
               "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationRecovery"
             },
             {
               "type": "null"
@@ -1946,6 +2035,9 @@
             "integer",
             "null"
           ]
+        },
+        "retryable": {
+          "type": "boolean"
         },
         "schema_version": {
           "format": "uint16",
@@ -1966,7 +2058,10 @@
       "required": [
         "schema_version",
         "code",
-        "message"
+        "category",
+        "message",
+        "message_key",
+        "retryable"
       ],
       "type": "object"
     },
@@ -2653,10 +2748,16 @@
     "NodeProblem": {
       "description": "UI- and transport-neutral error returned by every node command adapter.",
       "properties": {
+        "category": {
+          "$ref": "#/$defs/NodeErrorCategory"
+        },
         "code": {
           "$ref": "#/$defs/NodeProblemCode"
         },
         "message": {
+          "type": "string"
+        },
+        "message_key": {
           "type": "string"
         },
         "network_name": {
@@ -2665,13 +2766,31 @@
             "null"
           ]
         },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "retryable": {
           "type": "boolean"
         }
       },
       "required": [
         "code",
+        "category",
         "message",
+        "message_key",
         "retryable"
       ],
       "type": "object"
@@ -2680,6 +2799,7 @@
       "oneOf": [
         {
           "enum": [
+            "authentication_required",
             "invalid_request",
             "not_found",
             "conflict",
@@ -3390,12 +3510,48 @@
           "type": "object"
         },
         {
+          "description": "Transport-neutral error metadata carried by HTTP, WebSocket and operation\nfailures. `message` remains a human-readable fallback; clients branch on\n`code`, `category` and `message_key`, interpolate `params`, and use\n`recovery` to offer a safe next action.",
           "properties": {
+            "category": {
+              "$ref": "#/$defs/NodeErrorCategory"
+            },
             "code": {
               "$ref": "#/$defs/NodeHttpErrorCode"
             },
             "message": {
               "type": "string"
+            },
+            "message_key": {
+              "type": "string"
+            },
+            "object": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DomainObjectRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "params": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "recovery": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OperationRecovery"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retryable": {
+              "type": "boolean"
             },
             "schema_version": {
               "format": "uint16",
@@ -3412,7 +3568,10 @@
             "type",
             "schema_version",
             "code",
-            "message"
+            "category",
+            "message",
+            "message_key",
+            "retryable"
           ],
           "type": "object"
         }

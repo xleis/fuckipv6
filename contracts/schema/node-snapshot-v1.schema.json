@@ -233,6 +233,19 @@
       ],
       "type": "string"
     },
+    "NodeErrorCategory": {
+      "description": "Stable error domains shared by command results, HTTP responses and\nWebSocket failures. UI code must branch on this category rather than parse\nhuman-readable messages.",
+      "enum": [
+        "authentication",
+        "authorization",
+        "validation",
+        "state",
+        "capability",
+        "dependency",
+        "internal"
+      ],
+      "type": "string"
+    },
     "NodeIdentitySnapshot": {
       "description": "Public node identity metadata. Secret key material must never enter this DTO.",
       "properties": {
@@ -662,10 +675,16 @@
     "NodeProblem": {
       "description": "UI- and transport-neutral error returned by every node command adapter.",
       "properties": {
+        "category": {
+          "$ref": "#/$defs/NodeErrorCategory"
+        },
         "code": {
           "$ref": "#/$defs/NodeProblemCode"
         },
         "message": {
+          "type": "string"
+        },
+        "message_key": {
           "type": "string"
         },
         "network_name": {
@@ -674,13 +693,31 @@
             "null"
           ]
         },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "retryable": {
           "type": "boolean"
         }
       },
       "required": [
         "code",
+        "category",
         "message",
+        "message_key",
         "retryable"
       ],
       "type": "object"
@@ -689,6 +726,7 @@
       "oneOf": [
         {
           "enum": [
+            "authentication_required",
             "invalid_request",
             "not_found",
             "conflict",
@@ -773,6 +811,21 @@
         "p2p_tx_packets",
         "p2p_tx_bytes",
         "error_count"
+      ],
+      "type": "object"
+    },
+    "OperationRecovery": {
+      "properties": {
+        "hint_key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "hint_key"
       ],
       "type": "object"
     },

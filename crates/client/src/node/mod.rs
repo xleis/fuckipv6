@@ -27,10 +27,11 @@ pub use event::{
 pub use http_adapter::{
     NodeApiCommandResponse, NodeApiErrorResponse, NodeApiEvent, NodeApiManifestResponse,
     NodeApiObject, NodeApiObjectResponse, NodeApiOperationResponse, NodeApiResponseMeta,
-    NodeApiSnapshotResponse, NodeCommandHttpRequest, NodeCommandHttpResponse, NodeHttpAdapter,
-    NodeHttpAdapterError, NodeHttpErrorCode, NodeHttpErrorResponse, NodeManifestResponse,
-    NodeOperationSnapshot, NodeSnapshotResponse, NodeWsMessage, NodeWsResyncReason, NodeWsSession,
-    NodeWsSessionError, NODE_HTTP_API_PREFIX, NODE_HTTP_SCHEMA_VERSION, NODE_HTTP_V1_API_PREFIX,
+    NodeApiSnapshotResponse, NodeCommandHttpRequest, NodeCommandHttpResponse, NodeErrorDetails,
+    NodeHttpAdapter, NodeHttpAdapterError, NodeHttpErrorCode, NodeHttpErrorResponse,
+    NodeManifestResponse, NodeOperationSnapshot, NodeSnapshotResponse, NodeWsMessage,
+    NodeWsResyncReason, NodeWsSession, NodeWsSessionError, NODE_HTTP_API_PREFIX,
+    NODE_HTTP_SCHEMA_VERSION, NODE_HTTP_V1_API_PREFIX,
 };
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
@@ -43,7 +44,7 @@ pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, No
 pub use state::{
     NodeAccessModel, NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot,
     NodeConfigurationSnapshot, NodeControlHealth, NodeEmbeddedServiceSnapshot,
-    NodeEmbeddedServiceStatus, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
+    NodeEmbeddedServiceStatus, NodeErrorCategory, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
     NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
     NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission, NodePermissionSnapshot,
     NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeStateStore,

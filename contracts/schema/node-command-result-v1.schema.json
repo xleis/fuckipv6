@@ -567,6 +567,19 @@
       ],
       "type": "string"
     },
+    "NodeErrorCategory": {
+      "description": "Stable error domains shared by command results, HTTP responses and\nWebSocket failures. UI code must branch on this category rather than parse\nhuman-readable messages.",
+      "enum": [
+        "authentication",
+        "authorization",
+        "validation",
+        "state",
+        "capability",
+        "dependency",
+        "internal"
+      ],
+      "type": "string"
+    },
     "NodeIdentitySnapshot": {
       "description": "Public node identity metadata. Secret key material must never enter this DTO.",
       "properties": {
@@ -1073,10 +1086,16 @@
     "NodeProblem": {
       "description": "UI- and transport-neutral error returned by every node command adapter.",
       "properties": {
+        "category": {
+          "$ref": "#/$defs/NodeErrorCategory"
+        },
         "code": {
           "$ref": "#/$defs/NodeProblemCode"
         },
         "message": {
+          "type": "string"
+        },
+        "message_key": {
           "type": "string"
         },
         "network_name": {
@@ -1085,13 +1104,31 @@
             "null"
           ]
         },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "retryable": {
           "type": "boolean"
         }
       },
       "required": [
         "code",
+        "category",
         "message",
+        "message_key",
         "retryable"
       ],
       "type": "object"
@@ -1100,6 +1137,7 @@
       "oneOf": [
         {
           "enum": [
+            "authentication_required",
             "invalid_request",
             "not_found",
             "conflict",
@@ -1654,6 +1692,21 @@
         "positive_timeout"
       ],
       "type": "string"
+    },
+    "OperationRecovery": {
+      "properties": {
+        "hint_key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "hint_key"
+      ],
+      "type": "object"
     },
     "UiMode": {
       "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane. It remains available on\nheadless hosts as a server-only surface; the display environment only\ndecides whether a browser window can also be opened. `WebUi` must never be\nrepresented as the native `Gpui` surface.",

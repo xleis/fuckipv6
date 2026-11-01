@@ -56,14 +56,20 @@ export type NodeApiCommandResponse = {
 };
 
 export type NodeApiErrorResponse = {
+  "category": NodeErrorCategory;
   "code": NodeHttpErrorCode;
   "latest_cursor"?: NodeEventCursor | null;
   "message": string;
+  "message_key": string;
+  "object"?: DomainObjectRef | null;
+  "params"?: Record<string, string>;
   "problem"?: NodeProblem | null;
+  "recovery"?: OperationRecovery | null;
   "request_id": number;
   "requested_cursor"?: NodeEventCursor | null;
   "requested_schema_version"?: number | null;
   "resync_reason"?: NodeEventReplayReason | null;
+  "retryable": boolean;
   "schema_version": number;
   "server_time": string;
   "supported_schema_version"?: number | null;
@@ -348,6 +354,8 @@ export type NodeEmbeddedServiceSnapshot = {
 
 export type NodeEmbeddedServiceStatus = "starting" | "running" | "stopping" | "stopped" | "failed";
 
+export type NodeErrorCategory = "authentication" | "authorization" | "validation" | "state" | "capability" | "dependency" | "internal";
+
 export type NodeEvent = {
   "kind": NodeEventKind;
   "sequence": number;
@@ -431,13 +439,19 @@ export type NodeHttpContract = {
   "websocket_message": NodeWsMessage;
 };
 
-export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "not_found" | "operation_conflict" | "resync_required" | "backend_rejected" | "backend_unavailable" | "contract_violation" | "internal";
+export type NodeHttpErrorCode = "schema_version_mismatch" | "invalid_request" | "not_found" | "authentication_required" | "permission_denied" | "operation_conflict" | "operation_cancelled" | "operation_timed_out" | "resync_required" | "capability_unavailable" | "dependency_unavailable" | "backend_rejected" | "backend_unavailable" | "contract_violation" | "internal";
 
 export type NodeHttpErrorResponse = {
+  "category": NodeErrorCategory;
   "code": NodeHttpErrorCode;
   "message": string;
+  "message_key": string;
+  "object"?: DomainObjectRef | null;
+  "params"?: Record<string, string>;
   "problem"?: NodeProblem | null;
+  "recovery"?: OperationRecovery | null;
   "requested_schema_version"?: number | null;
+  "retryable": boolean;
   "schema_version": number;
   "supported_schema_version"?: number | null;
 };
@@ -593,13 +607,17 @@ export type NodeProbePeerCommand = {
 };
 
 export type NodeProblem = {
+  "category": NodeErrorCategory;
   "code": NodeProblemCode;
   "message": string;
+  "message_key": string;
   "network_name"?: string | null;
+  "params"?: Record<string, string>;
+  "recovery"?: OperationRecovery | null;
   "retryable": boolean;
 };
 
-export type NodeProblemCode = "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "timed_out" | "internal" | "unsupported";
+export type NodeProblemCode = "authentication_required" | "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "timed_out" | "internal" | "unsupported";
 
 export type NodeResidualCleanupResult = {
   "cleaned_networks": Array<string>;
@@ -739,8 +757,14 @@ export type NodeWsMessage = {
   "snapshot": NodeSnapshot;
   "type": "resync";
 } | {
+  "category": NodeErrorCategory;
   "code": NodeHttpErrorCode;
   "message": string;
+  "message_key": string;
+  "object"?: DomainObjectRef | null;
+  "params"?: Record<string, string>;
+  "recovery"?: OperationRecovery | null;
+  "retryable": boolean;
   "schema_version": number;
   "type": "error";
 };

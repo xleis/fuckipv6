@@ -1565,7 +1565,7 @@ struct ApiError {
     #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    problem: Option<NodeProblem>,
+    problem: Option<Box<NodeProblem>>,
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
@@ -1584,7 +1584,7 @@ fn api_error_with_problem(
         Json(ApiError {
             error: message.into(),
             code: None,
-            problem,
+            problem: problem.map(Box::new),
         }),
     )
 }
@@ -1621,6 +1621,7 @@ fn api_error_from_app_controller(
 
 fn status_for_node_problem(code: NodeProblemCode) -> StatusCode {
     match code {
+        NodeProblemCode::AuthenticationRequired => StatusCode::UNAUTHORIZED,
         NodeProblemCode::InvalidRequest => StatusCode::BAD_REQUEST,
         NodeProblemCode::NotFound => StatusCode::NOT_FOUND,
         NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,

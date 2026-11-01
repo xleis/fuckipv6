@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
+use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, FocusHandle, KeyDownEvent,
+    div, prelude::*, px, rgba, size, App, Application, Bounds, Context, FocusHandle, KeyDownEvent,
     Render, SharedString, Window, WindowBounds, WindowOptions,
 };
 
@@ -18,22 +19,22 @@ use crate::node::{
     NodeUiManifest, NodeUiPage,
 };
 
-const WINDOW_WIDTH: f32 = 1180.0;
-const WINDOW_HEIGHT: f32 = 800.0;
+const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
+const WINDOW_HEIGHT: f32 = DIMENSIONS.window_default_height_px as f32;
 
-const COLOR_BG: u32 = 0x0b0f14;
-const COLOR_SIDEBAR: u32 = 0x111821;
-const COLOR_PANEL: u32 = 0x16202b;
-const COLOR_PANEL_RAISED: u32 = 0x1c2936;
-const COLOR_BORDER: u32 = 0x2a3b4c;
-const COLOR_TEXT: u32 = 0xe6edf3;
-const COLOR_MUTED: u32 = 0x8fa3b5;
-const COLOR_ACCENT: u32 = 0x41d1a7;
-const COLOR_ACCENT_DIM: u32 = 0x1d6b59;
-const COLOR_WARNING: u32 = 0xc99a3e;
-const COLOR_ERROR_BG: u32 = 0x3a1c22;
-const COLOR_ERROR_BORDER: u32 = 0x8f3545;
-const COLOR_ERROR_TEXT: u32 = 0xffb4bf;
+const COLOR_BG: u32 = DARK_THEME.colors.background.rgba_hex();
+const COLOR_SIDEBAR: u32 = DARK_THEME.colors.background_soft.rgba_hex();
+const COLOR_PANEL: u32 = DARK_THEME.colors.panel_solid.rgba_hex();
+const COLOR_PANEL_RAISED: u32 = DARK_THEME.colors.panel_raised.rgba_hex();
+const COLOR_BORDER: u32 = DARK_THEME.colors.border.rgba_hex();
+const COLOR_TEXT: u32 = DARK_THEME.colors.text.rgba_hex();
+const COLOR_MUTED: u32 = DARK_THEME.colors.text_muted.rgba_hex();
+const COLOR_ACCENT: u32 = DARK_THEME.colors.accent.rgba_hex();
+const COLOR_ACCENT_DIM: u32 = DARK_THEME.colors.accent_pressed.rgba_hex();
+const COLOR_WARNING: u32 = DARK_THEME.colors.warning.rgba_hex();
+const COLOR_ERROR_BG: u32 = DARK_THEME.colors.danger_soft.rgba_hex();
+const COLOR_ERROR_BORDER: u32 = DARK_THEME.colors.danger.rgba_hex();
+const COLOR_ERROR_TEXT: u32 = DARK_THEME.colors.danger_text.rgba_hex();
 
 struct GpuiShell {
     commands: NodeCommandBus,
@@ -458,14 +459,19 @@ impl GpuiShell {
             .px_6()
             .py_4()
             .border_b_1()
-            .border_color(rgb(COLOR_BORDER))
+            .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_2xl().text_color(rgb(COLOR_TEXT)).child(title))
-                    .child(div().text_sm().text_color(rgb(COLOR_MUTED)).child(subtitle)),
+                    .child(div().text_2xl().text_color(rgba(COLOR_TEXT)).child(title))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(subtitle),
+                    ),
             )
             .child(
                 div()
@@ -477,12 +483,12 @@ impl GpuiShell {
                             .px_3()
                             .py_1()
                             .rounded_full()
-                            .bg(rgb(status_color))
-                            .text_color(rgb(COLOR_TEXT))
+                            .bg(rgba(status_color))
+                            .text_color(rgba(COLOR_TEXT))
                             .text_sm()
                             .child(primary_status.label_zh()),
                     )
-                    .child(div().text_sm().text_color(rgb(COLOR_MUTED)).child(format!(
+                    .child(div().text_sm().text_color(rgba(COLOR_MUTED)).child(format!(
                         "{} · revision {}",
                         self.selected_network.as_deref().unwrap_or("未选择网络"),
                         self.snapshot.revision
@@ -493,8 +499,8 @@ impl GpuiShell {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(refresh_color))
-                            .text_color(rgb(COLOR_TEXT))
+                            .bg(rgba(refresh_color))
+                            .text_color(rgba(COLOR_TEXT))
                             .text_sm()
                             .on_click(cx.listener(|shell, _, _, cx| {
                                 if shell.pending_commands == 0 {
@@ -532,8 +538,8 @@ impl GpuiShell {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(background))
-                    .text_color(rgb(if selected { COLOR_TEXT } else { COLOR_MUTED }))
+                    .bg(rgba(background))
+                    .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
                     .text_sm()
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.selected_page = page_id.clone();
@@ -560,12 +566,12 @@ impl GpuiShell {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(if selected {
+                    .bg(rgba(if selected {
                         COLOR_ACCENT_DIM
                     } else {
                         COLOR_PANEL
                     }))
-                    .text_color(rgb(if selected { COLOR_TEXT } else { COLOR_MUTED }))
+                    .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
                     .text_xs()
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.selected_network = Some(network_name.clone());
@@ -589,11 +595,11 @@ impl GpuiShell {
         div()
             .flex()
             .flex_col()
-            .w(px(238.0))
+            .w(px(DIMENSIONS.sidebar_px as f32))
             .h_full()
-            .bg(rgb(COLOR_SIDEBAR))
+            .bg(rgba(COLOR_SIDEBAR))
             .border_r_1()
-            .border_color(rgb(COLOR_BORDER))
+            .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
                     .px_6()
@@ -602,14 +608,14 @@ impl GpuiShell {
                     .child(
                         div()
                             .text_xl()
-                            .text_color(rgb(COLOR_ACCENT))
+                            .text_color(rgba(COLOR_ACCENT))
                             .child("fuckipv6"),
                     )
                     .child(
                         div()
                             .mt_1()
                             .text_xs()
-                            .text_color(rgb(COLOR_MUTED))
+                            .text_color(rgba(COLOR_MUTED))
                             .child("原生节点控制面 · manifest 驱动"),
                     ),
             )
@@ -619,18 +625,18 @@ impl GpuiShell {
                     .mx_3()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(COLOR_PANEL))
+                    .bg(rgba(COLOR_PANEL))
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(COLOR_MUTED))
+                            .text_color(rgba(COLOR_MUTED))
                             .child("当前网络"),
                     )
                     .child(div().mt_2().flex().flex_wrap().gap_1().children(
                         if network_chips.is_empty() {
                             vec![div()
                                 .text_xs()
-                                .text_color(rgb(COLOR_MUTED))
+                                .text_color(rgba(COLOR_MUTED))
                                 .child("没有运行中的网络")
                                 .into_any_element()]
                         } else {
@@ -643,9 +649,9 @@ impl GpuiShell {
                     .m_3()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(COLOR_PANEL))
+                    .bg(rgba(COLOR_PANEL))
                     .text_xs()
-                    .text_color(rgb(COLOR_MUTED))
+                    .text_color(rgba(COLOR_MUTED))
                     .child(manifest_state),
             )
     }
@@ -659,10 +665,10 @@ impl GpuiShell {
             .px_4()
             .py_3()
             .rounded_md()
-            .bg(rgb(COLOR_ERROR_BG))
+            .bg(rgba(COLOR_ERROR_BG))
             .border_1()
-            .border_color(rgb(COLOR_ERROR_BORDER))
-            .text_color(rgb(COLOR_ERROR_TEXT))
+            .border_color(rgba(COLOR_ERROR_BORDER))
+            .text_color(rgba(COLOR_ERROR_TEXT))
             .text_sm()
             .child(format!("操作失败: {error}"))
             .on_click(cx.listener(|shell, _, _, cx| {
@@ -678,8 +684,8 @@ impl GpuiShell {
             .px_4()
             .py_2()
             .rounded_md()
-            .bg(rgb(COLOR_ACCENT_DIM))
-            .text_color(rgb(COLOR_TEXT))
+            .bg(rgba(COLOR_ACCENT_DIM))
+            .text_color(rgba(COLOR_TEXT))
             .text_sm()
             .child(self.notice.clone().unwrap_or_default())
     }
@@ -742,16 +748,16 @@ impl GpuiShell {
                 .child(
                     div()
                         .text_lg()
-                        .text_color(rgb(COLOR_TEXT))
+                        .text_color(rgba(COLOR_TEXT))
                         .child("共享动作"),
                 )
                 .children(if actions.is_empty() {
                     vec![div()
                         .p_4()
                         .rounded_lg()
-                        .bg(rgb(COLOR_PANEL))
+                        .bg(rgba(COLOR_PANEL))
                         .text_sm()
-                        .text_color(rgb(COLOR_MUTED))
+                        .text_color(rgba(COLOR_MUTED))
                         .child("此页面在 manifest 中没有声明动作；当前仅展示真实快照字段。")
                         .into_any_element()]
                 } else {
@@ -800,9 +806,9 @@ impl GpuiShell {
             .gap_3()
             .p_4()
             .rounded_lg()
-            .bg(rgb(COLOR_PANEL))
+            .bg(rgba(COLOR_PANEL))
             .border_1()
-            .border_color(rgb(if confirmation_pending {
+            .border_color(rgba(if confirmation_pending {
                 COLOR_WARNING
             } else {
                 COLOR_BORDER
@@ -820,10 +826,10 @@ impl GpuiShell {
                             .child(
                                 div()
                                     .text_base()
-                                    .text_color(rgb(COLOR_TEXT))
+                                    .text_color(rgba(COLOR_TEXT))
                                     .child(action_label(&action.id)),
                             )
-                            .child(div().text_xs().text_color(rgb(COLOR_MUTED)).child(format!(
+                            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
                                 "{} · {:?} · permission={} · availability={} · {}",
                                 action.id, action.command, permission, availability, status
                             ))),
@@ -833,7 +839,7 @@ impl GpuiShell {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(
+                            .bg(rgba(
                                 if action.backend_status == NodeUiBackendStatus::Implemented {
                                     COLOR_ACCENT_DIM
                                 } else {
@@ -841,7 +847,7 @@ impl GpuiShell {
                                 },
                             ))
                             .text_xs()
-                            .text_color(rgb(
+                            .text_color(rgba(
                                 if action.backend_status == NodeUiBackendStatus::Implemented {
                                     COLOR_TEXT
                                 } else {
@@ -855,7 +861,7 @@ impl GpuiShell {
             .children(block_reason.map(|reason| {
                 div()
                     .text_xs()
-                    .text_color(rgb(COLOR_WARNING))
+                    .text_color(rgba(COLOR_WARNING))
                     .child(format!("动作被阻止: {}", reason.message()))
                     .into_any_element()
             }))
@@ -865,8 +871,8 @@ impl GpuiShell {
                     .px_4()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(button_background))
-                    .text_color(rgb(COLOR_TEXT))
+                    .bg(rgba(button_background))
+                    .text_color(rgba(COLOR_TEXT))
                     .text_sm()
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if shell.pending_commands == 0 && block_reason.is_none() {
@@ -932,7 +938,7 @@ impl GpuiShell {
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().text_xs().text_color(rgb(COLOR_MUTED)).child(format!(
+            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
                 "{label}{required} · {} · {:?}",
                 field.id, field.validation
             )))
@@ -964,11 +970,11 @@ impl GpuiShell {
             .px_3()
             .py_2()
             .rounded_md()
-            .bg(rgb(COLOR_PANEL_RAISED))
+            .bg(rgba(COLOR_PANEL_RAISED))
             .border_1()
-            .border_color(rgb(if focused { COLOR_ACCENT } else { COLOR_BORDER }))
+            .border_color(rgba(if focused { COLOR_ACCENT } else { COLOR_BORDER }))
             .text_sm()
-            .text_color(rgb(if value.is_empty() {
+            .text_color(rgba(if value.is_empty() {
                 COLOR_MUTED
             } else {
                 COLOR_TEXT
@@ -1010,12 +1016,12 @@ impl GpuiShell {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(if selected {
+                    .bg(rgba(if selected {
                         COLOR_ACCENT_DIM
                     } else {
                         COLOR_PANEL_RAISED
                     }))
-                    .text_color(rgb(if selected { COLOR_TEXT } else { COLOR_MUTED }))
+                    .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
                     .text_xs()
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.set_field_value(&action_id, &field_id, choice_value.clone());
@@ -1036,7 +1042,7 @@ impl Render for GpuiShell {
             .flex_col()
             .flex_1()
             .h_full()
-            .bg(rgb(COLOR_BG))
+            .bg(rgba(COLOR_BG))
             .child(self.header(cx));
 
         if self.error.is_some() {
@@ -1050,9 +1056,9 @@ impl Render for GpuiShell {
                 .px_6()
                 .py_3()
                 .border_t_1()
-                .border_color(rgb(COLOR_BORDER))
+                .border_color(rgba(COLOR_BORDER))
                 .text_xs()
-                .text_color(rgb(COLOR_MUTED))
+                .text_color(rgba(COLOR_MUTED))
                 .child(
                     "fuckipv6 · manifest-driven GPUI · NodeSnapshot/NodeCommandBus shared with WebUI · UI 对等尚未完成",
                 ),
@@ -1064,7 +1070,7 @@ impl Render for GpuiShell {
             .flex()
             .w_full()
             .h_full()
-            .bg(rgb(COLOR_BG))
+            .bg(rgba(COLOR_BG))
             .child(self.sidebar(cx))
             .child(main)
     }
@@ -1078,25 +1084,25 @@ fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
         .min_w(px(180.0))
         .p_4()
         .rounded_lg()
-        .bg(rgb(COLOR_PANEL))
+        .bg(rgba(COLOR_PANEL))
         .border_1()
-        .border_color(rgb(COLOR_BORDER))
+        .border_color(rgba(COLOR_BORDER))
         .child(
             div()
                 .text_sm()
-                .text_color(rgb(COLOR_MUTED))
+                .text_color(rgba(COLOR_MUTED))
                 .child(label.to_string()),
         )
         .child(
             div()
                 .text_2xl()
-                .text_color(rgb(COLOR_TEXT))
+                .text_color(rgba(COLOR_TEXT))
                 .child(value.to_string()),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(COLOR_MUTED))
+                .text_color(rgba(COLOR_MUTED))
                 .child(source.to_string()),
         )
 }
@@ -1120,19 +1126,19 @@ fn section_card(section: &SectionModel) -> gpui::AnyElement {
         .gap_2()
         .p_4()
         .rounded_lg()
-        .bg(rgb(COLOR_PANEL))
+        .bg(rgba(COLOR_PANEL))
         .border_1()
-        .border_color(rgb(COLOR_BORDER))
+        .border_color(rgba(COLOR_BORDER))
         .child(
             div()
                 .text_base()
-                .text_color(rgb(COLOR_TEXT))
+                .text_color(rgba(COLOR_TEXT))
                 .child(section.title.clone()),
         )
         .children(if section.rows.is_empty() {
             vec![div()
                 .text_sm()
-                .text_color(rgb(COLOR_MUTED))
+                .text_color(rgba(COLOR_MUTED))
                 .child(section.empty_text.clone())
                 .into_any_element()]
         } else {
@@ -1148,17 +1154,17 @@ fn row_card(row: &RowModel) -> gpui::AnyElement {
         .gap_1()
         .p_3()
         .rounded_md()
-        .bg(rgb(COLOR_PANEL_RAISED))
+        .bg(rgba(COLOR_PANEL_RAISED))
         .child(
             div()
                 .text_sm()
-                .text_color(rgb(COLOR_TEXT))
+                .text_color(rgba(COLOR_TEXT))
                 .child(row.title.clone()),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(COLOR_MUTED))
+                .text_color(rgba(COLOR_MUTED))
                 .child(row.detail.clone()),
         )
         .into_any_element()
@@ -1169,20 +1175,20 @@ fn empty_state(title: &str, detail: impl Into<String>) -> impl IntoElement {
         div()
             .p_6()
             .rounded_lg()
-            .bg(rgb(COLOR_PANEL))
+            .bg(rgba(COLOR_PANEL))
             .border_1()
-            .border_color(rgb(COLOR_BORDER))
+            .border_color(rgba(COLOR_BORDER))
             .child(
                 div()
                     .text_xl()
-                    .text_color(rgb(COLOR_TEXT))
+                    .text_color(rgba(COLOR_TEXT))
                     .child(title.to_string()),
             )
             .child(
                 div()
                     .mt_2()
                     .text_sm()
-                    .text_color(rgb(COLOR_MUTED))
+                    .text_color(rgba(COLOR_MUTED))
                     .child(detail.into()),
             ),
     )

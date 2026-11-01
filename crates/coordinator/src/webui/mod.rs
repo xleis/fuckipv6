@@ -247,7 +247,7 @@ async fn index() -> Html<&'static str> {
 async fn webui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        WEBUI_CSS,
+        fuckipv6_common::design_tokens::webui_css(),
     )
 }
 
@@ -935,8 +935,6 @@ fn tail_lines(input: &str, max_lines: usize) -> Vec<String> {
 
     lines
 }
-
-const WEBUI_CSS: &str = include_str!("../../../common/assets/webui.css");
 
 const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="zh-CN" data-theme="dark" translate="no">

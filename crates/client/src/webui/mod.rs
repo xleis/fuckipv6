@@ -888,7 +888,7 @@ async fn handle_owner_auth_copy_js() -> impl IntoResponse {
 async fn handle_webui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        WEBUI_CSS,
+        fuckipv6_common::design_tokens::webui_css(),
     )
 }
 
@@ -2106,8 +2106,6 @@ async fn handle_routing(
         }
     }
 }
-
-const WEBUI_CSS: &str = include_str!("../../../common/assets/webui.css");
 
 const UNIFIED_MASTER_HTML: &str = r##"<!doctype html>
 <html lang="zh-CN" data-theme="dark" translate="no">
@@ -7029,11 +7027,12 @@ mod tests {
         assert!(UNIFIED_MASTER_HTML.contains("Bearer ${token}"));
         assert!(UNIFIED_MASTER_HTML.contains("fuckipv6.bearer.${token}"));
         assert!(!UNIFIED_MASTER_HTML.contains("?token="));
-        assert!(WEBUI_CSS.contains("--sidebar-w"));
-        assert!(WEBUI_CSS.contains("--panel"));
-        assert!(WEBUI_CSS.contains(".modal-wrap.active"));
-        assert!(WEBUI_CSS.contains("[data-theme=\"light\"]"));
-        assert!(WEBUI_CSS.contains("@media (max-width: 900px)"));
+        let css = fuckipv6_common::design_tokens::webui_css();
+        assert!(css.contains("--sidebar-w"));
+        assert!(css.contains("--panel"));
+        assert!(css.contains(".modal-wrap.active"));
+        assert!(css.contains("[data-theme=\"light\"]"));
+        assert!(css.contains("@media (max-width: 900px)"));
     }
 
     #[test]

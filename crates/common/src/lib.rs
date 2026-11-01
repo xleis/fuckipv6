@@ -4,6 +4,7 @@ pub mod codec;
 pub mod config;
 pub mod config_encryption;
 pub mod crypto;
+pub mod design_tokens;
 pub mod dht;
 pub mod domain;
 pub mod logging;

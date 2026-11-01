@@ -7,140 +7,6 @@
    ========================================================================== */
 
 /* ----------------------------------------------------------------------------
-   1. Design tokens
-   -------------------------------------------------------------------------- */
-:root {
-  color-scheme: dark;
-
-  --bg: #070b12;
-  --bg-soft: #0a101a;
-  --bg-deep: #050810;
-
-  --panel: rgba(17, 26, 41, 0.78);
-  --panel-solid: #101827;
-  --panel-raised: rgba(24, 35, 53, 0.82);
-  --panel-inset: rgba(6, 11, 19, 0.55);
-
-  --surface: rgba(148, 163, 184, 0.06);
-  --surface-hover: rgba(148, 163, 184, 0.11);
-  --input-bg: rgba(6, 11, 19, 0.62);
-
-  --border: rgba(148, 163, 184, 0.14);
-  --border-soft: rgba(148, 163, 184, 0.08);
-  --border-strong: rgba(148, 163, 184, 0.26);
-
-  --text: #e9eef7;
-  --text-main: #e9eef7;
-  --text-secondary: #a4b4ca;
-  --text-muted: #6c7e96;
-  --text-faint: #4b5b71;
-
-  --accent: #38bdf8;
-  --accent-2: #818cf8;
-  --accent-soft: rgba(56, 189, 248, 0.12);
-  --accent-glow: rgba(56, 189, 248, 0.35);
-
-  --green: #34d399;
-  --green-soft: rgba(52, 211, 153, 0.12);
-  --green-glow: rgba(52, 211, 153, 0.35);
-  --amber: #fbbf24;
-  --amber-soft: rgba(251, 191, 36, 0.13);
-  --red: #fb7185;
-  --red-soft: rgba(251, 113, 133, 0.12);
-  --purple: #a78bfa;
-  --purple-soft: rgba(167, 139, 250, 0.12);
-
-  --tone-cyan: #38bdf8;
-  --tone-cyan-soft: rgba(56, 189, 248, 0.12);
-  --tone-violet: #a78bfa;
-  --tone-violet-soft: rgba(167, 139, 250, 0.12);
-  --tone-emerald: #34d399;
-  --tone-emerald-soft: rgba(52, 211, 153, 0.12);
-  --tone-amber: #fbbf24;
-  --tone-amber-soft: rgba(251, 191, 36, 0.12);
-  --tone-blue: #60a5fa;
-  --tone-blue-soft: rgba(96, 165, 250, 0.12);
-  --tone-rose: #fb7185;
-  --tone-rose-soft: rgba(251, 113, 133, 0.12);
-
-  --radius-xl: 20px;
-  --radius-lg: 16px;
-  --radius-md: 12px;
-  --radius-sm: 9px;
-
-  --shadow-panel: 0 30px 70px -40px rgba(0, 0, 0, 0.95), 0 1px 0 rgba(255, 255, 255, 0.03) inset;
-  --shadow-pop: 0 30px 80px -20px rgba(0, 0, 0, 0.85);
-  --shadow-accent: 0 14px 34px -16px rgba(56, 189, 248, 0.55);
-
-  --font-sans: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, "Cascadia Code",
-    "Fira Code", Menlo, Consolas, monospace;
-
-  --sidebar-w: 264px;
-  --topbar-h: 76px;
-}
-
-[data-theme="light"] {
-  color-scheme: light;
-
-  --bg: #eef2f8;
-  --bg-soft: #f5f8fc;
-  --bg-deep: #e5ebf4;
-
-  --panel: rgba(255, 255, 255, 0.88);
-  --panel-solid: #ffffff;
-  --panel-raised: rgba(255, 255, 255, 0.96);
-  --panel-inset: rgba(241, 245, 250, 0.85);
-
-  --surface: rgba(15, 23, 42, 0.04);
-  --surface-hover: rgba(15, 23, 42, 0.07);
-  --input-bg: #ffffff;
-
-  --border: rgba(15, 23, 42, 0.10);
-  --border-soft: rgba(15, 23, 42, 0.06);
-  --border-strong: rgba(15, 23, 42, 0.20);
-
-  --text: #0f1b2d;
-  --text-main: #0f1b2d;
-  --text-secondary: #45566d;
-  --text-muted: #6b7c93;
-  --text-faint: #94a3b8;
-
-  --accent: #0284c7;
-  --accent-2: #6366f1;
-  --accent-soft: rgba(2, 132, 199, 0.09);
-  --accent-glow: rgba(2, 132, 199, 0.22);
-
-  --green: #059669;
-  --green-soft: rgba(5, 150, 105, 0.10);
-  --green-glow: rgba(5, 150, 105, 0.22);
-  --amber: #b45309;
-  --amber-soft: rgba(180, 83, 9, 0.10);
-  --red: #e11d48;
-  --red-soft: rgba(225, 29, 72, 0.09);
-  --purple: #7c3aed;
-  --purple-soft: rgba(124, 58, 237, 0.09);
-
-  --tone-cyan: #0284c7;
-  --tone-cyan-soft: rgba(2, 132, 199, 0.10);
-  --tone-violet: #7c3aed;
-  --tone-violet-soft: rgba(124, 58, 237, 0.10);
-  --tone-emerald: #059669;
-  --tone-emerald-soft: rgba(5, 150, 105, 0.10);
-  --tone-amber: #b45309;
-  --tone-amber-soft: rgba(180, 83, 9, 0.10);
-  --tone-blue: #2563eb;
-  --tone-blue-soft: rgba(37, 99, 235, 0.10);
-  --tone-rose: #e11d48;
-  --tone-rose-soft: rgba(225, 29, 72, 0.09);
-
-  --shadow-panel: 0 22px 50px -32px rgba(15, 23, 42, 0.35), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-pop: 0 30px 80px -24px rgba(15, 23, 42, 0.35);
-  --shadow-accent: 0 14px 30px -16px rgba(2, 132, 199, 0.45);
-}
-
-/* ----------------------------------------------------------------------------
    2. Base
    -------------------------------------------------------------------------- */
 *,
@@ -159,8 +25,8 @@ body {
   margin: 0;
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   background-color: var(--bg);
@@ -273,7 +139,7 @@ code {
   flex-direction: column;
   flex: 1;
   width: 100%;
-  max-width: 1440px;
+  max-width: var(--content-max-w);
   margin: 0 auto;
   padding: 26px 32px 40px;
 }
@@ -377,14 +243,14 @@ code {
   border-radius: 11px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-base);
   font-weight: 500;
   text-align: left;
   transition:
-    color 0.18s ease,
-    background 0.18s ease,
-    border-color 0.18s ease,
-    transform 0.18s ease;
+    color var(--motion-duration-base) var(--motion-ease-standard),
+    background var(--motion-duration-base) var(--motion-ease-standard),
+    border-color var(--motion-duration-base) var(--motion-ease-standard),
+    transform var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .nav-tab > svg,
@@ -392,7 +258,7 @@ code {
   width: 17px;
   height: 17px;
   color: var(--text-faint);
-  transition: color 0.18s ease;
+  transition: color var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .nav-tab .nav-icon {
@@ -553,7 +419,7 @@ code {
   justify-content: space-between;
   gap: 18px;
   width: 100%;
-  max-width: 1440px;
+  max-width: var(--content-max-w);
   min-height: var(--topbar-h);
   margin: 0 auto;
   padding: 14px 32px;
@@ -638,7 +504,7 @@ code {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 3px var(--green-soft), 0 0 12px var(--green-glow);
-  animation: pip-pulse 2.6s ease-in-out infinite;
+  animation: pip-pulse var(--motion-duration-pulse) var(--motion-ease-standard) infinite;
 }
 
 .live-pip.offline {
@@ -669,11 +535,11 @@ code {
   font-weight: 500;
   white-space: nowrap;
   transition:
-    color 0.16s ease,
-    background 0.16s ease,
-    border-color 0.16s ease,
-    transform 0.16s ease,
-    box-shadow 0.16s ease;
+    color var(--motion-duration-base) var(--motion-ease-standard),
+    background var(--motion-duration-base) var(--motion-ease-standard),
+    border-color var(--motion-duration-base) var(--motion-ease-standard),
+    transform var(--motion-duration-base) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .btn svg {
@@ -767,9 +633,9 @@ code {
   box-shadow: 0 18px 40px -34px rgba(0, 0, 0, 0.9);
   overflow: hidden;
   transition:
-    transform 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+    transform var(--motion-duration-slow) var(--motion-ease-standard),
+    border-color var(--motion-duration-slow) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-slow) var(--motion-ease-standard);
 }
 
 [data-theme="light"] .m-item {
@@ -1104,7 +970,7 @@ code {
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
-  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  transition: background var(--motion-duration-base) var(--motion-ease-standard), border-color var(--motion-duration-base) var(--motion-ease-standard), color var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 [data-theme="light"] .topo-legend-item {
@@ -1144,7 +1010,7 @@ code {
   color: var(--text-muted);
   font-size: 11px;
   white-space: nowrap;
-  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+  transition: color var(--motion-duration-base) var(--motion-ease-standard), background var(--motion-duration-base) var(--motion-ease-standard), border-color var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .topo-btn svg {
@@ -1229,7 +1095,7 @@ code {
 
 .machine-prop-val {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
@@ -1239,7 +1105,7 @@ code {
 
 .copyable {
   cursor: pointer;
-  transition: color 0.15s ease, opacity 0.15s ease;
+  transition: color var(--motion-duration-base) var(--motion-ease-standard), opacity var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .copyable:hover {
@@ -1275,7 +1141,7 @@ code {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--input-bg);
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  transition: border-color var(--motion-duration-base) var(--motion-ease-standard), box-shadow var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .search-box:focus-within {
@@ -1318,7 +1184,7 @@ code {
   background-repeat: no-repeat;
   background-position: right 11px center;
   cursor: pointer;
-  transition: border-color 0.16s ease, color 0.16s ease;
+  transition: border-color var(--motion-duration-base) var(--motion-ease-standard), color var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .select-pill:hover {
@@ -1381,7 +1247,7 @@ tbody tr:last-child td {
 }
 
 tbody tr {
-  transition: background 0.15s ease;
+  transition: background var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 tbody tr:hover td {
@@ -1494,10 +1360,10 @@ td .btn {
   box-shadow: 0 18px 40px -34px rgba(0, 0, 0, 0.9);
   cursor: pointer;
   transition:
-    transform 0.18s ease,
-    border-color 0.18s ease,
-    background 0.18s ease,
-    box-shadow 0.18s ease;
+    transform var(--motion-duration-base) var(--motion-ease-standard),
+    border-color var(--motion-duration-base) var(--motion-ease-standard),
+    background var(--motion-duration-base) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 [data-theme="light"] .mode-card {
@@ -1642,7 +1508,7 @@ td .btn {
   align-items: center;
   gap: 9px;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--font-size-base);
   font-weight: 600;
   letter-spacing: -0.005em;
 }
@@ -1689,7 +1555,7 @@ td .btn {
   background: var(--input-bg);
   color: var(--text);
   font-size: 12.5px;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  transition: border-color var(--motion-duration-base) var(--motion-ease-standard), box-shadow var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .form-control::placeholder {
@@ -1752,7 +1618,7 @@ select.form-control option {
   font-size: 12px;
   color: var(--text-secondary);
   cursor: pointer;
-  line-height: 1.55;
+  line-height: var(--line-height-base);
 }
 
 .checkbox-row input[type="checkbox"] {
@@ -1857,7 +1723,7 @@ pre#logs {
   gap: 8px;
   padding: 2px 5px;
   border-radius: 6px;
-  transition: background 0.12s ease;
+  transition: background var(--motion-duration-fast) var(--motion-ease-standard);
 }
 
 .log-row:hover {
@@ -1975,7 +1841,7 @@ footer {
 
 .modal-wrap.active {
   display: flex;
-  animation: fade-in 0.16s ease both;
+  animation: fade-in var(--motion-duration-base) var(--motion-ease-standard) both;
 }
 
 .modal-box {
@@ -1988,7 +1854,7 @@ footer {
   background:
     linear-gradient(180deg, rgba(23, 34, 52, 0.98), rgba(10, 16, 26, 0.99));
   box-shadow: var(--shadow-pop);
-  animation: modal-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: modal-in var(--motion-duration-slow) var(--motion-ease-entrance) both;
 }
 
 [data-theme="light"] .modal-box {
@@ -2053,7 +1919,7 @@ footer {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   box-shadow: var(--shadow-pop);
-  animation: menu-in 0.12s ease both;
+  animation: menu-in var(--motion-duration-fast) var(--motion-ease-standard) both;
 }
 
 [data-theme="light"] .cyber-context-menu {
@@ -2093,7 +1959,7 @@ footer {
   color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--motion-duration-fast) var(--motion-ease-standard), color var(--motion-duration-fast) var(--motion-ease-standard);
 }
 
 .cm-item:hover {
@@ -2177,7 +2043,7 @@ footer {
   box-shadow: var(--shadow-pop);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  animation: toast-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: toast-in var(--motion-duration-slow) var(--motion-ease-entrance) both;
 }
 
 [data-theme="light"] .toast {
@@ -2446,9 +2312,9 @@ footer {
   *,
   *::before,
   *::after {
-    animation-duration: 0.001ms !important;
+    animation-duration: var(--motion-duration-reduced) !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
+    transition-duration: var(--motion-duration-reduced) !important;
     scroll-behavior: auto !important;
   }
 }
@@ -2487,7 +2353,7 @@ footer {
 
 .empty-state strong {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-base);
   font-weight: 600;
 }
 
@@ -2509,7 +2375,7 @@ footer {
 }
 
 .tab-content {
-  animation: tab-in 0.22s ease both;
+  animation: tab-in var(--motion-duration-slow) var(--motion-ease-standard) both;
 }
 
 @keyframes tab-in {

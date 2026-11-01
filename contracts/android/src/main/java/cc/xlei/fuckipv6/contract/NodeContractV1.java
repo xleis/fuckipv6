@@ -427,6 +427,7 @@ public final class NodeContractV1 {
     public enum NodeHttpErrorCode {
         SCHEMA_VERSION_MISMATCH("schema_version_mismatch"),
         INVALID_REQUEST("invalid_request"),
+        PAYLOAD_TOO_LARGE("payload_too_large"),
         NOT_FOUND("not_found"),
         AUTHENTICATION_REQUIRED("authentication_required"),
         PERMISSION_DENIED("permission_denied"),

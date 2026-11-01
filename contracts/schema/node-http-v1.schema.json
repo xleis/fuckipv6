@@ -1960,6 +1960,7 @@
       "enum": [
         "schema_version_mismatch",
         "invalid_request",
+        "payload_too_large",
         "not_found",
         "authentication_required",
         "permission_denied",

@@ -13,7 +13,7 @@ use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
         ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
-        Extension, Path, Query, State,
+        DefaultBodyLimit, Extension, Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::{
@@ -52,6 +52,11 @@ pub const NODE_HTTP_API_PREFIX: &str = "/api/node";
 /// Stable prefix for the versioned control API. The legacy `/api/node` routes
 /// remain available while UI adapters migrate, but new clients must use v1.
 pub const NODE_HTTP_V1_API_PREFIX: &str = "/api/v1";
+
+/// Maximum JSON body accepted by either command endpoint. The limit is applied
+/// by the HTTP adapter before JSON deserialization so oversized chunked or
+/// content-length requests cannot consume unbounded memory.
+pub const NODE_HTTP_MAX_COMMAND_BODY_BYTES: usize = 256 * 1024;
 
 /// Metadata carried by every v1 success and error response.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -248,6 +253,7 @@ pub struct NodeCommandHttpResponse {
 pub enum NodeHttpErrorCode {
     SchemaVersionMismatch,
     InvalidRequest,
+    PayloadTooLarge,
     NotFound,
     AuthenticationRequired,
     PermissionDenied,
@@ -285,7 +291,9 @@ pub struct NodeErrorDetails {
 impl NodeHttpErrorCode {
     fn category(self) -> NodeErrorCategory {
         match self {
-            Self::SchemaVersionMismatch | Self::InvalidRequest => NodeErrorCategory::Validation,
+            Self::SchemaVersionMismatch | Self::InvalidRequest | Self::PayloadTooLarge => {
+                NodeErrorCategory::Validation
+            }
             Self::NotFound
             | Self::OperationConflict
             | Self::OperationCancelled
@@ -305,6 +313,7 @@ impl NodeHttpErrorCode {
         match self {
             Self::SchemaVersionMismatch => "error.schema_version_mismatch",
             Self::InvalidRequest => "error.invalid_request",
+            Self::PayloadTooLarge => "error.payload_too_large",
             Self::NotFound => "error.not_found",
             Self::AuthenticationRequired => "error.authentication_required",
             Self::PermissionDenied => "error.permission_denied",
@@ -326,6 +335,7 @@ impl NodeHttpErrorCode {
         match self {
             Self::SchemaVersionMismatch => "请求的节点 API 版本不受支持",
             Self::InvalidRequest => "请求无效",
+            Self::PayloadTooLarge => "请求体超过允许的大小",
             Self::NotFound => "请求的对象不存在",
             Self::AuthenticationRequired => "需要重新进行身份认证",
             Self::PermissionDenied => "无权执行此操作",
@@ -343,7 +353,7 @@ impl NodeHttpErrorCode {
 
     fn recovery(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::SchemaVersionMismatch | Self::InvalidRequest => {
+            Self::SchemaVersionMismatch | Self::InvalidRequest | Self::PayloadTooLarge => {
                 Some(("edit_request", "recovery.fix_request"))
             }
             Self::NotFound | Self::OperationConflict | Self::ResyncRequired => {
@@ -976,7 +986,7 @@ impl NodeHttpAdapter {
             )
             .route(
                 &format!("{NODE_HTTP_API_PREFIX}/commands"),
-                post(handle_command),
+                post(handle_command).layer(DefaultBodyLimit::max(NODE_HTTP_MAX_COMMAND_BODY_BYTES)),
             )
             .route(
                 &format!("{NODE_HTTP_V1_API_PREFIX}/snapshot"),
@@ -988,7 +998,8 @@ impl NodeHttpAdapter {
             )
             .route(
                 &format!("{NODE_HTTP_V1_API_PREFIX}/commands"),
-                post(handle_v1_command),
+                post(handle_v1_command)
+                    .layer(DefaultBodyLimit::max(NODE_HTTP_MAX_COMMAND_BODY_BYTES)),
             )
             .route(
                 &format!("{NODE_HTTP_V1_API_PREFIX}/operations/{{id}}"),
@@ -1349,6 +1360,14 @@ fn node_cursor_id(cursor: NodeEventCursor) -> String {
     format!("{}:{}", cursor.sequence, cursor.snapshot_revision)
 }
 
+fn api_json_rejection_response(request_id: u64, error: JsonRejection) -> Response {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        HttpApiError::payload_too_large(request_id).into_response()
+    } else {
+        HttpApiError::invalid_request(request_id, error.body_text()).into_response()
+    }
+}
+
 fn validate_api_query(query: &NodeApiQuery, request_id: u64) -> Result<(), Box<HttpApiError>> {
     let version = query.schema_version.unwrap_or(NODE_HTTP_SCHEMA_VERSION);
     if version != NODE_HTTP_SCHEMA_VERSION {
@@ -1370,7 +1389,7 @@ async fn handle_v1_command(
         Ok(Json(payload)) => payload,
         Err(error) => {
             let request_id = adapter.allocate_request_id();
-            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+            return api_json_rejection_response(request_id, error);
         }
     };
     let request_id = payload.request.request_id;
@@ -1776,8 +1795,12 @@ fn sse_event(message: NodeApiEvent, id: Option<NodeEventCursor>) -> SseEvent {
 async fn handle_command(
     State(adapter): State<NodeHttpAdapter>,
     Extension(context): Extension<NodeCommandContext>,
-    Json(payload): Json<NodeCommandHttpRequest>,
+    payload: Result<Json<NodeCommandHttpRequest>, JsonRejection>,
 ) -> Response {
+    let payload = match payload {
+        Ok(Json(payload)) => payload,
+        Err(error) => return HttpAdapterError::from_json_rejection(error).into_response(),
+    };
     if let Err(error) = require_schema_version_value(payload.schema_version) {
         return error.into_response();
     }
@@ -2059,6 +2082,27 @@ impl HttpAdapterError {
         }
     }
 
+    fn from_json_rejection(error: JsonRejection) -> Self {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            let mut response = Self::from_code(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                NodeHttpErrorCode::PayloadTooLarge,
+                "request body exceeds command limit",
+            );
+            response.body.error = response
+                .body
+                .error
+                .with_param("limit_bytes", NODE_HTTP_MAX_COMMAND_BODY_BYTES.to_string());
+            response
+        } else {
+            Self::from_code(
+                error.status(),
+                NodeHttpErrorCode::InvalidRequest,
+                error.body_text(),
+            )
+        }
+    }
+
     fn from_code(
         status: StatusCode,
         code: NodeHttpErrorCode,
@@ -2104,6 +2148,19 @@ impl HttpApiError {
             StatusCode::BAD_REQUEST,
             NodeHttpErrorCode::InvalidRequest,
         )
+    }
+
+    fn payload_too_large(request_id: u64) -> Self {
+        let mut error = Self::new(
+            request_id,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            NodeHttpErrorCode::PayloadTooLarge,
+        );
+        error.body.error = error
+            .body
+            .error
+            .with_param("limit_bytes", NODE_HTTP_MAX_COMMAND_BODY_BYTES.to_string());
+        error
     }
 
     fn not_found(request_id: u64, diagnostic: impl Into<String>) -> Self {
@@ -2461,6 +2518,21 @@ mod tests {
             .expect("v1 command response")
     }
 
+    async fn post_raw_command(adapter: NodeHttpAdapter, path: &str, body: Vec<u8>) -> Response {
+        adapter
+            .test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("raw command request"),
+            )
+            .await
+            .expect("raw command response")
+    }
+
     async fn fetch_v1_operation(adapter: &NodeHttpAdapter, operation_id: &str) -> Response {
         adapter
             .clone()
@@ -2585,6 +2657,27 @@ mod tests {
         assert_eq!(manifest.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
         assert!(manifest.meta.request_id > snapshot.meta.request_id);
         assert_eq!(manifest.manifest.pages.len(), 11);
+    }
+
+    #[tokio::test]
+    async fn command_endpoints_reject_oversized_json_before_deserialization() {
+        let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
+        let oversized = vec![b' '; NODE_HTTP_MAX_COMMAND_BODY_BYTES + 1];
+
+        for path in ["/api/node/commands", "/api/v1/commands"] {
+            let response = post_raw_command(adapter.clone(), path, oversized.clone()).await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+            let body: serde_json::Value = json_body(response).await;
+            assert_eq!(body["schema_version"], NODE_HTTP_SCHEMA_VERSION, "{path}");
+            assert_eq!(body["code"], "payload_too_large", "{path}");
+            assert_eq!(body["message_key"], "error.payload_too_large", "{path}");
+            assert_eq!(
+                body["params"]["limit_bytes"],
+                NODE_HTTP_MAX_COMMAND_BODY_BYTES.to_string(),
+                "{path}"
+            );
+            assert_eq!(body["retryable"], false, "{path}");
+        }
     }
 
     #[tokio::test]

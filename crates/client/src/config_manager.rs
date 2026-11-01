@@ -73,6 +73,11 @@ impl ConfigManager {
         Ok(Self { config_dir })
     }
 
+    /// Read-only root used for node-local protected state.
+    pub(crate) fn config_dir(&self) -> &std::path::Path {
+        &self.config_dir
+    }
+
     /// 获取配置目录
     fn get_config_dir() -> Result<PathBuf> {
         Self::resolve_config_dir(

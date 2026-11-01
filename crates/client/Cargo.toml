@@ -53,6 +53,9 @@ getrandom = { workspace = true }
 
 anyhow = { workspace = true }
 bytes = { workspace = true }
+webauthn-rs = { version = "0.6.2", default-features = false }
+base64 = "0.22"
+subtle = "2"
 
 # GPUI is a native desktop dependency. Unsupported targets keep the capability
 # disabled instead of reporting a browser-hosted surface as GPUI.

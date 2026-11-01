@@ -1,17 +1,20 @@
 pub mod controller;
 mod node_surface;
+mod owner_bootstrap;
 pub mod security;
 
+use crate::config_manager::ConfigManager;
 use crate::node::{NodeHttpAdapter, NodeProblem, NodeProblemCode};
+use crate::owner_security::service::{OwnerSecurityError, OwnerSecurityService};
 use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Extension, Query, State,
     },
-    http::{header, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Json, Response},
+    response::{Html, IntoResponse, Json, Redirect, Response},
     routing::{get, post},
     Router,
 };
@@ -30,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use webauthn_rs::prelude::RegisterPublicKeyCredential;
 
 pub use security::{
     DEFAULT_WEBUI_BIND, DEFAULT_WEBUI_PORT, ENV_WEBUI_ALLOW_REMOTE, ENV_WEBUI_BIND,
@@ -68,6 +72,15 @@ fn create_app_web_router_with_auth_and_node(
     auth: WebUiAuth,
     node_adapter: Option<NodeHttpAdapter>,
 ) -> Router {
+    create_app_web_router_with_auth_node_and_owner(controller, auth, node_adapter, None)
+}
+
+fn create_app_web_router_with_auth_node_and_owner(
+    controller: Arc<AppController>,
+    auth: WebUiAuth,
+    node_adapter: Option<NodeHttpAdapter>,
+    owner_security: Option<Arc<OwnerSecurityService>>,
+) -> Router {
     let auth = Arc::new(auth);
     let node_manifest_surface = node_adapter.is_some();
     let protected = Router::new()
@@ -102,16 +115,24 @@ fn create_app_web_router_with_auth_and_node(
         require_api_auth,
     ));
 
-    Router::new()
+    let owner_routes = owner_security
+        .as_ref()
+        .map(|owner| owner_security_router(owner.clone()));
+
+    let mut app = Router::new()
         .route("/", get(handle_index))
         .route("/assets/webui.css", get(handle_webui_css))
         .route("/assets/node_ui.js", get(handle_node_ui_js))
+        .route("/assets/owner_bootstrap.js", get(handle_owner_bootstrap_js))
         .route("/api/auth/login", post(handle_login))
-        .merge(protected)
-        .layer(Extension(auth))
-        .layer(Extension(WebUiSurface {
-            node_manifest_surface,
-        }))
+        .merge(protected);
+    if let Some(owner_routes) = owner_routes {
+        app = app.merge(owner_routes);
+    }
+    app.layer(Extension(auth)).layer(Extension(WebUiSurface {
+        node_manifest_surface,
+        owner_security,
+    }))
 }
 
 /// Start the only production WebUI surface: a manifest-driven view backed by
@@ -123,16 +144,24 @@ pub async fn start_app_webui_with_node(
 ) -> Result<tokio::task::JoinHandle<()>> {
     let config = WebUiConfig::from_process_env(port)?;
     config.validate_runtime_exposure()?;
-    let app = create_app_web_router_with_auth_and_node(
-        controller.clone(),
-        config.auth().clone(),
-        Some(node_adapter),
-    );
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("WebUI 无法监听 {addr}"))?;
     let local_addr = listener.local_addr().context("读取 WebUI 监听地址失败")?;
+    let owner_config = ConfigManager::new().context("无法读取节点所有者配置目录")?;
+    let (owner_security, bootstrap_code) =
+        OwnerSecurityService::from_config(&owner_config, local_addr.port())
+            .context("无法初始化节点所有者安全边界")?;
+    if let Some(bootstrap_code) = bootstrap_code {
+        write_bootstrap_code_to_terminal(bootstrap_code.as_str(), local_addr.port())?;
+    }
+    let app = create_app_web_router_with_auth_node_and_owner(
+        controller.clone(),
+        config.auth().clone(),
+        Some(node_adapter),
+        Some(Arc::new(owner_security)),
+    );
 
     tracing::info!(
         listen = %local_addr,
@@ -163,6 +192,73 @@ pub async fn start_app_webui_with_node(
     });
 
     Ok(handle)
+}
+
+#[cfg(unix)]
+fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
+    use std::io::Write;
+
+    // `/dev/tty` bypasses redirected stdout/stderr and therefore service
+    // journals, pipe collectors, and persistent process logs. If there is no
+    // controlling terminal, keep the WebUI and node control plane running but
+    // leave owner initialization locked. Never fall back to a log sink. The
+    // owner can restart interactively to display a fresh one-time code.
+    let mut terminal = match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "当前进程没有控制终端；所有者初始化保持锁定，请从本机终端重新启动以显示一次性初始化码"
+            );
+            return Ok(());
+        }
+    };
+    writeln!(
+        terminal,
+        "------------------------------------------------------------------------"
+    )
+    .context("无法向本机控制终端显示初始化说明")?;
+    writeln!(terminal, "🔐 本机所有者初始化码（仅显示一次）: {code}")
+        .context("无法向本机控制终端显示初始化码")?;
+    writeln!(
+        terminal,
+        "请打开 http://localhost:{port}/ 完成 Passkey 注册。"
+    )
+    .context("无法向本机控制终端显示初始化地址")?;
+    writeln!(
+        terminal,
+        "------------------------------------------------------------------------"
+    )
+    .context("无法向本机控制终端显示初始化说明")?;
+    terminal.flush().context("无法刷新本机控制终端输出")
+}
+
+#[cfg(not(unix))]
+fn write_bootstrap_code_to_terminal(code: &str, port: u16) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+
+    let mut terminal = std::io::stderr();
+    if !terminal.is_terminal() {
+        tracing::warn!(
+            "当前进程没有控制终端；所有者初始化保持锁定，请从本机终端重新启动以显示一次性初始化码"
+        );
+        return Ok(());
+    }
+    writeln!(
+        terminal,
+        "------------------------------------------------------------------------"
+    )?;
+    writeln!(terminal, "🔐 本机所有者初始化码（仅显示一次）: {code}")?;
+    writeln!(
+        terminal,
+        "请打开 http://localhost:{port}/ 完成 Passkey 注册。"
+    )?;
+    writeln!(
+        terminal,
+        "------------------------------------------------------------------------"
+    )?;
+    terminal.flush()?;
+    Ok(())
 }
 
 async fn require_api_auth(
@@ -221,17 +317,57 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct WebUiSurface {
     node_manifest_surface: bool,
+    owner_security: Option<Arc<OwnerSecurityService>>,
 }
 
-async fn handle_index(Extension(surface): Extension<WebUiSurface>) -> impl IntoResponse {
-    if surface.node_manifest_surface {
-        Html(node_surface::NODE_MANIFEST_HTML)
-    } else {
-        Html(UNIFIED_MASTER_HTML)
+async fn handle_index(Extension(surface): Extension<WebUiSurface>, headers: HeaderMap) -> Response {
+    if let Some(owner) = &surface.owner_security {
+        let status = match owner.status() {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::error!(%error, "所有者安全状态读取失败，WebUI 已失败关闭");
+                return with_no_store(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Html(owner_bootstrap::OWNER_UNAVAILABLE_HTML),
+                    )
+                        .into_response(),
+                );
+            }
+        };
+        if !status.initialized {
+            if let Some(redirect) = localhost_redirect(&headers) {
+                return with_no_store(redirect.into_response());
+            }
+            return with_no_store(Html(owner_bootstrap::OWNER_BOOTSTRAP_HTML).into_response());
+        }
     }
+
+    let response = if surface.node_manifest_surface {
+        Html(node_surface::NODE_MANIFEST_HTML).into_response()
+    } else {
+        Html(UNIFIED_MASTER_HTML).into_response()
+    };
+    with_no_store(response)
+}
+
+fn localhost_redirect(headers: &HeaderMap) -> Option<Redirect> {
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    let port = host.strip_prefix("127.0.0.1:")?;
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(Redirect::temporary(&format!("http://localhost:{port}/")))
+}
+
+fn with_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn handle_node_ui_js() -> impl IntoResponse {
@@ -241,11 +377,195 @@ async fn handle_node_ui_js() -> impl IntoResponse {
     )
 }
 
+async fn handle_owner_bootstrap_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        owner_bootstrap::OWNER_BOOTSTRAP_JS,
+    )
+}
+
 async fn handle_webui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         WEBUI_CSS,
     )
+}
+
+fn owner_security_router(owner: Arc<OwnerSecurityService>) -> Router {
+    Router::new()
+        .route("/api/v1/auth/bootstrap", get(handle_bootstrap_status))
+        .route(
+            "/api/v1/auth/bootstrap/verify",
+            post(handle_bootstrap_verify),
+        )
+        .route(
+            "/api/v1/auth/webauthn/registration/start",
+            post(handle_webauthn_registration_start),
+        )
+        .route(
+            "/api/v1/auth/webauthn/registration/finish",
+            post(handle_webauthn_registration_finish),
+        )
+        .route(
+            "/api/v1/auth/bootstrap/recovery-confirm",
+            post(handle_bootstrap_recovery_confirm),
+        )
+        .with_state(owner)
+        .route_layer(middleware::from_fn(require_loopback))
+        .route_layer(middleware::from_fn(owner_no_store))
+}
+
+async fn require_loopback(request: axum::extract::Request, next: Next) -> Response {
+    let Some(ConnectInfo(remote_addr)) = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .cloned()
+    else {
+        return owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问");
+    };
+    if !remote_addr.ip().is_loopback() || has_forwarding_headers(&request) {
+        return owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问");
+    }
+    next.run(request).await
+}
+
+fn has_forwarding_headers(request: &axum::extract::Request) -> bool {
+    ["forwarded", "x-forwarded-for", "x-real-ip"]
+        .iter()
+        .any(|name| request.headers().contains_key(*name))
+}
+
+async fn owner_no_store(request: axum::extract::Request, next: Next) -> Response {
+    with_no_store(next.run(request).await)
+}
+
+fn owner_api_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ApiError {
+            error: message.into(),
+            problem: None,
+        }),
+    )
+        .into_response()
+}
+
+fn owner_service_error(error: OwnerSecurityError) -> Response {
+    let status = match &error {
+        OwnerSecurityError::AlreadyInitialized | OwnerSecurityError::CeremonyInProgress => {
+            StatusCode::CONFLICT
+        }
+        OwnerSecurityError::InvalidBootstrapCode => StatusCode::UNAUTHORIZED,
+        OwnerSecurityError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        OwnerSecurityError::CeremonyMissing => StatusCode::NOT_FOUND,
+        OwnerSecurityError::RecoveryNotConfirmed => StatusCode::BAD_REQUEST,
+        OwnerSecurityError::CorruptState | OwnerSecurityError::Internal(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    owner_api_error(status, error.to_string())
+}
+
+#[derive(Deserialize)]
+struct BootstrapCodeRequest {
+    code: String,
+}
+
+impl fmt::Debug for BootstrapCodeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BootstrapCodeRequest")
+            .field("code", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct BootstrapVerifyResponse {
+    verified: bool,
+}
+
+#[derive(Deserialize)]
+struct WebauthnRegistrationFinishRequest {
+    credential: RegisterPublicKeyCredential,
+}
+
+#[derive(Serialize)]
+struct WebauthnRegistrationFinishResponse {
+    recovery_code: String,
+}
+
+impl fmt::Debug for WebauthnRegistrationFinishResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebauthnRegistrationFinishResponse")
+            .field("recovery_code", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+struct RecoveryConfirmationRequest {
+    confirmed: bool,
+}
+
+async fn handle_bootstrap_status(State(owner): State<Arc<OwnerSecurityService>>) -> Response {
+    match owner.status() {
+        Ok(status) => (StatusCode::OK, Json(status)).into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_bootstrap_verify(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Json(request): Json<BootstrapCodeRequest>,
+) -> Response {
+    match owner.verify_bootstrap_code(&request.code) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(BootstrapVerifyResponse { verified: true }),
+        )
+            .into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_webauthn_registration_start(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Json(request): Json<BootstrapCodeRequest>,
+) -> Response {
+    match owner.start_registration(&request.code) {
+        Ok(challenge) => (StatusCode::OK, Json(challenge)).into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_webauthn_registration_finish(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Json(request): Json<WebauthnRegistrationFinishRequest>,
+) -> Response {
+    match owner.finish_registration(&request.credential) {
+        Ok(recovery_code) => (
+            StatusCode::OK,
+            Json(WebauthnRegistrationFinishResponse { recovery_code }),
+        )
+            .into_response(),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_bootstrap_recovery_confirm(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Json(request): Json<RecoveryConfirmationRequest>,
+) -> Response {
+    match owner.confirm_recovery(request.confirmed) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => owner_service_error(error),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3486,13 +3806,70 @@ mod tests {
         NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeEventBus, NodeStateStore,
         NodeUiManifest,
     };
+    use crate::owner_security::store::fixture_passkey;
     use axum::body::{to_bytes, Body};
     use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
     use fuckipv6_common::CoordinatorAuthConfig;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
+
+    static TEST_DIR_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    struct OwnerAppFixture {
+        app: Router,
+        service: Arc<OwnerSecurityService>,
+        code: zeroize::Zeroizing<String>,
+        config_dir: PathBuf,
+    }
+
+    impl Drop for OwnerAppFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.config_dir);
+        }
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let sequence = TEST_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fuckipv6-webui-{prefix}-{}-{nanos}-{sequence}",
+            std::process::id()
+        ))
+    }
+
+    fn owner_app_fixture(port: u16) -> OwnerAppFixture {
+        let config_dir = unique_test_dir("owner");
+        let config = ConfigManager::new_for_dir(config_dir.clone()).expect("owner test config");
+        let (service, code) =
+            OwnerSecurityService::from_config(&config, port).expect("owner service");
+        let service = Arc::new(service);
+        let app = create_app_web_router_with_auth_node_and_owner(
+            Arc::new(AppController::new()),
+            WebUiAuth::disabled(),
+            None,
+            Some(service.clone()),
+        );
+        OwnerAppFixture {
+            app,
+            service,
+            code: code.expect("uninitialized owner bootstrap code"),
+            config_dir,
+        }
+    }
+
+    fn request_from(mut request: Request<Body>, source_ip: IpAddr) -> Request<Body> {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(source_ip, 49_152)));
+        request
+    }
 
     #[derive(Clone)]
     struct NodeRouteHandler {
@@ -3593,6 +3970,351 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&bytes).expect("JSON response")
+    }
+
+    fn assert_no_store(response: &axum::response::Response) {
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_bootstrap_api_is_loopback_only_and_always_no_store() {
+        let fixture = owner_app_fixture(8080);
+
+        let missing_connect_info = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .body(Body::empty())
+                    .expect("bootstrap request without connect info"),
+            )
+            .await
+            .expect("bootstrap response without connect info");
+        assert_eq!(missing_connect_info.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&missing_connect_info);
+
+        let remote = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .body(Body::empty())
+                    .expect("remote bootstrap request"),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            ))
+            .await
+            .expect("remote bootstrap response");
+        assert_eq!(remote.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&remote);
+
+        let forwarded = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .header("x-forwarded-for", "203.0.113.5")
+                    .body(Body::empty())
+                    .expect("forwarded bootstrap request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("forwarded bootstrap response");
+        assert_eq!(forwarded.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&forwarded);
+
+        let loopback = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .body(Body::empty())
+                    .expect("loopback bootstrap request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("loopback bootstrap response");
+        assert_eq!(loopback.status(), StatusCode::OK);
+        assert_no_store(&loopback);
+        let payload = response_json(loopback).await;
+        assert_eq!(payload["initialized"], false);
+        assert_eq!(payload["origin"], "http://localhost:8080");
+
+        let legacy =
+            create_app_web_router_with_auth(Arc::new(AppController::new()), WebUiAuth::disabled());
+        let legacy_owner_route = legacy
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .body(Body::empty())
+                    .expect("legacy owner API request"),
+            )
+            .await
+            .expect("legacy owner API response");
+        assert_eq!(legacy_owner_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn owner_bootstrap_index_serves_secure_local_flow_only() {
+        let fixture = owner_app_fixture(8080);
+
+        let redirect = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "127.0.0.1:8080")
+                    .body(Body::empty())
+                    .expect("literal loopback index request"),
+            )
+            .await
+            .expect("literal loopback index response");
+        assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            redirect
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:8080/")
+        );
+        assert_no_store(&redirect);
+
+        let page = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "localhost:8080")
+                    .body(Body::empty())
+                    .expect("owner bootstrap index request"),
+            )
+            .await
+            .expect("owner bootstrap index response");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_no_store(&page);
+        assert_eq!(
+            response_text(page).await,
+            owner_bootstrap::OWNER_BOOTSTRAP_HTML
+        );
+
+        let script = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/owner_bootstrap.js")
+                    .body(Body::empty())
+                    .expect("owner bootstrap script request"),
+            )
+            .await
+            .expect("owner bootstrap script response");
+        assert_eq!(script.status(), StatusCode::OK);
+        assert_no_store(&script);
+        assert_eq!(
+            response_text(script).await,
+            owner_bootstrap::OWNER_BOOTSTRAP_JS
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_bootstrap_rejects_bad_input_without_echoing_secrets() {
+        let fixture = owner_app_fixture(8080);
+        let supplied = "not-the-bootstrap-code-but-long-enough";
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request(
+                    "POST",
+                    "/api/v1/auth/bootstrap/verify",
+                    &serde_json::json!({ "code": supplied }).to_string(),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("invalid bootstrap code response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&response);
+        let body = response_text(response).await;
+        assert!(!body.contains(supplied));
+        assert!(!body.contains(fixture.code.as_str()));
+
+        let malformed = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request("POST", "/api/v1/auth/bootstrap/verify", "{\"code\":"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("malformed bootstrap request response");
+        assert!(!malformed.status().is_success());
+        assert_no_store(&malformed);
+        assert!(!response_text(malformed)
+            .await
+            .contains(fixture.code.as_str()));
+
+        let request_debug = format!(
+            "{:?}",
+            BootstrapCodeRequest {
+                code: fixture.code.to_string(),
+            }
+        );
+        assert!(request_debug.contains("[REDACTED]"));
+        assert!(!request_debug.contains(fixture.code.as_str()));
+
+        let response_debug = format!(
+            "{:?}",
+            WebauthnRegistrationFinishResponse {
+                recovery_code: "do-not-log-recovery-code".to_string(),
+            }
+        );
+        assert!(response_debug.contains("[REDACTED]"));
+        assert!(!response_debug.contains("do-not-log-recovery-code"));
+    }
+
+    #[tokio::test]
+    async fn owner_bootstrap_completion_closes_initialization_and_unlocks_product_ui() {
+        let fixture = owner_app_fixture(8080);
+        let verify = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request(
+                    "POST",
+                    "/api/v1/auth/bootstrap/verify",
+                    &serde_json::json!({ "code": fixture.code.as_str() }).to_string(),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("bootstrap verify response");
+        assert_eq!(verify.status(), StatusCode::OK);
+        assert_no_store(&verify);
+
+        let start = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request(
+                    "POST",
+                    "/api/v1/auth/webauthn/registration/start",
+                    &serde_json::json!({ "code": fixture.code.as_str() }).to_string(),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("WebAuthn registration start response");
+        assert_eq!(start.status(), StatusCode::OK);
+        assert_no_store(&start);
+
+        let recovery_code = fixture
+            .service
+            .finish_registration_for_test(fixture_passkey())
+            .expect("test webauthn registration finish");
+        assert!(!recovery_code.is_empty());
+
+        let confirm = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request(
+                    "POST",
+                    "/api/v1/auth/bootstrap/recovery-confirm",
+                    r#"{"confirmed":true}"#,
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("recovery confirmation response");
+        assert_eq!(confirm.status(), StatusCode::NO_CONTENT);
+        assert_no_store(&confirm);
+
+        let status = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/auth/bootstrap")
+                    .body(Body::empty())
+                    .expect("completed bootstrap status request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("completed bootstrap status response");
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_no_store(&status);
+        let payload = response_json(status).await;
+        assert_eq!(payload["initialized"], true);
+
+        let closed = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request(
+                    "POST",
+                    "/api/v1/auth/webauthn/registration/start",
+                    &serde_json::json!({ "code": fixture.code.as_str() }).to_string(),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("closed registration response");
+        assert_eq!(closed.status(), StatusCode::CONFLICT);
+        assert_no_store(&closed);
+        assert!(!response_text(closed).await.contains(fixture.code.as_str()));
+
+        let page = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "localhost:8080")
+                    .body(Body::empty())
+                    .expect("completed product index request"),
+            )
+            .await
+            .expect("completed product index response");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_no_store(&page);
+        assert_eq!(response_text(page).await, UNIFIED_MASTER_HTML);
+    }
+
+    #[tokio::test]
+    async fn owner_security_failure_locks_the_webui_instead_of_falling_back() {
+        let fixture = owner_app_fixture(8080);
+        std::fs::create_dir(fixture.config_dir.join("owner"))
+            .expect("create incomplete owner directory");
+
+        let page = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "localhost:8080")
+                    .body(Body::empty())
+                    .expect("locked index request"),
+            )
+            .await
+            .expect("locked index response");
+        assert_eq!(page.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_no_store(&page);
+        let body = response_text(page).await;
+        assert_eq!(body, owner_bootstrap::OWNER_UNAVAILABLE_HTML);
+        assert!(!body.contains(UNIFIED_MASTER_HTML));
     }
 
     #[tokio::test]

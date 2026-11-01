@@ -27,6 +27,7 @@ pub mod logging;
 pub(crate) mod lxt_rescue;
 pub mod multi_network;
 pub mod node;
+pub mod owner_security;
 pub mod p2p;
 pub mod remote_node;
 pub mod routing;

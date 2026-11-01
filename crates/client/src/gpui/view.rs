@@ -12,9 +12,10 @@ use super::view_model::{
     validate_manifest_bindings, ActionBinding, PageKind, RowModel, SectionModel,
 };
 use crate::node::{
-    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeNetworkStatus, NodePrimaryStatus, NodeSnapshot, NodeStateStore,
-    NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
+    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
+    NodeCommandRequest, NodeCommandResult, NodeNetworkStatus, NodePrimaryStatus, NodeSnapshot,
+    NodeStateStore, NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind,
+    NodeUiManifest, NodeUiPage,
 };
 
 const WINDOW_WIDTH: f32 = 1180.0;
@@ -127,6 +128,7 @@ impl GpuiShell {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1).max(1);
         let request = NodeCommandRequest::new(request_id, command);
+        let context = NodeCommandContext::local_owner_for_snapshot(&self.snapshot, "gpui");
         let commands = self.commands.clone();
         self.pending_commands = self.pending_commands.saturating_add(1);
         self.error = None;
@@ -135,7 +137,7 @@ impl GpuiShell {
         cx.notify();
 
         cx.spawn(async move |weak, cx| {
-            let result = commands.execute(request).await;
+            let result = commands.execute(context, request).await;
             let _ = weak.update(cx, |shell, cx| {
                 shell.pending_commands = shell.pending_commands.saturating_sub(1);
                 shell.apply_command_result(result);

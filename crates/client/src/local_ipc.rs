@@ -203,11 +203,18 @@ pub struct PeerIdentity {
 pub struct LocalConnection {
     stream: LocalStream,
     peer: PeerIdentity,
+    verified_client_role: Option<IpcRole>,
 }
 
 impl LocalConnection {
     pub fn peer(&self) -> PeerIdentity {
         self.peer
+    }
+
+    /// The client role is only available after the versioned handshake has
+    /// completed. It is transport metadata and never sourced from command JSON.
+    pub fn verified_client_role(&self) -> Option<&IpcRole> {
+        self.verified_client_role.as_ref()
     }
 
     pub async fn send<T: Serialize>(&mut self, kind: FrameKind, value: &T) -> Result<()> {
@@ -332,7 +339,11 @@ impl LocalServer {
             .context("接受本地 IPC 连接失败")?;
         let peer = peer_identity(&stream)?;
         authorize_peer(peer, current_user_id())?;
-        Ok(LocalConnection { stream, peer })
+        Ok(LocalConnection {
+            stream,
+            peer,
+            verified_client_role: None,
+        })
     }
 
     /// Complete the versioned client/server handshake for an authenticated
@@ -377,6 +388,7 @@ impl LocalServer {
             },
             server_pid: std::process::id(),
         };
+        connection.verified_client_role = Some(hello.role);
         connection.send(FrameKind::ServerHello, &ack).await?;
         Ok(connection)
     }
@@ -476,7 +488,11 @@ pub async fn connect(endpoint: &LocalEndpoint, role: IpcRole) -> Result<LocalCon
     // well prevents accidentally connecting through a replaced/stale path.
     authorize_peer(peer, current_user_id())?;
 
-    let mut connection = LocalConnection { stream, peer };
+    let mut connection = LocalConnection {
+        stream,
+        peer,
+        verified_client_role: None,
+    };
     let hello = ClientHello {
         protocol_version: PROTOCOL_VERSION,
         role,

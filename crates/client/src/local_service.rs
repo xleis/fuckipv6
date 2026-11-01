@@ -18,7 +18,9 @@ use crate::local_ipc::{
     EndpointRole, FrameKind, IpcErrorCode, LocalConnection, LocalError, LocalEvent, LocalRequest,
     LocalResponse, LocalServer,
 };
-use crate::node::{NodeCommandBus, NodeCommandBusError, NodeEventBus, NodeStateStore};
+use crate::node::{
+    NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeEventBus, NodeStateStore,
+};
 
 /// Commands may perform persistence and runtime transitions, so they get a
 /// larger budget than individual frame I/O operations.
@@ -241,7 +243,21 @@ async fn serve_connection(
                 }
 
                 let command_timeout = command_timeout(&command_request.command);
-                let result = match timeout(command_timeout, commands.execute(command_request)).await
+                let snapshot = state.snapshot().await;
+                let source = format!(
+                    "local_ipc:{:?}:pid={:?}",
+                    connection
+                        .verified_client_role()
+                        .cloned()
+                        .unwrap_or(crate::local_ipc::IpcRole::Control),
+                    connection.peer().pid
+                );
+                let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, source);
+                let result = match timeout(
+                    command_timeout,
+                    commands.execute(context, command_request),
+                )
+                .await
                 {
                     Ok(Ok(result)) => result,
                     Ok(Err(error)) => {

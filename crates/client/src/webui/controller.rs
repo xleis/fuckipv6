@@ -11,11 +11,11 @@ use tokio::sync::RwLock;
 
 use crate::node::{
     NodeBlacklistSnapshot, NodeClientBlacklistCommand, NodeCommand, NodeCommandBus,
-    NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
-    NodeNetworkAllocationSnapshot, NodeNetworkRole, NodeNetworkStatus, NodePeerProbeSnapshot,
-    NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
-    NodeStateStore, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeCommandBusError, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest,
+    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand,
+    NodeNetworkAllocation, NodeNetworkAllocationSnapshot, NodeNetworkRole, NodeNetworkStatus,
+    NodePeerProbeSnapshot, NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeRoutingMode,
+    NodeSnapshot, NodeStateStore, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 #[cfg(test)]
 use crate::node::{NodeCommandFuture, NodeCommandHandler, NodeCommandResult};
@@ -484,10 +484,12 @@ impl AppController {
         command: NodeCommand,
     ) -> Result<NodeCommandOutcome, AppControllerError> {
         let request_id = self.request_id.fetch_add(1, Ordering::Relaxed);
+        let snapshot = self.node.state.snapshot().await;
+        let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "webui_controller");
         let result = self
             .node
             .commands
-            .execute(NodeCommandRequest::new(request_id, command))
+            .execute(context, NodeCommandRequest::new(request_id, command))
             .await?;
         match result.outcome {
             NodeCommandOutcome::Rejected(problem) => Err(AppControllerError::from_problem(problem)),

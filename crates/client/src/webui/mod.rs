@@ -6,7 +6,9 @@ pub mod security;
 mod tls;
 
 use crate::config_manager::ConfigManager;
-use crate::node::{NodeHttpAdapter, NodeProblem, NodeProblemCode};
+use crate::node::{
+    NodeCommandContext, NodeHttpAdapter, NodeProblem, NodeProblemCode, NodeStateStore,
+};
 use crate::owner_security::service::{
     AuthenticatedOwnerSession, IssuedOwnerSession, OwnerBootstrapChannel, OwnerSecurityError,
     OwnerSecurityService,
@@ -153,6 +155,7 @@ fn create_app_web_router_with_mutation_limiter(
         .route("/api/coordinator/ban", post(handle_coordinator_ban))
         .route("/api/coordinator/unban", post(handle_coordinator_unban))
         .with_state(controller);
+    let node_state = node_adapter.as_ref().map(NodeHttpAdapter::state_store);
     let protected = match node_adapter {
         Some(adapter) => protected.merge(adapter.router()),
         None => protected,
@@ -164,6 +167,7 @@ fn create_app_web_router_with_mutation_limiter(
             owner: owner_security.clone(),
             public_claim: public_claim.clone(),
             mutation_limiter,
+            node_state,
         },
         require_api_auth,
     ));
@@ -420,11 +424,28 @@ struct ApiAuthState {
     owner: Option<Arc<OwnerSecurityService>>,
     public_claim: Option<Arc<PublicClaimConfig>>,
     mutation_limiter: Arc<MutationRateLimiter>,
+    node_state: Option<NodeStateStore>,
+}
+
+async fn attach_owner_command_context(
+    state: &ApiAuthState,
+    request: &mut axum::extract::Request,
+    source: &str,
+) {
+    let Some(node_state) = &state.node_state else {
+        return;
+    };
+    let snapshot = node_state.snapshot().await;
+    request
+        .extensions_mut()
+        .insert(NodeCommandContext::local_owner_for_snapshot(
+            &snapshot, source,
+        ));
 }
 
 async fn require_api_auth(
     State(state): State<ApiAuthState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let connect_ip = request
@@ -464,6 +485,7 @@ async fn require_api_auth(
                 return mutation_rate_limited_response(retry_after);
             }
         }
+        attach_owner_command_context(&state, &mut request, "webui_public_owner").await;
         return next.run(request).await;
     }
 
@@ -498,6 +520,14 @@ async fn require_api_auth(
         }
     }
 
+    let source = if owner_authenticated {
+        "webui_local_owner"
+    } else if bearer_authenticated {
+        "webui_bearer_owner"
+    } else {
+        "webui_loopback_owner"
+    };
+    attach_owner_command_context(&state, &mut request, source).await;
     next.run(request).await
 }
 

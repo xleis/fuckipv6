@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
-use crate::node::{NodeCommandBus, NodeCommandRequest, NodeCommandResult};
+use crate::node::{NodeCommandBus, NodeCommandContext, NodeCommandRequest, NodeCommandResult};
 use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
 
@@ -638,7 +638,13 @@ async fn handle_client(
         }) => update_runtime_routing(&registry, mode, exit_node, is_exit_node).await,
         Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
         Ok(IpcRequest::NodeCommand(request)) => match commands {
-            Some(commands) => match commands.execute(request).await {
+            Some(commands) => match commands
+                .execute(
+                    NodeCommandContext::untrusted("legacy_loopback_tcp"),
+                    request,
+                )
+                .await
+            {
                 Ok(result) => IpcResponse::NodeCommand(result),
                 Err(error) => IpcResponse::Error {
                     message: format!("节点命令执行失败: {error}"),
@@ -1212,7 +1218,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipc_executes_shared_node_commands_and_returns_typed_results() -> anyhow::Result<()> {
+    async fn legacy_ipc_commands_are_rejected_until_transport_authentication_exists(
+    ) -> anyhow::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?.to_string();
 
@@ -1236,10 +1243,14 @@ mod tests {
         match response {
             IpcResponse::NodeCommand(result) => {
                 assert_eq!(result.request_id, 77);
-                assert!(matches!(
-                    result.outcome,
-                    crate::node::NodeCommandOutcome::Snapshot(_)
-                ));
+                let crate::node::NodeCommandOutcome::Rejected(problem) = result.outcome else {
+                    panic!("legacy loopback TCP must not dispatch node commands");
+                };
+                assert_eq!(problem.code, crate::node::NodeProblemCode::PermissionDenied);
+                assert_eq!(
+                    problem.params.get("authorization_code").map(String::as_str),
+                    Some("permission.authentication_required")
+                );
             }
             other => panic!("unexpected response: {other:?}"),
         }

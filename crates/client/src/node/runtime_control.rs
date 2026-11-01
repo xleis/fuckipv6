@@ -4254,7 +4254,7 @@ mod tests {
         );
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 600,
                 NodeCommand::UpdateRouting(routing_command(
                     "routing-success",
@@ -4373,7 +4373,7 @@ mod tests {
         );
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 700,
                 NodeCommand::SetNetworkRole(role_command(
                     "role-success",
@@ -4528,7 +4528,7 @@ mod tests {
             harness.runtime.clone(),
         );
         let invalid = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 710,
                 NodeCommand::SetNetworkRole(role_command(
                     "role-rejections",
@@ -4567,7 +4567,7 @@ mod tests {
         for (offset, (command, expected_code, expected_retryable)) in cases.into_iter().enumerate()
         {
             let result = bus
-                .execute(NodeCommandRequest::new(
+                .execute_test(NodeCommandRequest::new(
                     711 + offset as u64,
                     NodeCommand::SetNetworkRole(command),
                 ))

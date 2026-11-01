@@ -1,3 +1,4 @@
+mod authorization;
 mod command;
 pub mod contract;
 mod event;
@@ -10,6 +11,15 @@ pub(crate) mod runtime_metadata;
 mod state;
 mod ui_manifest;
 
+pub use authorization::NodeCommandContext;
+
+#[cfg(test)]
+pub(crate) fn test_owner_context() -> NodeCommandContext {
+    NodeCommandContext::local_owner(
+        fuckipv6_common::domain::NodeId::from_public_key(b"fuckipv6-command-bus-test-owner"),
+        "test",
+    )
+}
 pub use command::{
     validate_network_name, NodeBlacklistSnapshot, NodeCleanupFailureReason,
     NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot, NodeCleanupStepStatus,

@@ -22,8 +22,8 @@ use tokio::time::{sleep, Duration, Instant};
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
-    NodeCommand, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot, NodeNetworkStatus,
-    NodeProbePeerCommand, NodeSnapshot,
+    NodeCommand, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodeProbePeerCommand, NodeSnapshot,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -2754,9 +2754,11 @@ pub(crate) async fn execute_cli_node_command(
 ) -> Result<NodeCommandOutcome> {
     static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let snapshot = session.state().snapshot().await;
+    let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "cli");
     let result = session
         .commands()
-        .execute(NodeCommandRequest::new(request_id, command))
+        .execute(context, NodeCommandRequest::new(request_id, command))
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     match result.outcome {
@@ -3021,6 +3023,7 @@ pub async fn node_ping(target: &str, count: u32) -> Result<()> {
     let network_name = network.name.clone();
     let attempts = count.max(1);
     let mut succeeded = 0_u32;
+    let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "cli_ping");
 
     println!("正在通过节点运行时探测: {target} (网络: {network_name})");
     println!("─────────────────────────────────────");
@@ -3028,14 +3031,17 @@ pub async fn node_ping(target: &str, count: u32) -> Result<()> {
     for attempt in 1..=attempts {
         let result = session
             .commands()
-            .execute(NodeCommandRequest::new(
-                u64::from(attempt),
-                NodeCommand::ProbePeer(NodeProbePeerCommand {
-                    network_name: network_name.clone(),
-                    target: target.to_string(),
-                    timeout_ms: 3_000,
-                }),
-            ))
+            .execute(
+                context.clone(),
+                NodeCommandRequest::new(
+                    u64::from(attempt),
+                    NodeCommand::ProbePeer(NodeProbePeerCommand {
+                        network_name: network_name.clone(),
+                        target: target.to_string(),
+                        timeout_ms: 3_000,
+                    }),
+                ),
+            )
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 

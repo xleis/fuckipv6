@@ -1,16 +1,25 @@
+use fuckipv6_common::domain::{AuditEntry, AuditOutcome, NetworkId};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
+use super::authorization::{authorize_command, CommandDenial};
+use super::ui_manifest::audit_for_command;
 use super::{
-    NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole, NodeNetworkSelection,
-    NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot, NodeUiManifest,
+    NodeCommandContext, NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole,
+    NodeNetworkSelection, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
+    NodeUiManifest,
 };
+
+#[cfg(test)]
+use fuckipv6_common::domain::NodeId;
 
 /// One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -769,10 +778,88 @@ struct CommandEnvelope {
     response: oneshot::Sender<NodeCommandResult>,
 }
 
+#[derive(Default)]
+struct CommandAuditTrail {
+    entries: Arc<Mutex<Vec<AuditEntry>>>,
+    next_sequence: Arc<AtomicU64>,
+}
+
+impl CommandAuditTrail {
+    fn record(
+        &self,
+        context: &NodeCommandContext,
+        request: &NodeCommandRequest,
+        outcome: AuditOutcome,
+        reason: &str,
+    ) {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        let audit_id = fuckipv6_common::domain::AuditId::from_public_key(
+            format!(
+                "{}:{}:{}:{}:{}",
+                context.actor(),
+                request.request_id,
+                request.command.kind().as_str(),
+                sequence,
+                unix_time_ms()
+            )
+            .as_bytes(),
+        );
+        let canonical_action = audit_for_command(request.command.kind()).action;
+        let action = canonical_action.as_deref().unwrap_or("node.command");
+        let mut details = BTreeMap::new();
+        details.insert("command".into(), request.command.kind().as_str().into());
+        details.insert("request_id".into(), request.request_id.to_string());
+        details.insert("authorization_reason".into(), reason.into());
+        details.insert("actor_source".into(), context.source().into());
+        details.insert(
+            "role".into(),
+            match context.role() {
+                fuckipv6_common::domain::NetworkRole::Owner => "owner",
+                fuckipv6_common::domain::NetworkRole::Administrator => "administrator",
+                fuckipv6_common::domain::NetworkRole::Member => "member",
+                fuckipv6_common::domain::NetworkRole::TemporaryCoordinator => {
+                    "temporary_coordinator"
+                }
+            }
+            .into(),
+        );
+        let summary = match outcome {
+            AuditOutcome::Succeeded => "节点命令执行成功",
+            AuditOutcome::Failed => "节点命令执行失败",
+            AuditOutcome::Denied => "节点命令授权被拒绝",
+        };
+        let entry = AuditEntry {
+            audit_id,
+            operation_id: None,
+            actor: context.actor().clone(),
+            network_id: None::<NetworkId>,
+            action: action.into(),
+            resource: format!("node_command:{}", request.command.kind().as_str()),
+            outcome,
+            occurred_at_unix_ms: unix_time_ms(),
+            summary: summary.into(),
+            details,
+            sensitive_keys: Default::default(),
+        };
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.push(entry);
+        }
+    }
+
+    fn entries(&self) -> Vec<AuditEntry> {
+        self.entries
+            .lock()
+            .map(|entries| entries.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// Asynchronous command bus shared by CLI, IPC, WebUI and GPUI.
 #[derive(Clone)]
 pub struct NodeCommandBus {
     sender: mpsc::Sender<CommandEnvelope>,
+    events: NodeEventBus,
+    audit: Arc<CommandAuditTrail>,
 }
 
 impl NodeCommandBus {
@@ -781,6 +868,7 @@ impl NodeCommandBus {
         H: NodeCommandHandler,
     {
         let (sender, mut receiver) = mpsc::channel::<CommandEnvelope>(capacity.max(1));
+        let bus_events = events.clone();
         tokio::spawn(async move {
             let mut in_flight = tokio::task::JoinSet::new();
             loop {
@@ -807,24 +895,104 @@ impl NodeCommandBus {
             while in_flight.join_next().await.is_some() {}
         });
 
-        Self { sender }
+        Self {
+            sender,
+            events: bus_events,
+            audit: Arc::new(CommandAuditTrail::default()),
+        }
     }
 
+    /// Execute one command after server-side authorization. The context must be
+    /// constructed by the authenticated transport adapter, never from request
+    /// JSON or UI permission declarations.
     pub async fn execute(
         &self,
+        context: NodeCommandContext,
         request: NodeCommandRequest,
     ) -> Result<NodeCommandResult, NodeCommandBusError> {
         request.validate().map_err(NodeCommandBusError::Invalid)?;
         let request_id = request.request_id;
+        if let Err(denial) = authorize_command(&context, &request.command).map(|_| ()) {
+            let result = denied(request_id, &denial);
+            self.events.publish(NodeEventKind::CommandCompleted {
+                request_id,
+                success: false,
+            });
+            self.audit
+                .record(&context, &request, AuditOutcome::Denied, denial.reason);
+            return Ok(result);
+        }
+
         let (response, receiver) = oneshot::channel();
-        self.sender
+        let audit_request = request.clone();
+        if self
+            .sender
             .send(CommandEnvelope { request, response })
             .await
-            .map_err(|_| NodeCommandBusError::Closed)?;
-        receiver
-            .await
-            .map_err(|_| NodeCommandBusError::ResponseDropped(request_id))
+            .is_err()
+        {
+            return Err(NodeCommandBusError::Closed);
+        }
+        match receiver.await {
+            Ok(result) => {
+                self.audit.record(
+                    &context,
+                    &audit_request,
+                    if result.is_success() {
+                        AuditOutcome::Succeeded
+                    } else {
+                        AuditOutcome::Failed
+                    },
+                    "command authorized; handler outcome recorded",
+                );
+                Ok(result)
+            }
+            Err(_) => {
+                self.audit.record(
+                    &context,
+                    &audit_request,
+                    AuditOutcome::Failed,
+                    "handler response channel closed",
+                );
+                Err(NodeCommandBusError::ResponseDropped(request_id))
+            }
+        }
     }
+
+    /// Read the sanitized authorization/execution audit trail. This is used by
+    /// tests and by future owner-only audit projections.
+    pub fn audit_entries(&self) -> Vec<AuditEntry> {
+        self.audit.entries()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_test(
+        &self,
+        request: NodeCommandRequest,
+    ) -> Result<NodeCommandResult, NodeCommandBusError> {
+        self.execute(test_owner_context(), request).await
+    }
+}
+
+fn denied(request_id: u64, denial: &CommandDenial) -> NodeCommandResult {
+    NodeCommandResult::rejected(
+        request_id,
+        NodeProblem::new(NodeProblemCode::PermissionDenied, "无权执行此节点命令")
+            .with_param("authorization_code", denial.code),
+    )
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[cfg(test)]
+fn test_owner_context() -> NodeCommandContext {
+    NodeCommandContext::local_owner(NodeId::from_public_key(b"node-command-bus-test"), "test")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -840,6 +1008,7 @@ pub enum NodeCommandBusError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn valid_commands() -> Vec<NodeCommand> {
         vec![
@@ -929,6 +1098,24 @@ mod tests {
 
     impl NodeCommandHandler for EchoHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            Box::pin(async move {
+                NodeCommandResult::completed(
+                    request.request_id,
+                    NodeCommandOutcome::Completed {
+                        message: "ok".into(),
+                    },
+                )
+            })
+        }
+    }
+
+    struct CountingHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeCommandHandler for CountingHandler {
+        fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 NodeCommandResult::completed(
                     request.request_id,
@@ -1185,7 +1372,7 @@ mod tests {
         let mut event_rx = events.subscribe();
         let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), events, 4);
         let result = bus
-            .execute(NodeCommandRequest::new(42, NodeCommand::GetSnapshot))
+            .execute_test(NodeCommandRequest::new(42, NodeCommand::GetSnapshot))
             .await
             .expect("command result");
 
@@ -1205,7 +1392,7 @@ mod tests {
     async fn command_bus_rejects_invalid_command_before_dispatch() {
         let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 7,
                 NodeCommand::ProbePeer(NodeProbePeerCommand {
                     network_name: "home".into(),
@@ -1215,5 +1402,80 @@ mod tests {
             ))
             .await;
         assert!(matches!(result, Err(NodeCommandBusError::Invalid(_))));
+    }
+
+    #[tokio::test]
+    async fn untrusted_command_is_rejected_audited_and_never_dispatched() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let bus = NodeCommandBus::spawn(
+            Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+
+        let result = bus
+            .execute(
+                NodeCommandContext::untrusted("legacy_loopback_tcp"),
+                NodeCommandRequest::new(51, NodeCommand::GetSnapshot),
+            )
+            .await
+            .expect("authorization rejection is a command result");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected authorization rejection");
+        };
+        assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some("permission.authentication_required")
+        );
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].outcome, AuditOutcome::Denied);
+        assert_eq!(audit[0].details["command"], "get_snapshot");
+        assert_eq!(audit[0].details["actor_source"], "legacy_loopback_tcp");
+    }
+
+    #[tokio::test]
+    async fn authorized_command_and_audit_do_not_persist_payload_secrets() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let bus = NodeCommandBus::spawn(
+            Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        let invitation = "fk://owner-secret-invitation@example.test:6666";
+
+        let result = bus
+            .execute(
+                NodeCommandContext::local_owner(actor(), "local-ipc:owner"),
+                NodeCommandRequest::new(
+                    52,
+                    NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                        target: invitation.into(),
+                        network_name: Some("home".into()),
+                        start: false,
+                    }),
+                ),
+            )
+            .await
+            .expect("authorized command result");
+
+        assert!(result.is_success());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].outcome, AuditOutcome::Succeeded);
+        assert_eq!(audit[0].details["command"], "join_network");
+        assert!(!format!("{:?}", audit[0]).contains("owner-secret-invitation"));
+    }
+
+    fn actor() -> NodeId {
+        NodeId::from_public_key(b"command-bus-audit-test")
     }
 }

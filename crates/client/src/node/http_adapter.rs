@@ -13,7 +13,7 @@ use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
         ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        Extension, Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::{
@@ -35,10 +35,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use super::{
-    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeControlHealth, NodeErrorCategory, NodeEvent, NodeEventBus,
-    NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason, NodeProblem,
-    NodeProblemCode, NodeSnapshot, NodeStateStore, NodeUiManifest, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
+    NodeCommandRequest, NodeCommandResult, NodeControlHealth, NodeErrorCategory, NodeEvent,
+    NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,
+    NodeProblem, NodeProblemCode, NodeSnapshot, NodeStateStore, NodeUiManifest,
+    NODE_UI_MANIFEST_SCHEMA_VERSION,
 };
 
 /// Version of the HTTP/WebSocket envelope contract used by desktop and
@@ -673,6 +674,7 @@ impl NodeHttpAdapter {
     /// dispatch duplicate side effects.
     async fn submit_operation(
         &self,
+        context: NodeCommandContext,
         request: NodeCommandRequest,
         idempotency_key: IdempotencyKey,
     ) -> Result<(NodeOperationSnapshot, bool), OperationSubmitError> {
@@ -687,7 +689,10 @@ impl NodeHttpAdapter {
             &serde_json::to_vec(&request.command)
                 .map_err(|error| OperationSubmitError::Internal(error.to_string()))?,
         );
-        let actor = self.local_owner_actor().await;
+        let actor = DomainActorRef {
+            node_id: context.actor().clone(),
+            display: context.source().to_owned(),
+        };
         let operation_id = new_operation_id()?;
         let now = unix_time_ms();
         let operation = Operation {
@@ -763,34 +768,24 @@ impl NodeHttpAdapter {
             let adapter = self.clone();
             let operation_id = snapshot.operation.operation_id.clone();
             tokio::spawn(async move {
-                adapter.run_operation(operation_id, request).await;
+                adapter.run_operation(operation_id, context, request).await;
             });
         }
         Ok((snapshot, created))
     }
 
-    async fn local_owner_actor(&self) -> DomainActorRef {
-        let node_id = self
-            .state
-            .snapshot()
-            .await
-            .identity
-            .as_ref()
-            .and_then(|identity| NodeId::parse(identity.node_id.as_str()).ok())
-            .unwrap_or_else(|| NodeId::from_public_key(b"fuckipv6-uninitialized-local-owner"));
-        DomainActorRef {
-            node_id,
-            display: "local_owner".into(),
-        }
-    }
-
-    async fn run_operation(&self, operation_id: OperationId, request: NodeCommandRequest) {
+    async fn run_operation(
+        &self,
+        operation_id: OperationId,
+        context: NodeCommandContext,
+        request: NodeCommandRequest,
+    ) {
         let request_id = request.request_id;
         if !self.transition_operation(&operation_id, OperationState::Running, "dispatching") {
             return;
         }
         self.progress_operation(&operation_id, "executing");
-        let result = self.commands.execute(request).await;
+        let result = self.commands.execute(context, request).await;
         match result {
             Ok(result) => {
                 let result = result_for_control_client(result);
@@ -1016,21 +1011,33 @@ impl NodeHttpAdapter {
     /// `NodeStateStore::update` or maintain a second operation state machine.
     pub async fn execute(
         &self,
+        context: NodeCommandContext,
         request: NodeCommandRequest,
     ) -> Result<NodeCommandResult, NodeHttpAdapterError> {
         self.commands
-            .execute(request)
+            .execute(context, request)
             .await
             .map_err(NodeHttpAdapterError::from)
     }
 
     async fn execute_generated(
         &self,
+        context: NodeCommandContext,
         command: NodeCommand,
     ) -> Result<NodeCommandResult, NodeHttpAdapterError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        self.execute(NodeCommandRequest::new(request_id, command))
+        self.execute(context, NodeCommandRequest::new(request_id, command))
             .await
+    }
+
+    pub(crate) fn state_store(&self) -> NodeStateStore {
+        self.state.clone()
+    }
+
+    #[cfg(test)]
+    fn test_router(self) -> Router {
+        self.router()
+            .layer(Extension(crate::node::test_owner_context()))
     }
 
     fn allocate_request_id(&self) -> u64 {
@@ -1039,8 +1046,13 @@ impl NodeHttpAdapter {
 
     /// Fetch the latest snapshot through `NodeCommand::GetSnapshot`; the
     /// adapter never synthesizes a snapshot from private state.
-    pub async fn snapshot(&self) -> Result<NodeSnapshot, NodeHttpAdapterError> {
-        let result = self.execute_generated(NodeCommand::GetSnapshot).await?;
+    pub async fn snapshot(
+        &self,
+        context: NodeCommandContext,
+    ) -> Result<NodeSnapshot, NodeHttpAdapterError> {
+        let result = self
+            .execute_generated(context, NodeCommand::GetSnapshot)
+            .await?;
         match result.outcome {
             NodeCommandOutcome::Snapshot(snapshot) => Ok(*snapshot),
             NodeCommandOutcome::Rejected(problem) => Err(NodeHttpAdapterError::Rejected(problem)),
@@ -1051,8 +1063,13 @@ impl NodeHttpAdapter {
     }
 
     /// Fetch the declarative UI contract through `NodeCommand::GetUiManifest`.
-    pub async fn manifest(&self) -> Result<NodeUiManifest, NodeHttpAdapterError> {
-        let result = self.execute_generated(NodeCommand::GetUiManifest).await?;
+    pub async fn manifest(
+        &self,
+        context: NodeCommandContext,
+    ) -> Result<NodeUiManifest, NodeHttpAdapterError> {
+        let result = self
+            .execute_generated(context, NodeCommand::GetUiManifest)
+            .await?;
         match result.outcome {
             NodeCommandOutcome::UiManifest(manifest) => {
                 if manifest.schema_version != NODE_UI_MANIFEST_SCHEMA_VERSION {
@@ -1346,6 +1363,7 @@ fn validate_api_query(query: &NodeApiQuery, request_id: u64) -> Result<(), Box<H
 
 async fn handle_v1_command(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     payload: Result<Json<NodeCommandHttpRequest>, JsonRejection>,
 ) -> Response {
     let payload = match payload {
@@ -1377,7 +1395,7 @@ async fn handle_v1_command(
             .into_response();
         };
         return match adapter
-            .submit_operation(payload.request, idempotency_key)
+            .submit_operation(context, payload.request, idempotency_key)
             .await
         {
             Ok((operation, _created)) => (
@@ -1411,7 +1429,7 @@ async fn handle_v1_command(
         };
     }
 
-    match adapter.execute(payload.request).await {
+    match adapter.execute(context, payload.request).await {
         Ok(result) => {
             let result = result_for_control_client(result);
             let status = status_for_command_result(&result);
@@ -1431,6 +1449,7 @@ async fn handle_v1_command(
 
 async fn handle_v1_snapshot(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     query: Result<Query<NodeApiQuery>, QueryRejection>,
 ) -> Response {
     let request_id = adapter.allocate_request_id();
@@ -1444,7 +1463,7 @@ async fn handle_v1_snapshot(
         return (*error).into_response();
     }
 
-    match adapter.snapshot().await {
+    match adapter.snapshot(context).await {
         Ok(snapshot) => Json(NodeApiSnapshotResponse {
             meta: NodeApiResponseMeta::new(request_id),
             snapshot: snapshot_for_control_client(snapshot),
@@ -1456,6 +1475,7 @@ async fn handle_v1_snapshot(
 
 async fn handle_v1_manifest(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     query: Result<Query<NodeApiQuery>, QueryRejection>,
 ) -> Response {
     let request_id = adapter.allocate_request_id();
@@ -1469,7 +1489,7 @@ async fn handle_v1_manifest(
         return (*error).into_response();
     }
 
-    match adapter.manifest().await {
+    match adapter.manifest(context).await {
         Ok(manifest) => Json(NodeApiManifestResponse {
             meta: NodeApiResponseMeta::new(request_id),
             manifest,
@@ -1508,6 +1528,7 @@ async fn handle_v1_operation(
 
 async fn handle_v1_object(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     Path((kind, id)): Path<(String, String)>,
     query: Result<Query<NodeApiQuery>, QueryRejection>,
 ) -> Response {
@@ -1522,7 +1543,7 @@ async fn handle_v1_object(
         return (*error).into_response();
     }
 
-    let snapshot = match adapter.snapshot().await {
+    let snapshot = match adapter.snapshot(context).await {
         Ok(snapshot) => snapshot_for_control_client(snapshot),
         Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
     };
@@ -1595,6 +1616,7 @@ struct NodeApiEventStreamState {
 
 async fn handle_v1_events(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     headers: HeaderMap,
     query: Result<Query<NodeApiQuery>, QueryRejection>,
 ) -> Response {
@@ -1633,7 +1655,7 @@ async fn handle_v1_events(
         None => std::collections::VecDeque::new(),
     };
 
-    let snapshot = match adapter.snapshot().await {
+    let snapshot = match adapter.snapshot(context).await {
         Ok(snapshot) => snapshot_for_control_client(snapshot),
         Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
     };
@@ -1753,13 +1775,14 @@ fn sse_event(message: NodeApiEvent, id: Option<NodeEventCursor>) -> SseEvent {
 
 async fn handle_command(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     Json(payload): Json<NodeCommandHttpRequest>,
 ) -> Response {
     if let Err(error) = require_schema_version_value(payload.schema_version) {
         return error.into_response();
     }
 
-    match adapter.execute(payload.request).await {
+    match adapter.execute(context, payload.request).await {
         Ok(result) => {
             let result = result_for_control_client(result);
             let status = status_for_command_result(&result);
@@ -1778,11 +1801,16 @@ async fn handle_command(
 
 async fn handle_snapshot(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     Query(query): Query<NodeHttpQuery>,
 ) -> Result<Json<NodeSnapshotResponse>, HttpAdapterError> {
     require_schema_version(&query)?;
-    let snapshot =
-        snapshot_for_control_client(adapter.snapshot().await.map_err(HttpAdapterError::from)?);
+    let snapshot = snapshot_for_control_client(
+        adapter
+            .snapshot(context)
+            .await
+            .map_err(HttpAdapterError::from)?,
+    );
     Ok(Json(NodeSnapshotResponse {
         schema_version: NODE_HTTP_SCHEMA_VERSION,
         snapshot,
@@ -1791,10 +1819,14 @@ async fn handle_snapshot(
 
 async fn handle_manifest(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     Query(query): Query<NodeHttpQuery>,
 ) -> Result<Json<NodeManifestResponse>, HttpAdapterError> {
     require_schema_version(&query)?;
-    let manifest = adapter.manifest().await.map_err(HttpAdapterError::from)?;
+    let manifest = adapter
+        .manifest(context)
+        .await
+        .map_err(HttpAdapterError::from)?;
     Ok(Json(NodeManifestResponse {
         schema_version: NODE_HTTP_SCHEMA_VERSION,
         manifest,
@@ -1803,6 +1835,7 @@ async fn handle_manifest(
 
 async fn handle_events(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     Query(query): Query<NodeHttpQuery>,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -1812,13 +1845,17 @@ async fn handle_events(
     let Ok(ws) = ws else {
         return HttpAdapterError::upgrade_required().into_response();
     };
-    ws.on_upgrade(move |socket| run_event_socket(socket, adapter))
+    ws.on_upgrade(move |socket| run_event_socket(socket, adapter, context))
 }
 
-async fn run_event_socket(mut socket: WebSocket, adapter: NodeHttpAdapter) {
+async fn run_event_socket(
+    mut socket: WebSocket,
+    adapter: NodeHttpAdapter,
+    context: NodeCommandContext,
+) {
     // Subscribe before fetching the snapshot so no event is lost in the gap.
     let receiver = adapter.events.subscribe();
-    let snapshot = match adapter.snapshot().await {
+    let snapshot = match adapter.snapshot(context).await {
         Ok(snapshot) => snapshot_for_control_client(snapshot),
         Err(error) => {
             let message = NodeWsMessage::Error {
@@ -2392,7 +2429,7 @@ mod tests {
     async fn post_command(adapter: NodeHttpAdapter, payload: &NodeCommandHttpRequest) -> Response {
         let body = serde_json::to_vec(payload).expect("serialize command request");
         adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2411,7 +2448,7 @@ mod tests {
     ) -> Response {
         let body = serde_json::to_vec(payload).expect("serialize command request");
         adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2427,7 +2464,7 @@ mod tests {
     async fn fetch_v1_operation(adapter: &NodeHttpAdapter, operation_id: &str) -> Response {
         adapter
             .clone()
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri(format!(
@@ -2463,7 +2500,7 @@ mod tests {
 
         let snapshot_response = adapter
             .clone()
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/node/snapshot?schema_version=1")
@@ -2486,7 +2523,7 @@ mod tests {
         );
 
         let manifest_response = adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/node/manifest?schema_version=1")
@@ -2512,7 +2549,7 @@ mod tests {
 
         let snapshot_response = adapter
             .clone()
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/snapshot?schema_version=1")
@@ -2534,7 +2571,7 @@ mod tests {
         );
 
         let manifest_response = adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/manifest?schema_version=1")
@@ -2924,7 +2961,7 @@ mod tests {
     async fn v1_operation_route_returns_stable_not_found_envelope() {
         let (adapter, _state, _events) = adapter_fixture(node_ui_manifest());
         let response = adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/operations/op_missing?schema_version=1")
@@ -2964,7 +3001,7 @@ mod tests {
 
         let response = adapter
             .clone()
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/objects/network/home?schema_version=1")
@@ -2983,7 +3020,7 @@ mod tests {
         ));
 
         let missing = adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/objects/network/missing?schema_version=1")
@@ -3004,7 +3041,7 @@ mod tests {
 
         let response = adapter
             .clone()
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/events?schema_version=1&after=0:0")
@@ -3052,7 +3089,7 @@ mod tests {
         // repeated.
         state.update(|_| {}).await;
         let response = adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/events?schema_version=1")
@@ -3114,7 +3151,7 @@ mod tests {
 
         let expired = adapter
             .clone()
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/events?schema_version=1&after=0:0")
@@ -3137,7 +3174,7 @@ mod tests {
         );
 
         let malformed = adapter
-            .router()
+            .test_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/events?schema_version=1&after=not-a-cursor")
@@ -3159,7 +3196,7 @@ mod tests {
         ] {
             let (adapter, _state, events) = adapter_fixture(node_ui_manifest());
             let response = adapter
-                .router()
+                .test_router()
                 .oneshot(
                     Request::builder()
                         .uri("/api/v1/events?schema_version=1")
@@ -3227,7 +3264,7 @@ mod tests {
         ] {
             let response = adapter
                 .clone()
-                .router()
+                .test_router()
                 .oneshot(
                     Request::builder()
                         .uri(path)
@@ -3355,7 +3392,7 @@ mod tests {
         ] {
             let response = adapter
                 .clone()
-                .router()
+                .test_router()
                 .oneshot(
                     Request::builder()
                         .uri(path)
@@ -3382,7 +3419,7 @@ mod tests {
         let (adapter, _state, _events) = adapter_fixture(manifest);
 
         let error = adapter
-            .manifest()
+            .manifest(crate::node::test_owner_context())
             .await
             .expect_err("manifest must be rejected");
         assert!(matches!(
@@ -3398,7 +3435,7 @@ mod tests {
         let (adapter, _state, _events) = adapter_fixture(manifest);
 
         let error = adapter
-            .manifest()
+            .manifest(crate::node::test_owner_context())
             .await
             .expect_err("malformed manifest must be rejected");
         assert!(matches!(
@@ -3416,7 +3453,7 @@ mod tests {
             .expect("bind test server");
         let address = listener.local_addr().expect("test server address");
         let server = tokio::spawn(async move {
-            axum::serve(listener, adapter.router())
+            axum::serve(listener, adapter.test_router())
                 .await
                 .expect("serve adapter");
         });

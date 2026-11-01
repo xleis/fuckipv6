@@ -748,7 +748,7 @@ mod tests {
         command: NodeCommand,
     ) -> NodeProblem {
         let result = bus
-            .execute(NodeCommandRequest::new(request_id, command))
+            .execute_test(NodeCommandRequest::new(request_id, command))
             .await
             .expect("command result");
         assert_eq!(result.request_id, request_id);
@@ -782,7 +782,7 @@ mod tests {
         let bus = spawn_command_bus(state, registry, NodeEventBus::default());
 
         let result = bus
-            .execute(NodeCommandRequest::new(1, NodeCommand::GetSnapshot))
+            .execute_test(NodeCommandRequest::new(1, NodeCommand::GetSnapshot))
             .await
             .expect("snapshot result");
 
@@ -808,7 +808,7 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize manifest request");
         assert_eq!(decoded, request);
 
-        let result = bus.execute(decoded).await.expect("manifest result");
+        let result = bus.execute_test(decoded).await.expect("manifest result");
         match result.outcome {
             NodeCommandOutcome::UiManifest(manifest) => {
                 assert_eq!(
@@ -844,7 +844,7 @@ mod tests {
         );
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 70,
                 NodeCommand::GetBlacklist {
                     network_name: "lab".into(),
@@ -862,7 +862,7 @@ mod tests {
         }
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 71,
                 NodeCommand::BanClient(NodeClientBlacklistCommand {
                     network_name: "lab".into(),
@@ -880,7 +880,7 @@ mod tests {
         }
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 72,
                 NodeCommand::UnbanClient(NodeClientBlacklistCommand {
                     network_name: "lab".into(),
@@ -898,7 +898,7 @@ mod tests {
         }
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 73,
                 NodeCommand::GetNetworkAllocation {
                     network_name: "lab".into(),
@@ -921,7 +921,7 @@ mod tests {
             ipv6_pool: "fd00::1000/120".into(),
         };
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 74,
                 NodeCommand::UpdateNetworkAllocation(NodeUpdateNetworkAllocationCommand {
                     network_name: "lab".into(),
@@ -962,7 +962,7 @@ mod tests {
         let bus = spawn_command_bus(NodeStateStore::new(), registry, NodeEventBus::default());
 
         let result = bus
-            .execute(NodeCommandRequest::new(2, NodeCommand::Shutdown))
+            .execute_test(NodeCommandRequest::new(2, NodeCommand::Shutdown))
             .await
             .expect("shutdown result");
 
@@ -995,7 +995,7 @@ mod tests {
         );
 
         let result = bus
-            .execute(NodeCommandRequest::new(20, NodeCommand::Shutdown))
+            .execute_test(NodeCommandRequest::new(20, NodeCommand::Shutdown))
             .await
             .expect("shutdown result");
 
@@ -1014,7 +1014,7 @@ mod tests {
         );
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 3,
                 NodeCommand::StopNetworks {
                     networks: vec!["home".into()],
@@ -1041,7 +1041,7 @@ mod tests {
         );
 
         let result = bus
-            .execute(NodeCommandRequest::new(
+            .execute_test(NodeCommandRequest::new(
                 4,
                 NodeCommand::StartNetworks {
                     selection: crate::node::NodeNetworkSelection::All,

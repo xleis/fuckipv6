@@ -26,7 +26,7 @@ use crate::local_ipc::{
 use crate::local_service::serve_owned_node;
 use crate::logging;
 use crate::multi_network::MultiNetworkSupervisor;
-use crate::node::{NodeCommand, NodeCommandRequest};
+use crate::node::{NodeCommand, NodeCommandContext, NodeCommandRequest};
 
 const CONTROL_ARGUMENT: &str = "__control";
 const NODE_ARGUMENT: &str = "__node";
@@ -268,12 +268,15 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     // `ready` is deliberately not reported until the persisted data plane has
     // had a chance to start. The control process uses stdout readiness as the
     // barrier before exposing the node to UI clients.
+    let startup_snapshot = supervisor.state().snapshot().await;
+    let startup_context =
+        NodeCommandContext::local_owner_for_snapshot(&startup_snapshot, "node_runtime_startup");
     match timeout(
         NODE_STARTUP_TIMEOUT,
-        commands.execute(NodeCommandRequest::new(
-            u64::MAX - 1,
-            NodeCommand::StartNode,
-        )),
+        commands.execute(
+            startup_context,
+            NodeCommandRequest::new(u64::MAX - 1, NodeCommand::StartNode),
+        ),
     )
     .await
     {

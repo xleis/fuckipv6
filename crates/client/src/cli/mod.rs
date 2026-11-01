@@ -380,6 +380,9 @@ pub enum Commands {
     /// 安装、升级和管理 systemd/launchd/Windows 系统服务
     Service(crate::service::ServiceArgs),
 
+    /// 在本机终端验证恢复码并注册新的所有者 Passkey（不提供公网找回）
+    RecoverOwner,
+
     /// 查看版本信息
     Version,
 
@@ -856,6 +859,10 @@ async fn run_command(command: Commands) -> Result<()> {
         | Commands::QuicInfo
         | Commands::RegisterCheck { .. }) => run_runtime_command(command).await?,
         command @ Commands::LxtRescue { .. } => run_lxt_rescue_command(command).await?,
+        Commands::RecoverOwner => {
+            logging::init_default()?;
+            crate::owner_security::recovery::run_local_recovery().await?;
+        }
         Commands::Service(args) => crate::service::run(args)?,
         command @ (Commands::InitConfig { .. }
         | Commands::EncryptConfig { .. }
@@ -1392,6 +1399,19 @@ mod tests {
         assert!(!options.headless);
         assert!(options.gui);
         assert_eq!(options.webui_port, 8080);
+    }
+
+    #[test]
+    fn parses_local_owner_recovery_without_secret_arguments() {
+        let cli = Cli::try_parse_from(["fuckipv6", "recover-owner"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::RecoverOwner)));
+        assert!(Cli::try_parse_from([
+            "fuckipv6",
+            "recover-owner",
+            "--recovery-code",
+            "must-not-be-a-cli-secret",
+        ])
+        .is_err());
     }
 
     #[test]

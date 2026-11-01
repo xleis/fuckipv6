@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>fuckipv6 · 本地所有者恢复</title>
+  <link rel="stylesheet" href="/assets/recovery.css">
+</head>
+<body data-recovery-ticket="__RECOVERY_TICKET__" data-recovery-origin="__RECOVERY_ORIGIN__">
+  <div class="shell">
+    <section class="panel" aria-labelledby="page-title">
+      <header>
+        <div class="brand">fuckipv6</div>
+        <h1 id="page-title" class="title">本地所有者恢复</h1>
+        <p class="sub">本机终端已校验恢复码。请注册新的 Passkey，并离线保存随后生成的新恢复码。</p>
+      </header>
+      <main>
+        <section id="step-intro" class="step active" aria-labelledby="intro-title">
+          <div class="step-head"><span class="step-no">1</span><span id="intro-title" class="step-title">确认恢复影响</span></div>
+          <div class="warning">恢复完成后，现有全部 Passkey 和登录会话都会立即失效。此操作不会创建公网找回入口。</div>
+          <p class="hint">恢复服务只监听本机回环地址，并在完成或取消后自动关闭。恢复凭据不会写入 URL、浏览器存储或审计日志。</p>
+          <div class="actions">
+            <button id="begin-recovery" type="button">注册新 Passkey</button>
+            <button id="cancel-recovery" class="secondary" type="button">取消恢复</button>
+          </div>
+        </section>
+
+        <section id="step-recovery" class="step" aria-labelledby="recovery-title">
+          <div class="step-head"><span class="step-no">2</span><span id="recovery-title" class="step-title">离线保存新恢复码</span></div>
+          <div class="warning">新恢复码只显示这一次。请在下方的确认框勾选前，将它保存到离线安全位置。</div>
+          <label for="recovery-code">新恢复码</label>
+          <div class="recovery">
+            <code id="recovery-code" class="code" tabindex="0"></code>
+            <button id="copy-recovery" class="secondary" type="button">复制</button>
+          </div>
+          <label class="check" for="recovery-saved"><input id="recovery-saved" type="checkbox">我已离线保存新恢复码，并确认旧 Passkey 与会话将全部失效。</label>
+          <div class="actions">
+            <button id="confirm-recovery" type="button" disabled>完成本地恢复</button>
+            <button id="cancel-after-registration" class="secondary" type="button">取消恢复</button>
+          </div>
+        </section>
+
+        <section id="step-complete" class="step" aria-labelledby="complete-title">
+          <div class="step-head"><span class="step-no">✓</span><span id="complete-title" class="step-title">本地恢复已关闭</span></div>
+          <p id="complete-message" class="hint"></p>
+          <div class="actions"><button id="close-window" class="secondary" type="button">关闭窗口</button></div>
+        </section>
+
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+      </main>
+      <footer><span class="dot"></span><span>仅本机回环 · WebAuthn 来源校验 · 一次性恢复会话</span></footer>
+    </section>
+  </div>
+  <script src="/assets/recovery.js"></script>
+</body>
+</html>

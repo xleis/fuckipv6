@@ -54,6 +54,7 @@ tracing = { workspace = true }
 
 chrono = { workspace = true }
 getrandom = { workspace = true }
+rpassword = "7.4"
 
 anyhow = { workspace = true }
 bytes = { workspace = true }

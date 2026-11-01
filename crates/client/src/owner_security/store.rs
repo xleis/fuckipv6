@@ -20,6 +20,7 @@ const OWNER_DIR: &str = "owner";
 const OWNER_FILE: &str = "owner.json";
 const RECOVERY_VERIFIER_FILE: &str = "recovery.verifier";
 const INIT_LOCK_FILE: &str = ".owner-init.lock";
+const RECOVERY_LOCK_FILE: &str = ".owner-recovery.lock";
 const BOOTSTRAP_VERIFIER_FILE: &str = "owner-bootstrap.verifier";
 const RECOVERY_SECRET_REF: &str = "protected_file:owner/recovery.verifier";
 
@@ -195,6 +196,11 @@ impl OwnerStore {
             .filter(|passkey| passkey.reference.is_active())
             .map(|passkey| passkey.credential.clone())
             .collect()
+    }
+
+    pub(crate) fn fingerprint(&self) -> Result<[u8; 32]> {
+        let bytes = serde_json::to_vec(self).context("无法计算所有者状态指纹")?;
+        Ok(Sha256::digest(bytes).into())
     }
 
     pub(crate) fn all_credentials(&self) -> Vec<Passkey> {
@@ -398,6 +404,21 @@ impl OwnerPersistence {
         self.config_dir.join(BOOTSTRAP_VERIFIER_FILE)
     }
 
+    /// Acquire the process-wide local recovery lease. The lease is held from
+    /// code verification until the recovery page exits, preventing two local
+    /// recovery ceremonies from racing even when they use different ports.
+    pub(crate) fn acquire_recovery_lock(&self) -> Result<File> {
+        let lock = open_private_file(&self.config_dir.join(RECOVERY_LOCK_FILE), true, true)?;
+        FileExt::try_lock_exclusive(&lock).context("已有本机所有者恢复流程正在进行")?;
+        Ok(lock)
+    }
+
+    pub(crate) fn verify_recovery_code(&self, code: &str) -> Result<bool> {
+        let stored = self.read_recovery_verifier()?;
+        let supplied = Sha256::digest(code.as_bytes());
+        Ok(stored.ct_eq(supplied.as_slice()).into())
+    }
+
     /// Provision the one-time bootstrap code without ever persisting the code
     /// itself. Only its fixed-size digest is written to the protected config
     /// directory; the caller must display the plaintext once on the terminal.
@@ -537,6 +558,80 @@ impl OwnerPersistence {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error).context("无法释放所有者更新锁"),
         }
+    }
+
+    /// Replace every owner credential and invalidate every persisted session
+    /// after a local recovery. `expected_fingerprint` rejects a recovery that
+    /// raced with a passkey/session mutation and would overwrite newer state.
+    pub(crate) fn replace_after_recovery(
+        &self,
+        expected_fingerprint: &[u8; 32],
+        store: &OwnerStore,
+        recovery_verifier: &[u8; 32],
+    ) -> Result<()> {
+        store.validate()?;
+        let lock_path = self.config_dir.join(INIT_LOCK_FILE);
+        let lock = open_private_file(&lock_path, true, true)?;
+        FileExt::lock_exclusive(&lock).context("无法锁定所有者恢复事务")?;
+        let result = (|| -> Result<()> {
+            let current = match self.load()? {
+                OwnerLoad::Complete(store) => store,
+                OwnerLoad::Uninitialized => anyhow::bail!("所有者尚未初始化"),
+                OwnerLoad::Corrupt(reason) => anyhow::bail!("所有者状态损坏: {reason}"),
+            };
+            let current_fingerprint = current.fingerprint()?;
+            if !bool::from(current_fingerprint.ct_eq(expected_fingerprint)) {
+                anyhow::bail!("恢复期间所有者状态已变化，请重新开始恢复");
+            }
+            if current.owner.node_id != store.owner.node_id {
+                anyhow::bail!("恢复记录属于其他节点，拒绝替换");
+            }
+
+            let owner_dir = self.config_dir.join(OWNER_DIR);
+            let owner_path = owner_dir.join(OWNER_FILE);
+            let verifier_path = owner_dir.join(RECOVERY_VERIFIER_FILE);
+            let previous_owner =
+                serde_json::to_vec_pretty(&current).context("无法序列化恢复前所有者记录")?;
+            let replacement_owner =
+                serde_json::to_vec_pretty(store).context("无法序列化恢复后所有者记录")?;
+            let replacement_verifier = URL_SAFE_NO_PAD.encode(recovery_verifier);
+
+            write_private_file_atomic(&owner_path, &replacement_owner)?;
+            if let Err(error) =
+                write_private_file_atomic(&verifier_path, replacement_verifier.as_bytes())
+            {
+                if let Err(rollback_error) = write_private_file_atomic(&owner_path, &previous_owner)
+                {
+                    return Err(error).context(format!(
+                        "恢复码验证器写入失败且所有者记录回滚失败: {rollback_error}"
+                    ));
+                }
+                return Err(error).context("恢复码验证器写入失败，所有者记录已回滚");
+            }
+            Ok(())
+        })();
+        let unlock = FileExt::unlock(&lock);
+        match (result, unlock) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error).context("无法释放所有者恢复锁"),
+        }
+    }
+
+    fn read_recovery_verifier(&self) -> Result<[u8; 32]> {
+        let path = self.config_dir.join(OWNER_DIR).join(RECOVERY_VERIFIER_FILE);
+        let metadata = std::fs::symlink_metadata(&path).context("无法检查恢复码验证器")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            anyhow::bail!("恢复码验证器无效");
+        }
+        secure_file(&path)?;
+        let encoded = std::fs::read_to_string(&path).context("无法读取恢复码验证器")?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded.trim())
+            .context("恢复码验证器编码无效")?;
+        bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("恢复码验证器长度无效"))
     }
 
     fn commit_locked(

@@ -5,6 +5,7 @@
 //! state remains in memory until the owner record is atomically committed.
 
 pub(crate) mod audit;
+pub(crate) mod recovery;
 pub(crate) mod service;
 pub(crate) mod store;
 pub(crate) mod webauthn;

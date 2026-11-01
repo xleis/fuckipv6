@@ -10,15 +10,16 @@ use fuckipv6_common::i18n::{
 use fuckipv6_common::ui_components::{Capability, SemanticState};
 use fuckipv6_common::ui_layout::{DetailPresentation, LayoutClass, PageSection};
 use gpui::{
-    div, prelude::*, px, rgba, size, App, Bounds, Context, Div, FocusHandle, KeyDownEvent, Render,
-    SharedString, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle,
+    KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window, WindowBounds, WindowOptions,
 };
 
 use super::components::{
     button, capability_ring, choice_control, empty_state as component_empty_state,
-    error_state as component_error_state, nav_tab, status_badge, tabs, text_input,
+    error_state as component_error_state, nav_tab, status_badge, tab_control, tabs,
     toast as component_toast, toolbar, ButtonVariant, CapabilityItem, CapabilityVisual,
 };
+use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values,
     validate_manifest_bindings, ActionBinding, PageKind, RowModel, SectionModel,
@@ -44,6 +45,15 @@ const COLOR_MUTED: u32 = DARK_THEME.colors.text_muted.rgba_hex();
 const COLOR_ACCENT: u32 = DARK_THEME.colors.accent.rgba_hex();
 const COLOR_WARNING: u32 = DARK_THEME.colors.warning.rgba_hex();
 
+actions!(fuckipv6_shell, [RefreshSnapshot, Quit]);
+
+const A11Y_ROOT_ROLE: Role = Role::Application;
+const A11Y_NAVIGATION_ROLE: Role = Role::Navigation;
+const A11Y_MAIN_ROLE: Role = Role::Main;
+const A11Y_HEADING_ROLE: Role = Role::Heading;
+const A11Y_TAB_LIST_ROLE: Role = Role::TabList;
+const A11Y_TAB_PANEL_ROLE: Role = Role::TabPanel;
+
 struct GpuiShell {
     commands: NodeCommandBus,
     configs: ConfigManager,
@@ -54,9 +64,9 @@ struct GpuiShell {
     selected_page: String,
     selected_section: PageSection,
     selected_network: Option<String>,
-    focused_field: Option<String>,
     pending_confirmation: Option<String>,
     form_values: HashMap<String, String>,
+    text_inputs: HashMap<String, Entity<NativeTextInput>>,
     focus_handle: FocusHandle,
     pending_commands: u32,
     next_request_id: u64,
@@ -89,9 +99,9 @@ impl GpuiShell {
             selected_page: "overview".into(),
             selected_section: PageSection::DEFAULT,
             selected_network,
-            focused_field: None,
             pending_confirmation: None,
             form_values: HashMap::new(),
+            text_inputs: HashMap::new(),
             focus_handle: cx.focus_handle(),
             pending_commands: 0,
             next_request_id: 1,
@@ -117,7 +127,7 @@ impl GpuiShell {
             let snapshot = updates.borrow_and_update().clone();
             if weak
                 .update(cx, |shell, cx| {
-                    shell.apply_snapshot(snapshot);
+                    shell.apply_snapshot(snapshot, cx);
                     cx.notify();
                 })
                 .is_err()
@@ -131,6 +141,7 @@ impl GpuiShell {
     fn set_language(&mut self, preference: LanguagePreference, cx: &mut Context<Self>) {
         self.language_preference = preference;
         self.locale = preference.resolve(detect_system_locale());
+        set_shell_menus(cx, self.locale);
         if let Err(error) = self.configs.set_node_language_preference(preference) {
             self.error = Some(tr(
                 self.locale,
@@ -141,7 +152,7 @@ impl GpuiShell {
         cx.notify();
     }
 
-    fn apply_snapshot(&mut self, snapshot: NodeSnapshot) {
+    fn apply_snapshot(&mut self, snapshot: NodeSnapshot, cx: &mut Context<Self>) {
         self.snapshot = snapshot;
         let selection_still_exists = self.selected_network.as_deref().is_some_and(|selected| {
             self.snapshot
@@ -159,6 +170,7 @@ impl GpuiShell {
                 .map(|network| network.name.clone());
         }
         self.fill_empty_network_fields();
+        self.sync_text_inputs(cx);
     }
 
     fn submit_raw(&mut self, command: NodeCommand, cx: &mut Context<Self>) {
@@ -177,11 +189,17 @@ impl GpuiShell {
             let result = commands.execute(context, request).await;
             let _ = weak.update(cx, |shell, cx| {
                 shell.pending_commands = shell.pending_commands.saturating_sub(1);
-                shell.apply_command_result(result);
+                shell.apply_command_result(result, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn refresh_snapshot(&mut self, _: &RefreshSnapshot, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_commands == 0 {
+            self.submit_raw(NodeCommand::GetSnapshot, cx);
+        }
     }
 
     fn submit_manifest_action(&mut self, action_id: &str, cx: &mut Context<Self>) {
@@ -255,7 +273,11 @@ impl GpuiShell {
         }
     }
 
-    fn apply_command_result(&mut self, result: Result<NodeCommandResult, NodeCommandBusError>) {
+    fn apply_command_result(
+        &mut self,
+        result: Result<NodeCommandResult, NodeCommandBusError>,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_confirmation = None;
         let result = match result {
             Ok(result) => result,
@@ -271,7 +293,7 @@ impl GpuiShell {
 
         match result.outcome {
             NodeCommandOutcome::Snapshot(snapshot) => {
-                self.apply_snapshot(*snapshot);
+                self.apply_snapshot(*snapshot, cx);
                 self.notice = Some(t(self.locale, "gpui.snapshot_refreshed").to_string());
             }
             NodeCommandOutcome::UiManifest(manifest) => {
@@ -305,7 +327,7 @@ impl GpuiShell {
                     }
                 }
                 self.manifest = Some(manifest);
-                self.initialize_forms();
+                self.initialize_forms(cx);
                 self.notice = Some(tr(
                     self.locale,
                     "gpui.manifest_loaded",
@@ -434,20 +456,75 @@ impl GpuiShell {
         }
     }
 
-    fn initialize_forms(&mut self) {
+    fn initialize_forms(&mut self, cx: &mut Context<Self>) {
         let Some(manifest) = &self.manifest else {
             return;
         };
         let mut defaults = HashMap::new();
+        let mut text_fields = Vec::new();
         for action in manifest.pages.iter().flat_map(|page| &page.actions) {
             for (field, value) in default_form_values(action, self.selected_network.as_deref()) {
                 defaults.insert(self.field_key(&action.id, &field), value);
+            }
+            for field in &action.fields {
+                if !matches!(
+                    field.input,
+                    NodeUiInputKind::Boolean
+                        | NodeUiInputKind::Role
+                        | NodeUiInputKind::RoutingMode
+                        | NodeUiInputKind::NetworkSelection
+                ) {
+                    let key = self.field_key(&action.id, &field.id);
+                    text_fields.push((
+                        key,
+                        SharedString::from(format!("field-{}-{}", action.id, field.id)),
+                        SharedString::from(field_label(self.locale, &field.label_key)),
+                        SharedString::from(placeholder_for(
+                            self.locale,
+                            &field.input,
+                            &action.id,
+                            &field.id,
+                        )),
+                    ));
+                }
             }
         }
         for (key, value) in defaults {
             self.form_values.entry(key).or_insert(value);
         }
         self.fill_empty_network_fields();
+
+        for (key, id, label, placeholder) in text_fields {
+            if self.text_inputs.contains_key(&key) {
+                continue;
+            }
+            let value = self.form_values.get(&key).cloned().unwrap_or_default();
+            let input = cx.new(|cx| NativeTextInput::new(id, label, placeholder, value, cx));
+            let subscription_key = key.clone();
+            cx.subscribe(
+                &input,
+                move |shell: &mut Self, _, event: &TextInputEvent, cx| {
+                    shell
+                        .form_values
+                        .insert(subscription_key.clone(), event.value.clone());
+                    cx.notify();
+                },
+            )
+            .detach();
+            self.text_inputs.insert(key, input);
+        }
+        self.sync_text_inputs(cx);
+    }
+
+    fn sync_text_inputs(&mut self, cx: &mut Context<Self>) {
+        for (key, input) in &self.text_inputs {
+            let Some(value) = self.form_values.get(key).cloned() else {
+                continue;
+            };
+            if input.read(cx).value() != value {
+                input.update(cx, |input, cx| input.set_value(value, cx));
+            }
+        }
     }
 
     fn fill_empty_network_fields(&mut self) {
@@ -489,54 +566,6 @@ impl GpuiShell {
     fn set_field_value(&mut self, action_id: &str, field_id: &str, value: impl Into<String>) {
         self.form_values
             .insert(self.field_key(action_id, field_id), value.into());
-    }
-
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(field_key) = self.focused_field.clone() else {
-            return;
-        };
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.alt || keystroke.modifiers.platform {
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "escape" => {
-                self.focused_field = None;
-                cx.stop_propagation();
-            }
-            "backspace" => {
-                if let Some(value) = self.form_values.get_mut(&field_key) {
-                    value.pop();
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "delete" => {
-                if let Some(value) = self.form_values.get_mut(&field_key) {
-                    value.clear();
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "enter" => {
-                self.focused_field = None;
-                cx.stop_propagation();
-                cx.notify();
-            }
-            _ => {
-                if let Some(key_char) = &keystroke.key_char {
-                    if !key_char.is_empty() {
-                        self.form_values
-                            .entry(field_key)
-                            .or_default()
-                            .push_str(key_char);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }
-            }
-        }
     }
 
     fn page(&self) -> Option<&NodeUiPage> {
@@ -602,7 +631,16 @@ impl GpuiShell {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_2xl().text_color(rgba(COLOR_TEXT)).child(title))
+                    .child(
+                        div()
+                            .id("page-heading")
+                            .role(A11Y_HEADING_ROLE)
+                            .aria_level(1)
+                            .aria_label(title.clone())
+                            .text_2xl()
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(title),
+                    )
                     .child(
                         div()
                             .text_sm()
@@ -665,7 +703,6 @@ impl GpuiShell {
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.selected_page = page_id.clone();
                     shell.selected_section = PageSection::DEFAULT;
-                    shell.focused_field = None;
                     shell.pending_confirmation = None;
                     shell.error = None;
                     shell.notice = None;
@@ -718,6 +755,9 @@ impl GpuiShell {
         };
 
         div()
+            .id("primary-sidebar")
+            .role(A11Y_NAVIGATION_ROLE)
+            .aria_label(t(self.locale, "common.navigation").to_string())
             .flex()
             .flex_col()
             .w(px(DIMENSIONS.sidebar_px as f32))
@@ -827,14 +867,13 @@ impl GpuiShell {
             .unwrap_or_default();
         let tab = |section: PageSection, label: String| {
             let selected = self.selected_section == section;
-            choice_control(
+            tab_control(
                 SharedString::from(format!("page-section-{}", section.name())),
                 label,
                 selected,
             )
             .on_click(cx.listener(move |shell, _, _, cx| {
                 shell.selected_section = section;
-                shell.focused_field = None;
                 shell.pending_confirmation = None;
                 cx.notify();
             }))
@@ -842,6 +881,9 @@ impl GpuiShell {
         };
 
         div()
+            .id("page-sections")
+            .role(A11Y_TAB_LIST_ROLE)
+            .aria_label(t(self.locale, "common.page_sections").to_string())
             .flex()
             .items_center()
             .gap_2()
@@ -1123,27 +1165,20 @@ impl GpuiShell {
         &self,
         action: &NodeUiAction,
         field: &NodeUiField,
-        value: &str,
-        cx: &mut Context<Self>,
+        _value: &str,
+        _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let field_key = self.field_key(&action.id, &field.id);
-        let field_key_for_click = field_key.clone();
-        let focused = self.focused_field.as_deref() == Some(field_key.as_str());
-        let placeholder = placeholder_for(self.locale, &field.input, &action.id, &field.id);
-        let label = field_label(self.locale, &field.label_key);
-        text_input(
-            SharedString::from(format!("field-{field_key}")),
-            label,
-            value,
-            placeholder,
-            focused,
-        )
-        .on_click(cx.listener(move |shell, _, window, cx| {
-            shell.focused_field = Some(field_key_for_click.clone());
-            window.focus(&shell.focus_handle, cx);
-            cx.notify();
-        }))
-        .into_any_element()
+        if let Some(input) = self.text_inputs.get(&field_key) {
+            input.clone().into_any_element()
+        } else {
+            component_error_state(
+                SharedString::from(format!("missing-text-input-{field_key}")),
+                t(self.locale, "common.input_field"),
+                t(self.locale, "common.waiting_manifest"),
+            )
+            .into_any_element()
+        }
     }
 
     fn choice_field(
@@ -1190,6 +1225,8 @@ impl GpuiShell {
 
         div()
             .id("wide-detail")
+            .role(Role::Complementary)
+            .aria_label(t(self.locale, "common.current_context").to_string())
             .flex()
             .flex_col()
             .gap_4()
@@ -1255,6 +1292,9 @@ impl Render for GpuiShell {
         let show_detail = DetailPresentation::for_layout(layout) == DetailPresentation::Persistent;
         let content = self.page_content(cx);
         let mut main = div()
+            .id("main-content")
+            .role(A11Y_MAIN_ROLE)
+            .aria_label(t(self.locale, "common.main_content").to_string())
             .flex()
             .flex_col()
             .flex_1()
@@ -1268,20 +1308,42 @@ impl Render for GpuiShell {
             main = main.child(self.notice_banner());
         }
 
-        main = main.child(self.local_tabs(cx)).child(content).child(
-            div()
-                .px_6()
-                .py_3()
-                .border_t_1()
-                .border_color(rgba(COLOR_BORDER))
-                .text_xs()
-                .text_color(rgba(COLOR_MUTED))
-                .child(t(self.locale, "gpui.footer").to_string()),
-        );
+        main = main
+            .child(self.local_tabs(cx))
+            .child(
+                div()
+                    .id("page-panel")
+                    .role(A11Y_TAB_PANEL_ROLE)
+                    .aria_label(tr(
+                        self.locale,
+                        "gpui.page_section_panel",
+                        &[
+                            ("page", &page_label(self.locale, &self.selected_page)),
+                            ("section", self.selected_section.name()),
+                        ],
+                    ))
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(content),
+            )
+            .child(
+                div()
+                    .px_6()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "gpui.footer").to_string()),
+            );
 
         let mut root = div()
+            .id("gpui-root")
+            .role(A11Y_ROOT_ROLE)
+            .aria_label("fuckipv6")
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(Self::refresh_snapshot))
             .flex()
             .w_full()
             .h_full()
@@ -1572,6 +1634,23 @@ fn page_title(locale: Locale, id: &str) -> String {
     format!("{} · {}", page_label(locale, id), id)
 }
 
+fn bind_shell_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-r", RefreshSnapshot, None),
+        KeyBinding::new("cmd-r", RefreshSnapshot, None),
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("cmd-q", Quit, None),
+    ]);
+}
+
+fn set_shell_menus(cx: &mut App, locale: Locale) {
+    cx.set_menus([Menu::new("fuckipv6").items([
+        MenuItem::action(t(locale, "common.refresh"), RefreshSnapshot),
+        MenuItem::separator(),
+        MenuItem::action(t(locale, "common.quit"), Quit),
+    ])]);
+}
+
 pub fn run_window(
     state: NodeStateStore,
     commands: NodeCommandBus,
@@ -1581,6 +1660,10 @@ pub fn run_window(
     let error_slot = open_error.clone();
 
     gpui_platform::application().run(move |cx: &mut App| {
+        super::text_input::bind_keys(cx);
+        bind_shell_keys(cx);
+        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+        set_shell_menus(cx, detect_system_locale());
         cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -1631,9 +1714,91 @@ pub fn run_window(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use crate::gpui::view_model::ActionBlockReason;
-    use crate::node::NodeUiValidation;
+    use crate::node::{
+        NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult, NodeEventBus,
+        NodeUiValidation,
+    };
+    use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
+
+    struct SnapshotCommandHandler {
+        state: NodeStateStore,
+    }
+
+    impl NodeCommandHandler for SnapshotCommandHandler {
+        fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            let state = self.state.clone();
+            Box::pin(async move {
+                let request_id = request.request_id;
+                match request.command {
+                    NodeCommand::GetSnapshot => {
+                        NodeCommandResult::snapshot(request_id, state.snapshot().await)
+                    }
+                    NodeCommand::GetUiManifest => {
+                        NodeCommandResult::ui_manifest(request_id, crate::node::node_ui_manifest())
+                    }
+                    command => panic!("unexpected GPUI test command: {command:?}"),
+                }
+            })
+        }
+    }
+
+    fn open_shell_window(cx: &mut TestAppContext, width: f32) -> gpui::WindowHandle<GpuiShell> {
+        static NEXT_CONFIG_DIR: AtomicU64 = AtomicU64::new(1);
+
+        let state = NodeStateStore::new();
+        // GPUI tests do not install a Tokio runtime, while the production
+        // command bus dispatches through Tokio. Rendering the initial shell
+        // only needs the bus to exist; async command behavior is covered by
+        // the node command tests.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("temporary Tokio runtime");
+        let runtime_guard = runtime.enter();
+        let bus = NodeCommandBus::spawn(
+            Arc::new(SnapshotCommandHandler {
+                state: state.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        drop(runtime_guard);
+        drop(runtime);
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-gpui-test-{}-{}",
+            std::process::id(),
+            NEXT_CONFIG_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let configs = ConfigManager::new_for_dir(config_dir).expect("temporary config directory");
+        let window = cx.open_window(size(px(width), px(WINDOW_HEIGHT)), move |_, cx| {
+            GpuiShell::new(state, bus, configs, cx)
+        });
+        cx.run_until_parked();
+        window
+    }
+
+    fn bound_keystrokes(
+        cx: &mut TestAppContext,
+        action: &dyn gpui::Action,
+    ) -> Vec<(bool, bool, String)> {
+        let keymap = cx.update(|cx| cx.key_bindings());
+        let keymap = keymap.borrow();
+        keymap
+            .bindings_for_action(action)
+            .map(|binding| {
+                let keystroke = &binding.keystrokes()[0].inner();
+                (
+                    keystroke.modifiers.control,
+                    keystroke.modifiers.platform,
+                    keystroke.key.clone(),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn all_manifest_pages_have_a_navigation_label() {
@@ -1771,5 +1936,107 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[gpui::test]
+    fn shell_keymap_binds_refresh_and_quit(cx: &mut TestAppContext) {
+        cx.update(bind_shell_keys);
+        assert_eq!(
+            bound_keystrokes(cx, &RefreshSnapshot),
+            [
+                (true, false, "r".to_string()),
+                (false, true, "r".to_string())
+            ]
+        );
+        assert_eq!(
+            bound_keystrokes(cx, &Quit),
+            [
+                (true, false, "q".to_string()),
+                (false, true, "q".to_string())
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn shell_menus_use_localized_refresh_and_quit_labels(cx: &mut TestAppContext) {
+        for (locale, refresh, quit) in [
+            (Locale::ZhCn, "刷新", "退出"),
+            (Locale::En, "Refresh", "Quit"),
+        ] {
+            let menus = cx
+                .update(|cx| {
+                    set_shell_menus(cx, locale);
+                    cx.get_menus()
+                })
+                .expect("test platform menu support");
+            assert_eq!(menus.len(), 1);
+            assert_eq!(menus[0].name.as_ref(), "fuckipv6");
+            assert_eq!(menus[0].items.len(), 3);
+
+            match &menus[0].items[0] {
+                OwnedMenuItem::Action { name, action, .. } => {
+                    assert_eq!(name, refresh);
+                    assert!(action.partial_eq(&RefreshSnapshot));
+                }
+                _ => panic!("expected refresh menu action"),
+            }
+            assert!(matches!(menus[0].items[1], OwnedMenuItem::Separator));
+            match &menus[0].items[2] {
+                OwnedMenuItem::Action { name, action, .. } => {
+                    assert_eq!(name, quit);
+                    assert!(action.partial_eq(&Quit));
+                }
+                _ => panic!("expected quit menu action"),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn shell_declares_structural_accessibility_roles(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1280.0);
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible.update(|window, _| window.is_a11y_enabled()));
+        assert_eq!(
+            [
+                A11Y_ROOT_ROLE,
+                A11Y_NAVIGATION_ROLE,
+                A11Y_MAIN_ROLE,
+                A11Y_HEADING_ROLE,
+                A11Y_TAB_LIST_ROLE,
+                A11Y_TAB_PANEL_ROLE,
+            ]
+            .map(|role| format!("{role:?}")),
+            [
+                "Application",
+                "Navigation",
+                "Main",
+                "Heading",
+                "TabList",
+                "TabPanel",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn high_dpi_preserves_logical_window_width_and_breakpoints(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 900.0);
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        let before = visible.update(|window, _| window.viewport_size());
+        visible.simulate_scale_factor_change(1.5);
+        let after = visible.update(|window, _| window.viewport_size());
+        let scale_factor = visible.update(|window, _| window.scale_factor());
+
+        assert_eq!(scale_factor, 1.5);
+        assert_eq!(before, after);
+        assert_eq!(f32::from(after.width), 900.0);
+        assert_eq!(
+            layout_for_window_width(f32::from(after.width)),
+            LayoutClass::Desktop
+        );
+        assert_eq!(
+            DetailPresentation::for_layout(layout_for_window_width(1280.0)),
+            DetailPresentation::Persistent
+        );
     }
 }

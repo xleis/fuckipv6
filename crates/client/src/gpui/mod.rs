@@ -1,5 +1,8 @@
 pub mod components;
+#[allow(dead_code)]
+mod path_picker;
 mod session;
+mod text_input;
 mod view;
 pub mod view_model;
 

@@ -11,7 +11,7 @@ pub(crate) mod runtime_metadata;
 mod state;
 mod ui_manifest;
 
-pub use authorization::NodeCommandContext;
+pub use authorization::{NetworkCommandScope, NodeCommandContext};
 
 #[cfg(test)]
 pub(crate) fn test_owner_context() -> NodeCommandContext {

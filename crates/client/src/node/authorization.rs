@@ -5,9 +5,13 @@
 //! re-evaluates the authenticated actor, capability, network scope and role
 //! ceiling before a handler is dispatched.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use fuckipv6_common::domain::{role_ceiling_allows, NetworkRole, PolicyAction, ResourceKind};
+use fuckipv6_common::domain::{
+    evaluate_permissions, role_ceiling_allows, AccessContext, GroupId, MembershipState, NetworkId,
+    NetworkRole, PermissionDecision, PermissionRequest, PermissionRule, PolicyAction, ResourceKind,
+    ResourceRef,
+};
 
 use super::command::{NodeCommand, NodeCommandKind};
 use super::state::{NodePermission, NodeSnapshot};
@@ -18,13 +22,55 @@ use super::state::{NodePermission, NodeSnapshot};
 pub struct NodeCommandContext {
     actor: fuckipv6_common::domain::NodeId,
     source: String,
-    role: NetworkRole,
     capabilities: HashSet<NodePermission>,
-    allowed_networks: Option<BTreeSet<String>>,
-    membership_active: bool,
+    local_policy: Vec<PermissionRule>,
+    network_scopes: BTreeMap<String, NetworkCommandScope>,
     recent_reauthentication: bool,
     local_owner: bool,
     authenticated: bool,
+}
+
+/// One network membership resolved by the authenticated transport.
+///
+/// The policy rules and group memberships are copied from server-side state.
+/// They are never accepted from a command payload or a UI capability hint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkCommandScope {
+    network_id: NetworkId,
+    role: NetworkRole,
+    membership_state: MembershipState,
+    groups: BTreeSet<GroupId>,
+    policy: Vec<PermissionRule>,
+}
+
+impl NetworkCommandScope {
+    pub fn new(
+        network_id: NetworkId,
+        role: NetworkRole,
+        membership_state: MembershipState,
+        policy: Vec<PermissionRule>,
+    ) -> Self {
+        Self {
+            network_id,
+            role,
+            membership_state,
+            groups: BTreeSet::new(),
+            policy,
+        }
+    }
+
+    pub fn with_groups(mut self, groups: impl IntoIterator<Item = GroupId>) -> Self {
+        self.groups = groups.into_iter().collect();
+        self
+    }
+
+    pub fn network_id(&self) -> &NetworkId {
+        &self.network_id
+    }
+
+    pub fn role(&self) -> NetworkRole {
+        self.role
+    }
 }
 
 impl NodeCommandContext {
@@ -35,10 +81,9 @@ impl NodeCommandContext {
         Self {
             actor,
             source: source.into(),
-            role: NetworkRole::Owner,
             capabilities: NodePermission::ALL.into_iter().collect(),
-            allowed_networks: None,
-            membership_active: true,
+            local_policy: Vec::new(),
+            network_scopes: BTreeMap::new(),
             recent_reauthentication: true,
             local_owner: true,
             authenticated: true,
@@ -61,28 +106,33 @@ impl NodeCommandContext {
         Self::local_owner(actor_from_snapshot(snapshot), source)
     }
 
-    /// A network-scoped principal. `allowed_networks` is the server-side ACL
-    /// already resolved for this session; command payloads cannot widen it.
+    /// A network-scoped principal. Every map entry is an authenticated network
+    /// binding resolved on the server; command payloads cannot widen it.
     pub fn network_session(
         actor: fuckipv6_common::domain::NodeId,
         source: impl Into<String>,
-        role: NetworkRole,
         capabilities: impl IntoIterator<Item = NodePermission>,
-        allowed_networks: impl IntoIterator<Item = String>,
-        membership_active: bool,
+        scopes: impl IntoIterator<Item = (String, NetworkCommandScope)>,
         recently_reauthenticated: bool,
     ) -> Self {
         Self {
             actor,
             source: source.into(),
-            role,
             capabilities: capabilities.into_iter().collect(),
-            allowed_networks: Some(allowed_networks.into_iter().collect()),
-            membership_active,
+            local_policy: Vec::new(),
+            network_scopes: scopes.into_iter().collect(),
             recent_reauthentication: recently_reauthenticated,
             local_owner: false,
             authenticated: true,
         }
+    }
+
+    /// Attach the node-local policy layer. Network access succeeds only when
+    /// both this layer and the matching network policy contain an allow and
+    /// neither contains a deny.
+    pub fn with_local_policy(mut self, policy: Vec<PermissionRule>) -> Self {
+        self.local_policy = policy;
+        self
     }
 
     /// A transport with no verified principal, such as the legacy loopback TCP
@@ -93,10 +143,9 @@ impl NodeCommandContext {
                 b"fuckipv6-unauthenticated-command-actor",
             ),
             source: source.into(),
-            role: NetworkRole::Member,
             capabilities: HashSet::new(),
-            allowed_networks: Some(BTreeSet::new()),
-            membership_active: false,
+            local_policy: Vec::new(),
+            network_scopes: BTreeMap::new(),
             recent_reauthentication: false,
             local_owner: false,
             authenticated: false,
@@ -111,8 +160,40 @@ impl NodeCommandContext {
         &self.source
     }
 
-    pub fn role(&self) -> NetworkRole {
-        self.role
+    /// Render the effective role(s) for audit without inventing a single role
+    /// when one session carries peer-specific bindings for several networks.
+    pub(crate) fn roles_for_command(&self, command: &NodeCommand) -> String {
+        if self.local_owner {
+            return "owner".into();
+        }
+        let roles = match command_network_targets(command) {
+            NetworkTargets::Named(names) => names
+                .iter()
+                .filter_map(|name| self.network_scopes.get(name))
+                .map(|scope| role_name(scope.role))
+                .collect::<BTreeSet<_>>(),
+            NetworkTargets::None | NetworkTargets::All => BTreeSet::new(),
+        };
+        if roles.is_empty() {
+            return "scoped".into();
+        }
+        roles.into_iter().collect::<Vec<_>>().join(",")
+    }
+
+    pub(crate) fn network_id_for_command(&self, command: &NodeCommand) -> Option<NetworkId> {
+        let NetworkTargets::Named(names) = command_network_targets(command) else {
+            return None;
+        };
+        let mut ids = names
+            .iter()
+            .filter_map(|name| self.network_scopes.get(name))
+            .map(|scope| scope.network_id.clone());
+        let first = ids.next()?;
+        if ids.next().is_none() {
+            Some(first)
+        } else {
+            None
+        }
     }
 
     pub fn recently_reauthenticated(&self) -> bool {
@@ -126,8 +207,17 @@ impl NodeCommandContext {
 
 #[derive(Debug)]
 pub(crate) struct CommandDenial {
-    pub(crate) code: &'static str,
-    pub(crate) reason: &'static str,
+    pub(crate) code: String,
+    pub(crate) reason: String,
+}
+
+impl CommandDenial {
+    fn new(code: &str, reason: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            reason: reason.into(),
+        }
+    }
 }
 
 pub(crate) fn authorize_command(
@@ -135,75 +225,158 @@ pub(crate) fn authorize_command(
     command: &NodeCommand,
 ) -> Result<(), CommandDenial> {
     if !context.authenticated {
-        return Err(CommandDenial {
-            code: "permission.authentication_required",
-            reason: "actor is not authenticated",
-        });
-    }
-    if !context.membership_active {
-        return Err(CommandDenial {
-            code: "permission.membership_inactive",
-            reason: "actor membership is inactive",
-        });
+        return Err(CommandDenial::new(
+            "permission.authentication_required",
+            "actor is not authenticated",
+        ));
     }
 
     let kind = command.kind();
     let permission = required_permission(kind);
     if !context.capabilities.contains(&permission) {
-        return Err(CommandDenial {
-            code: "permission.capability_denied",
-            reason: "required node capability is not granted",
-        });
+        return Err(CommandDenial::new(
+            "permission.capability_denied",
+            "required node capability is not granted",
+        ));
     }
 
     // Local node ownership is the final local-control boundary. Network
     // governance can never revoke it, but it also cannot use this path to act on
-    // a different node.
+    // a different node. Owner-only global projections remain owner-only even
+    // when a network member has ViewState capability in one network.
     if is_local_owner_only(kind) && !context.local_owner {
-        return Err(CommandDenial {
-            code: "permission.local_owner_required",
-            reason: "command requires the local node owner",
-        });
+        return Err(CommandDenial::new(
+            "permission.local_owner_required",
+            "command requires the local node owner",
+        ));
     }
 
-    if context.role == NetworkRole::TemporaryCoordinator && kind.is_write() {
-        return Err(CommandDenial {
-            code: "permission.temporary_coordinator_read_only",
-            reason: "temporary coordinator is read-only",
-        });
+    if context.local_owner {
+        return Ok(());
     }
 
     let (action, resource) = policy_target(kind);
-    if !role_ceiling_allows(context.role, action, resource) {
-        return Err(CommandDenial {
-            code: "permission.role_ceiling_exceeded",
-            reason: "network role ceiling does not allow the command",
-        });
-    }
-
-    if !context.local_owner {
-        let targets = command_network_targets(command);
-        if targets == NetworkTargets::All {
-            return Err(CommandDenial {
-                code: "permission.network_scope_denied",
-                reason: "network-scoped actor cannot select all networks",
-            });
+    let targets = command_network_targets(command);
+    let names = match targets {
+        NetworkTargets::Named(names) if !names.is_empty() => names,
+        NetworkTargets::Named(_) | NetworkTargets::None => {
+            return Err(CommandDenial::new(
+                "permission.network_scope_denied",
+                "network-scoped command requires at least one authenticated network target",
+            ));
         }
-        if let NetworkTargets::Named(names) = targets {
-            let allowed = context.allowed_networks.as_ref().ok_or(CommandDenial {
-                code: "permission.network_scope_denied",
-                reason: "network scope is missing",
-            })?;
-            if names.iter().any(|name| !allowed.contains(name)) {
-                return Err(CommandDenial {
-                    code: "permission.network_scope_denied",
-                    reason: "command target is outside the authenticated network scope",
-                });
-            }
+        NetworkTargets::All => {
+            return Err(CommandDenial::new(
+                "permission.network_scope_denied",
+                "network-scoped actor cannot select all networks",
+            ));
+        }
+    };
+
+    let mut seen = BTreeSet::new();
+    for network_name in names {
+        if !seen.insert(network_name.clone()) {
+            continue;
+        }
+        let scope = context.network_scopes.get(&network_name).ok_or_else(|| {
+            CommandDenial::new(
+                "permission.network_scope_denied",
+                "command target is outside the authenticated network scope",
+            )
+        })?;
+        if !scope.membership_state.can_access_network_resources() {
+            return Err(CommandDenial::new(
+                "permission.membership_inactive",
+                format!(
+                    "network membership state does not grant resource access: {}",
+                    membership_state_name(scope.membership_state)
+                ),
+            ));
+        }
+        if scope.role == NetworkRole::TemporaryCoordinator && kind.is_write() {
+            return Err(CommandDenial::new(
+                "permission.temporary_coordinator_read_only",
+                "temporary coordinator is read-only",
+            ));
+        }
+        if !role_ceiling_allows(scope.role, action, resource) {
+            return Err(CommandDenial::new(
+                "permission.role_ceiling_exceeded",
+                format!(
+                    "role {} exceeds the command policy ceiling",
+                    role_name(scope.role)
+                ),
+            ));
+        }
+
+        let request = PermissionRequest {
+            action,
+            resource: ResourceRef {
+                kind: resource,
+                network_id: scope.network_id.clone(),
+                object_id: None,
+            },
+        };
+        let access = AccessContext {
+            network_id: scope.network_id.clone(),
+            actor: context.actor.clone(),
+            role: scope.role,
+            groups: scope.groups.clone(),
+            membership_active: true,
+            recent_reauthentication: context.recent_reauthentication,
+            emergency_coordinator: scope.role == NetworkRole::TemporaryCoordinator,
+        };
+        let decision =
+            evaluate_permissions(&context.local_policy, &scope.policy, &request, &access);
+        if let PermissionDecision::Deny {
+            code,
+            layer,
+            rule_id,
+        } = decision
+        {
+            let stable_code = match code.as_str() {
+                "permission.role_ceiling_exceeded" => "permission.role_ceiling_exceeded",
+                "permission.cross_network_denied" => "permission.network_scope_denied",
+                _ => "permission.policy_denied",
+            };
+            let reason = match rule_id {
+                Some(rule_id) => {
+                    format!("policy denied by {layer} layer rule {rule_id}: {network_name}")
+                }
+                None => format!("policy denied by {layer} layer: {network_name} ({code})"),
+            };
+            return Err(CommandDenial::new(stable_code, reason));
         }
     }
 
     Ok(())
+}
+
+fn role_name(role: NetworkRole) -> &'static str {
+    match role {
+        NetworkRole::Owner => "owner",
+        NetworkRole::Administrator => "administrator",
+        NetworkRole::Member => "member",
+        NetworkRole::TemporaryCoordinator => "temporary_coordinator",
+    }
+}
+
+fn membership_state_name(state: MembershipState) -> &'static str {
+    match state {
+        MembershipState::Discovered => "discovered",
+        MembershipState::Applying => "applying",
+        MembershipState::PendingApproval => "pending_approval",
+        MembershipState::Accepted => "accepted",
+        MembershipState::KeyReady => "key_ready",
+        MembershipState::Connecting => "connecting",
+        MembershipState::Active => "active",
+        MembershipState::Degraded => "degraded",
+        MembershipState::Leaving => "leaving",
+        MembershipState::Left => "left",
+        MembershipState::Rejected => "rejected",
+        MembershipState::Suspended => "suspended",
+        MembershipState::Cancelled => "cancelled",
+    }
 }
 
 pub(crate) fn actor_from_snapshot(snapshot: &NodeSnapshot) -> fuckipv6_common::domain::NodeId {
@@ -244,7 +417,9 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
 fn is_local_owner_only(kind: NodeCommandKind) -> bool {
     matches!(
         kind,
-        NodeCommandKind::GetDiagnostics
+        NodeCommandKind::GetSnapshot
+            | NodeCommandKind::GetUiManifest
+            | NodeCommandKind::GetDiagnostics
             | NodeCommandKind::CreateNetwork
             | NodeCommandKind::JoinNetwork
             | NodeCommandKind::StartNode
@@ -349,31 +524,146 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{
+        PermissionCondition, PermissionEffect, SecurityRuleId, SubjectSelector,
+    };
 
     fn actor() -> fuckipv6_common::domain::NodeId {
         fuckipv6_common::domain::NodeId::from_public_key(b"authorization-test-node")
+    }
+
+    fn network_id(name: &str) -> NetworkId {
+        NetworkId::from_public_key(name.as_bytes())
+    }
+
+    fn rule(
+        rule_id: &[u8],
+        effect: PermissionEffect,
+        subject: SubjectSelector,
+        action: PolicyAction,
+        resource: ResourceKind,
+        conditions: Vec<PermissionCondition>,
+    ) -> PermissionRule {
+        PermissionRule {
+            rule_id: SecurityRuleId::from_public_key(rule_id),
+            effect,
+            subjects: vec![subject],
+            resources: vec![resource],
+            actions: vec![action],
+            conditions,
+        }
+    }
+
+    fn allow(
+        rule_id: &[u8],
+        subject: SubjectSelector,
+        action: PolicyAction,
+        resource: ResourceKind,
+    ) -> PermissionRule {
+        rule(
+            rule_id,
+            PermissionEffect::Allow,
+            subject,
+            action,
+            resource,
+            vec![PermissionCondition::MembershipActive],
+        )
+    }
+
+    fn deny(
+        rule_id: &[u8],
+        subject: SubjectSelector,
+        action: PolicyAction,
+        resource: ResourceKind,
+    ) -> PermissionRule {
+        rule(
+            rule_id,
+            PermissionEffect::Deny,
+            subject,
+            action,
+            resource,
+            vec![PermissionCondition::MembershipActive],
+        )
+    }
+
+    fn network_context_with_groups(
+        role: NetworkRole,
+        capabilities: impl IntoIterator<Item = NodePermission>,
+        networks: &[&str],
+        membership_state: MembershipState,
+        groups: impl IntoIterator<Item = GroupId>,
+        policies: (Vec<PermissionRule>, Vec<PermissionRule>),
+        recently_reauthenticated: bool,
+    ) -> NodeCommandContext {
+        let (local_policy, network_policy) = policies;
+        let groups = groups.into_iter().collect::<BTreeSet<_>>();
+        let scopes = networks.iter().map(|network| {
+            (
+                (*network).to_string(),
+                NetworkCommandScope::new(
+                    network_id(network),
+                    role,
+                    membership_state,
+                    network_policy.clone(),
+                )
+                .with_groups(groups.iter().cloned()),
+            )
+        });
+        NodeCommandContext::network_session(
+            actor(),
+            "authorization-test",
+            capabilities,
+            scopes,
+            recently_reauthenticated,
+        )
+        .with_local_policy(local_policy)
     }
 
     fn network_context(
         role: NetworkRole,
         capabilities: impl IntoIterator<Item = NodePermission>,
         networks: &[&str],
-        membership_active: bool,
+        membership_state: MembershipState,
+        local_policy: Vec<PermissionRule>,
+        network_policy: Vec<PermissionRule>,
     ) -> NodeCommandContext {
-        NodeCommandContext::network_session(
-            actor(),
-            "authorization-test",
+        network_context_with_groups(
             role,
             capabilities,
-            networks.iter().map(|network| (*network).to_string()),
-            membership_active,
+            networks,
+            membership_state,
+            std::iter::empty(),
+            (local_policy, network_policy),
             true,
+        )
+    }
+
+    fn start_home() -> NodeCommand {
+        NodeCommand::StartNetworks {
+            selection: crate::node::NodeNetworkSelection::Named(vec!["home".into()]),
+        }
+    }
+
+    fn start_policies() -> (Vec<PermissionRule>, Vec<PermissionRule>) {
+        (
+            vec![allow(
+                b"local-start-networks",
+                SubjectSelector::AnyMember,
+                PolicyAction::Enable,
+                ResourceKind::Network,
+            )],
+            vec![allow(
+                b"network-start-networks",
+                SubjectSelector::AnyMember,
+                PolicyAction::Enable,
+                ResourceKind::Network,
+            )],
         )
     }
 
     fn assert_denied(context: &NodeCommandContext, command: NodeCommand, code: &str) {
         let denial = authorize_command(context, &command).expect_err("command must be denied");
-        assert_eq!(denial.code, code);
+        assert_eq!(denial.code.as_str(), code);
         assert!(!denial.reason.is_empty());
     }
 
@@ -388,31 +678,63 @@ mod tests {
 
     #[test]
     fn inactive_membership_and_missing_capability_are_denied() {
+        let (local_policy, network_policy) = start_policies();
+        for membership_state in [
+            MembershipState::Accepted,
+            MembershipState::Connecting,
+            MembershipState::Suspended,
+        ] {
+            assert_denied(
+                &network_context(
+                    NetworkRole::Administrator,
+                    [NodePermission::ManageNetworks],
+                    &["home"],
+                    membership_state,
+                    local_policy.clone(),
+                    network_policy.clone(),
+                ),
+                start_home(),
+                "permission.membership_inactive",
+            );
+        }
         assert_denied(
             &network_context(
-                NetworkRole::Member,
-                [NodePermission::ViewState],
+                NetworkRole::Administrator,
+                [],
                 &["home"],
-                false,
+                MembershipState::Active,
+                local_policy,
+                network_policy,
             ),
-            NodeCommand::GetSnapshot,
-            "permission.membership_inactive",
-        );
-        assert_denied(
-            &network_context(NetworkRole::Member, [], &["home"], true),
-            NodeCommand::GetSnapshot,
+            start_home(),
             "permission.capability_denied",
         );
     }
 
     #[test]
     fn local_owner_only_commands_cannot_be_used_by_network_members() {
+        let (local_policy, network_policy) = (
+            vec![allow(
+                b"local-read-network",
+                SubjectSelector::AnyMember,
+                PolicyAction::Read,
+                ResourceKind::Network,
+            )],
+            vec![allow(
+                b"network-read-network",
+                SubjectSelector::AnyMember,
+                PolicyAction::Read,
+                ResourceKind::Network,
+            )],
+        );
         assert_denied(
             &network_context(
-                NetworkRole::Member,
+                NetworkRole::Administrator,
                 [NodePermission::ViewState],
                 &["home"],
-                true,
+                MembershipState::Active,
+                local_policy,
+                network_policy,
             ),
             NodeCommand::GetDiagnostics,
             "permission.local_owner_required",
@@ -421,27 +743,56 @@ mod tests {
 
     #[test]
     fn temporary_coordinator_is_read_only() {
+        let (local_policy, network_policy) = start_policies();
         assert_denied(
             &network_context(
                 NetworkRole::TemporaryCoordinator,
-                [NodePermission::ManageNetworks],
+                [NodePermission::ManageNetworks, NodePermission::ViewState],
                 &["home"],
-                true,
+                MembershipState::Active,
+                local_policy.clone(),
+                network_policy,
             ),
-            NodeCommand::StartNetworks {
-                selection: crate::node::NodeNetworkSelection::Named(vec!["home".into()]),
-            },
+            start_home(),
             "permission.temporary_coordinator_read_only",
         );
+
+        authorize_command(
+            &network_context(
+                NetworkRole::TemporaryCoordinator,
+                [NodePermission::ViewState],
+                &["home"],
+                MembershipState::Active,
+                vec![allow(
+                    b"local-read-network",
+                    SubjectSelector::AnyMember,
+                    PolicyAction::Read,
+                    ResourceKind::Network,
+                )],
+                vec![allow(
+                    b"network-read-network",
+                    SubjectSelector::AnyMember,
+                    PolicyAction::Read,
+                    ResourceKind::Network,
+                )],
+            ),
+            &NodeCommand::GetBlacklist {
+                network_name: "home".into(),
+            },
+        )
+        .expect("temporary coordinator can read network state");
     }
 
     #[test]
     fn network_scope_cannot_be_widened_by_the_command_payload() {
+        let (local_policy, network_policy) = start_policies();
         let context = network_context(
             NetworkRole::Administrator,
             [NodePermission::ManageNetworks],
             &["home"],
-            true,
+            MembershipState::Active,
+            local_policy,
+            network_policy,
         );
         assert_denied(
             &context,
@@ -471,17 +822,165 @@ mod tests {
         )
         .expect("local owner can control the node");
 
+        let (local_policy, network_policy) = start_policies();
         authorize_command(
             &network_context(
                 NetworkRole::Administrator,
                 [NodePermission::ManageNetworks],
                 &["home"],
-                true,
+                MembershipState::Active,
+                local_policy,
+                network_policy,
             ),
-            &NodeCommand::StartNetworks {
-                selection: crate::node::NodeNetworkSelection::Named(vec!["home".into()]),
-            },
+            &start_home(),
         )
         .expect("administrator can act within its authenticated network scope");
+    }
+
+    #[test]
+    fn deny_wins_and_both_policy_layers_must_allow() {
+        let action = PolicyAction::Enable;
+        let resource = ResourceKind::Network;
+        let local_allow = allow(b"local-allow", SubjectSelector::AnyMember, action, resource);
+        let network_allow = allow(
+            b"network-allow",
+            SubjectSelector::AnyMember,
+            action,
+            resource,
+        );
+        let local_deny = deny(b"local-deny", SubjectSelector::AnyMember, action, resource);
+        let network_deny = deny(
+            b"network-deny",
+            SubjectSelector::AnyMember,
+            action,
+            resource,
+        );
+
+        for (local_policy, network_policy) in [
+            (
+                vec![local_allow.clone(), local_deny],
+                vec![network_allow.clone()],
+            ),
+            (
+                vec![local_allow.clone()],
+                vec![network_allow.clone(), network_deny],
+            ),
+            (Vec::new(), vec![network_allow.clone()]),
+            (vec![local_allow], Vec::new()),
+        ] {
+            assert_denied(
+                &network_context(
+                    NetworkRole::Administrator,
+                    [NodePermission::ManageNetworks],
+                    &["home"],
+                    MembershipState::Active,
+                    local_policy,
+                    network_policy,
+                ),
+                start_home(),
+                "permission.policy_denied",
+            );
+        }
+    }
+
+    #[test]
+    fn group_membership_and_reauthentication_conditions_are_enforced() {
+        let subject = SubjectSelector::Group(GroupId::from_public_key(b"authorization-group"));
+        let group = GroupId::from_public_key(b"authorization-group");
+        let local_policy = vec![allow(
+            b"local-allow",
+            SubjectSelector::AnyMember,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+        )];
+        let network_policy = vec![rule(
+            b"network-group-reauth",
+            PermissionEffect::Allow,
+            subject,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+            vec![
+                PermissionCondition::MembershipActive,
+                PermissionCondition::RecentReauthentication,
+            ],
+        )];
+
+        authorize_command(
+            &network_context_with_groups(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                [group.clone()],
+                (local_policy.clone(), network_policy.clone()),
+                true,
+            ),
+            &start_home(),
+        )
+        .expect("group member with fresh reauthentication is allowed");
+
+        assert_denied(
+            &network_context_with_groups(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                [group],
+                (local_policy, network_policy),
+                false,
+            ),
+            start_home(),
+            "permission.policy_denied",
+        );
+    }
+
+    #[test]
+    fn explicit_allow_cannot_escalate_the_network_role_ceiling() {
+        let (local_policy, network_policy) = start_policies();
+        assert_denied(
+            &network_context(
+                NetworkRole::Member,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            start_home(),
+            "permission.role_ceiling_exceeded",
+        );
+    }
+
+    #[test]
+    fn policy_condition_for_another_network_fails_closed() {
+        let local_policy = vec![allow(
+            b"local-allow",
+            SubjectSelector::AnyMember,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+        )];
+        let network_policy = vec![rule(
+            b"network-other-network-only",
+            PermissionEffect::Allow,
+            SubjectSelector::AnyMember,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+            vec![
+                PermissionCondition::MembershipActive,
+                PermissionCondition::ResourceInNetwork(network_id("office")),
+            ],
+        )];
+        assert_denied(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            start_home(),
+            "permission.policy_denied",
+        );
     }
 }

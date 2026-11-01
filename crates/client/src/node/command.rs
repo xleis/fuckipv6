@@ -1,4 +1,4 @@
-use fuckipv6_common::domain::{AuditEntry, AuditOutcome, NetworkId};
+use fuckipv6_common::domain::{AuditEntry, AuditOutcome};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -811,18 +811,11 @@ impl CommandAuditTrail {
         details.insert("request_id".into(), request.request_id.to_string());
         details.insert("authorization_reason".into(), reason.into());
         details.insert("actor_source".into(), context.source().into());
-        details.insert(
-            "role".into(),
-            match context.role() {
-                fuckipv6_common::domain::NetworkRole::Owner => "owner",
-                fuckipv6_common::domain::NetworkRole::Administrator => "administrator",
-                fuckipv6_common::domain::NetworkRole::Member => "member",
-                fuckipv6_common::domain::NetworkRole::TemporaryCoordinator => {
-                    "temporary_coordinator"
-                }
-            }
-            .into(),
-        );
+        details.insert("role".into(), context.roles_for_command(&request.command));
+        let network_id = context.network_id_for_command(&request.command);
+        if let Some(network_id) = &network_id {
+            details.insert("network_id".into(), network_id.to_string());
+        }
         let summary = match outcome {
             AuditOutcome::Succeeded => "节点命令执行成功",
             AuditOutcome::Failed => "节点命令执行失败",
@@ -832,7 +825,7 @@ impl CommandAuditTrail {
             audit_id,
             operation_id: None,
             actor: context.actor().clone(),
-            network_id: None::<NetworkId>,
+            network_id,
             action: action.into(),
             resource: format!("node_command:{}", request.command.kind().as_str()),
             outcome,
@@ -919,7 +912,7 @@ impl NodeCommandBus {
                 success: false,
             });
             self.audit
-                .record(&context, &request, AuditOutcome::Denied, denial.reason);
+                .record(&context, &request, AuditOutcome::Denied, &denial.reason);
             return Ok(result);
         }
 
@@ -978,7 +971,7 @@ fn denied(request_id: u64, denial: &CommandDenial) -> NodeCommandResult {
     NodeCommandResult::rejected(
         request_id,
         NodeProblem::new(NodeProblemCode::PermissionDenied, "无权执行此节点命令")
-            .with_param("authorization_code", denial.code),
+            .with_param("authorization_code", denial.code.clone()),
     )
 }
 
@@ -1437,6 +1430,59 @@ mod tests {
         assert_eq!(audit[0].outcome, AuditOutcome::Denied);
         assert_eq!(audit[0].details["command"], "get_snapshot");
         assert_eq!(audit[0].details["actor_source"], "legacy_loopback_tcp");
+    }
+
+    #[tokio::test]
+    async fn scoped_denial_audit_records_actor_role_network_and_reason() {
+        let network_id = fuckipv6_common::domain::NetworkId::from_public_key(b"audit-network-home");
+        let context = NodeCommandContext::network_session(
+            actor(),
+            "control-api:member-session",
+            [],
+            [(
+                "home".into(),
+                crate::node::NetworkCommandScope::new(
+                    network_id.clone(),
+                    fuckipv6_common::domain::NetworkRole::Administrator,
+                    fuckipv6_common::domain::MembershipState::Active,
+                    Vec::new(),
+                ),
+            )],
+            true,
+        );
+        let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
+
+        let result = bus
+            .execute(
+                context,
+                NodeCommandRequest::new(
+                    53,
+                    NodeCommand::StartNetworks {
+                        selection: NodeNetworkSelection::Named(vec!["home".into()]),
+                    },
+                ),
+            )
+            .await
+            .expect("authorization rejection is a command result");
+
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected authorization rejection");
+        };
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some("permission.capability_denied")
+        );
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].actor, actor());
+        assert_eq!(audit[0].network_id.as_ref(), Some(&network_id));
+        assert_eq!(audit[0].details["role"], "administrator");
+        assert_eq!(audit[0].details["network_id"], network_id.to_string());
+        assert_eq!(
+            audit[0].details["actor_source"],
+            "control-api:member-session"
+        );
+        assert!(audit[0].details["authorization_reason"].contains("capability"));
     }
 
     #[tokio::test]

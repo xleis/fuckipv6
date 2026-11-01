@@ -539,7 +539,7 @@ fn handle_incoming_message(
     channels: ConnectionChannels<'_>,
     assigned_ips_state: &mut Option<VirtualIps>,
 ) -> Result<()> {
-    if let SignalingMessage::RegisterAck {
+    let registered = if let SignalingMessage::RegisterAck {
         assigned_ip,
         assigned_ips,
         relay_endpoint,
@@ -547,12 +547,10 @@ fn handle_incoming_message(
         ..
     } = &msg
     {
-        let _ = channels.assigned_ip_tx.send(Some(*assigned_ip));
         let ips = assigned_ips
             .clone()
             .unwrap_or_else(|| VirtualIps::from_ipv6(*assigned_ip));
         *assigned_ips_state = Some(ips.clone());
-        let _ = channels.assigned_virtual_ips_tx.send(Some(ips.clone()));
         let _ = channels.relay_endpoint_tx.send(relay_endpoint.clone());
         let all_relays =
             RelayEndpoint::combine_relay_endpoints(relay_endpoint.as_ref(), relay_endpoints);
@@ -561,9 +559,20 @@ fn handle_incoming_message(
         if let Some(endpoint) = relay_endpoint {
             tracing::info!("QUIC 中继服务端点: {}", endpoint.addr);
         }
-    }
+        Some((*assigned_ip, ips))
+    } else {
+        None
+    };
 
     update_known_peers(&msg, channels.known_peers_tx);
+
+    if let Some((assigned_ip, ips)) = registered {
+        let _ = channels.assigned_virtual_ips_tx.send(Some(ips));
+        // `assigned_ip` is the public completion signal used by
+        // `wait_for_initial_registration`; publish every other registration
+        // field first so callers observe one coherent RegisterAck snapshot.
+        let _ = channels.assigned_ip_tx.send(Some(assigned_ip));
+    }
 
     if let Some(event) = signaling_message_to_event(msg) {
         let _ = channels.event_tx.send(event);

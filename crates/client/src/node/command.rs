@@ -1,4 +1,4 @@
-use fuckipv6_common::domain::{AuditEntry, AuditOutcome};
+use fuckipv6_common::domain::{ActivityEntry, AuditEntry, AuditOutcome};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use super::ui_manifest::audit_for_command;
 use super::{
     NodeCommandContext, NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole,
     NodeNetworkSelection, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
-    NodeUiManifest,
+    NodeStateStore, NodeUiManifest,
 };
 
 #[cfg(test)]
@@ -781,6 +781,7 @@ struct CommandEnvelope {
 #[derive(Default)]
 struct CommandAuditTrail {
     entries: Arc<Mutex<Vec<AuditEntry>>>,
+    recent_activity: Arc<Mutex<Vec<ActivityEntry>>>,
     next_sequence: Arc<AtomicU64>,
 }
 
@@ -835,7 +836,13 @@ impl CommandAuditTrail {
             sensitive_keys: Default::default(),
         };
         if let Ok(mut entries) = self.entries.lock() {
-            entries.push(entry);
+            entries.push(entry.clone());
+        }
+        if request.command.kind().is_write() || outcome == AuditOutcome::Denied {
+            if let Ok(mut activity) = self.recent_activity.lock() {
+                activity.insert(0, entry.project_activity());
+                activity.truncate(5);
+            }
         }
     }
 
@@ -843,6 +850,13 @@ impl CommandAuditTrail {
         self.entries
             .lock()
             .map(|entries| entries.clone())
+            .unwrap_or_default()
+    }
+
+    fn recent_activity(&self) -> Vec<ActivityEntry> {
+        self.recent_activity
+            .lock()
+            .map(|activity| activity.clone())
             .unwrap_or_default()
     }
 }
@@ -853,10 +867,38 @@ pub struct NodeCommandBus {
     sender: mpsc::Sender<CommandEnvelope>,
     events: NodeEventBus,
     audit: Arc<CommandAuditTrail>,
+    activity_state: Option<NodeStateStore>,
 }
 
 impl NodeCommandBus {
     pub fn spawn<H>(handler: Arc<H>, events: NodeEventBus, capacity: usize) -> Self
+    where
+        H: NodeCommandHandler,
+    {
+        Self::spawn_with_activity_state(handler, events, capacity, None)
+    }
+
+    /// Spawn a command bus that publishes its sanitized activity feed into the
+    /// canonical node snapshot. Transport adapters receive activity through the
+    /// same watch/SSE channel as every other node-state change.
+    pub(crate) fn spawn_with_state<H>(
+        handler: Arc<H>,
+        events: NodeEventBus,
+        capacity: usize,
+        state: NodeStateStore,
+    ) -> Self
+    where
+        H: NodeCommandHandler,
+    {
+        Self::spawn_with_activity_state(handler, events, capacity, Some(state))
+    }
+
+    fn spawn_with_activity_state<H>(
+        handler: Arc<H>,
+        events: NodeEventBus,
+        capacity: usize,
+        activity_state: Option<NodeStateStore>,
+    ) -> Self
     where
         H: NodeCommandHandler,
     {
@@ -892,6 +934,7 @@ impl NodeCommandBus {
             sender,
             events: bus_events,
             audit: Arc::new(CommandAuditTrail::default()),
+            activity_state,
         }
     }
 
@@ -911,8 +954,13 @@ impl NodeCommandBus {
                 request_id,
                 success: false,
             });
-            self.audit
-                .record(&context, &request, AuditOutcome::Denied, &denial.reason);
+            self.record_and_publish_activity(
+                &context,
+                &request,
+                AuditOutcome::Denied,
+                &denial.reason,
+            )
+            .await;
             return Ok(result);
         }
 
@@ -928,7 +976,7 @@ impl NodeCommandBus {
         }
         match receiver.await {
             Ok(result) => {
-                self.audit.record(
+                self.record_and_publish_activity(
                     &context,
                     &audit_request,
                     if result.is_success() {
@@ -937,18 +985,35 @@ impl NodeCommandBus {
                         AuditOutcome::Failed
                     },
                     "command authorized; handler outcome recorded",
-                );
+                )
+                .await;
                 Ok(result)
             }
             Err(_) => {
-                self.audit.record(
+                self.record_and_publish_activity(
                     &context,
                     &audit_request,
                     AuditOutcome::Failed,
                     "handler response channel closed",
-                );
+                )
+                .await;
                 Err(NodeCommandBusError::ResponseDropped(request_id))
             }
+        }
+    }
+
+    async fn record_and_publish_activity(
+        &self,
+        context: &NodeCommandContext,
+        request: &NodeCommandRequest,
+        outcome: AuditOutcome,
+        reason: &str,
+    ) {
+        self.audit.record(context, request, outcome, reason);
+        if let Some(state) = &self.activity_state {
+            state
+                .set_recent_activity(self.audit.recent_activity())
+                .await;
         }
     }
 
@@ -1450,7 +1515,13 @@ mod tests {
             )],
             true,
         );
-        let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
+        let state = NodeStateStore::new();
+        let bus = NodeCommandBus::spawn_with_state(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            4,
+            state.clone(),
+        );
 
         let result = bus
             .execute(
@@ -1483,17 +1554,23 @@ mod tests {
             "control-api:member-session"
         );
         assert!(audit[0].details["authorization_reason"].contains("capability"));
+        let activity = state.snapshot().await.recent_activity;
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].outcome, AuditOutcome::Denied);
+        assert_eq!(activity[0].details["command"], "start_networks");
     }
 
     #[tokio::test]
     async fn authorized_command_and_audit_do_not_persist_payload_secrets() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let bus = NodeCommandBus::spawn(
+        let state = NodeStateStore::new();
+        let bus = NodeCommandBus::spawn_with_state(
             Arc::new(CountingHandler {
                 calls: calls.clone(),
             }),
             NodeEventBus::default(),
             4,
+            state.clone(),
         );
         let invitation = "fk://owner-secret-invitation@example.test:6666";
 
@@ -1519,6 +1596,10 @@ mod tests {
         assert_eq!(audit[0].outcome, AuditOutcome::Succeeded);
         assert_eq!(audit[0].details["command"], "join_network");
         assert!(!format!("{:?}", audit[0]).contains("owner-secret-invitation"));
+        let activity = state.snapshot().await.recent_activity;
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].details["command"], "join_network");
+        assert!(!format!("{activity:?}").contains("owner-secret-invitation"));
     }
 
     #[tokio::test]
@@ -1541,6 +1622,34 @@ mod tests {
         assert_eq!(audit[0].details["request_id"], "54");
         assert_eq!(audit[0].details["actor_source"], "test");
         assert_eq!(audit[0].outcome, AuditOutcome::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn snapshot_activity_is_newest_first_limited_to_five_and_excludes_reads() {
+        let state = NodeStateStore::new();
+        let bus = NodeCommandBus::spawn_with_state(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            8,
+            state.clone(),
+        );
+
+        for request_id in 60..67 {
+            bus.execute_test(NodeCommandRequest::new(request_id, NodeCommand::StartNode))
+                .await
+                .expect("authorized command");
+        }
+        bus.execute_test(NodeCommandRequest::new(70, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot query");
+
+        let activity = state.snapshot().await.recent_activity;
+        assert_eq!(activity.len(), 5);
+        assert!(activity
+            .iter()
+            .all(|entry| entry.details["command"] == "start_node"));
+        assert_eq!(activity[0].details["request_id"], "66");
+        assert_eq!(activity[4].details["request_id"], "62");
     }
 
     fn actor() -> NodeId {

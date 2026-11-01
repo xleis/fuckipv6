@@ -10,6 +10,23 @@ export type NodeManifestActionCommandKind =
 
 export type AclAction = "allow" | "deny";
 
+export type ActivityEntry = {
+  "action": string;
+  "actor": NodeId;
+  "audit_id": AuditId;
+  "details": Record<string, string>;
+  "network_id"?: NetworkId | null;
+  "occurred_at_unix_ms": number;
+  "operation_id"?: OperationId | null;
+  "outcome": AuditOutcome;
+  "resource": string;
+  "summary": string;
+};
+
+export type AuditId = string;
+
+export type AuditOutcome = "succeeded" | "failed" | "denied";
+
 export type CapabilityKind = "coordinator" | "relay" | "exit" | "file";
 
 export type CapabilityState = "disabled" | "starting" | "enabled" | "degraded" | "unavailable" | "unsupported" | "unknown";
@@ -42,6 +59,8 @@ export type ExitNodePlatform = "linux" | "windows" | "macos" | "other";
 export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_required" | "routing_tool_unavailable" | "iptables_unavailable" | "ipv4_forwarding_unavailable";
 
 export type IdempotencyKey = string;
+
+export type NetworkId = string;
 
 export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
 
@@ -657,6 +676,7 @@ export type NodeSnapshot = {
   "networks": Array<NodeNetworkSnapshot>;
   "peers": Array<NodePeerSnapshot>;
   "permissions"?: NodePermissionSnapshot;
+  "recent_activity"?: Array<ActivityEntry>;
   "revision": number;
   "ui_mode"?: UiModeResolution | null;
 };

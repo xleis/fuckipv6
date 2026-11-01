@@ -699,8 +699,8 @@ pub fn spawn_command_bus(
     registry: MultiNetworkRegistry,
     events: super::NodeEventBus,
 ) -> super::NodeCommandBus {
-    let handler = NodeRuntimeHandler::new(state, registry);
-    super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
+    let handler = NodeRuntimeHandler::new(state.clone(), registry);
+    super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
 }
 
 /// Spawn the command bus while sharing embedded service ownership with the
@@ -712,8 +712,8 @@ pub fn spawn_command_bus_with_services(
     events: super::NodeEventBus,
     services: EmbeddedServiceManager,
 ) -> super::NodeCommandBus {
-    let handler = NodeRuntimeHandler::with_services(state, registry, services);
-    super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
+    let handler = NodeRuntimeHandler::with_services(state.clone(), registry, services);
+    super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
 }
 
 pub(crate) fn spawn_command_bus_with_runtime(
@@ -723,8 +723,8 @@ pub(crate) fn spawn_command_bus_with_runtime(
     services: EmbeddedServiceManager,
     runtime: NetworkRuntimeManager,
 ) -> super::NodeCommandBus {
-    let handler = NodeRuntimeHandler::with_runtime(state, registry, services, runtime);
-    super::NodeCommandBus::spawn(Arc::new(handler), events, 32)
+    let handler = NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime);
+    super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
 }
 
 #[cfg(test)]

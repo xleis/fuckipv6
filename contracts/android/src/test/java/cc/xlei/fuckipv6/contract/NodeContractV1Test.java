@@ -40,7 +40,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 67,
+                NodeContractV1.DTO_CLASS_NAMES.length == 68,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -96,6 +96,7 @@ public final class NodeContractV1Test {
             "ui_mode",
             "networks",
             "peers",
+            "recent_activity",
             "logs",
             "last_error"
         }) {

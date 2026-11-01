@@ -8,6 +8,82 @@
       ],
       "type": "string"
     },
+    "ActivityEntry": {
+      "description": "Activity is an intentionally separate projection. Adding a field to the\nsecurity audit does not automatically expose that field in product feeds.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "audit_id": {
+          "$ref": "#/$defs/AuditId"
+        },
+        "details": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "network_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "occurred_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/AuditOutcome"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audit_id",
+        "actor",
+        "action",
+        "resource",
+        "outcome",
+        "occurred_at_unix_ms",
+        "summary",
+        "details"
+      ],
+      "type": "object"
+    },
+    "AuditId": {
+      "type": "string"
+    },
+    "AuditOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "denied"
+      ],
+      "type": "string"
+    },
     "CapabilityKind": {
       "description": "The fixed first-version capability set. Unknown wire values fail closed at\ndeserialization and are never inferred from a free-form label.",
       "enum": [
@@ -113,6 +189,9 @@
         "iptables_unavailable",
         "ipv4_forwarding_unavailable"
       ],
+      "type": "string"
+    },
+    "NetworkId": {
       "type": "string"
     },
     "NetworkMode": {
@@ -578,6 +657,9 @@
         "dependency",
         "internal"
       ],
+      "type": "string"
+    },
+    "NodeId": {
       "type": "string"
     },
     "NodeIdentitySnapshot": {
@@ -1357,6 +1439,14 @@
             "permissions": []
           }
         },
+        "recent_activity": {
+          "default": [],
+          "description": "The five most recent user-meaningful command outcomes. Entries are\nalready redacted by the domain audit projection and ordered newest\nfirst, so every UI adapter consumes the same activity feed.",
+          "items": {
+            "$ref": "#/$defs/ActivityEntry"
+          },
+          "type": "array"
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,
@@ -1691,6 +1781,9 @@
         "routing_mode",
         "positive_timeout"
       ],
+      "type": "string"
+    },
+    "OperationId": {
       "type": "string"
     },
     "OperationRecovery": {

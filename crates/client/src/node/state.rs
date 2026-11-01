@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
-use fuckipv6_common::domain::{CapabilityKind, CapabilityState, OperationRecovery};
+use fuckipv6_common::domain::{ActivityEntry, CapabilityKind, CapabilityState, OperationRecovery};
 use fuckipv6_common::ExitNodeCapabilities;
 
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodePhase};
@@ -41,6 +41,11 @@ pub struct NodeSnapshot {
     pub ui_mode: Option<UiModeResolution>,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
+    /// The five most recent user-meaningful command outcomes. Entries are
+    /// already redacted by the domain audit projection and ordered newest
+    /// first, so every UI adapter consumes the same activity feed.
+    #[serde(default)]
+    pub recent_activity: Vec<ActivityEntry>,
     pub logs: Vec<NodeLogEntry>,
     pub last_error: Option<NodeProblem>,
 }
@@ -807,6 +812,13 @@ impl NodeStateStore {
 
     pub async fn set_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) -> NodeSnapshot {
         self.update(|snapshot| snapshot.lifecycle = lifecycle).await
+    }
+
+    /// Replace the short activity feed after a command has been audited.
+    /// Callers provide the domain projection, never raw command payloads.
+    pub async fn set_recent_activity(&self, activity: Vec<ActivityEntry>) {
+        self.update(|snapshot| snapshot.recent_activity = activity)
+            .await;
     }
 
     /// Update local control-plane reachability without changing the

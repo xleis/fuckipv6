@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ActivityEntry", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodeProbePeerCommand", "NodeProblem", "NodeResidualCleanupResult", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -33,6 +33,31 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown AclAction wire value: " + value);
+        }
+    }
+
+    public enum AuditOutcome {
+        SUCCEEDED("succeeded"),
+        FAILED("failed"),
+        DENIED("denied");
+
+        private final String wireName;
+
+        AuditOutcome(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static AuditOutcome fromWireName(String value) {
+            for (AuditOutcome candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown AuditOutcome wire value: " + value);
         }
     }
 
@@ -986,6 +1011,33 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for ActivityEntry. */
+    public static final class ActivityEntry {
+        public final String action;
+        public final String actor;
+        public final String audit_id;
+        public final Map<String, Object> details;
+        public final String network_id;
+        public final Long occurred_at_unix_ms;
+        public final String operation_id;
+        public final AuditOutcome outcome;
+        public final String resource;
+        public final String summary;
+
+        public ActivityEntry(String action, String actor, String audit_id, Map<String, Object> details, String network_id, Long occurred_at_unix_ms, String operation_id, AuditOutcome outcome, String resource, String summary) {
+            this.action = action;
+            this.actor = actor;
+            this.audit_id = audit_id;
+            this.details = details;
+            this.network_id = network_id;
+            this.occurred_at_unix_ms = occurred_at_unix_ms;
+            this.operation_id = operation_id;
+            this.outcome = outcome;
+            this.resource = resource;
+            this.summary = summary;
+        }
+    }
+
     /** DTO for DomainActorRef. */
     public static final class DomainActorRef {
         public final String display;
@@ -1792,10 +1844,11 @@ public final class NodeContractV1 {
         public final List<NodeNetworkSnapshot> networks;
         public final List<NodePeerSnapshot> peers;
         public final NodePermissionSnapshot permissions;
+        public final List<ActivityEntry> recent_activity;
         public final Long revision;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, Long revision, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
             this.configuration = configuration;
             this.control_health = control_health;
@@ -1808,6 +1861,7 @@ public final class NodeContractV1 {
             this.networks = networks;
             this.peers = peers;
             this.permissions = permissions;
+            this.recent_activity = recent_activity;
             this.revision = revision;
             this.ui_mode = ui_mode;
         }

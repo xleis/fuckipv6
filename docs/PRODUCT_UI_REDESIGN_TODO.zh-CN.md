@@ -709,14 +709,23 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 全部通过；
 - 对应提交：`605a9c0`（可信传输上下文与命令总线入口）与 `0dc1214`（逐网络双策略授权、临时 Coordinator 禁写和越权回归）。
 
-### W4-06 生成客户端与漂移检查 `[ ]`
+### W4-06 生成客户端与漂移检查 `[x]`
 
-- [ ] OpenAPI/JSON Schema；
-- [ ] TypeScript 客户端；
-- [ ] 生成文件漂移检查；
-- [ ] 命令/事件/错误枚举一致性；
-- [ ] Android 契约验证；
-- [ ] CI 阻断漂移。
+- [x] OpenAPI/JSON Schema；
+- [x] TypeScript 客户端；
+- [x] 生成文件漂移检查；
+- [x] 命令/事件/错误枚举一致性；
+- [x] Android 契约验证；
+- [x] CI 阻断漂移。
+
+**实现与测试证据（2026-11-01）**
+
+- `contracts/schema/` 包含 7 份由 Rust `JsonSchema` 生成的 draft 2020-12 契约：command、request、result、event、HTTP、snapshot 和 UI manifest；该条要求的是 OpenAPI 或 JSON Schema 二选一，因此不额外维护第二套 OpenAPI；
+- TypeScript 绑定包含完整 DTO、命令/事件/错误枚举、schema 版本检查和 HTTP 客户端；Android 绑定包含 Java 8 可用的 DTO、枚举、联合类型和命令信封校验；
+- 命令常量来自 `NodeCommandKind` 的单一权威定义，事件、错误分类和 HTTP 错误码由同一批 schema `$defs` 投影；生成器会拒绝不同 schema 之间的同名定义冲突，`--check` 会阻断生成文件漂移；
+- `./scripts/check-contracts.sh` 通过：Rust 契约测试 7 passed、TypeScript strict check/build、`test_contract_bindings`、`test_webui_node_ui` 和 Android `NodeContractV1Test` 全部 passed；
+- `./scripts/generate-contracts.sh` 后 `git diff --exit-code -- contracts` 通过，证明重新生成无漂移；
+- CI 的 `contracts` 作业执行 schema/绑定门禁、完整重新生成，并以 `git diff --exit-code -- contracts` 阻断漂移。
 
 ### W4-07 API 安全与限额 `[ ]`
 

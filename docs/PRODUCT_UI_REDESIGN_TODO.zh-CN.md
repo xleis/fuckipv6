@@ -892,14 +892,16 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **证据（2026-11-02）**：GPUI 与 WebUI 统一按“所有者与安全、远程访问、服务与更新、发现索引、数据与恢复”五组展示权威快照，不再使用通用指标卡或旧设置摘要。所有者身份、Node ID、公钥指纹、访问模型、权限、WebUI 会话、所有者恢复、UI/显示环境、WebUI 监听来源、四项能力状态、内嵌服务、更新与备份未接入原因、发现角色、revision 和只读写入状态均来自现有快照；平台/构建不支持的能力单独展示状态与原因，所有尚未接入的功能明确标注为不可用，不渲染伪开关或伪按钮。`cargo test -p fuckipv6-client --all-features` 通过（lib 630 passed、3 ignored；集成测试 9 passed、1 ignored），`cargo clippy -p fuckipv6-client --all-features --all-targets -- -D warnings`、WebUI `typecheck`、`lint`、29/29 单元测试和嵌入式生产构建均通过，`dist/assets/app.js` 已同步刷新。
 
-### W6-05 高级设置 `[ ]`
+### W6-05 高级设置 `[x]`
 
-- [ ] 可搜索；
-- [ ] 监听地址、端口、接口白名单；
-- [ ] DNS/DoH/DoT/泄漏保护；
-- [ ] NAT、Keepalive、并发和资源限制；
-- [ ] WebUI 会话、代理、限流、HSTS；
-- [ ] 日志、指标、更新、维护窗口。
+- [x] 可搜索；
+- [x] 监听地址、端口、接口白名单；
+- [x] DNS/DoH/DoT/泄漏保护；
+- [x] NAT、Keepalive、并发和资源限制；
+- [x] WebUI 会话、代理、限流、HSTS；
+- [x] 日志、指标、更新、维护窗口。
+
+**证据（2026-11-02）**：GPUI 与 WebUI 同时提供同一套 5 组、21 个高级设置项：监听与接口、DNS 与隐私、NAT/连接与资源、WebUI 与访问安全、日志/指标与维护。每项均标注 `启动配置`、`只读`、`部分接入` 或 `不支持`，并显示真实快照值或稳定的未接入原因；P2P 实时监听地址优先于配置端口，Keepalive、连接超时和日志级别来自逐网络安全快照。全局搜索可从中英文关键词定位高级设置并导航到设置页。当前切片不渲染伪开关或伪按钮，事务性编辑、完整配置预览、差异应用和回滚仍由 W6-06 负责。`cargo test -p fuckipv6-client --all-features` 通过（lib 630 passed、3 ignored；集成测试 9 passed、1 ignored），`cargo clippy -p fuckipv6-client --all-features --all-targets -- -D warnings`、WebUI `typecheck`、`lint`、31/31 单元测试和嵌入式生产构建均通过，`dist/assets/app.js` 已同步刷新。
 
 ### W6-06 配置预览与回滚 `[ ]`
 
@@ -2378,7 +2380,8 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [ ] W5-05～W5-08：a11y、GPUI 适配、WebUI 新工程和视觉回归；
 - [x] W6-01～W6-03：五模块外壳、唯一主状态和概览；
 - [x] W6-04：设置基础页；
-- [ ] W6-05～W6-07：高级设置、差异应用和状态矩阵；
+- [x] W6-05：可搜索的高级设置权威清单；
+- [ ] W6-06～W6-07：差异应用和状态矩阵；
 - [ ] 删除旧双 WebUI 的新功能入口；
 - [ ] 新 React/Vite 成为唯一 WebUI 产品表面；
 - [ ] GPUI 与 WebUI 使用同一状态/权限/命令契约。

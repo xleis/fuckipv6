@@ -24,6 +24,7 @@ import {
   RadioTower,
   Server,
   ShieldCheck,
+  SlidersHorizontal,
   Waypoints,
   Wifi,
   WifiOff,
@@ -44,6 +45,7 @@ import {
   primaryStatus,
 } from "../contract/invariants";
 import { t, tr } from "../i18n";
+import { advancedSettingsGroups } from "../settings";
 
 type PageContentProps = {
   page: NodeUiPage;
@@ -1000,9 +1002,18 @@ function Settings({
         `${network.name} · ${label(locale, `status.network.${network.status}`)}`,
     )
     .join(label(locale, "common.list_separator"));
+  const advancedGroups = advancedSettingsGroups(snapshot, locale);
+  const advancedIcons: Record<string, LucideIcon> = {
+    "network-listeners": Network,
+    "dns-privacy": Globe2,
+    "transport-limits": Gauge,
+    "web-security": ShieldCheck,
+    "observability-maintenance": Activity,
+  };
 
   return (
-    <div className="settings-grid">
+    <div className="settings-content">
+      <div className="settings-grid">
       <SettingsSection
         group="owner-security"
         title={label(locale, "settings.section.owner_security")}
@@ -1200,6 +1211,59 @@ function Settings({
           </div>
         </dl>
       </SettingsSection>
+      </div>
+
+      <section
+        className="advanced-settings"
+        aria-labelledby="advanced-settings-title"
+      >
+        <div className="advanced-settings-heading">
+          <div>
+            <h2 id="advanced-settings-title">
+              {label(locale, "settings.advanced.title")}
+            </h2>
+            <p>{label(locale, "settings.advanced.description")}</p>
+          </div>
+          <SlidersHorizontal size={20} />
+        </div>
+        <div className="settings-grid advanced-settings-grid">
+          {advancedGroups.map((group) => {
+            const Icon = advancedIcons[group.id] ?? SlidersHorizontal;
+            return (
+              <SettingsSection
+                key={group.id}
+                group={group.id}
+                title={group.title}
+                icon={Icon}
+              >
+                <dl className="detail-list advanced-detail-list">
+                  {group.rows.map((setting) => (
+                    <div
+                      key={setting.id}
+                      data-advanced-setting-id={setting.id}
+                      data-search-keywords={setting.keywords}
+                    >
+                      <dt>{setting.title}</dt>
+                      <dd>
+                        <span
+                          className={`settings-state ${setting.state}`}
+                          data-setting-state={setting.state}
+                        >
+                          {label(
+                            locale,
+                            `settings.advanced.state.${setting.state}`,
+                          )}
+                        </span>
+                        <span>{setting.detail}</span>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </SettingsSection>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }

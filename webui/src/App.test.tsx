@@ -155,7 +155,7 @@ describe("React WebUI shell", () => {
     await expectModuleTabs("settings", ["settings"]);
   });
 
-  it("renders five read-only settings groups with explicit platform limits", async () => {
+  it("renders basic and advanced read-only settings with explicit capability states", async () => {
     authenticate({
       ...populatedSnapshot,
       ui_mode: {
@@ -175,7 +175,9 @@ describe("React WebUI shell", () => {
     );
     await screen.findByRole("heading", { name: "translated:page.settings" });
 
-    const grid = container.querySelector<HTMLElement>(".settings-grid");
+    const grid = container.querySelector<HTMLElement>(
+      ".settings-content > .settings-grid:not(.advanced-settings-grid)",
+    );
     expect(grid).toBeInTheDocument();
     const groups = Array.from(
       grid?.querySelectorAll<HTMLElement>("[data-settings-group]") ?? [],
@@ -209,6 +211,39 @@ describe("React WebUI shell", () => {
     expect(groups[4]).toHaveTextContent("translated:settings.value.read_only");
     expect(groups[4]).toHaveTextContent("translated:settings.read_only.detail");
     expect(grid?.querySelector("button, input, select, textarea")).toBeNull();
+
+    const advanced = container.querySelector<HTMLElement>(".advanced-settings");
+    expect(advanced).toBeInTheDocument();
+    expect(
+      within(advanced as HTMLElement).getByRole("heading", {
+        name: "translated:settings.advanced.title",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      Array.from(
+        advanced?.querySelectorAll<HTMLElement>(
+          ".advanced-settings-grid > [data-settings-group]",
+        ) ?? [],
+      ).map((group) => group.dataset.settingsGroup),
+    ).toEqual([
+      "network-listeners",
+      "dns-privacy",
+      "transport-limits",
+      "web-security",
+      "observability-maintenance",
+    ]);
+    expect(
+      advanced?.querySelectorAll("[data-advanced-setting-id]"),
+    ).toHaveLength(21);
+    expect(
+      Array.from(
+        advanced?.querySelectorAll<HTMLElement>("[data-setting-state]") ?? [],
+      ).map((setting) => setting.dataset.settingState),
+    ).toEqual(expect.arrayContaining(["managed", "read_only", "partial", "unsupported"]));
+    expect(
+      advanced?.querySelector('[data-advanced-setting-id="listen-ports"]'),
+    ).toHaveTextContent("127.0.0.1:9000");
+    expect(advanced?.querySelector("button, input, select, textarea")).toBeNull();
   });
 
   it("exposes the shared four-region shell with a persistent action panel", async () => {
@@ -290,6 +325,27 @@ describe("React WebUI shell", () => {
     expect(search).toHaveValue("");
     expect(search).toHaveFocus();
     expect(screen.queryByRole("list", { name: "translated:common.search_results" })).toBeNull();
+  });
+
+  it("finds advanced settings and navigates to the settings page", async () => {
+    authenticate(populatedSnapshot);
+    const user = userEvent.setup();
+    renderApp();
+
+    const search = await screen.findByRole("textbox", {
+      name: "translated:common.search",
+    });
+    await user.type(search, "doh");
+    await user.click(
+      screen.getByRole("button", {
+        name: /translated:search\.kind\.setting · translated:settings\.row\.doh_upstreams/,
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.settings" }),
+    ).toBeInTheDocument();
+    expect(search).toHaveValue("");
   });
 
   it("uses the shared shell and action-panel tokens", () => {

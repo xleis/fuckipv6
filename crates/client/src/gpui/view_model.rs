@@ -214,6 +214,40 @@ pub struct SectionModel {
     pub empty_text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvancedSettingState {
+    Managed,
+    ReadOnly,
+    Partial,
+    Unsupported,
+}
+
+impl AdvancedSettingState {
+    const fn label_key(self) -> &'static str {
+        match self {
+            Self::Managed => "settings.advanced.state.managed",
+            Self::ReadOnly => "settings.advanced.state.read_only",
+            Self::Partial => "settings.advanced.state.partial",
+            Self::Unsupported => "settings.advanced.state.unsupported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdvancedSettingRow {
+    id: &'static str,
+    title: String,
+    detail: String,
+    state: AdvancedSettingState,
+    keywords: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdvancedSettingGroup {
+    title: String,
+    rows: Vec<AdvancedSettingRow>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverviewNetwork {
     pub name: String,
@@ -271,6 +305,7 @@ pub enum SearchResultKind {
     Identity,
     Network,
     Peer,
+    Setting,
 }
 
 impl SearchResultKind {
@@ -280,6 +315,7 @@ impl SearchResultKind {
             Self::Identity => "search.kind.identity",
             Self::Network => "search.kind.network",
             Self::Peer => "search.kind.peer",
+            Self::Setting => "search.kind.setting",
         }
     }
 }
@@ -436,6 +472,22 @@ pub fn search_node_snapshot(
                     .unwrap_or_default(),
             ),
         );
+    }
+
+    for group in advanced_setting_groups(snapshot, locale) {
+        for setting in group.rows {
+            push(
+                SearchResult {
+                    id: format!("setting:{}", setting.id),
+                    kind: SearchResultKind::Setting,
+                    title: setting.title,
+                    detail: format!("{} · {}", group.title, setting.detail),
+                    page_id: "settings".into(),
+                    network_name: None,
+                },
+                format!("{} setting settings advanced 高级 设置", setting.keywords),
+            );
+        }
     }
 
     matches.sort_by_key(|(rank, index, _)| (*rank, *index));
@@ -1955,6 +2007,277 @@ fn project_identity(
     )
 }
 
+fn configured_network_values(
+    snapshot: &NodeSnapshot,
+    locale: Locale,
+    mut render: impl FnMut(&crate::node::NodeNetworkConfigSnapshot) -> String,
+) -> String {
+    let values = snapshot
+        .configuration
+        .networks
+        .iter()
+        .map(|network| format!("{} · {}", network.network_name, render(network)))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        t(locale, "common.none").to_string()
+    } else {
+        values.join(t(locale, "common.list_separator"))
+    }
+}
+
+fn advanced_setting_row(
+    locale: Locale,
+    id: &'static str,
+    title_key: &str,
+    detail: impl Into<String>,
+    state: AdvancedSettingState,
+    keywords: &'static str,
+) -> AdvancedSettingRow {
+    AdvancedSettingRow {
+        id,
+        title: t(locale, title_key).to_string(),
+        detail: detail.into(),
+        state,
+        keywords,
+    }
+}
+
+fn advanced_setting_groups(snapshot: &NodeSnapshot, locale: Locale) -> Vec<AdvancedSettingGroup> {
+    let listen_ports = configured_network_values(snapshot, locale, |network| {
+        snapshot
+            .networks
+            .iter()
+            .find(|live| live.name == network.network_name)
+            .and_then(|live| live.p2p_listen_addr)
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| {
+                if network.p2p_listen_port == 0 {
+                    t(locale, "settings.advanced.port_random").to_string()
+                } else {
+                    format!(":{}", network.p2p_listen_port)
+                }
+            })
+    });
+    let keepalive = configured_network_values(snapshot, locale, |network| {
+        format!(
+            "{} {}",
+            network.p2p_heartbeat_interval_secs,
+            t(locale, "settings.advanced.unit_seconds")
+        )
+    });
+    let connections = configured_network_values(snapshot, locale, |network| {
+        format!(
+            "{} {} {}",
+            t(locale, "settings.advanced.connect_timeout"),
+            network.p2p_connect_timeout_secs,
+            t(locale, "settings.advanced.unit_seconds")
+        )
+    });
+    let log_levels = configured_network_values(snapshot, locale, |network| {
+        if network.log_level.is_empty() {
+            t(locale, "common.unknown").to_string()
+        } else {
+            network.log_level.clone()
+        }
+    });
+
+    vec![
+        AdvancedSettingGroup {
+            title: t(locale, "settings.section.network_listeners").to_string(),
+            rows: vec![
+                advanced_setting_row(
+                    locale,
+                    "listen-addresses",
+                    "settings.row.listen_addresses",
+                    t(locale, "settings.advanced.listen_addresses.detail"),
+                    AdvancedSettingState::ReadOnly,
+                    "listen address bind ipv4 ipv6 wildcard socket port",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "listen-ports",
+                    "settings.row.listen_ports",
+                    listen_ports,
+                    AdvancedSettingState::ReadOnly,
+                    "p2p port udp listen random socket",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "interface-allowlist",
+                    "settings.row.interface_allowlist",
+                    t(locale, "settings.advanced.interface_allowlist.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "interface allowlist denylist network adapter",
+                ),
+            ],
+        },
+        AdvancedSettingGroup {
+            title: t(locale, "settings.section.dns_privacy").to_string(),
+            rows: vec![
+                advanced_setting_row(
+                    locale,
+                    "dns-mode",
+                    "settings.row.dns_mode",
+                    t(locale, "settings.advanced.dns_mode.detail"),
+                    AdvancedSettingState::Partial,
+                    "dns mode resolver doh dot split routing",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "doh-upstreams",
+                    "settings.row.doh_upstreams",
+                    t(locale, "settings.advanced.doh_upstreams.detail"),
+                    AdvancedSettingState::Managed,
+                    "doh dns over https upstream resolver",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "dot",
+                    "settings.row.dot",
+                    t(locale, "settings.advanced.dot.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "dot dns over tls encrypted resolver",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "dns-leak-protection",
+                    "settings.row.dns_leak_protection",
+                    t(locale, "settings.advanced.dns_leak.detail"),
+                    AdvancedSettingState::Partial,
+                    "dns leak protection resolv.conf hijack",
+                ),
+            ],
+        },
+        AdvancedSettingGroup {
+            title: t(locale, "settings.section.transport_limits").to_string(),
+            rows: vec![
+                advanced_setting_row(
+                    locale,
+                    "nat-detection",
+                    "settings.row.nat_detection",
+                    t(locale, "settings.advanced.nat_detection.detail"),
+                    AdvancedSettingState::Partial,
+                    "nat traversal stun mapping detection",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "keepalive",
+                    "settings.row.keepalive",
+                    keepalive,
+                    AdvancedSettingState::ReadOnly,
+                    "keepalive heartbeat interval connection",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "connections",
+                    "settings.row.connections",
+                    connections,
+                    AdvancedSettingState::ReadOnly,
+                    "connection timeout queue concurrency worker batch",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "resource-limits",
+                    "settings.row.resource_limits",
+                    t(locale, "settings.advanced.resource_limits.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "resource limit bandwidth quota connection count target",
+                ),
+            ],
+        },
+        AdvancedSettingGroup {
+            title: t(locale, "settings.section.web_security").to_string(),
+            rows: vec![
+                advanced_setting_row(
+                    locale,
+                    "webui-listener",
+                    "settings.row.webui_listener",
+                    t(locale, "settings.advanced.webui_listener.detail"),
+                    AdvancedSettingState::Managed,
+                    "webui listen bind origin proxy public exposure",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "webui-session",
+                    "settings.row.webui_session",
+                    t(locale, "settings.advanced.webui_session.detail"),
+                    AdvancedSettingState::ReadOnly,
+                    "session cookie passkey expiry httponly samesite login",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "webui-rate-limit",
+                    "settings.row.webui_rate_limit",
+                    t(locale, "settings.advanced.webui_rate_limit.detail"),
+                    AdvancedSettingState::ReadOnly,
+                    "rate limit login mutation brute force",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "hsts",
+                    "settings.row.hsts",
+                    t(locale, "settings.advanced.hsts.detail"),
+                    AdvancedSettingState::Managed,
+                    "hsts https certificate tls header security",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "trusted-proxy",
+                    "settings.row.trusted_proxy",
+                    t(locale, "settings.advanced.trusted_proxy.detail"),
+                    AdvancedSettingState::Managed,
+                    "trusted proxy forwarded origin ip",
+                ),
+            ],
+        },
+        AdvancedSettingGroup {
+            title: t(locale, "settings.section.observability_maintenance").to_string(),
+            rows: vec![
+                advanced_setting_row(
+                    locale,
+                    "log-levels",
+                    "settings.row.log_levels",
+                    log_levels,
+                    AdvancedSettingState::ReadOnly,
+                    "log level trace debug info warn error",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "log-retention",
+                    "settings.row.log_retention",
+                    t(locale, "settings.advanced.log_retention.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "log retention remote shipping redaction privacy",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "metrics",
+                    "settings.row.metrics",
+                    t(locale, "settings.advanced.metrics.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "metrics prometheus endpoint monitoring",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "updates",
+                    "settings.row.updates",
+                    t(locale, "settings.advanced.updates.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "update channel proxy signature rollback",
+                ),
+                advanced_setting_row(
+                    locale,
+                    "maintenance-window",
+                    "settings.row.maintenance_window",
+                    t(locale, "settings.advanced.maintenance.detail"),
+                    AdvancedSettingState::Unsupported,
+                    "maintenance window schedule",
+                ),
+            ],
+        },
+    ]
+}
+
 fn project_settings(
     snapshot: &NodeSnapshot,
     locale: Locale,
@@ -2184,36 +2507,55 @@ fn project_settings(
             ),
         ),
     ];
-    (
-        Vec::new(),
-        vec![
-            section(
-                t(locale, "settings.section.owner_security"),
-                t(locale, "common.no_data"),
-                owner_rows,
-            ),
-            section(
-                t(locale, "settings.section.remote_access"),
-                t(locale, "common.not_available"),
-                remote_rows,
-            ),
-            section(
-                t(locale, "settings.section.services_updates"),
-                t(locale, "gpui.empty.embedded_services"),
-                service_rows,
-            ),
-            section(
-                t(locale, "settings.section.discovery_index"),
-                t(locale, "settings.discovery_index.detail"),
-                discovery_rows,
-            ),
-            section(
-                t(locale, "settings.section.data_recovery"),
-                t(locale, "common.no_data"),
-                data_rows,
-            ),
-        ],
-    )
+    let mut sections = vec![
+        section(
+            t(locale, "settings.section.owner_security"),
+            t(locale, "common.no_data"),
+            owner_rows,
+        ),
+        section(
+            t(locale, "settings.section.remote_access"),
+            t(locale, "common.not_available"),
+            remote_rows,
+        ),
+        section(
+            t(locale, "settings.section.services_updates"),
+            t(locale, "gpui.empty.embedded_services"),
+            service_rows,
+        ),
+        section(
+            t(locale, "settings.section.discovery_index"),
+            t(locale, "settings.discovery_index.detail"),
+            discovery_rows,
+        ),
+        section(
+            t(locale, "settings.section.data_recovery"),
+            t(locale, "common.no_data"),
+            data_rows,
+        ),
+    ];
+    sections.extend(
+        advanced_setting_groups(snapshot, locale)
+            .into_iter()
+            .map(|group| {
+                let rows = group
+                    .rows
+                    .into_iter()
+                    .map(|setting| {
+                        row(
+                            setting.title,
+                            format!(
+                                "{} · {}",
+                                t(locale, setting.state.label_key()),
+                                setting.detail
+                            ),
+                        )
+                    })
+                    .collect();
+                section(group.title, t(locale, "common.no_data"), rows)
+            }),
+    );
+    (Vec::new(), sections)
 }
 
 pub(crate) fn network_status_key(status: NodeNetworkStatus) -> &'static str {
@@ -2453,7 +2795,7 @@ mod tests {
     }
 
     #[test]
-    fn search_finds_pages_identity_networks_and_peers() {
+    fn search_finds_pages_identity_networks_peers_and_settings() {
         let manifest = node_ui_manifest();
         let snapshot = populated_snapshot();
 
@@ -2474,6 +2816,13 @@ mod tests {
             .iter()
             .any(|result| result.kind == SearchResultKind::Peer
                 && result.network_name.as_deref() == Some("home")));
+
+        let settings = search_node_snapshot(&manifest, &snapshot, "doh", Locale::En);
+        assert!(settings.iter().any(|result| {
+            result.kind == SearchResultKind::Setting
+                && result.id == "setting:doh-upstreams"
+                && result.page_id == "settings"
+        }));
     }
 
     #[test]
@@ -2550,7 +2899,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_projects_five_read_only_groups_and_platform_limitations() {
+    fn settings_projects_basic_and_advanced_read_only_inventory() {
         let manifest = node_ui_manifest();
         let page = manifest
             .pages
@@ -2582,6 +2931,11 @@ mod tests {
                 t(Locale::ZhCn, "settings.section.services_updates"),
                 t(Locale::ZhCn, "settings.section.discovery_index"),
                 t(Locale::ZhCn, "settings.section.data_recovery"),
+                t(Locale::ZhCn, "settings.section.network_listeners"),
+                t(Locale::ZhCn, "settings.section.dns_privacy"),
+                t(Locale::ZhCn, "settings.section.transport_limits"),
+                t(Locale::ZhCn, "settings.section.web_security"),
+                t(Locale::ZhCn, "settings.section.observability_maintenance"),
             ]
         );
         assert!(model
@@ -2632,6 +2986,33 @@ mod tests {
         assert!(write_mode
             .detail
             .contains(t(Locale::ZhCn, "settings.read_only.detail")));
+
+        assert_eq!(model.sections[5].rows.len(), 3);
+        assert!(model.sections[7].rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.keepalive")
+                && row.detail.contains("30")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "settings.advanced.state.read_only"))
+        }));
+        assert!(model.sections[6].rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.doh_upstreams")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "settings.advanced.state.managed"))
+        }));
+        assert!(model.sections[8].rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.webui_session")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "settings.advanced.state.read_only"))
+        }));
+        assert!(model.sections[9].rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "settings.row.metrics")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "settings.advanced.state.unsupported"))
+        }));
     }
 
     #[test]

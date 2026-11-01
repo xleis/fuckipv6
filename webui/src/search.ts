@@ -4,8 +4,14 @@ import type {
 } from "../../contracts/typescript/node-contract-v1";
 import { t, tr } from "./i18n";
 import { navigationModuleForPage } from "./navigation";
+import { advancedSettingSearchEntries } from "./settings";
 
-export type SearchResultKind = "page" | "identity" | "network" | "peer";
+export type SearchResultKind =
+  | "page"
+  | "identity"
+  | "network"
+  | "peer"
+  | "setting";
 
 export type SearchResult = {
   id: string;
@@ -114,6 +120,19 @@ export function searchNodeSnapshot(
         networkName: peer.network_name,
       },
       `${peer.peer_id} ${peer.network_name} ${peer.virtual_ipv6} ${peer.virtual_ipv4 ?? ""} peer`,
+    );
+  }
+
+  for (const setting of advancedSettingSearchEntries(snapshot, locale)) {
+    push(
+      {
+        id: `setting:${setting.id}`,
+        kind: "setting",
+        title: setting.title,
+        detail: `${setting.group} · ${setting.detail}`,
+        pageId: "settings",
+      },
+      `${setting.keywords} setting settings advanced 高级 设置`,
     );
   }
 

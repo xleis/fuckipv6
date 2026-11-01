@@ -24,6 +24,20 @@ describe("global object search", () => {
     expect(home.some((result) => result.kind === "peer" && result.networkName === "home")).toBe(true);
   });
 
+  it("finds advanced settings as navigation results", () => {
+    installTestI18nRuntime();
+
+    const results = searchNodeSnapshot(manifest, snapshot, "doh", "en");
+    expect(
+      results.some(
+        (result) =>
+          result.kind === "setting" &&
+          result.id === "setting:doh-upstreams" &&
+          result.pageId === "settings",
+      ),
+    ).toBe(true);
+  });
+
   it("does not search for blank queries and returns no fabricated matches", () => {
     installTestI18nRuntime();
 

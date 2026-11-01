@@ -1107,10 +1107,65 @@ button:disabled {
   font-family: var(--font-mono);
   font-size: 10px;
 }
+.settings-content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-5);
+}
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-4);
+}
+.advanced-settings {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.advanced-settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  color: var(--accent);
+}
+.advanced-settings-heading h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--font-size-lg);
+}
+.advanced-settings-heading p {
+  max-width: 76ch;
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+}
+.advanced-detail-list dd {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.settings-state {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-raised);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.settings-state.managed {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  color: var(--accent);
+}
+.settings-state.partial {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  color: var(--warning);
+}
+.settings-state.unsupported {
+  color: var(--text-muted);
 }
 .identity-card {
   display: flex;

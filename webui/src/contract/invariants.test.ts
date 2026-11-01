@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
+import productVisualFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   NodeApiManifestResponse,
   NodeSnapshot,
@@ -75,6 +76,24 @@ describe("node UI contract invariants", () => {
     const invalid = structuredClone(manifest);
     invalid.pages = invalid.pages.filter((page) => page.id !== "topology");
     expect(() => validateManifestResponse(manifestResponse(invalid))).toThrow("page set/order mismatch");
+  });
+
+  it("accepts the shared deterministic product visual fixture verbatim", () => {
+    const fixture = productVisualFixture as {
+      schema_version: number;
+      locale: string;
+      language_preference: string;
+      snapshot: NodeSnapshot;
+    };
+
+    expect(fixture.schema_version).toBe(1);
+    expect(fixture.locale).toBe("en");
+    expect(fixture.language_preference).toBe("en");
+    expect(validateSnapshot(fixture.snapshot)).toEqual(fixture.snapshot);
+    expect(fixture.snapshot.revision).toBe(4242);
+    expect(fixture.snapshot.networks).toHaveLength(2);
+    expect(fixture.snapshot.peers).toHaveLength(2);
+    expect(fixture.snapshot.logs).toHaveLength(5);
   });
 
   it("accepts a well-formed snapshot and rejects an invalid lifecycle phase", () => {

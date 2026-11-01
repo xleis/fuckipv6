@@ -19,6 +19,8 @@ mod tests {
 
     const NODE_MANIFEST_FIXTURE: &str =
         include_str!("../../../../contracts/typescript/fixtures/node-manifest.json");
+    const PRODUCT_VISUAL_SNAPSHOT_FIXTURE: &str =
+        include_str!("../../../../contracts/typescript/fixtures/product-visual-snapshot.json");
 
     fn fixture_manifest() -> Value {
         serde_json::from_str(NODE_MANIFEST_FIXTURE).expect("parse stable node manifest fixture")
@@ -52,6 +54,29 @@ mod tests {
             canonical["pages"].as_array().expect("manifest pages").len(),
             11
         );
+    }
+
+    #[test]
+    fn product_visual_fixture_is_deterministic_and_contract_valid() {
+        #[derive(serde::Deserialize)]
+        struct ProductVisualFixture {
+            schema_version: u16,
+            locale: String,
+            language_preference: String,
+            snapshot: crate::node::NodeSnapshot,
+        }
+
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse product visual fixture");
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.locale, "en");
+        assert_eq!(fixture.language_preference, "en");
+        assert_eq!(fixture.snapshot.revision, 4242);
+        assert_eq!(fixture.snapshot.networks.len(), 2);
+        assert_eq!(fixture.snapshot.peers.len(), 2);
+        assert_eq!(fixture.snapshot.logs.len(), 5);
+        assert_eq!(fixture.snapshot.capabilities.capabilities.len(), 4);
+        assert!(fixture.snapshot.exit_node_capabilities.supported);
     }
 
     #[test]

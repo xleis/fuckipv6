@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "locale": "en",
+  "language_preference": "en",
+  "snapshot": {
+    "revision": 4242,
+    "lifecycle": {
+      "phase": "running",
+      "active_networks": 2,
+      "configured_networks": 2,
+      "failed_networks": []
+    },
+    "control_health": "available",
+    "identity": {
+      "node_id": "node-visual-01",
+      "display_name": "Visual Fixture Node",
+      "public_key_fingerprint": "SHA256:7A:2C:91:10:55:03:DE:AD:BE:EF"
+    },
+    "configuration": {
+      "networks": [
+        {
+          "network_name": "home",
+          "coordinator_url": "ws://127.0.0.1:16666",
+          "virtual_mode": "dual_stack",
+          "preferred_ipv4": "10.66.0.2",
+          "preferred_ipv6": "fd00::2",
+          "virtual_network": "fd00::/64",
+          "tun_name": "fk-home",
+          "mtu": 1280,
+          "p2p_listen_port": 9000,
+          "p2p_connect_timeout_secs": 5,
+          "p2p_heartbeat_interval_secs": 30,
+          "routing_mode": "bypass_mainland",
+          "exit_node": "peer-tokyo",
+          "direct_cidrs": ["10.0.0.0/8", "192.168.0.0/16"],
+          "proxy_cidrs": ["203.0.113.0/24"],
+          "exit_node_enabled": true,
+          "exit_node_allowed_clients": ["peer-london"],
+          "exit_node_allow_lan_access": false,
+          "exit_node_region": "HK",
+          "acl_enabled": true,
+          "acl_default_action": "deny",
+          "acl_rule_count": 3,
+          "log_level": "info",
+          "log_file_configured": true,
+          "identity_configured": true
+        },
+        {
+          "network_name": "studio",
+          "coordinator_url": "ws://127.0.0.1:16668",
+          "virtual_mode": "ipv6_only",
+          "preferred_ipv4": null,
+          "preferred_ipv6": "fd10::4",
+          "virtual_network": "fd10::/64",
+          "tun_name": "fk-studio",
+          "mtu": 1280,
+          "p2p_listen_port": 9002,
+          "p2p_connect_timeout_secs": 5,
+          "p2p_heartbeat_interval_secs": 30,
+          "routing_mode": "mesh_only",
+          "exit_node": null,
+          "direct_cidrs": [],
+          "proxy_cidrs": [],
+          "exit_node_enabled": false,
+          "exit_node_allowed_clients": [],
+          "exit_node_allow_lan_access": false,
+          "exit_node_region": null,
+          "acl_enabled": false,
+          "acl_default_action": "allow",
+          "acl_rule_count": 0,
+          "log_level": "warn",
+          "log_file_configured": false,
+          "identity_configured": true
+        }
+      ]
+    },
+    "exit_node_capabilities": {
+      "schema_version": 1,
+      "platform": "linux",
+      "supported": true,
+      "ipv4_forwarding": true,
+      "ipv6_forwarding": true,
+      "nat": true,
+      "cleanup": true,
+      "unsupported_reasons": []
+    },
+    "capabilities": {
+      "capabilities": [
+        { "kind": "coordinator", "state": "enabled" },
+        { "kind": "relay", "state": "enabled" },
+        { "kind": "exit", "state": "enabled" },
+        { "kind": "file", "state": "unsupported" }
+      ]
+    },
+    "permissions": {
+      "access_model": "trusted_control_plane",
+      "permissions": [
+        "view_state",
+        "manage_networks",
+        "change_routing",
+        "manage_roles",
+        "probe_peers",
+        "stop_node",
+        "view_logs"
+      ]
+    },
+    "embedded_services": [
+      {
+        "network_name": "home",
+        "status": "running",
+        "signaling_addr": "127.0.0.1:16666",
+        "relay_addr": "127.0.0.1:16667"
+      },
+      {
+        "network_name": "studio",
+        "status": "running",
+        "signaling_addr": "127.0.0.1:16668",
+        "relay_addr": "127.0.0.1:16669"
+      }
+    ],
+    "networks": [
+      {
+        "name": "home",
+        "tun_name": "fk-home",
+        "status": "online",
+        "assigned_ipv6": "fd00::2",
+        "assigned_ipv4": "10.66.0.2",
+        "p2p_listen_addr": "127.0.0.1:9000",
+        "uptime_secs": 86400,
+        "roles": ["member", "exit_node"],
+        "peer_count": 2,
+        "traffic": {
+          "tun_rx_packets": 18042,
+          "tun_rx_bytes": 28491732,
+          "tun_tx_packets": 15220,
+          "tun_tx_bytes": 13004820,
+          "p2p_rx_packets": 17102,
+          "p2p_rx_bytes": 27510440,
+          "p2p_tx_packets": 14801,
+          "p2p_tx_bytes": 12601002,
+          "error_count": 0
+        }
+      },
+      {
+        "name": "studio",
+        "tun_name": "fk-studio",
+        "status": "online",
+        "assigned_ipv6": "fd10::4",
+        "assigned_ipv4": null,
+        "p2p_listen_addr": "127.0.0.1:9002",
+        "uptime_secs": 3600,
+        "roles": ["member", "relay"],
+        "peer_count": 1,
+        "traffic": {
+          "tun_rx_packets": 622,
+          "tun_rx_bytes": 208514,
+          "tun_tx_packets": 511,
+          "tun_tx_bytes": 122048,
+          "p2p_rx_packets": 590,
+          "p2p_rx_bytes": 198442,
+          "p2p_tx_packets": 501,
+          "p2p_tx_bytes": 118004,
+          "error_count": 1
+        }
+      }
+    ],
+    "peers": [
+      {
+        "peer_id": "peer-tokyo",
+        "network_name": "home",
+        "virtual_ipv6": "fd00::3",
+        "virtual_ipv4": "10.66.0.3",
+        "endpoints": ["198.51.100.10:9000"],
+        "online": true,
+        "p2p_active": true,
+        "p2p_healthy": true,
+        "rtt_us": 32600,
+        "loss_rate": 0.0,
+        "traffic": {
+          "tun_rx_packets": 8201,
+          "tun_rx_bytes": 9651200,
+          "tun_tx_packets": 8110,
+          "tun_tx_bytes": 9442010,
+          "p2p_rx_packets": 8001,
+          "p2p_rx_bytes": 9501200,
+          "p2p_tx_packets": 7902,
+          "p2p_tx_bytes": 9301000,
+          "error_count": 0
+        }
+      },
+      {
+        "peer_id": "peer-london",
+        "network_name": "home",
+        "virtual_ipv6": "fd00::4",
+        "virtual_ipv4": "10.66.0.4",
+        "endpoints": ["198.51.100.20:9000"],
+        "online": true,
+        "p2p_active": false,
+        "p2p_healthy": true,
+        "rtt_us": 182500,
+        "loss_rate": 0.002,
+        "traffic": {
+          "tun_rx_packets": 3101,
+          "tun_rx_bytes": 3910020,
+          "tun_tx_packets": 2970,
+          "tun_tx_bytes": 3501200,
+          "p2p_rx_packets": 0,
+          "p2p_rx_bytes": 0,
+          "p2p_tx_packets": 0,
+          "p2p_tx_bytes": 0,
+          "error_count": 0
+        }
+      }
+    ],
+    "logs": [
+      {
+        "unix_ms": 1767225605000,
+        "level": "info",
+        "target": "node.lifecycle",
+        "message": "Node runtime is running"
+      },
+      {
+        "unix_ms": 1767225604000,
+        "level": "info",
+        "target": "network.home",
+        "message": "Network home is online"
+      },
+      {
+        "unix_ms": 1767225603000,
+        "level": "info",
+        "target": "network.studio",
+        "message": "Relay listener is ready"
+      },
+      {
+        "unix_ms": 1767225602000,
+        "level": "debug",
+        "target": "peer.peer-tokyo",
+        "message": "P2P health probe completed"
+      },
+      {
+        "unix_ms": 1767225601000,
+        "level": "warn",
+        "target": "network.studio",
+        "message": "One peer packet was retransmitted"
+      }
+    ],
+    "last_error": null
+  }
+}

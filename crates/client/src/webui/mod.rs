@@ -35,7 +35,7 @@ use public_claim::PublicClaimConfig;
 use security::{http_url, WebUiAuth, WebUiConfig, WebUiLoginError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use webauthn_rs::prelude::RegisterPublicKeyCredential;
 
@@ -501,44 +501,158 @@ async fn authorize_owner_access(
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
+    let connect_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(remote_addr)| remote_addr.ip());
+    let has_forwarding = request_has_forwarding_headers(&request);
+    let channel_hint = connect_ip.map(|ip| {
+        if ip.is_loopback() && !has_forwarding {
+            OwnerBootstrapChannel::Local
+        } else {
+            OwnerBootstrapChannel::Public
+        }
+    });
+
     if request.uri().query().is_some() {
-        return owner_api_error(
-            StatusCode::BAD_REQUEST,
-            "所有者初始化凭据不得出现在 URL query 中",
+        return finish_owner_response(
+            &access,
+            connect_ip,
+            channel_hint,
+            &method,
+            &path,
+            owner_api_error(
+                StatusCode::BAD_REQUEST,
+                "所有者初始化凭据不得出现在 URL query 中",
+            ),
         );
     }
 
-    let Some(ConnectInfo(remote_addr)) = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .cloned()
-    else {
-        return owner_api_error(StatusCode::FORBIDDEN, "所有者初始化请求缺少可信来源");
+    let Some(remote_ip) = connect_ip else {
+        return finish_owner_response(
+            &access,
+            None,
+            None,
+            &method,
+            &path,
+            owner_api_error(StatusCode::FORBIDDEN, "所有者初始化请求缺少可信来源"),
+        );
     };
-    let has_forwarding = request_has_forwarding_headers(&request);
-    let channel = if remote_addr.ip().is_loopback() && !has_forwarding {
-        OwnerBootstrapChannel::Local
+    let (channel, source_ip) = if remote_ip.is_loopback() && !has_forwarding {
+        (OwnerBootstrapChannel::Local, remote_ip)
     } else {
         let Some(public_claim) = &access.public_claim else {
-            return owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问");
+            return finish_owner_response(
+                &access,
+                Some(remote_ip),
+                Some(OwnerBootstrapChannel::Public),
+                &method,
+                &path,
+                owner_api_error(StatusCode::FORBIDDEN, "本机初始化仅允许回环访问"),
+            );
         };
-        if let Err(rejection) =
-            public_claim.authorize(remote_addr.ip(), request.method(), request.headers())
+        let client_ip = match public_claim.authorize(remote_ip, request.method(), request.headers())
         {
-            return owner_api_error(rejection.status(), rejection.message());
-        }
+            Ok(client_ip) => client_ip,
+            Err(rejection) => {
+                return finish_owner_response(
+                    &access,
+                    Some(remote_ip),
+                    Some(OwnerBootstrapChannel::Public),
+                    &method,
+                    &path,
+                    owner_api_error(rejection.status(), rejection.message()),
+                );
+            }
+        };
         match access.owner.status_for(OwnerBootstrapChannel::Public) {
             Ok(status) if status.initialized => {
-                return owner_api_error(StatusCode::GONE, "公网认领入口已永久关闭");
+                return finish_owner_response(
+                    &access,
+                    Some(client_ip),
+                    Some(OwnerBootstrapChannel::Public),
+                    &method,
+                    &path,
+                    owner_api_error(StatusCode::GONE, "公网认领入口已永久关闭"),
+                );
             }
             Ok(_) => {}
-            Err(error) => return owner_service_error(error),
+            Err(error) => {
+                return finish_owner_response(
+                    &access,
+                    Some(client_ip),
+                    Some(OwnerBootstrapChannel::Public),
+                    &method,
+                    &path,
+                    owner_service_error(error),
+                );
+            }
         }
-        OwnerBootstrapChannel::Public
+        (OwnerBootstrapChannel::Public, client_ip)
     };
 
     request.extensions_mut().insert(channel);
-    next.run(request).await
+    let response = next.run(request).await;
+    finish_owner_response(
+        &access,
+        Some(source_ip),
+        Some(channel),
+        &method,
+        &path,
+        response,
+    )
+}
+
+fn finish_owner_response(
+    access: &OwnerAccessState,
+    source_ip: Option<IpAddr>,
+    channel: Option<OwnerBootstrapChannel>,
+    method: &str,
+    path: &str,
+    response: Response,
+) -> Response {
+    let status = response.status();
+    match access.owner.record_bootstrap_audit(
+        channel,
+        source_ip,
+        method,
+        path,
+        Some(status.as_u16()),
+        owner_audit_outcome(status),
+    ) {
+        Ok(()) => response,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                method,
+                path,
+                "所有者安全审计写入失败，控制面拒绝继续操作"
+            );
+            owner_api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "安全审计写入失败，控制面拒绝继续操作",
+            )
+        }
+    }
+}
+
+fn owner_audit_outcome(status: StatusCode) -> &'static str {
+    if status.is_success() {
+        return "success";
+    }
+    match status {
+        StatusCode::BAD_REQUEST => "bad_request",
+        StatusCode::UNAUTHORIZED => "invalid_code",
+        StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::NOT_FOUND => "ceremony_missing",
+        StatusCode::CONFLICT => "conflict_or_closed",
+        StatusCode::GONE => "permanently_closed",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+        status if status.is_server_error() => "internal_error",
+        _ => "rejected",
+    }
 }
 
 fn request_has_forwarding_headers(request: &axum::extract::Request) -> bool {
@@ -4143,6 +4257,15 @@ mod tests {
         serde_json::from_slice(&bytes).expect("JSON response")
     }
 
+    fn read_audit_records(service: &OwnerSecurityService) -> (String, Vec<serde_json::Value>) {
+        let content = std::fs::read_to_string(service.audit_path()).expect("owner audit JSONL");
+        let records = content
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("owner audit record"))
+            .collect();
+        (content, records)
+    }
+
     fn assert_no_store(response: &axum::response::Response) {
         assert_eq!(
             response
@@ -4405,6 +4528,41 @@ mod tests {
         assert_eq!(closed.status(), StatusCode::GONE);
         assert_no_store(&closed);
         assert!(!response_text(closed).await.contains(fixture.code.as_str()));
+
+        let (audit, records) = read_audit_records(&fixture.service);
+        let verified = records
+            .iter()
+            .find(|record| {
+                record["path"] == "/api/v1/auth/bootstrap/verify" && record["status"] == 200
+            })
+            .expect("verified public claim audit");
+        assert_eq!(verified["channel"], "public");
+        assert_eq!(verified["source_ip"], "203.0.113.9");
+        assert_eq!(verified["outcome"], "success");
+
+        let permanently_closed = records
+            .iter()
+            .find(|record| record["status"] == 410)
+            .expect("closed public claim audit");
+        assert_eq!(permanently_closed["channel"], "public");
+        assert_eq!(permanently_closed["source_ip"], "203.0.113.9");
+        assert_eq!(permanently_closed["outcome"], "permanently_closed");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["status"] == 200)
+                .count(),
+            2,
+            "GET/status and POST/verify each produce exactly one audit record"
+        );
+        assert!(records.iter().all(|record| {
+            !record["path"]
+                .as_str()
+                .is_some_and(|path| path.contains('?') || path.contains("code="))
+        }));
+        assert!(records.iter().all(|record| record["outcome"] != "accepted"));
+        assert!(!audit.contains(fixture.code.as_str()));
+        assert!(!audit.contains(&recovery_code));
     }
 
     #[tokio::test]
@@ -4526,6 +4684,76 @@ mod tests {
         );
         assert!(response_debug.contains("[REDACTED]"));
         assert!(!response_debug.contains("do-not-log-recovery-code"));
+    }
+
+    #[tokio::test]
+    async fn owner_bootstrap_rate_limits_failures_and_audits_each_final_response_once() {
+        let fixture = owner_app_fixture(8080);
+        let supplied = "wrong-bootstrap-code-that-must-never-be-logged";
+
+        for attempt in 1..=5 {
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(request_from(
+                    json_request(
+                        "POST",
+                        "/api/v1/auth/bootstrap/verify",
+                        &serde_json::json!({ "code": supplied }).to_string(),
+                    ),
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ))
+                .await
+                .expect("invalid bootstrap attempt");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "attempt {attempt}"
+            );
+            assert_no_store(&response);
+            assert!(!response_text(response).await.contains(supplied));
+        }
+
+        let limited = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                json_request(
+                    "POST",
+                    "/api/v1/auth/bootstrap/verify",
+                    &serde_json::json!({ "code": supplied }).to_string(),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("rate-limited bootstrap attempt");
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_no_store(&limited);
+        assert!(!response_text(limited).await.contains(supplied));
+
+        let (content, records) = read_audit_records(&fixture.service);
+        assert_eq!(records.len(), 6);
+        assert!(records.iter().all(|record| record["channel"] == "local"));
+        assert!(records
+            .iter()
+            .all(|record| record["source_ip"] == "127.0.0.1"));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["outcome"] == "invalid_code")
+                .count(),
+            5
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["outcome"] == "rate_limited")
+                .count(),
+            1
+        );
+        assert!(records.iter().all(|record| record["outcome"] != "accepted"));
+        assert!(!content.contains(supplied));
+        assert!(!content.contains(fixture.code.as_str()));
     }
 
     #[tokio::test]

@@ -244,6 +244,23 @@ export FUCKIPV6_WEBUI_JWT_SECRET='使用足够长的随机签名密钥'
 - WebUI/API 没有内置 TLS，远程使用时必须置于 TLS 反向代理或受控管理网之后；
 - 回环模式默认免密，本机同权限进程仍可访问控制面；需要本机认证时也可仅设置 `FUCKIPV6_WEBUI_PASSWORD`。
 
+### 公网首次所有者认领
+
+公网认领必须由受信 TLS 反向代理转发到仍只监听回环的 WebUI。启用时同时设置：
+
+```bash
+export FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://relay.xlei.cc
+export FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+```
+
+- 不要设置 `FUCKIPV6_WEBUI_BIND=0.0.0.0` 或 `::`；反向代理应连接 `127.0.0.1:8080`，由代理终止 TLS；
+- `FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS` 只能填写实际代理地址，不能使用 `0.0.0.0/0` 或 `::/0`；
+- 代理必须覆盖而不是追加转发头：`Host` 与 `X-Forwarded-Host` 必须等于配置 origin 的主机，`X-Forwarded-Proto` 必须为 `https`，`X-Forwarded-For` 必须只含一个真实客户端 IP；POST 还必须带完全匹配的 `Origin`；
+- 只要出现 `Forwarded` 或 `X-Real-IP`，公网认领即拒绝，避免不同代理层对来源产生歧义；
+- 不接受 HTTP 降级，也不允许 WebUI 直接以明文 HTTP 监听公网；
+- 一次性初始化码只能放在 JSON 请求体中，禁止放入 URL、query、Referer 或日志；成功后公网认领入口永久返回 `410 Gone`；
+- 所有者初始化请求的最终 HTTP 状态写入配置目录下的 `owner-security-audit.jsonl`。文件权限为 `0600`，仅记录通道、来源 IP、方法、路径、状态和固定 outcome，不记录请求体、请求头、初始化码、恢复码或 Passkey；审计写入失败时控制面失败关闭。
+
 本地 IPC 默认监听 `127.0.0.1:6668`，可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。由于 IPC 尚无认证握手，`FUCKIPV6_IPC_ALLOW_REMOTE=1` 只表示显式确认危险意图，非回环地址仍会拒绝启动；远程操作请使用 SSH 隧道。
 
 当前 WebUI 是功能较完整的无头界面。GPUI 已实现真实原生外壳、11 页真实快照投影和 manifest 动作接线，并消费同一命令和状态契约；完整交互、IME/无障碍、跨平台实机与自动对等测试仍未完成。

@@ -122,7 +122,7 @@ impl PublicClaimConfig {
         peer: IpAddr,
         method: &Method,
         headers: &HeaderMap,
-    ) -> Result<(), PublicClaimRejection> {
+    ) -> Result<IpAddr, PublicClaimRejection> {
         if !self
             .trusted_proxies
             .iter()
@@ -161,14 +161,17 @@ impl PublicClaimConfig {
         }
 
         let forwarded_for = single_header(headers, "x-forwarded-for")?;
-        if forwarded_for.contains(',') || IpAddr::from_str(forwarded_for).is_err() {
+        if forwarded_for.contains(',') {
             return Err(PublicClaimRejection::BadRequest(
                 "X-Forwarded-For 必须是受信代理覆盖后的单个客户端 IP",
             ));
         }
+        let client_ip = IpAddr::from_str(forwarded_for).map_err(|_| {
+            PublicClaimRejection::BadRequest("X-Forwarded-For 必须是受信代理覆盖后的单个客户端 IP")
+        })?;
 
         if matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS) {
-            return Ok(());
+            return Ok(client_ip);
         }
 
         let request_origin = single_header(headers, header::ORIGIN.as_str())?;
@@ -186,7 +189,7 @@ impl PublicClaimConfig {
         {
             return Err(PublicClaimRejection::Forbidden("公网认领拒绝跨站请求"));
         }
-        Ok(())
+        Ok(client_ip)
     }
 }
 
@@ -256,9 +259,12 @@ mod tests {
         let config = config();
         assert_eq!(config.origin_string(), "https://relay.xlei.cc");
         assert_eq!(config.authority, "relay.xlei.cc");
-        assert!(config
-            .authorize("127.0.0.1".parse().unwrap(), &Method::POST, &headers())
-            .is_ok());
+        assert_eq!(
+            config
+                .authorize("127.0.0.1".parse().unwrap(), &Method::POST, &headers())
+                .expect("authorized public claim"),
+            "203.0.113.9".parse::<IpAddr>().unwrap()
+        );
     }
 
     #[test]

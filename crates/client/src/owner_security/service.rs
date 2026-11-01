@@ -1,3 +1,4 @@
+use super::audit::OwnerSecurityAudit;
 use super::store::{CommitOutcome, OwnerLoad, OwnerPersistence, OwnerStore};
 use super::webauthn::OwnerWebauthn;
 use crate::config_manager::ConfigManager;
@@ -7,6 +8,7 @@ use base64::Engine;
 use fuckipv6_common::domain::NodeId;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -24,6 +26,15 @@ const MAX_BOOTSTRAP_BACKOFF: Duration = Duration::from_secs(5 * 60);
 pub(crate) enum OwnerBootstrapChannel {
     Local,
     Public,
+}
+
+impl OwnerBootstrapChannel {
+    pub(crate) const fn audit_label(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Public => "public",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -93,6 +104,7 @@ enum State {
 
 pub(crate) struct OwnerSecurityService {
     persistence: OwnerPersistence,
+    audit: OwnerSecurityAudit,
     local_webauthn: OwnerWebauthn,
     public_webauthn: Option<OwnerWebauthn>,
     node_id: NodeId,
@@ -130,6 +142,7 @@ impl OwnerSecurityService {
             .node_display_name()?
             .unwrap_or_else(|| "本机所有者".to_string());
         let persistence = OwnerPersistence::new(config.config_dir().to_path_buf())?;
+        let audit = OwnerSecurityAudit::new(config.config_dir())?;
         let (state, bootstrap_code) = match persistence.load()? {
             OwnerLoad::Uninitialized => {
                 let code = generate_secret()?;
@@ -154,6 +167,7 @@ impl OwnerSecurityService {
         Ok((
             Self {
                 persistence,
+                audit,
                 local_webauthn,
                 public_webauthn,
                 node_id,
@@ -166,6 +180,31 @@ impl OwnerSecurityService {
             },
             bootstrap_code,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_bootstrap_audit(
+        &self,
+        channel: Option<OwnerBootstrapChannel>,
+        source_ip: Option<IpAddr>,
+        method: &str,
+        path: &str,
+        status: Option<u16>,
+        outcome: &str,
+    ) -> Result<()> {
+        self.audit.record(
+            channel.map_or("unknown", OwnerBootstrapChannel::audit_label),
+            source_ip,
+            method,
+            path,
+            status,
+            outcome,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit_path(&self) -> &std::path::Path {
+        self.audit.path()
     }
 
     pub(crate) fn status(&self) -> ServiceResult<BootstrapStatus> {
@@ -459,6 +498,25 @@ impl OwnerSecurityService {
     #[cfg(test)]
     pub(crate) fn finish_registration_for_test(&self, passkey: Passkey) -> ServiceResult<String> {
         let channel = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| OwnerSecurityError::CorruptState)?;
+            let State::AwaitingPasskey { channel, .. } = &*state else {
+                return Err(OwnerSecurityError::CeremonyMissing);
+            };
+            *channel
+        };
+        self.finish_registration_for_test_channel(channel, passkey)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_registration_for_test_channel(
+        &self,
+        requested_channel: OwnerBootstrapChannel,
+        passkey: Passkey,
+    ) -> ServiceResult<String> {
+        let channel = {
             let mut state = self
                 .state
                 .lock()
@@ -466,6 +524,9 @@ impl OwnerSecurityService {
             let State::AwaitingPasskey { channel, .. } = &*state else {
                 return Err(OwnerSecurityError::CeremonyMissing);
             };
+            if *channel != requested_channel {
+                return Err(OwnerSecurityError::CeremonyMissing);
+            }
             let channel = *channel;
             *state = State::NoOwner;
             channel
@@ -576,6 +637,7 @@ mod tests {
         persistence.provision_bootstrap_code(&code)?;
         let service = OwnerSecurityService {
             persistence,
+            audit: OwnerSecurityAudit::new(&dir)?,
             local_webauthn: OwnerWebauthn::new(8080)?,
             public_webauthn: None,
             node_id: NodeId::from_public_key(b"owner-service-test"),
@@ -774,6 +836,79 @@ mod tests {
             1
         );
         assert_eq!(service.status()?.phase, BootstrapPhase::Complete);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_local_and_public_claim_has_exactly_one_registration_winner() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-owner-channel-race-{}-{:x}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let config = ConfigManager::new_for_dir(dir.clone())?;
+        let public_origin = Url::parse("https://relay.xlei.cc")?;
+        let (service, code) = OwnerSecurityService::from_config_with_public_origin(
+            &config,
+            8080,
+            Some(&public_origin),
+        )?;
+        let code = Arc::new(code.expect("initial bootstrap code"));
+        let service = Arc::new(service);
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [OwnerBootstrapChannel::Local, OwnerBootstrapChannel::Public]
+            .into_iter()
+            .map(|channel| {
+                let service = service.clone();
+                let barrier = barrier.clone();
+                let code = code.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let outcome = service
+                        .start_registration_for(channel, code.as_str())
+                        .map(|_| ());
+                    (channel, outcome)
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("registration thread"))
+            .collect();
+
+        let winners: Vec<_> = outcomes
+            .iter()
+            .filter(|(_, outcome)| outcome.is_ok())
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(_, outcome)| {
+                    matches!(outcome, Err(OwnerSecurityError::CeremonyInProgress))
+                })
+                .count(),
+            1
+        );
+
+        let winner = winners[0].0;
+        let loser = match winner {
+            OwnerBootstrapChannel::Local => OwnerBootstrapChannel::Public,
+            OwnerBootstrapChannel::Public => OwnerBootstrapChannel::Local,
+        };
+        assert!(matches!(
+            service.finish_registration_for_test_channel(loser, fixture_passkey()),
+            Err(OwnerSecurityError::CeremonyMissing)
+        ));
+        let recovery_code =
+            service.finish_registration_for_test_channel(winner, fixture_passkey())?;
+        assert!(!recovery_code.is_empty());
+
+        drop(service);
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

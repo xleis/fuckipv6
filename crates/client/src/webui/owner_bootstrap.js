@@ -11,6 +11,8 @@
   const savedCheckbox = $("recovery-saved");
   const confirmButton = $("confirm-recovery");
   const statusBox = $("status");
+  const pageTitle = $("page-title");
+  const footer = $("bootstrap-footer");
 
   let currentRecoveryCode = "";
 
@@ -112,7 +114,17 @@
     return payload;
   }
 
-  async function verifyLocalSurface() {
+  function applySurfaceMode(origin) {
+    const publicClaim = window.location.protocol === "https:";
+    const title = publicClaim ? "公网所有者认领" : "本机所有者初始化";
+    document.title = `fuckipv6 · ${title}`;
+    pageTitle.textContent = title;
+    footer.textContent = publicClaim
+      ? `HTTPS 公网认领 · Origin ${origin} · 来源校验、限流与审计已启用`
+      : `本机回环初始化 · WebAuthn origin ${origin}`;
+  }
+
+  async function verifyBootstrapSurface() {
     try {
       const status = await requestJson("/api/v1/auth/bootstrap", { method: "GET" });
       if (status.initialized) {
@@ -124,9 +136,10 @@
         startButton.disabled = true;
         return false;
       }
+      applySurfaceMode(status.origin || window.origin);
       return true;
     } catch (error) {
-      showStatus(error && error.message ? error.message : "无法读取本机初始化状态", "error");
+      showStatus(error && error.message ? error.message : "无法读取所有者初始化状态", "error");
       startButton.disabled = true;
       return false;
     }
@@ -140,7 +153,7 @@
       return;
     }
     if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials) {
-      showStatus("当前浏览器不支持安全 WebAuthn。请使用 http://localhost 打开本页，并使用现代浏览器。", "error");
+      showStatus("当前浏览器不支持安全 WebAuthn。请使用 HTTPS 公网地址或 http://localhost 打开本页，并使用现代浏览器。", "error");
       return;
     }
 
@@ -209,17 +222,17 @@
       });
       currentRecoveryCode = "";
       recoveryCode.textContent = "";
-      showStatus("本机所有者初始化完成，正在进入控制台...", "ok");
+      showStatus("所有者初始化完成，正在进入控制台...", "ok");
       window.setTimeout(() => window.location.replace("/"), 400);
     } catch (error) {
       showStatus(error && error.message ? error.message : "初始化提交失败", "error");
       confirmButton.disabled = false;
-      confirmButton.textContent = "完成本机初始化";
+      confirmButton.textContent = "完成所有者初始化";
     }
   }
 
   startButton.addEventListener("click", beginRegistration);
-  verifyLocalSurface();
+  verifyBootstrapSurface();
   copyButton.addEventListener("click", copyRecoveryCode);
   savedCheckbox.addEventListener("change", () => {
     confirmButton.disabled = !savedCheckbox.checked;

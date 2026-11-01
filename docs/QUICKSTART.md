@@ -111,6 +111,8 @@ ssh -L 8080:127.0.0.1:8080 user@node
 
 随后在操作机打开 `http://127.0.0.1:8080`。如确需让 WebUI/API 监听非回环地址，必须同时设置 `FUCKIPV6_WEBUI_BIND`、`FUCKIPV6_WEBUI_ALLOW_REMOTE=1` 和非空 `FUCKIPV6_WEBUI_PASSWORD`，否则节点拒绝启动；远程部署还应通过 TLS 反向代理或受控管理网提供传输保护。完整变量见[部署指南](DEPLOYMENT.md#运行-webui)。
 
+公网首次认领走受信 HTTPS 反向代理到回环 WebUI，而不是直接暴露 WebUI。设置 `FUCKIPV6_WEBUI_PUBLIC_ORIGIN=https://你的域名` 和 `FUCKIPV6_WEBUI_TRUSTED_PROXY_CIDRS=代理CIDR`；代理必须覆盖 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto: https`、单个 `X-Forwarded-For`，并对 POST 保留匹配的 `Origin`。`Forwarded`、`X-Real-IP`、HTTP 降级都会被拒绝。初始化码只提交到 JSON 请求体，成功后入口永久关闭；详细限制见[公网首次所有者认领](DEPLOYMENT.md#公网首次所有者认领)。
+
 IPC 默认监听 `127.0.0.1:6668`，也可用 `FUCKIPV6_IPC_ADDR=[::1]:6668` 选择 IPv6 回环。IPC 当前没有认证协议，因此即使设置 `FUCKIPV6_IPC_ALLOW_REMOTE=1` 也不会允许非回环监听。
 
 有桌面显示时可运行 `fuckipv6 --gpui` 启动真实 GPUI 原生外壳；无显示环境使用 headless WebUI。当前 GPUI 已接通共享 manifest、状态和命令总线，11 个页面会展示真实快照并映射 manifest 动作；但完整交互、正式 IME/无障碍和 GPUI/WebUI 自动对等仍未完成，不能宣称功能对等。

@@ -776,23 +776,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_waits_until_fixed_listener_ports_are_released() {
-        let signaling_port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
-            listener.local_addr().expect("TCP address").port()
-        };
-        let relay_port = {
-            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UDP port");
-            socket.local_addr().expect("UDP address").port()
-        };
+    async fn stop_waits_until_listener_ports_are_released() {
         let manager = test_manager(2);
-        manager
+        let started = manager
             .start(
-                EmbeddedServiceStartRequest::new("port-release", signaling_port, relay_port)
+                EmbeddedServiceStartRequest::new("port-release", 0, 0)
                     .with_external_host("127.0.0.1"),
             )
             .await
-            .expect("start service on fixed ports");
+            .expect("start service on OS-assigned ports");
+        let signaling_port = started.signaling_addr.port();
+        let relay_port = started.relay_addr.port();
 
         manager.stop("port-release").await.expect("stop service");
 

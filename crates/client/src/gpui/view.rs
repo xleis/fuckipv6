@@ -5,9 +5,10 @@ use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
 use fuckipv6_common::ui_components::{Capability, SemanticState};
+use fuckipv6_common::ui_layout::{DetailPresentation, LayoutClass, PageSection};
 use gpui::{
-    div, prelude::*, px, rgba, size, App, Application, Bounds, Context, FocusHandle, KeyDownEvent,
-    Render, SharedString, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, rgba, size, App, Application, Bounds, Context, Div, FocusHandle,
+    KeyDownEvent, Render, SharedString, Window, WindowBounds, WindowOptions,
 };
 
 use super::components::{
@@ -44,6 +45,7 @@ struct GpuiShell {
     snapshot: NodeSnapshot,
     manifest: Option<NodeUiManifest>,
     selected_page: String,
+    selected_section: PageSection,
     selected_network: Option<String>,
     focused_field: Option<String>,
     pending_confirmation: Option<String>,
@@ -68,6 +70,7 @@ impl GpuiShell {
             snapshot,
             manifest: None,
             selected_page: "overview".into(),
+            selected_section: PageSection::DEFAULT,
             selected_network,
             focused_field: None,
             pending_confirmation: None,
@@ -237,6 +240,7 @@ impl GpuiShell {
                 {
                     if let Some(page) = manifest.pages.first() {
                         self.selected_page = page.id.clone();
+                        self.selected_section = PageSection::DEFAULT;
                     }
                 }
                 self.manifest = Some(manifest);
@@ -519,6 +523,7 @@ impl GpuiShell {
                 )
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.selected_page = page_id.clone();
+                    shell.selected_section = PageSection::DEFAULT;
                     shell.focused_field = None;
                     shell.pending_confirmation = None;
                     shell.error = None;
@@ -666,13 +671,40 @@ impl GpuiShell {
         )
     }
 
+    fn local_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let action_count = self
+            .page()
+            .map(|page| page.actions.len())
+            .unwrap_or_default();
+        let tab = |section: PageSection, label: String| {
+            let selected = self.selected_section == section;
+            choice_control(
+                SharedString::from(format!("page-section-{}", section.name())),
+                label,
+                selected,
+            )
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                shell.selected_section = section;
+                shell.focused_field = None;
+                shell.pending_confirmation = None;
+                cx.notify();
+            }))
+            .into_any_element()
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_6()
+            .pt_4()
+            .child(tab(PageSection::Data, "数据".into()))
+            .child(tab(PageSection::Actions, format!("动作 · {action_count}")))
+    }
+
     fn page_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
-            return component_empty_state(
-                "等待共享 manifest",
-                "GPUI 只渲染 manifest 声明的页面；在 manifest 校验完成前不会构造页面或动作。",
-            )
-            .into_any_element();
+            return loading_skeleton().into_any_element();
         };
         let model = match build_page_model(manifest, &self.snapshot, &self.selected_page) {
             Ok(model) => model,
@@ -680,63 +712,70 @@ impl GpuiShell {
                 return component_error_state("页面映射失败", error.to_string()).into_any_element();
             }
         };
-        let page = self.page().cloned();
-        let actions = page
-            .map(|page| page.actions)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|action| self.action_card(action, cx))
-            .collect::<Vec<_>>();
+        let actions = if self.selected_section == PageSection::Actions {
+            self.page()
+                .cloned()
+                .map(|page| page.actions)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|action| self.action_card(action, cx))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let mut content = div()
             .id("page-scroll")
             .flex()
             .flex_col()
             .gap_4()
-            .p_6()
+            .px_6()
+            .pb_6()
+            .pt_3()
             .overflow_y_scroll()
             .flex_1();
 
-        if !model.metrics.is_empty() {
-            content = content.child(
-                div().flex().flex_wrap().gap_3().children(
-                    model
-                        .metrics
-                        .iter()
-                        .map(|metric| metric_card(&metric.label, &metric.value, &metric.source)),
-                ),
-            );
-        }
-
-        content = content.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .children(model.sections.iter().map(section_card)),
-        );
-
-        content = content.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
+        match self.selected_section {
+            PageSection::Data => {
+                if !model.metrics.is_empty() {
+                    content = content.child(div().flex().flex_wrap().gap_3().children(
+                        model.metrics.iter().map(|metric| {
+                            metric_card(&metric.label, &metric.value, &metric.source)
+                        }),
+                    ));
+                }
+                content = content.child(
                     div()
-                        .text_lg()
-                        .text_color(rgba(COLOR_TEXT))
-                        .child("共享动作"),
-                )
-                .children(if actions.is_empty() {
-                    vec![component_empty_state(
-                        "没有共享动作",
-                        "此页面在 manifest 中没有声明动作；当前仅展示真实快照字段。",
-                    )
-                    .into_any_element()]
-                } else {
-                    actions
-                }),
-        );
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .children(model.sections.iter().map(section_card)),
+                );
+            }
+            PageSection::Actions => {
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_lg()
+                                .text_color(rgba(COLOR_TEXT))
+                                .child("共享动作"),
+                        )
+                        .children(if actions.is_empty() {
+                            vec![component_empty_state(
+                                "没有共享动作",
+                                "此页面在 manifest 中没有声明动作；当前仅展示真实快照字段。",
+                            )
+                            .into_any_element()]
+                        } else {
+                            actions
+                        }),
+                );
+            }
+        }
 
         content.into_any_element()
     }
@@ -968,10 +1007,69 @@ impl GpuiShell {
             }))
             .into_any_element()
     }
+
+    fn detail_panel(&self) -> impl IntoElement {
+        let status = self.snapshot.primary_status();
+        let selected_network = self.selected_network.as_deref().unwrap_or("未选择网络");
+
+        div()
+            .id("wide-detail")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .w(px(DIMENSIONS.detail_default_px as f32))
+            .h_full()
+            .p_5()
+            .bg(rgba(COLOR_SIDEBAR))
+            .border_l_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(rgba(COLOR_TEXT))
+                            .child("当前上下文"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child("基于实际快照，详情变化不会改变主内容宽度"),
+                    ),
+            )
+            .child(detail_row("页面", page_title(&self.selected_page)))
+            .child(detail_row("当前网络", selected_network.to_string()))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child("首要状态"),
+                    )
+                    .child(status_badge(
+                        status.label_zh(),
+                        primary_status_semantic(status),
+                    )),
+            )
+            .child(detail_row(
+                "快照 revision",
+                self.snapshot.revision.to_string(),
+            ))
+    }
 }
 
 impl Render for GpuiShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout = layout_for_window_width(f32::from(window.viewport_size().width));
+        let show_detail = DetailPresentation::for_layout(layout) == DetailPresentation::Persistent;
         let content = self.page_content(cx);
         let mut main = div()
             .flex()
@@ -987,7 +1085,7 @@ impl Render for GpuiShell {
             main = main.child(self.notice_banner());
         }
 
-        main = main.child(content).child(
+        main = main.child(self.local_tabs(cx)).child(content).child(
             div()
                 .px_6()
                 .py_3()
@@ -1000,7 +1098,7 @@ impl Render for GpuiShell {
                 ),
         );
 
-        div()
+        let mut root = div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
@@ -1008,8 +1106,74 @@ impl Render for GpuiShell {
             .h_full()
             .bg(rgba(COLOR_BG))
             .child(self.sidebar(cx))
-            .child(main)
+            .child(main);
+
+        if show_detail {
+            root = root.child(self.detail_panel());
+        }
+
+        root
     }
+}
+
+fn layout_for_window_width(width_px: f32) -> LayoutClass {
+    LayoutClass::for_width(width_px.clamp(0.0, u16::MAX as f32) as u16)
+}
+
+fn window_min_size() -> gpui::Size<gpui::Pixels> {
+    size(
+        px(DIMENSIONS.window_min_width_px as f32),
+        px(DIMENSIONS.window_min_height_px as f32),
+    )
+}
+
+fn loading_skeleton() -> Div {
+    let block = |height: f32| {
+        div()
+            .w_full()
+            .h(px(height))
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .px_6()
+        .pb_6()
+        .pt_3()
+        .flex_1()
+        .child(
+            div()
+                .flex()
+                .gap_3()
+                .child(div().flex_1().child(block(92.0)))
+                .child(div().flex_1().child(block(92.0))),
+        )
+        .child(block(180.0))
+        .child(block(140.0))
+}
+
+fn detail_row(label: &str, value: String) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded_md()
+        .bg(rgba(COLOR_PANEL))
+        .border_1()
+        .border_color(rgba(COLOR_BORDER))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgba(COLOR_MUTED))
+                .child(label.to_string()),
+        )
+        .child(div().text_sm().text_color(rgba(COLOR_TEXT)).child(value))
 }
 
 fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
@@ -1261,6 +1425,7 @@ pub fn run_window(state: NodeStateStore, commands: NodeCommandBus) -> Result<()>
         let result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(window_min_size()),
                 titlebar: Some(gpui::TitlebarOptions {
                     title: Some(SharedString::from("fuckipv6")),
                     ..Default::default()
@@ -1315,6 +1480,40 @@ mod tests {
     #[test]
     fn page_titles_keep_the_stable_manifest_id() {
         assert_eq!(page_title("exit_node"), "Exit Node · exit_node");
+    }
+
+    #[test]
+    fn data_is_the_default_local_page_section() {
+        assert_eq!(PageSection::DEFAULT, PageSection::Data);
+    }
+
+    #[test]
+    fn wide_layout_persists_detail_at_the_shared_breakpoint() {
+        assert_eq!(
+            DetailPresentation::for_layout(layout_for_window_width(1279.0)),
+            DetailPresentation::Hidden
+        );
+        assert_eq!(
+            DetailPresentation::for_layout(layout_for_window_width(1280.0)),
+            DetailPresentation::Persistent
+        );
+    }
+
+    #[test]
+    fn minimum_native_window_matches_the_shared_contract() {
+        let minimum = window_min_size();
+        assert_eq!(
+            f32::from(minimum.width),
+            DIMENSIONS.window_min_width_px as f32
+        );
+        assert_eq!(
+            f32::from(minimum.height),
+            DIMENSIONS.window_min_height_px as f32
+        );
+        assert_eq!(
+            layout_for_window_width(f32::from(minimum.width)),
+            LayoutClass::Desktop
+        );
     }
 
     #[test]

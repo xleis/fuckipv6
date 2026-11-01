@@ -52,6 +52,7 @@ type PageContentProps = {
   snapshot: NodeSnapshot;
   locale: Locale;
   selectedNetwork: string;
+  footer?: ReactNode;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
   onRequestAction(actionId: string): void;
@@ -1343,6 +1344,7 @@ export function PageContent(props: PageContentProps) {
         </div>
       </header>
       {content}
+      {props.footer}
     </section>
   );
 }

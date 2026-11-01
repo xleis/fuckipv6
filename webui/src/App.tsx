@@ -27,6 +27,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type {
   NodeCommandOutcome,
+  NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiAction,
   NodeUiManifest,
@@ -39,6 +40,7 @@ import {
   newIdempotencyKey,
   nextRequestId,
   sendCommand,
+  waitForOperation,
 } from "./api/client";
 import {
   loadLanguagePreference,
@@ -56,11 +58,16 @@ import {
   type NavigationModuleContract,
 } from "./navigation";
 import { ActionPanel } from "./components/action-panel";
+import {
+  CONFIGURATION_ACTION_IDS,
+  ConfigurationWorkflow,
+} from "./components/configuration-workflow";
 import { PageContent } from "./components/page-content";
 import {
   commandEnvelope,
   defaultNetworkName,
   label,
+  operationStateIsTerminal,
   primaryStatus,
   validateSnapshot,
   type ActionValues,
@@ -442,6 +449,24 @@ function AppShell({
     }
   }
 
+  async function resolveOperationOutcome(
+    submitted: NodeOperationSnapshot,
+  ): Promise<NodeCommandOutcome> {
+    const operation = operationStateIsTerminal(submitted.state)
+      ? submitted
+      : await waitForOperation(submitted.operation_id);
+    if (operation.result) return operation.result.outcome;
+    if (operation.state !== "succeeded") {
+      const error = operation.error;
+      throw new Error(
+        error
+          ? tr(locale, error.message_key, error.params ?? {})
+          : label(locale, "common.operation_failed"),
+      );
+    }
+    throw new Error(label(locale, "common.operation_failed"));
+  }
+
   async function submitAction(
     action: NodeUiAction,
     values: ActionValues,
@@ -457,9 +482,13 @@ function AppShell({
           newIdempotencyKey(),
         ),
       );
-      if (!response.result)
-        throw new Error(label(locale, "common.operation_failed"));
-      const outcome = response.result.outcome;
+      const outcome = response.result
+        ? response.result.outcome
+        : response.operation
+          ? await resolveOperationOutcome(response.operation)
+          : (() => {
+              throw new Error(label(locale, "common.operation_failed"));
+            })();
       if (outcome.status === "snapshot") {
         queryClient.setQueryData(SNAPSHOT_QUERY_KEY, outcome.data);
       } else {
@@ -733,12 +762,30 @@ function AppShell({
                 snapshot={snapshot}
                 locale={locale}
                 selectedNetwork={selectedNetwork}
+                footer={
+                  activePage.actions.some((action) =>
+                    CONFIGURATION_ACTION_IDS.has(action.id),
+                  ) ? (
+                    <ConfigurationWorkflow
+                      actions={activePage.actions.filter((action) =>
+                        CONFIGURATION_ACTION_IDS.has(action.id),
+                      )}
+                      snapshot={snapshot}
+                      selectedNetwork={selectedNetwork}
+                      locale={locale}
+                      pendingAction={pendingAction}
+                      onSubmit={submitAction}
+                    />
+                  ) : null
+                }
                 onSelectNetwork={setSelectedNetworkState}
                 onNavigate={navigate}
                 onRequestAction={requestAction}
               />
               <ActionPanel
-                actions={activePage.actions}
+                actions={activePage.actions.filter(
+                  (action) => !CONFIGURATION_ACTION_IDS.has(action.id),
+                )}
                 snapshot={snapshot}
                 selectedNetwork={selectedNetwork}
                 locale={locale}

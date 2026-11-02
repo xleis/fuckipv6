@@ -169,7 +169,7 @@ const OVERVIEW_ACTIVITY_ACTIONS = new Set([
   "node.shutdown",
 ]);
 
-function overviewPrimaryAction(
+function runtimePrimaryAction(
   statusId: string,
 ): { id: string; labelKey: string } | null {
   if (statusId === "uninitialized" || statusId === "stopped") {
@@ -285,33 +285,22 @@ function recentOverviewActivity(
 }
 
 function Overview({
-  page,
   snapshot,
   locale,
-  selectedNetwork,
   onSelectNetwork,
   onNavigate,
   onRequestAction,
-}: PageContentProps) {
+}: Pick<
+  PageContentProps,
+  "snapshot" | "locale" | "onSelectNetwork" | "onNavigate" | "onRequestAction"
+>) {
   const status = primaryStatus(snapshot, locale);
-  const primaryAction = overviewPrimaryAction(status.id);
   const issues = overviewIssues(snapshot, locale);
   const activity = recentOverviewActivity(snapshot, locale);
   const nodeName =
     snapshot.identity?.display_name ||
     snapshot.identity?.node_id ||
     label(locale, "overview.node_name_fallback");
-  const availableActions = new Map(
-    page.actions.map((action) => [action.id, action]),
-  );
-  const requestedPrimaryAction = primaryAction
-    ? availableActions.get(primaryAction.id)
-    : undefined;
-  const executablePrimaryAction =
-    requestedPrimaryAction &&
-    !executionBlockReason(requestedPrimaryAction, snapshot, selectedNetwork)
-      ? requestedPrimaryAction
-      : undefined;
   const shortcut = (actionId: string) => {
     onNavigate("networks");
     onRequestAction(actionId);
@@ -336,15 +325,13 @@ function Overview({
             <strong>{status.label}</strong> · {status.detail}
           </p>
         </div>
-        {executablePrimaryAction ? (
-          <button
-            className="primary-button overview-primary-action"
-            type="button"
-            onClick={() => onRequestAction(executablePrimaryAction.id)}
-          >
-            {label(locale, executablePrimaryAction.label_key)}
-          </button>
-        ) : null}
+        <button
+          className="primary-button overview-primary-action"
+          type="button"
+          onClick={() => onNavigate("node_runtime")}
+        >
+          {label(locale, "overview.manage_runtime")}
+        </button>
       </section>
 
       {issues.length > 0 ? (
@@ -468,6 +455,183 @@ function Overview({
             {label(locale, "action.join_network")}
           </button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function NodeRuntime({
+  page,
+  snapshot,
+  locale,
+  selectedNetwork,
+  onRequestAction,
+}: PageContentProps) {
+  const status = primaryStatus(snapshot, locale);
+  const requestedAction = runtimePrimaryAction(status.id);
+  const action = requestedAction
+    ? page.actions.find((candidate) => candidate.id === requestedAction.id)
+    : undefined;
+  const executableAction =
+    action && !executionBlockReason(action, snapshot, selectedNetwork)
+      ? action
+      : undefined;
+  const phase = label(locale, `status.phase.${snapshot.lifecycle.phase}`);
+  const controlHealth = label(
+    locale,
+    `status.control.${snapshot.control_health ?? "unknown"}`,
+  );
+  const failedNetworks = snapshot.lifecycle.failed_networks.length
+    ? snapshot.lifecycle.failed_networks.join(", ")
+    : label(locale, "common.none");
+  const lastError = snapshot.last_error
+    ? tr(
+        locale,
+        snapshot.last_error.message_key,
+        snapshot.last_error.params ?? {},
+      )
+    : label(locale, "common.none");
+
+  return (
+    <div className="page-stack runtime-stack">
+      <section className={`hero-status ${statusTone(status.id)}`}>
+        <div className="hero-status-icon">
+          {status.id === "running" ? (
+            <CheckCircle2 size={30} />
+          ) : status.id === "failed" ? (
+            <AlertTriangle size={30} />
+          ) : (
+            <Server size={30} />
+          )}
+        </div>
+        <div className="hero-status-copy">
+          <span>{label(locale, "runtime.metric.status")}</span>
+          <h2>{status.label}</h2>
+          <p>{status.detail}</p>
+        </div>
+        {executableAction ? (
+          <button
+            className="primary-button runtime-primary-action"
+            type="button"
+            onClick={() => onRequestAction(executableAction.id)}
+          >
+            {label(locale, executableAction.label_key)}
+          </button>
+        ) : null}
+      </section>
+
+      <div className="metric-grid">
+        <div className="metric-card">
+          <Activity size={20} />
+          <span>{label(locale, "runtime.metric.phase")}</span>
+          <strong>{phase}</strong>
+        </div>
+        <div className="metric-card">
+          <Cpu size={20} />
+          <span>{label(locale, "runtime.metric.revision")}</span>
+          <strong>{snapshot.revision}</strong>
+        </div>
+        <div className="metric-card">
+          <Network size={20} />
+          <span>{label(locale, "runtime.metric.active_networks")}</span>
+          <strong>{snapshot.lifecycle.active_networks}</strong>
+        </div>
+        <div className="metric-card">
+          <Database size={20} />
+          <span>{label(locale, "runtime.metric.configured_networks")}</span>
+          <strong>{snapshot.lifecycle.configured_networks}</strong>
+        </div>
+      </div>
+
+      <section className="surface-card" data-testid="runtime-state">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.state")}</h3>
+          <Server size={17} />
+        </div>
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "runtime.row.primary_status")}</dt>
+            <dd>{status.label}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.phase")}</dt>
+            <dd>{phase}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.control_health")}</dt>
+            <dd>{controlHealth}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.revision")}</dt>
+            <dd>{snapshot.revision}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.failed_networks")}</dt>
+            <dd>{failedNetworks}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.last_error")}</dt>
+            <dd>{lastError}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="surface-card" data-testid="runtime-networks">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.networks")}</h3>
+          <span>{snapshot.networks.length}</span>
+        </div>
+        {snapshot.networks.length === 0
+          ? empty(label(locale, "runtime.empty.networks"))
+          : snapshot.networks.map((network) => (
+              <div className="compact-row" key={network.name}>
+                <CircleDot
+                  size={15}
+                  className={statusTone(network.status)}
+                />
+                <span>
+                  <strong>{network.name}</strong>
+                  <small>
+                    {tr(locale, "runtime.row.network_detail", {
+                      status: label(locale, `status.network.${network.status}`),
+                      peers: network.peer_count,
+                      roles: network.roles.join(" · ") || label(locale, "common.none"),
+                    })}
+                  </small>
+                </span>
+              </div>
+            ))}
+      </section>
+
+      <section className="surface-card" data-testid="runtime-services">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.services")}</h3>
+          <span>{snapshot.embedded_services?.length ?? 0}</span>
+        </div>
+        {(snapshot.embedded_services?.length ?? 0) === 0
+          ? empty(label(locale, "runtime.empty.services"))
+          : (snapshot.embedded_services ?? []).map((service) => (
+              <div className="compact-row" key={service.network_name}>
+                <RadioTower
+                  size={15}
+                  className={statusTone(service.status)}
+                />
+                <span>
+                  <strong>{service.network_name}</strong>
+                  <small>
+                    {tr(locale, "runtime.row.service_detail", {
+                      status: label(locale, `status.service.${service.status}`),
+                      signaling:
+                        service.signaling_addr ??
+                        label(locale, "common.not_available"),
+                      relay:
+                        service.relay_addr ??
+                        label(locale, "common.not_available"),
+                    })}
+                  </small>
+                </span>
+              </div>
+            ))}
       </section>
     </div>
   );
@@ -1277,6 +1441,7 @@ const PAGE_ICONS: Record<string, LucideIcon> = {
   overview: Gauge,
   networks: Network,
   peers: Waypoints,
+  node_runtime: Server,
   topology: Globe2,
   traffic: Activity,
   routing: Database,
@@ -1299,6 +1464,9 @@ export function PageContent(props: PageContentProps) {
       break;
     case "peers":
       content = <Peers {...props} />;
+      break;
+    case "node_runtime":
+      content = <NodeRuntime {...props} />;
       break;
     case "topology":
       content = <Topology {...props} />;

@@ -229,7 +229,7 @@ describe("React WebUI shell", () => {
     expect(loadSnapshot).not.toHaveBeenCalled();
   });
 
-  it("renders five modules and all eleven manifest-backed secondary pages", async () => {
+  it("renders five modules and all twelve manifest-backed secondary pages", async () => {
     authenticate();
     renderApp();
 
@@ -237,7 +237,12 @@ describe("React WebUI shell", () => {
     expect(screen.getAllByRole("button", { name: /^translated:nav\.(overview|nodes|networks|activity|settings)$/ })).toHaveLength(5);
 
     await expectModuleTabs("overview", ["overview"]);
-    await expectModuleTabs("nodes", ["peers", "routing", "identity"]);
+    await expectModuleTabs("nodes", [
+      "peers",
+      "node_runtime",
+      "routing",
+      "identity",
+    ]);
     await expectModuleTabs("networks", ["networks", "topology", "exit_node", "relay"]);
     await expectModuleTabs("activity", ["traffic", "logs"]);
     await expectModuleTabs("settings", ["settings"]);
@@ -661,20 +666,35 @@ describe("React WebUI shell", () => {
       action: "get_node_diagnostics",
     },
   ])(
-    "opens the real primary action for $status",
+    "navigates from overview to the executable runtime action for $status",
     async ({ value, action }) => {
       authenticate(value as NodeSnapshot);
       const user = userEvent.setup();
       renderApp();
 
       await screen.findByRole("heading", { name: "translated:page.overview" });
+      await user.click(
+        screen.getByRole("button", { name: "translated:overview.manage_runtime" }),
+      );
+
+      expect(
+        await screen.findByRole("heading", { name: "translated:page.node_runtime" }),
+      ).toBeInTheDocument();
       const panel = await screen.findByRole("complementary", {
         name: "translated:common.shared_actions",
       });
+      await waitFor(() => {
+        expect(
+          screen
+            .getAllByRole("button", { name: `translated:action.${action}` })
+            .some((button) => button.classList.contains("runtime-primary-action")),
+        ).toBe(true);
+      });
       const primaryAction = screen
         .getAllByRole("button", { name: `translated:action.${action}` })
-        .find((button) => button.classList.contains("overview-primary-action"));
-      if (!primaryAction) throw new Error("overview primary action is missing");
+        .find((button) => button.classList.contains("runtime-primary-action"));
+      if (!primaryAction) throw new Error("runtime primary action is missing");
+      expect(primaryAction).toHaveClass("runtime-primary-action");
       await user.click(primaryAction);
 
       expect(
@@ -686,7 +706,7 @@ describe("React WebUI shell", () => {
     },
   );
 
-  it("hides a primary action that the owner cannot execute", async () => {
+  it("keeps runtime navigation visible but hides an unauthorized primary action", async () => {
     authenticate({
       ...snapshot,
       permissions: {
@@ -694,11 +714,38 @@ describe("React WebUI shell", () => {
         permissions: ["view_state"],
       },
     });
+    const user = userEvent.setup();
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
+    const navigation = screen.getByRole("button", {
+      name: "translated:overview.manage_runtime",
+    });
+    expect(navigation).toHaveClass("overview-primary-action");
+    await user.click(navigation);
+
+    await screen.findByRole("heading", { name: "translated:page.node_runtime" });
     expect(
-      document.querySelector(".overview-primary-action"),
+      document.querySelector(".runtime-primary-action"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not offer a lifecycle action while the node is transitioning", async () => {
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "starting" },
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:overview.manage_runtime" }),
+    );
+
+    await screen.findByRole("heading", { name: "translated:page.node_runtime" });
+    expect(
+      document.querySelector(".runtime-primary-action"),
     ).not.toBeInTheDocument();
   });
 

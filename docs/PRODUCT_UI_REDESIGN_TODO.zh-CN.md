@@ -577,6 +577,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 完成证据（本轮提交）：
 
 - 所有受保护 API 的非只读请求先完成认证，再执行同源校验；浏览器所有者会话要求唯一的 `Origin` 与配置的公网 origin 或当前 local `Host` 的 scheme/host/port 完全一致，`Sec-Fetch-Site` 存在时必须为 `same-origin`，缺失或重复 `Origin` 失败关闭；
+- WebUI 认证中间件把真实所有者会话的五分钟近期认证状态传入命令上下文；命令 HTTP 适配器在登记 operation 和调用 handler 前再次预授权。关停、配置应用/回滚、节点重启、TUN 重建、节点改名和残留清理等敏感命令在会话过期时返回 `401 authentication_required`、`authorization_code=permission.recent_authentication_required`，且不创建 operation、不触达 handler；普通读取仍可继续；
 - 公网路径继续由 `PublicClaimConfig::authorize` 校验受信反向代理/直接 TLS、单一转发客户端地址、固定 `Host`/`Origin` 和跨站 Fetch Metadata 后才接受所有者 Cookie；显式 Bearer 认证按非浏览器调用处理，不依赖 Cookie 同源边界；
 - 所有者会话 Cookie 使用 `HttpOnly`、`SameSite=Strict`、`Path=/` 和 12 小时过期，公网通道额外设置 `Secure`；CSP 使用逐响应 nonce 和 `frame-ancestors 'none'`，HTTPS 响应同时设置 HSTS、`X-Frame-Options: DENY`、`nosniff`、`no-referrer`、Permissions Policy 与同源隔离头；
 - 登录失败使用独立的重试退避；已认证状态变更使用按来源 IP 的独立 token bucket，默认突发 20 次、每 200ms 恢复 1 次、条目 15 分钟过期且最多 4096 个来源。限流表满时不淘汰活跃来源，拒绝结果带 `Cache-Control: no-store` 和 `Retry-After`；
@@ -599,7 +600,8 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 完成证据（本轮提交）：
 
 - WebUI 所有者安全对话框提供会话状态、Passkey 列表、注册和撤销；最后一个可用 Passkey 的撤销由后端 `last_passkey` 稳定错误码失败关闭；
-- 最近五分钟认证过期时，前端打开重认证对话框，Passkey 验证成功后自动重试原操作；取消则明确显示操作未执行，不乐观宣告成功；
+- WebUI 写命令使用 `idem_` 加 43 位无填充 base64url 的契约幂等键；遇到上述近期认证拒绝时保留原命令 envelope 与幂等键，完成 Passkey 重认证后自动重试一次，取消则明确提示操作未执行且不登记乐观 operation；
+- Rust 测试覆盖 fresh/stale 会话分流、预授权阻断 operation 登记、普通读取兼容；WebUI 测试覆盖近期认证错误识别、合法幂等键、重认证后自动重试与取消路径；GPUI 继续直接使用桌面 OS 会话作为本地所有者信任边界，不出现 WebUI 登录、Passkey 恢复或重认证界面；
 - 初始化页、登录页、本地恢复页和安全对话框统一使用共享 `i18n.json` 目录，覆盖登录边界、恢复码单次展示、`recover-owner` 本地恢复、origin/安全上下文与证书/域名错误提示；断言页面不使用 `localStorage`、`sessionStorage`、Bearer 或 query token；
 - `/api/v1/auth/session` 返回通道对应的 `expected_origin`：local 为 `http://localhost:<port>`，public 为配置的 HTTPS 公网 origin；安全 UI 用它诊断 WebAuthn origin 不匹配，不能跳过受信任上下文或 TLS 校验；
 - owner API 错误增加稳定 `code`：`recent_authentication_required`、`last_passkey`、`invalid_session` 等，供共享前端处理且不依赖本地化错误文本；

@@ -9,6 +9,7 @@ import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeEventReplayReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
+import cc.xlei.fuckipv6.contract.NodeContractV1.NodeRoutingSummaryStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.OperationKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.OperationState;
 import cc.xlei.fuckipv6.contract.NodeContractV1.TunCapabilityReason;
@@ -43,7 +44,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 82,
+                NodeContractV1.DTO_CLASS_NAMES.length == 85,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -103,6 +104,7 @@ public final class NodeContractV1Test {
             "networks",
             "peers",
             "recent_activity",
+            "routing_summaries",
             "logs",
             "last_error"
         }) {
@@ -165,6 +167,13 @@ public final class NodeContractV1Test {
                 TunPlatform.LINUX,
                 TunPlatform.fromWireName("linux"),
                 "TUN platform");
+        assertSame(
+                NodeRoutingSummaryStatus.APPLY_FAILED,
+                NodeRoutingSummaryStatus.fromWireName("apply_failed"),
+                "routing summary apply failure");
+        expectIllegalArgument(
+                () -> NodeRoutingSummaryStatus.fromWireName("invented"),
+                "unknown routing summary status");
         assertSame(
                 TunCapabilityReason.PERMISSION_DENIED,
                 TunCapabilityReason.fromWireName("permission_denied"),
@@ -320,6 +329,21 @@ public final class NodeContractV1Test {
         assertSame(
                 "named", new NodeContractV1.NodeNetworkSelection.Named(null).kind,
                 "named network selection tag");
+
+        assertSame(
+                "direct", new NodeContractV1.NodeRoutingDefaultAction.Direct().kind,
+                "direct routing action tag");
+        assertSame(
+                "exit", new NodeContractV1.NodeRoutingDefaultAction.Exit("exit-node").kind,
+                "exit routing action tag");
+        assertSame(
+                "network",
+                new NodeContractV1.NodeRoutingTargetSnapshot.Network("home").kind,
+                "network routing target tag");
+        assertSame(
+                "exit",
+                new NodeContractV1.NodeRoutingTargetSnapshot.Exit("exit-node").kind,
+                "exit routing target tag");
 
         new NodeContractV1.NodeWsMessage.Snapshot(1, null);
         new NodeContractV1.NodeWsMessage.Event(null, 1);

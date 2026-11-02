@@ -65,7 +65,9 @@ pub use state::{
     NodeLogEntry, NodeLogLevel, NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot,
     NodeNetworkStatus, NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission,
     NodePermissionSnapshot, NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeProblemDetails,
-    NodeRoutingMode, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummarySnapshot,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSnapshot, NodeStateStore,
+    NodeTrafficSnapshot, NodeValidationIssue,
 };
 pub use ui_manifest::{
     audit_for_command, node_ui_manifest, NodeUiAction, NodeUiAudit, NodeUiAuditPolicy,

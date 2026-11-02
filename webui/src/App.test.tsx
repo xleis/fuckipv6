@@ -21,6 +21,7 @@ import type {
   NodeApiCommandResponse,
   NodeCommandOutcome,
   NodeOperationSnapshot,
+  NodeRoutingSummarySnapshot,
   NodeSnapshot,
   NodeUiManifest,
 } from "../../contracts/typescript/node-contract-v1";
@@ -163,9 +164,7 @@ function configurationDocument(revision: number): ConfigurationDocument {
   };
 }
 
-function configurationHistory(
-  revision: number,
-): ConfigurationHistoryEntry {
+function configurationHistory(revision: number): ConfigurationHistoryEntry {
   return {
     transaction_id: `tx-${revision}`,
     revision,
@@ -206,11 +205,17 @@ function mockConfigurationCommands(): void {
 
 async function expectModuleTabs(module: string, tabs: string[]): Promise<void> {
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: `translated:nav.${module}` }));
-  const tablist = screen.getByRole("tablist", { name: "translated:common.page_sections" });
-  expect(within(tablist).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(
-    tabs.map((tab) => `translated:nav.${tab}`),
+  await user.click(
+    screen.getByRole("button", { name: `translated:nav.${module}` }),
   );
+  const tablist = screen.getByRole("tablist", {
+    name: "translated:common.page_sections",
+  });
+  expect(
+    within(tablist)
+      .getAllByRole("tab")
+      .map((tab) => tab.textContent),
+  ).toEqual(tabs.map((tab) => `translated:nav.${tab}`));
 }
 
 beforeEach(() => {
@@ -231,8 +236,16 @@ describe("React WebUI shell", () => {
     vi.mocked(loadOwnerSession).mockResolvedValue({ authenticated: false });
     renderApp();
 
-    expect(await screen.findByRole("heading", { name: "translated:owner_auth.login.title" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "translated:owner_auth.passkey.login_button" })).toBeDisabled();
+    expect(
+      await screen.findByRole("heading", {
+        name: "translated:owner_auth.login.title",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "translated:owner_auth.passkey.login_button",
+      }),
+    ).toBeDisabled();
     expect(loadManifest).not.toHaveBeenCalled();
     expect(loadSnapshot).not.toHaveBeenCalled();
   });
@@ -241,8 +254,14 @@ describe("React WebUI shell", () => {
     authenticate();
     renderApp();
 
-    expect(await screen.findByRole("heading", { name: "translated:page.overview" })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /^translated:nav\.(overview|nodes|networks|activity|settings)$/ })).toHaveLength(5);
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.overview" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", {
+        name: /^translated:nav\.(overview|nodes|networks|activity|settings)$/,
+      }),
+    ).toHaveLength(5);
 
     await expectModuleTabs("overview", ["overview"]);
     await expectModuleTabs("nodes", [
@@ -251,7 +270,12 @@ describe("React WebUI shell", () => {
       "routing",
       "identity",
     ]);
-    await expectModuleTabs("networks", ["networks", "topology", "exit_node", "relay"]);
+    await expectModuleTabs("networks", [
+      "networks",
+      "topology",
+      "exit_node",
+      "relay",
+    ]);
     await expectModuleTabs("activity", ["traffic", "logs"]);
     await expectModuleTabs("settings", ["settings"]);
   });
@@ -308,12 +332,16 @@ describe("React WebUI shell", () => {
 
     const interfaces = await screen.findByTestId("runtime-interfaces");
     expect(within(interfaces).getByText("fk-home")).toBeInTheDocument();
-    expect(interfaces).toHaveTextContent('"kind":"translated:interface.kind.tun"');
+    expect(interfaces).toHaveTextContent(
+      '"kind":"translated:interface.kind.tun"',
+    );
     expect(interfaces).toHaveTextContent(
       '"ownership":"translated:interface.ownership.product"',
     );
     expect(interfaces).toHaveTextContent('"addresses":"fd00::2/64"');
-    expect(interfaces).toHaveTextContent("translated:runtime.row.interface_defaults");
+    expect(interfaces).toHaveTextContent(
+      "translated:runtime.row.interface_defaults",
+    );
 
     const problems = screen.getByTestId("runtime-interface-problems");
     expect(within(problems).getByText("home")).toBeInTheDocument();
@@ -324,9 +352,191 @@ describe("React WebUI shell", () => {
 
     const tun = screen.getByTestId("runtime-tun");
     expect(tun).toHaveTextContent("translated:runtime.row.tun_platform");
-    expect(tun).toHaveTextContent("translated:runtime.value.tun_platform.linux");
-    expect(tun).toHaveTextContent("translated:runtime.value.tun_reason.permission_denied");
-    expect(tun).toHaveTextContent("translated:runtime.value.tun_reason.device_unavailable");
+    expect(tun).toHaveTextContent(
+      "translated:runtime.value.tun_platform.linux",
+    );
+    expect(tun).toHaveTextContent(
+      "translated:runtime.value.tun_reason.permission_denied",
+    );
+    expect(tun).toHaveTextContent(
+      "translated:runtime.value.tun_reason.device_unavailable",
+    );
+  });
+
+  it("renders authoritative routing summaries and navigates with the route identity", async () => {
+    if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
+    window.FuckIPV6I18n.tr = (_locale, key, params) =>
+      `translated:${key}:${JSON.stringify(params ?? {})}`;
+
+    const sourceNetwork = populatedSnapshot.networks[1];
+    const sourceConfig = populatedSnapshot.configuration?.networks[1];
+    if (!sourceNetwork || !sourceConfig)
+      throw new Error("network fixture is missing");
+    const officeNetwork = {
+      ...sourceNetwork,
+      name: "office",
+      tun_name: "fk-office",
+    };
+    const rejectNetwork = {
+      ...sourceNetwork,
+      name: "reject",
+      tun_name: "fk-reject",
+    };
+    const officeConfig = {
+      ...sourceConfig,
+      network_name: "office",
+      tun_name: "fk-office",
+    };
+    const rejectConfig = {
+      ...sourceConfig,
+      network_name: "reject",
+      tun_name: "fk-reject",
+    };
+    const routingSummaries: NodeRoutingSummarySnapshot[] = [
+      {
+        network_name: "home",
+        default_action: { kind: "direct" },
+        effective_target: null,
+        enabled_rule_count: 2,
+        last_applied_revision: 7,
+        last_applied_at_unix_ms: 1_700_000_000_000,
+        status: "current",
+        problem: null,
+      },
+      {
+        network_name: "studio",
+        default_action: { kind: "network" },
+        effective_target: { kind: "network", network_name: "studio" },
+        enabled_rule_count: 3,
+        last_applied_revision: 8,
+        last_applied_at_unix_ms: 1_700_000_001_000,
+        status: "stale",
+        problem: {
+          code: "unavailable",
+          category: "dependency",
+          message: "raw stopped",
+          message_key: "runtime.routing.problem.stopped",
+          params: {},
+          network_name: "studio",
+          retryable: true,
+        },
+      },
+      {
+        network_name: "office",
+        default_action: { kind: "exit", value: "peer-1" },
+        effective_target: { kind: "exit", node_id: "peer-1" },
+        enabled_rule_count: 4,
+        last_applied_revision: 9,
+        last_applied_at_unix_ms: 1_700_000_002_000,
+        status: "invalid",
+        problem: {
+          code: "invalid_request",
+          category: "validation",
+          message: "raw invalid",
+          message_key: "runtime.routing.problem.invalid",
+          params: {},
+          network_name: "office",
+          retryable: false,
+        },
+      },
+      {
+        network_name: "reject",
+        default_action: { kind: "reject" },
+        effective_target: null,
+        enabled_rule_count: 5,
+        last_applied_revision: 10,
+        last_applied_at_unix_ms: 1_700_000_003_000,
+        status: "apply_failed",
+        problem: {
+          code: "internal",
+          category: "internal",
+          message: "raw rollback",
+          message_key: "runtime.routing.problem.rollback_failed",
+          params: {},
+          network_name: "reject",
+          retryable: true,
+        },
+      },
+    ];
+
+    authenticate({
+      ...populatedSnapshot,
+      lifecycle: { ...populatedSnapshot.lifecycle, phase: "running" },
+      networks: [...populatedSnapshot.networks, officeNetwork, rejectNetwork],
+      configuration: {
+        networks: [
+          ...(populatedSnapshot.configuration?.networks ?? []),
+          officeConfig,
+          rejectConfig,
+        ],
+      },
+      routing_summaries: routingSummaries,
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
+    );
+
+    const routing = await screen.findByTestId("runtime-routing");
+    expect(routing.querySelectorAll("[data-routing-network]")).toHaveLength(4);
+    expect(
+      Array.from(routing.querySelectorAll("[data-routing-status]")).map((row) =>
+        row.getAttribute("data-routing-status"),
+      ),
+    ).toEqual(["current", "stale", "invalid", "apply_failed"]);
+
+    const home = routing.querySelector('[data-routing-network="home"]');
+    expect(home).toHaveTextContent("translated:routing.status.current");
+    expect(home).toHaveTextContent("translated:routing.action.direct");
+    expect(home).toHaveTextContent('"target":"translated:common.none"');
+    expect(home).toHaveTextContent('"rules":"2"');
+    expect(home).toHaveTextContent('"revision":"7"');
+    expect(home).toHaveTextContent('"applied":"2023-11-14T22:13:20.000Z"');
+
+    const studio = routing.querySelector('[data-routing-network="studio"]');
+    expect(studio).toHaveTextContent("translated:routing.action.network");
+    expect(studio).toHaveTextContent(/translated:routing\.target\.network/);
+    expect(studio).toHaveTextContent("studio");
+    expect(studio).toHaveTextContent(
+      "translated:runtime.routing.problem.stopped",
+    );
+
+    const office = routing.querySelector('[data-routing-network="office"]');
+    expect(office).toHaveTextContent("translated:routing.action.exit");
+    expect(office).toHaveTextContent(/translated:routing\.target\.exit/);
+    expect(office).toHaveTextContent("peer-1");
+    expect(office).toHaveTextContent(
+      "translated:runtime.routing.problem.invalid",
+    );
+
+    const reject = routing.querySelector('[data-routing-network="reject"]');
+    expect(reject).toHaveTextContent("translated:routing.action.reject");
+    expect(reject).toHaveTextContent(
+      "translated:runtime.routing.problem.rollback_failed",
+    );
+    expect(routing).not.toContainElement(
+      routing.querySelector('[data-testid="configuration-workspace"]'),
+    );
+
+    await user.click(
+      within(studio as HTMLElement).getByRole("button", {
+        name: "translated:routing.manage",
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.routing" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", {
+        name: "translated:common.current_network",
+      }),
+    ).toHaveValue("studio");
   });
 
   it("renders one authoritative page state with node failure ahead of control failure", async () => {
@@ -345,7 +555,9 @@ describe("React WebUI shell", () => {
     const notices = container.querySelectorAll("[data-page-state]");
     expect(notices).toHaveLength(1);
     expect(notices[0]).toHaveAttribute("data-page-state", "node_failed");
-    expect(container.querySelector('[data-page-state="degraded"]')).not.toBeInTheDocument();
+    expect(
+      container.querySelector('[data-page-state="degraded"]'),
+    ).not.toBeInTheDocument();
     expect(
       container.querySelector('[data-page-state="control_unavailable"]'),
     ).not.toBeInTheDocument();
@@ -379,19 +591,22 @@ describe("React WebUI shell", () => {
       },
       expected: "permission_denied",
     },
-  ])("renders the $name as the single primary state", async ({ value, expected }) => {
-    authenticate(value);
-    const { container } = renderApp();
+  ])(
+    "renders the $name as the single primary state",
+    async ({ value, expected }) => {
+      authenticate(value);
+      const { container } = renderApp();
 
-    await screen.findByRole("heading", { name: "translated:page.overview" });
-    await waitFor(() => {
-      expect(container.querySelectorAll("[data-page-state]")).toHaveLength(1);
-    });
-    expect(container.querySelector("[data-page-state]")).toHaveAttribute(
-      "data-page-state",
-      expected,
-    );
-  });
+      await screen.findByRole("heading", { name: "translated:page.overview" });
+      await waitFor(() => {
+        expect(container.querySelectorAll("[data-page-state]")).toHaveLength(1);
+      });
+      expect(container.querySelector("[data-page-state]")).toHaveAttribute(
+        "data-page-state",
+        expected,
+      );
+    },
+  );
 
   it("shows stale state after the event stream disconnects", async () => {
     authenticate(populatedSnapshot);
@@ -418,7 +633,9 @@ describe("React WebUI shell", () => {
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
     vi.mocked(loadSnapshot).mockRejectedValueOnce(new HttpError(503, null));
-    await user.click(screen.getByRole("button", { name: "translated:common.refresh" }));
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.refresh" }),
+    );
 
     await waitFor(() => {
       expect(container.querySelector("[data-page-state]")).toHaveAttribute(
@@ -449,20 +666,27 @@ describe("React WebUI shell", () => {
     authenticate({
       ...populatedSnapshot,
       capabilities: {
-        capabilities: populatedSnapshot.capabilities?.capabilities.map((capability) =>
-          capability.kind === "exit"
-            ? { ...capability, state: "unsupported" as const }
-            : capability,
-        ) ?? [],
+        capabilities:
+          populatedSnapshot.capabilities?.capabilities.map((capability) =>
+            capability.kind === "exit"
+              ? { ...capability, state: "unsupported" as const }
+              : capability,
+          ) ?? [],
       },
     });
     const { container } = renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(screen.getByRole("button", { name: "translated:nav.networks" }));
-    await user.click(screen.getByRole("tab", { name: "translated:nav.exit_node" }));
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.networks" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.exit_node" }),
+    );
 
-    expect(await screen.findByRole("heading", { name: "translated:page.exit_node" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.exit_node" }),
+    ).toBeInTheDocument();
     expect(container.querySelector("[data-page-state]")).toHaveAttribute(
       "data-page-state",
       "unsupported",
@@ -476,7 +700,9 @@ describe("React WebUI shell", () => {
     const { queryClient } = renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(screen.getByRole("button", { name: "translated:nav.settings" }));
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.settings" }),
+    );
     const editor = await screen.findByRole("textbox", {
       name: "translated:configuration.editor.label",
     });
@@ -486,7 +712,9 @@ describe("React WebUI shell", () => {
     expect(editor).toHaveValue(draft);
 
     vi.mocked(loadSnapshot).mockRejectedValueOnce(new AuthenticationError());
-    await user.click(screen.getByRole("button", { name: "translated:common.refresh" }));
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.refresh" }),
+    );
     expect(
       await screen.findByRole("heading", {
         name: "translated:owner_auth.login.title",
@@ -540,7 +768,9 @@ describe("React WebUI shell", () => {
       "discovery-index",
       "data-recovery",
     ]);
-    expect(groups.map((group) => group.querySelector("h3")?.textContent)).toEqual([
+    expect(
+      groups.map((group) => group.querySelector("h3")?.textContent),
+    ).toEqual([
       "translated:settings.section.owner_security",
       "translated:settings.section.remote_access",
       "translated:settings.section.services_updates",
@@ -553,12 +783,22 @@ describe("React WebUI shell", () => {
     expect(groups[0]).toHaveTextContent(
       "translated:choice.permission.manage_networks",
     );
-    expect(groups[1]).toHaveTextContent("translated:settings.webui_configuration.detail");
+    expect(groups[1]).toHaveTextContent(
+      "translated:settings.webui_configuration.detail",
+    );
     expect(groups[2]).toHaveTextContent("translated:capability.file");
-    expect(groups[2]).toHaveTextContent("translated:status.capability.unsupported");
-    expect(groups[2]).toHaveTextContent("translated:settings.platform_limitations.detail");
-    expect(groups[2]).not.toHaveTextContent("translated:settings.platform_limitations.none");
-    expect(groups[3]).toHaveTextContent("translated:settings.discovery_index.detail");
+    expect(groups[2]).toHaveTextContent(
+      "translated:status.capability.unsupported",
+    );
+    expect(groups[2]).toHaveTextContent(
+      "translated:settings.platform_limitations.detail",
+    );
+    expect(groups[2]).not.toHaveTextContent(
+      "translated:settings.platform_limitations.none",
+    );
+    expect(groups[3]).toHaveTextContent(
+      "translated:settings.discovery_index.detail",
+    );
     expect(groups[4]).toHaveTextContent("translated:settings.value.read_only");
     expect(groups[4]).toHaveTextContent("translated:settings.read_only.detail");
     expect(grid?.querySelector("button, input, select, textarea")).toBeNull();
@@ -590,11 +830,20 @@ describe("React WebUI shell", () => {
       Array.from(
         advanced?.querySelectorAll<HTMLElement>("[data-setting-state]") ?? [],
       ).map((setting) => setting.dataset.settingState),
-    ).toEqual(expect.arrayContaining(["managed", "read_only", "partial", "unsupported"]));
+    ).toEqual(
+      expect.arrayContaining([
+        "managed",
+        "read_only",
+        "partial",
+        "unsupported",
+      ]),
+    );
     expect(
       advanced?.querySelector('[data-advanced-setting-id="listen-ports"]'),
     ).toHaveTextContent("127.0.0.1:9000");
-    expect(advanced?.querySelector("button, input, select, textarea")).toBeNull();
+    expect(
+      advanced?.querySelector("button, input, select, textarea"),
+    ).toBeNull();
   });
 
   it("exposes the shared four-region shell with a persistent action panel", async () => {
@@ -602,13 +851,18 @@ describe("React WebUI shell", () => {
     const { container } = renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    const regions = Array.from(container.querySelectorAll<HTMLElement>("[data-ui-region]"))
-      .map((element) => element.dataset.uiRegion);
+    const regions = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-ui-region]"),
+    ).map((element) => element.dataset.uiRegion);
 
     expect(regions).toEqual(["sidebar", "topbar", "content", "action-panel"]);
     const workspace = container.querySelector<HTMLElement>(".workspace");
-    const content = workspace?.querySelector<HTMLElement>('[data-ui-region="content"]');
-    const actionPanel = workspace?.querySelector<HTMLElement>('[data-ui-region="action-panel"]');
+    const content = workspace?.querySelector<HTMLElement>(
+      '[data-ui-region="content"]',
+    );
+    const actionPanel = workspace?.querySelector<HTMLElement>(
+      '[data-ui-region="action-panel"]',
+    );
     expect(content).toBeInTheDocument();
     expect(actionPanel).toBeInTheDocument();
     expect(content?.nextElementSibling).toBe(actionPanel);
@@ -636,9 +890,9 @@ describe("React WebUI shell", () => {
     expect(
       await screen.findByRole("heading", { name: "translated:page.networks" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("translated:common.current_network")).toHaveValue(
-      "home",
-    );
+    expect(
+      screen.getByLabelText("translated:common.current_network"),
+    ).toHaveValue("home");
     expect(search).toHaveValue("");
 
     await user.type(search, "peer-tokyo");
@@ -650,9 +904,9 @@ describe("React WebUI shell", () => {
     expect(
       await screen.findByRole("heading", { name: "translated:page.peers" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("translated:common.current_network")).toHaveValue(
-      "home",
-    );
+    expect(
+      screen.getByLabelText("translated:common.current_network"),
+    ).toHaveValue("home");
   });
 
   it("supports global search keyboard focus, empty state, and clearing", async () => {
@@ -675,7 +929,9 @@ describe("React WebUI shell", () => {
     );
     expect(search).toHaveValue("");
     expect(search).toHaveFocus();
-    expect(screen.queryByRole("list", { name: "translated:common.search_results" })).toBeNull();
+    expect(
+      screen.queryByRole("list", { name: "translated:common.search_results" }),
+    ).toBeNull();
   });
 
   it("finds advanced settings and navigates to the settings page", async () => {
@@ -700,9 +956,16 @@ describe("React WebUI shell", () => {
   });
 
   it("uses the shared shell and action-panel tokens", () => {
-    const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
-    expect(styles).toContain("grid-template-columns: var(--sidebar-w) minmax(0, 1fr)");
-    expect(styles).toContain("grid-template-rows: var(--topbar-h) auto minmax(0, 1fr)");
+    const styles = readFileSync(
+      resolve(process.cwd(), "src/styles.css"),
+      "utf8",
+    );
+    expect(styles).toContain(
+      "grid-template-columns: var(--sidebar-w) minmax(0, 1fr)",
+    );
+    expect(styles).toContain(
+      "grid-template-rows: var(--topbar-h) auto minmax(0, 1fr)",
+    );
     expect(styles).toMatch(
       /\.workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) var\(--action-panel-compact-w\)/s,
     );
@@ -758,11 +1021,15 @@ describe("React WebUI shell", () => {
 
       await screen.findByRole("heading", { name: "translated:page.overview" });
       await user.click(
-        screen.getByRole("button", { name: "translated:overview.manage_runtime" }),
+        screen.getByRole("button", {
+          name: "translated:overview.manage_runtime",
+        }),
       );
 
       expect(
-        await screen.findByRole("heading", { name: "translated:page.node_runtime" }),
+        await screen.findByRole("heading", {
+          name: "translated:page.node_runtime",
+        }),
       ).toBeInTheDocument();
       const panel = await screen.findByRole("complementary", {
         name: "translated:common.shared_actions",
@@ -771,7 +1038,9 @@ describe("React WebUI shell", () => {
         expect(
           screen
             .getAllByRole("button", { name: `translated:action.${action}` })
-            .some((button) => button.classList.contains("runtime-primary-action")),
+            .some((button) =>
+              button.classList.contains("runtime-primary-action"),
+            ),
         ).toBe(true);
       });
       const primaryAction = screen
@@ -779,11 +1048,11 @@ describe("React WebUI shell", () => {
         .find((button) => button.classList.contains("runtime-primary-action"));
       if (!primaryAction) throw new Error("runtime primary action is missing");
       expect(primaryAction).toHaveClass("runtime-primary-action");
-      const secondary = document.querySelector(
-        ".runtime-secondary-action",
-      );
+      const secondary = document.querySelector(".runtime-secondary-action");
       if (secondaryAction) {
-        expect(secondary).toHaveTextContent(`translated:action.${secondaryAction}`);
+        expect(secondary).toHaveTextContent(
+          `translated:action.${secondaryAction}`,
+        );
       } else {
         expect(secondary).not.toBeInTheDocument();
       }
@@ -835,7 +1104,9 @@ describe("React WebUI shell", () => {
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
     await user.click(
-      screen.getByRole("button", { name: "translated:overview.manage_runtime" }),
+      screen.getByRole("button", {
+        name: "translated:overview.manage_runtime",
+      }),
     );
     const secondary = await waitFor(() => {
       const button = document.querySelector<HTMLButtonElement>(
@@ -898,7 +1169,9 @@ describe("React WebUI shell", () => {
     expect(navigation).toHaveClass("overview-primary-action");
     await user.click(navigation);
 
-    await screen.findByRole("heading", { name: "translated:page.node_runtime" });
+    await screen.findByRole("heading", {
+      name: "translated:page.node_runtime",
+    });
     expect(
       document.querySelector(".runtime-primary-action"),
     ).not.toBeInTheDocument();
@@ -914,10 +1187,14 @@ describe("React WebUI shell", () => {
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
     await user.click(
-      screen.getByRole("button", { name: "translated:overview.manage_runtime" }),
+      screen.getByRole("button", {
+        name: "translated:overview.manage_runtime",
+      }),
     );
 
-    await screen.findByRole("heading", { name: "translated:page.node_runtime" });
+    await screen.findByRole("heading", {
+      name: "translated:page.node_runtime",
+    });
     expect(
       document.querySelector(".runtime-primary-action"),
     ).not.toBeInTheDocument();
@@ -936,11 +1213,19 @@ describe("React WebUI shell", () => {
       .closest(".overview-network-row");
     expect(home).toHaveTextContent("translated:overview.network.detail");
     expect(home).toHaveTextContent("translated:overview.network.path");
-    expect(home).toHaveTextContent('"routing":"translated:choice.routing.bypass_mainland"');
+    expect(home).toHaveTextContent(
+      '"routing":"translated:choice.routing.bypass_mainland"',
+    );
     expect(home).toHaveTextContent('"exit":"translated:overview.exit.selected');
-    expect(container.querySelector(".overview-stack .metric-card")).not.toBeInTheDocument();
-    expect(container.querySelector(".overview-stack [data-chart]")).not.toBeInTheDocument();
-    expect(container.querySelector(".overview-stack canvas")).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".overview-stack .metric-card"),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".overview-stack [data-chart]"),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".overview-stack canvas"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows at most three deduplicated operational issues", async () => {
@@ -993,7 +1278,9 @@ describe("React WebUI shell", () => {
       );
 
       expect(
-        await screen.findByRole("heading", { name: "translated:page.networks" }),
+        await screen.findByRole("heading", {
+          name: "translated:page.networks",
+        }),
       ).toBeInTheDocument();
       expect(
         screen.getByRole("tab", { name: "translated:nav.networks" }),

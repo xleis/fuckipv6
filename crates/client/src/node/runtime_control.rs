@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::{ClientConfig, NetworkTicket};
 use futures::future::join_all;
@@ -17,8 +17,10 @@ use super::{
     NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus, NodeEventKind,
     NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot,
     NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase,
-    NodeProblem, NodeProblemCode, NodeResidualCleanupResult, NodeRoutingMode, NodeRuntimePlan,
-    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeStateStore, NodeTrafficSnapshot,
+    NodeProblem, NodeProblemCode, NodeResidualCleanupResult, NodeRoutingDefaultAction,
+    NodeRoutingMode, NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus,
+    NodeRoutingTargetSnapshot, NodeRuntimePlan, NodeRuntimeResidueSnapshot,
+    NodeSetNetworkRoleCommand, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
     NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
@@ -883,6 +885,120 @@ enum RuntimeControlCommand {
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<StopSummary, RuntimeControlError>>,
     },
+}
+
+fn routing_summary_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn routing_problem(
+    network_name: &str,
+    product_key: &'static str,
+    code: NodeProblemCode,
+    message: impl Into<String>,
+) -> NodeProblem {
+    NodeProblem::new(code, message)
+        .for_network(network_name)
+        .with_message_key(product_key)
+}
+
+fn routing_default_action(
+    config: &NodeNetworkConfigSnapshot,
+) -> (NodeRoutingDefaultAction, Option<NodeRoutingTargetSnapshot>) {
+    match config.routing_mode {
+        NodeRoutingMode::MeshOnly => (NodeRoutingDefaultAction::Direct, None),
+        NodeRoutingMode::BypassMainland | NodeRoutingMode::GlobalProxy => {
+            match config
+                .exit_node
+                .as_deref()
+                .filter(|node| !node.trim().is_empty())
+            {
+                Some(node_id) => (
+                    NodeRoutingDefaultAction::Exit(node_id.to_string()),
+                    Some(NodeRoutingTargetSnapshot::Exit {
+                        node_id: node_id.to_string(),
+                    }),
+                ),
+                None => (
+                    NodeRoutingDefaultAction::Network,
+                    Some(NodeRoutingTargetSnapshot::Network {
+                        network_name: config.network_name.clone(),
+                    }),
+                ),
+            }
+        }
+    }
+}
+
+fn routing_rule_count(config: &NodeNetworkConfigSnapshot) -> usize {
+    config
+        .direct_cidrs
+        .len()
+        .saturating_add(config.proxy_cidrs.len())
+}
+
+fn routing_summary_with_status(
+    snapshot: &NodeSnapshot,
+    config: &NodeNetworkConfigSnapshot,
+    status: NodeRoutingSummaryStatus,
+    problem: Option<NodeProblem>,
+) -> NodeRoutingSummarySnapshot {
+    let previous = snapshot
+        .routing_summaries
+        .iter()
+        .find(|summary| summary.network_name == config.network_name);
+    if status != NodeRoutingSummaryStatus::Current {
+        if let Some(previous) = previous {
+            let mut summary = (*previous).clone();
+            summary.status = status;
+            summary.problem = problem;
+            return summary;
+        }
+    }
+    let (last_applied_revision, last_applied_at_unix_ms) =
+        if status == NodeRoutingSummaryStatus::Current {
+            (
+                Some(
+                    previous
+                        .and_then(|summary| summary.last_applied_revision)
+                        .unwrap_or(0)
+                        .saturating_add(1),
+                ),
+                Some(routing_summary_timestamp()),
+            )
+        } else {
+            (None, None)
+        };
+    let (default_action, effective_target) = routing_default_action(config);
+    NodeRoutingSummarySnapshot {
+        network_name: config.network_name.clone(),
+        default_action,
+        effective_target,
+        enabled_rule_count: routing_rule_count(config),
+        last_applied_revision,
+        last_applied_at_unix_ms,
+        status,
+        problem,
+    }
+}
+
+fn replace_routing_summary(snapshot: &mut NodeSnapshot, summary: NodeRoutingSummarySnapshot) {
+    if let Some(existing) = snapshot
+        .routing_summaries
+        .iter_mut()
+        .find(|existing| existing.network_name == summary.network_name)
+    {
+        *existing = summary;
+    } else {
+        snapshot.routing_summaries.push(summary);
+    }
+    snapshot
+        .routing_summaries
+        .sort_by(|left, right| left.network_name.cmp(&right.network_name));
 }
 
 /// Cloneable control handle for the actor that owns live network runtimes.
@@ -1816,7 +1932,7 @@ impl NetworkRuntimeActor {
 
         let config_snapshot = runtime_metadata::network_config_snapshot(&spec.name, &spec.config);
         let initial_roles = roles_from_config(&spec.config);
-        self.record_network_config(config_snapshot).await;
+        self.record_network_config(config_snapshot.clone()).await;
         self.record_network(NodeNetworkSnapshot {
             name: spec.name.clone(),
             tun_name: crate::multi_network::derive_tun_name(
@@ -1883,6 +1999,13 @@ impl NetworkRuntimeActor {
                 }
             })
             .await;
+        if !self.publish_started_routing(&config_snapshot).await {
+            let _ = started.shutdown.send(true);
+            let _ = timeout(self.timeouts.stop, started.handle).await;
+            return Err(RuntimeControlError::Persistence(format!(
+                "网络 [{network_name}] 运行时已启动，但权威路由摘要未能发布，已停止该运行时"
+            )));
+        }
         self.cleanup_failures.remove(&network_name);
         self.retained_owners.remove(&network_name);
         self.completed_cleanup.remove(&network_name);
@@ -2124,6 +2247,19 @@ impl NetworkRuntimeActor {
             })?;
         ensure_member_role(&network_name, &previous_roles)?;
 
+        if let Err(problem) = command.validate_runtime_policy() {
+            let message = problem.message.clone();
+            self.record_routing_problem(
+                &network_name,
+                NodeRoutingSummaryStatus::Invalid,
+                "runtime.routing.problem.invalid",
+                NodeProblemCode::InvalidRequest,
+                message.clone(),
+            )
+            .await;
+            return Err(RuntimeControlError::Invalid(message));
+        }
+
         let result = match request_runtime_routing_update(
             &routing_control,
             &command,
@@ -2133,6 +2269,14 @@ impl NetworkRuntimeActor {
         {
             Ok(result) => result,
             Err(RuntimeRoutingRequestError::ControlClosed) => {
+                self.record_routing_problem(
+                    &network_name,
+                    NodeRoutingSummaryStatus::ApplyFailed,
+                    "runtime.routing.problem.hot_update_failed",
+                    NodeProblemCode::Unavailable,
+                    format!("网络 [{network_name}] 的路由运行时控制通道已关闭，未应用新的路由策略"),
+                )
+                .await;
                 return Err(RuntimeControlError::NotFound(format!(
                     "网络 [{network_name}] 的运行时控制通道已关闭"
                 )));
@@ -2146,12 +2290,36 @@ impl NetworkRuntimeActor {
                 )
                 .await;
                 return Err(match rollback {
-                    Ok(()) => RuntimeControlError::Persistence(format!(
-                        "网络 [{network_name}] 路由热更新失败: {failure_message}；已通过运行时重新应用旧配置，文件和运行态已回滚"
-                    )),
-                    Err(rollback_error) => RuntimeControlError::Persistence(format!(
-                        "网络 [{network_name}] 路由热更新失败: {failure_message}；旧配置回滚未能确认: {rollback_error}"
-                    )),
+                    Ok(()) => {
+                        self.record_routing_problem(
+                            &network_name,
+                            NodeRoutingSummaryStatus::ApplyFailed,
+                            "runtime.routing.problem.hot_update_failed",
+                            NodeProblemCode::Unavailable,
+                            format!(
+                                "网络 [{network_name}] 路由热更新失败: {failure_message}；旧路由已重新应用"
+                            ),
+                        )
+                        .await;
+                        RuntimeControlError::Persistence(format!(
+                            "网络 [{network_name}] 路由热更新失败: {failure_message}；已通过运行时重新应用旧配置，文件和运行态已回滚"
+                        ))
+                    }
+                    Err(rollback_error) => {
+                        self.record_routing_problem(
+                            &network_name,
+                            NodeRoutingSummaryStatus::ApplyFailed,
+                            "runtime.routing.problem.rollback_failed",
+                            NodeProblemCode::Unavailable,
+                            format!(
+                                "网络 [{network_name}] 路由热更新失败且旧路由回滚失败: {failure_message}；{rollback_error}"
+                            ),
+                        )
+                        .await;
+                        RuntimeControlError::Persistence(format!(
+                            "网络 [{network_name}] 路由热更新失败: {failure_message}；旧配置回滚未能确认: {rollback_error}"
+                        ))
+                    }
                 });
             }
         };
@@ -2180,12 +2348,36 @@ impl NetworkRuntimeActor {
             // while the runtime update was in flight.
             self.restore_role_projection(previous, previous_roles).await;
             return Err(match rollback {
-                Ok(()) => RuntimeControlError::Persistence(format!(
-                    "网络 [{network_name}] 的共享快照发布失败，运行态、持久化配置和共享快照已回滚"
-                )),
-                Err(rollback_error) => RuntimeControlError::Persistence(format!(
-                    "网络 [{network_name}] 的共享快照发布失败，且运行态回滚失败: {rollback_error}"
-                )),
+                Ok(()) => {
+                    self.record_routing_problem(
+                        &network_name,
+                        NodeRoutingSummaryStatus::ApplyFailed,
+                        "runtime.routing.problem.publish_failed",
+                        NodeProblemCode::Internal,
+                        format!(
+                            "网络 [{network_name}] 的权威路由摘要发布失败，已重新应用旧路由并回滚共享快照"
+                        ),
+                    )
+                    .await;
+                    RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 的共享快照发布失败，运行态、持久化配置和共享快照已回滚"
+                    ))
+                }
+                Err(rollback_error) => {
+                    self.record_routing_problem(
+                        &network_name,
+                        NodeRoutingSummaryStatus::ApplyFailed,
+                        "runtime.routing.problem.rollback_failed",
+                        NodeProblemCode::Internal,
+                        format!(
+                            "网络 [{network_name}] 的权威路由摘要发布失败且运行态回滚失败: {rollback_error}"
+                        ),
+                    )
+                    .await;
+                    RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 的共享快照发布失败，且运行态回滚失败: {rollback_error}"
+                    ))
+                }
             });
         }
 
@@ -2277,6 +2469,14 @@ impl NetworkRuntimeActor {
         {
             Ok(_) => {}
             Err(RuntimeRoutingRequestError::ControlClosed) => {
+                self.record_routing_problem(
+                    &network_name,
+                    NodeRoutingSummaryStatus::ApplyFailed,
+                    "runtime.routing.problem.hot_update_failed",
+                    NodeProblemCode::Unavailable,
+                    format!("网络 [{network_name}] 的角色运行时控制通道已关闭，未应用新的角色策略"),
+                )
+                .await;
                 return Err(RuntimeControlError::NotFound(format!(
                     "网络 [{network_name}] 的运行时控制通道已关闭"
                 )));
@@ -2290,12 +2490,36 @@ impl NetworkRuntimeActor {
                 )
                 .await;
                 return Err(match rollback {
-                    Ok(()) => RuntimeControlError::Persistence(format!(
-                        "网络 [{network_name}] 角色运行态更新失败: {failure_message}；已重新应用旧配置，运行态与持久化配置已回滚"
-                    )),
-                    Err(rollback_error) => RuntimeControlError::Persistence(format!(
-                        "网络 [{network_name}] 角色运行态更新失败: {failure_message}；旧配置回滚未能确认: {rollback_error}"
-                    )),
+                    Ok(()) => {
+                        self.record_routing_problem(
+                            &network_name,
+                            NodeRoutingSummaryStatus::ApplyFailed,
+                            "runtime.routing.problem.hot_update_failed",
+                            NodeProblemCode::Unavailable,
+                            format!(
+                                "网络 [{network_name}] 角色运行态更新失败: {failure_message}；旧路由已重新应用"
+                            ),
+                        )
+                        .await;
+                        RuntimeControlError::Persistence(format!(
+                            "网络 [{network_name}] 角色运行态更新失败: {failure_message}；已重新应用旧配置，运行态与持久化配置已回滚"
+                        ))
+                    }
+                    Err(rollback_error) => {
+                        self.record_routing_problem(
+                            &network_name,
+                            NodeRoutingSummaryStatus::ApplyFailed,
+                            "runtime.routing.problem.rollback_failed",
+                            NodeProblemCode::Unavailable,
+                            format!(
+                                "网络 [{network_name}] 角色运行态更新失败且旧路由回滚失败: {failure_message}；{rollback_error}"
+                            ),
+                        )
+                        .await;
+                        RuntimeControlError::Persistence(format!(
+                            "网络 [{network_name}] 角色运行态更新失败: {failure_message}；旧配置回滚未能确认: {rollback_error}"
+                        ))
+                    }
                 });
             }
         }
@@ -2315,12 +2539,36 @@ impl NetworkRuntimeActor {
             self.restore_role_projection(previous_config, previous_roles.clone())
                 .await;
             return Err(match rollback {
-                Ok(()) => RuntimeControlError::Persistence(format!(
-                    "网络 [{network_name}] 的角色共享快照发布失败，运行态、持久化配置和共享快照已回滚"
-                )),
-                Err(rollback_error) => RuntimeControlError::Persistence(format!(
-                    "网络 [{network_name}] 的角色共享快照发布失败，且运行态回滚失败: {rollback_error}"
-                )),
+                Ok(()) => {
+                    self.record_routing_problem(
+                        &network_name,
+                        NodeRoutingSummaryStatus::ApplyFailed,
+                        "runtime.routing.problem.publish_failed",
+                        NodeProblemCode::Internal,
+                        format!(
+                            "网络 [{network_name}] 的角色摘要发布失败，已重新应用旧路由并回滚共享快照"
+                        ),
+                    )
+                    .await;
+                    RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 的角色共享快照发布失败，运行态、持久化配置和共享快照已回滚"
+                    ))
+                }
+                Err(rollback_error) => {
+                    self.record_routing_problem(
+                        &network_name,
+                        NodeRoutingSummaryStatus::ApplyFailed,
+                        "runtime.routing.problem.rollback_failed",
+                        NodeProblemCode::Internal,
+                        format!(
+                            "网络 [{network_name}] 的角色摘要发布失败且运行态回滚失败: {rollback_error}"
+                        ),
+                    )
+                    .await;
+                    RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 的角色共享快照发布失败，且运行态回滚失败: {rollback_error}"
+                    ))
+                }
             });
         }
 
@@ -2927,6 +3175,22 @@ impl NetworkRuntimeActor {
                 snapshot
                     .peers
                     .retain(|peer| !clean_networks.contains(peer.network_name.as_str()));
+                for summary in snapshot
+                    .routing_summaries
+                    .iter_mut()
+                    .filter(|summary| clean_networks.contains(summary.network_name.as_str()))
+                {
+                    summary.status = NodeRoutingSummaryStatus::Stale;
+                    summary.problem = Some(routing_problem(
+                        &summary.network_name,
+                        "runtime.routing.problem.stopped",
+                        NodeProblemCode::Unavailable,
+                        format!(
+                            "网络 [{}] 已停止，最后一次成功路由应用不再生效",
+                            summary.network_name
+                        ),
+                    ));
+                }
             })
             .await;
     }
@@ -3081,6 +3345,9 @@ impl NetworkRuntimeActor {
                 snapshot
                     .peers
                     .retain(|peer| peer.network_name != network_name);
+                snapshot
+                    .routing_summaries
+                    .retain(|summary| summary.network_name != network_name);
                 if snapshot
                     .last_error
                     .as_ref()
@@ -3104,6 +3371,14 @@ impl NetworkRuntimeActor {
                 );
             })
             .await;
+        self.record_routing_problem(
+            network_name,
+            NodeRoutingSummaryStatus::ApplyFailed,
+            "runtime.routing.problem.start_failed",
+            NodeProblemCode::Unavailable,
+            format!("网络 [{network_name}] 路由运行时启动失败，未发布生效中的策略"),
+        )
+        .await;
     }
 
     async fn record_identity(&self, identity: NodeIdentitySnapshot) {
@@ -3174,6 +3449,71 @@ impl NetworkRuntimeActor {
         });
     }
 
+    async fn publish_started_routing(&self, config: &NodeNetworkConfigSnapshot) -> bool {
+        let mut published = false;
+        self.state
+            .update(|snapshot| {
+                let has_config = snapshot
+                    .configuration
+                    .networks
+                    .iter()
+                    .any(|network| network.network_name == config.network_name);
+                let has_runtime = snapshot
+                    .networks
+                    .iter()
+                    .any(|network| network.name == config.network_name);
+                if !has_config || !has_runtime {
+                    return;
+                }
+                replace_routing_summary(
+                    snapshot,
+                    routing_summary_with_status(
+                        snapshot,
+                        config,
+                        NodeRoutingSummaryStatus::Current,
+                        None,
+                    ),
+                );
+                published = true;
+            })
+            .await;
+        published
+    }
+
+    async fn record_routing_problem(
+        &self,
+        network_name: &str,
+        status: NodeRoutingSummaryStatus,
+        message_key: &'static str,
+        code: NodeProblemCode,
+        message: impl Into<String>,
+    ) {
+        let problem = routing_problem(network_name, message_key, code, message);
+        self.state
+            .update(|snapshot| {
+                let config = snapshot
+                    .configuration
+                    .networks
+                    .iter()
+                    .find(|config| config.network_name == network_name)
+                    .cloned();
+                if let Some(config) = config {
+                    replace_routing_summary(
+                        snapshot,
+                        routing_summary_with_status(snapshot, &config, status, Some(problem)),
+                    );
+                } else if let Some(summary) = snapshot
+                    .routing_summaries
+                    .iter_mut()
+                    .find(|summary| summary.network_name == network_name)
+                {
+                    summary.status = status;
+                    summary.problem = Some(problem);
+                }
+            })
+            .await;
+    }
+
     async fn record_network_config(&self, config: NodeNetworkConfigSnapshot) {
         self.state
             .update(|snapshot| {
@@ -3227,6 +3567,15 @@ impl NetworkRuntimeActor {
                 {
                     existing.roles = roles.clone();
                 }
+                replace_routing_summary(
+                    snapshot,
+                    routing_summary_with_status(
+                        snapshot,
+                        &config,
+                        NodeRoutingSummaryStatus::Current,
+                        None,
+                    ),
+                );
                 published = true;
             })
             .await;
@@ -5424,6 +5773,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_routing_policy_publishes_invalid_without_touching_runtime() {
+        let harness = TestHarness::new("routing-invalid").await;
+        start_fake_network(&harness, "routing-invalid").await;
+
+        let before = harness
+            .state
+            .snapshot()
+            .await
+            .routing_summaries
+            .into_iter()
+            .find(|summary| summary.network_name == "routing-invalid")
+            .expect("current summary after startup");
+        assert_eq!(before.status, NodeRoutingSummaryStatus::Current);
+        assert_eq!(before.last_applied_revision, Some(1));
+        let calls_before = harness.fake.routing_calls().len();
+
+        let error = harness
+            .runtime
+            .update_routing(routing_command(
+                "routing-invalid",
+                NodeRoutingMode::GlobalProxy,
+                Some("  "),
+                false,
+            ))
+            .await
+            .expect_err("blank exit must reject");
+        assert!(matches!(error, RuntimeControlError::Invalid(_)));
+        assert_eq!(harness.fake.routing_calls().len(), calls_before);
+
+        let after = harness
+            .state
+            .snapshot()
+            .await
+            .routing_summaries
+            .into_iter()
+            .find(|summary| summary.network_name == "routing-invalid")
+            .expect("invalid summary");
+        assert_eq!(after.status, NodeRoutingSummaryStatus::Invalid);
+        assert_eq!(after.last_applied_revision, before.last_applied_revision);
+        assert_eq!(
+            after.last_applied_at_unix_ms,
+            before.last_applied_at_unix_ms
+        );
+        assert_eq!(
+            after
+                .problem
+                .as_ref()
+                .map(|problem| problem.message_key.as_str()),
+            Some("runtime.routing.problem.invalid")
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn routing_update_for_a_non_running_network_does_not_touch_the_runtime() {
         let harness = TestHarness::new("routing-missing").await;
 
@@ -5439,6 +5843,7 @@ mod tests {
             .expect_err("non-running network must be rejected");
         assert!(matches!(error, RuntimeControlError::NotFound(_)));
         assert!(harness.fake.routing_calls().is_empty());
+        assert!(harness.state.snapshot().await.routing_summaries.is_empty());
 
         harness.shutdown().await;
     }

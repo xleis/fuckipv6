@@ -480,15 +480,24 @@ pub struct NodeUpdateRoutingCommand {
 
 impl NodeUpdateRoutingCommand {
     fn validate(&self) -> Result<(), NodeProblem> {
-        validate_network_name(&self.network_name)?;
+        // Transport/name syntax is rejected before the command reaches the
+        // runtime actor. Policy validation intentionally lives in
+        // `validate_runtime_policy` so a running network can publish an
+        // authoritative Invalid routing summary instead of silently retaining
+        // a misleading Current summary.
+        validate_network_name(&self.network_name)
+    }
+
+    pub(crate) fn validate_runtime_policy(&self) -> Result<(), NodeProblem> {
         if self
             .exit_node
             .as_deref()
             .is_some_and(|exit| exit.trim().is_empty())
         {
-            return Err(invalid(
-                "出口节点不能是空字符串；不设置出口节点时应省略该字段",
-            ));
+            return Err(
+                invalid("出口节点不能是空字符串；不设置出口节点时应省略该字段")
+                    .for_network(self.network_name.clone()),
+            );
         }
         Ok(())
     }
@@ -1492,12 +1501,6 @@ mod tests {
                 network_name: Some("../office".into()),
                 start: false,
             }),
-            NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
-                network_name: "home".into(),
-                mode: NodeRoutingMode::MeshOnly,
-                exit_node: Some("  ".into()),
-                is_exit_node: false,
-            }),
             NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
                 network_name: "home/office".into(),
                 role: NodeNetworkRole::Relay,
@@ -1518,6 +1521,25 @@ mod tests {
         for command in commands {
             assert_invalid(command);
         }
+    }
+
+    #[test]
+    fn routing_policy_validation_is_deferred_to_the_runtime_actor() {
+        let command = NodeUpdateRoutingCommand {
+            network_name: "home".into(),
+            mode: NodeRoutingMode::MeshOnly,
+            exit_node: Some("  ".into()),
+            is_exit_node: false,
+        };
+
+        assert!(NodeCommand::UpdateRouting(command.clone())
+            .validate()
+            .is_ok());
+        let problem = command
+            .validate_runtime_policy()
+            .expect_err("blank exit node must be rejected as runtime policy");
+        assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+        assert_eq!(problem.network_name.as_deref(), Some("home"));
     }
 
     #[test]

@@ -1721,6 +1721,63 @@
       ],
       "type": "object"
     },
+    "NodeRoutingDefaultAction": {
+      "description": "The default action currently applied to traffic that does not match a\nnetwork-specific rule.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "network",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exit",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "reject",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "NodeRoutingMode": {
       "enum": [
         "mesh_only",
@@ -1728,6 +1785,129 @@
         "global_proxy"
       ],
       "type": "string"
+    },
+    "NodeRoutingSummarySnapshot": {
+      "description": "One network's authoritative traffic-policy state as last applied by the\nnode runtime. Editable configuration remains in `NodeConfigurationSnapshot`.",
+      "properties": {
+        "default_action": {
+          "$ref": "#/$defs/NodeRoutingDefaultAction"
+        },
+        "effective_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeRoutingTargetSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled_rule_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_applied_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_applied_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/NodeRoutingSummaryStatus"
+        }
+      },
+      "required": [
+        "network_name",
+        "default_action",
+        "enabled_rule_count",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NodeRoutingSummaryStatus": {
+      "oneOf": [
+        {
+          "const": "current",
+          "description": "Runtime accepted the policy and the matching snapshot was published.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "The last successful application predates the current stopped/runtime\nstate and must not be treated as active.",
+          "type": "string"
+        },
+        {
+          "const": "invalid",
+          "description": "Policy validation rejected the configuration before mutation.",
+          "type": "string"
+        },
+        {
+          "const": "apply_failed",
+          "description": "The runtime or snapshot publication failed after an application attempt.",
+          "type": "string"
+        }
+      ]
+    },
+    "NodeRoutingTargetSnapshot": {
+      "description": "Concrete traffic path behind a network or Exit default action.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "network",
+              "type": "string"
+            },
+            "network_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "network_name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exit",
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "node_id"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "NodeRuntimeResidueSnapshot": {
       "description": "Transport-neutral residue report shared by diagnostics and explicit cleanup.",
@@ -1924,6 +2104,14 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "routing_summaries": {
+          "default": [],
+          "description": "Authoritative per-network traffic-policy summaries. The node runtime is\nthe only writer; UI adapters never derive \"applied\" state from editable\nconfiguration. Missing data from older peers deserializes as empty.",
+          "items": {
+            "$ref": "#/$defs/NodeRoutingSummarySnapshot"
+          },
+          "type": "array"
         },
         "tun_capabilities": {
           "$ref": "#/$defs/TunCapabilities",

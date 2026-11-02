@@ -54,6 +54,11 @@ pub struct NodeSnapshot {
     /// they are tied to a network lifecycle transition.
     #[serde(default)]
     pub interface_problems: Vec<NodeProblem>,
+    /// Authoritative per-network traffic-policy summaries. The node runtime is
+    /// the only writer; UI adapters never derive "applied" state from editable
+    /// configuration. Missing data from older peers deserializes as empty.
+    #[serde(default)]
+    pub routing_summaries: Vec<NodeRoutingSummarySnapshot>,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     /// The five most recent user-meaningful command outcomes. Entries are
@@ -159,6 +164,13 @@ impl NodeSnapshot {
             "duplicate_interface_name",
             &mut violations,
         );
+        collect_duplicate_names(
+            self.routing_summaries
+                .iter()
+                .map(|summary| summary.network_name.as_str()),
+            "duplicate_routing_summary",
+            &mut violations,
+        );
 
         let configured = self
             .configuration
@@ -171,6 +183,94 @@ impl NodeSnapshot {
             .iter()
             .map(|network| (network.name.as_str(), network))
             .collect::<HashMap<_, _>>();
+
+        for summary in &self.routing_summaries {
+            if !configured.contains(summary.network_name.as_str()) {
+                violations.push(format!(
+                    "routing_summary_for_unconfigured_network:{}",
+                    summary.network_name
+                ));
+            }
+            match summary.status {
+                NodeRoutingSummaryStatus::Current | NodeRoutingSummaryStatus::Stale
+                    if summary.last_applied_revision.is_none()
+                        || summary.last_applied_at_unix_ms.is_none() =>
+                {
+                    violations.push(format!(
+                        "applied_routing_summary_missing_history:{}",
+                        summary.network_name
+                    ));
+                }
+                NodeRoutingSummaryStatus::Current
+                | NodeRoutingSummaryStatus::Stale
+                | NodeRoutingSummaryStatus::Invalid
+                | NodeRoutingSummaryStatus::ApplyFailed => {}
+            }
+            if summary.last_applied_revision.is_some() != summary.last_applied_at_unix_ms.is_some()
+            {
+                violations.push(format!(
+                    "incomplete_routing_summary_history:{}",
+                    summary.network_name
+                ));
+            }
+            if summary.status == NodeRoutingSummaryStatus::Current && summary.problem.is_some() {
+                violations.push(format!(
+                    "current_routing_summary_has_problem:{}",
+                    summary.network_name
+                ));
+            }
+            if summary.status != NodeRoutingSummaryStatus::Current && summary.problem.is_none() {
+                violations.push(format!(
+                    "blocked_routing_summary_missing_reason:{}",
+                    summary.network_name
+                ));
+            }
+            match (&summary.default_action, &summary.effective_target) {
+                (NodeRoutingDefaultAction::Direct | NodeRoutingDefaultAction::Reject, None) => {}
+                (NodeRoutingDefaultAction::Direct | NodeRoutingDefaultAction::Reject, Some(_)) => {
+                    violations.push(format!(
+                        "routing_summary_unexpected_target:{}",
+                        summary.network_name
+                    ))
+                }
+                (
+                    NodeRoutingDefaultAction::Network,
+                    Some(NodeRoutingTargetSnapshot::Network { network_name }),
+                ) if network_name == &summary.network_name => {}
+                (
+                    NodeRoutingDefaultAction::Network,
+                    Some(NodeRoutingTargetSnapshot::Network { .. }),
+                ) => violations.push(format!(
+                    "routing_summary_network_target_mismatch:{}",
+                    summary.network_name
+                )),
+                (
+                    NodeRoutingDefaultAction::Network,
+                    Some(NodeRoutingTargetSnapshot::Exit { .. }) | None,
+                ) => violations.push(format!(
+                    "routing_summary_network_target_invalid:{}",
+                    summary.network_name
+                )),
+                (
+                    NodeRoutingDefaultAction::Exit(exit_node),
+                    Some(NodeRoutingTargetSnapshot::Exit { node_id }),
+                ) if exit_node == node_id => {}
+                (
+                    NodeRoutingDefaultAction::Exit(_),
+                    Some(NodeRoutingTargetSnapshot::Exit { .. }),
+                ) => violations.push(format!(
+                    "routing_summary_exit_target_mismatch:{}",
+                    summary.network_name
+                )),
+                (
+                    NodeRoutingDefaultAction::Exit(_),
+                    Some(NodeRoutingTargetSnapshot::Network { .. }) | None,
+                ) => violations.push(format!(
+                    "routing_summary_exit_target_invalid:{}",
+                    summary.network_name
+                )),
+            }
+        }
 
         for network in &self.networks {
             if !configured.contains(network.name.as_str()) {
@@ -489,6 +589,53 @@ fn collect_duplicate_names<'a>(
 #[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeConfigurationSnapshot {
     pub networks: Vec<NodeNetworkConfigSnapshot>,
+}
+
+/// One network's authoritative traffic-policy state as last applied by the
+/// node runtime. Editable configuration remains in `NodeConfigurationSnapshot`.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRoutingSummarySnapshot {
+    pub network_name: String,
+    pub default_action: NodeRoutingDefaultAction,
+    pub effective_target: Option<NodeRoutingTargetSnapshot>,
+    pub enabled_rule_count: usize,
+    pub last_applied_revision: Option<u64>,
+    pub last_applied_at_unix_ms: Option<u64>,
+    pub status: NodeRoutingSummaryStatus,
+    pub problem: Option<NodeProblem>,
+}
+
+/// The default action currently applied to traffic that does not match a
+/// network-specific rule.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum NodeRoutingDefaultAction {
+    Direct,
+    Network,
+    Exit(String),
+    Reject,
+}
+
+/// Concrete traffic path behind a network or Exit default action.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum NodeRoutingTargetSnapshot {
+    Network { network_name: String },
+    Exit { node_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRoutingSummaryStatus {
+    /// Runtime accepted the policy and the matching snapshot was published.
+    Current,
+    /// The last successful application predates the current stopped/runtime
+    /// state and must not be treated as active.
+    Stale,
+    /// Policy validation rejected the configuration before mutation.
+    Invalid,
+    /// The runtime or snapshot publication failed after an application attempt.
+    ApplyFailed,
 }
 
 /// One network's effective configuration after loading startup overrides.
@@ -1174,6 +1321,175 @@ mod tests {
     #[test]
     fn default_snapshot_has_no_invariant_violations() {
         assert!(NodeSnapshot::default().invariant_violations().is_empty());
+    }
+
+    fn routing_summary(
+        network_name: &str,
+        default_action: NodeRoutingDefaultAction,
+        effective_target: Option<NodeRoutingTargetSnapshot>,
+        status: NodeRoutingSummaryStatus,
+        problem: Option<NodeProblem>,
+    ) -> NodeRoutingSummarySnapshot {
+        let history = matches!(
+            status,
+            NodeRoutingSummaryStatus::Current | NodeRoutingSummaryStatus::Stale
+        );
+        NodeRoutingSummarySnapshot {
+            network_name: network_name.into(),
+            default_action,
+            effective_target,
+            enabled_rule_count: 2,
+            last_applied_revision: history.then_some(1),
+            last_applied_at_unix_ms: history.then_some(1_700_000_000_000),
+            status,
+            problem,
+        }
+    }
+
+    #[test]
+    fn routing_summary_variants_cover_every_default_action_and_target() {
+        let names = ["direct", "network", "exit", "reject"];
+        let snapshot = NodeSnapshot {
+            configuration: NodeConfigurationSnapshot {
+                networks: names.into_iter().map(configuration).collect(),
+            },
+            routing_summaries: vec![
+                routing_summary(
+                    "direct",
+                    NodeRoutingDefaultAction::Direct,
+                    None,
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+                routing_summary(
+                    "network",
+                    NodeRoutingDefaultAction::Network,
+                    Some(NodeRoutingTargetSnapshot::Network {
+                        network_name: "network".into(),
+                    }),
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+                routing_summary(
+                    "exit",
+                    NodeRoutingDefaultAction::Exit("peer-1".into()),
+                    Some(NodeRoutingTargetSnapshot::Exit {
+                        node_id: "peer-1".into(),
+                    }),
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+                routing_summary(
+                    "reject",
+                    NodeRoutingDefaultAction::Reject,
+                    None,
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        assert!(snapshot.invariant_violations().is_empty());
+    }
+
+    #[test]
+    fn routing_summary_reports_duplicates_unconfigured_and_missing_history() {
+        let problem = NodeProblem::new(NodeProblemCode::InvalidRequest, "invalid");
+        let snapshot = NodeSnapshot {
+            configuration: NodeConfigurationSnapshot {
+                networks: vec![configuration("home")],
+            },
+            routing_summaries: vec![
+                routing_summary(
+                    "home",
+                    NodeRoutingDefaultAction::Direct,
+                    None,
+                    NodeRoutingSummaryStatus::Current,
+                    Some(problem.clone()),
+                ),
+                routing_summary(
+                    "ghost",
+                    NodeRoutingDefaultAction::Direct,
+                    None,
+                    NodeRoutingSummaryStatus::Invalid,
+                    Some(problem.clone()),
+                ),
+                routing_summary(
+                    "home",
+                    NodeRoutingDefaultAction::Direct,
+                    None,
+                    NodeRoutingSummaryStatus::Stale,
+                    None,
+                ),
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        let violations = snapshot.invariant_violations();
+        assert!(violations.contains(&"duplicate_routing_summary:home".into()));
+        assert!(violations.contains(&"routing_summary_for_unconfigured_network:ghost".into()));
+        assert!(violations.contains(&"current_routing_summary_has_problem:home".into()));
+        assert!(violations.contains(&"blocked_routing_summary_missing_reason:home".into()));
+    }
+
+    #[test]
+    fn routing_summary_reports_target_mismatches_and_incomplete_history() {
+        let problem = NodeProblem::new(NodeProblemCode::Unavailable, "blocked");
+        let mut incomplete = routing_summary(
+            "direct",
+            NodeRoutingDefaultAction::Direct,
+            None,
+            NodeRoutingSummaryStatus::ApplyFailed,
+            Some(problem.clone()),
+        );
+        incomplete.last_applied_revision = Some(3);
+        let snapshot = NodeSnapshot {
+            configuration: NodeConfigurationSnapshot {
+                networks: vec![
+                    configuration("direct"),
+                    configuration("network"),
+                    configuration("exit"),
+                ],
+            },
+            routing_summaries: vec![
+                routing_summary(
+                    "direct",
+                    NodeRoutingDefaultAction::Direct,
+                    Some(NodeRoutingTargetSnapshot::Exit {
+                        node_id: "unexpected".into(),
+                    }),
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+                routing_summary(
+                    "network",
+                    NodeRoutingDefaultAction::Network,
+                    Some(NodeRoutingTargetSnapshot::Network {
+                        network_name: "other".into(),
+                    }),
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+                routing_summary(
+                    "exit",
+                    NodeRoutingDefaultAction::Exit("peer-1".into()),
+                    Some(NodeRoutingTargetSnapshot::Exit {
+                        node_id: "peer-2".into(),
+                    }),
+                    NodeRoutingSummaryStatus::Current,
+                    None,
+                ),
+                incomplete,
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        let violations = snapshot.invariant_violations();
+        assert!(violations.contains(&"routing_summary_unexpected_target:direct".into()));
+        assert!(violations.contains(&"routing_summary_network_target_mismatch:network".into()));
+        assert!(violations.contains(&"routing_summary_exit_target_mismatch:exit".into()));
+        assert!(violations.contains(&"incomplete_routing_summary_history:direct".into()));
     }
 
     #[test]

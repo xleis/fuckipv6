@@ -36,6 +36,10 @@ import type {
   NodeLogEntry,
   NodeNetworkSnapshot,
   NodePeerSnapshot,
+  NodeProblem,
+  NodeRoutingDefaultAction,
+  NodeRoutingSummarySnapshot,
+  NodeRoutingTargetSnapshot,
   NodeSnapshot,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -70,6 +74,38 @@ function statusTone(value: string): string {
   if (["degraded", "connecting", "starting", "stopping"].includes(value))
     return "warn";
   return "neutral";
+}
+
+function routingTone(status: NodeRoutingSummarySnapshot["status"]): string {
+  if (status === "current") return "good";
+  if (status === "stale") return "warn";
+  return "bad";
+}
+
+function routingActionLabel(
+  locale: Locale,
+  action: NodeRoutingDefaultAction,
+): string {
+  return label(locale, `routing.action.${action.kind}`);
+}
+
+function routingTargetLabel(
+  locale: Locale,
+  target: NodeRoutingTargetSnapshot | null | undefined,
+): string {
+  if (!target) return label(locale, "common.none");
+  return target.kind === "network"
+    ? tr(locale, "routing.target.network", { network: target.network_name })
+    : tr(locale, "routing.target.exit", { node: target.node_id });
+}
+
+function routingProblemLabel(
+  locale: Locale,
+  problem: NodeProblem | null | undefined,
+): string | null {
+  if (!problem) return null;
+  const localized = tr(locale, problem.message_key, problem.params ?? {});
+  return localized === problem.message_key ? problem.message : localized;
 }
 
 function NetworkContextMenu({
@@ -474,6 +510,8 @@ function NodeRuntime({
   snapshot,
   locale,
   selectedNetwork,
+  onSelectNetwork,
+  onNavigate,
   onRequestAction,
 }: PageContentProps) {
   const status = primaryStatus(snapshot, locale);
@@ -486,10 +524,7 @@ function NodeRuntime({
     const action = page.actions.find(
       (candidate) => candidate.id === requestedAction.id,
     );
-    if (
-      !action ||
-      executionBlockReason(action, snapshot, selectedNetwork)
-    ) {
+    if (!action || executionBlockReason(action, snapshot, selectedNetwork)) {
       return [];
     }
     return [{ action, primary: index === 0 }];
@@ -511,6 +546,7 @@ function NodeRuntime({
     : label(locale, "common.none");
   const interfaces = snapshot.interfaces ?? [];
   const interfaceProblems = snapshot.interface_problems ?? [];
+  const routingSummaries = snapshot.routing_summaries ?? [];
   const tunCapabilities = snapshot.tun_capabilities;
   const tunPlatform = tunCapabilities
     ? label(locale, `runtime.value.tun_platform.${tunCapabilities.platform}`)
@@ -660,17 +696,16 @@ function NodeRuntime({
           ? empty(label(locale, "runtime.empty.networks"))
           : snapshot.networks.map((network) => (
               <div className="compact-row" key={network.name}>
-                <CircleDot
-                  size={15}
-                  className={statusTone(network.status)}
-                />
+                <CircleDot size={15} className={statusTone(network.status)} />
                 <span>
                   <strong>{network.name}</strong>
                   <small>
                     {tr(locale, "runtime.row.network_detail", {
                       status: label(locale, `status.network.${network.status}`),
                       peers: network.peer_count,
-                      roles: network.roles.join(" · ") || label(locale, "common.none"),
+                      roles:
+                        network.roles.join(" · ") ||
+                        label(locale, "common.none"),
                     })}
                   </small>
                 </span>
@@ -688,7 +723,9 @@ function NodeRuntime({
           : interfaces.map((iface) => {
               const addresses = iface.addresses.length
                 ? iface.addresses
-                    .map((address) => `${address.address}/${address.prefix_len}`)
+                    .map(
+                      (address) => `${address.address}/${address.prefix_len}`,
+                    )
                     .join(", ")
                 : label(locale, "common.none");
               const defaults = tr(locale, "runtime.row.interface_defaults", {
@@ -707,18 +744,12 @@ function NodeRuntime({
                   data-interface-index={iface.index}
                   key={iface.name}
                 >
-                  <CircleDot
-                    size={15}
-                    className={statusTone(iface.status)}
-                  />
+                  <CircleDot size={15} className={statusTone(iface.status)} />
                   <span>
                     <strong>{iface.name}</strong>
                     <small>
                       {tr(locale, "runtime.row.interface_detail", {
-                        kind: label(
-                          locale,
-                          `interface.kind.${iface.kind}`,
-                        ),
+                        kind: label(locale, `interface.kind.${iface.kind}`),
                         ownership: label(
                           locale,
                           `interface.ownership.${iface.ownership}`,
@@ -733,6 +764,78 @@ function NodeRuntime({
                     </small>
                     <small>{defaults}</small>
                   </span>
+                </div>
+              );
+            })}
+      </section>
+
+      <section className="surface-card" data-testid="runtime-routing">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.routing")}</h3>
+          <span>{routingSummaries.length}</span>
+        </div>
+        {routingSummaries.length === 0
+          ? empty(label(locale, "runtime.empty.routing"))
+          : routingSummaries.map((summary) => {
+              const revision =
+                summary.last_applied_revision == null
+                  ? label(locale, "common.not_available")
+                  : String(summary.last_applied_revision);
+              const applied =
+                summary.last_applied_at_unix_ms == null
+                  ? label(locale, "common.not_available")
+                  : formatTimestamp(locale, summary.last_applied_at_unix_ms);
+              const problem =
+                summary.status === "current"
+                  ? null
+                  : routingProblemLabel(locale, summary.problem);
+              return (
+                <div
+                  className="compact-row"
+                  data-routing-network={summary.network_name}
+                  data-routing-status={summary.status}
+                  key={summary.network_name}
+                >
+                  <CircleDot
+                    size={15}
+                    className={routingTone(summary.status)}
+                  />
+                  <span>
+                    <strong>{summary.network_name}</strong>
+                    <small>
+                      {tr(locale, "runtime.routing_summary_detail", {
+                        status: label(
+                          locale,
+                          `routing.status.${summary.status}`,
+                        ),
+                        action: routingActionLabel(
+                          locale,
+                          summary.default_action,
+                        ),
+                        target: routingTargetLabel(
+                          locale,
+                          summary.effective_target,
+                        ),
+                        rules: formatInteger(
+                          locale,
+                          summary.enabled_rule_count,
+                        ),
+                        revision,
+                        applied,
+                      })}
+                    </small>
+                    {problem ? <small className="bad">{problem}</small> : null}
+                  </span>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => {
+                      onSelectNetwork(summary.network_name);
+                      onNavigate("routing");
+                    }}
+                  >
+                    {label(locale, "routing.manage")}
+                  </button>
                 </div>
               );
             })}
@@ -754,7 +857,10 @@ function NodeRuntime({
               problem.params ?? {},
             );
             return (
-              <div className="compact-row" key={`${problem.message_key}-${index}`}>
+              <div
+                className="compact-row"
+                key={`${problem.message_key}-${index}`}
+              >
                 <AlertTriangle size={15} className="bad" />
                 <span>
                   <strong>
@@ -782,10 +888,7 @@ function NodeRuntime({
           ? empty(label(locale, "runtime.empty.services"))
           : (snapshot.embedded_services ?? []).map((service) => (
               <div className="compact-row" key={service.network_name}>
-                <RadioTower
-                  size={15}
-                  className={statusTone(service.status)}
-                />
+                <RadioTower size={15} className={statusTone(service.status)} />
                 <span>
                   <strong>{service.network_name}</strong>
                   <small>
@@ -1284,7 +1387,10 @@ function SettingsSection({
   children: ReactNode;
 }) {
   return (
-    <section className="surface-card settings-section" data-settings-group={group}>
+    <section
+      className="surface-card settings-section"
+      data-settings-group={group}
+    >
       <div className="card-heading">
         <h3>{title}</h3>
         <Icon size={17} />
@@ -1321,8 +1427,9 @@ function Settings({
       : [
           tr(locale, "settings.platform_limitations.detail", {
             capabilities:
-              unsupportedCapabilities.join(label(locale, "common.list_separator")) ||
-              label(locale, "capability.exit"),
+              unsupportedCapabilities.join(
+                label(locale, "common.list_separator"),
+              ) || label(locale, "capability.exit"),
           }),
           unsupportedReasons.length
             ? tr(locale, "settings.platform_limitations.reasons", {
@@ -1353,203 +1460,210 @@ function Settings({
   return (
     <div className="settings-content">
       <div className="settings-grid">
-      <SettingsSection
-        group="owner-security"
-        title={label(locale, "settings.section.owner_security")}
-        icon={ShieldCheck}
-      >
-        <dl className="detail-list">
-          <div>
-            <dt>{label(locale, "settings.row.owner_identity")}</dt>
-            <dd>
-              {snapshot.identity?.display_name?.trim() ||
-                label(locale, "common.unknown")}
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.node_id")}</dt>
-            <dd>
-              <code>
-                {snapshot.identity?.node_id ??
-                  label(locale, "common.not_available")}
-              </code>
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.public_key_fingerprint")}</dt>
-            <dd>
-              <code>
-                {snapshot.identity?.public_key_fingerprint ??
-                  label(locale, "common.not_available")}
-              </code>
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.access_model")}</dt>
-            <dd>
-              {label(
-                locale,
-                `choice.access_model.${snapshot.permissions?.access_model ?? "trusted_control_plane"}`,
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.granted_permissions")}</dt>
-            <dd>{permissionText}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.web_authentication")}</dt>
-            <dd>{label(locale, "settings.web_session.detail")}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.owner_recovery")}</dt>
-            <dd>{label(locale, "settings.owner_recovery.detail")}</dd>
-          </div>
-        </dl>
-      </SettingsSection>
-
-      <SettingsSection
-        group="remote-access"
-        title={label(locale, "settings.section.remote_access")}
-        icon={Globe2}
-      >
-        <dl className="detail-list">
-          <div>
-            <dt>{label(locale, "settings.row.effective_ui")}</dt>
-            <dd>
-              {snapshot.ui_mode
-                ? label(locale, `choice.ui_mode.${snapshot.ui_mode.effective}`)
-                : label(locale, "common.unknown")}
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.display_environment")}</dt>
-            <dd>
-              {snapshot.ui_mode
-                ? label(
-                    locale,
-                    `choice.display_environment.${snapshot.ui_mode.display}`,
-                  )
-                : label(locale, "common.unknown")}
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.webui_configuration")}</dt>
-            <dd>{label(locale, "settings.webui_configuration.detail")}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.session_security")}</dt>
-            <dd>{label(locale, "settings.web_session.detail")}</dd>
-          </div>
-        </dl>
-      </SettingsSection>
-
-      <SettingsSection
-        group="services-updates"
-        title={label(locale, "settings.section.services_updates")}
-        icon={Server}
-      >
-        <dl className="detail-list">
-          {capabilities.length ? (
-            capabilities.map((capability) => (
-              <div key={capability.kind}>
-                <dt>{label(locale, `capability.${capability.kind}`)}</dt>
-                <dd>{label(locale, `status.capability.${capability.state}`)}</dd>
-              </div>
-            ))
-          ) : (
+        <SettingsSection
+          group="owner-security"
+          title={label(locale, "settings.section.owner_security")}
+          icon={ShieldCheck}
+        >
+          <dl className="detail-list">
             <div>
-              <dt>{label(locale, "settings.row.capabilities")}</dt>
-              <dd>{label(locale, "common.unknown")}</dd>
+              <dt>{label(locale, "settings.row.owner_identity")}</dt>
+              <dd>
+                {snapshot.identity?.display_name?.trim() ||
+                  label(locale, "common.unknown")}
+              </dd>
             </div>
-          )}
-          {embeddedServices.length ? (
-            embeddedServices.map((service) => (
-              <div key={service.network_name}>
-                <dt>{service.network_name}</dt>
-                <dd>
-                  {tr(locale, "gpui.embedded_service_detail", {
-                    status: label(locale, `status.service.${service.status}`),
-                    signal:
-                      service.signaling_addr ??
-                      label(locale, "common.not_available"),
-                    relay:
-                      service.relay_addr ?? label(locale, "common.not_available"),
-                  })}
-                </dd>
-              </div>
-            ))
-          ) : (
             <div>
-              <dt>{label(locale, "settings.row.embedded_services")}</dt>
-              <dd>{label(locale, "common.none")}</dd>
+              <dt>{label(locale, "settings.row.node_id")}</dt>
+              <dd>
+                <code>
+                  {snapshot.identity?.node_id ??
+                    label(locale, "common.not_available")}
+                </code>
+              </dd>
             </div>
-          )}
-          <div>
-            <dt>{label(locale, "settings.row.update_configuration")}</dt>
-            <dd>{label(locale, "settings.updates.detail")}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.platform_limitations")}</dt>
-            <dd>{platformLimitations}</dd>
-          </div>
-        </dl>
-      </SettingsSection>
+            <div>
+              <dt>{label(locale, "settings.row.public_key_fingerprint")}</dt>
+              <dd>
+                <code>
+                  {snapshot.identity?.public_key_fingerprint ??
+                    label(locale, "common.not_available")}
+                </code>
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.access_model")}</dt>
+              <dd>
+                {label(
+                  locale,
+                  `choice.access_model.${snapshot.permissions?.access_model ?? "trusted_control_plane"}`,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.granted_permissions")}</dt>
+              <dd>{permissionText}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.web_authentication")}</dt>
+              <dd>{label(locale, "settings.web_session.detail")}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.owner_recovery")}</dt>
+              <dd>{label(locale, "settings.owner_recovery.detail")}</dd>
+            </div>
+          </dl>
+        </SettingsSection>
 
-      <SettingsSection
-        group="discovery-index"
-        title={label(locale, "settings.section.discovery_index")}
-        icon={Wifi}
-      >
-        <dl className="detail-list">
-          <div>
-            <dt>{label(locale, "settings.row.discovery_roles")}</dt>
-            <dd>
-              {discoveryRoles || label(locale, "settings.discovery_roles.none")}
-            </dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.discovery_index")}</dt>
-            <dd>{label(locale, "settings.discovery_index.detail")}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.custom_discovery_index")}</dt>
-            <dd>{label(locale, "settings.custom_index.detail")}</dd>
-          </div>
-        </dl>
-      </SettingsSection>
+        <SettingsSection
+          group="remote-access"
+          title={label(locale, "settings.section.remote_access")}
+          icon={Globe2}
+        >
+          <dl className="detail-list">
+            <div>
+              <dt>{label(locale, "settings.row.effective_ui")}</dt>
+              <dd>
+                {snapshot.ui_mode
+                  ? label(
+                      locale,
+                      `choice.ui_mode.${snapshot.ui_mode.effective}`,
+                    )
+                  : label(locale, "common.unknown")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.display_environment")}</dt>
+              <dd>
+                {snapshot.ui_mode
+                  ? label(
+                      locale,
+                      `choice.display_environment.${snapshot.ui_mode.display}`,
+                    )
+                  : label(locale, "common.unknown")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.webui_configuration")}</dt>
+              <dd>{label(locale, "settings.webui_configuration.detail")}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.session_security")}</dt>
+              <dd>{label(locale, "settings.web_session.detail")}</dd>
+            </div>
+          </dl>
+        </SettingsSection>
 
-      <SettingsSection
-        group="data-recovery"
-        title={label(locale, "settings.section.data_recovery")}
-        icon={Database}
-      >
-        <dl className="detail-list">
-          <div>
-            <dt>{label(locale, "settings.row.snapshot_revision")}</dt>
-            <dd>{snapshot.revision}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.configured_networks")}</dt>
-            <dd>{snapshot.configuration?.networks.length ?? 0}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.recent_activity")}</dt>
-            <dd>{snapshot.recent_activity?.length ?? 0}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.backup_restore")}</dt>
-            <dd>{label(locale, "settings.backup.detail")}</dd>
-          </div>
-          <div>
-            <dt>{label(locale, "settings.row.write_mode")}</dt>
-            <dd>
-              {label(locale, "settings.value.read_only")} ·{" "}
-              {label(locale, "settings.read_only.detail")}
-            </dd>
-          </div>
-        </dl>
-      </SettingsSection>
+        <SettingsSection
+          group="services-updates"
+          title={label(locale, "settings.section.services_updates")}
+          icon={Server}
+        >
+          <dl className="detail-list">
+            {capabilities.length ? (
+              capabilities.map((capability) => (
+                <div key={capability.kind}>
+                  <dt>{label(locale, `capability.${capability.kind}`)}</dt>
+                  <dd>
+                    {label(locale, `status.capability.${capability.state}`)}
+                  </dd>
+                </div>
+              ))
+            ) : (
+              <div>
+                <dt>{label(locale, "settings.row.capabilities")}</dt>
+                <dd>{label(locale, "common.unknown")}</dd>
+              </div>
+            )}
+            {embeddedServices.length ? (
+              embeddedServices.map((service) => (
+                <div key={service.network_name}>
+                  <dt>{service.network_name}</dt>
+                  <dd>
+                    {tr(locale, "gpui.embedded_service_detail", {
+                      status: label(locale, `status.service.${service.status}`),
+                      signal:
+                        service.signaling_addr ??
+                        label(locale, "common.not_available"),
+                      relay:
+                        service.relay_addr ??
+                        label(locale, "common.not_available"),
+                    })}
+                  </dd>
+                </div>
+              ))
+            ) : (
+              <div>
+                <dt>{label(locale, "settings.row.embedded_services")}</dt>
+                <dd>{label(locale, "common.none")}</dd>
+              </div>
+            )}
+            <div>
+              <dt>{label(locale, "settings.row.update_configuration")}</dt>
+              <dd>{label(locale, "settings.updates.detail")}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.platform_limitations")}</dt>
+              <dd>{platformLimitations}</dd>
+            </div>
+          </dl>
+        </SettingsSection>
+
+        <SettingsSection
+          group="discovery-index"
+          title={label(locale, "settings.section.discovery_index")}
+          icon={Wifi}
+        >
+          <dl className="detail-list">
+            <div>
+              <dt>{label(locale, "settings.row.discovery_roles")}</dt>
+              <dd>
+                {discoveryRoles ||
+                  label(locale, "settings.discovery_roles.none")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.discovery_index")}</dt>
+              <dd>{label(locale, "settings.discovery_index.detail")}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.custom_discovery_index")}</dt>
+              <dd>{label(locale, "settings.custom_index.detail")}</dd>
+            </div>
+          </dl>
+        </SettingsSection>
+
+        <SettingsSection
+          group="data-recovery"
+          title={label(locale, "settings.section.data_recovery")}
+          icon={Database}
+        >
+          <dl className="detail-list">
+            <div>
+              <dt>{label(locale, "settings.row.snapshot_revision")}</dt>
+              <dd>{snapshot.revision}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.configured_networks")}</dt>
+              <dd>{snapshot.configuration?.networks.length ?? 0}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.recent_activity")}</dt>
+              <dd>{snapshot.recent_activity?.length ?? 0}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.backup_restore")}</dt>
+              <dd>{label(locale, "settings.backup.detail")}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.write_mode")}</dt>
+              <dd>
+                {label(locale, "settings.value.read_only")} ·{" "}
+                {label(locale, "settings.read_only.detail")}
+              </dd>
+            </div>
+          </dl>
+        </SettingsSection>
       </div>
 
       <section
@@ -1671,10 +1785,7 @@ export function PageContent(props: PageContentProps) {
   }
   const Icon = PAGE_ICONS[page.id] ?? CircleDot;
   return (
-    <section
-      className="page-content"
-      aria-labelledby="page-title"
-    >
+    <section className="page-content" aria-labelledby="page-title">
       <header className="page-heading">
         <div className="page-heading-icon">
           <Icon size={20} />

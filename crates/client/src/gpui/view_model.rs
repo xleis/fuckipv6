@@ -11,7 +11,8 @@ use crate::node::{
     NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
     NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
     NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeRollbackConfigurationCommand, NodeRoutingMode, NodeSetNetworkRoleCommand, NodeSnapshot,
+    NodeRollbackConfigurationCommand, NodeRoutingDefaultAction, NodeRoutingMode,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetNetworkRoleCommand, NodeSnapshot,
     NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
     NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
@@ -238,6 +239,17 @@ pub struct MetricModel {
 pub struct RowModel {
     pub title: String,
     pub detail: String,
+    pub navigation: Option<RowNavigation>,
+}
+
+/// A typed navigation destination attached to an authoritative summary row.
+/// It intentionally carries the object identity so the destination opens the
+/// matching object rather than a generic editor with stale context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowNavigation {
+    pub page_id: String,
+    pub network_name: Option<String>,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1305,6 +1317,25 @@ fn row(title: impl Into<String>, detail: impl Into<String>) -> RowModel {
     RowModel {
         title: title.into(),
         detail: detail.into(),
+        navigation: None,
+    }
+}
+
+fn row_with_navigation(
+    title: impl Into<String>,
+    detail: impl Into<String>,
+    page_id: impl Into<String>,
+    network_name: impl Into<String>,
+    label: impl Into<String>,
+) -> RowModel {
+    RowModel {
+        title: title.into(),
+        detail: detail.into(),
+        navigation: Some(RowNavigation {
+            page_id: page_id.into(),
+            network_name: Some(network_name.into()),
+            label: label.into(),
+        }),
     }
 }
 
@@ -1645,6 +1676,47 @@ fn project_peers(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
     )
 }
 
+fn routing_status_key(status: NodeRoutingSummaryStatus) -> &'static str {
+    match status {
+        NodeRoutingSummaryStatus::Current => "routing.status.current",
+        NodeRoutingSummaryStatus::Stale => "routing.status.stale",
+        NodeRoutingSummaryStatus::Invalid => "routing.status.invalid",
+        NodeRoutingSummaryStatus::ApplyFailed => "routing.status.apply_failed",
+    }
+}
+
+fn routing_default_action_key(action: &NodeRoutingDefaultAction) -> &'static str {
+    match action {
+        NodeRoutingDefaultAction::Direct => "routing.action.direct",
+        NodeRoutingDefaultAction::Network => "routing.action.network",
+        NodeRoutingDefaultAction::Exit(_) => "routing.action.exit",
+        NodeRoutingDefaultAction::Reject => "routing.action.reject",
+    }
+}
+
+fn routing_target_label(target: &Option<NodeRoutingTargetSnapshot>, locale: Locale) -> String {
+    match target {
+        Some(NodeRoutingTargetSnapshot::Network { network_name }) => tr(
+            locale,
+            "routing.target.network",
+            &[("network", network_name)],
+        ),
+        Some(NodeRoutingTargetSnapshot::Exit { node_id }) => {
+            tr(locale, "routing.target.exit", &[("node", node_id)])
+        }
+        None => t(locale, "common.none").to_string(),
+    }
+}
+
+fn routing_timestamp_label(unix_ms: Option<u64>, locale: Locale) -> String {
+    unix_ms
+        .and_then(|timestamp| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp as i64)
+        })
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| t(locale, "common.not_available").to_string())
+}
+
 fn project_node_runtime(
     snapshot: &NodeSnapshot,
     locale: Locale,
@@ -1783,6 +1855,57 @@ fn project_node_runtime(
             )
         })
         .collect::<Vec<_>>();
+    let routing_summary_rows = snapshot
+        .routing_summaries
+        .iter()
+        .map(|summary| {
+            let revision = summary
+                .last_applied_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            let applied = routing_timestamp_label(summary.last_applied_at_unix_ms, locale);
+            let target = routing_target_label(&summary.effective_target, locale);
+            let mut detail = tr(
+                locale,
+                "runtime.routing_summary_detail",
+                &[
+                    ("status", t(locale, routing_status_key(summary.status))),
+                    (
+                        "action",
+                        t(locale, routing_default_action_key(&summary.default_action)),
+                    ),
+                    ("target", &target),
+                    ("rules", &summary.enabled_rule_count.to_string()),
+                    ("revision", &revision),
+                    ("applied", &applied),
+                ],
+            );
+            if summary.status != NodeRoutingSummaryStatus::Current {
+                if let Some(problem) = &summary.problem {
+                    let params = problem
+                        .params
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str()))
+                        .collect::<Vec<_>>();
+                    let localized = tr(locale, &problem.message_key, &params);
+                    let reason = if localized == problem.message_key {
+                        problem.message.clone()
+                    } else {
+                        localized
+                    };
+                    detail.push_str(" · ");
+                    detail.push_str(&reason);
+                }
+            }
+            row_with_navigation(
+                summary.network_name.clone(),
+                detail,
+                "routing",
+                summary.network_name.clone(),
+                t(locale, "routing.manage"),
+            )
+        })
+        .collect::<Vec<_>>();
     let service_rows = snapshot
         .embedded_services
         .iter()
@@ -1915,11 +2038,6 @@ fn project_node_runtime(
                     t(locale, "runtime.empty.interfaces"),
                     interface_rows,
                 ),
-                section(
-                    t(locale, "runtime.section.services"),
-                    t(locale, "runtime.empty.services"),
-                    service_rows,
-                ),
             ];
             if !interface_problem_rows.is_empty() {
                 sections.push(section(
@@ -1928,6 +2046,16 @@ fn project_node_runtime(
                     interface_problem_rows,
                 ));
             }
+            sections.push(section(
+                t(locale, "runtime.section.routing"),
+                t(locale, "runtime.empty.routing"),
+                routing_summary_rows,
+            ));
+            sections.push(section(
+                t(locale, "runtime.section.services"),
+                t(locale, "runtime.empty.services"),
+                service_rows,
+            ));
             sections
         },
     )
@@ -3131,10 +3259,35 @@ mod tests {
     use crate::node::{
         node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeIdentitySnapshot, NodeInterfaceAddress,
         NodeInterfaceSnapshot, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot,
-        NodeProblem, NodeProblemCode, NodeTrafficSnapshot, NodeUiField, NodeUiValidation,
+        NodeProblem, NodeProblemCode, NodeRoutingDefaultAction, NodeRoutingSummarySnapshot,
+        NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeTrafficSnapshot, NodeUiField,
+        NodeUiValidation,
     };
     use fuckipv6_common::domain::{ActivityEntry, AuditId, AuditOutcome, NodeId};
     use std::collections::BTreeMap;
+
+    fn routing_summary(
+        network_name: &str,
+        default_action: NodeRoutingDefaultAction,
+        effective_target: Option<NodeRoutingTargetSnapshot>,
+        status: NodeRoutingSummaryStatus,
+        problem_key: Option<&str>,
+    ) -> NodeRoutingSummarySnapshot {
+        NodeRoutingSummarySnapshot {
+            network_name: network_name.into(),
+            default_action,
+            effective_target,
+            enabled_rule_count: 3,
+            last_applied_revision: Some(7),
+            last_applied_at_unix_ms: Some(1_700_000_000_000),
+            status,
+            problem: problem_key.map(|key| {
+                NodeProblem::new(NodeProblemCode::Unavailable, format!("raw {key}"))
+                    .for_network(network_name)
+                    .with_message_key(key)
+            }),
+        }
+    }
 
     fn populated_snapshot() -> NodeSnapshot {
         let mut snapshot = NodeSnapshot::default();
@@ -3209,6 +3362,97 @@ mod tests {
                 identity_configured: true,
             });
         snapshot
+    }
+
+    #[test]
+    fn node_runtime_projects_authoritative_routing_summaries_and_navigation() {
+        let mut snapshot = NodeSnapshot::default();
+        snapshot.lifecycle.phase = NodePhase::Running;
+        snapshot.routing_summaries = vec![
+            routing_summary(
+                "direct",
+                NodeRoutingDefaultAction::Direct,
+                None,
+                NodeRoutingSummaryStatus::Current,
+                None,
+            ),
+            routing_summary(
+                "network",
+                NodeRoutingDefaultAction::Network,
+                Some(NodeRoutingTargetSnapshot::Network {
+                    network_name: "network".into(),
+                }),
+                NodeRoutingSummaryStatus::Stale,
+                Some("runtime.routing.problem.stopped"),
+            ),
+            routing_summary(
+                "exit",
+                NodeRoutingDefaultAction::Exit("peer-1".into()),
+                Some(NodeRoutingTargetSnapshot::Exit {
+                    node_id: "peer-1".into(),
+                }),
+                NodeRoutingSummaryStatus::Invalid,
+                Some("runtime.routing.problem.invalid"),
+            ),
+            routing_summary(
+                "reject",
+                NodeRoutingDefaultAction::Reject,
+                None,
+                NodeRoutingSummaryStatus::ApplyFailed,
+                Some("runtime.routing.problem.rollback_failed"),
+            ),
+        ];
+        let manifest = node_ui_manifest();
+        let model = build_page_model(&manifest, &snapshot, "node_runtime", Locale::En)
+            .expect("node runtime model");
+        let section = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "runtime.section.routing"))
+            .expect("routing summary section");
+
+        assert_eq!(section.rows.len(), 4);
+        assert!(section.rows[0]
+            .detail
+            .contains(t(Locale::En, "routing.action.direct")));
+        assert!(section.rows[0]
+            .detail
+            .contains(t(Locale::En, "routing.status.current")));
+        assert!(section.rows[1]
+            .detail
+            .contains(t(Locale::En, "routing.action.network")));
+        assert!(section.rows[1].detail.contains("network"));
+        assert!(section.rows[1]
+            .detail
+            .contains(t(Locale::En, "routing.status.stale")));
+        assert!(section.rows[1]
+            .detail
+            .contains(t(Locale::En, "runtime.routing.problem.stopped")));
+        assert!(section.rows[2]
+            .detail
+            .contains(t(Locale::En, "routing.action.exit")));
+        assert!(section.rows[2].detail.contains("peer-1"));
+        assert!(section.rows[2]
+            .detail
+            .contains(t(Locale::En, "routing.status.invalid")));
+        assert!(section.rows[3]
+            .detail
+            .contains(t(Locale::En, "routing.action.reject")));
+        assert!(section.rows[3]
+            .detail
+            .contains(t(Locale::En, "routing.status.apply_failed")));
+        assert!(section.rows[3]
+            .detail
+            .contains(t(Locale::En, "runtime.routing.problem.rollback_failed")));
+        for row in &section.rows {
+            assert!(row.detail.contains('3'));
+            assert!(row.detail.contains("7"));
+            assert!(row.detail.contains("2023-11-14 22:13:20 UTC"));
+            let navigation = row.navigation.as_ref().expect("typed route navigation");
+            assert_eq!(navigation.page_id, "routing");
+            assert_eq!(navigation.network_name.as_deref(), Some(row.title.as_str()));
+            assert_eq!(navigation.label, t(Locale::En, "routing.manage"));
+        }
     }
 
     #[test]
@@ -3697,15 +3941,14 @@ mod tests {
         assert_eq!(overview.activity[0].occurred_at_unix_ms, 6_000);
         assert_eq!(overview.activity[4].occurred_at_unix_ms, 2_000);
         assert_eq!(overview.activity[0].command.as_deref(), Some("command-6"));
-        assert!(overview
-            .activity
-            .iter()
-            .all(|activity| !activity.detail.contains("raw-summary")
+        assert!(overview.activity.iter().all(|activity| {
+            !activity.detail.contains("raw-summary")
                 && !activity.detail.contains("secret-")
                 && activity
                     .command
                     .as_deref()
-                    .is_none_or(|command| !command.contains("secret-"))));
+                    .is_none_or(|command| !command.contains("secret-"))
+        }));
     }
 
     #[test]

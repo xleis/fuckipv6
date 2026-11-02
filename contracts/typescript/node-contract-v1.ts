@@ -780,7 +780,39 @@ export type NodeRollbackConfigurationCommand = {
   "target_revision": number;
 };
 
+export type NodeRoutingDefaultAction = {
+  "kind": "direct";
+} | {
+  "kind": "network";
+} | {
+  "kind": "exit";
+  "value": string;
+} | {
+  "kind": "reject";
+};
+
 export type NodeRoutingMode = "mesh_only" | "bypass_mainland" | "global_proxy";
+
+export type NodeRoutingSummarySnapshot = {
+  "default_action": NodeRoutingDefaultAction;
+  "effective_target"?: NodeRoutingTargetSnapshot | null;
+  "enabled_rule_count": number;
+  "last_applied_at_unix_ms"?: number | null;
+  "last_applied_revision"?: number | null;
+  "network_name": string;
+  "problem"?: NodeProblem | null;
+  "status": NodeRoutingSummaryStatus;
+};
+
+export type NodeRoutingSummaryStatus = "current" | "stale" | "invalid" | "apply_failed";
+
+export type NodeRoutingTargetSnapshot = {
+  "kind": "network";
+  "network_name": string;
+} | {
+  "kind": "exit";
+  "node_id": string;
+};
 
 export type NodeRuntimeResidueSnapshot = {
   "cleanup_steps": Array<NodeCleanupStepSnapshot>;
@@ -816,6 +848,7 @@ export type NodeSnapshot = {
   "permissions"?: NodePermissionSnapshot;
   "recent_activity"?: Array<ActivityEntry>;
   "revision": number;
+  "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
   "tun_capabilities"?: TunCapabilities;
   "ui_mode"?: UiModeResolution | null;
 };

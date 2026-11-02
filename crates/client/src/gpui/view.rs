@@ -32,7 +32,7 @@ use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values, network_status_key,
     search_node_snapshot, validate_manifest_bindings, ActionBinding, OverviewModel, PageKind,
-    RowModel, SearchResult, SectionModel,
+    RowModel, RowNavigation, SearchResult, SectionModel,
 };
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
@@ -1498,9 +1498,8 @@ impl GpuiShell {
                         )
                         .w_full()
                         .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.selected_network = Some(network_name.clone());
                             shell.network_menu_open = false;
-                            shell.fill_empty_network_fields();
+                            shell.select_network_context(network_name.clone(), cx);
                             cx.notify();
                         }))
                     })),
@@ -1993,6 +1992,71 @@ impl GpuiShell {
         cx.notify();
     }
 
+    fn select_network_context(&mut self, network_name: String, cx: &mut Context<Self>) {
+        self.selected_network = Some(network_name.clone());
+        if let Some(manifest) = &self.manifest {
+            let network_fields = manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .flat_map(|action| {
+                    action
+                        .fields
+                        .iter()
+                        .filter(|field| {
+                            field.input == NodeUiInputKind::NetworkName || field.id == "networks"
+                        })
+                        .map(|field| self.field_key(&action.id, &field.id))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            for key in network_fields {
+                self.form_values.insert(key, network_name.clone());
+            }
+        }
+        self.fill_empty_network_fields();
+        self.sync_text_inputs(cx);
+    }
+
+    fn navigate_to_row(&mut self, navigation: &RowNavigation, cx: &mut Context<Self>) {
+        let page_exists = self.manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .pages
+                .iter()
+                .any(|page| page.id == navigation.page_id)
+        });
+        if !page_exists {
+            return;
+        }
+
+        self.selected_page = navigation.page_id.clone();
+        if let Some(network_name) = navigation.network_name.clone() {
+            let network_exists = self
+                .snapshot
+                .configuration
+                .networks
+                .iter()
+                .any(|network| network.network_name == network_name)
+                || self
+                    .snapshot
+                    .networks
+                    .iter()
+                    .any(|network| network.name == network_name);
+            if network_exists {
+                self.select_network_context(network_name, cx);
+            }
+        }
+
+        self.pending_confirmation = None;
+        self.language_menu_open = false;
+        self.network_menu_open = false;
+        self.search_query.clear();
+        if let Some(input) = &self.search_input {
+            input.update(cx, |input, cx| input.set_value("", cx));
+        }
+        cx.notify();
+    }
+
     fn search_results(&self) -> Vec<SearchResult> {
         let Some(manifest) = self.manifest.as_ref() else {
             return Vec::new();
@@ -2030,9 +2094,7 @@ impl GpuiShell {
                 .iter()
                 .any(|network| network.name == network_name)
             {
-                self.selected_network = Some(network_name);
-                self.fill_empty_network_fields();
-                self.sync_text_inputs(cx);
+                self.select_network_context(network_name, cx);
             }
         }
         self.pending_confirmation = None;
@@ -3928,13 +3990,12 @@ impl GpuiShell {
                 ),
             );
         }
-        content = content.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .children(model.sections.iter().map(section_card)),
-        );
+        let section_cards = model
+            .sections
+            .iter()
+            .map(|section| self.section_card(section, cx))
+            .collect::<Vec<_>>();
+        content = content.child(div().flex().flex_col().gap_4().children(section_cards));
         let has_configuration_actions = selected_page.is_some_and(|page| {
             page.actions
                 .iter()
@@ -4621,55 +4682,82 @@ fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
     }
 }
 
-fn section_card(section: &SectionModel) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_4()
-        .rounded_lg()
-        .bg(rgba(COLOR_PANEL))
-        .border_1()
-        .border_color(rgba(COLOR_BORDER))
-        .child(
-            div()
-                .text_base()
-                .text_color(rgba(COLOR_TEXT))
-                .child(section.title.clone()),
-        )
-        .children(if section.rows.is_empty() {
+impl GpuiShell {
+    fn section_card(&self, section: &SectionModel, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows = if section.rows.is_empty() {
             vec![div()
                 .text_sm()
                 .text_color(rgba(COLOR_MUTED))
                 .child(section.empty_text.clone())
                 .into_any_element()]
         } else {
-            section.rows.iter().map(row_card).collect()
-        })
-        .into_any_element()
-}
+            section
+                .rows
+                .iter()
+                .map(|row| self.row_card(row, cx))
+                .collect()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .text_base()
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(section.title.clone()),
+            )
+            .children(rows)
+            .into_any_element()
+    }
 
-fn row_card(row: &RowModel) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .rounded_md()
-        .bg(rgba(COLOR_PANEL_RAISED))
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgba(COLOR_TEXT))
-                .child(row.title.clone()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgba(COLOR_MUTED))
-                .child(row.detail.clone()),
-        )
-        .into_any_element()
+    fn row_card(&self, row: &RowModel, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(row.title.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(row.detail.clone()),
+            );
+
+        if let Some(navigation) = row.navigation.clone() {
+            let identity = navigation
+                .network_name
+                .as_deref()
+                .unwrap_or(navigation.page_id.as_str())
+                .to_string();
+            card = card.child(
+                button(
+                    SharedString::from(format!("row-navigation-{}-{identity}", navigation.page_id)),
+                    navigation.label.clone(),
+                    ButtonVariant::Secondary,
+                    false,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.navigate_to_row(&navigation, cx);
+                })),
+            );
+        }
+
+        card.into_any_element()
+    }
 }
 
 fn action_label(locale: Locale, id: &str) -> String {
@@ -5326,6 +5414,35 @@ mod tests {
                     .expect("peer search result");
                 shell.navigate_to_search_result(peer, window, cx);
                 assert_eq!(shell.selected_page, "peers");
+                assert_eq!(shell.selected_network.as_deref(), Some("home"));
+                assert!(shell.search_query.is_empty());
+            })
+            .expect("update shell");
+    }
+
+    #[gpui::test]
+    fn routing_summary_navigation_selects_network_and_opens_routing_page(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let window = open_shell_window(cx, 1280.0, WINDOW_HEIGHT);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.selected_page = "node_runtime".into();
+                shell.selected_network = Some("studio".into());
+                shell.search_query = "stale search".into();
+
+                shell.navigate_to_row(
+                    &RowNavigation {
+                        page_id: "routing".into(),
+                        network_name: Some("home".into()),
+                        label: t(Locale::En, "routing.manage").to_string(),
+                    },
+                    cx,
+                );
+
+                assert_eq!(shell.selected_page, "routing");
                 assert_eq!(shell.selected_network.as_deref(), Some("home"));
                 assert!(shell.search_query.is_empty());
             })

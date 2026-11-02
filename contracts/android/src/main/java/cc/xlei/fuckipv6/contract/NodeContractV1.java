@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -838,6 +838,32 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeRoutingMode wire value: " + value);
+        }
+    }
+
+    public enum NodeRoutingSummaryStatus {
+        CURRENT("current"),
+        STALE("stale"),
+        INVALID("invalid"),
+        APPLY_FAILED("apply_failed");
+
+        private final String wireName;
+
+        NodeRoutingSummaryStatus(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeRoutingSummaryStatus fromWireName(String value) {
+            for (NodeRoutingSummaryStatus candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeRoutingSummaryStatus wire value: " + value);
         }
     }
 
@@ -2211,6 +2237,29 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeRoutingSummarySnapshot. */
+    public static final class NodeRoutingSummarySnapshot {
+        public final NodeRoutingDefaultAction default_action;
+        public final NodeRoutingTargetSnapshot effective_target;
+        public final Long enabled_rule_count;
+        public final Long last_applied_at_unix_ms;
+        public final Long last_applied_revision;
+        public final String network_name;
+        public final NodeProblem problem;
+        public final String status;
+
+        public NodeRoutingSummarySnapshot(NodeRoutingDefaultAction default_action, NodeRoutingTargetSnapshot effective_target, Long enabled_rule_count, Long last_applied_at_unix_ms, Long last_applied_revision, String network_name, NodeProblem problem, String status) {
+            this.default_action = default_action;
+            this.effective_target = effective_target;
+            this.enabled_rule_count = enabled_rule_count;
+            this.last_applied_at_unix_ms = last_applied_at_unix_ms;
+            this.last_applied_revision = last_applied_revision;
+            this.network_name = network_name;
+            this.problem = problem;
+            this.status = status;
+        }
+    }
+
     /** DTO for NodeRuntimeResidueSnapshot. */
     public static final class NodeRuntimeResidueSnapshot {
         public final List<NodeCleanupStepSnapshot> cleanup_steps;
@@ -2265,10 +2314,11 @@ public final class NodeContractV1 {
         public final NodePermissionSnapshot permissions;
         public final List<ActivityEntry> recent_activity;
         public final Long revision;
+        public final List<NodeRoutingSummarySnapshot> routing_summaries;
         public final TunCapabilities tun_capabilities;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
             this.configuration = configuration;
             this.control_health = control_health;
@@ -2285,6 +2335,7 @@ public final class NodeContractV1 {
             this.permissions = permissions;
             this.recent_activity = recent_activity;
             this.revision = revision;
+            this.routing_summaries = routing_summaries;
             this.tun_capabilities = tun_capabilities;
             this.ui_mode = ui_mode;
         }
@@ -3293,6 +3344,69 @@ public final class NodeContractV1 {
             public Named(List<String> named) {
                 super("named");
                 this.named = named;
+            }
+        }
+    }
+
+    /** Tagged union DTO for NodeRoutingDefaultAction. */
+    public abstract static class NodeRoutingDefaultAction {
+        public final String kind;
+
+        private NodeRoutingDefaultAction(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class Direct extends NodeRoutingDefaultAction {
+            public Direct() {
+                super("direct");
+            }
+        }
+
+        public static final class Network extends NodeRoutingDefaultAction {
+            public Network() {
+                super("network");
+            }
+        }
+
+        public static final class Exit extends NodeRoutingDefaultAction {
+            public final String value;
+
+            public Exit(String value) {
+                super("exit");
+                this.value = value;
+            }
+        }
+
+        public static final class Reject extends NodeRoutingDefaultAction {
+            public Reject() {
+                super("reject");
+            }
+        }
+    }
+
+    /** Tagged union DTO for NodeRoutingTargetSnapshot. */
+    public abstract static class NodeRoutingTargetSnapshot {
+        public final String kind;
+
+        private NodeRoutingTargetSnapshot(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class Network extends NodeRoutingTargetSnapshot {
+            public final String network_name;
+
+            public Network(String network_name) {
+                super("network");
+                this.network_name = network_name;
+            }
+        }
+
+        public static final class Exit extends NodeRoutingTargetSnapshot {
+            public final String node_id;
+
+            public Exit(String node_id) {
+                super("exit");
+                this.node_id = node_id;
             }
         }
     }

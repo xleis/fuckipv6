@@ -7,10 +7,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fuckipv6_client::local_ipc::{self, LocalCommand, LocalEndpoint, LocalRequest, LocalResponse};
+use fuckipv6_client::node::{NodeCommand, NodeCommandRequest, NodeOperationSnapshot, NodePhase};
 use fuckipv6_client::ui::DisplayEnvironment;
+use fuckipv6_common::domain::{IdempotencyKey, OperationState};
 
 struct ProcessGuard {
     child: Child,
+    runtime_dir: PathBuf,
 }
 
 impl ProcessGuard {
@@ -25,7 +28,35 @@ impl Drop for ProcessGuard {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        cleanup_test_runtime(&self.runtime_dir);
     }
+}
+
+fn cleanup_test_runtime(runtime_dir: &Path) {
+    // Headless UI deliberately detaches control into its own process group.
+    // Kill by the runtime directory recorded in each process environment so a
+    // failed assertion cannot leak the detached control/node pair.
+    for lock_name in ["node.lock", "control.lock"] {
+        let Ok(pid) = read_pid(&runtime_dir.join(lock_name)) else {
+            continue;
+        };
+        if process_uses_runtime(pid, runtime_dir) {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(pid.to_string())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+fn process_uses_runtime(pid: u32, runtime_dir: &Path) -> bool {
+    let expected = format!("FUCKIPV6_RUNTIME_DIR={}", runtime_dir.display());
+    std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environment| {
+        environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == expected.as_bytes())
+    })
 }
 
 fn temp_dir(label: &str) -> Result<PathBuf> {
@@ -100,6 +131,21 @@ async fn wait_until_ready(endpoint: &LocalEndpoint) -> Result<()> {
     anyhow::bail!("控制面未在期限内提供节点快照")
 }
 
+async fn wait_for_terminal_operation(
+    endpoint: &LocalEndpoint,
+    operation_id: &str,
+) -> Result<NodeOperationSnapshot> {
+    for _ in 0..600 {
+        let operation =
+            local_ipc::lookup_operation(endpoint, local_ipc::IpcRole::WebUi, operation_id).await?;
+        if operation.operation.state.is_terminal() {
+            return Ok(operation);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("operation {operation_id} 未在期限内进入终态")
+}
+
 async fn wait_for_exit(child: &mut ProcessGuard) -> Result<std::process::ExitStatus> {
     for _ in 0..150 {
         if let Some(status) = child.try_wait()? {
@@ -121,6 +167,7 @@ fn spawn_control(directory: &Path) -> Result<ProcessGuard> {
             )
             .spawn()
             .context("无法启动 __control 集成测试进程")?,
+        runtime_dir: directory.join("runtime"),
     })
 }
 
@@ -133,6 +180,7 @@ fn spawn_headless_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
             .arg(port.to_string())
             .spawn()
             .context("无法启动无头 WebUI 集成测试进程")?,
+        runtime_dir: directory.join("runtime"),
     })
 }
 
@@ -156,6 +204,7 @@ fn spawn_service(directory: &Path, port: u16) -> Result<ProcessGuard> {
             .arg(&config_dir)
             .spawn()
             .context("无法启动 __service 集成测试进程")?,
+        runtime_dir: directory.join("runtime"),
     })
 }
 
@@ -167,6 +216,7 @@ fn spawn_headless_up_ui(directory: &Path, port: u16) -> Result<ProcessGuard> {
             .arg(port.to_string())
             .spawn()
             .context("无法启动无头命令 UI 集成测试进程")?,
+        runtime_dir: directory.join("runtime"),
     })
 }
 
@@ -407,6 +457,83 @@ async fn closing_headless_webui_does_not_stop_the_node() -> Result<()> {
     send_signal(control_pid, "TERM")?;
     wait_for_process_exit(control_pid).await?;
     wait_for_process_exit(node_pid).await?;
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_data_plane_keeps_control_and_webui_available() -> Result<()> {
+    if skip_webui_lifetime_test_on_desktop("stopping_data_plane_keeps_control_and_webui_available")
+    {
+        return Ok(());
+    }
+    let directory = temp_dir("data-plane-stop")?;
+    let runtime_dir = directory.join("runtime");
+    let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+
+    let mut ui = spawn_headless_ui(&directory, port)?;
+    wait_until_ready(&node_endpoint).await?;
+    wait_for_webui(port).await?;
+
+    let control_pid = read_pid(&runtime_dir.join("control.lock"))?;
+    let node_pid = read_pid(&runtime_dir.join("node.lock"))?;
+    assert_ne!(
+        control_pid, node_pid,
+        "control and node must be distinct processes"
+    );
+
+    let submitted = local_ipc::submit_operation(
+        &node_endpoint,
+        local_ipc::IpcRole::WebUi,
+        NodeCommandRequest::new(20, NodeCommand::StopNode),
+        IdempotencyKey::from_public_key(b"w7-01-stop-data-plane"),
+        "w7-01-integration-test".into(),
+    )
+    .await?;
+    let terminal =
+        wait_for_terminal_operation(&node_endpoint, submitted.operation.operation_id.as_str())
+            .await?;
+    assert_eq!(
+        terminal.operation.state,
+        OperationState::Succeeded,
+        "StopNode operation failed: {terminal:?}"
+    );
+
+    let response = local_ipc::request(
+        &node_endpoint,
+        local_ipc::IpcRole::WebUi,
+        &LocalRequest {
+            request_id: 21,
+            command: LocalCommand::Snapshot,
+        },
+    )
+    .await?;
+    let LocalResponse::Snapshot { snapshot, .. } = response else {
+        anyhow::bail!("停止数据面后未返回节点快照: {response:?}");
+    };
+    assert_eq!(snapshot.lifecycle.phase, NodePhase::Stopped);
+    assert_eq!(snapshot.lifecycle.active_networks, 0);
+
+    assert!(ui.try_wait()?.is_none(), "停止数据面后退出了 WebUI");
+    assert!(process_alive(control_pid), "停止数据面后退出了 control");
+    assert!(process_alive(node_pid), "停止数据面后退出了 node IPC 进程");
+    assert_eq!(
+        read_pid(&runtime_dir.join("node.lock"))?,
+        node_pid,
+        "停止数据面后重启了 node IPC 进程"
+    );
+    wait_for_webui(port).await?;
+
+    send_signal(control_pid, "TERM")?;
+    wait_for_process_exit(control_pid).await?;
+    wait_for_process_exit(node_pid).await?;
+    let ui_pid = ui.child.id();
+    send_signal(ui_pid, "TERM")?;
+    let status = wait_for_exit(&mut ui).await?;
+    assert!(status.success(), "headless WebUI exited with {status}");
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }
@@ -676,6 +803,68 @@ async fn stopped_node_is_force_killed_by_control_without_manual_cleanup() -> Res
     assert!(
         !endpoint_path(&node_endpoint).exists(),
         "stale node IPC endpoint was not removed"
+    );
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_restart_replaces_stale_runtime_without_manual_cleanup() -> Result<()> {
+    let directory = temp_dir("cold-restart")?;
+    let runtime_dir = directory.join("runtime");
+    let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
+    let control_lock = runtime_dir.join("control.lock");
+    let node_lock = runtime_dir.join("node.lock");
+
+    let mut first_control = spawn_control(&directory)?;
+    wait_until_ready(&node_endpoint).await?;
+    let old_control_pid = first_control.child.id();
+    let old_node_pid = read_pid(&node_lock)?;
+
+    // Freeze both processes before killing them so control cannot restart the
+    // node between the two signals. SIGKILL leaves the Unix socket and lock
+    // files behind, matching the process state seen after an abrupt reboot.
+    send_signal(old_control_pid, "STOP")?;
+    send_signal(old_node_pid, "STOP")?;
+    send_signal(old_control_pid, "KILL")?;
+    send_signal(old_node_pid, "KILL")?;
+    wait_for_exit(&mut first_control).await?;
+    wait_for_process_exit(old_node_pid).await?;
+    assert!(
+        endpoint_path(&node_endpoint).exists(),
+        "SIGKILL did not leave the expected stale node socket"
+    );
+
+    let mut replacement_control = spawn_control(&directory)?;
+    let new_control_pid = replacement_control.child.id();
+    let new_node_pid = wait_for_new_pid(&node_lock, old_node_pid).await?;
+    wait_until_ready(&node_endpoint).await?;
+    wait_for_pid(&control_lock, new_control_pid).await?;
+
+    assert_ne!(new_control_pid, old_control_pid);
+    assert_ne!(new_node_pid, old_node_pid);
+    assert!(process_alive(new_control_pid));
+    assert!(process_alive(new_node_pid));
+    assert!(matches!(
+        local_ipc::request(
+            &node_endpoint,
+            local_ipc::IpcRole::Control,
+            &LocalRequest {
+                request_id: 30,
+                command: LocalCommand::Snapshot,
+            },
+        )
+        .await?,
+        LocalResponse::Snapshot { .. }
+    ));
+
+    send_signal(new_control_pid, "TERM")?;
+    let status = wait_for_exit(&mut replacement_control).await?;
+    assert!(status.success(), "replacement control exited with {status}");
+    wait_for_process_exit(new_node_pid).await?;
+    assert!(
+        !endpoint_path(&node_endpoint).exists(),
+        "replacement runtime left its node IPC endpoint behind"
     );
     std::fs::remove_dir_all(directory)?;
     Ok(())

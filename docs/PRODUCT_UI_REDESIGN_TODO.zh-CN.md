@@ -933,19 +933,19 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 目标：节点页是本地所有者管理“本机运行时”的入口，不是全局产品中心。启停、接口、身份和诊断必须操作同一个权威 runtime，不得由 UI 生命周期隐式接管。
 
-### W7-01 节点运行状态与启停 `[ ]`
+### W7-01 节点运行状态与启停 `[x]`
 
 - [x] 从 control 读取权威 NodeSnapshot，不从 UI 本地状态推断；
 - [x] 展示未初始化、已停止、启动中、运行中、停止中、降级、故障；
 - [x] 实现启动、停止、重启，并展示 operation 进度、阶段和可取消性；
 - [x] 启动失败返回结构化原因、建议动作和可复制诊断 ID；
-- [ ] 停止 node 后保持 control 与 WebUI 存活；
+- [x] 停止 node 后保持 control 与 WebUI 存活；
 - [x] 关闭 GPUI/WebUI 不触发 node shutdown；
 - [x] 停止操作在硬超时后执行受控清理，不要求用户手工 kill；
 - [x] 启动/停止幂等，重复请求返回同一 operation 或明确无操作结果；
-- [ ] 覆盖控制服务重启、node 崩溃、系统重启后的状态恢复测试。
+- [x] 覆盖控制服务重启、node 崩溃、系统重启后的状态恢复测试。
 
-**证据（2026-11-02）**：GPUI 的写操作统一改走权威 operation IPC，不再由 UI 命令总线直接执行；运行卡片展示 operation 状态、阶段、尝试次数、可取消性及阻止原因，失败时展示稳定错误码、可重试标记、恢复建议和可复制诊断 ID。GPUI 每 400ms 查询一次进度并设置 120 秒查询截止时间；查询超时只停止 UI 轮询并明确提示后台可能仍在运行，不终止 operation。幂等键仅在 operation 成功后释放，失败、取消、超时和查询超时均保留以便安全重试。WebUI 同步展示结构化 operation 卡片，按动作、网络和排序后的表单值复用幂等键；节点页在 running 时提供停止主操作与重启次操作，在 degraded/failed 时提供诊断主操作与重启次操作，control_unavailable 不再显示误导性主操作。`cargo test -p fuckipv6-client --all-features` 通过（lib 660 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 9 passed，覆盖 UI 断连、WebUI 关闭、control 崩溃恢复、node 崩溃重启和无手工清理的强制终止；`lifecycle_cleanup_linux` 1 ignored）；`cargo test -p fuckipv6-common i18n` 9/9 通过；WebUI 8 个测试文件 64/64 通过，`typecheck`、`lint` 和生产构建通过（仅有现存 Vite 非 module i18n 提示与 >500 kB chunk 警告）；`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过，`dist/assets/app.js` 与 `app.css` 已同步刷新。系统重启后的状态恢复仍缺专项实机验证，因此 W7-01 保持未完成。
+**证据（2026-11-02）**：GPUI 的写操作统一改走权威 operation IPC，不再由 UI 命令总线直接执行；运行卡片展示 operation 状态、阶段、尝试次数、可取消性及阻止原因，失败时展示稳定错误码、可重试标记、恢复建议和可复制诊断 ID。GPUI 每 400ms 查询一次进度并设置 120 秒查询截止时间；查询超时只停止 UI 轮询并明确提示后台可能仍在运行，不终止 operation。幂等键仅在 operation 成功后释放，失败、取消、超时和查询超时均保留以便安全重试。WebUI 同步展示结构化 operation 卡片，按动作、网络和排序后的表单值复用幂等键；节点页在 running 时提供停止主操作与重启次操作，在 degraded/failed 时提供诊断主操作与重启次操作，control_unavailable 不再显示误导性主操作。新增端到端测试通过 `NodeCommand::StopNode` 停止全部数据面，断言快照进入 `Stopped` 且活动网络归零，同时 control、node IPC 进程、节点 IPC 快照和 WebUI TCP 监听均继续存活；新增冷启动测试先 SIGSTOP 再 SIGKILL control 与 node，确认 stale socket/lock 被保留后，以同一 runtime 目录直接启动新 control/node，验证 PID 替换、旧 IPC 可安全重建且无需手工删除文件，覆盖系统重启后的关键残留状态。无头 WebUI 路径在隔离 mount/user namespace 中隐藏桌面对话 socket 后执行，`w2_runtime_process` 11/11 通过；测试夹具现在按临时 runtime 环境精确回收被 UI 主动脱离的 control/node，失败或 panic 时也不再残留进程。`cargo test -p fuckipv6-client --all-features` 通过（lib 660 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 11 passed；`lifecycle_cleanup_linux` 1 ignored）；`cargo test -p fuckipv6-common i18n` 9/9 通过；WebUI 8 个测试文件 64/64 通过，`typecheck`、`lint` 和生产构建通过（仅有现存 Vite 非 module i18n 提示与 >500 kB chunk 警告）；`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过，`dist/assets/app.js` 与 `app.css` 已同步刷新。
 
 **验收**：用户只通过产品操作即可可靠启停节点；任何界面关闭、control/node 独立崩溃都不会产生第二份 runtime 或残留进程。
 

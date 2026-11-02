@@ -9,7 +9,8 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest",
-    "visual:snapshot": "node scripts/visual-snapshot.mjs"
+    "visual:snapshot": "node scripts/visual-snapshot.mjs",
+    "visual:regression": "node scripts/visual-regression.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.16",
@@ -38,6 +39,7 @@
     "eslint-plugin-react-hooks": "^7.0.0",
     "globals": "^16.4.0",
     "jsdom": "^27.0.0",
+    "pngjs": "^7.0.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.1",
     "vite": "^7.1.9",

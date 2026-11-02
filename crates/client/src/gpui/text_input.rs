@@ -79,6 +79,7 @@ pub struct NativeTextInput {
     content: SharedString,
     focus_handle: FocusHandle,
     state: TextInputState,
+    compact: bool,
 }
 
 impl NativeTextInput {
@@ -97,6 +98,7 @@ impl NativeTextInput {
             placeholder: placeholder.into(),
             content,
             focus_handle: cx.focus_handle(),
+            compact: false,
             state: TextInputState {
                 selected_range: cursor..cursor,
                 selection_reversed: false,
@@ -106,6 +108,12 @@ impl NativeTextInput {
                 is_selecting: false,
             },
         }
+    }
+
+    /// Uses the 34px toolbar geometry from the WebUI search control.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     pub fn value(&self) -> &str {
@@ -712,11 +720,27 @@ impl Render for NativeTextInput {
             .flex()
             .items_center()
             .w_full()
-            .min_h(px(DIMENSIONS.control_md_px as f32))
-            .px(px(SPACING_PX[3] as f32))
-            .py(px(SPACING_PX[2] as f32))
+            .h(px(if self.compact {
+                34.0
+            } else {
+                DIMENSIONS.control_md_px as f32
+            }))
+            .px(px(if self.compact {
+                34.0
+            } else {
+                SPACING_PX[3] as f32
+            }))
+            .py(px(if self.compact {
+                0.0
+            } else {
+                SPACING_PX[2] as f32
+            }))
             .overflow_hidden()
-            .rounded(px(RADII.md_px as f32))
+            .rounded(px(if self.compact {
+                RADII.sm_px as f32
+            } else {
+                RADII.md_px as f32
+            }))
             .bg(rgba(colors.input_background.rgba_hex()))
             .border_1()
             .border_color(rgba(

@@ -151,9 +151,7 @@ pub fn button(
         (colors.surface, colors.border_soft, colors.text_faint)
     } else {
         match variant {
-            ButtonVariant::Primary => {
-                (colors.accent_pressed, colors.accent, colors.background_deep)
-            }
+            ButtonVariant::Primary => (colors.accent, colors.accent, colors.background_deep),
             ButtonVariant::Secondary => (colors.panel_raised, colors.border, colors.text),
             ButtonVariant::Ghost => (
                 colors.panel_raised.with_alpha(0),
@@ -315,7 +313,12 @@ fn choice_surface(
         .child(label)
 }
 
-pub fn nav_tab(id: SharedString, label: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
+pub fn nav_tab(
+    id: SharedString,
+    label: impl Into<SharedString>,
+    icon: Option<gpui::AnyElement>,
+    selected: bool,
+) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
     let label = label.into();
     let mut tab = div()
@@ -325,10 +328,20 @@ pub fn nav_tab(id: SharedString, label: impl Into<SharedString>, selected: bool)
         .aria_selected(selected)
         .focusable()
         .tab_stop(true)
-        .mx(px(SPACING_PX[3] as f32))
+        .relative()
+        .flex()
+        .items_center()
+        .gap(px(SPACING_PX[3] as f32))
+        .w_full()
+        .h(px(42.0))
         .px(px(SPACING_PX[3] as f32))
-        .py(px(SPACING_PX[2] as f32))
-        .rounded(px(RADII.md_px as f32))
+        .rounded(px(RADII.sm_px as f32))
+        .border_1()
+        .border_color(rgba(if selected {
+            colors.accent.with_alpha(0x40).rgba_hex()
+        } else {
+            0x00000000
+        }))
         .text_size(px(TYPOGRAPHY.sm.size_px as f32))
         .font_weight(FontWeight(if selected {
             TYPOGRAPHY.semibold_weight
@@ -337,20 +350,27 @@ pub fn nav_tab(id: SharedString, label: impl Into<SharedString>, selected: bool)
         } as f32))
         .text_color(rgba(
             if selected {
-                colors.text
+                colors.accent
             } else {
                 colors.text_muted
             }
             .rgba_hex(),
-        ))
-        .child(label);
-    tab = if selected {
-        tab.bg(rgba(colors.accent_soft.rgba_hex()))
-            .border_l_2()
-            .border_color(rgba(colors.accent.rgba_hex()))
+        ));
+    if selected {
+        tab = tab.bg(rgba(colors.accent_soft.rgba_hex())).child(
+            div()
+                .absolute()
+                .left(px(-3.0))
+                .top(px(9.0))
+                .bottom(px(9.0))
+                .w(px(3.0))
+                .rounded_full()
+                .bg(rgba(colors.accent.rgba_hex())),
+        );
     } else {
-        tab.bg(rgba(colors.background_soft.rgba_hex()))
-    };
+        tab = tab.bg(rgba(colors.background_soft.with_alpha(0).rgba_hex()));
+    }
+    tab = tab.children(icon).child(label);
     tab
 }
 

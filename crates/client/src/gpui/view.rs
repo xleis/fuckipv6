@@ -48,14 +48,110 @@ const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
 const WINDOW_HEIGHT: f32 = DIMENSIONS.window_default_height_px as f32;
 
 const COLOR_BG: u32 = DARK_THEME.colors.background.rgba_hex();
-const COLOR_SIDEBAR: u32 = DARK_THEME.colors.background_soft.rgba_hex();
-const COLOR_PANEL: u32 = DARK_THEME.colors.panel_solid.rgba_hex();
+const COLOR_SIDEBAR: u32 = DARK_THEME.colors.background_deep.rgba_hex();
+const COLOR_PANEL: u32 = DARK_THEME.colors.surface.rgba_hex();
 const COLOR_PANEL_RAISED: u32 = DARK_THEME.colors.panel_raised.rgba_hex();
 const COLOR_BORDER: u32 = DARK_THEME.colors.border.rgba_hex();
 const COLOR_TEXT: u32 = DARK_THEME.colors.text.rgba_hex();
+const COLOR_TEXT_SECONDARY: u32 = DARK_THEME.colors.text_secondary.rgba_hex();
 const COLOR_MUTED: u32 = DARK_THEME.colors.text_muted.rgba_hex();
+const COLOR_FAINT: u32 = DARK_THEME.colors.text_faint.rgba_hex();
 const COLOR_ACCENT: u32 = DARK_THEME.colors.accent.rgba_hex();
 const COLOR_WARNING: u32 = DARK_THEME.colors.warning.rgba_hex();
+
+fn lucide_icon(data: &'static [u8], size: f32, color: u32) -> gpui::AnyElement {
+    gpui::svg()
+        .data(data)
+        .w(px(size))
+        .h(px(size))
+        .text_color(rgba(color))
+        .into_any_element()
+}
+
+fn surface_card() -> Div {
+    let colors = DARK_THEME.colors;
+    div()
+        .rounded(px(16.0))
+        .bg(gpui::linear_gradient(
+            150.0,
+            gpui::linear_color_stop(rgba(colors.surface.rgba_hex()), 0.0),
+            gpui::linear_color_stop(
+                rgba(colors.background_deep.with_alpha(0xeb).rgba_hex()),
+                1.0,
+            ),
+        ))
+        .border_1()
+        .border_color(rgba(COLOR_BORDER))
+        .shadow(vec![gpui::BoxShadow::new(
+            px(0.0),
+            px(1.0),
+            rgba(0x00000066).into(),
+        )
+        .blur_radius(px(3.0))])
+}
+
+fn empty_state(text: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_h(px(130.0))
+        .rounded(px(16.0))
+        .border_1()
+        .border_dashed()
+        .border_color(rgba(COLOR_BORDER))
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .text_color(rgba(COLOR_MUTED))
+        .child(text.into())
+}
+
+fn card_heading(title: impl Into<SharedString>, icon: gpui::AnyElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .mb_3()
+        .child(
+            div()
+                .text_size(px(14.0))
+                .line_height(px(21.7))
+                .font_weight(gpui::FontWeight(600.0))
+                .text_color(rgba(COLOR_TEXT))
+                .child(title.into()),
+        )
+        .child(icon)
+}
+
+fn navigation_icon(module_id: &str, size: f32, color: u32) -> gpui::AnyElement {
+    let data = match module_id {
+        "overview" => include_bytes!("../../assets/icons/gauge.svg").as_slice(),
+        "nodes" => include_bytes!("../../assets/icons/server-cog.svg").as_slice(),
+        "networks" => include_bytes!("../../assets/icons/network.svg").as_slice(),
+        "activity" => include_bytes!("../../assets/icons/activity.svg").as_slice(),
+        "settings" => include_bytes!("../../assets/icons/settings.svg").as_slice(),
+        _ => include_bytes!("../../assets/icons/circle-dot.svg").as_slice(),
+    };
+    lucide_icon(data, size, color)
+}
+
+fn page_icon_data(id: &str) -> &'static [u8] {
+    match PageKind::from_id(id) {
+        Some(PageKind::Overview) => include_bytes!("../../assets/icons/gauge.svg"),
+        Some(PageKind::Networks) => include_bytes!("../../assets/icons/network.svg"),
+        Some(PageKind::Peers) => include_bytes!("../../assets/icons/waypoints.svg"),
+        Some(PageKind::Topology) => include_bytes!("../../assets/icons/globe-2.svg"),
+        Some(PageKind::Traffic) => include_bytes!("../../assets/icons/activity.svg"),
+        Some(PageKind::Routing) => include_bytes!("../../assets/icons/database.svg"),
+        Some(PageKind::ExitNode) => include_bytes!("../../assets/icons/door-open.svg"),
+        Some(PageKind::Relay) => include_bytes!("../../assets/icons/radio-tower.svg"),
+        Some(PageKind::Logs) => include_bytes!("../../assets/icons/boxes.svg"),
+        Some(PageKind::Identity) => include_bytes!("../../assets/icons/key-round.svg"),
+        Some(PageKind::Settings) => include_bytes!("../../assets/icons/cpu.svg"),
+        None => include_bytes!("../../assets/icons/circle-dot.svg"),
+    }
+}
 
 actions!(fuckipv6_shell, [RefreshSnapshot, FocusSearch, Quit]);
 
@@ -175,6 +271,7 @@ impl GpuiShell {
                 "",
                 cx,
             )
+            .compact()
         });
         cx.subscribe(
             &search_input,
@@ -1045,20 +1142,40 @@ impl GpuiShell {
     fn language_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_label = t(self.locale, self.language_preference.label_key()).to_string();
         let mut selector = div().relative().child(
-            button(
-                SharedString::from("language-menu-trigger"),
-                format!("{selected_label} ▾"),
-                ButtonVariant::Secondary,
-                false,
-            )
-            .aria_label(t(self.locale, "common.language").to_string())
-            .h(px(34.0))
-            .px_3()
-            .on_click(cx.listener(|shell, _, _, cx| {
-                shell.language_menu_open = !shell.language_menu_open;
-                shell.network_menu_open = false;
-                cx.notify();
-            })),
+            div()
+                .id("language-menu-trigger")
+                .role(Role::Button)
+                .aria_label(t(self.locale, "common.language").to_string())
+                .focusable()
+                .tab_stop(true)
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(34.0))
+                .px_3()
+                .rounded(px(9.0))
+                .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight(600.0))
+                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                .child(lucide_icon(
+                    include_bytes!("../../assets/icons/globe-2.svg"),
+                    16.0,
+                    COLOR_TEXT_SECONDARY,
+                ))
+                .child(selected_label)
+                .child(lucide_icon(
+                    include_bytes!("../../assets/icons/chevron-down.svg"),
+                    14.0,
+                    COLOR_MUTED,
+                ))
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.language_menu_open = !shell.language_menu_open;
+                    shell.network_menu_open = false;
+                    cx.notify();
+                })),
         );
 
         if self.language_menu_open {
@@ -1121,24 +1238,46 @@ impl GpuiShell {
                 div()
                     .text_size(px(10.0))
                     .font_weight(gpui::FontWeight(600.0))
-                    .text_color(rgba(DARK_THEME.colors.text_faint.rgba_hex()))
-                    .child(t(self.locale, "common.current_network").to_string()),
+                    .text_color(rgba(COLOR_FAINT))
+                    .child(
+                        t(self.locale, "common.current_network")
+                            .to_string()
+                            .to_uppercase(),
+                    ),
             )
             .child(
-                button(
-                    SharedString::from("network-picker-trigger"),
-                    format!("{selected_label} ▾"),
-                    ButtonVariant::Secondary,
-                    disabled,
-                )
-                .aria_label(t(self.locale, "common.current_network").to_string())
-                .h(px(34.0))
-                .min_w(px(132.0))
-                .on_click(cx.listener(|shell, _, _, cx| {
-                    shell.network_menu_open = !shell.network_menu_open;
-                    shell.language_menu_open = false;
-                    cx.notify();
-                })),
+                div()
+                    .id("network-picker-trigger")
+                    .role(Role::Button)
+                    .aria_label(t(self.locale, "common.current_network").to_string())
+                    .focusable()
+                    .tab_stop(!disabled)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .h(px(32.0))
+                    .min_w(px(180.0))
+                    .max_w(px(220.0))
+                    .px_3()
+                    .rounded(px(9.0))
+                    .bg(rgba(DARK_THEME.colors.input_background.rgba_hex()))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .text_size(px(12.0))
+                    .text_color(rgba(if disabled { COLOR_FAINT } else { COLOR_TEXT }))
+                    .opacity(if disabled { 0.6 } else { 1.0 })
+                    .child(selected_label)
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/chevron-down.svg"),
+                        14.0,
+                        COLOR_MUTED,
+                    ))
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.network_menu_open = !shell.network_menu_open;
+                        shell.language_menu_open = false;
+                        cx.notify();
+                    })),
             );
 
         if self.network_menu_open && !self.snapshot.networks.is_empty() {
@@ -1225,6 +1364,7 @@ impl GpuiShell {
         let disabled = self.pending_commands > 0;
         div()
             .id(app_region_id(AppRegion::Topbar))
+            .debug_selector(|| "visual-topbar".into())
             .h(px(DIMENSIONS.topbar_px as f32))
             .flex()
             .items_center()
@@ -1238,7 +1378,7 @@ impl GpuiShell {
             .child(
                 button(
                     SharedString::from("refresh-snapshot"),
-                    "⟳",
+                    "",
                     ButtonVariant::Secondary,
                     disabled,
                 )
@@ -1250,6 +1390,11 @@ impl GpuiShell {
                 .w(px(34.0))
                 .h(px(34.0))
                 .px_0()
+                .child(lucide_icon(
+                    include_bytes!("../../assets/icons/refresh-cw.svg"),
+                    17.0,
+                    COLOR_TEXT_SECONDARY,
+                ))
                 .on_click(cx.listener(|shell, _, _, cx| {
                     if shell.pending_commands == 0 {
                         shell.submit_raw(NodeCommand::GetSnapshot, cx);
@@ -1259,7 +1404,7 @@ impl GpuiShell {
             .child(
                 button(
                     SharedString::from("quit-application"),
-                    "↪",
+                    "",
                     ButtonVariant::Secondary,
                     false,
                 )
@@ -1267,6 +1412,11 @@ impl GpuiShell {
                 .w(px(34.0))
                 .h(px(34.0))
                 .px_0()
+                .child(lucide_icon(
+                    include_bytes!("../../assets/icons/log-out.svg"),
+                    17.0,
+                    COLOR_TEXT_SECONDARY,
+                ))
                 .on_click(cx.listener(|_, _, window, _| window.remove_window())),
             )
     }
@@ -1279,17 +1429,11 @@ impl GpuiShell {
             .map(|module| {
                 let page_id = self.module_landing_page(module);
                 let selected = active_module_id == Some(module.id.as_str());
-                let icon = match module.id.as_str() {
-                    "overview" => "◎",
-                    "nodes" => "▦",
-                    "networks" => "◇",
-                    "activity" => "∿",
-                    "settings" => "⚙",
-                    _ => "·",
-                };
+                let icon = navigation_icon(module.id.as_str(), 19.0, COLOR_MUTED);
                 nav_tab(
                     SharedString::from(format!("nav-module-{}", module.id)),
-                    format!("{icon}  {}", t(self.locale, &module.label_key)),
+                    t(self.locale, &module.label_key).to_string(),
+                    Some(icon),
                     selected,
                 )
                 .on_click(cx.listener(move |shell, _, _, cx| {
@@ -1319,6 +1463,7 @@ impl GpuiShell {
 
         div()
             .id(app_region_id(AppRegion::Sidebar))
+            .debug_selector(|| "visual-sidebar".into())
             .role(A11Y_NAVIGATION_ROLE)
             .aria_label(t(self.locale, "common.main_navigation").to_string())
             .flex()
@@ -1347,10 +1492,14 @@ impl GpuiShell {
                             .rounded_md()
                             .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
                             .border_1()
-                            .border_color(rgba(DARK_THEME.colors.accent.rgba_hex()))
-                            .text_size(px(20.0))
-                            .text_color(rgba(COLOR_ACCENT))
-                            .child("⌁"),
+                            .border_color(rgba(
+                                DARK_THEME.colors.accent.with_alpha(0x73).rgba_hex(),
+                            ))
+                            .child(lucide_icon(
+                                include_bytes!("../../assets/icons/wifi.svg"),
+                                22.0,
+                                COLOR_ACCENT,
+                            )),
                     )
                     .child(
                         div()
@@ -1372,7 +1521,13 @@ impl GpuiShell {
                             ),
                     ),
             )
-            .child(tabs("primary-navigation").flex_1().p_2().children(nav))
+            .child(
+                tabs("primary-navigation")
+                    .flex_1()
+                    .px_2()
+                    .py_4()
+                    .children(nav),
+            )
             .child(
                 div()
                     .flex()
@@ -1458,27 +1613,49 @@ impl GpuiShell {
         let clear_search = (!self.search_query.trim().is_empty()).then(|| {
             button(
                 SharedString::from("clear-global-search"),
-                "×",
+                "",
                 ButtonVariant::Ghost,
                 false,
             )
-            .w(px(34.0))
-            .h(px(34.0))
+            .absolute()
+            .right(px(4.0))
+            .top(px(3.0))
+            .w(px(28.0))
+            .h(px(28.0))
             .px_0()
+            .border_0()
             .aria_label(t(self.locale, "common.search_clear").to_string())
+            .child(lucide_icon(
+                include_bytes!("../../assets/icons/x.svg"),
+                14.0,
+                COLOR_MUTED,
+            ))
             .on_click(cx.listener(|shell, _, _, cx| shell.clear_search(cx)))
         });
         let search_control = div()
             .id("global-search")
+            .relative()
             .flex()
             .items_center()
-            .gap_1()
             .w(px(320.0))
+            .h(px(34.0))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(11.0))
+                    .top(px(9.0))
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/search.svg"),
+                        15.0,
+                        COLOR_FAINT,
+                    )),
+            )
             .children(search_input)
             .children(clear_search);
 
         div()
             .id("local-toolbar")
+            .debug_selector(|| "visual-toolbar".into())
             .h(px(48.0))
             .flex()
             .items_center()
@@ -1690,9 +1867,31 @@ impl GpuiShell {
         overview: &OverviewModel,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let palette = semantic_palette(primary_status_semantic(overview.primary_status));
-        let mut primary_card = div()
+        let colors = DARK_THEME.colors;
+        let hero_tone = match overview.primary_status {
+            NodePrimaryStatus::Running => colors.success,
+            NodePrimaryStatus::Degraded
+            | NodePrimaryStatus::Starting
+            | NodePrimaryStatus::Stopping => colors.warning,
+            NodePrimaryStatus::Failed => colors.danger,
+            NodePrimaryStatus::Uninitialized
+            | NodePrimaryStatus::Stopped
+            | NodePrimaryStatus::ControlUnavailable => colors.accent,
+        };
+        let hero_icon = match overview.primary_status {
+            NodePrimaryStatus::Running => {
+                include_bytes!("../../assets/icons/check-circle-2.svg").as_slice()
+            }
+            NodePrimaryStatus::Failed => {
+                include_bytes!("../../assets/icons/alert-triangle.svg").as_slice()
+            }
+            _ => include_bytes!("../../assets/icons/activity.svg").as_slice(),
+        };
+
+        let mut primary_card = surface_card()
             .id("overview-primary-status")
+            .debug_selector(|| "visual-hero".into())
+            .bg(rgba(colors.surface.rgba_hex()))
             .role(Role::Status)
             .aria_label(format!(
                 "{} · {}",
@@ -1703,35 +1902,63 @@ impl GpuiShell {
             .items_center()
             .gap_4()
             .p_5()
-            .rounded_lg()
-            .bg(rgba(palette.background.rgba_hex()))
-            .border_1()
-            .border_color(rgba(palette.border.rgba_hex()))
+            .border_color(rgba(match overview.primary_status {
+                NodePrimaryStatus::Running => colors.success.with_alpha(0x59).rgba_hex(),
+                NodePrimaryStatus::Degraded
+                | NodePrimaryStatus::Starting
+                | NodePrimaryStatus::Stopping => colors.warning.with_alpha(0x66).rgba_hex(),
+                NodePrimaryStatus::Failed => colors.danger.with_alpha(0x66).rgba_hex(),
+                NodePrimaryStatus::Uninitialized
+                | NodePrimaryStatus::Stopped
+                | NodePrimaryStatus::ControlUnavailable => COLOR_BORDER,
+            }))
+            .child(lucide_icon(hero_icon, 30.0, hero_tone.rgba_hex()))
             .child(
                 div()
+                    .debug_selector(|| "visual-hero-copy".into())
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
-                    .gap_1()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgba(palette.foreground.rgba_hex()))
-                            .child(t(self.locale, "common.primary_status").to_string()),
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(
+                                t(self.locale, "common.primary_status")
+                                    .to_string()
+                                    .to_uppercase(),
+                            ),
                     )
                     .child(
                         div()
-                            .text_xl()
+                            .mt(px(3.0))
+                            .text_size(px(20.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_TEXT))
                             .child(overview.node_name.clone()),
                     )
-                    .child(div().text_sm().text_color(rgba(COLOR_MUTED)).child(format!(
-                        "{} · {}",
-                        t(self.locale, overview.primary_status.label_key()),
-                        t(self.locale, overview.primary_status.detail_key())
-                    ))),
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_1()
+                            .text_size(px(13.0))
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(
+                                        t(self.locale, overview.primary_status.label_key())
+                                            .to_string(),
+                                    ),
+                            )
+                            .child(div().text_color(rgba(COLOR_TEXT_SECONDARY)).child(format!(
+                                "· {}",
+                                t(self.locale, overview.primary_status.detail_key())
+                            ))),
+                    ),
             );
 
         if let Some(action_id) = visible_overview_primary_action(
@@ -1750,6 +1977,7 @@ impl GpuiShell {
                     ButtonVariant::Primary,
                     false,
                 )
+                .flex_shrink_0()
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.open_action("overview", &target, cx);
                 })),
@@ -1766,49 +1994,51 @@ impl GpuiShell {
 
         if !overview.issues.is_empty() {
             stack = stack.child(
-                div()
+                surface_card()
                     .id("overview-issues")
                     .flex()
                     .flex_col()
-                    .gap_2()
                     .p_4()
-                    .rounded_lg()
-                    .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
-                    .border_1()
-                    .border_color(rgba(DARK_THEME.colors.warning.rgba_hex()))
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight(600.0))
-                            .text_color(rgba(COLOR_TEXT))
-                            .child(t(self.locale, "overview.need_attention").to_string()),
-                    )
+                    .border_color(rgba(colors.warning.with_alpha(0x59).rgba_hex()))
+                    .child(card_heading(
+                        t(self.locale, "overview.need_attention").to_string(),
+                        lucide_icon(
+                            include_bytes!("../../assets/icons/alert-triangle.svg"),
+                            17.0,
+                            COLOR_MUTED,
+                        ),
+                    ))
                     .children(overview.issues.iter().map(|issue| {
                         div()
                             .flex()
+                            .items_start()
                             .gap_2()
+                            .py_2()
                             .border_t_1()
                             .border_color(rgba(COLOR_BORDER))
-                            .pt_2()
-                            .text_sm()
-                            .text_color(rgba(COLOR_WARNING))
-                            .child("!")
-                            .child(issue.clone())
+                            .text_size(px(12.0))
+                            .child(lucide_icon(
+                                include_bytes!("../../assets/icons/alert-triangle.svg"),
+                                15.0,
+                                COLOR_WARNING,
+                            ))
+                            .child(
+                                div()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(issue.clone()),
+                            )
                     })),
             );
         }
 
         let network_rows = if overview.networks.is_empty() {
-            vec![div()
-                .text_sm()
-                .text_color(rgba(COLOR_MUTED))
-                .child(t(self.locale, "common.no_running_networks").to_string())
-                .into_any_element()]
+            vec![empty_state(t(self.locale, "common.no_running_networks")).into_any_element()]
         } else {
             overview
                 .networks
                 .iter()
-                .map(|network| {
+                .enumerate()
+                .map(|(index, network)| {
                     let network_palette = semantic_palette(match network.status {
                         NodeNetworkStatus::Online => SemanticState::Success,
                         NodeNetworkStatus::Degraded | NodeNetworkStatus::Connecting => {
@@ -1819,6 +2049,14 @@ impl GpuiShell {
                             SemanticState::Neutral
                         }
                     });
+                    let icon_color = match network.status {
+                        NodeNetworkStatus::Online => colors.success.rgba_hex(),
+                        NodeNetworkStatus::Degraded | NodeNetworkStatus::Connecting => {
+                            colors.warning.rgba_hex()
+                        }
+                        NodeNetworkStatus::Failed => colors.danger.rgba_hex(),
+                        NodeNetworkStatus::Offline | NodeNetworkStatus::Stopping => COLOR_FAINT,
+                    };
                     div()
                         .id(SharedString::from(format!(
                             "overview-network-{}",
@@ -1828,50 +2066,82 @@ impl GpuiShell {
                         .items_center()
                         .gap_3()
                         .py_2()
-                        .border_t_1()
-                        .border_color(rgba(COLOR_BORDER))
+                        .when(index == 0, |row| {
+                            row.debug_selector(|| "visual-network-first".into())
+                        })
+                        .when(index > 0, |row| {
+                            row.debug_selector(|| "visual-network-second".into())
+                                .border_t_1()
+                                .border_color(rgba(COLOR_BORDER))
+                        })
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/circle-dot.svg"),
+                            15.0,
+                            icon_color,
+                        ))
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .gap_1()
+                                .gap(px(2.0))
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
                                         .font_weight(gpui::FontWeight(600.0))
                                         .text_color(rgba(COLOR_TEXT))
                                         .child(network.name.clone()),
                                 )
-                                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
-                                    self.locale,
-                                    "overview.network.detail",
-                                    &[
-                                        ("peers", &network.peer_count.to_string()),
-                                        ("tun", &network.tun_name),
-                                    ],
-                                )))
-                                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
-                                    self.locale,
-                                    "overview.network.path",
-                                    &[("routing", &network.routing), ("exit", &network.exit)],
-                                )))
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.57))
                                         .text_color(rgba(COLOR_MUTED))
-                                        .child(network.roles.join(" · ")),
+                                        .child(tr(
+                                            self.locale,
+                                            "overview.network.detail",
+                                            &[
+                                                ("peers", &network.peer_count.to_string()),
+                                                ("tun", &network.tun_name),
+                                            ],
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.57))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(tr(
+                                            self.locale,
+                                            "overview.network.path",
+                                            &[
+                                                ("routing", &network.routing),
+                                                ("exit", &network.exit),
+                                            ],
+                                        )),
                                 ),
                         )
                         .child(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
                                 .rounded_full()
-                                .px_2()
-                                .py_1()
-                                .text_xs()
+                                .px(px(7.0))
+                                .py(px(2.0))
+                                .text_size(px(10.0))
+                                .font_weight(gpui::FontWeight(600.0))
                                 .text_color(rgba(network_palette.foreground.rgba_hex()))
                                 .bg(rgba(network_palette.background.rgba_hex()))
+                                .child(
+                                    div()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded_full()
+                                        .bg(rgba(network_palette.foreground.rgba_hex())),
+                                )
                                 .child(
                                     t(self.locale, network_status_key(network.status)).to_string(),
                                 ),
@@ -1881,78 +2151,119 @@ impl GpuiShell {
                 .collect::<Vec<_>>()
         };
         stack = stack.child(
-            div()
+            surface_card()
                 .id("overview-networks")
+                .debug_selector(|| "visual-networks".into())
                 .flex()
                 .flex_col()
-                .gap_2()
                 .p_4()
-                .rounded_lg()
-                .bg(rgba(COLOR_PANEL))
-                .border_1()
-                .border_color(rgba(COLOR_BORDER))
                 .child(
                     div()
+                        .debug_selector(|| "visual-networks-heading".into())
                         .flex()
+                        .items_center()
                         .justify_between()
-                        .text_base()
-                        .text_color(rgba(COLOR_TEXT))
-                        .child(t(self.locale, "overview.networks_title").to_string())
-                        .child(overview.networks.len().to_string()),
+                        .gap_3()
+                        .mb_3()
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .line_height(px(21.7))
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(t(self.locale, "overview.networks_title").to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(overview.networks.len().to_string()),
+                        ),
                 )
                 .children(network_rows),
         );
 
         let activity_rows = if overview.activity.is_empty() {
-            vec![div()
-                .text_sm()
-                .text_color(rgba(COLOR_MUTED))
-                .child(t(self.locale, "overview.activity.empty").to_string())
+            vec![empty_state(t(self.locale, "overview.activity.empty"))
+                .debug_selector(|| "visual-activity-empty".into())
                 .into_any_element()]
         } else {
             overview
                 .activity
                 .iter()
-                .map(|activity| {
+                .enumerate()
+                .map(|(index, activity)| {
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_1()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(rgba(COLOR_BORDER))
+                        .items_start()
+                        .gap_3()
+                        .py_3()
+                        .when(index > 0, |row| {
+                            row.border_t_1().border_color(rgba(COLOR_BORDER))
+                        })
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/circle-dot.svg"),
+                            14.0,
+                            COLOR_ACCENT,
+                        ))
                         .child(
                             div()
-                                .text_sm()
-                                .text_color(rgba(COLOR_TEXT))
-                                .child(activity.action.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgba(COLOR_MUTED))
-                                .child(activity.detail.clone()),
+                                .flex()
+                                .flex_col()
+                                .min_w(px(0.0))
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_TEXT))
+                                        .child(activity.action.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(activity.detail.clone()),
+                                )
+                                .children(activity.command.as_ref().map(|command| {
+                                    div()
+                                        .mt(px(2.0))
+                                        .max_w(px(720.0))
+                                        .overflow_hidden()
+                                        .rounded(px(4.0))
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .bg(rgba(COLOR_PANEL_RAISED))
+                                        .text_size(px(10.0))
+                                        .line_height(px(14.5))
+                                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                        .child(command.clone())
+                                })),
                         )
                         .into_any_element()
                 })
                 .collect::<Vec<_>>()
         };
         stack = stack.child(
-            div()
+            surface_card()
                 .id("overview-activity")
+                .debug_selector(|| "visual-activity".into())
                 .flex()
                 .flex_col()
-                .gap_2()
                 .p_4()
-                .rounded_lg()
-                .bg(rgba(COLOR_PANEL))
-                .border_1()
-                .border_color(rgba(COLOR_BORDER))
                 .child(
-                    div()
-                        .text_base()
-                        .text_color(rgba(COLOR_TEXT))
-                        .child(t(self.locale, "overview.activity_title").to_string()),
+                    card_heading(
+                        t(self.locale, "overview.activity_title").to_string(),
+                        lucide_icon(
+                            include_bytes!("../../assets/icons/activity.svg"),
+                            17.0,
+                            COLOR_MUTED,
+                        ),
+                    )
+                    .debug_selector(|| "visual-activity-heading".into()),
                 )
                 .children(activity_rows),
         );
@@ -1961,35 +2272,42 @@ impl GpuiShell {
             .shortcuts
             .iter()
             .map(|shortcut| {
+                let enabled = shortcut.action_id.is_some();
                 let mut card = div()
                     .id(SharedString::from(format!(
                         "overview-shortcut-{}",
                         shortcut.id
                     )))
                     .flex()
+                    .flex_1()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_1()
-                    .min_h(px(52.0))
+                    .gap(px(2.0))
+                    .min_w(px(0.0))
+                    .h(px(51.0))
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(9.0))
                     .border_1()
                     .border_color(rgba(COLOR_BORDER))
-                    .bg(rgba(COLOR_PANEL_RAISED))
-                    .text_sm()
-                    .text_color(rgba(if shortcut.action_id.is_some() {
-                        COLOR_TEXT
-                    } else {
-                        COLOR_MUTED
-                    }))
+                    .bg(rgba(colors.surface.rgba_hex()))
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .when(shortcut.id == "create_network", |card| {
+                        card.debug_selector(|| "visual-shortcut-first".into())
+                    })
+                    .opacity(if enabled { 1.0 } else { 0.5 })
                     .child(shortcut.label.clone());
                 if let Some(reason) = &shortcut.unavailable_reason {
                     card = card.child(
                         div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
+                            .text_size(px(10.0))
+                            .line_height(px(12.5))
+                            .font_weight(gpui::FontWeight(400.0))
+                            .text_color(rgba(COLOR_FAINT))
                             .child(reason.clone()),
                     );
                 }
@@ -2002,23 +2320,30 @@ impl GpuiShell {
             })
             .collect::<Vec<_>>();
         stack = stack.child(
-            div()
+            surface_card()
                 .id("overview-shortcuts")
+                .debug_selector(|| "visual-shortcuts".into())
                 .flex()
                 .flex_col()
-                .gap_2()
                 .p_4()
-                .rounded_lg()
-                .bg(rgba(COLOR_PANEL))
-                .border_1()
-                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    card_heading(
+                        t(self.locale, "overview.shortcuts").to_string(),
+                        lucide_icon(
+                            include_bytes!("../../assets/icons/waypoints.svg"),
+                            17.0,
+                            COLOR_MUTED,
+                        ),
+                    )
+                    .debug_selector(|| "visual-shortcuts-heading".into()),
+                )
                 .child(
                     div()
-                        .text_base()
-                        .text_color(rgba(COLOR_TEXT))
-                        .child(t(self.locale, "overview.shortcuts").to_string()),
-                )
-                .child(div().flex().gap_2().children(shortcut_cards)),
+                        .debug_selector(|| "visual-shortcuts-grid".into())
+                        .flex()
+                        .gap_2()
+                        .children(shortcut_cards),
+                ),
         );
 
         stack.into_any_element()
@@ -3196,10 +3521,11 @@ impl GpuiShell {
         let page_title = selected_page
             .map(|page| t(self.locale, &page.title_key).to_string())
             .unwrap_or_else(|| t(self.locale, "common.unknown_page").to_string());
-        let page_icon = page_icon(&self.selected_page);
+        let page_icon = lucide_icon(page_icon_data(&self.selected_page), 20.0, COLOR_ACCENT);
 
         let mut content = div()
             .id(app_region_id(AppRegion::Content))
+            .debug_selector(|| "visual-content".into())
             .track_focus(&self.content_focus_handle)
             .role(Role::Article)
             .aria_label(page_title.clone())
@@ -3212,12 +3538,14 @@ impl GpuiShell {
             .child(
                 div()
                     .id("page-heading")
+                    .debug_selector(|| "visual-page-heading".into())
                     .role(A11Y_HEADING_ROLE)
                     .aria_level(1)
                     .aria_label(page_title.clone())
                     .flex()
                     .items_center()
                     .gap_3()
+                    .h(px(44.0))
                     .child(
                         div()
                             .w(px(40.0))
@@ -3226,7 +3554,7 @@ impl GpuiShell {
                             .items_center()
                             .justify_center()
                             .rounded_md()
-                            .bg(rgba(COLOR_PANEL))
+                            .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
                             .border_1()
                             .border_color(rgba(COLOR_BORDER))
                             .text_color(rgba(COLOR_ACCENT))
@@ -3235,18 +3563,28 @@ impl GpuiShell {
                     .child(
                         div()
                             .flex()
+                            .flex_1()
                             .flex_col()
                             .min_w(px(0.0))
                             .child(
                                 div()
                                     .text_size(px(20.0))
+                                    .line_height(px(24.0))
                                     .font_weight(gpui::FontWeight(600.0))
                                     .text_color(rgba(COLOR_TEXT))
                                     .child(page_title),
                             )
-                            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(
-                                t(self.locale, "common.node_contract_description").to_string(),
-                            )),
+                            .child(
+                                div()
+                                    .mt(px(3.0))
+                                    .text_xs()
+                                    .line_height(px(16.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(
+                                        t(self.locale, "common.node_contract_description")
+                                            .to_string(),
+                                    ),
+                            ),
                     ),
             );
 
@@ -3340,6 +3678,9 @@ impl GpuiShell {
                         "action-card-head-{}",
                         action.id
                     )))
+                    .when(action_id == "refresh_snapshot", |head| {
+                        head.debug_selector(|| "visual-action-first".into())
+                    })
                     .role(Role::Button)
                     .aria_label(action_label.clone())
                     .aria_expanded(expanded)
@@ -3570,6 +3911,7 @@ impl GpuiShell {
 
         let mut panel = div()
             .id(app_region_id(AppRegion::ActionPanel))
+            .debug_selector(|| "visual-actions".into())
             .role(Role::Complementary)
             .aria_label(t(self.locale, "common.shared_actions").to_string())
             .flex()
@@ -3577,18 +3919,25 @@ impl GpuiShell {
             .min_w(px(0.0))
             .overflow_hidden()
             .rounded_lg()
-            .bg(rgba(COLOR_PANEL))
+            .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
             .border_1()
             .border_color(rgba(COLOR_BORDER))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.0),
+                px(1.0),
+                rgba(0x00000066).into(),
+            )
+            .blur_radius(px(3.0))])
             .child(
                 div()
+                    .debug_selector(|| "visual-action-title".into())
                     .flex()
                     .items_center()
-                    .h(px(38.0))
+                    .h(px(40.5))
                     .px_4()
                     .border_b_1()
                     .border_color(rgba(COLOR_BORDER))
-                    .text_xs()
+                    .text_size(px(10.0))
                     .font_weight(gpui::FontWeight(600.0))
                     .text_color(rgba(COLOR_MUTED))
                     .child(
@@ -3621,6 +3970,7 @@ impl Render for GpuiShell {
         let workspace = if presentation == ActionPanelPresentation::Stacked {
             div()
                 .id("page-workspace")
+                .debug_selector(|| "visual-workspace".into())
                 .role(A11Y_TAB_PANEL_ROLE)
                 .aria_label(t(self.locale, "common.module_pages").to_string())
                 .flex()
@@ -3635,6 +3985,7 @@ impl Render for GpuiShell {
         } else {
             div()
                 .id("page-workspace")
+                .debug_selector(|| "visual-workspace".into())
                 .role(A11Y_TAB_PANEL_ROLE)
                 .aria_label(t(self.locale, "common.module_pages").to_string())
                 .flex()
@@ -3735,29 +4086,41 @@ fn page_tab_control(
     selected: bool,
 ) -> gpui::Stateful<Div> {
     let label = label.into();
-    div()
+    let mut tab = div()
         .id(id)
         .role(Role::Tab)
         .aria_label(label.clone())
         .aria_selected(selected)
         .focusable()
         .tab_stop(true)
+        .relative()
         .flex()
         .items_center()
         .h(px(34.0))
         .px_3()
         .rounded_sm()
-        .border_b_2()
-        .border_color(rgba(if selected { COLOR_ACCENT } else { 0x00000000 }))
         .bg(rgba(if selected {
-            COLOR_PANEL_RAISED
+            DARK_THEME.colors.surface_hover.rgba_hex()
         } else {
             0x00000000
         }))
         .text_size(px(12.0))
         .font_weight(gpui::FontWeight(if selected { 600.0 } else { 400.0 }))
         .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
-        .child(label)
+        .child(label);
+    if selected {
+        tab = tab.child(
+            div()
+                .absolute()
+                .left(px(10.0))
+                .right(px(10.0))
+                .bottom(px(-7.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(rgba(COLOR_ACCENT)),
+        );
+    }
+    tab
 }
 
 fn sync_badge(id: impl Into<gpui::ElementId>, label: String) -> gpui::Stateful<Div> {
@@ -3776,23 +4139,6 @@ fn sync_badge(id: impl Into<gpui::ElementId>, label: String) -> gpui::Stateful<D
         .font_weight(gpui::FontWeight(600.0))
         .text_color(rgba(COLOR_WARNING))
         .child(label)
-}
-
-fn page_icon(id: &str) -> &'static str {
-    match PageKind::from_id(id) {
-        Some(PageKind::Overview) => "◎",
-        Some(PageKind::Networks) => "◇",
-        Some(PageKind::Peers) => "⌘",
-        Some(PageKind::Topology) => "◉",
-        Some(PageKind::Traffic) => "∿",
-        Some(PageKind::Routing) => "⇄",
-        Some(PageKind::ExitNode) => "↗",
-        Some(PageKind::Relay) => "⌁",
-        Some(PageKind::Logs) => "☷",
-        Some(PageKind::Identity) => "⚿",
-        Some(PageKind::Settings) => "⚙",
-        None => "·",
-    }
 }
 
 fn configuration_audit_details(
@@ -4161,13 +4507,58 @@ mod tests {
         NodeUiValidation,
     };
     use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
+    use serde_json::{json, Map, Value};
 
     const PRODUCT_VISUAL_SNAPSHOT_FIXTURE: &str =
         include_str!("../../../../contracts/typescript/fixtures/product-visual-snapshot.json");
+    const VISUAL_GEOMETRY_SELECTORS: [&str; 22] = [
+        "visual-sidebar",
+        "visual-topbar",
+        "visual-toolbar",
+        "visual-workspace",
+        "visual-content",
+        "visual-page-heading",
+        "visual-hero",
+        "visual-hero-copy",
+        "visual-networks",
+        "visual-networks-heading",
+        "visual-network-first",
+        "visual-activity",
+        "visual-activity-heading",
+        "visual-activity-empty",
+        "visual-shortcuts",
+        "visual-shortcuts-heading",
+        "visual-shortcuts-grid",
+        "visual-shortcut-first",
+        "visual-actions",
+        "visual-action-title",
+        "visual-action-first",
+        "visual-network-second",
+    ];
 
     #[derive(serde::Deserialize)]
     struct ProductVisualFixture {
         snapshot: NodeSnapshot,
+    }
+
+    fn visual_geometry(visible: &mut VisualTestContext) -> Value {
+        let mut geometry = Map::new();
+        for selector in VISUAL_GEOMETRY_SELECTORS {
+            let key = selector.trim_start_matches("visual-").replace('-', "_");
+            let bounds = visible
+                .debug_bounds(selector)
+                .map(|bounds| {
+                    json!({
+                        "x": f32::from(bounds.origin.x),
+                        "y": f32::from(bounds.origin.y),
+                        "width": f32::from(bounds.size.width),
+                        "height": f32::from(bounds.size.height),
+                    })
+                })
+                .unwrap_or(Value::Null);
+            geometry.insert(key, bounds);
+        }
+        Value::Object(geometry)
     }
 
     struct SnapshotCommandHandler {
@@ -4220,7 +4611,11 @@ mod tests {
         }
     }
 
-    fn open_shell_window(cx: &mut TestAppContext, width: f32) -> gpui::WindowHandle<GpuiShell> {
+    fn open_shell_window(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+    ) -> gpui::WindowHandle<GpuiShell> {
         static NEXT_CONFIG_DIR: AtomicU64 = AtomicU64::new(1);
 
         let state = NodeStateStore::new();
@@ -4249,7 +4644,7 @@ mod tests {
         );
         drop(runtime_guard);
         drop(runtime);
-        let window = cx.open_window(size(px(width), px(WINDOW_HEIGHT)), move |_, cx| {
+        let window = cx.open_window(size(px(width), px(height)), move |_, cx| {
             GpuiShell::new(state, bus, configs, cx)
         });
         cx.run_until_parked();
@@ -4318,7 +4713,7 @@ mod tests {
                 Locale::ZhCn,
                 &page.title_key
             ));
-            assert_ne!(page_icon(&page.id), "·");
+            assert!(!page_icon_data(&page.id).is_empty());
         }
     }
 
@@ -4466,7 +4861,7 @@ mod tests {
     fn search_results_navigate_to_network_and_peer_context(cx: &mut TestAppContext) {
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
             .expect("parse shared product visual fixture");
-        let window = open_shell_window(cx, 1280.0);
+        let window = open_shell_window(cx, 1280.0, WINDOW_HEIGHT);
         window
             .update(cx, |shell, window, cx| {
                 shell.manifest = Some(crate::node::node_ui_manifest());
@@ -4542,7 +4937,7 @@ mod tests {
 
     #[gpui::test]
     fn shell_declares_structural_accessibility_roles(cx: &mut TestAppContext) {
-        let window = open_shell_window(cx, 1280.0);
+        let window = open_shell_window(cx, 1280.0, WINDOW_HEIGHT);
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         visible.run_until_parked();
         assert!(visible.update(|window, _| window.is_a11y_enabled()));
@@ -4636,13 +5031,83 @@ mod tests {
         }
         cx.update(|app| {
             window
-                .update(app, |shell, _, cx| {
+                .update(app, |shell, window, cx| {
+                    shell.selected_page = "overview".into();
+                    shell.selected_network = Some("home".into());
                     shell.notice = None;
+                    shell.error = None;
+                    window.set_window_title("fuckipv6");
                     cx.notify();
                 })
-                .expect("clear GPUI visual-test notice");
+                .expect("install deterministic GPUI visual state");
         });
         cx.run_until_parked();
+        let semantics = cx.update(|app| {
+            let shell = window.read(app).expect("read GPUI screenshot shell");
+            let manifest = shell
+                .manifest
+                .as_ref()
+                .expect("GPUI screenshot manifest is loaded");
+            let page = manifest
+                .pages
+                .iter()
+                .find(|page| page.id == shell.selected_page)
+                .expect("GPUI screenshot page is in the manifest");
+            let model = build_page_model(
+                manifest,
+                &shell.snapshot,
+                &shell.selected_page,
+                shell.locale,
+            )
+            .expect("project GPUI screenshot page model");
+            let overview = model.overview.as_ref().expect("overview screenshot model");
+            let page_tabs = navigation_module_for_page(&shell.selected_page)
+                .map(|module| {
+                    module
+                        .page_ids
+                        .iter()
+                        .filter_map(|page_id| {
+                            manifest.pages.iter().find(|page| &page.id == page_id)
+                        })
+                        .map(|page| t(shell.locale, &page.nav_label_key).to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            json!({
+                "title": "fuckipv6",
+                "locale": "en",
+                "font_family": "Inter",
+                "viewport": {
+                    "width": 1440,
+                    "height": 900,
+                    "devicePixelRatio": 2,
+                },
+                "modules": navigation_modules()
+                    .iter()
+                    .map(|module| t(shell.locale, &module.label_key).to_string())
+                    .collect::<Vec<_>>(),
+                "page_tabs": page_tabs,
+                "primary_status": {
+                    "label": t(shell.locale, overview.primary_status.label_key()).to_string(),
+                    "detail": t(shell.locale, overview.primary_status.detail_key()).to_string(),
+                },
+                "page_heading": t(shell.locale, &page.title_key).to_string(),
+                "action_panel": t(shell.locale, "common.shared_actions").to_string(),
+                "actions": page.actions
+                    .iter()
+                    .filter(|action| !is_configuration_action(&action.id))
+                    .map(|action| action_label(shell.locale, &action.id))
+                    .collect::<Vec<_>>(),
+                "shortcuts": overview.shortcuts
+                    .iter()
+                    .map(|shortcut| shortcut.label.clone())
+                    .collect::<Vec<_>>(),
+                "network_statuses": overview.networks
+                    .iter()
+                    .map(|network| t(shell.locale, network_status_key(network.status)).to_string())
+                    .collect::<Vec<_>>(),
+            })
+        });
         let image = cx
             .capture_screenshot(window.into())
             .expect("GPUI headless screenshot");
@@ -4650,12 +5115,77 @@ mod tests {
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent).expect("screenshot directory");
         }
+        let metadata = json!({
+            "schema_version": 1,
+            "surface": "gpui",
+            "fixture_revision": expected_revision,
+            "fixture_locale": "en",
+            "platform": std::env::consts::OS,
+            "dimensions": {
+                "width": image.width(),
+                "height": image.height(),
+            },
+            "semantics": semantics,
+        });
         image.save(&output).expect("write GPUI screenshot");
+        std::fs::write(
+            output.with_extension("json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&metadata).expect("serialize GPUI visual metadata")
+            ),
+        )
+        .expect("write GPUI visual metadata");
+    }
+
+    #[gpui::test]
+    fn reports_product_shell_geometry_for_visual_regression(cx: &mut TestAppContext) {
+        if std::env::var_os("GPUI_VISUAL_GEOMETRY").is_none() {
+            return;
+        }
+
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let window = open_shell_window(cx, 1440.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "overview".into();
+                shell.selected_network = Some("home".into());
+                shell.notice = None;
+                shell.error = None;
+                cx.notify();
+            })
+            .expect("install visual fixture");
+        cx.run_until_parked();
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in VISUAL_GEOMETRY_SELECTORS {
+            println!("{selector}: {:?}", visible.debug_bounds(selector));
+        }
+        if let Some(output) = std::env::var_os("GPUI_VISUAL_GEOMETRY_JSON") {
+            let output = std::path::PathBuf::from(output);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).expect("geometry directory");
+            }
+            let geometry = visual_geometry(&mut visible);
+            std::fs::write(
+                output,
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&geometry).expect("serialize GPUI geometry")
+                ),
+            )
+            .expect("write GPUI visual geometry");
+        }
     }
 
     #[gpui::test]
     fn high_dpi_preserves_logical_window_width_and_breakpoints(cx: &mut TestAppContext) {
-        let window = open_shell_window(cx, 900.0);
+        let window = open_shell_window(cx, 900.0, WINDOW_HEIGHT);
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         let before = visible.update(|window, _| window.viewport_size());
         visible.simulate_scale_factor_change(1.5);

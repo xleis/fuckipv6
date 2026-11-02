@@ -26,6 +26,7 @@ function commandAvailable(command) {
 function findChrome() {
   const candidates = [
     process.env.CHROME_BIN,
+    "chrome",
     "google-chrome-stable",
     "google-chrome",
     "chromium",
@@ -368,9 +369,14 @@ async function main() {
       cdp,
       `(() => {
         const text = (element) => element?.textContent?.trim() ?? "";
+        const fontFamily = getComputedStyle(document.body).fontFamily
+          .split(",")[0]
+          .trim()
+          .replace(/^["']|["']$/g, "");
         return {
           title: document.title,
           locale: document.documentElement.lang,
+          font_family: fontFamily,
           viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
           modules: [...document.querySelectorAll(".module-button")].map(text),
           page_tabs: [...document.querySelectorAll('[role="tab"]')].map(text),
@@ -380,6 +386,58 @@ async function main() {
           },
           page_heading: text(document.querySelector(".workspace h1")),
           action_panel: text(document.querySelector(".actions-panel .panel-title")),
+          actions: [...document.querySelectorAll(".actions-panel .action-card-head span")].map(text),
+          shortcuts: [...document.querySelectorAll('[data-testid="overview-shortcuts"] .overview-shortcuts > *')].map(
+            (element) => text(element.querySelector("span") ?? element),
+          ),
+          network_statuses: [...document.querySelectorAll('[data-testid="overview-networks"] .status-pill')].map(text),
+          geometry: Object.fromEntries(
+            [
+              ["sidebar", ".primary-nav"],
+              ["topbar", ".global-bar"],
+              ["toolbar", ".local-toolbar"],
+              ["workspace", ".workspace"],
+              ["content", ".page-content-stack"],
+              ["page_heading", ".page-heading"],
+              ["hero", ".hero-status"],
+              ["hero_copy", ".hero-status-copy"],
+              ["networks", '[data-testid="overview-networks"]'],
+              ["networks_heading", '[data-testid="overview-networks"] .card-heading'],
+              ["network_first", '[data-testid="overview-networks"] .compact-row'],
+              ["network_second", '[data-testid="overview-networks"] .compact-row:nth-of-type(2)'],
+              ["activity", '[data-testid="overview-activity"]'],
+              ["activity_heading", '[data-testid="overview-activity"] .card-heading'],
+              ["activity_empty", '[data-testid="overview-activity"] .empty-state'],
+              ["shortcuts", '[data-testid="overview-shortcuts"]'],
+              ["shortcuts_heading", '[data-testid="overview-shortcuts"] .card-heading'],
+              ["shortcuts_grid", '[data-testid="overview-shortcuts"] .overview-shortcuts'],
+              ["shortcut_first", '[data-testid="overview-shortcuts"] .overview-shortcuts > :first-child'],
+              ["actions", ".actions-panel"],
+              ["action_title", ".actions-panel .panel-title"],
+              ["action_first", ".actions-panel .action-card-head"],
+            ].map(([name, selector]) => {
+              const element = document.querySelector(selector);
+              if (!element) return [name, null];
+              const bounds = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              return [
+                name,
+                {
+                  x: bounds.x,
+                  y: bounds.y,
+                  width: bounds.width,
+                  height: bounds.height,
+                  background_color: style.backgroundColor,
+                  background_image: style.backgroundImage,
+                  border_color: style.borderColor,
+                  border_radius: style.borderRadius,
+                  color: style.color,
+                  font_size: style.fontSize,
+                  font_weight: style.fontWeight,
+                },
+              ];
+            }),
+          ),
           overview_network_rows: [...document.querySelectorAll(".compact-row")].map((element) => {
             const bounds = element.getBoundingClientRect();
             const cardBounds = element.closest(".surface-card")?.getBoundingClientRect();

@@ -155,6 +155,52 @@ jobs:
       - name: Verify capability gate and native X11 window
         run: ./scripts/gpui-smoke.sh
 
+  visual-regression:
+    name: Cross-surface visual regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install visual regression dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y
+          xvfb libvulkan1 mesa-vulkan-drivers
+          libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
+          fonts-inter
+
+      - name: Install WebUI dependencies
+        run: npm ci --prefix webui
+
+      - name: Compare GPUI and WebUI
+        run: xvfb-run -a npm run visual:regression --prefix webui
+
+      - name: Upload visual regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression
+          path: target/visual-regression
+          if-no-files-found: warn
+
   linux:
     name: Linux gate
     runs-on: ubuntu-latest
@@ -260,7 +306,7 @@ jobs:
   aggregate:
     name: Aggregate release decision
     if: always()
-    needs: [docs, contracts, supply-chain, api-security, gpui-smoke, linux, windows, macos]
+    needs: [docs, contracts, supply-chain, api-security, gpui-smoke, visual-regression, linux, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -286,6 +332,7 @@ jobs:
             --upstream-result "supply-chain=${{ needs.supply-chain.result }}" \
             --upstream-result "api-security=${{ needs.api-security.result }}" \
             --upstream-result "gpui-smoke=${{ needs.gpui-smoke.result }}" \
+            --upstream-result "visual-regression=${{ needs.visual-regression.result }}" \
             --upstream-result "linux=${{ needs.linux.result }}" \
             --upstream-result "windows=${{ needs.windows.result }}" \
             --upstream-result "macos=${{ needs.macos.result }}"

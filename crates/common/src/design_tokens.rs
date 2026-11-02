@@ -520,6 +520,16 @@ impl ThemeTokens {
 
         css.push_str("\n  /* Source-compatible semantic aliases. */\n");
         for (alias, target) in [
+            ("background", "--bg"),
+            ("background-soft", "--bg-soft"),
+            ("background-deep", "--bg-deep"),
+            ("surface-raised", "--panel-raised"),
+            ("surface-selected", "--surface-hover"),
+            ("text-primary", "--text"),
+            ("accent-secondary", "--accent-2"),
+            ("font-size-2xl", "--font-size-xxl"),
+            ("shadow-sm", "--shadow-panel"),
+            ("shadow-lg", "--shadow-panel"),
             ("green", "--success"),
             ("green-soft", "--success-soft"),
             ("green-glow", "--success-glow"),

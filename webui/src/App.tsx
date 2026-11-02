@@ -1183,6 +1183,9 @@ export function App(): JSX.Element {
     () => resolveLocale(languageQuery.data),
     [languageQuery.data],
   );
+  useEffect(() => {
+    window.FuckIPV6I18n?.applyDocument(document, locale);
+  }, [locale]);
   if (sessionQuery.isPending) return <LoadingScreen locale={locale} />;
   if (
     sessionQuery.error instanceof AuthenticationError ||

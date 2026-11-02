@@ -267,7 +267,11 @@ function recentOverviewActivity(
   command?: string;
 }> {
   return [...(snapshot.recent_activity ?? [])]
-    .sort((left, right) => right.occurred_at_unix_ms - left.occurred_at_unix_ms)
+    .sort(
+      (left, right) =>
+        right.occurred_at_unix_ms - left.occurred_at_unix_ms ||
+        right.audit_id.localeCompare(left.audit_id),
+    )
     .slice(0, 5)
     .map((entry) => ({
       id: entry.audit_id,

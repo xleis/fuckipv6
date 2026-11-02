@@ -786,7 +786,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 已实现：`crates/common/src/ui_layout.rs` 冻结 600/900/1280 三档断点、侧栏/顶栏/内容/详情区域、五项主导航、Data/Actions 局部 Tab 和稳定刷新语义；设计令牌新增 232px 侧栏、56px 顶栏、320–480px 详情宽度、64px 底部导航、960×640 最小窗口。`ui-components.css/js` 提供响应式侧栏、导航/详情抽屉、底部导航、骨架、busy 指示、焦点恢复和减少动态效果。节点 WebUI 已改为真实双区域布局，manifest 的完整 11 页保留在侧栏，底部导航只映射五项一级目的地，刷新时保留旧快照内容并显示 busy 状态。GPUI 创建窗口时强制 960×640 最小尺寸，按实际窗口宽度读取共享断点；页面默认进入 Data 局部 Tab，Actions 独立展示共享动作，manifest 首次加载显示骨架，宽度达到 1280px 时显示固定宽度上下文详情面板。
 
-边界：GPUI 已消费桌面/宽屏断点、局部 Tab、骨架与详情契约；由于原生窗口最小宽度为 960px，窄屏抽屉路径由 WebUI 验收。Android 本项只完成共享 NavigationBar 契约，原生 Compose 实现仍由 W16-01 验收。W5-07 的 React/Vite 单一应用壳与 W5-08 像素级视觉回归仍未完成。
+边界：GPUI 已消费桌面/宽屏断点、局部 Tab、骨架与详情契约；由于原生窗口最小宽度为 960px，窄屏抽屉路径由 WebUI 验收。Android 本项只完成共享 NavigationBar 契约，原生 Compose 实现仍由 W16-01 验收。React/Vite 单一应用壳由 W5-07 验收，跨端视觉门禁由 W5-08 验收。
 
 ### W5-04 国际化 `[x]`
 
@@ -799,7 +799,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 实现说明：`crates/common/assets/i18n.json` 是简中/英文双目录的唯一可见文案来源，Rust、节点 WebUI 与 GPUI 共享同一套稳定键。系统语言检测、显式语言偏好和浏览器/桌面手动切换均已接通，偏好持久化到节点配置；数字、字节、时长、显式时区时间和 IPv4/IPv6 地址使用确定性格式化。浏览器运行时与 Rust 均支持占位符安全的伪本地化，并按 Unicode grapheme cluster 截断，组合字符和 ZWJ emoji 不会被拆开。`NodeProblem` 的业务分支使用稳定的 snake_case `code` 与 `error.*` `message_key`，测试门禁要求 code/key 仅含稳定 ASCII 字符且两个语言目录都存在对应键；自然语言 `message` 只用于兼容展示，不作为业务判定依据。
 
-边界：本项完成第一版简中/英文及现有产品表面的国际化，不包含后续新增语言；W5-05 可访问性、W5-07 React 单一应用壳和 W5-08 像素级视觉回归仍未完成。
+边界：本项完成第一版简中/英文及现有产品表面的国际化，不包含后续新增语言；WebUI 可访问性、React 单一应用壳和跨端视觉门禁分别由 W5-05、W5-07、W5-08 验收。
 
 ### W5-05 可访问性 `[x]`
 
@@ -837,15 +837,19 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] `npm run build`、`npm run lint`、`npm run typecheck`、`npm test -- --run` 通过；
 - [x] 契约固件接受/拒绝、快照校验、命令封包/请求 ID/幂等键、Passkey 未认证视图、五模块与十一页面 manifest 驱动外壳均有自动化测试。
 
-**证据（2026-11-01）**：React 单元测试 8/8 通过；WebUI 生产构建成功；Rust `webui::node_surface` 嵌入资源测试通过。CSP 已收紧为 `script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-inline'`：内联脚本继续完全禁止，仅允许 Radix 弹层和虚拟列表所需的 `style` 属性。W5-08 的 GPUI/WebUI 像素级对比仍未完成，不能将本项视为整体 UI 重构完成。
+**证据（2026-11-01）**：React 单元测试 8/8 通过；WebUI 生产构建成功；Rust `webui::node_surface` 嵌入资源测试通过。CSP 已收紧为 `script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-inline'`：内联脚本继续完全禁止，仅允许 Radix 弹层和虚拟列表所需的 `style` 属性。跨端视觉门禁见 W5-08。
 
-### W5-08 视觉与语义回归 `[ ]`
+### W5-08 视觉与语义回归 `[x]`
 
-- [ ] 同平台、同窗口、同字体、同 DPR 截图；
-- [ ] GPUI/WebUI 页面层级和控件顺序对比；
-- [ ] 可接受差异清单只包含字体栅格化、原生滚动条、IME 等；
-- [ ] 功能/权限/状态/流程分叉为零；
-- [ ] 视觉回归纳入 CI。
+- [x] 同平台、同窗口、同字体、同 DPR 截图；
+- [x] GPUI/WebUI 页面层级和控件顺序对比；
+- [x] 可接受差异清单只包含字体栅格化、原生滚动条、IME 等；
+- [x] 功能/权限/状态/流程分叉为零；
+- [x] 视觉回归纳入 CI。
+
+**证据（2026-11-02）**：`npm run visual:regression --prefix webui` 在 Linux、1440×900 逻辑窗口、2× DPR、Inter 字体和英文 Overview fixture 上同时驱动 GPUI headless 截图与 Chrome/WebUI 截图。门禁严格比较标题、语言、字体、视口、五模块、页面 Tab、主状态、页面标题、动作面板、动作顺序、快捷入口顺序和网络状态顺序，当前语义差异为 0；比较 22 个层级/布局节点的 88 个位置与尺寸属性，固定几何容差为 1.5px，仅 `hero_copy.width` 因按钮文本测量形成弹性剩余宽度而允许 2.5px，实测最大偏差为 1.9844px。2880×1800 截图的 5,184,000 个像素指标为 MAE 8.272661、RMSE 19.986747、通道差大于 16 的像素占比 21.6003%、大于 32 的占比 2.1752%，均低于门禁阈值 10、22、23% 和 3%。脚本生成 `target/visual-regression/{gpui,webui}/overview.png`、`diff.png` 和 `visual-regression.json`；CI 的 `visual-regression` job 在 Xvfb/Vulkan 环境中运行同一命令并上传全部产物。
+
+边界：允许差异仅为平台字体栅格化/亚像素文本测量、可滚动时原生与浏览器滚动条绘制、以及空闲截图中不出现的 IME 组合界面；不接受布局节点缺失、控件顺序变化、状态/权限/动作分叉或几何超差。像素阈值用于约束抗锯齿和字体 hinting，不宣称两种渲染器逐字节相同。
 
 ## 9. W6：应用外壳、概览与设置
 
@@ -2382,7 +2386,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 ### 22.2 P0 UI 地基队列 `[ ]`
 
 - [x] W5-01～W5-04：设计令牌、状态组件、布局和 i18n；
-- [ ] W5-05～W5-08：a11y、GPUI 适配、WebUI 新工程和视觉回归；
+- [x] W5-05～W5-08：a11y、GPUI 适配、WebUI 新工程和视觉回归；
 - [x] W6-01～W6-03：五模块外壳、唯一主状态和概览；
 - [x] W6-04：设置基础页；
 - [x] W6-05：可搜索的高级设置权威清单；

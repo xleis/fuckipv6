@@ -278,8 +278,10 @@ pub struct OverviewNetwork {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverviewActivity {
+    pub id: String,
     pub action: String,
     pub detail: String,
+    pub command: Option<String>,
     pub occurred_at_unix_ms: u64,
 }
 
@@ -1439,18 +1441,16 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
                     t(locale, "activity.outcome.denied")
                 }
             };
-            let mut detail = tr(
+            let detail = tr(
                 locale,
                 "overview.activity.detail",
                 &[("outcome", outcome), ("resource", &entry.resource)],
             );
-            if let Some(command) = entry.details.get("command") {
-                detail.push_str(" · ");
-                detail.push_str(command);
-            }
             OverviewActivity {
+                id: entry.audit_id.to_string(),
                 action,
                 detail,
+                command: entry.details.get("command").cloned(),
                 occurred_at_unix_ms: entry.occurred_at_unix_ms,
             }
         })
@@ -3183,12 +3183,16 @@ mod tests {
         assert_eq!(overview.activity.len(), 5);
         assert_eq!(overview.activity[0].occurred_at_unix_ms, 6_000);
         assert_eq!(overview.activity[4].occurred_at_unix_ms, 2_000);
-        assert!(overview.activity[0].detail.contains("command-6"));
+        assert_eq!(overview.activity[0].command.as_deref(), Some("command-6"));
         assert!(overview
             .activity
             .iter()
             .all(|activity| !activity.detail.contains("raw-summary")
-                && !activity.detail.contains("secret-")));
+                && !activity.detail.contains("secret-")
+                && activity
+                    .command
+                    .as_deref()
+                    .is_none_or(|command| !command.contains("secret-"))));
     }
 
     #[test]

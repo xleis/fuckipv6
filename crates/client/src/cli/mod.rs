@@ -780,6 +780,7 @@ pub async fn run_default_app(
     if ui_mode.effective.is_gpui() {
         anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过 `fuckipv6 --gpui` 运行");
     }
+    let _surface_lease = crate::ui::acquire_surface(crate::ui::UiSurfaceKind::WebUi)?;
 
     let session = crate::remote_node::RemoteNodeSession::start_with_role_async(
         commands::RuntimeOptions {

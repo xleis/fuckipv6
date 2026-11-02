@@ -40,6 +40,7 @@ fn preflight(is_available: bool, display: DisplayEnvironment) -> Result<()> {
 /// Start the real GPUI application on the current (main) thread.
 pub fn run(options: crate::cli::commands::RuntimeOptions) -> Result<()> {
     preflight(is_available(), DisplayEnvironment::detect())?;
+    let _surface_lease = crate::ui::acquire_surface(crate::ui::UiSurfaceKind::Gpui)?;
 
     let session = NativeNodeSession::start(options)?;
     let state = session.state();

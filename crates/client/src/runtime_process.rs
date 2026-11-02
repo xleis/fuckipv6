@@ -483,6 +483,7 @@ async fn run_service(
     if options.webui_port == 0 {
         bail!("服务模式要求非零 WebUI 监听端口");
     }
+    let _surface_lease = crate::ui::acquire_surface(crate::ui::UiSurfaceKind::WebUi)?;
     let shutdown = ShutdownSignal::register()?;
 
     // The service process must own the control lease. If another control already

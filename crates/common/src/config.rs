@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -74,6 +75,7 @@ impl ClientConfig {
     ) -> anyhow::Result<()> {
         validate_ws_url(&self.coordinator_url, "coordinator_url")?;
         validate_network_config(&self.network)?;
+        validate_routing_config(&self.routing)?;
         validate_tun_config(&self.tun)?;
         validate_p2p_config(&self.p2p)?;
         validate_log_config(&self.log)?;
@@ -653,6 +655,19 @@ fn validate_network_config(config: &NetworkConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_routing_config(config: &crate::routing::RoutingConfig) -> anyhow::Result<()> {
+    for (field, values) in [
+        ("routing.direct_cidrs", &config.direct_cidrs),
+        ("routing.proxy_cidrs", &config.proxy_cidrs),
+    ] {
+        for (index, cidr) in values.iter().enumerate() {
+            cidr.parse::<IpNet>()
+                .with_context(|| format!("{field}[{index}] 不是有效 CIDR: {}", cidr.trim()))?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_tun_config(config: &TunConfig) -> anyhow::Result<()> {
     if config.name.trim().is_empty() {
         anyhow::bail!("tun.name 不能为空");
@@ -1068,6 +1083,21 @@ mod tests {
             .expect_err("empty STUN server list should be rejected")
             .to_string()
             .contains("stun_servers"));
+
+        config.p2p.nat_detection.stun_servers = vec!["stun.example.com:3478".into()];
+        config.routing.direct_cidrs = vec!["10.0.0.0/8".into(), "not-a-cidr".into()];
+        let error = config
+            .validate()
+            .expect_err("malformed direct CIDR must fail closed");
+        assert!(error.to_string().contains("routing.direct_cidrs[1]"));
+        assert!(error.to_string().contains("not-a-cidr"));
+
+        config.routing.direct_cidrs.clear();
+        config.routing.proxy_cidrs = vec!["fd00::/129".into()];
+        let error = config
+            .validate()
+            .expect_err("malformed proxy CIDR must fail closed");
+        assert!(error.to_string().contains("routing.proxy_cidrs[0]"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use fuckipv6_common::{
     decrypt_config_file, encrypt_config_file, ClientConfig, Identity, NatType, PeerInfo,
     RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
 };
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::collections::HashMap;
 use std::future::Future;
 #[cfg(target_os = "linux")]
@@ -346,22 +347,17 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     let mut route_engine = SmartRouteEngine::new(config.routing.mode);
     route_engine.set_virtual_networks(
-        config
-            .network
-            .virtual_network
-            .as_deref()
-            .and_then(|v| v.parse().ok()),
-        "10.8.0.0/24".parse().ok(),
+        parse_optional_ipv6_cidr(
+            config.network.virtual_network.as_deref(),
+            "network.virtual_network",
+        )?,
+        Some(parse_default_virtual_ipv4_network()?),
     );
-    for cidr in &config.routing.direct_cidrs {
-        if let Ok(net) = cidr.parse() {
-            route_engine.add_direct_cidr(net);
-        }
+    for cidr in parse_cidr_list(&config.routing.direct_cidrs, "routing.direct_cidrs")? {
+        route_engine.add_direct_cidr(cidr);
     }
-    for cidr in &config.routing.proxy_cidrs {
-        if let Ok(net) = cidr.parse() {
-            route_engine.add_proxy_cidr(net);
-        }
+    for cidr in parse_cidr_list(&config.routing.proxy_cidrs, "routing.proxy_cidrs")? {
+        route_engine.add_proxy_cidr(cidr);
     }
     let exit_node_manager = ExitNodeManager::new(config.exit_node.clone());
     let configured_exit_node = config.routing.exit_node.clone();
@@ -369,24 +365,15 @@ pub(crate) async fn prepare_client_runtime_ext(
     #[cfg(target_os = "linux")]
     let (route_manager, exit_forwarder) = {
         let mut virtual_cidrs = Vec::new();
-        if let Some(network) = config
-            .network
-            .virtual_network
-            .as_deref()
-            .and_then(|value| value.parse().ok())
-        {
-            virtual_cidrs.push(network);
+        if let Some(network) = parse_optional_ipv6_cidr(
+            config.network.virtual_network.as_deref(),
+            "network.virtual_network",
+        )? {
+            virtual_cidrs.push(IpNet::V6(network));
         }
-        if let Ok(network) = "10.8.0.0/24".parse() {
-            virtual_cidrs.push(network);
-        }
+        virtual_cidrs.push(IpNet::V4(parse_default_virtual_ipv4_network()?));
 
-        let direct_cidrs: Vec<_> = config
-            .routing
-            .direct_cidrs
-            .iter()
-            .filter_map(|cidr| cidr.parse().ok())
-            .collect();
+        let direct_cidrs = parse_cidr_list(&config.routing.direct_cidrs, "routing.direct_cidrs")?;
         let mut control_endpoints = Vec::new();
         if config.routing.mode != fuckipv6_common::RoutingMode::MeshOnly {
             control_endpoints.extend(resolve_websocket_endpoints(&config.coordinator_url).await?);
@@ -992,6 +979,38 @@ async fn handle_runtime_command(
     }
 }
 
+fn parse_cidr_list(values: &[String], field: &str) -> Result<Vec<IpNet>> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.parse::<IpNet>().with_context(|| {
+                format!(
+                    "{field}[{index}] 不是有效 CIDR，拒绝启动或应用路由: {}",
+                    value.trim()
+                )
+            })
+        })
+        .collect()
+}
+
+fn parse_optional_ipv6_cidr(value: Option<&str>, field: &str) -> Result<Option<Ipv6Net>> {
+    value
+        .map(|value| {
+            value.parse::<Ipv6Net>().with_context(|| {
+                format!(
+                    "{field} 必须是 IPv6 CIDR，拒绝启动或应用路由: {}",
+                    value.trim()
+                )
+            })
+        })
+        .transpose()
+}
+
+fn parse_default_virtual_ipv4_network() -> Result<Ipv4Net> {
+    "10.8.0.0/24".parse().context("内置默认虚拟 IPv4 网络无效")
+}
+
 fn parse_runtime_routing_mode(mode: &str) -> Result<fuckipv6_common::RoutingMode> {
     match mode.to_lowercase().as_str() {
         "meshonly" | "mesh-only" | "mesh_only" => Ok(fuckipv6_common::RoutingMode::MeshOnly),
@@ -1121,25 +1140,15 @@ async fn apply_linux_routing_mode(
     use fuckipv6_common::RoutingMode;
 
     let mut virtual_cidrs = Vec::new();
-    if let Some(network) = runtime
-        .config
-        .network
-        .virtual_network
-        .as_deref()
-        .and_then(|value| value.parse().ok())
-    {
-        virtual_cidrs.push(network);
+    if let Some(network) = parse_optional_ipv6_cidr(
+        runtime.config.network.virtual_network.as_deref(),
+        "network.virtual_network",
+    )? {
+        virtual_cidrs.push(IpNet::V6(network));
     }
-    if let Ok(network) = "10.8.0.0/24".parse() {
-        virtual_cidrs.push(network);
-    }
-    let direct_cidrs: Vec<_> = runtime
-        .config
-        .routing
-        .direct_cidrs
-        .iter()
-        .filter_map(|cidr| cidr.parse().ok())
-        .collect();
+    virtual_cidrs.push(IpNet::V4(parse_default_virtual_ipv4_network()?));
+    let direct_cidrs =
+        parse_cidr_list(&runtime.config.routing.direct_cidrs, "routing.direct_cidrs")?;
 
     let mut control_endpoints = Vec::new();
     if mode != RoutingMode::MeshOnly {

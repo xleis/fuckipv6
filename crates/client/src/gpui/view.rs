@@ -141,6 +141,7 @@ fn page_icon_data(id: &str) -> &'static [u8] {
         Some(PageKind::Overview) => include_bytes!("../../assets/icons/gauge.svg"),
         Some(PageKind::Networks) => include_bytes!("../../assets/icons/network.svg"),
         Some(PageKind::Peers) => include_bytes!("../../assets/icons/waypoints.svg"),
+        Some(PageKind::NodeRuntime) => include_bytes!("../../assets/icons/server-cog.svg"),
         Some(PageKind::Topology) => include_bytes!("../../assets/icons/globe-2.svg"),
         Some(PageKind::Traffic) => include_bytes!("../../assets/icons/activity.svg"),
         Some(PageKind::Routing) => include_bytes!("../../assets/icons/database.svg"),
@@ -171,23 +172,16 @@ fn app_region_id(region: AppRegion) -> SharedString {
     SharedString::from(format!("gpui-region-{}", region.name()))
 }
 
-fn visible_overview_primary_action<'a>(
+fn visible_overview_primary_page<'a>(
     overview: &'a OverviewModel,
     manifest: Option<&NodeUiManifest>,
-    snapshot: &NodeSnapshot,
-    selected_network: Option<&str>,
 ) -> Option<&'a str> {
-    let action_id = overview.primary_action.as_deref()?;
-    let action = manifest?
+    let page_id = overview.primary_page_id.as_deref()?;
+    manifest?
         .pages
         .iter()
-        .find(|page| page.id == "overview")?
-        .actions
-        .iter()
-        .find(|action| action.id == action_id)?;
-    action_block_reason(action, snapshot, selected_network)
-        .is_none()
-        .then_some(action_id)
+        .any(|page| page.id == page_id)
+        .then_some(page_id)
 }
 
 struct GpuiShell {
@@ -1961,25 +1955,24 @@ impl GpuiShell {
                     ),
             );
 
-        if let Some(action_id) = visible_overview_primary_action(
-            overview,
-            self.manifest.as_ref(),
-            &self.snapshot,
-            self.selected_network.as_deref(),
-        )
-        .map(str::to_string)
+        if let Some(page_id) =
+            visible_overview_primary_page(overview, self.manifest.as_ref()).map(str::to_string)
         {
-            let target = action_id.clone();
+            let target = page_id.clone();
             primary_card = primary_card.child(
                 button(
                     SharedString::from("overview-primary-action"),
-                    action_label(self.locale, &action_id),
+                    t(self.locale, "overview.manage_runtime").to_string(),
                     ButtonVariant::Primary,
                     false,
                 )
                 .flex_shrink_0()
                 .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.open_action("overview", &target, cx);
+                    shell.selected_page = target.clone();
+                    shell.pending_confirmation = None;
+                    shell.error = None;
+                    shell.notice = None;
+                    cx.notify();
                 })),
             );
         }
@@ -4810,7 +4803,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_hides_a_primary_action_without_permission() {
+    fn overview_primary_action_navigates_to_the_runtime_page() {
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
             .expect("parse shared product visual fixture");
         let manifest = crate::node::node_ui_manifest();
@@ -4819,14 +4812,16 @@ mod tests {
         let overview = model.overview.as_ref().expect("overview projection");
 
         assert_eq!(
-            visible_overview_primary_action(overview, Some(&manifest), &fixture.snapshot, None,),
-            Some("stop_node")
+            visible_overview_primary_page(overview, Some(&manifest)),
+            Some("node_runtime")
         );
 
-        let mut denied = fixture.snapshot;
-        denied.permissions.permissions.clear();
+        let mut without_runtime = manifest.clone();
+        without_runtime
+            .pages
+            .retain(|page| page.id != "node_runtime");
         assert_eq!(
-            visible_overview_primary_action(overview, Some(&manifest), &denied, None),
+            visible_overview_primary_page(overview, Some(&without_runtime)),
             None
         );
     }

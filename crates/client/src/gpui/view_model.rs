@@ -7,7 +7,7 @@ use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
-    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand,
+    NodeControlHealth, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand,
     NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
     NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePrimaryStatus,
     NodeProbePeerCommand, NodeRollbackConfigurationCommand, NodeRoutingMode,
@@ -25,6 +25,7 @@ pub enum PageKind {
     Overview,
     Networks,
     Peers,
+    NodeRuntime,
     Topology,
     Traffic,
     Routing,
@@ -36,10 +37,11 @@ pub enum PageKind {
 }
 
 impl PageKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Overview,
         Self::Networks,
         Self::Peers,
+        Self::NodeRuntime,
         Self::Topology,
         Self::Traffic,
         Self::Routing,
@@ -55,6 +57,7 @@ impl PageKind {
             "overview" => Some(Self::Overview),
             "networks" => Some(Self::Networks),
             "peers" => Some(Self::Peers),
+            "node_runtime" => Some(Self::NodeRuntime),
             "topology" => Some(Self::Topology),
             "traffic" => Some(Self::Traffic),
             "routing" => Some(Self::Routing),
@@ -72,6 +75,7 @@ impl PageKind {
             Self::Overview => "overview",
             Self::Networks => "networks",
             Self::Peers => "peers",
+            Self::NodeRuntime => "node_runtime",
             Self::Topology => "topology",
             Self::Traffic => "traffic",
             Self::Routing => "routing",
@@ -301,7 +305,7 @@ pub struct OverviewShortcut {
 pub struct OverviewModel {
     pub node_name: String,
     pub primary_status: NodePrimaryStatus,
-    pub primary_action: Option<String>,
+    pub primary_page_id: Option<String>,
     pub issues: Vec<String>,
     pub networks: Vec<OverviewNetwork>,
     pub activity: Vec<OverviewActivity>,
@@ -1212,6 +1216,10 @@ fn project_page(
             let (metrics, sections) = project_peers(snapshot, locale);
             (metrics, sections, None)
         }
+        PageKind::NodeRuntime => {
+            let (metrics, sections) = project_node_runtime(snapshot, locale);
+            (metrics, sections, None)
+        }
         PageKind::Topology => {
             let (metrics, sections) = project_topology(snapshot, locale);
             (metrics, sections, None)
@@ -1271,17 +1279,6 @@ fn row(title: impl Into<String>, detail: impl Into<String>) -> RowModel {
     RowModel {
         title: title.into(),
         detail: detail.into(),
-    }
-}
-
-fn overview_primary_action(status: NodePrimaryStatus) -> Option<&'static str> {
-    match status {
-        NodePrimaryStatus::Uninitialized | NodePrimaryStatus::Stopped => Some("start_node"),
-        NodePrimaryStatus::Running => Some("stop_node"),
-        NodePrimaryStatus::Degraded
-        | NodePrimaryStatus::Failed
-        | NodePrimaryStatus::ControlUnavailable => Some("get_node_diagnostics"),
-        NodePrimaryStatus::Starting | NodePrimaryStatus::Stopping => None,
     }
 }
 
@@ -1459,7 +1456,7 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
     OverviewModel {
         node_name: node_name.to_string(),
         primary_status,
-        primary_action: overview_primary_action(primary_status).map(str::to_string),
+        primary_page_id: Some("node_runtime".into()),
         issues,
         networks,
         activity,
@@ -1619,6 +1616,152 @@ fn project_peers(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             t(locale, "gpui.empty.peers"),
             rows,
         )],
+    )
+}
+
+fn project_node_runtime(
+    snapshot: &NodeSnapshot,
+    locale: Locale,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
+    let primary_status = snapshot.primary_status();
+    let phase = t(locale, node_phase_key(snapshot.lifecycle.phase));
+    let control_health = t(locale, control_health_key(snapshot.control_health));
+    let failed_networks = if snapshot.lifecycle.failed_networks.is_empty() {
+        t(locale, "common.none").to_string()
+    } else {
+        snapshot
+            .lifecycle
+            .failed_networks
+            .join(t(locale, "common.list_separator"))
+    };
+    let last_error = snapshot
+        .last_error
+        .as_ref()
+        .map(|problem| {
+            let localized = tr(locale, &problem.message_key, &[]);
+            if localized == problem.message_key {
+                t(locale, "common.unknown").to_string()
+            } else {
+                localized
+            }
+        })
+        .unwrap_or_else(|| t(locale, "common.none").to_string());
+    let network_rows = snapshot
+        .networks
+        .iter()
+        .map(|network| {
+            let roles = if network.roles.is_empty() {
+                t(locale, "common.none").to_string()
+            } else {
+                network
+                    .roles
+                    .iter()
+                    .map(|role| t(locale, role_key(*role)).to_string())
+                    .collect::<Vec<_>>()
+                    .join(t(locale, "common.list_separator"))
+            };
+            row(
+                network.name.clone(),
+                tr(
+                    locale,
+                    "runtime.row.network_detail",
+                    &[
+                        ("status", t(locale, network_status_key(network.status))),
+                        ("peers", &network.peer_count.to_string()),
+                        ("roles", &roles),
+                    ],
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let service_rows = snapshot
+        .embedded_services
+        .iter()
+        .map(|service| {
+            let signaling = service
+                .signaling_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            let relay = service
+                .relay_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            row(
+                service.network_name.clone(),
+                tr(
+                    locale,
+                    "runtime.row.service_detail",
+                    &[
+                        (
+                            "status",
+                            t(locale, embedded_service_status_key(service.status)),
+                        ),
+                        ("signaling", &signaling),
+                        ("relay", &relay),
+                    ],
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    (
+        vec![
+            metric(
+                t(locale, "runtime.metric.status"),
+                t(locale, primary_status.label_key()),
+                "NodeSnapshot.primary_status",
+            ),
+            metric(
+                t(locale, "runtime.metric.phase"),
+                phase,
+                "NodeSnapshot.lifecycle.phase",
+            ),
+            metric(
+                t(locale, "runtime.metric.revision"),
+                snapshot.revision,
+                "NodeSnapshot.revision",
+            ),
+            metric(
+                t(locale, "runtime.metric.active_networks"),
+                snapshot.lifecycle.active_networks,
+                "NodeSnapshot.lifecycle.active_networks",
+            ),
+            metric(
+                t(locale, "runtime.metric.configured_networks"),
+                snapshot.lifecycle.configured_networks,
+                "NodeSnapshot.lifecycle.configured_networks",
+            ),
+        ],
+        vec![
+            section(
+                t(locale, "runtime.section.state"),
+                t(locale, "common.no_data"),
+                vec![
+                    row(
+                        t(locale, "runtime.row.primary_status"),
+                        t(locale, primary_status.label_key()),
+                    ),
+                    row(t(locale, "runtime.row.phase"), phase),
+                    row(t(locale, "runtime.row.control_health"), control_health),
+                    row(
+                        t(locale, "runtime.row.revision"),
+                        snapshot.revision.to_string(),
+                    ),
+                    row(t(locale, "runtime.row.failed_networks"), failed_networks),
+                    row(t(locale, "runtime.row.last_error"), last_error),
+                ],
+            ),
+            section(
+                t(locale, "runtime.section.networks"),
+                t(locale, "runtime.empty.networks"),
+                network_rows,
+            ),
+            section(
+                t(locale, "runtime.section.services"),
+                t(locale, "runtime.empty.services"),
+                service_rows,
+            ),
+        ],
     )
 }
 
@@ -2612,6 +2755,24 @@ pub(crate) fn network_status_key(status: NodeNetworkStatus) -> &'static str {
     }
 }
 
+fn node_phase_key(phase: NodePhase) -> &'static str {
+    match phase {
+        NodePhase::Stopped => "status.phase.stopped",
+        NodePhase::Starting => "status.phase.starting",
+        NodePhase::Running => "status.phase.running",
+        NodePhase::Stopping => "status.phase.stopping",
+        NodePhase::Failed => "status.phase.failed",
+    }
+}
+
+fn control_health_key(health: NodeControlHealth) -> &'static str {
+    match health {
+        NodeControlHealth::Available => "status.control.available",
+        NodeControlHealth::Unavailable => "status.control.unavailable",
+        NodeControlHealth::Unknown => "status.control.unknown",
+    }
+}
+
 fn embedded_service_status_key(status: NodeEmbeddedServiceStatus) -> &'static str {
     match status {
         NodeEmbeddedServiceStatus::Starting => "status.service.starting",
@@ -2914,7 +3075,7 @@ mod tests {
         assert!(model.sections.is_empty());
         assert_eq!(overview.node_name, "desktop");
         assert_eq!(overview.primary_status, NodePrimaryStatus::Running);
-        assert_eq!(overview.primary_action.as_deref(), Some("stop_node"));
+        assert_eq!(overview.primary_page_id.as_deref(), Some("node_runtime"));
         assert_eq!(overview.networks.len(), 1);
         assert_eq!(overview.networks[0].name, "home");
         assert_eq!(overview.networks[0].peer_count, 1);
@@ -3078,24 +3239,9 @@ mod tests {
     }
 
     #[test]
-    fn overview_primary_action_maps_every_primary_status() {
-        let cases = [
-            (NodePrimaryStatus::Uninitialized, Some("start_node")),
-            (NodePrimaryStatus::Stopped, Some("start_node")),
-            (NodePrimaryStatus::Starting, None),
-            (NodePrimaryStatus::Stopping, None),
-            (NodePrimaryStatus::Running, Some("stop_node")),
-            (NodePrimaryStatus::Degraded, Some("get_node_diagnostics")),
-            (NodePrimaryStatus::Failed, Some("get_node_diagnostics")),
-            (
-                NodePrimaryStatus::ControlUnavailable,
-                Some("get_node_diagnostics"),
-            ),
-        ];
-
-        for (status, expected) in cases {
-            assert_eq!(overview_primary_action(status), expected);
-        }
+    fn overview_primary_destination_is_the_runtime_page() {
+        let overview = project_overview(&NodeSnapshot::default(), Locale::En);
+        assert_eq!(overview.primary_page_id.as_deref(), Some("node_runtime"));
     }
 
     #[test]
@@ -3381,13 +3527,13 @@ mod tests {
         );
 
         let mut manifest = node_ui_manifest();
-        manifest.pages[0].actions[0].id = "unknown_action".into();
-        assert!(build_page_model_for_page(
-            &manifest.pages[0],
-            &NodeSnapshot::default(),
-            Locale::ZhCn
-        )
-        .is_err());
+        let page = manifest
+            .pages
+            .iter_mut()
+            .find(|page| !page.actions.is_empty())
+            .expect("manifest page with actions");
+        page.actions[0].id = "unknown_action".into();
+        assert!(build_page_model_for_page(page, &NodeSnapshot::default(), Locale::ZhCn).is_err());
         assert!(validate_manifest_bindings(&manifest).is_err());
     }
 

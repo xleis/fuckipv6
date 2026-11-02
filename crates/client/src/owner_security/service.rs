@@ -1070,6 +1070,32 @@ impl OwnerSecurityService {
         })
     }
 
+    /// Age an owner session's last Passkey authentication without weakening
+    /// production time handling. WebUI middleware tests use this to exercise
+    /// the five-minute recent-authentication boundary deterministically.
+    #[cfg(test)]
+    pub(crate) fn age_session_for_test(
+        &self,
+        token: &str,
+        age: std::time::Duration,
+    ) -> ServiceResult<()> {
+        let reference =
+            session_reference_from_token(token).map_err(|_| OwnerSecurityError::InvalidSession)?;
+        let age_ms = duration_millis(age)?;
+        Ok(self.persistence.update(|store| {
+            let session = store
+                .sessions
+                .iter_mut()
+                .find(|session| session.reference == reference)
+                .ok_or(OwnerSecurityError::InvalidSession)?;
+            session.last_authenticated_at_unix_ms = unix_time_ms()?.saturating_sub(age_ms);
+            session.created_at_unix_ms = session
+                .created_at_unix_ms
+                .min(session.last_authenticated_at_unix_ms);
+            Ok(())
+        })?)
+    }
+
     #[cfg(test)]
     fn expire_ceremony_for_test(&self) {
         let mut state = self.state.lock().expect("owner service state");

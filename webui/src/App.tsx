@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   useMutation,
@@ -26,6 +27,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type {
+  NodeApiCommandResponse,
+  NodeCommandHttpRequest,
   NodeCommandOutcome,
   NodeOperationSnapshot,
   NodeSnapshot,
@@ -36,6 +39,7 @@ import type {
 import {
   AuthenticationError,
   HttpError,
+  ReauthenticationRequiredError,
   loadManifest,
   loadSnapshot,
   newIdempotencyKey,
@@ -48,6 +52,7 @@ import {
   loadOwnerSession,
   loginWithPasskey,
   logoutOwnerSession,
+  reauthenticateWithPasskey,
   saveLanguagePreference,
   type LanguagePreference,
 } from "./api/session";
@@ -161,6 +166,12 @@ type NodeEventState = {
   status: "connecting" | "live" | "resyncing" | "reconnecting";
   stale: boolean;
   lastAuthoritativeAt: number | null;
+};
+
+type ReauthenticationAttempt = {
+  envelope: NodeCommandHttpRequest;
+  resolve(response: NodeApiCommandResponse): void;
+  reject(error: unknown): void;
 };
 
 function useNodeEvents(
@@ -656,6 +667,11 @@ function AppShell({
   const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const idempotencyKeys = useRef(new Map<string, string>());
+  const reauthenticationAttempt = useRef<ReauthenticationAttempt | null>(null);
+  const [reauthenticationOpen, setReauthenticationOpen] = useState(false);
+  const [reauthenticationPending, setReauthenticationPending] =
+    useState(false);
+  const [reauthenticationFailure, setReauthenticationFailure] = useState("");
   const setPageId = (value: string) => onUiSessionChange({ pageId: value });
   const setSelectedNetworkState = (value: string) =>
     onUiSessionChange({ selectedNetwork: value });
@@ -766,6 +782,67 @@ function AppShell({
     return { operation };
   }
 
+  async function sendWithReauthentication(
+    envelope: NodeCommandHttpRequest,
+  ): Promise<NodeApiCommandResponse> {
+    try {
+      return await sendCommand(envelope);
+    } catch (error) {
+      if (!(error instanceof ReauthenticationRequiredError)) throw error;
+      return new Promise<NodeApiCommandResponse>((resolve, reject) => {
+        reauthenticationAttempt.current = { envelope, resolve, reject };
+        setReauthenticationFailure("");
+        setReauthenticationOpen(true);
+      });
+    }
+  }
+
+  function cancelReauthentication(): void {
+    if (reauthenticationPending) return;
+    const attempt = reauthenticationAttempt.current;
+    if (!attempt) return;
+    reauthenticationAttempt.current = null;
+    setReauthenticationOpen(false);
+    setReauthenticationFailure("");
+    attempt.reject(new Error(label(locale, "owner_auth.reauth.cancelled")));
+  }
+
+  async function reauthenticateAndRetry(): Promise<void> {
+    const attempt = reauthenticationAttempt.current;
+    if (!attempt || reauthenticationPending) return;
+    setReauthenticationPending(true);
+    setReauthenticationFailure("");
+
+    let session: Awaited<ReturnType<typeof reauthenticateWithPasskey>>;
+    try {
+      session = await reauthenticateWithPasskey();
+    } catch (error) {
+      setReauthenticationFailure(
+        `${label(locale, "owner_auth.reauth.failed")} ${errorMessage(error)}`,
+      );
+      setReauthenticationPending(false);
+      return;
+    }
+    queryClient.setQueryData(SESSION_QUERY_KEY, session);
+
+    let response: NodeApiCommandResponse;
+    try {
+      response = await sendCommand(attempt.envelope);
+    } catch (error) {
+      reauthenticationAttempt.current = null;
+      setReauthenticationOpen(false);
+      setReauthenticationPending(false);
+      attempt.reject(error);
+      return;
+    }
+
+    if (reauthenticationAttempt.current !== attempt) return;
+    reauthenticationAttempt.current = null;
+    setReauthenticationOpen(false);
+    setReauthenticationPending(false);
+    attempt.resolve(response);
+  }
+
   async function submitAction(
     action: NodeUiAction,
     values: ActionValues,
@@ -787,15 +864,14 @@ function AppShell({
       onOperation(operation);
     };
     try {
-      const response = await sendCommand(
-        commandEnvelope(
-          nextRequestId(),
-          action,
-          values,
-          locale,
-          idempotencyKey,
-        ),
+      const envelope = commandEnvelope(
+        nextRequestId(),
+        action,
+        values,
+        locale,
+        idempotencyKey,
       );
+      const response = await sendWithReauthentication(envelope);
       const submission = response.result
         ? {
             outcome: response.result.outcome,
@@ -1186,6 +1262,66 @@ function AppShell({
             </div>
           )}
         </main>
+      <Dialog.Root
+        open={reauthenticationOpen}
+        onOpenChange={(open) => {
+          if (!open) cancelReauthentication();
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content confirm-dialog">
+            <div className="dialog-heading">
+              <div className="dialog-icon">
+                <KeyRound size={20} />
+              </div>
+              <div>
+                <Dialog.Title>
+                  {label(locale, "owner_auth.reauth.title")}
+                </Dialog.Title>
+                <Dialog.Description>
+                  {label(locale, "owner_auth.reauth.description")}
+                </Dialog.Description>
+              </div>
+            </div>
+            {reauthenticationFailure ? (
+              <p className="form-error" role="alert">
+                {reauthenticationFailure}
+              </p>
+            ) : null}
+            <div className="dialog-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={reauthenticationPending}
+                onClick={cancelReauthentication}
+              >
+                {label(locale, "common.cancel")}
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={reauthenticationPending}
+                onClick={() => void reauthenticateAndRetry()}
+              >
+                {reauthenticationPending
+                  ? label(locale, "owner_auth.passkey.waiting")
+                  : label(locale, "owner_auth.passkey.reauth_button")}
+              </button>
+            </div>
+            <Dialog.Close asChild>
+              <button
+                className="icon-button dialog-close"
+                type="button"
+                disabled={reauthenticationPending}
+                aria-label={label(locale, "common.close")}
+              >
+                <X size={17} />
+              </button>
+            </Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       </div>
     </div>
   );

@@ -26,6 +26,13 @@ export class AuthenticationError extends Error {
   }
 }
 
+export class ReauthenticationRequiredError extends Error {
+  constructor(message = "recent owner reauthentication required") {
+    super(message);
+    this.name = "ReauthenticationRequiredError";
+  }
+}
+
 export class ContractError extends Error {
   constructor(message: string) {
     super(`node-ui-contract: ${message}`);
@@ -50,18 +57,62 @@ export type JsonResult<T> = {
 
 let requestSequence = Date.now() * 1000;
 
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function recentAuthenticationRequired(payload: unknown): boolean {
+  if (!record(payload)) return false;
+
+  const result = payload.result;
+  if (record(result) && record(result.outcome)) {
+    const outcome = result.outcome;
+    if (
+      outcome.status === "rejected" &&
+      record(outcome.data) &&
+      outcome.data.code === "authentication_required" &&
+      record(outcome.data.params) &&
+      outcome.data.params.authorization_code ===
+        "permission.recent_authentication_required"
+    ) {
+      return true;
+    }
+  }
+
+  if (record(payload.problem)) {
+    const problem = payload.problem;
+    return (
+      problem.code === "authentication_required" &&
+      record(problem.params) &&
+      problem.params.authorization_code ===
+        "permission.recent_authentication_required"
+    );
+  }
+  return false;
+}
+
 export function nextRequestId(): number {
   requestSequence += 1;
   return requestSequence;
 }
 
 export function newIdempotencyKey(): string {
-  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let encoded = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index];
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    encoded += alphabet[first >> 2];
+    encoded += alphabet[((first & 0x03) << 4) | ((second ?? 0) >> 4)];
+    if (second !== undefined) {
+      encoded += alphabet[((second & 0x0f) << 2) | ((third ?? 0) >> 6)];
+    }
+    if (third !== undefined) encoded += alphabet[third & 0x3f];
+  }
+  return `idem_${encoded}`;
 }
 
 export async function requestJson<T>(path: string, init: RequestInit = {}): Promise<JsonResult<T>> {
@@ -80,6 +131,9 @@ export async function requestJson<T>(path: string, init: RequestInit = {}): Prom
     payload = (await response.json()) as T;
   } catch {
     payload = null;
+  }
+  if (response.status === 401 && recentAuthenticationRequired(payload)) {
+    throw new ReauthenticationRequiredError();
   }
   if (response.status === 401) {
     throw new AuthenticationError();

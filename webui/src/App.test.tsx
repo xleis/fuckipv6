@@ -29,11 +29,16 @@ import { App } from "./App";
 import {
   AuthenticationError,
   HttpError,
+  ReauthenticationRequiredError,
   loadManifest,
   loadSnapshot,
   sendCommand,
 } from "./api/client";
-import { loadLanguagePreference, loadOwnerSession } from "./api/session";
+import {
+  loadLanguagePreference,
+  loadOwnerSession,
+  reauthenticateWithPasskey,
+} from "./api/session";
 import { installTestI18nRuntime } from "./test/runtime";
 
 vi.mock("./api/client", async (importOriginal) => {
@@ -54,6 +59,7 @@ vi.mock("./api/session", async (importOriginal) => {
     loadLanguagePreference: vi.fn(),
     saveLanguagePreference: vi.fn(),
     logoutOwnerSession: vi.fn(),
+    reauthenticateWithPasskey: vi.fn(),
   };
 });
 
@@ -1149,6 +1155,139 @@ describe("React WebUI shell", () => {
     const first = vi.mocked(sendCommand).mock.calls[0][0];
     const second = vi.mocked(sendCommand).mock.calls[1][0];
     expect(second.idempotency_key).toBe(first.idempotency_key);
+  });
+
+  it("reauthenticates a stale WebUI session and retries the original command", async () => {
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+      permissions: {
+        access_model: "trusted_control_plane",
+        permissions: ["view_state", "manage_networks", "stop_node"],
+      },
+    });
+    vi.mocked(sendCommand)
+      .mockRejectedValueOnce(new ReauthenticationRequiredError())
+      .mockImplementationOnce(async (request) => ({
+        schema_version: 1,
+        request_id: request.request.request_id,
+        server_time: "2026-11-02T00:00:00Z",
+        result: {
+          request_id: request.request.request_id,
+          outcome: {
+            status: "completed",
+            data: { message: "node restarted" },
+          },
+        },
+      }));
+    vi.mocked(reauthenticateWithPasskey).mockResolvedValue({
+      authenticated: true,
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:overview.manage_runtime",
+      }),
+    );
+    const secondary = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(
+        ".runtime-secondary-action",
+      );
+      if (!button) throw new Error("runtime restart action is missing");
+      return button;
+    });
+    await user.click(secondary);
+
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+    let dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByRole("heading", {
+        name: "translated:owner_auth.reauth.title",
+      }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:owner_auth.passkey.reauth_button",
+      }),
+    );
+
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(2));
+    expect(reauthenticateWithPasskey).toHaveBeenCalledTimes(1);
+    const first = vi.mocked(sendCommand).mock.calls[0][0];
+    const second = vi.mocked(sendCommand).mock.calls[1][0];
+    expect(second).toEqual(first);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("cancels reauthentication without retrying or creating an operation", async () => {
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+      permissions: {
+        access_model: "trusted_control_plane",
+        permissions: ["view_state", "manage_networks", "stop_node"],
+      },
+    });
+    vi.mocked(sendCommand).mockRejectedValueOnce(
+      new ReauthenticationRequiredError(),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:overview.manage_runtime",
+      }),
+    );
+    const secondary = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(
+        ".runtime-secondary-action",
+      );
+      if (!button) throw new Error("runtime restart action is missing");
+      return button;
+    });
+    await user.click(secondary);
+
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+    let dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "translated:common.cancel" }),
+    );
+
+    await waitFor(() =>
+      expect(panel.querySelector(".form-error")).toHaveTextContent(
+        "translated:owner_auth.reauth.cancelled",
+      ),
+    );
+    expect(sendCommand).toHaveBeenCalledTimes(1);
+    expect(reauthenticateWithPasskey).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("operation-status")).not.toBeInTheDocument();
   });
 
   it("keeps runtime navigation visible but hides an unauthorized primary action", async () => {

@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tls::WebUiTlsConfig;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential, Url};
 
@@ -460,16 +460,23 @@ async fn attach_owner_command_context(
     state: &ApiAuthState,
     request: &mut axum::extract::Request,
     source: &str,
+    session: Option<&AuthenticatedOwnerSession>,
 ) {
     let Some(node_state) = &state.node_state else {
         return;
     };
     let snapshot = node_state.snapshot().await;
-    request
-        .extensions_mut()
-        .insert(NodeCommandContext::local_owner_for_snapshot(
-            &snapshot, source,
-        ));
+    let context = match session {
+        Some(session) => NodeCommandContext::owner_session_for_snapshot(
+            &snapshot,
+            source,
+            session.recently_authenticated(unix_time_ms()),
+        ),
+        // Test and explicitly disabled-auth routers do not carry a WebUI owner
+        // service. Their loopback caller remains the local OS owner.
+        None => NodeCommandContext::local_owner_for_snapshot(&snapshot, source),
+    };
+    request.extensions_mut().insert(context);
 }
 
 async fn require_api_auth(
@@ -503,18 +510,17 @@ async fn require_api_auth(
         let Some(token) = owner_session_cookie(request.headers()) else {
             return unauthorized_response("公网管理 API 需要节点所有者 Passkey 会话");
         };
-        if owner
-            .authenticate_session(OwnerBootstrapChannel::Public, token)
-            .is_err()
-        {
-            return unauthorized_response("节点所有者 Passkey 会话无效或已过期");
-        }
+        let session = match owner.authenticate_session(OwnerBootstrapChannel::Public, token) {
+            Ok(session) => session,
+            Err(_) => return unauthorized_response("节点所有者 Passkey 会话无效或已过期"),
+        };
         if is_mutation {
             if let Err(retry_after) = state.mutation_limiter.check(client_ip) {
                 return mutation_rate_limited_response(retry_after);
             }
         }
-        attach_owner_command_context(&state, &mut request, "webui_public_owner").await;
+        attach_owner_command_context(&state, &mut request, "webui_public_owner", Some(&session))
+            .await;
         return next.run(request).await;
     }
 
@@ -526,12 +532,10 @@ async fn require_api_auth(
         let Some(token) = owner_session_cookie(request.headers()) else {
             return unauthorized_response("控制面认证失败：请使用节点所有者 Passkey 登录");
         };
-        if owner
-            .authenticate_session(OwnerBootstrapChannel::Local, token)
-            .is_err()
-        {
-            return unauthorized_response("节点所有者会话无效或已过期");
-        }
+        let session = match owner.authenticate_session(OwnerBootstrapChannel::Local, token) {
+            Ok(session) => session,
+            Err(_) => return unauthorized_response("节点所有者会话无效或已过期"),
+        };
         if is_mutation && !local_mutation_has_same_origin(&state, &request) {
             return forbidden_response("拒绝跨站状态变更请求：Origin 或 Sec-Fetch-Site 校验失败");
         }
@@ -541,7 +545,8 @@ async fn require_api_auth(
                 return mutation_rate_limited_response(retry_after);
             }
         }
-        attach_owner_command_context(&state, &mut request, "webui_local_owner").await;
+        attach_owner_command_context(&state, &mut request, "webui_local_owner", Some(&session))
+            .await;
         return next.run(request).await;
     }
 
@@ -573,8 +578,16 @@ async fn require_api_auth(
     } else {
         "webui_loopback_owner"
     };
-    attach_owner_command_context(&state, &mut request, source).await;
+    attach_owner_command_context(&state, &mut request, source, None).await;
     next.run(request).await
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(1)
+        .max(1)
 }
 
 fn request_is_mutation(request: &axum::extract::Request) -> bool {
@@ -2294,16 +2307,24 @@ mod tests {
             .expect("owner recovery confirmation");
     }
 
-    fn initialize_owner_and_issue_local_cookie(fixture: &OwnerAppFixture) -> String {
+    fn initialize_owner_and_issue_local_session(
+        fixture: &OwnerAppFixture,
+    ) -> (String, IssuedOwnerSession) {
         initialize_owner(fixture);
         let issued = fixture
             .service
             .issue_session_for_test(OwnerBootstrapChannel::Local)
             .expect("owner test session");
-        owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local)
-            .to_str()
-            .expect("owner session cookie")
-            .to_string()
+        let cookie =
+            owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local)
+                .to_str()
+                .expect("owner session cookie")
+                .to_string();
+        (cookie, issued)
+    }
+
+    fn initialize_owner_and_issue_local_cookie(fixture: &OwnerAppFixture) -> String {
+        initialize_owner_and_issue_local_session(fixture).0
     }
 
     fn owner_node_app_fixture(port: u16, node_adapter: Option<NodeHttpAdapter>) -> OwnerAppFixture {
@@ -3928,6 +3949,96 @@ mod tests {
             .expect("origin-less cookie command");
         assert_eq!(missing_origin.status(), StatusCode::FORBIDDEN);
         assert_eq!(command_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_local_owner_reauthenticates_before_v1_sensitive_commands() {
+        let (adapter, command_count) = node_adapter_fixture(node_ui_manifest());
+        let fixture = owner_node_app_fixture(8080, Some(adapter));
+        let (cookie, issued) = initialize_owner_and_issue_local_session(&fixture);
+        let fresh_body = r#"{"schema_version":1,"idempotency_key":"idem_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","request":{"request_id":31,"command":{"command":"shutdown"}}}"#;
+
+        let fresh = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/commands",
+                    fresh_body,
+                    Some(cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("fresh owner sensitive command");
+        assert_eq!(fresh.status(), StatusCode::ACCEPTED);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while command_count.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fresh owner operation must reach the handler");
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+
+        fixture
+            .service
+            .age_session_for_test(issued.token.as_str(), Duration::from_secs(301))
+            .expect("age owner session");
+        let stale_body = r#"{"schema_version":1,"idempotency_key":"idem_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ","request":{"request_id":32,"command":{"command":"shutdown"}}}"#;
+        let stale = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/commands",
+                    stale_body,
+                    Some(cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("stale owner sensitive command");
+        let stale_status = stale.status();
+        let stale_payload = response_json(stale).await;
+        assert_eq!(
+            stale_status,
+            StatusCode::UNAUTHORIZED,
+            "unexpected stale response: {stale_payload}"
+        );
+        assert_eq!(
+            stale_payload["result"]["outcome"]["data"]["code"],
+            "authentication_required"
+        );
+        assert_eq!(
+            stale_payload["result"]["outcome"]["data"]["params"]["authorization_code"],
+            "permission.recent_authentication_required"
+        );
+        assert!(stale_payload["operation"].is_null());
+        assert_eq!(command_count.load(Ordering::SeqCst), 1);
+
+        let read_body = r#"{"schema_version":1,"request":{"request_id":33,"command":{"command":"get_snapshot"}}}"#;
+        let read = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/commands",
+                    read_body,
+                    Some(cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("stale owner read command");
+        assert_eq!(read.status(), StatusCode::OK);
+        assert_eq!(command_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

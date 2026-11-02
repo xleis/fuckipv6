@@ -34,6 +34,19 @@ export async function loginWithPasskey(): Promise<OwnerSession> {
   return session;
 }
 
+export async function reauthenticateWithPasskey(): Promise<OwnerSession> {
+  const start = await apiRequest<unknown>("/api/v1/auth/passkey/reauth/start", { method: "POST" });
+  const credential = await navigator.credentials.get({ publicKey: decodeRequestOptions(start) });
+  if (!isCredential(credential)) throw new Error("Passkey reauthentication was cancelled");
+  await apiRequest<unknown>("/api/v1/auth/passkey/reauth/finish", {
+    method: "POST",
+    body: JSON.stringify({ credential: encodeAuthenticationCredential(credential) }),
+  });
+  const session = await loadOwnerSession();
+  if (!session.authenticated) throw new Error("The owner session was not reestablished");
+  return session;
+}
+
 export async function registerPasskey(label: string): Promise<unknown> {
   const start = await apiRequest<unknown>("/api/v1/auth/passkeys/registration/start", {
     method: "POST",

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { newIdempotencyKey, nextRequestId, waitForOperation } from "./client";
+import type { NodeCommandHttpRequest } from "../../../contracts/typescript/node-contract-v1";
+import {
+  AuthenticationError,
+  ReauthenticationRequiredError,
+  newIdempotencyKey,
+  nextRequestId,
+  sendCommand,
+  waitForOperation,
+} from "./client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -13,11 +21,81 @@ describe("request identities", () => {
     expect(second).toBe(first + 1);
   });
 
-  it("allocates unique UUID-shaped idempotency keys", () => {
+  it("recognizes a recent-authentication command rejection", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            schema_version: 1,
+            request_id: 31,
+            server_time: "2026-11-02T00:00:00Z",
+            result: {
+              request_id: 31,
+              outcome: {
+                status: "rejected",
+                data: {
+                  code: "authentication_required",
+                  params: {
+                    authorization_code:
+                      "permission.recent_authentication_required",
+                  },
+                },
+              },
+            },
+            operation: null,
+          }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    const envelope: NodeCommandHttpRequest = {
+      schema_version: 1,
+      idempotency_key: "reauth-test",
+      request: {
+        request_id: 31,
+        command: { command: "shutdown" },
+      },
+    };
+
+    await expect(sendCommand(envelope)).rejects.toBeInstanceOf(
+      ReauthenticationRequiredError,
+    );
+  });
+
+  it("keeps ordinary authentication failures distinct from reauthentication", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            code: "authentication_required",
+            message: "owner session expired",
+            request_id: 32,
+          }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    const envelope: NodeCommandHttpRequest = {
+      schema_version: 1,
+      idempotency_key: "reauth-test",
+      request: {
+        request_id: 32,
+        command: { command: "shutdown" },
+      },
+    };
+
+    await expect(sendCommand(envelope)).rejects.toBeInstanceOf(
+      AuthenticationError,
+    );
+  });
+
+  it("allocates contract-valid unique idempotency keys", () => {
     const first = newIdempotencyKey();
     const second = newIdempotencyKey();
-    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(second).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(first).toMatch(/^idem_[A-Za-z0-9_-]{43}$/);
+    expect(second).toMatch(/^idem_[A-Za-z0-9_-]{43}$/);
     expect(second).not.toBe(first);
   });
 

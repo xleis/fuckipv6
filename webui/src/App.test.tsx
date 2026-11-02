@@ -20,6 +20,7 @@ import type {
   ConfigurationHistoryEntry,
   NodeApiCommandResponse,
   NodeCommandOutcome,
+  NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiManifest,
 } from "../../contracts/typescript/node-contract-v1";
@@ -637,6 +638,7 @@ describe("React WebUI shell", () => {
       status: "uninitialized",
       value: snapshot,
       action: "start_node",
+      secondaryAction: null,
     },
     {
       status: "running",
@@ -649,6 +651,7 @@ describe("React WebUI shell", () => {
         },
       },
       action: "stop_node",
+      secondaryAction: "restart_node",
     },
     {
       status: "degraded",
@@ -664,10 +667,11 @@ describe("React WebUI shell", () => {
         },
       },
       action: "get_node_diagnostics",
+      secondaryAction: "restart_node",
     },
   ])(
     "navigates from overview to the executable runtime action for $status",
-    async ({ value, action }) => {
+    async ({ value, action, secondaryAction }) => {
       authenticate(value as NodeSnapshot);
       const user = userEvent.setup();
       renderApp();
@@ -695,6 +699,14 @@ describe("React WebUI shell", () => {
         .find((button) => button.classList.contains("runtime-primary-action"));
       if (!primaryAction) throw new Error("runtime primary action is missing");
       expect(primaryAction).toHaveClass("runtime-primary-action");
+      const secondary = document.querySelector(
+        ".runtime-secondary-action",
+      );
+      if (secondaryAction) {
+        expect(secondary).toHaveTextContent(`translated:action.${secondaryAction}`);
+      } else {
+        expect(secondary).not.toBeInTheDocument();
+      }
       await user.click(primaryAction);
 
       expect(
@@ -705,6 +717,88 @@ describe("React WebUI shell", () => {
       expect(panel.querySelector(".action-form")).toBeInTheDocument();
     },
   );
+
+  it("reuses the operation idempotency key after a terminal failure", async () => {
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+      permissions: {
+        access_model: "trusted_control_plane",
+        permissions: ["view_state", "manage_networks", "stop_node"],
+      },
+    });
+    const failedOperation = {
+      operation_id: "op-restart-failed",
+      state: "failed",
+      stage: "cleanup",
+      attempt: 1,
+      max_attempts: 3,
+      cancellable: false,
+      cancel_blocked_reason: "operation.cancel.not_supported",
+      error: {
+        code: "node.restart_failed",
+        message_key: "error.node_restart_failed",
+        retryable: true,
+        recovery: { kind: "retry", hint_key: "recovery.retry" },
+      },
+    } as NodeOperationSnapshot;
+    vi.mocked(sendCommand).mockImplementation(
+      async (request): Promise<NodeApiCommandResponse> => ({
+        schema_version: 1,
+        request_id: request.request.request_id,
+        server_time: "2026-11-02T00:00:00Z",
+        operation: failedOperation,
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:overview.manage_runtime" }),
+    );
+    const secondary = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(
+        ".runtime-secondary-action",
+      );
+      if (!button) throw new Error("runtime restart action is missing");
+      return button;
+    });
+    expect(secondary).toHaveTextContent("translated:action.restart_node");
+    await user.click(secondary);
+
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+    let dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+    );
+    await waitFor(() => {
+      expect(panel.querySelector(".form-error")).toHaveTextContent(
+        "translated:error.node_restart_failed",
+      );
+    });
+    expect(await screen.findByTestId("operation-status")).toHaveTextContent(
+      "op-restart-failed",
+    );
+
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+    dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+    );
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(2));
+
+    const first = vi.mocked(sendCommand).mock.calls[0][0];
+    const second = vi.mocked(sendCommand).mock.calls[1][0];
+    expect(second.idempotency_key).toBe(first.idempotency_key);
+  });
 
   it("keeps runtime navigation visible but hides an unauthorized primary action", async () => {
     authenticate({

@@ -41,6 +41,18 @@ button {
   outline-offset: 2px;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .skip-link {
   position: fixed;
   z-index: 1000;
@@ -818,6 +830,13 @@ button:disabled {
   margin: 0;
   color: var(--text-secondary);
 }
+.runtime-action-group {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
 .hero-status-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1435,6 +1454,96 @@ button:disabled {
 }
 .action-list {
   display: grid;
+}
+.actions-panel > .operation-status {
+  margin: var(--space-3) var(--space-3) 0;
+}
+.operation-status {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+.operation-status-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.operation-status-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.operation-status-heading span,
+.operation-diagnostic-id > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.operation-status-heading strong {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+}
+.operation-copy {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding-inline: var(--space-2);
+  font-size: 10px;
+}
+.operation-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.operation-metadata > span {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface);
+}
+.operation-metadata code {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+.operation-error {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  font-size: var(--font-size-xs);
+}
+.operation-error strong {
+  color: var(--danger);
+  font-size: 10px;
+}
+.operation-error p,
+.operation-error span {
+  margin: 0;
+}
+.operation-diagnostic-id {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.operation-diagnostic-id code {
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  user-select: all;
 }
 .action-card + .action-card {
   border-top: 1px solid var(--border);

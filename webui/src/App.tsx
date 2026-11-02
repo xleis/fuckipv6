@@ -58,7 +58,10 @@ import {
   navigationModuleForPage,
   type NavigationModuleContract,
 } from "./navigation";
-import { ActionPanel } from "./components/action-panel";
+import {
+  ActionPanel,
+  type ActionSubmission,
+} from "./components/action-panel";
 import {
   CONFIGURATION_ACTION_IDS,
   ConfigurationWorkflow,
@@ -648,8 +651,11 @@ function AppShell({
   const searchQuery = uiSession.searchQuery;
   const requestedActionId = uiSession.requestedActionId;
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [activeOperation, setActiveOperation] =
+    useState<NodeOperationSnapshot | null>(null);
   const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
+  const idempotencyKeys = useRef(new Map<string, string>());
   const setPageId = (value: string) => onUiSessionChange({ pageId: value });
   const setSelectedNetworkState = (value: string) =>
     onUiSessionChange({ selectedNetwork: value });
@@ -742,27 +748,44 @@ function AppShell({
 
   async function resolveOperationOutcome(
     submitted: NodeOperationSnapshot,
-  ): Promise<NodeCommandOutcome> {
+    onOperation: (operation: NodeOperationSnapshot) => void,
+  ): Promise<ActionSubmission> {
+    onOperation(submitted);
     const operation = operationStateIsTerminal(submitted.state)
       ? submitted
-      : await waitForOperation(submitted.operation_id);
-    if (operation.result) return operation.result.outcome;
-    if (operation.state !== "succeeded") {
-      const error = operation.error;
-      throw new Error(
-        error
-          ? tr(locale, error.message_key, error.params ?? {})
-          : label(locale, "common.operation_failed"),
-      );
+      : await waitForOperation(submitted.operation_id, {
+          onOperation,
+        });
+    onOperation(operation);
+    if (operation.result) {
+      return { outcome: operation.result.outcome, operation };
     }
-    throw new Error(label(locale, "common.operation_failed"));
+    if (operation.state === "succeeded") {
+      throw new Error(label(locale, "common.operation_failed"));
+    }
+    return { operation };
   }
 
   async function submitAction(
     action: NodeUiAction,
     values: ActionValues,
-  ): Promise<NodeCommandOutcome> {
+    onOperation: (operation: NodeOperationSnapshot) => void,
+  ): Promise<ActionSubmission> {
     setPendingAction(action.id);
+    const fingerprint = JSON.stringify([
+      action.id,
+      selectedNetwork,
+      Object.keys(values)
+        .sort()
+        .map((key) => [key, values[key]]),
+    ]);
+    const idempotencyKey =
+      idempotencyKeys.current.get(fingerprint) ?? newIdempotencyKey();
+    idempotencyKeys.current.set(fingerprint, idempotencyKey);
+    const rememberOperation = (operation: NodeOperationSnapshot) => {
+      setActiveOperation(operation);
+      onOperation(operation);
+    };
     try {
       const response = await sendCommand(
         commandEnvelope(
@@ -770,28 +793,50 @@ function AppShell({
           action,
           values,
           locale,
-          newIdempotencyKey(),
+          idempotencyKey,
         ),
       );
-      const outcome = response.result
-        ? response.result.outcome
+      const submission = response.result
+        ? {
+            outcome: response.result.outcome,
+            operation: response.operation ?? undefined,
+          }
         : response.operation
-          ? await resolveOperationOutcome(response.operation)
+          ? await resolveOperationOutcome(response.operation, rememberOperation)
           : (() => {
               throw new Error(label(locale, "common.operation_failed"));
             })();
-      if (outcome.status === "snapshot") {
-        queryClient.setQueryData(SNAPSHOT_QUERY_KEY, outcome.data);
+      if (submission.operation) {
+        setActiveOperation(submission.operation);
+        onOperation(submission.operation);
+      }
+      if (submission.outcome?.status === "snapshot") {
+        queryClient.setQueryData(SNAPSHOT_QUERY_KEY, submission.outcome.data);
       } else {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY }),
           queryClient.invalidateQueries({ queryKey: MANIFEST_QUERY_KEY }),
         ]);
       }
-      return outcome;
+      if (
+        submission.outcome?.status !== "rejected" &&
+        (!submission.operation || submission.operation.state === "succeeded")
+      ) {
+        idempotencyKeys.current.delete(fingerprint);
+      }
+      return submission;
     } finally {
       setPendingAction(null);
     }
+  }
+
+  async function submitConfigurationAction(
+    action: NodeUiAction,
+    values: ActionValues,
+  ): Promise<NodeCommandOutcome> {
+    const submission = await submitAction(action, values, setActiveOperation);
+    if (submission.outcome) return submission.outcome;
+    throw new Error(label(locale, "common.operation_failed"));
   }
 
   function navigate(nextPage: string, networkName?: string): void {
@@ -1111,7 +1156,7 @@ function AppShell({
                         interactionBlocked={interactionBlocked}
                         draft={uiSession.configurationDraft}
                         onDraftChange={handleConfigurationDraftChange}
-                        onSubmit={submitAction}
+                        onSubmit={submitConfigurationAction}
                       />
                     ) : null
                   }
@@ -1130,6 +1175,7 @@ function AppShell({
                 pendingAction={pendingAction}
                 interactionBlocked={interactionBlocked}
                 requestedActionId={requestedActionId}
+                operation={activeOperation}
                 onRequestedActionOpened={() => setRequestedActionId(null)}
                 onSubmit={submitAction}
               />

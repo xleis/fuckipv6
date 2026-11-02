@@ -45,8 +45,9 @@ pub fn run(options: crate::cli::commands::RuntimeOptions) -> Result<()> {
     let session = NativeNodeSession::start(options)?;
     let state = session.state();
     let commands = session.commands();
+    let operations = session.operations();
     let configs = ConfigManager::new()?;
-    let window_result = view::run_window(state, commands, configs);
+    let window_result = view::run_window(state, commands, Some(operations), configs);
     session.shutdown();
     window_result
 }

@@ -169,19 +169,28 @@ const OVERVIEW_ACTIVITY_ACTIONS = new Set([
   "node.shutdown",
 ]);
 
-function runtimePrimaryAction(
-  statusId: string,
-): { id: string; labelKey: string } | null {
+type RuntimePageAction = { id: string; labelKey: string };
+
+function runtimeActionPlan(statusId: string): {
+  primary: RuntimePageAction;
+  secondary?: RuntimePageAction;
+} | null {
   if (statusId === "uninitialized" || statusId === "stopped") {
-    return { id: "start_node", labelKey: "action.start_node" };
+    return { primary: { id: "start_node", labelKey: "action.start_node" } };
   }
   if (statusId === "running") {
-    return { id: "stop_node", labelKey: "action.stop_node" };
-  }
-  if (["degraded", "failed", "control_unavailable"].includes(statusId)) {
     return {
-      id: "get_node_diagnostics",
-      labelKey: "action.get_node_diagnostics",
+      primary: { id: "stop_node", labelKey: "action.stop_node" },
+      secondary: { id: "restart_node", labelKey: "action.restart_node" },
+    };
+  }
+  if (statusId === "degraded" || statusId === "failed") {
+    return {
+      primary: {
+        id: "get_node_diagnostics",
+        labelKey: "action.get_node_diagnostics",
+      },
+      secondary: { id: "restart_node", labelKey: "action.restart_node" },
     };
   }
   return null;
@@ -468,14 +477,23 @@ function NodeRuntime({
   onRequestAction,
 }: PageContentProps) {
   const status = primaryStatus(snapshot, locale);
-  const requestedAction = runtimePrimaryAction(status.id);
-  const action = requestedAction
-    ? page.actions.find((candidate) => candidate.id === requestedAction.id)
-    : undefined;
-  const executableAction =
-    action && !executionBlockReason(action, snapshot, selectedNetwork)
-      ? action
-      : undefined;
+  const actionPlan = runtimeActionPlan(status.id);
+  const executableActions = [
+    actionPlan?.primary,
+    actionPlan?.secondary,
+  ].flatMap((requestedAction, index) => {
+    if (!requestedAction) return [];
+    const action = page.actions.find(
+      (candidate) => candidate.id === requestedAction.id,
+    );
+    if (
+      !action ||
+      executionBlockReason(action, snapshot, selectedNetwork)
+    ) {
+      return [];
+    }
+    return [{ action, primary: index === 0 }];
+  });
   const phase = label(locale, `status.phase.${snapshot.lifecycle.phase}`);
   const controlHealth = label(
     locale,
@@ -509,14 +527,23 @@ function NodeRuntime({
           <h2>{status.label}</h2>
           <p>{status.detail}</p>
         </div>
-        {executableAction ? (
-          <button
-            className="primary-button runtime-primary-action"
-            type="button"
-            onClick={() => onRequestAction(executableAction.id)}
-          >
-            {label(locale, executableAction.label_key)}
-          </button>
+        {executableActions.length > 0 ? (
+          <div className="runtime-action-group">
+            {executableActions.map(({ action, primary }) => (
+              <button
+                className={
+                  primary
+                    ? "primary-button runtime-primary-action"
+                    : "secondary-button runtime-secondary-action"
+                }
+                type="button"
+                key={action.id}
+                onClick={() => onRequestAction(action.id)}
+              >
+                {label(locale, action.label_key)}
+              </button>
+            ))}
+          </div>
         ) : null}
       </section>
 

@@ -154,6 +154,7 @@ export async function waitForOperation(
     intervalMs?: number;
     timeoutMs?: number;
     signal?: AbortSignal;
+    onOperation?: (operation: NodeOperationSnapshot) => void;
   } = {},
 ): Promise<NodeOperationSnapshot> {
   const intervalMs = options.intervalMs ?? 400;
@@ -161,6 +162,7 @@ export async function waitForOperation(
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const operation = await loadOperation(operationId);
+    options.onOperation?.(operation);
     if (operationStateIsTerminal(operation.state)) return operation;
     if (Date.now() >= deadline)
       throw new Error(`operation ${operationId} did not reach a terminal state in time`);

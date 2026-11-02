@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
+use fuckipv6_common::domain::{IdempotencyKey, OperationError, OperationState};
 use fuckipv6_common::i18n::{
     detect_system_locale, resolve_language, t, tr, LanguagePreference, Locale,
 };
@@ -12,8 +13,9 @@ use fuckipv6_common::ui_layout::{
     LayoutClass, NavigationModule,
 };
 use gpui::{
-    actions, div, prelude::*, px, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle,
-    KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context, Div, Entity,
+    FocusHandle, KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_base::input::{InputEvent, Textarea, TextareaState};
 
@@ -39,13 +41,17 @@ use crate::config_transaction::{
 use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
-    NodeNetworkStatus, NodePreviewConfigurationCommand, NodePrimaryStatus,
-    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
+    NodeNetworkStatus, NodeOperationSnapshot, NodePreviewConfigurationCommand, NodePrimaryStatus,
+    NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
     NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
+    OperationClientError,
 };
+use crate::remote_node::RemoteOperationClient;
 
 const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
 const WINDOW_HEIGHT: f32 = DIMENSIONS.window_default_height_px as f32;
+const OPERATION_LOOKUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+const OPERATION_LOOKUP_FAILURE_LIMIT: u16 = 300;
 
 const COLOR_BG: u32 = DARK_THEME.colors.background.rgba_hex();
 const COLOR_SIDEBAR: u32 = DARK_THEME.colors.background_deep.rgba_hex();
@@ -186,6 +192,7 @@ fn visible_overview_primary_page<'a>(
 
 struct GpuiShell {
     commands: NodeCommandBus,
+    operations: Option<RemoteOperationClient>,
     configs: ConfigManager,
     language_preference: LanguagePreference,
     locale: Locale,
@@ -207,6 +214,9 @@ struct GpuiShell {
     content_focus_handle: FocusHandle,
     pending_commands: u32,
     next_request_id: u64,
+    operation: Option<NodeOperationSnapshot>,
+    operation_fingerprint: Option<String>,
+    operation_idempotency_key: Option<IdempotencyKey>,
     error: Option<String>,
     notice: Option<String>,
     language_menu_open: bool,
@@ -217,6 +227,7 @@ impl GpuiShell {
     fn new(
         state: NodeStateStore,
         commands: NodeCommandBus,
+        operations: Option<RemoteOperationClient>,
         configs: ConfigManager,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -230,6 +241,7 @@ impl GpuiShell {
             .map(|network| network.name.clone());
         let mut shell = Self {
             commands,
+            operations,
             configs,
             language_preference,
             locale,
@@ -251,6 +263,9 @@ impl GpuiShell {
             content_focus_handle: cx.focus_handle(),
             pending_commands: 0,
             next_request_id: 1,
+            operation: None,
+            operation_fingerprint: None,
+            operation_idempotency_key: None,
             error: None,
             notice: None,
             language_menu_open: false,
@@ -351,6 +366,10 @@ impl GpuiShell {
     }
 
     fn submit_raw(&mut self, command: NodeCommand, cx: &mut Context<Self>) {
+        if command.kind().is_write() {
+            self.submit_operation(command, cx);
+            return;
+        }
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1).max(1);
         let request = NodeCommandRequest::new(request_id, command);
@@ -371,6 +390,180 @@ impl GpuiShell {
             });
         })
         .detach();
+    }
+
+    fn submit_operation(&mut self, command: NodeCommand, cx: &mut Context<Self>) {
+        let Some(operations) = self.operations.clone() else {
+            self.error = Some(t(self.locale, "gpui.operations_unavailable").to_string());
+            cx.notify();
+            return;
+        };
+        let fingerprint =
+            serde_json::to_string(&command).unwrap_or_else(|_| command.kind().as_str().to_owned());
+        if self.operation_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            self.operation = None;
+            self.operation_idempotency_key = None;
+            self.operation_fingerprint = Some(fingerprint);
+        }
+        let idempotency_key = self
+            .operation_idempotency_key
+            .clone()
+            .unwrap_or_else(new_idempotency_key);
+        self.operation_idempotency_key = Some(idempotency_key.clone());
+
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1).max(1);
+        let request = NodeCommandRequest::new(request_id, command);
+        let context = NodeCommandContext::local_owner_for_snapshot(&self.snapshot, "gpui");
+        self.pending_commands = self.pending_commands.saturating_add(1);
+        self.error = None;
+        self.notice = None;
+        self.pending_confirmation = None;
+        cx.notify();
+
+        cx.spawn(async move |weak, cx| {
+            let mut submitted = match operations.submit(context, request, idempotency_key).await {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let _ = weak.update(cx, |shell, cx| {
+                        shell.pending_commands = shell.pending_commands.saturating_sub(1);
+                        shell.fail_operation_client(error);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let deadline = std::time::Instant::now() + OPERATION_LOOKUP_DEADLINE;
+            let mut lookup_failures = 0_u16;
+            loop {
+                let terminal = operation_state_is_terminal(submitted.operation.state);
+                let operation_id = submitted.operation.operation_id.as_str().to_owned();
+                let snapshot = submitted.clone();
+                let _ = weak.update(cx, |shell, cx| {
+                    shell.operation = Some(snapshot.clone());
+                    if terminal {
+                        shell.finish_operation(snapshot, cx);
+                    }
+                    cx.notify();
+                });
+                if terminal {
+                    break;
+                }
+
+                if std::time::Instant::now() >= deadline {
+                    let _ = weak.update(cx, |shell, cx| {
+                        shell.pending_commands = shell.pending_commands.saturating_sub(1);
+                        shell.error =
+                            Some(t(shell.locale, "gpui.operation_lookup_timeout").to_string());
+                        if shell.configuration.operation.is_some() {
+                            shell.configuration.set_error(
+                                t(shell.locale, "gpui.operation_lookup_timeout").to_string(),
+                            );
+                            shell.configuration.finish();
+                        }
+                        cx.notify();
+                    });
+                    break;
+                }
+
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                match operations.lookup(&operation_id).await {
+                    Ok(Some(operation)) => {
+                        lookup_failures = 0;
+                        submitted = operation;
+                    }
+                    Ok(None) => {
+                        lookup_failures = lookup_failures.saturating_add(1);
+                    }
+                    Err(error) => {
+                        lookup_failures = lookup_failures.saturating_add(1);
+                        let _ = weak.update(cx, |shell, cx| {
+                            shell.error = Some(tr(
+                                shell.locale,
+                                "gpui.operation_lookup_failed",
+                                &[("error", &error.to_string())],
+                            ));
+                            cx.notify();
+                        });
+                    }
+                }
+                if lookup_failures >= OPERATION_LOOKUP_FAILURE_LIMIT {
+                    let _ = weak.update(cx, |shell, cx| {
+                        shell.pending_commands = shell.pending_commands.saturating_sub(1);
+                        shell.error =
+                            Some(t(shell.locale, "gpui.operation_lookup_timeout").to_string());
+                        if shell.configuration.operation.is_some() {
+                            shell.configuration.set_error(
+                                t(shell.locale, "gpui.operation_lookup_timeout").to_string(),
+                            );
+                            shell.configuration.finish();
+                        }
+                        cx.notify();
+                    });
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn fail_operation_client(&mut self, error: OperationClientError) {
+        let message = match error {
+            OperationClientError::Invalid(problem) => {
+                format_operation_problem(self.locale, &problem)
+            }
+            error => error.to_string(),
+        };
+        if self.configuration.operation.is_some() {
+            self.configuration.set_error(message.clone());
+            self.configuration.finish();
+        }
+        self.error = Some(tr(
+            self.locale,
+            "gpui.operation_failed",
+            &[("error", &message)],
+        ));
+    }
+
+    fn finish_operation(&mut self, operation: NodeOperationSnapshot, cx: &mut Context<Self>) {
+        self.pending_commands = self.pending_commands.saturating_sub(1);
+        if operation_releases_idempotency_key(operation.operation.state) {
+            self.operation_idempotency_key = None;
+            if let Some(result) = operation.result {
+                self.apply_command_result(Ok(result), cx);
+            } else {
+                self.submit_raw(NodeCommand::GetSnapshot, cx);
+            }
+            return;
+        }
+
+        let message = operation
+            .operation
+            .error
+            .as_ref()
+            .map(|error| format_operation_error(self.locale, error))
+            .unwrap_or_else(|| {
+                tr(
+                    self.locale,
+                    "gpui.operation_finished_without_error",
+                    &[(
+                        "state",
+                        t(self.locale, operation_state_key(operation.operation.state)),
+                    )],
+                )
+            });
+        if self.configuration.operation.is_some() {
+            self.configuration.set_error(message.clone());
+            self.configuration.finish();
+        }
+        self.error = Some(tr(
+            self.locale,
+            "gpui.operation_failed",
+            &[("error", &message)],
+        ));
     }
 
     fn refresh_snapshot(&mut self, _: &RefreshSnapshot, _: &mut Window, cx: &mut Context<Self>) {
@@ -3480,6 +3673,140 @@ impl GpuiShell {
         workspace.into_any_element()
     }
 
+    fn operation_status_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(operation) = self.operation.as_ref() else {
+            return div().into_any_element();
+        };
+        let state = t(self.locale, operation_state_key(operation.operation.state)).to_string();
+        let diagnostic_id = operation.diagnostic_id().to_owned();
+        let cancellability = if operation.operation.cancellable {
+            t(self.locale, "operation.cancellable_yes").to_string()
+        } else {
+            let reason = operation
+                .operation
+                .cancel_blocked_reason
+                .as_deref()
+                .map(|key| t(self.locale, key))
+                .unwrap_or_else(|| t(self.locale, "operation.cancellable_unknown"));
+            tr(
+                self.locale,
+                "operation.cancellable_no",
+                &[("reason", reason)],
+            )
+        };
+        let error = operation.operation.error.as_ref().map(|error| {
+            let retry = if error.retryable {
+                t(self.locale, "operation.retryable")
+            } else {
+                t(self.locale, "operation.not_retryable")
+            };
+            format!(
+                "{} · {}: {} · {}",
+                format_operation_error(self.locale, error),
+                t(self.locale, "operation.error_code"),
+                error.code,
+                retry
+            )
+        });
+        let attempt = tr(
+            self.locale,
+            "operation.attempt",
+            &[
+                ("attempt", &operation.operation.attempt.to_string()),
+                ("max", &operation.operation.max_attempts.to_string()),
+            ],
+        );
+
+        div()
+            .id("node-operation-status")
+            .debug_selector(|| "visual-node-operation".into())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(if operation.operation.error.is_some() {
+                COLOR_WARNING
+            } else {
+                COLOR_BORDER
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "operation.title").to_string()),
+                    )
+                    .child(
+                        button(
+                            SharedString::from("copy-operation-diagnostic-id"),
+                            t(self.locale, "operation.copy_diagnostic_id"),
+                            ButtonVariant::Secondary,
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            if let Some(operation) = &shell.operation {
+                                let diagnostic_id = operation.diagnostic_id().to_owned();
+                                cx.write_to_clipboard(ClipboardItem::new_string(diagnostic_id));
+                                shell.notice = Some(
+                                    t(shell.locale, "operation.diagnostic_copied").to_string(),
+                                );
+                                cx.notify();
+                            }
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .text_xs()
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(format!("{}: {state}", t(self.locale, "operation.state")))
+                    .child(format!(
+                        "{}: {}",
+                        t(self.locale, "operation.stage"),
+                        operation.operation.stage
+                    ))
+                    .child(attempt)
+                    .child(cancellability),
+            )
+            .when_some(error, |card, error| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(rgba(COLOR_WARNING))
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "operation.diagnostic_id").to_string())
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(diagnostic_id),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn page_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
@@ -3585,6 +3912,10 @@ impl GpuiShell {
             return content
                 .child(self.overview_content(overview, cx))
                 .into_any_element();
+        }
+
+        if self.selected_page == "node_runtime" {
+            content = content.child(self.operation_status_card(cx));
         }
 
         if !model.metrics.is_empty() {
@@ -4419,6 +4750,76 @@ fn bind_shell_keys(cx: &mut App) {
     ]);
 }
 
+fn new_idempotency_key() -> IdempotencyKey {
+    let mut random = [0_u8; 32];
+    if getrandom::fill(&mut random).is_err() {
+        let fallback = format!(
+            "gpui-operation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        );
+        return IdempotencyKey::from_public_key(fallback.as_bytes());
+    }
+    IdempotencyKey::from_public_key(&random)
+}
+
+fn operation_state_is_terminal(state: OperationState) -> bool {
+    matches!(
+        state,
+        OperationState::Succeeded
+            | OperationState::Failed
+            | OperationState::Cancelled
+            | OperationState::TimedOut
+    )
+}
+
+fn operation_releases_idempotency_key(state: OperationState) -> bool {
+    state == OperationState::Succeeded
+}
+
+fn operation_state_key(state: OperationState) -> &'static str {
+    match state {
+        OperationState::Queued => "operation.state.queued",
+        OperationState::Running => "operation.state.running",
+        OperationState::WaitingForReauth => "operation.state.waiting_for_reauth",
+        OperationState::Succeeded => "operation.state.succeeded",
+        OperationState::Failed => "operation.state.failed",
+        OperationState::Cancelled => "operation.state.cancelled",
+        OperationState::TimedOut => "operation.state.timed_out",
+    }
+}
+
+fn format_operation_error(locale: Locale, error: &OperationError) -> String {
+    let params = error
+        .params
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let mut message = tr(locale, &error.message_key, &params);
+    if let Some(recovery) = &error.recovery {
+        message.push_str(" · ");
+        message.push_str(t(locale, &recovery.hint_key));
+    }
+    message
+}
+
+fn format_operation_problem(locale: Locale, problem: &NodeProblem) -> String {
+    let params = problem
+        .params
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let mut message = tr(locale, &problem.message_key, &params);
+    if let Some(recovery) = &problem.recovery {
+        message.push_str(" · ");
+        message.push_str(t(locale, &recovery.hint_key));
+    }
+    message
+}
+
 fn set_shell_menus(cx: &mut App, locale: Locale) {
     cx.set_menus([Menu::new("fuckipv6").items([
         MenuItem::action(t(locale, "common.refresh"), RefreshSnapshot),
@@ -4430,11 +4831,11 @@ fn set_shell_menus(cx: &mut App, locale: Locale) {
 pub fn run_window(
     state: NodeStateStore,
     commands: NodeCommandBus,
+    operations: Option<RemoteOperationClient>,
     configs: ConfigManager,
 ) -> Result<()> {
     let open_error = Arc::new(Mutex::new(None::<String>));
     let error_slot = open_error.clone();
-
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_base::init(cx);
         super::text_input::bind_keys(cx);
@@ -4460,7 +4861,15 @@ pub fn run_window(
                 ..Default::default()
             },
             |_, cx| {
-                cx.new(|cx| GpuiShell::new(state.clone(), commands.clone(), configs.clone(), cx))
+                cx.new(|cx| {
+                    GpuiShell::new(
+                        state.clone(),
+                        commands.clone(),
+                        operations.clone(),
+                        configs.clone(),
+                        cx,
+                    )
+                })
             },
         );
 
@@ -4501,6 +4910,26 @@ mod tests {
     };
     use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
+
+    #[test]
+    fn operation_idempotency_key_is_released_only_after_success() {
+        for state in [
+            OperationState::Queued,
+            OperationState::Running,
+            OperationState::WaitingForReauth,
+            OperationState::Failed,
+            OperationState::Cancelled,
+            OperationState::TimedOut,
+        ] {
+            assert!(
+                !operation_releases_idempotency_key(state),
+                "{state:?} must preserve its operation identity"
+            );
+        }
+        assert!(operation_releases_idempotency_key(
+            OperationState::Succeeded
+        ));
+    }
 
     const PRODUCT_VISUAL_SNAPSHOT_FIXTURE: &str =
         include_str!("../../../../contracts/typescript/fixtures/product-visual-snapshot.json");
@@ -4638,7 +5067,7 @@ mod tests {
         drop(runtime_guard);
         drop(runtime);
         let window = cx.open_window(size(px(width), px(height)), move |_, cx| {
-            GpuiShell::new(state, bus, configs, cx)
+            GpuiShell::new(state, bus, None, configs, cx)
         });
         cx.run_until_parked();
         window
@@ -4997,7 +5426,7 @@ mod tests {
         );
         let window = cx
             .open_window(size(px(1440.0), px(900.0)), move |_, cx| {
-                cx.new(|cx| GpuiShell::new(state, bus, configs, cx))
+                cx.new(|cx| GpuiShell::new(state, bus, None, configs, cx))
             })
             .expect("headless GPUI window");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

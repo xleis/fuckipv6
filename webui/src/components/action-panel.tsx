@@ -1,8 +1,16 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { AlertTriangle, ChevronRight, ShieldAlert, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronRight,
+  Copy,
+  ShieldAlert,
+  X,
+} from "lucide-react";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import type {
   NodeCommandOutcome,
+  NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiAction,
   NodeUiField,
@@ -16,6 +24,7 @@ import {
   validateActionValues,
   type ActionValues,
 } from "../contract/invariants";
+import { tr } from "../i18n";
 import { pageStateDefinition, type PageStateKind } from "../state-matrix";
 
 type ActionPanelProps = {
@@ -26,11 +35,18 @@ type ActionPanelProps = {
   pendingAction: string | null;
   interactionBlocked: PageStateKind | null;
   requestedActionId: string | null;
+  operation: NodeOperationSnapshot | null;
   onRequestedActionOpened(): void;
   onSubmit(
     action: NodeUiAction,
     values: ActionValues,
-  ): Promise<NodeCommandOutcome>;
+    onOperation: (operation: NodeOperationSnapshot) => void,
+  ): Promise<ActionSubmission>;
+};
+
+export type ActionSubmission = {
+  outcome?: NodeCommandOutcome;
+  operation?: NodeOperationSnapshot;
 };
 
 const numberInputs = new Set(["port", "timeout_ms"]);
@@ -150,6 +166,105 @@ function FieldControl({
   );
 }
 
+function operationFailureSummary(
+  operation: NodeOperationSnapshot,
+  locale: Locale,
+): string {
+  const error = operation.error;
+  if (!error) return label(locale, "common.operation_failed");
+  const message = tr(locale, error.message_key, error.params ?? {});
+  return error.recovery
+    ? `${message} · ${label(locale, error.recovery.hint_key)}`
+    : message;
+}
+
+function OperationStatusCard({
+  operation,
+  locale,
+}: {
+  operation: NodeOperationSnapshot;
+  locale: Locale;
+}) {
+  const [copied, setCopied] = useState(false);
+  const cancellation = operation.cancellable
+    ? label(locale, "operation.cancellable_yes")
+    : tr(locale, "operation.cancellable_no", {
+        reason: operation.cancel_blocked_reason
+          ? label(locale, operation.cancel_blocked_reason)
+          : label(locale, "operation.cancellable_unknown"),
+      });
+
+  async function copyDiagnosticId(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(operation.operation_id);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <section className="operation-status" data-testid="operation-status">
+      <div className="operation-status-heading">
+        <div>
+          <span>{label(locale, "operation.title")}</span>
+          <strong>{label(locale, `operation.state.${operation.state}`)}</strong>
+        </div>
+        <button
+          className="secondary-button operation-copy"
+          type="button"
+          onClick={() => void copyDiagnosticId()}
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {label(
+            locale,
+            copied
+              ? "operation.diagnostic_copied"
+              : "operation.copy_diagnostic_id",
+          )}
+        </button>
+      </div>
+      <div className="operation-metadata">
+        <span>
+          {label(locale, "operation.stage")}: <code>{operation.stage}</code>
+        </span>
+        <span>
+          {tr(locale, "operation.attempt", {
+            attempt: String(operation.attempt),
+            max: String(operation.max_attempts),
+          })}
+        </span>
+        <span>{cancellation}</span>
+      </div>
+      {operation.error ? (
+        <div className="operation-error" role="alert">
+          <strong>
+            {label(locale, "operation.error_code")}: {operation.error.code}
+          </strong>
+          <p>{operationFailureSummary(operation, locale)}</p>
+          <span>
+            {label(
+              locale,
+              operation.error.retryable
+                ? "operation.retryable"
+                : "operation.not_retryable",
+            )}
+          </span>
+        </div>
+      ) : null}
+      <div className="operation-diagnostic-id">
+        <span>{label(locale, "operation.diagnostic_id")}</span>
+        <code>{operation.operation_id}</code>
+      </div>
+      {copied ? (
+        <span className="sr-only" role="status">
+          {label(locale, "operation.diagnostic_copied")}
+        </span>
+      ) : null}
+    </section>
+  );
+}
+
 function ActionCard({
   action,
   snapshot,
@@ -172,7 +287,8 @@ function ActionCard({
   onSubmit(
     action: NodeUiAction,
     values: ActionValues,
-  ): Promise<NodeCommandOutcome>;
+    onOperation: (operation: NodeOperationSnapshot) => void,
+  ): Promise<ActionSubmission>;
 }) {
   const [open, setOpen] = useState(requested);
   const [confirming, setConfirming] = useState(false);
@@ -220,12 +336,16 @@ function ActionCard({
     setFailure("");
     setResult("");
     try {
-      const outcome = await onSubmit(action, values);
-      if (outcome.status === "rejected") {
-        setFailure(outcomeSummary(outcome, locale));
-      } else {
-        setResult(outcomeSummary(outcome, locale));
+      const submission = await onSubmit(action, values, () => {});
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome) {
+        setResult(outcomeSummary(submission.outcome, locale));
         setOpen(false);
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
       }
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error));
@@ -414,6 +534,9 @@ export function ActionPanel(props: ActionPanelProps) {
       <div className="panel-title">
         {label(locale, "common.shared_actions")}
       </div>
+      {props.operation ? (
+        <OperationStatusCard operation={props.operation} locale={locale} />
+      ) : null}
       <div className="action-list">
         {actions.map((action) => (
           <ActionCard

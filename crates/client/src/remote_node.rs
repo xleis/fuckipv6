@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use fuckipv6_common::domain::IdempotencyKey;
 use serde_json::Value;
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -17,8 +18,8 @@ use crate::local_ipc::{
 };
 use crate::node::{
     NodeCommandBus, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
-    NodeCommandResult, NodeControlHealth, NodeEventBus, NodeEventKind, NodeProblem,
-    NodeProblemCode, NodeStateStore,
+    NodeCommandResult, NodeControlHealth, NodeEventBus, NodeEventKind, NodeOperationSnapshot,
+    NodeProblem, NodeProblemCode, NodeStateStore, OperationClient, OperationClientError,
 };
 use crate::runtime_process;
 
@@ -29,6 +30,7 @@ const RECONNECT_MAX: Duration = Duration::from_secs(2);
 /// UI ownership of a connection to the node, never of the node itself.
 pub struct RemoteNodeSession {
     runtime: Option<Runtime>,
+    operations: RemoteOperationClient,
     state: NodeStateStore,
     commands: NodeCommandBus,
     events: NodeEventBus,
@@ -54,11 +56,14 @@ impl RemoteNodeSession {
             .build()
             .context("无法创建 UI IPC 运行时")?;
 
-        let (state, commands, events, cancel, sync) =
-            runtime.block_on(Self::connect_parts(options, role))?;
+        let (endpoint, state, commands, events, cancel, sync) =
+            runtime.block_on(Self::connect_parts(options, role.clone()))?;
+        let runtime_handle = runtime.handle().clone();
+        let operations = RemoteOperationClient::new(endpoint, role, Some(runtime_handle));
 
         Ok(Self {
             runtime: Some(runtime),
+            operations,
             state,
             commands,
             events,
@@ -70,9 +75,11 @@ impl RemoteNodeSession {
     /// Connect from an existing Tokio runtime, as used by the async CLI/WebUI
     /// entrypoint. This avoids constructing and blocking on a nested runtime.
     pub async fn start_with_role_async(options: RuntimeOptions, role: IpcRole) -> Result<Self> {
-        let (state, commands, events, cancel, sync) = Self::connect_parts(options, role).await?;
+        let (endpoint, state, commands, events, cancel, sync) =
+            Self::connect_parts(options, role.clone()).await?;
         Ok(Self {
             runtime: None,
+            operations: RemoteOperationClient::new(endpoint, role, None),
             state,
             commands,
             events,
@@ -85,6 +92,7 @@ impl RemoteNodeSession {
         options: RuntimeOptions,
         role: IpcRole,
     ) -> Result<(
+        local_ipc::LocalEndpoint,
         NodeStateStore,
         NodeCommandBus,
         NodeEventBus,
@@ -110,8 +118,13 @@ impl RemoteNodeSession {
         });
         let commands = NodeCommandBus::spawn(handler, events.clone(), 32);
         let (cancel, cancel_rx) = watch::channel(false);
-        let sync = tokio::spawn(sync_node_state(endpoint, role, state.clone(), cancel_rx));
-        Ok((state, commands, events, cancel, sync))
+        let sync = tokio::spawn(sync_node_state(
+            endpoint.clone(),
+            role,
+            state.clone(),
+            cancel_rx,
+        ));
+        Ok((endpoint, state, commands, events, cancel, sync))
     }
 
     pub fn state(&self) -> NodeStateStore {
@@ -126,6 +139,13 @@ impl RemoteNodeSession {
     /// notify renderers after state or command revisions change.
     pub fn events(&self) -> NodeEventBus {
         self.events.clone()
+    }
+
+    /// Adapter for durable, idempotent write operations. The client borrows
+    /// the session runtime so callers never need to block the GPUI executor on
+    /// Tokio socket I/O.
+    pub fn operations(&self) -> RemoteOperationClient {
+        self.operations.clone()
     }
 
     /// Disconnect the UI. The control and node processes deliberately keep
@@ -146,6 +166,55 @@ impl RemoteNodeSession {
             let _ = runtime.block_on(async { timeout(Duration::from_secs(2), sync).await });
         }
         runtime.shutdown_timeout(Duration::from_secs(2));
+    }
+}
+
+/// Tokio-aware wrapper around the IPC operation client. Sessions created by
+/// the synchronous GPUI entrypoint own a dedicated runtime; async sessions use
+/// the caller's runtime.
+#[derive(Clone)]
+pub struct RemoteOperationClient {
+    client: OperationClient,
+    runtime: Option<Handle>,
+}
+
+impl RemoteOperationClient {
+    fn new(endpoint: local_ipc::LocalEndpoint, role: IpcRole, runtime: Option<Handle>) -> Self {
+        Self {
+            client: OperationClient::remote(endpoint, role),
+            runtime,
+        }
+    }
+
+    pub async fn submit(
+        &self,
+        context: crate::node::NodeCommandContext,
+        request: NodeCommandRequest,
+        idempotency_key: IdempotencyKey,
+    ) -> std::result::Result<NodeOperationSnapshot, OperationClientError> {
+        let client = self.client.clone();
+        let future = async move { client.submit(context, request, idempotency_key).await };
+        match &self.runtime {
+            Some(runtime) => runtime.spawn(future).await.map_err(|error| {
+                OperationClientError::Unavailable(format!("operation task failed: {error}"))
+            })?,
+            None => future.await,
+        }
+    }
+
+    pub async fn lookup(
+        &self,
+        operation_id: &str,
+    ) -> std::result::Result<Option<NodeOperationSnapshot>, OperationClientError> {
+        let client = self.client.clone();
+        let operation_id = operation_id.to_owned();
+        let future = async move { client.lookup(&operation_id).await };
+        match &self.runtime {
+            Some(runtime) => runtime.spawn(future).await.map_err(|error| {
+                OperationClientError::Unavailable(format!("operation task failed: {error}"))
+            })?,
+            None => future.await,
+        }
     }
 }
 

@@ -108,6 +108,19 @@ impl NodeCommandContext {
         Self::local_owner(actor_from_snapshot(snapshot), source)
     }
 
+    /// Derive a verified WebUI owner context from the current node identity
+    /// snapshot. Unlike the desktop OS-session boundary, WebUI sessions carry
+    /// an explicit Passkey reauthentication freshness bit.
+    pub fn owner_session_for_snapshot(
+        snapshot: &NodeSnapshot,
+        source: impl Into<String>,
+        recently_reauthenticated: bool,
+    ) -> Self {
+        let mut context = Self::local_owner_for_snapshot(snapshot, source);
+        context.recent_reauthentication = recently_reauthenticated;
+        context
+    }
+
     /// A network-scoped principal. Every map entry is an authenticated network
     /// binding resolved on the server; command payloads cannot widen it.
     pub fn network_session(
@@ -267,6 +280,12 @@ pub(crate) fn authorize_command(
     }
 
     if context.local_owner {
+        if requires_recent_reauthentication(kind) && !context.recent_reauthentication {
+            return Err(CommandDenial::new(
+                "permission.recent_authentication_required",
+                "recent owner reauthentication is required",
+            ));
+        }
         return Ok(());
     }
 
@@ -434,6 +453,23 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::ApplyConfiguration
         | NodeCommandKind::RollbackConfiguration => NodePermission::ManageNetworks,
     }
+}
+
+/// Operations whose blast radius or ability to alter the trust boundary
+/// requires a WebUI owner to have completed a Passkey ceremony recently.
+/// Desktop local-owner contexts are always fresh because the OS user session
+/// is their authentication boundary.
+fn requires_recent_reauthentication(kind: NodeCommandKind) -> bool {
+    matches!(
+        kind,
+        NodeCommandKind::Shutdown
+            | NodeCommandKind::ApplyConfiguration
+            | NodeCommandKind::RollbackConfiguration
+            | NodeCommandKind::RestartNode
+            | NodeCommandKind::RebuildTun
+            | NodeCommandKind::SetNodeDisplayName
+            | NodeCommandKind::CleanupResiduals
+    )
 }
 
 fn is_local_owner_only(kind: NodeCommandKind) -> bool {
@@ -965,6 +1001,24 @@ mod tests {
             }),
         )
         .expect("desktop owner can rename the node without a WebUI session");
+    }
+
+    #[test]
+    fn stale_webui_owner_requires_reauthentication_only_for_sensitive_commands() {
+        let mut context = NodeCommandContext::local_owner(actor(), "webui-public-owner");
+        context.recent_reauthentication = false;
+
+        assert_denied(
+            &context,
+            NodeCommand::Shutdown,
+            "permission.recent_authentication_required",
+        );
+        authorize_command(&context, &NodeCommand::GetDiagnostics)
+            .expect("stale WebUI owner can still execute ordinary read commands");
+
+        context.recent_reauthentication = true;
+        authorize_command(&context, &NodeCommand::Shutdown)
+            .expect("recently reauthenticated WebUI owner can execute sensitive commands");
     }
 
     #[test]

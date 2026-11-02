@@ -1188,10 +1188,15 @@ impl NodeCommandBus {
     }
 }
 
-fn denied(request_id: u64, denial: &CommandDenial) -> NodeCommandResult {
+pub(crate) fn denied(request_id: u64, denial: &CommandDenial) -> NodeCommandResult {
+    let code = if denial.code == "permission.recent_authentication_required" {
+        NodeProblemCode::AuthenticationRequired
+    } else {
+        NodeProblemCode::PermissionDenied
+    };
     NodeCommandResult::rejected(
         request_id,
-        NodeProblem::new(NodeProblemCode::PermissionDenied, "无权执行此节点命令")
+        NodeProblem::new(code, "执行此节点命令需要重新认证或更高权限")
             .with_param("authorization_code", denial.code.clone()),
     )
 }
@@ -1699,6 +1704,39 @@ mod tests {
         assert_eq!(audit[0].outcome, AuditOutcome::Denied);
         assert_eq!(audit[0].details["command"], "get_snapshot");
         assert_eq!(audit[0].details["actor_source"], "legacy_loopback_tcp");
+    }
+
+    #[tokio::test]
+    async fn stale_webui_owner_sensitive_command_maps_to_authentication_required() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = NodeStateStore::new();
+        let snapshot = state.snapshot().await;
+        let context =
+            NodeCommandContext::owner_session_for_snapshot(&snapshot, "webui-public-owner", false);
+        let bus = NodeCommandBus::spawn(
+            Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+
+        let result = bus
+            .execute(context, NodeCommandRequest::new(52, NodeCommand::Shutdown))
+            .await
+            .expect("authorization rejection is a command result");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected authorization rejection");
+        };
+        assert_eq!(problem.code, NodeProblemCode::AuthenticationRequired);
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some("permission.recent_authentication_required")
+        );
+        assert_eq!(bus.audit_entries().len(), 1);
+        assert_eq!(bus.audit_entries()[0].outcome, AuditOutcome::Denied);
     }
 
     #[tokio::test]

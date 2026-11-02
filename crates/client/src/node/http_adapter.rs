@@ -1459,6 +1459,24 @@ async fn handle_v1_command(
         return HttpApiError::invalid_request(request_id, "request_id 必须大于 0").into_response();
     }
 
+    // Mutating operations are registered before they execute. Authorize them
+    // here as well so a stale WebUI owner cannot create an operation record (or
+    // reach a handler) before the command bus rejects the request.
+    if let Err(denial) = super::authorization::authorize_command(&context, &payload.request.command)
+    {
+        let result = super::command::denied(request_id, &denial);
+        let status = status_for_command_result(&result);
+        return (
+            status,
+            Json(NodeApiCommandResponse {
+                meta: NodeApiResponseMeta::new(request_id),
+                result: Some(result),
+                operation: None,
+            }),
+        )
+            .into_response();
+    }
+
     let _command_permit = match adapter.try_acquire_command_permit() {
         Some(permit) => permit,
         None => {
@@ -3117,6 +3135,53 @@ mod tests {
         let body: NodeApiErrorResponse = json_body(conflict_response).await;
         assert_eq!(body.error.code, NodeHttpErrorCode::OperationConflict);
         assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_v1_sensitive_command_is_rejected_before_handler_dispatch() {
+        let (adapter, state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::ZERO,
+        );
+        let snapshot = state.snapshot().await;
+        let context =
+            NodeCommandContext::owner_session_for_snapshot(&snapshot, "webui-public-owner", false);
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(58, NodeCommand::Shutdown),
+            idempotency_key: Some(IdempotencyKey::from_public_key(
+                b"stale-reauthentication-v1",
+            )),
+        };
+        let body = serde_json::to_vec(&payload).expect("serialize command request");
+        let response = adapter
+            .router()
+            .layer(Extension(context))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/commands")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("v1 command request"),
+            )
+            .await
+            .expect("v1 command response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: NodeApiCommandResponse = json_body(response).await;
+        let result = body.result.expect("synchronous rejection result");
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected sensitive command rejection");
+        };
+        assert_eq!(problem.code, NodeProblemCode::AuthenticationRequired);
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some("permission.recent_authentication_required")
+        );
+        assert!(body.operation.is_none());
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

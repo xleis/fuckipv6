@@ -15,11 +15,13 @@ pub(crate) const NODE_LOG_LIMIT: usize = 256;
 pub(crate) fn identity_snapshot(
     identity: &Identity,
     display_name: Option<String>,
+    created_at_unix_ms: Option<u64>,
 ) -> NodeIdentitySnapshot {
     NodeIdentitySnapshot {
         node_id: identity.client_id().to_string(),
         display_name,
         public_key_fingerprint: Identity::public_key_fingerprint(&identity.public_key_bytes()),
+        created_at_unix_ms,
     }
 }
 
@@ -120,7 +122,11 @@ mod tests {
     #[test]
     fn identity_projection_exposes_only_public_metadata() -> anyhow::Result<()> {
         let identity = Identity::generate()?;
-        let snapshot = identity_snapshot(&identity, Some("edge-gateway".into()));
+        let snapshot = identity_snapshot(
+            &identity,
+            Some("edge-gateway".into()),
+            Some(1_700_000_000_000),
+        );
 
         assert_eq!(snapshot.node_id, identity.client_id());
         assert_eq!(snapshot.display_name.as_deref(), Some("edge-gateway"));
@@ -128,6 +134,7 @@ mod tests {
             snapshot.public_key_fingerprint,
             Identity::public_key_fingerprint(&identity.public_key_bytes())
         );
+        assert_eq!(snapshot.created_at_unix_ms, Some(1_700_000_000_000));
         Ok(())
     }
 

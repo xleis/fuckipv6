@@ -740,6 +740,9 @@ pub struct NodeIdentitySnapshot {
     pub node_id: String,
     pub display_name: Option<String>,
     pub public_key_fingerprint: String,
+    /// Unix timestamp when the current identity key was created. This remains
+    /// optional so snapshots produced by older nodes can still be decoded.
+    pub created_at_unix_ms: Option<u64>,
 }
 
 /// One local network and the roles this node currently performs in it.
@@ -1740,6 +1743,7 @@ mod tests {
                 node_id: "node-1".into(),
                 display_name: Some("home-gateway".into()),
                 public_key_fingerprint: "b3:fixture".into(),
+                created_at_unix_ms: Some(1_700_000_000_000),
             }),
             ..NodeSnapshot::default()
         };
@@ -1872,6 +1876,7 @@ mod tests {
             node_id: "node-1".into(),
             display_name: None,
             public_key_fingerprint: "fixture".into(),
+            created_at_unix_ms: Some(1_700_000_000_000),
         });
         assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Stopped);
 
@@ -1947,6 +1952,7 @@ mod tests {
             node_id: "node-1".into(),
             display_name: None,
             public_key_fingerprint: "fixture".into(),
+            created_at_unix_ms: Some(1_700_000_000_000),
         });
         assert_eq!(snapshot.primary_status(), NodePrimaryStatus::Stopped);
     }

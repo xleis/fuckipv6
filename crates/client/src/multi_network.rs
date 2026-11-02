@@ -85,9 +85,11 @@ impl MultiNetworkSupervisor {
         let ui_mode = options.ui_mode;
         let events = NodeEventBus::default();
         let registry = MultiNetworkRegistry::new();
+        let node_identity = configs.load_node_identity()?;
         let identity = runtime_metadata::identity_snapshot(
-            &configs.load_node_identity()?,
+            &node_identity,
             configs.node_display_name()?,
+            Some(configs.node_identity_created_at_unix_ms()?),
         );
         let state =
             NodeStateStore::with_events_identity_and_ui(events.clone(), Some(identity), ui_mode);
@@ -458,6 +460,9 @@ mod tests {
         assert_eq!(identity.display_name.as_deref(), Some("edge-gateway"));
         assert!(!identity.node_id.is_empty());
         assert!(!identity.public_key_fingerprint.is_empty());
+        assert!(identity
+            .created_at_unix_ms
+            .is_some_and(|created_at| created_at > 0));
 
         let encoded = serde_json::to_string(&snapshot)?;
         assert!(!encoded.contains("private_key"));

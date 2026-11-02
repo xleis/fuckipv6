@@ -1844,11 +1844,13 @@ public final class NodeContractV1 {
 
     /** DTO for NodeIdentitySnapshot. */
     public static final class NodeIdentitySnapshot {
+        public final Long created_at_unix_ms;
         public final String display_name;
         public final String node_id;
         public final String public_key_fingerprint;
 
-        public NodeIdentitySnapshot(String display_name, String node_id, String public_key_fingerprint) {
+        public NodeIdentitySnapshot(Long created_at_unix_ms, String display_name, String node_id, String public_key_fingerprint) {
+            this.created_at_unix_ms = created_at_unix_ms;
             this.display_name = display_name;
             this.node_id = node_id;
             this.public_key_fingerprint = public_key_fingerprint;

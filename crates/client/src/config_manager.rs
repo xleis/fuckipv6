@@ -52,6 +52,10 @@ struct NodeMetadata {
     display_name: Option<String>,
     #[serde(default)]
     language: LanguagePreference,
+    /// Unix timestamp of the current node identity. Legacy metadata is migrated
+    /// once from the identity file's modification time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_created_at_unix_ms: Option<u64>,
 }
 
 /// 配置管理器
@@ -177,13 +181,49 @@ impl ConfigManager {
     fn save_node_metadata(&self, metadata: &NodeMetadata) -> Result<()> {
         let metadata_path = self.config_dir.join(NODE_METADATA_FILE);
         let content = serde_json::to_string_pretty(metadata).context("无法序列化节点元数据")?;
-        std::fs::write(&metadata_path, content)
-            .with_context(|| format!("无法写入节点元数据: {}", metadata_path.display()))
+        let temporary_file =
+            metadata_path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&temporary_file, content)
+            .with_context(|| format!("无法写入临时节点元数据: {}", temporary_file.display()))?;
+        if let Err(error) = std::fs::rename(&temporary_file, &metadata_path) {
+            let _ = std::fs::remove_file(&temporary_file);
+            return Err(error)
+                .with_context(|| format!("无法替换节点元数据: {}", metadata_path.display()));
+        }
+        Ok(())
     }
 
     /// Load the optional display name from node-wide metadata.
     pub(crate) fn node_display_name(&self) -> Result<Option<String>> {
         normalize_display_name(self.load_node_metadata()?.display_name)
+    }
+
+    /// Return the stable creation time for the current node identity.
+    ///
+    /// Metadata written by older releases has no timestamp. In that case the
+    /// identity file's modification time is the best available evidence; it is
+    /// persisted immediately so later metadata edits and reopen operations do
+    /// not make the displayed creation time drift.
+    pub(crate) fn node_identity_created_at_unix_ms(&self) -> Result<u64> {
+        let mut metadata = self.load_node_metadata()?;
+        if let Some(created_at) = metadata.identity_created_at_unix_ms {
+            return Ok(created_at);
+        }
+
+        let identity_path = self.node_identity_path();
+        let modified = std::fs::metadata(&identity_path)
+            .with_context(|| format!("无法读取节点身份信息: {}", identity_path.display()))?
+            .modified()
+            .with_context(|| format!("无法读取节点身份创建时间: {}", identity_path.display()))?;
+        let created_at = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("节点身份创建时间早于 Unix epoch")?
+            .as_millis()
+            .try_into()
+            .context("节点身份创建时间超出 u64 范围")?;
+        metadata.identity_created_at_unix_ms = Some(created_at);
+        self.save_node_metadata(&metadata)?;
+        Ok(created_at)
     }
 
     /// Persist a node-wide display name. Empty or whitespace-only values clear it.
@@ -750,6 +790,8 @@ mod tests {
         let first_fingerprint = Identity::public_key_fingerprint(&first.public_key_bytes());
         assert!(manager.node_identity_path().exists());
         assert_eq!(manager.node_display_name()?, None);
+        let created_at = manager.node_identity_created_at_unix_ms()?;
+        assert!(created_at > 0);
 
         manager.set_node_display_name(Some("  edge-gateway  "))?;
         assert_eq!(manager.node_display_name()?, Some("edge-gateway".into()));
@@ -762,6 +804,7 @@ mod tests {
             first_fingerprint
         );
         assert_eq!(reopened.node_display_name()?, Some("edge-gateway".into()));
+        assert_eq!(reopened.node_identity_created_at_unix_ms()?, created_at);
 
         let config_path = reopened.create_network("home", "ws://home.example:6666", true)?;
         let network_config = ClientConfig::from_file(config_path)?;
@@ -812,6 +855,31 @@ mod tests {
             reopened.node_language_preference()?,
             LanguagePreference::ZhCn
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_metadata_gets_a_stable_identity_creation_timestamp() -> anyhow::Result<()> {
+        let dir = temp_config_dir("identity-created-at");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        manager.load_node_identity()?;
+        std::fs::write(
+            dir.join(NODE_METADATA_FILE),
+            r#"{"display_name":"legacy-node"}"#,
+        )?;
+
+        let first = manager.node_identity_created_at_unix_ms()?;
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(NODE_METADATA_FILE))?)?;
+        assert_eq!(stored["identity_created_at_unix_ms"], first);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        assert_eq!(reopened.node_identity_created_at_unix_ms()?, first);
+        assert_eq!(reopened.node_display_name()?, Some("legacy-node".into()));
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

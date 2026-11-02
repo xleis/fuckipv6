@@ -987,6 +987,15 @@
     "NodeIdentitySnapshot": {
       "description": "Public node identity metadata. Secret key material must never enter this DTO.",
       "properties": {
+        "created_at_unix_ms": {
+          "description": "Unix timestamp when the current identity key was created. This remains\noptional so snapshots produced by older nodes can still be decoded.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "display_name": {
           "type": [
             "string",

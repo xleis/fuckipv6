@@ -3296,6 +3296,7 @@ mod tests {
             node_id: "node-1".into(),
             display_name: Some("desktop".into()),
             public_key_fingerprint: "aa:bb".into(),
+            created_at_unix_ms: Some(1_700_000_000_000),
         });
         snapshot
             .permissions

@@ -572,6 +572,7 @@ export type NodeHttpErrorResponse = {
 export type NodeId = string;
 
 export type NodeIdentitySnapshot = {
+  "created_at_unix_ms"?: number | null;
   "display_name"?: string | null;
   "node_id": string;
   "public_key_fingerprint": string;

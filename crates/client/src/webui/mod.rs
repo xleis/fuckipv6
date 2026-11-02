@@ -4166,7 +4166,8 @@ mod tests {
 
     #[tokio::test]
     async fn owner_router_requires_a_local_session_even_over_loopback() {
-        let fixture = owner_app_fixture(8080);
+        let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
+        let fixture = owner_node_app_fixture(8080, Some(adapter));
         let anonymous = fixture
             .app
             .clone()
@@ -4180,6 +4181,20 @@ mod tests {
             .await
             .expect("anonymous status response");
         assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let anonymous_node_api = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/node/snapshot?schema_version=1")
+                    .body(Body::empty())
+                    .expect("anonymous node snapshot request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("anonymous node snapshot response");
+        assert_eq!(anonymous_node_api.status(), StatusCode::UNAUTHORIZED);
 
         initialize_owner(&fixture);
         let unauthenticated = fixture

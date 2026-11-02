@@ -496,6 +496,10 @@ fn runtime_options_with_capabilities(
     let requested = requested_ui_mode(headless, webui, gpui)?;
     let resolution = resolve_ui_mode(requested, capabilities)?;
     let effective = resolution.effective;
+    // The native desktop surface never owns a WebUI listener. Normalize the
+    // port at the shared options boundary so command paths cannot retain a
+    // misleading non-zero port after resolving to GPUI.
+    let webui_port = if effective.is_gpui() { 0 } else { webui_port };
 
     let (headless, gui) = match effective {
         UiMode::Headless => (true, false),
@@ -1278,6 +1282,14 @@ mod tests {
         .expect("available GPUI must be preserved");
         assert!(!options.headless);
         assert!(!options.gui);
+        assert_eq!(options.webui_port, 0);
+        assert_eq!(
+            options
+                .ui_mode
+                .expect("GPUI options must retain the resolved mode")
+                .effective,
+            UiMode::Gpui
+        );
 
         let unavailable = UiCapabilities {
             gpui_available: false,
@@ -1318,9 +1330,11 @@ mod tests {
 
         assert!(!options.headless);
         assert!(!options.gui);
+        assert_eq!(options.webui_port, 0);
         assert_eq!(
-            resolve_ui_mode(UiModeRequest::Auto, capabilities)
-                .expect("automatic mode")
+            options
+                .ui_mode
+                .expect("automatic desktop mode must retain its resolution")
                 .effective,
             UiMode::Gpui
         );

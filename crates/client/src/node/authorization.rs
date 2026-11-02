@@ -906,6 +906,30 @@ mod tests {
     }
 
     #[test]
+    fn desktop_local_owner_executes_sensitive_commands_without_web_authentication() {
+        // GPUI is reachable only after the operating-system user session has
+        // authenticated. Its local-owner context therefore carries the OS
+        // trust boundary directly and must not depend on a WebUI Passkey session.
+        let desktop_context = NodeCommandContext::local_owner(actor(), "gpui");
+
+        assert!(desktop_context.is_local_owner());
+        authorize_command(
+            &desktop_context,
+            &NodeCommand::RebuildTun {
+                network_name: "home".into(),
+            },
+        )
+        .expect("desktop owner can execute a local-owner-only command");
+        authorize_command(
+            &desktop_context,
+            &NodeCommand::StartNetworks {
+                selection: crate::node::NodeNetworkSelection::All,
+            },
+        )
+        .expect("desktop owner can start networks without a WebUI session");
+    }
+
+    #[test]
     fn deny_wins_and_both_policy_layers_must_allow() {
         let action = PolicyAction::Enable;
         let resource = ResourceKind::Network;

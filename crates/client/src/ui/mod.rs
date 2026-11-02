@@ -1,7 +1,7 @@
 pub mod mode;
 mod surface;
 
-pub(crate) use surface::{acquire as acquire_surface, UiSurfaceKind};
+pub(crate) use surface::{acquire as acquire_surface, SurfaceLease, UiSurfaceKind};
 
 pub use mode::{
     apply_environment_request, detect_ui_mode, resolve_legacy_ui_mode, resolve_ui_mode,

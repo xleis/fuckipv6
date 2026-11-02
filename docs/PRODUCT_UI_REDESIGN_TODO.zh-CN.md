@@ -408,8 +408,11 @@ cleanup 绕过，超时或 owner 丢失会保持残留事实并允许重试；�
 - [x] 所有入口连接同一 control；
 - [x] 命令子入口和顶层入口一致；
 - [x] 添加 X11/Wayland/无 DISPLAY 场景测试。
+- [x] WebUI 监听器必须持有运行目录独占表面租约，租约存活到监听任务结束。
 
 **验收**：X11、Wayland、Windows/macOS 桌面在 GPUI 可用时只选择 GPUI；桌面显式 `--webui`/`--headless` 被拒绝，GPUI 不可用时失败关闭且不回退 WebUI。无 DISPLAY 自动选择 Headless WebUI，显式 GPUI 因无显示环境被拒绝；`FUCKIPV6_PUBLIC_IP` 不参与显示环境判断，`FUCKIPV6_HEADLESS`/`FUCKIPV6_GUI` 不能掩盖实际桌面检测。顶层入口与 `host/join/connect/up/start` 子入口使用同一模式解析，GPUI 只在 OS 主线程启动。`headless_command_entrypoint_reexports_the_same_control` 验证 `up` 子入口关闭 UI 后仍连接同一 control/node。
+
+**证据（2026-11-02）**：`start_app_webui_with_node` 只允许 crate 内生产调用，并强制接收不可克隆的 `SurfaceLease`；租约移入 WebUI 监听任务，直到服务停止才释放，因此普通 WebUI、系统服务和 GPUI 无法同时暴露界面。桌面自动模式回归断言解析为 GPUI 且 `webui_port == 0`；WebUI 最终监听边界和 `__service` 启动边界都会重新检测桌面环境并失败关闭。`cargo test -p fuckipv6-client --all-features` 通过（库测试 671 passed、3 ignored；`register_check` 1 passed；`w2_runtime` 11 passed，包含 `desktop_hosts_refuse_webui_before_starting_the_node`；特权 lifecycle 1 ignored）。
 
 ### W2-08 服务监督 `[~]`
 
@@ -591,6 +594,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 恢复码确认；
 - [x] 证书/域名错误状态；
 - [x] 认证界面仅属于 WebUI；GPUI 不显示登录、Passkey 或恢复入口。
+- [x] GPUI 本地所有者命令不依赖 WebUI 会话或 Passkey 重认证；WebUI 即使回环访问也必须认证。
 
 完成证据（本轮提交）：
 
@@ -601,7 +605,9 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - owner API 错误增加稳定 `code`：`recent_authentication_required`、`last_passkey`、`invalid_session` 等，供共享前端处理且不依赖本地化错误文本；
 - 本地 mutation CSRF origin 与 owner service 的 local WebAuthn origin 对齐；`http://127.0.0.1:<port>` 不再被误认为合法的 `http://localhost:<port>` 所有者来源；
 - GPUI 身份与设置页不显示应用内登录、Passkey、恢复、WebUI 会话或监听器配置，由 `desktop_identity_surface_trusts_the_os_session_without_web_authentication` 与设置投影测试防止回归；Passkey/HttpOnly 同源会话只属于 WebUI；
-- `cargo test -p fuckipv6-client --no-default-features`：库测试 534 passed、3 ignored；集成测试 1 passed（`register_check`）与 8 passed（`w2_runtime`）；特权 lifecycle 集成测试 1 ignored；
+- GPUI 使用操作系统当前用户会话作为信任边界，命令上下文直接由本地所有者 IPC 构造；自动化测试验证其可执行 `RebuildTun` 和启动网络等敏感命令，不要求 WebUI Passkey、登录或恢复流程。WebUI 控制面即使经回环访问也要求所有者 Cookie，公网还要求可信 HTTPS/代理、同源校验和限流；
+- `cargo test -p fuckipv6-client --no-default-features`：库测试 596 passed、3 ignored；集成测试 1 passed（`register_check`）与 11 passed（`w2_runtime`）；特权 lifecycle 集成测试 1 ignored；
+- `cargo test -p fuckipv6-client --all-features`：库测试 671 passed、3 ignored；集成测试 12 passed，特权 lifecycle 1 ignored；`cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
 - `cargo test -p fuckipv6-client gpui::view_model`：17 passed；
 - `cargo check -p fuckipv6-client --no-default-features --all-targets`、`cargo clippy -p fuckipv6-client --no-default-features --all-targets -- -D warnings`、`cargo check -p fuckipv6-client --all-targets`、`cargo clippy -p fuckipv6-client --all-targets -- -D warnings` 均通过；
 - `node --check crates/client/src/webui/owner_bootstrap.js`、`node --check crates/client/src/owner_security/owner_recovery.js`、`node scripts/test_webui_node_ui.mjs`、`cargo fmt --all -- --check` 与 `git diff --check` 均通过；

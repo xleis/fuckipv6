@@ -780,7 +780,7 @@ pub async fn run_default_app(
     if ui_mode.effective.is_gpui() {
         anyhow::bail!("原生 GPUI 必须在 OS 主线程启动；请通过 `fuckipv6 --gpui` 运行");
     }
-    let _surface_lease = crate::ui::acquire_surface(crate::ui::UiSurfaceKind::WebUi)?;
+    let surface_lease = crate::ui::acquire_surface(crate::ui::UiSurfaceKind::WebUi)?;
 
     let session = crate::remote_node::RemoteNodeSession::start_with_role_async(
         commands::RuntimeOptions {
@@ -799,7 +799,8 @@ pub async fn run_default_app(
         crate::node::NodeHttpAdapter::new(session.commands(), session.state(), session.events());
     let controller = std::sync::Arc::new(crate::webui::AppController::from_node_session(session));
     let server_handle =
-        crate::webui::start_app_webui_with_node(port, controller.clone(), node_http).await?;
+        crate::webui::start_app_webui_with_node(port, controller.clone(), node_http, surface_lease)
+            .await?;
 
     if host {
         if let Err(e) = controller

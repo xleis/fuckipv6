@@ -13,7 +13,7 @@ use crate::owner_security::service::{
     AuthenticatedOwnerSession, IssuedOwnerSession, OwnerBootstrapChannel, OwnerSecurityError,
     OwnerSecurityService,
 };
-use crate::ui::{resolve_ui_mode, UiCapabilities, UiModeRequest};
+use crate::ui::{resolve_ui_mode, SurfaceLease, UiCapabilities, UiModeRequest};
 use anyhow::{Context, Result};
 use axum::{
     extract::{
@@ -224,10 +224,11 @@ fn ensure_webui_start_allowed(capabilities: UiCapabilities) -> Result<()> {
 
 /// Start the only production WebUI surface: a manifest-driven view backed by
 /// the authenticated node command/state/event adapters.
-pub async fn start_app_webui_with_node(
+pub(crate) async fn start_app_webui_with_node(
     port: u16,
     controller: Arc<AppController>,
     node_adapter: NodeHttpAdapter,
+    surface_lease: SurfaceLease,
 ) -> Result<tokio::task::JoinHandle<()>> {
     // Keep this gate at the actual listener boundary, not only in CLI option
     // parsing, so every future caller is subject to the same desktop policy.
@@ -317,6 +318,10 @@ pub async fn start_app_webui_with_node(
     });
 
     let handle = tokio::spawn(async move {
+        // The caller must acquire this lease before constructing a WebUI. Keep
+        // it in the listener task so the runtime directory cannot admit GPUI or
+        // a second WebUI until this server has actually stopped.
+        let _surface_lease = surface_lease;
         let result = match (http_listener, https_server) {
             (Some(listener), None) => axum::serve(
                 listener,

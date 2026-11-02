@@ -15,6 +15,7 @@ use crate::node::{
     NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
     NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
+use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
 
 /// Typed views supported by the native adapter. Keeping this closed set separate
@@ -193,6 +194,7 @@ pub enum ActionBlockReason {
     NoNetworkSelected,
     PermissionDenied,
     ExitNodeUnsupported,
+    TunUnavailable(TunCapabilityReason),
 }
 
 impl ActionBlockReason {
@@ -205,6 +207,13 @@ impl ActionBlockReason {
             Self::NoNetworkSelected => "blocked.no_network_selected",
             Self::PermissionDenied => "blocked.permission_denied",
             Self::ExitNodeUnsupported => "blocked.exit_node_unsupported",
+            Self::TunUnavailable(reason) => match reason {
+                TunCapabilityReason::PlatformUnsupported => "blocked.tun_platform_unsupported",
+                TunCapabilityReason::PermissionDenied => "blocked.tun_permission_denied",
+                TunCapabilityReason::DeviceUnavailable => "blocked.tun_device_unavailable",
+                TunCapabilityReason::ToolUnavailable => "blocked.tun_tool_unavailable",
+                TunCapabilityReason::Unknown => "blocked.tun_unavailable",
+            },
         }
     }
 }
@@ -769,6 +778,15 @@ pub fn action_block_reason(
         {
             return Some(ActionBlockReason::ExitNodeUnsupported);
         }
+    }
+
+    if action.id == "rebuild_tun" && !snapshot.tun_capabilities.can_rebuild {
+        return Some(ActionBlockReason::TunUnavailable(
+            snapshot
+                .tun_capabilities
+                .blocking_reason()
+                .unwrap_or(TunCapabilityReason::Unknown),
+        ));
     }
 
     match action.availability {
@@ -1794,6 +1812,17 @@ fn project_node_runtime(
             )
         })
         .collect::<Vec<_>>();
+    let tun_capabilities = &snapshot.tun_capabilities;
+    let tun_reasons = if tun_capabilities.reasons.is_empty() {
+        t(locale, "runtime.value.tun_reason.unknown").to_string()
+    } else {
+        tun_capabilities
+            .reasons
+            .iter()
+            .map(|reason| t(locale, tun_reason_key(*reason)).to_string())
+            .collect::<Vec<_>>()
+            .join(t(locale, "common.list_separator"))
+    };
 
     (
         vec![
@@ -1847,6 +1876,39 @@ fn project_node_runtime(
                     t(locale, "runtime.section.networks"),
                     t(locale, "runtime.empty.networks"),
                     network_rows,
+                ),
+                section(
+                    t(locale, "runtime.section.tun"),
+                    t(locale, "common.no_data"),
+                    vec![
+                        row(
+                            t(locale, "runtime.row.tun_platform"),
+                            t(locale, tun_platform_key(tun_capabilities.platform)),
+                        ),
+                        row(
+                            t(locale, "runtime.row.tun_supported"),
+                            t(
+                                locale,
+                                if tun_capabilities.supported {
+                                    "common.enabled"
+                                } else {
+                                    "common.disabled"
+                                },
+                            ),
+                        ),
+                        row(
+                            t(locale, "runtime.row.tun_rebuildable"),
+                            t(
+                                locale,
+                                if tun_capabilities.can_rebuild {
+                                    "common.enabled"
+                                } else {
+                                    "common.disabled"
+                                },
+                            ),
+                        ),
+                        row(t(locale, "runtime.row.tun_reason"), tun_reasons),
+                    ],
                 ),
                 section(
                     t(locale, "runtime.section.interfaces"),
@@ -2953,6 +3015,25 @@ fn interface_status_key(status: NodeInterfaceStatus) -> &'static str {
     }
 }
 
+fn tun_platform_key(platform: TunPlatform) -> &'static str {
+    match platform {
+        TunPlatform::Linux => "runtime.value.tun_platform.linux",
+        TunPlatform::Macos => "runtime.value.tun_platform.macos",
+        TunPlatform::Windows => "runtime.value.tun_platform.windows",
+        TunPlatform::Other => "runtime.value.tun_platform.other",
+    }
+}
+
+fn tun_reason_key(reason: TunCapabilityReason) -> &'static str {
+    match reason {
+        TunCapabilityReason::PlatformUnsupported => "runtime.value.tun_reason.platform_unsupported",
+        TunCapabilityReason::PermissionDenied => "runtime.value.tun_reason.permission_denied",
+        TunCapabilityReason::DeviceUnavailable => "runtime.value.tun_reason.device_unavailable",
+        TunCapabilityReason::ToolUnavailable => "runtime.value.tun_reason.tool_unavailable",
+        TunCapabilityReason::Unknown => "runtime.value.tun_reason.unknown",
+    }
+}
+
 fn permission_key(permission: NodePermission) -> &'static str {
     match permission {
         NodePermission::ViewState => "choice.permission.view_state",
@@ -3841,6 +3922,92 @@ mod tests {
             action_block_reason(&exit_action, &supported, Some("home")),
             None
         );
+    }
+
+    #[test]
+    fn tun_capability_blocks_rebuild_and_projects_every_reason() {
+        let manifest = node_ui_manifest();
+        let rebuild = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "networks")
+            .expect("networks page")
+            .actions
+            .iter()
+            .find(|action| action.id == "rebuild_tun")
+            .expect("rebuild action")
+            .clone();
+        let runtime_page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let mut snapshot = populated_snapshot();
+        snapshot.tun_capabilities = crate::tun::TunCapabilities {
+            schema_version: crate::tun::TUN_CAPABILITY_SCHEMA_VERSION,
+            platform: crate::tun::TunPlatform::Linux,
+            supported: true,
+            can_rebuild: false,
+            reasons: vec![
+                crate::tun::TunCapabilityReason::PermissionDenied,
+                crate::tun::TunCapabilityReason::DeviceUnavailable,
+            ],
+        };
+
+        assert_eq!(
+            action_block_reason(&rebuild, &snapshot, Some("home")),
+            Some(ActionBlockReason::TunUnavailable(
+                crate::tun::TunCapabilityReason::PermissionDenied
+            ))
+        );
+        let model = build_page_model_for_page(runtime_page, &snapshot, Locale::ZhCn)
+            .expect("runtime model");
+        let tun = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.tun"))
+            .expect("TUN capability section");
+        assert_eq!(tun.rows.len(), 4);
+        assert!(tun.rows[0].detail.contains("Linux"));
+        assert!(tun.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "common.enabled")));
+        assert!(tun.rows[2]
+            .detail
+            .contains(t(Locale::ZhCn, "common.disabled")));
+        assert!(tun.rows[3].detail.contains(t(
+            Locale::ZhCn,
+            "runtime.value.tun_reason.permission_denied"
+        )));
+        assert!(tun.rows[3].detail.contains(t(
+            Locale::ZhCn,
+            "runtime.value.tun_reason.device_unavailable"
+        )));
+    }
+
+    #[test]
+    fn rebuildable_tun_capability_does_not_block_rebuild() {
+        let manifest = node_ui_manifest();
+        let rebuild = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "networks")
+            .expect("networks page")
+            .actions
+            .iter()
+            .find(|action| action.id == "rebuild_tun")
+            .expect("rebuild action")
+            .clone();
+        let mut snapshot = populated_snapshot();
+        snapshot.tun_capabilities = crate::tun::TunCapabilities {
+            schema_version: crate::tun::TUN_CAPABILITY_SCHEMA_VERSION,
+            platform: crate::tun::TunPlatform::Linux,
+            supported: true,
+            can_rebuild: true,
+            reasons: Vec::new(),
+        };
+
+        assert_eq!(action_block_reason(&rebuild, &snapshot, Some("home")), None);
     }
 
     #[test]

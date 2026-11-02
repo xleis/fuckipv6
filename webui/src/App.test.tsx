@@ -76,6 +76,13 @@ const snapshot: NodeSnapshot = {
     access_model: "trusted_control_plane",
     permissions: ["view_state", "manage_networks"],
   },
+  tun_capabilities: {
+    schema_version: 1,
+    platform: "linux",
+    supported: true,
+    can_rebuild: true,
+    reasons: [],
+  },
   control_health: "available",
   identity: null,
   last_error: null,
@@ -256,6 +263,13 @@ describe("React WebUI shell", () => {
     authenticate({
       ...snapshot,
       lifecycle: { ...snapshot.lifecycle, phase: "running" },
+      tun_capabilities: {
+        schema_version: 1,
+        platform: "linux",
+        supported: true,
+        can_rebuild: false,
+        reasons: ["permission_denied", "device_unavailable"],
+      },
       interfaces: [
         {
           index: 7,
@@ -307,6 +321,12 @@ describe("React WebUI shell", () => {
       "translated:error.operation_unavailable",
     );
     expect(problems).not.toHaveTextContent("raw host interface error");
+
+    const tun = screen.getByTestId("runtime-tun");
+    expect(tun).toHaveTextContent("translated:runtime.row.tun_platform");
+    expect(tun).toHaveTextContent("translated:runtime.value.tun_platform.linux");
+    expect(tun).toHaveTextContent("translated:runtime.value.tun_reason.permission_denied");
+    expect(tun).toHaveTextContent("translated:runtime.value.tun_reason.device_unavailable");
   });
 
   it("renders one authoritative page state with node failure ahead of control failure", async () => {

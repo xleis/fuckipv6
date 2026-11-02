@@ -163,6 +163,14 @@ const NETWORK_STATUSES = new Set([
   "failed",
 ]);
 const NETWORK_ROLES = new Set(["member", "discovery", "relay", "exit_node"]);
+const TUN_PLATFORMS = new Set(["linux", "macos", "windows", "other"]);
+const TUN_CAPABILITY_REASONS = new Set([
+  "platform_unsupported",
+  "permission_denied",
+  "device_unavailable",
+  "tool_unavailable",
+  "unknown",
+]);
 
 export type ActionValues = Record<string, string | boolean>;
 export type BlockReason =
@@ -171,7 +179,32 @@ export type BlockReason =
   | "no_online_network"
   | "no_network_selected"
   | "platform_unsupported"
+  | "tun_platform_unsupported"
+  | "tun_permission_denied"
+  | "tun_device_unavailable"
+  | "tun_tool_unavailable"
+  | "tun_unavailable"
   | "backend_unavailable";
+
+function tunBlockReason(
+  capabilities: NodeSnapshot["tun_capabilities"] | undefined,
+): BlockReason {
+  if (!capabilities || !capabilities.supported)
+    return "tun_platform_unsupported";
+  switch (capabilities.reasons?.[0]) {
+    case "platform_unsupported":
+      return "tun_platform_unsupported";
+    case "permission_denied":
+      return "tun_permission_denied";
+    case "device_unavailable":
+      return "tun_device_unavailable";
+    case "tool_unavailable":
+      return "tun_tool_unavailable";
+    case "unknown":
+    default:
+      return "tun_unavailable";
+  }
+}
 
 function fail(message: string): never {
   throw new ContractError(message);
@@ -365,6 +398,23 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
   ) {
     fail("permissions invalid");
   }
+  if (snapshot.tun_capabilities !== undefined) {
+    if (
+      !record(snapshot.tun_capabilities) ||
+      !Number.isSafeInteger(snapshot.tun_capabilities.schema_version) ||
+      snapshot.tun_capabilities.schema_version < 0 ||
+      !TUN_PLATFORMS.has(snapshot.tun_capabilities.platform) ||
+      typeof snapshot.tun_capabilities.supported !== "boolean" ||
+      typeof snapshot.tun_capabilities.can_rebuild !== "boolean" ||
+      !Array.isArray(snapshot.tun_capabilities.reasons)
+    ) {
+      fail("TUN capabilities invalid");
+    }
+    for (const reason of snapshot.tun_capabilities.reasons) {
+      if (!TUN_CAPABILITY_REASONS.has(reason))
+        fail(`TUN capability reason invalid: ${reason}`);
+    }
+  }
   for (const network of snapshot.networks) {
     if (!record(network)) fail("network snapshot invalid");
     stringValue(network.name, "network name invalid", true);
@@ -471,6 +521,9 @@ export function executionBlockReason(
     ) {
       return "platform_unsupported";
     }
+  }
+  if (action.id === "rebuild_tun" && !snapshot.tun_capabilities?.can_rebuild) {
+    return tunBlockReason(snapshot.tun_capabilities);
   }
   if (
     action.availability === "node_running" &&

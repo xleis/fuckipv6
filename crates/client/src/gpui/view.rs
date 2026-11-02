@@ -4909,6 +4909,7 @@ mod tests {
         NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult, NodeEventBus,
         NodeUiValidation,
     };
+    use crate::tun::TunCapabilityReason;
     use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
 
@@ -5205,6 +5206,11 @@ mod tests {
             ActionBlockReason::NoNetworkSelected,
             ActionBlockReason::PermissionDenied,
             ActionBlockReason::ExitNodeUnsupported,
+            ActionBlockReason::TunUnavailable(TunCapabilityReason::PlatformUnsupported),
+            ActionBlockReason::TunUnavailable(TunCapabilityReason::PermissionDenied),
+            ActionBlockReason::TunUnavailable(TunCapabilityReason::DeviceUnavailable),
+            ActionBlockReason::TunUnavailable(TunCapabilityReason::ToolUnavailable),
+            ActionBlockReason::TunUnavailable(TunCapabilityReason::Unknown),
         ] {
             assert!(fuckipv6_common::i18n::has_key(
                 Locale::ZhCn,

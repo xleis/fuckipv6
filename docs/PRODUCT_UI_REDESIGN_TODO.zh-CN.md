@@ -962,11 +962,11 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 展示 IPv4/IPv6 地址和默认路由归属；
 - [x] 允许无敏感信息的基础接口诊断；
 - [x] 允许有权限时刷新/重建 TUN，并走 operation 与审计；
-- [ ] TUN 创建失败、地址冲突、路由失败、DNS 失败分别可解释；
-- [ ] 平台不支持或权限不足时禁用动作并显示原因；
+- [x] TUN 创建失败、地址冲突、路由失败、DNS 失败分别可解释；
+- [x] 平台不支持或权限不足时禁用动作并显示原因；
 - [x] UI 不直接调用系统命令修改路由或 DNS。
 
-**证据（2026-11-02）**：GPUI 与 WebUI 节点运行页均直接投影服务端 `NodeSnapshot.interfaces` 和 `interface_problems`，展示接口名称、类型、系统/产品/未知归属、up/down/unknown 状态、MTU、IPv4/IPv6 地址及 IPv4/IPv6 默认路由归属；中英文共享 i18n，诊断消息优先使用稳定 `message_key` 和参数本地化。新增 `RebuildTun` 领域命令和 manifest 动作，按网络校验本地所有者权限，经统一 operation 服务执行，operation kind 为 `TunRebuild`、目标为对应 Network，并记录 `node.tun.rebuild` 审计动作；UI 不直接运行系统网络命令。定向 GPUI/WebUI 接口测试、`cargo test -p fuckipv6-client --all-features`（lib 669 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 11 passed；`lifecycle_cleanup_linux` 1 ignored）、WebUI 65/65、`cargo test -p fuckipv6-common i18n` 9/9、`./scripts/check-contracts.sh`、`cargo fmt --all -- --check` 均通过；失败分类、平台权限预检和完整恢复验证仍留在后续工作包，因此不宣称完整平台可用。
+**证据（2026-11-02）**：GPUI 与 WebUI 节点运行页均直接投影服务端 `NodeSnapshot.interfaces` 和 `interface_problems`，展示接口名称、类型、系统/产品/未知归属、up/down/unknown 状态、MTU、IPv4/IPv6 地址及 IPv4/IPv6 默认路由归属；中英文共享 i18n，诊断消息优先使用稳定 `message_key` 和参数本地化。新增 `RebuildTun` 领域命令和 manifest 动作，按网络校验本地所有者权限，经统一 operation 服务执行，operation kind 为 `TunRebuild`、目标为对应 Network，并记录 `node.tun.rebuild` 审计动作；UI 不直接运行系统网络命令。本轮新增 `NetworkSetupStage` 错误链标记，将 TUN 创建、地址冲突、路由、DNS、权限、平台、设备、工具及未知失败映射为稳定 `message_key`，公开命令响应不复制底层 stderr；Linux TUN/路由/DNS 配置失败改为 fail-closed，不再 warning 后伪装成功。`TunCapabilities` 由节点进程预检并进入权威 `NodeSnapshot`，缺失/旧数据默认不可重建；GPUI/WebUI 同时展示平台、支持状态、可重建状态和全部阻断原因，平台或权限不足时禁用入口。`RebuildTun` 在销毁现有会话前再次检查权威能力，不可重建时保持原会话运行，可重建时才走同一网络的停止、清理、重启流程。契约生成已增加 `TunCapabilities`、`TunPlatform` 和 `TunCapabilityReason`，Android DTO 清单与 fail-closed 枚举测试同步更新。验证通过：`cargo test -p fuckipv6-client --all-features`（lib 685 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 11 passed；`lifecycle_cleanup_linux` 1 ignored）、WebUI 8 个测试文件 67/67、`cargo test -p fuckipv6-common i18n` 9/9、`./scripts/check-contracts.sh` 与 `cargo fmt --all -- --check`。本轮没有执行真实 TUN、路由、DNS 或断网环境测试，因此 W7-02 保持进行中，不宣称完整平台可用。
 
 **验收**：接口状态来自服务端快照；所有修改可恢复、可审计；不存在“看起来已开启”但实际 TUN 未建立的伪状态。
 

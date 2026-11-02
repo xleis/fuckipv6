@@ -9,6 +9,7 @@ import type {
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   commandEnvelope,
+  executionBlockReason,
   operationStateIsTerminal,
   validateAcceptedCommandResponse,
   validateManifestResponse,
@@ -46,6 +47,13 @@ function emptySnapshot(): NodeSnapshot {
     permissions: {
       access_model: "trusted_control_plane",
       permissions: ["view_state", "manage_networks"],
+    },
+    tun_capabilities: {
+      schema_version: 1,
+      platform: "linux",
+      supported: true,
+      can_rebuild: true,
+      reasons: [],
     },
     control_health: "available",
     identity: null,
@@ -150,6 +158,71 @@ describe("node UI contract invariants", () => {
         auto_connect: true,
       },
     });
+  });
+
+  it("fails closed when a rebuild action has no TUN capability data", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "rebuild_tun");
+    expect(action).toBeDefined();
+    const snapshot = structuredClone(emptySnapshot()) as Partial<NodeSnapshot>;
+    delete snapshot.tun_capabilities;
+
+    expect(
+      executionBlockReason(action!, snapshot as NodeSnapshot, "home"),
+    ).toBe("tun_platform_unsupported");
+  });
+
+  it("maps TUN blocking reasons and permits only rebuildable capabilities", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "rebuild_tun")!;
+    const snapshot = emptySnapshot();
+    snapshot.networks = [
+      {
+        name: "home",
+        tun_name: "fk-home",
+        status: "online",
+        assigned_ipv6: "fd00::2",
+        assigned_ipv4: null,
+        p2p_listen_addr: null,
+        uptime_secs: 1,
+        roles: ["member"],
+        peer_count: 0,
+        traffic: {
+          tun_rx_bytes: 0,
+          tun_tx_bytes: 0,
+          tun_rx_packets: 0,
+          tun_tx_packets: 0,
+          p2p_rx_bytes: 0,
+          p2p_tx_bytes: 0,
+          p2p_rx_packets: 0,
+          p2p_tx_packets: 0,
+          error_count: 0,
+        },
+      },
+    ];
+    snapshot.tun_capabilities = {
+      schema_version: 1,
+      platform: "linux",
+      supported: true,
+      can_rebuild: false,
+      reasons: ["permission_denied", "device_unavailable"],
+    };
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "tun_permission_denied",
+    );
+
+    snapshot.tun_capabilities.supported = false;
+    snapshot.tun_capabilities.reasons = ["unknown"];
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "tun_platform_unsupported",
+    );
+
+    snapshot.tun_capabilities.supported = true;
+    snapshot.tun_capabilities.can_rebuild = true;
+    snapshot.tun_capabilities.reasons = [];
+    expect(executionBlockReason(action, snapshot, "home")).toBeNull();
   });
 
   it("validates asynchronous command acceptance and terminal operation snapshots", () => {

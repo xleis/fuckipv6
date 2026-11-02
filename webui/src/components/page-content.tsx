@@ -511,6 +511,27 @@ function NodeRuntime({
     : label(locale, "common.none");
   const interfaces = snapshot.interfaces ?? [];
   const interfaceProblems = snapshot.interface_problems ?? [];
+  const tunCapabilities = snapshot.tun_capabilities;
+  const tunPlatform = tunCapabilities
+    ? label(locale, `runtime.value.tun_platform.${tunCapabilities.platform}`)
+    : label(locale, "common.unknown");
+  const tunSupported = tunCapabilities
+    ? label(
+        locale,
+        tunCapabilities.supported ? "common.enabled" : "common.disabled",
+      )
+    : label(locale, "common.not_available");
+  const tunRebuildable = tunCapabilities
+    ? label(
+        locale,
+        tunCapabilities.can_rebuild ? "common.enabled" : "common.disabled",
+      )
+    : label(locale, "common.not_available");
+  const tunReasons = tunCapabilities?.reasons?.length
+    ? tunCapabilities.reasons
+        .map((reason) => label(locale, `runtime.value.tun_reason.${reason}`))
+        .join(label(locale, "common.list_separator"))
+    : label(locale, "common.not_available");
 
   return (
     <div className="page-stack runtime-stack">
@@ -601,6 +622,31 @@ function NodeRuntime({
           <div>
             <dt>{label(locale, "runtime.row.last_error")}</dt>
             <dd>{lastError}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="surface-card" data-testid="runtime-tun">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.tun")}</h3>
+          <ShieldCheck size={17} />
+        </div>
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "runtime.row.tun_platform")}</dt>
+            <dd>{tunPlatform}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.tun_supported")}</dt>
+            <dd>{tunSupported}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.tun_rebuildable")}</dt>
+            <dd>{tunRebuildable}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "runtime.row.tun_reason")}</dt>
+            <dd>{tunReasons}</dd>
           </div>
         </dl>
       </section>

@@ -196,6 +196,7 @@ fn remote_problem(request_id: u64, error: anyhow::Error) -> NodeProblem {
             IpcErrorCode::BackendUnavailable | IpcErrorCode::EventGap | IpcErrorCode::Timeout => {
                 NodeProblemCode::Unavailable
             }
+            IpcErrorCode::NotFound => NodeProblemCode::NotFound,
             IpcErrorCode::Unsupported => NodeProblemCode::Unsupported,
             IpcErrorCode::Internal => NodeProblemCode::Internal,
         })

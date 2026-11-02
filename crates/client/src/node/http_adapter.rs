@@ -975,7 +975,7 @@ impl NodeHttpAdapter {
             let error = operation_error_for_problem(&problem, &record.operation.target);
             if record
                 .operation
-                .cancel(Some(error), unix_time_ms())
+                .finish_cancelled(Some(error), unix_time_ms())
                 .is_err()
             {
                 return;

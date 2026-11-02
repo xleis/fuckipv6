@@ -419,6 +419,20 @@ impl Operation {
                 "operation is not cancellable",
             ));
         }
+        self.finish_cancelled(reason, now_unix_ms)
+    }
+
+    /// Record cancellation reported by command execution itself.
+    ///
+    /// Execution can end as cancelled even when the operation never exposed a
+    /// user-facing cancellation action. Keep the terminal transition separate
+    /// from [`Self::cancel`] so `cancellable` continues to describe an available
+    /// action rather than the possible outcomes of the command.
+    pub fn finish_cancelled(
+        &mut self,
+        reason: Option<OperationError>,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
         if !self.state.can_transition_to(OperationState::Cancelled) {
             return Err(DomainError::invalid_transition(format!(
                 "operation cannot transition from {:?} to {:?}",
@@ -680,6 +694,22 @@ mod tests {
         operation.cancel(Some(error), 12).unwrap();
         assert_eq!(operation.state, OperationState::Cancelled);
         assert_eq!(operation.error.as_ref().unwrap().partial_changes.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_execution_does_not_require_user_cancellation_capability() {
+        let mut operation = operation();
+        assert!(!operation.cancellable);
+        operation
+            .transition(OperationState::Running, "applying", 11)
+            .unwrap();
+        operation.finish_cancelled(None, 12).unwrap();
+
+        assert_eq!(operation.state, OperationState::Cancelled);
+        assert_eq!(operation.stage, "cancelled");
+        assert!(!operation.cancellable);
+        assert!(operation.cancel_blocked_reason.is_none());
+        operation.validate().unwrap();
     }
 
     #[test]

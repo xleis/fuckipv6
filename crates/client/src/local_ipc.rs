@@ -22,9 +22,13 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
-use crate::node::{NodeCommandRequest, NodeCommandResult, NodeEvent, NodeSnapshot};
+use crate::node::{
+    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeOperationSnapshot, NodeSnapshot,
+    OperationSubmitError,
+};
+use fuckipv6_common::domain::IdempotencyKey;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -95,7 +99,17 @@ pub struct LocalRequest {
 pub enum LocalCommand {
     Snapshot,
     Execute(NodeCommandRequest),
-    Subscribe { after_sequence: Option<u64> },
+    Subscribe {
+        after_sequence: Option<u64>,
+    },
+    SubmitOperation {
+        request: NodeCommandRequest,
+        idempotency_key: IdempotencyKey,
+        source: String,
+    },
+    LookupOperation {
+        operation_id: String,
+    },
     StopNode,
 }
 
@@ -107,6 +121,7 @@ pub enum LocalResponse {
         event_sequence: u64,
     },
     NodeCommand(NodeCommandResult),
+    Operation(Box<NodeOperationSnapshot>),
     Subscribed {
         snapshot: Box<NodeSnapshot>,
         event_sequence: u64,
@@ -132,6 +147,7 @@ pub enum IpcErrorCode {
     MalformedRequest,
     RequestIdMismatch,
     BackendUnavailable,
+    NotFound,
     EventGap,
     Unsupported,
     Timeout,
@@ -143,6 +159,8 @@ pub struct LocalError {
     pub code: IpcErrorCode,
     pub message: String,
     pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_error: Option<OperationSubmitError>,
 }
 
 impl LocalError {
@@ -151,6 +169,31 @@ impl LocalError {
             code,
             message: message.into(),
             retryable: false,
+            operation_error: None,
+        }
+    }
+
+    pub fn operation(error: OperationSubmitError) -> Self {
+        let (code, message, retryable) = match &error {
+            OperationSubmitError::Invalid(problem) => (
+                IpcErrorCode::MalformedRequest,
+                problem.message.clone(),
+                problem.retryable,
+            ),
+            OperationSubmitError::Conflict(operation_id) => (
+                IpcErrorCode::BackendUnavailable,
+                format!("幂等键冲突；原操作: {}", operation_id.as_str()),
+                false,
+            ),
+            OperationSubmitError::Internal(message) => {
+                (IpcErrorCode::Internal, message.clone(), false)
+            }
+        };
+        Self {
+            code,
+            message,
+            retryable,
+            operation_error: Some(error),
         }
     }
 
@@ -575,6 +618,55 @@ pub async fn execute(
     }
 }
 
+pub async fn submit_operation(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    command_request: NodeCommandRequest,
+    idempotency_key: IdempotencyKey,
+    source: String,
+) -> Result<NodeOperationSnapshot> {
+    let request_id = command_request.request_id;
+    let response = request(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id,
+            command: LocalCommand::SubmitOperation {
+                request: command_request,
+                idempotency_key,
+                source,
+            },
+        },
+    )
+    .await?;
+    match response {
+        LocalResponse::Operation(operation) => Ok(*operation),
+        other => bail!("本地 IPC 返回了意外 operation 响应: {other:?}"),
+    }
+}
+
+pub async fn lookup_operation(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    operation_id: &str,
+) -> Result<NodeOperationSnapshot> {
+    let response = request(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::LookupOperation {
+                operation_id: operation_id.to_owned(),
+            },
+        },
+    )
+    .await?;
+    match response {
+        LocalResponse::Operation(operation) => Ok(*operation),
+        other => bail!("本地 IPC 返回了意外 operation 查询响应: {other:?}"),
+    }
+}
+
 pub async fn write_frame<T: Serialize>(
     writer: &mut (impl AsyncWrite + Unpin),
     kind: FrameKind,
@@ -911,7 +1003,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_explicit() {
-        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(PROTOCOL_VERSION, 2);
         const { assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024) };
     }
 

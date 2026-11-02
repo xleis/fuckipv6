@@ -4,6 +4,7 @@ pub mod contract;
 mod event;
 mod http_adapter;
 mod lifecycle;
+mod operation_service;
 mod plan;
 mod runtime_control;
 mod runtime_handler;
@@ -40,11 +41,14 @@ pub use http_adapter::{
     NodeApiObject, NodeApiObjectResponse, NodeApiOperationResponse, NodeApiResponseMeta,
     NodeApiSnapshotResponse, NodeCommandHttpRequest, NodeCommandHttpResponse, NodeErrorDetails,
     NodeHttpAdapter, NodeHttpAdapterError, NodeHttpErrorCode, NodeHttpErrorResponse,
-    NodeManifestResponse, NodeOperationSnapshot, NodeSnapshotResponse, NodeWsMessage,
-    NodeWsResyncReason, NodeWsSession, NodeWsSessionError, NODE_HTTP_API_PREFIX,
-    NODE_HTTP_SCHEMA_VERSION, NODE_HTTP_V1_API_PREFIX,
+    NodeManifestResponse, NodeSnapshotResponse, NodeWsMessage, NodeWsResyncReason, NodeWsSession,
+    NodeWsSessionError, NODE_HTTP_API_PREFIX, NODE_HTTP_SCHEMA_VERSION, NODE_HTTP_V1_API_PREFIX,
 };
 pub use lifecycle::{NodeLifecycle, NodeLifecycleSnapshot, NodePhase};
+pub use operation_service::{
+    NodeOperationSnapshot, OperationClient, OperationClientError, OperationService,
+    OperationSubmitError,
+};
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
 pub(crate) use runtime_control::{
     NetworkRuntimeManager, RuntimeControlError, StartSummary, RESTART_TIMEOUT, START_TIMEOUT,

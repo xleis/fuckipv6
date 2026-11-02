@@ -20,6 +20,7 @@ use crate::local_ipc::{
 };
 use crate::node::{
     NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeEventBus, NodeStateStore,
+    OperationService,
 };
 
 /// Commands may perform persistence and runtime transitions, so they get a
@@ -77,6 +78,13 @@ async fn serve_node_inner(
         bail!("节点命令服务只能绑定 node IPC endpoint");
     }
 
+    let operations = OperationService::persistent_for_endpoint(
+        server.endpoint(),
+        commands.clone(),
+        state.clone(),
+        events.clone(),
+    )?;
+
     let server = Arc::new(server);
     let mut connections = JoinSet::new();
 
@@ -94,6 +102,7 @@ async fn serve_node_inner(
                         let task_commands = commands.clone();
                         let task_state = state.clone();
                         let task_events = events.clone();
+                        let task_operations = operations.clone();
                         let task_shutdown = shutdown.clone();
                         let task_stop_controller = stop_controller.clone();
                         connections.spawn(async move {
@@ -108,6 +117,7 @@ async fn serve_node_inner(
                                 task_commands,
                                 task_state,
                                 task_events,
+                                task_operations,
                                 task_shutdown,
                                 task_stop_controller,
                             )
@@ -171,6 +181,7 @@ async fn serve_connection(
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
+    operations: OperationService,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
@@ -295,6 +306,76 @@ async fn serve_connection(
                 connection
                     .send_response(&LocalResponse::NodeCommand(result))
                     .await?;
+            }
+            crate::local_ipc::LocalCommand::SubmitOperation {
+                request: command_request,
+                idempotency_key,
+                source,
+            } => {
+                if request.request_id != command_request.request_id {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::RequestIdMismatch,
+                            format!(
+                                "本地 IPC 外层 request_id={} 与节点命令 request_id={} 不一致",
+                                request.request_id, command_request.request_id
+                            ),
+                        ),
+                    )
+                    .await?;
+                    continue;
+                }
+
+                let snapshot = state.snapshot().await;
+                let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, source);
+                let result = match timeout(
+                    COMMAND_TIMEOUT,
+                    operations.submit(context, command_request, idempotency_key),
+                )
+                .await
+                {
+                    Ok(Ok((operation, _created))) => operation,
+                    Ok(Err(error)) => {
+                        send_local_error(connection, LocalError::operation(error)).await?;
+                        continue;
+                    }
+                    Err(_) => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(
+                                IpcErrorCode::Timeout,
+                                format!("节点操作提交在 {} 秒内未完成", COMMAND_TIMEOUT.as_secs()),
+                            )
+                            .retryable(true),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+
+                connection
+                    .send_response(&LocalResponse::Operation(Box::new(result)))
+                    .await?;
+            }
+            crate::local_ipc::LocalCommand::LookupOperation { operation_id } => {
+                match operations.lookup(&operation_id) {
+                    Some(operation) => {
+                        connection
+                            .send_response(&LocalResponse::Operation(Box::new(operation)))
+                            .await?;
+                    }
+                    None => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(
+                                IpcErrorCode::NotFound,
+                                format!("节点操作不存在: {operation_id}"),
+                            ),
+                        )
+                        .await?;
+                    }
+                }
             }
             crate::local_ipc::LocalCommand::Subscribe { after_sequence } => {
                 stream_events(
@@ -494,12 +575,16 @@ mod tests {
     use anyhow::Context;
     use tokio::sync::watch;
 
-    use crate::local_ipc::{connect, execute, request, IpcRole, LocalEndpoint, LocalRequest};
+    use crate::local_ipc::{
+        connect, execute, lookup_operation, request, submit_operation, IpcRole, LocalEndpoint,
+        LocalRequest,
+    };
     use crate::node::{
         NodeCommand, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
         NodeCommandResult, NodeEventKind, NodeLogLevel, RESTART_TIMEOUT, START_TIMEOUT,
         STOP_TIMEOUT,
     };
+    use fuckipv6_common::domain::{IdempotencyKey, OperationState};
 
     #[test]
     fn lifecycle_ipc_timeout_exceeds_runtime_actor_deadlines() {
@@ -647,6 +732,59 @@ mod tests {
         assert!(matches!(
             result.outcome,
             NodeCommandOutcome::Completed { ref message } if message == "echo"
+        ));
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn submit_and_lookup_operation_round_trip_through_ipc() -> Result<()> {
+        let fixture = Fixture::new("operations", 8).await?;
+        let request = NodeCommandRequest::new(8, NodeCommand::StartNode);
+        let key = IdempotencyKey::from_public_key(b"ipc-operation-round-trip");
+
+        let submitted = submit_operation(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            request.clone(),
+            key.clone(),
+            "local_ipc:cli".into(),
+        )
+        .await?;
+        let reused = submit_operation(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            request,
+            key,
+            "local_ipc:cli".into(),
+        )
+        .await?;
+        assert_eq!(
+            reused.operation.operation_id,
+            submitted.operation.operation_id
+        );
+
+        let terminal = timeout(Duration::from_secs(2), async {
+            loop {
+                let operation = lookup_operation(
+                    &fixture.endpoint,
+                    IpcRole::Cli,
+                    submitted.operation.operation_id.as_str(),
+                )
+                .await?;
+                if operation.operation.state.is_terminal() {
+                    return Ok::<_, anyhow::Error>(operation);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("IPC operation did not reach a terminal state")??;
+
+        assert_eq!(terminal.operation.state, OperationState::Succeeded);
+        assert!(matches!(
+            terminal.result.as_ref().map(|result| &result.outcome),
+            Some(NodeCommandOutcome::Completed { message }) if message == "echo"
         ));
 
         fixture.finish().await

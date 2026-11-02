@@ -421,6 +421,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         NodeCommandKind::StartNetworks
         | NodeCommandKind::StopNetworks
         | NodeCommandKind::RestartNetworks
+        | NodeCommandKind::RebuildTun
         | NodeCommandKind::CreateNetwork
         | NodeCommandKind::JoinNetwork
         | NodeCommandKind::BanClient
@@ -440,6 +441,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
         NodeCommandKind::GetSnapshot
             | NodeCommandKind::GetUiManifest
             | NodeCommandKind::GetDiagnostics
+            | NodeCommandKind::RebuildTun
             | NodeCommandKind::CreateNetwork
             | NodeCommandKind::JoinNetwork
             | NodeCommandKind::StartNode
@@ -470,6 +472,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::StartNetworks => (PolicyAction::Enable, ResourceKind::Network),
         NodeCommandKind::StopNetworks => (PolicyAction::Disable, ResourceKind::Network),
         NodeCommandKind::RestartNetworks
+        | NodeCommandKind::RebuildTun
         | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::RestartNode => (PolicyAction::Update, ResourceKind::Network),
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
@@ -526,6 +529,9 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
             } else {
                 NetworkTargets::Named(networks.clone())
             }
+        }
+        NodeCommand::RebuildTun { network_name } => {
+            NetworkTargets::Named(vec![network_name.clone()])
         }
         NodeCommand::UpdateRouting(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
@@ -870,6 +876,33 @@ mod tests {
             &start_home(),
         )
         .expect("administrator can act within its authenticated network scope");
+    }
+
+    #[test]
+    fn tun_rebuild_is_reserved_for_the_local_owner() {
+        let (local_policy, network_policy) = start_policies();
+        assert_denied(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            NodeCommand::RebuildTun {
+                network_name: "home".into(),
+            },
+            "permission.local_owner_required",
+        );
+
+        authorize_command(
+            &NodeCommandContext::local_owner(actor(), "local-owner-test"),
+            &NodeCommand::RebuildTun {
+                network_name: "home".into(),
+            },
+        )
+        .expect("local owner can rebuild a network TUN");
     }
 
     #[test]

@@ -7,13 +7,13 @@ use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
-    NodeControlHealth, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeJoinNetworkCommand,
-    NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
-    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePrimaryStatus,
-    NodeProbePeerCommand, NodeRollbackConfigurationCommand, NodeRoutingMode,
-    NodeSetNetworkRoleCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability, NodeUiBackendStatus,
-    NodeUiManifest, NodeUiPage, NodeUiPermission, NodeUpdateNetworkAllocationCommand,
-    NodeUpdateRoutingCommand,
+    NodeControlHealth, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeInterfaceKind,
+    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
+    NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
+    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProbePeerCommand,
+    NodeRollbackConfigurationCommand, NodeRoutingMode, NodeSetNetworkRoleCommand, NodeSnapshot,
+    NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
+    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 use crate::ui::{DisplayEnvironment, UiMode};
 
@@ -100,6 +100,7 @@ pub enum ActionBinding {
     StartNetworks,
     StopNetworks,
     RestartNetworks,
+    RebuildTun,
     ProbePeer,
     GetBlacklist,
     BanClient,
@@ -122,7 +123,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -130,6 +131,7 @@ impl ActionBinding {
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
+        Self::RebuildTun,
         Self::ProbePeer,
         Self::GetBlacklist,
         Self::BanClient,
@@ -160,6 +162,7 @@ impl ActionBinding {
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
             Self::RestartNetworks => "restart_networks",
+            Self::RebuildTun => "rebuild_tun",
             Self::ProbePeer => "probe_peer",
             Self::GetBlacklist => "get_blacklist",
             Self::BanClient => "ban_client",
@@ -681,6 +684,7 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::RestartNetworks,
             NodeCommandKind::RestartNetworks,
         ),
+        "rebuild_tun" => (ActionBinding::RebuildTun, NodeCommandKind::RebuildTun),
         "probe_peer" => (ActionBinding::ProbePeer, NodeCommandKind::ProbePeer),
         "get_blacklist" => (ActionBinding::GetBlacklist, NodeCommandKind::GetBlacklist),
         "ban_client" => (ActionBinding::BanClient, NodeCommandKind::BanClient),
@@ -883,6 +887,9 @@ pub fn build_command(
             networks: split_names(&field("networks")),
             all: parse_bool(action, "all", &field("all"))?,
         }),
+        Ok(ActionBinding::RebuildTun) => Ok(NodeCommand::RebuildTun {
+            network_name: field("network_name"),
+        }),
         Ok(ActionBinding::ProbePeer) => Ok(NodeCommand::ProbePeer(NodeProbePeerCommand {
             network_name: field("network_name"),
             target: field("target"),
@@ -999,6 +1006,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
         "restart_networks" => HashSet::from(["networks", "all"]),
+        "rebuild_tun" => HashSet::from(["network_name"]),
         "cleanup_node_residuals" => HashSet::from(["networks", "all"]),
         "probe_peer" => HashSet::from(["network_name", "target", "timeout_ms"]),
         "get_blacklist" => HashSet::from(["network_name"]),
@@ -1674,6 +1682,89 @@ fn project_node_runtime(
             )
         })
         .collect::<Vec<_>>();
+    let interface_rows = snapshot
+        .interfaces
+        .iter()
+        .map(|interface| {
+            let addresses = if interface.addresses.is_empty() {
+                t(locale, "common.none").to_string()
+            } else {
+                interface
+                    .addresses
+                    .iter()
+                    .map(|address| format!("{}/{}", address.address, address.prefix_len))
+                    .collect::<Vec<_>>()
+                    .join(t(locale, "common.list_separator"))
+            };
+            let defaults = tr(
+                locale,
+                "runtime.row.interface_defaults",
+                &[
+                    (
+                        "ipv4",
+                        if interface.default_ipv4 {
+                            t(locale, "common.enabled")
+                        } else {
+                            t(locale, "common.disabled")
+                        },
+                    ),
+                    (
+                        "ipv6",
+                        if interface.default_ipv6 {
+                            t(locale, "common.enabled")
+                        } else {
+                            t(locale, "common.disabled")
+                        },
+                    ),
+                ],
+            );
+            row(
+                interface.name.clone(),
+                format!(
+                    "{} · {}",
+                    tr(
+                        locale,
+                        "runtime.row.interface_detail",
+                        &[
+                            ("kind", t(locale, interface_kind_key(interface.kind))),
+                            (
+                                "ownership",
+                                t(locale, interface_ownership_key(interface.ownership)),
+                            ),
+                            ("status", t(locale, interface_status_key(interface.status))),
+                            ("mtu", &interface.mtu.to_string()),
+                            ("addresses", &addresses),
+                        ],
+                    ),
+                    defaults,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let interface_problem_rows = snapshot
+        .interface_problems
+        .iter()
+        .map(|problem| {
+            let params = problem
+                .params
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let localized = tr(locale, &problem.message_key, &params);
+            let detail = if localized == problem.message_key {
+                problem.message.clone()
+            } else {
+                localized
+            };
+            row(
+                problem
+                    .network_name
+                    .clone()
+                    .unwrap_or_else(|| t(locale, "runtime.interface.host").to_string()),
+                detail,
+            )
+        })
+        .collect::<Vec<_>>();
     let service_rows = snapshot
         .embedded_services
         .iter()
@@ -1732,36 +1823,51 @@ fn project_node_runtime(
                 "NodeSnapshot.lifecycle.configured_networks",
             ),
         ],
-        vec![
-            section(
-                t(locale, "runtime.section.state"),
-                t(locale, "common.no_data"),
-                vec![
-                    row(
-                        t(locale, "runtime.row.primary_status"),
-                        t(locale, primary_status.label_key()),
-                    ),
-                    row(t(locale, "runtime.row.phase"), phase),
-                    row(t(locale, "runtime.row.control_health"), control_health),
-                    row(
-                        t(locale, "runtime.row.revision"),
-                        snapshot.revision.to_string(),
-                    ),
-                    row(t(locale, "runtime.row.failed_networks"), failed_networks),
-                    row(t(locale, "runtime.row.last_error"), last_error),
-                ],
-            ),
-            section(
-                t(locale, "runtime.section.networks"),
-                t(locale, "runtime.empty.networks"),
-                network_rows,
-            ),
-            section(
-                t(locale, "runtime.section.services"),
-                t(locale, "runtime.empty.services"),
-                service_rows,
-            ),
-        ],
+        {
+            let mut sections = vec![
+                section(
+                    t(locale, "runtime.section.state"),
+                    t(locale, "common.no_data"),
+                    vec![
+                        row(
+                            t(locale, "runtime.row.primary_status"),
+                            t(locale, primary_status.label_key()),
+                        ),
+                        row(t(locale, "runtime.row.phase"), phase),
+                        row(t(locale, "runtime.row.control_health"), control_health),
+                        row(
+                            t(locale, "runtime.row.revision"),
+                            snapshot.revision.to_string(),
+                        ),
+                        row(t(locale, "runtime.row.failed_networks"), failed_networks),
+                        row(t(locale, "runtime.row.last_error"), last_error),
+                    ],
+                ),
+                section(
+                    t(locale, "runtime.section.networks"),
+                    t(locale, "runtime.empty.networks"),
+                    network_rows,
+                ),
+                section(
+                    t(locale, "runtime.section.interfaces"),
+                    t(locale, "runtime.empty.interfaces"),
+                    interface_rows,
+                ),
+                section(
+                    t(locale, "runtime.section.services"),
+                    t(locale, "runtime.empty.services"),
+                    service_rows,
+                ),
+            ];
+            if !interface_problem_rows.is_empty() {
+                sections.push(section(
+                    t(locale, "runtime.section.interface_problems"),
+                    t(locale, "runtime.empty.interface_problems"),
+                    interface_problem_rows,
+                ));
+            }
+            sections
+        },
     )
 }
 
@@ -2821,6 +2927,32 @@ fn routing_mode_key(mode: NodeRoutingMode) -> &'static str {
     }
 }
 
+fn interface_kind_key(kind: NodeInterfaceKind) -> &'static str {
+    match kind {
+        NodeInterfaceKind::Loopback => "interface.kind.loopback",
+        NodeInterfaceKind::Physical => "interface.kind.physical",
+        NodeInterfaceKind::Virtual => "interface.kind.virtual",
+        NodeInterfaceKind::Tun => "interface.kind.tun",
+        NodeInterfaceKind::Unknown => "interface.kind.unknown",
+    }
+}
+
+fn interface_ownership_key(ownership: NodeInterfaceOwnership) -> &'static str {
+    match ownership {
+        NodeInterfaceOwnership::System => "interface.ownership.system",
+        NodeInterfaceOwnership::Product => "interface.ownership.product",
+        NodeInterfaceOwnership::Unknown => "interface.ownership.unknown",
+    }
+}
+
+fn interface_status_key(status: NodeInterfaceStatus) -> &'static str {
+    match status {
+        NodeInterfaceStatus::Up => "interface.status.up",
+        NodeInterfaceStatus::Down => "interface.status.down",
+        NodeInterfaceStatus::Unknown => "interface.status.unknown",
+    }
+}
+
 fn permission_key(permission: NodePermission) -> &'static str {
     match permission {
         NodePermission::ViewState => "choice.permission.view_state",
@@ -2916,9 +3048,9 @@ pub fn validate_manifest_bindings(manifest: &NodeUiManifest) -> Result<(), Strin
 mod tests {
     use super::*;
     use crate::node::{
-        node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeIdentitySnapshot, NodeNetworkSnapshot,
-        NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode, NodeTrafficSnapshot,
-        NodeUiField, NodeUiValidation,
+        node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeIdentitySnapshot, NodeInterfaceAddress,
+        NodeInterfaceSnapshot, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot,
+        NodeProblem, NodeProblemCode, NodeTrafficSnapshot, NodeUiField, NodeUiValidation,
     };
     use fuckipv6_common::domain::{ActivityEntry, AuditId, AuditOutcome, NodeId};
     use std::collections::BTreeMap;
@@ -3236,6 +3368,92 @@ mod tests {
                 "desktop settings must not expose WebUI-only authentication surface: {removed}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_projects_authoritative_interfaces_and_diagnostics() {
+        let mut snapshot = populated_snapshot();
+        snapshot.interfaces.push(NodeInterfaceSnapshot {
+            index: 7,
+            name: "fk-home".into(),
+            kind: NodeInterfaceKind::Tun,
+            ownership: NodeInterfaceOwnership::Product,
+            status: NodeInterfaceStatus::Up,
+            mtu: 1_420,
+            addresses: vec![NodeInterfaceAddress {
+                address: "fd00::2".parse().expect("IPv6"),
+                prefix_len: 64,
+            }],
+            default_ipv4: false,
+            default_ipv6: true,
+        });
+        snapshot.interface_problems.push(
+            NodeProblem::new(NodeProblemCode::Unavailable, "raw host interface error")
+                .for_network("home"),
+        );
+
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+        let interfaces = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.interfaces"))
+            .expect("interface section");
+        assert_eq!(interfaces.rows.len(), 1);
+        assert_eq!(interfaces.rows[0].title, "fk-home");
+        assert!(interfaces.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "interface.kind.tun")));
+        assert!(interfaces.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "interface.ownership.product")));
+        assert!(interfaces.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "interface.status.up")));
+        assert!(interfaces.rows[0].detail.contains("fd00::2/64"));
+        assert!(interfaces.rows[0].detail.contains(&tr(
+            Locale::ZhCn,
+            "runtime.row.interface_defaults",
+            &[
+                ("ipv4", t(Locale::ZhCn, "common.disabled")),
+                ("ipv6", t(Locale::ZhCn, "common.enabled")),
+            ],
+        )));
+
+        let problems = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.interface_problems"))
+            .expect("interface diagnostics");
+        assert_eq!(problems.rows.len(), 1);
+        assert_eq!(problems.rows[0].title, "home");
+        assert_eq!(
+            problems.rows[0].detail,
+            t(Locale::ZhCn, "error.operation_unavailable")
+        );
+        assert!(!problems.rows[0].detail.contains("raw host interface error"));
+    }
+
+    #[test]
+    fn runtime_hides_empty_interface_diagnostics_section() {
+        let snapshot = populated_snapshot();
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+
+        assert!(model
+            .sections
+            .iter()
+            .all(|section| section.title != t(Locale::ZhCn, "runtime.section.interface_problems")));
     }
 
     #[test]

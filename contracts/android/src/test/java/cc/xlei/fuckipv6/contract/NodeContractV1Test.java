@@ -9,6 +9,7 @@ import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeEventReplayReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
+import cc.xlei.fuckipv6.contract.NodeContractV1.OperationKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.OperationState;
 
 /** Dependency-free executable checks for Android-safe contract bindings. */
@@ -40,7 +41,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 79,
+                NodeContractV1.DTO_CLASS_NAMES.length == 81,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -94,6 +95,8 @@ public final class NodeContractV1Test {
             "permissions",
             "embedded_services",
             "ui_mode",
+            "interfaces",
+            "interface_problems",
             "networks",
             "peers",
             "recent_activity",
@@ -135,6 +138,14 @@ public final class NodeContractV1Test {
                 NodeCommandKind.GET_CONFIGURATION_HISTORY,
                 NodeCommandKind.fromWireName("get_configuration_history"),
                 "configuration history command");
+        assertSame(
+                NodeCommandKind.REBUILD_TUN,
+                NodeCommandKind.fromWireName("rebuild_tun"),
+                "TUN rebuild command");
+        assertSame(
+                OperationKind.TUN_REBUILD,
+                OperationKind.fromWireName("tun_rebuild"),
+                "TUN rebuild operation kind");
         expectIllegalArgument(
                 () -> NodeCommandKind.fromWireName("not_a_command"),
                 "unknown command");
@@ -179,6 +190,9 @@ public final class NodeContractV1Test {
         assertTrue(
                 !NodeContractV1.isManifestAction(NodeCommandKind.GET_UI_MANIFEST),
                 "get_ui_manifest must remain bootstrap-only");
+        assertTrue(
+                NodeContractV1.isManifestAction(NodeCommandKind.REBUILD_TUN),
+                "rebuild_tun must be a visible action");
         assertTrue(
                 NodeContractV1.isManifestAction(NodeCommandKind.GET_NODE_DIAGNOSTICS),
                 "get_node_diagnostics must be a visible action");

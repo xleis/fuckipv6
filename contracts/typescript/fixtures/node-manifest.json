@@ -185,6 +185,32 @@
             "consequence_key": "confirm.restart_networks.consequence",
             "destructive": false
           }
+        },
+        {
+          "id": "rebuild_tun",
+          "label_key": "action.rebuild_tun",
+          "command": "rebuild_tun",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.tun.rebuild"
+          },
+          "availability": "network_online",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.rebuild_tun.title",
+            "consequence_key": "confirm.rebuild_tun.consequence",
+            "destructive": false
+          }
         }
       ]
     },

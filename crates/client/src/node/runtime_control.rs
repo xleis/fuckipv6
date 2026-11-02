@@ -3553,6 +3553,7 @@ mod tests {
     use super::*;
     use crate::node::{
         NodeCommand, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeEvent,
+        NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceSnapshot, NodeInterfaceStatus,
         NodePeerSnapshot,
     };
     use crate::p2p::connection::P2pEngine;
@@ -5623,6 +5624,17 @@ mod tests {
                     .find(|network| network.name == "owned")
                     .expect("running network state");
                 network.peer_count = 1;
+                snapshot.interfaces.push(NodeInterfaceSnapshot {
+                    index: u32::MAX,
+                    name: network.tun_name.clone(),
+                    kind: NodeInterfaceKind::Tun,
+                    ownership: NodeInterfaceOwnership::Product,
+                    status: NodeInterfaceStatus::Up,
+                    mtu: 1_420,
+                    addresses: Vec::new(),
+                    default_ipv4: false,
+                    default_ipv6: false,
+                });
                 snapshot.peers.push(peer_snapshot("owned"));
             })
             .await;
@@ -5656,6 +5668,11 @@ mod tests {
                 && network.peer_count == 0
         }));
         assert!(snapshot.peers.is_empty());
+        harness
+            .state
+            .refresh_interface_capture(Default::default(), Some(&BTreeMap::new()))
+            .await;
+        let snapshot = harness.state.snapshot().await;
         assert!(snapshot.invariant_violations().is_empty());
         let service = snapshot
             .embedded_services

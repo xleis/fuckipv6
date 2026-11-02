@@ -289,6 +289,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
         NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),
         NodeCommandKind::RestartNetworks => NodeUiAudit::record("network.restart"),
+        NodeCommandKind::RebuildTun => NodeUiAudit::record("node.tun.rebuild"),
         NodeCommandKind::UpdateRouting => NodeUiAudit::record("routing.update"),
         NodeCommandKind::SetNetworkRole => NodeUiAudit::record("network.role.set"),
         NodeCommandKind::GetBlacklist => NodeUiAudit::none(),
@@ -522,6 +523,26 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         Some(confirmation(
                             "confirm.restart_networks.title",
                             "confirm.restart_networks.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "rebuild_tun",
+                        "action.rebuild_tun",
+                        NodeCommandKind::RebuildTun,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkOnline,
+                        vec![field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        )],
+                        Some(confirmation(
+                            "confirm.rebuild_tun.title",
+                            "confirm.rebuild_tun.consequence",
                             false,
                         )),
                     ),
@@ -1315,6 +1336,7 @@ mod tests {
         );
         for command in [
             NodeCommandKind::StartNetworks,
+            NodeCommandKind::RebuildTun,
             NodeCommandKind::CreateNetwork,
             NodeCommandKind::JoinNetwork,
             NodeCommandKind::StartNode,

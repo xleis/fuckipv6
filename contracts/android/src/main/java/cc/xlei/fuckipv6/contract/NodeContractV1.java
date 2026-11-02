@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -389,6 +389,7 @@ public final class NodeContractV1 {
         JOIN_NETWORK("join_network"),
         PREVIEW_CONFIGURATION("preview_configuration"),
         PROBE_PEER("probe_peer"),
+        REBUILD_TUN("rebuild_tun"),
         RESTART_NETWORKS("restart_networks"),
         RESTART_NODE("restart_node"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
@@ -566,6 +567,83 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeHttpErrorCode wire value: " + value);
+        }
+    }
+
+    public enum NodeInterfaceKind {
+        LOOPBACK("loopback"),
+        PHYSICAL("physical"),
+        VIRTUAL("virtual"),
+        TUN("tun"),
+        UNKNOWN("unknown");
+
+        private final String wireName;
+
+        NodeInterfaceKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeInterfaceKind fromWireName(String value) {
+            for (NodeInterfaceKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeInterfaceKind wire value: " + value);
+        }
+    }
+
+    public enum NodeInterfaceOwnership {
+        SYSTEM("system"),
+        PRODUCT("product"),
+        UNKNOWN("unknown");
+
+        private final String wireName;
+
+        NodeInterfaceOwnership(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeInterfaceOwnership fromWireName(String value) {
+            for (NodeInterfaceOwnership candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeInterfaceOwnership wire value: " + value);
+        }
+    }
+
+    public enum NodeInterfaceStatus {
+        UP("up"),
+        DOWN("down"),
+        UNKNOWN("unknown");
+
+        private final String wireName;
+
+        NodeInterfaceStatus(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeInterfaceStatus fromWireName(String value) {
+            for (NodeInterfaceStatus candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeInterfaceStatus wire value: " + value);
         }
     }
 
@@ -972,6 +1050,7 @@ public final class NodeContractV1 {
         NODE_CLEANUP("node_cleanup"),
         NETWORK_CREATE("network_create"),
         NETWORK_APPLY("network_apply"),
+        TUN_REBUILD("tun_rebuild"),
         NETWORK_LEAVE("network_leave"),
         MEMBERSHIP_APPROVE("membership_approve"),
         MEMBERSHIP_REJECT("membership_reject"),
@@ -1697,6 +1776,42 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeInterfaceAddress. */
+    public static final class NodeInterfaceAddress {
+        public final String address;
+        public final Integer prefix_len;
+
+        public NodeInterfaceAddress(String address, Integer prefix_len) {
+            this.address = address;
+            this.prefix_len = prefix_len;
+        }
+    }
+
+    /** DTO for NodeInterfaceSnapshot. */
+    public static final class NodeInterfaceSnapshot {
+        public final List<NodeInterfaceAddress> addresses;
+        public final Boolean default_ipv4;
+        public final Boolean default_ipv6;
+        public final Long index;
+        public final NodeInterfaceKind kind;
+        public final Long mtu;
+        public final String name;
+        public final NodeInterfaceOwnership ownership;
+        public final NodeInterfaceStatus status;
+
+        public NodeInterfaceSnapshot(List<NodeInterfaceAddress> addresses, Boolean default_ipv4, Boolean default_ipv6, Long index, NodeInterfaceKind kind, Long mtu, String name, NodeInterfaceOwnership ownership, NodeInterfaceStatus status) {
+            this.addresses = addresses;
+            this.default_ipv4 = default_ipv4;
+            this.default_ipv6 = default_ipv6;
+            this.index = index;
+            this.kind = kind;
+            this.mtu = mtu;
+            this.name = name;
+            this.ownership = ownership;
+            this.status = status;
+        }
+    }
+
     /** DTO for NodeJoinNetworkCommand. */
     public static final class NodeJoinNetworkCommand {
         public final String network_name;
@@ -2087,6 +2202,8 @@ public final class NodeContractV1 {
         public final List<NodeEmbeddedServiceSnapshot> embedded_services;
         public final ExitNodeCapabilities exit_node_capabilities;
         public final NodeIdentitySnapshot identity;
+        public final List<NodeProblem> interface_problems;
+        public final List<NodeInterfaceSnapshot> interfaces;
         public final NodeProblem last_error;
         public final NodeLifecycleSnapshot lifecycle;
         public final List<NodeLogEntry> logs;
@@ -2097,13 +2214,15 @@ public final class NodeContractV1 {
         public final Long revision;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
             this.configuration = configuration;
             this.control_health = control_health;
             this.embedded_services = embedded_services;
             this.exit_node_capabilities = exit_node_capabilities;
             this.identity = identity;
+            this.interface_problems = interface_problems;
+            this.interfaces = interfaces;
             this.last_error = last_error;
             this.lifecycle = lifecycle;
             this.logs = logs;
@@ -2531,6 +2650,23 @@ public final class NodeContractV1 {
                 public RestartNetworksPayload(Boolean all, List<String> networks) {
                     this.all = all;
                     this.networks = networks;
+                }
+            }
+        }
+
+        public static final class RebuildTun extends NodeCommand {
+            public final RebuildTunPayload payload;
+
+            public RebuildTun(RebuildTunPayload payload) {
+                super(NodeCommandKind.REBUILD_TUN);
+                this.payload = payload;
+            }
+            /** DTO for RebuildTunPayload. */
+            public static final class RebuildTunPayload {
+                public final String network_name;
+
+                public RebuildTunPayload(String network_name) {
+                    this.network_name = network_name;
                 }
             }
         }
@@ -3201,6 +3337,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.PREVIEW_CONFIGURATION ||
             command == NodeCommandKind.PROBE_PEER ||
+            command == NodeCommandKind.REBUILD_TUN ||
             command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.RESTART_NODE ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||

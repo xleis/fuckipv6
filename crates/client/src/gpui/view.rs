@@ -4681,6 +4681,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "start_networks" => "action.start_networks",
         "stop_networks" => "action.stop_networks",
         "restart_networks" => "action.restart_networks",
+        "rebuild_tun" => "action.rebuild_tun",
         "probe_peer" => "action.probe_peer",
         "get_blacklist" => "action.get_blacklist",
         "ban_client" => "action.ban_client",

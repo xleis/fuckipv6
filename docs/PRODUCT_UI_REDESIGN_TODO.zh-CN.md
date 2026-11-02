@@ -949,16 +949,18 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：用户只通过产品操作即可可靠启停节点；任何界面关闭、control/node 独立崩溃都不会产生第二份 runtime 或残留进程。
 
-### W7-02 网络接口与 TUN `[ ]`
+### W7-02 网络接口与 TUN `[~]`
 
-- [ ] 展示回环、物理、虚拟、TUN 接口及其地址、MTU、状态；
-- [ ] 区分系统接口、本产品创建接口和未知接口；
-- [ ] 展示 IPv4/IPv6 地址和默认路由归属；
-- [ ] 允许无敏感信息的基础接口诊断；
-- [ ] 允许有权限时刷新/重建 TUN，并走 operation 与审计；
+- [x] 展示回环、物理、虚拟、TUN 接口及其地址、MTU、状态；
+- [x] 区分系统接口、本产品创建接口和未知接口；
+- [x] 展示 IPv4/IPv6 地址和默认路由归属；
+- [x] 允许无敏感信息的基础接口诊断；
+- [x] 允许有权限时刷新/重建 TUN，并走 operation 与审计；
 - [ ] TUN 创建失败、地址冲突、路由失败、DNS 失败分别可解释；
 - [ ] 平台不支持或权限不足时禁用动作并显示原因；
-- [ ] UI 不直接调用系统命令修改路由或 DNS。
+- [x] UI 不直接调用系统命令修改路由或 DNS。
+
+**证据（2026-11-02）**：GPUI 与 WebUI 节点运行页均直接投影服务端 `NodeSnapshot.interfaces` 和 `interface_problems`，展示接口名称、类型、系统/产品/未知归属、up/down/unknown 状态、MTU、IPv4/IPv6 地址及 IPv4/IPv6 默认路由归属；中英文共享 i18n，诊断消息优先使用稳定 `message_key` 和参数本地化。新增 `RebuildTun` 领域命令和 manifest 动作，按网络校验本地所有者权限，经统一 operation 服务执行，operation kind 为 `TunRebuild`、目标为对应 Network，并记录 `node.tun.rebuild` 审计动作；UI 不直接运行系统网络命令。定向 GPUI/WebUI 接口测试、`cargo test -p fuckipv6-client --all-features`（lib 669 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 11 passed；`lifecycle_cleanup_linux` 1 ignored）、WebUI 65/65、`cargo test -p fuckipv6-common i18n` 9/9、`./scripts/check-contracts.sh`、`cargo fmt --all -- --check` 均通过；失败分类、平台权限预检和完整恢复验证仍留在后续工作包，因此不宣称完整平台可用。
 
 **验收**：接口状态来自服务端快照；所有修改可恢复、可审计；不存在“看起来已开启”但实际 TUN 未建立的伪状态。
 

@@ -555,6 +555,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::RestartNetworks { .. } | NodeCommand::RestartNode => {
             OperationKind::NodeRestart
         }
+        NodeCommand::RebuildTun { .. } => OperationKind::TunRebuild,
         NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
         NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
@@ -594,6 +595,7 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
             .as_deref()
             .map(network_target)
             .unwrap_or_else(node_target),
+        NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
@@ -966,6 +968,23 @@ mod tests {
                 auto_connect: false,
             }),
         )
+    }
+
+    #[test]
+    fn tun_rebuild_uses_a_network_scoped_operation() {
+        let local_node = NodeId::from_public_key(b"operation-service-local-node");
+        let command = NodeCommand::RebuildTun {
+            network_name: "home".into(),
+        };
+
+        assert_eq!(operation_kind(&command), OperationKind::TunRebuild);
+        assert_eq!(
+            operation_target(&command, &local_node),
+            DomainObjectRef {
+                kind: ObjectKind::Network,
+                id: "home".into(),
+            }
+        );
     }
 
     #[tokio::test]

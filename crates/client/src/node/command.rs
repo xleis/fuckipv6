@@ -58,6 +58,7 @@ pub enum NodeCommandKind {
     StartNetworks,
     StopNetworks,
     RestartNetworks,
+    RebuildTun,
     CreateNetwork,
     JoinNetwork,
     UpdateRouting,
@@ -82,13 +83,14 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
+        Self::RebuildTun,
         Self::CreateNetwork,
         Self::JoinNetwork,
         Self::UpdateRouting,
@@ -113,12 +115,13 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 25] = [
+    pub const ACTIONS: [Self; 26] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
+        Self::RebuildTun,
         Self::CreateNetwork,
         Self::JoinNetwork,
         Self::UpdateRouting,
@@ -149,6 +152,7 @@ impl NodeCommandKind {
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
             Self::RestartNetworks => "restart_networks",
+            Self::RebuildTun => "rebuild_tun",
             Self::CreateNetwork => "create_network",
             Self::JoinNetwork => "join_network",
             Self::UpdateRouting => "update_routing",
@@ -181,6 +185,7 @@ impl NodeCommandKind {
             Self::StartNetworks
                 | Self::StopNetworks
                 | Self::RestartNetworks
+                | Self::RebuildTun
                 | Self::CreateNetwork
                 | Self::JoinNetwork
                 | Self::UpdateRouting
@@ -222,6 +227,10 @@ pub enum NodeCommand {
     RestartNetworks {
         networks: Vec<String>,
         all: bool,
+    },
+    /// Recreate one network's TUN under the actor-owned lifecycle transition.
+    RebuildTun {
+        network_name: String,
     },
     CreateNetwork(NodeCreateNetworkCommand),
     JoinNetwork(NodeJoinNetworkCommand),
@@ -275,6 +284,7 @@ impl NodeCommand {
             Self::StartNetworks { .. } => NodeCommandKind::StartNetworks,
             Self::StopNetworks { .. } => NodeCommandKind::StopNetworks,
             Self::RestartNetworks { .. } => NodeCommandKind::RestartNetworks,
+            Self::RebuildTun { .. } => NodeCommandKind::RebuildTun,
             Self::CreateNetwork(_) => NodeCommandKind::CreateNetwork,
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
@@ -352,6 +362,7 @@ impl NodeCommand {
                 }
                 validate_network_names(networks)
             }
+            Self::RebuildTun { network_name } => validate_network_name(network_name),
             Self::CreateNetwork(command) => command.validate(),
             Self::JoinNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
@@ -1191,6 +1202,9 @@ mod tests {
                 networks: vec!["home".into()],
                 all: false,
             },
+            NodeCommand::RebuildTun {
+                network_name: "home".into(),
+            },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
                 signaling_port: 6666,
@@ -1408,6 +1422,9 @@ mod tests {
             NodeCommand::RestartNetworks {
                 networks: vec!["home".into()],
                 all: true,
+            },
+            NodeCommand::RebuildTun {
+                network_name: "../home".into(),
             },
             NodeCommand::CleanupResiduals {
                 networks: Vec::new(),

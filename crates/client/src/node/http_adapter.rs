@@ -1224,6 +1224,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::RestartNetworks { .. } | NodeCommand::RestartNode => {
             OperationKind::NodeRestart
         }
+        NodeCommand::RebuildTun { .. } => OperationKind::TunRebuild,
         NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
         NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
@@ -1268,6 +1269,7 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
             .unwrap_or_else(node_target),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
+        NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
             network_target(&command.network_name)
         }

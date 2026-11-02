@@ -350,6 +350,103 @@
       ],
       "type": "object"
     },
+    "NodeInterfaceAddress": {
+      "properties": {
+        "address": {
+          "format": "ip",
+          "type": "string"
+        },
+        "prefix_len": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "address",
+        "prefix_len"
+      ],
+      "type": "object"
+    },
+    "NodeInterfaceKind": {
+      "enum": [
+        "loopback",
+        "physical",
+        "virtual",
+        "tun",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "NodeInterfaceOwnership": {
+      "description": "Product ownership is established by an exact match against the live\nruntime's TUN name. Interface naming conventions never establish ownership.",
+      "enum": [
+        "system",
+        "product",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "NodeInterfaceSnapshot": {
+      "description": "One redacted host network interface captured by the node process.\n\nThe snapshot intentionally omits hardware addresses, routes, policy rules\nand operating-system diagnostics. UI adapters render this projection and\nnever query or mutate host networking themselves.",
+      "properties": {
+        "addresses": {
+          "items": {
+            "$ref": "#/$defs/NodeInterfaceAddress"
+          },
+          "type": "array"
+        },
+        "default_ipv4": {
+          "type": "boolean"
+        },
+        "default_ipv6": {
+          "type": "boolean"
+        },
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/NodeInterfaceKind"
+        },
+        "mtu": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ownership": {
+          "$ref": "#/$defs/NodeInterfaceOwnership"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeInterfaceStatus"
+        }
+      },
+      "required": [
+        "index",
+        "name",
+        "kind",
+        "ownership",
+        "status",
+        "mtu",
+        "addresses",
+        "default_ipv4",
+        "default_ipv6"
+      ],
+      "type": "object"
+    },
+    "NodeInterfaceStatus": {
+      "enum": [
+        "up",
+        "down",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "NodeLifecycleSnapshot": {
       "description": "Shared lifecycle snapshot consumed by CLI, IPC, WebUI, and (later) GPUI.",
       "properties": {
@@ -1086,6 +1183,22 @@
           "type": "null"
         }
       ]
+    },
+    "interface_problems": {
+      "default": [],
+      "description": "Redacted problems encountered while collecting or reconciling host\ninterfaces. Command and runtime failures remain in `last_error` when\nthey are tied to a network lifecycle transition.",
+      "items": {
+        "$ref": "#/$defs/NodeProblem"
+      },
+      "type": "array"
+    },
+    "interfaces": {
+      "default": [],
+      "description": "Authoritative host interface capture for the node page. This is filled\nby the node process from OS network state; UI adapters never probe the\nhost themselves. Missing data deserializes as an empty capture.",
+      "items": {
+        "$ref": "#/$defs/NodeInterfaceSnapshot"
+      },
+      "type": "array"
     },
     "last_error": {
       "anyOf": [

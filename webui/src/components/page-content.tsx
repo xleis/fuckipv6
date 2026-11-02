@@ -63,9 +63,9 @@ function empty(text: string): JSX.Element {
 }
 
 function statusTone(value: string): string {
-  if (["online", "running", "enabled", "available"].includes(value))
+  if (["online", "running", "enabled", "available", "up"].includes(value))
     return "good";
-  if (["failed", "error", "unavailable", "unsupported"].includes(value))
+  if (["failed", "error", "unavailable", "unsupported", "down"].includes(value))
     return "bad";
   if (["degraded", "connecting", "starting", "stopping"].includes(value))
     return "warn";
@@ -509,6 +509,8 @@ function NodeRuntime({
         snapshot.last_error.params ?? {},
       )
     : label(locale, "common.none");
+  const interfaces = snapshot.interfaces ?? [];
+  const interfaceProblems = snapshot.interface_problems ?? [];
 
   return (
     <div className="page-stack runtime-stack">
@@ -629,6 +631,101 @@ function NodeRuntime({
               </div>
             ))}
       </section>
+
+      <section className="surface-card" data-testid="runtime-interfaces">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.interfaces")}</h3>
+          <span>{interfaces.length}</span>
+        </div>
+        {interfaces.length === 0
+          ? empty(label(locale, "runtime.empty.interfaces"))
+          : interfaces.map((iface) => {
+              const addresses = iface.addresses.length
+                ? iface.addresses
+                    .map((address) => `${address.address}/${address.prefix_len}`)
+                    .join(", ")
+                : label(locale, "common.none");
+              const defaults = tr(locale, "runtime.row.interface_defaults", {
+                ipv4: label(
+                  locale,
+                  iface.default_ipv4 ? "common.enabled" : "common.disabled",
+                ),
+                ipv6: label(
+                  locale,
+                  iface.default_ipv6 ? "common.enabled" : "common.disabled",
+                ),
+              });
+              return (
+                <div
+                  className="compact-row"
+                  data-interface-index={iface.index}
+                  key={iface.name}
+                >
+                  <CircleDot
+                    size={15}
+                    className={statusTone(iface.status)}
+                  />
+                  <span>
+                    <strong>{iface.name}</strong>
+                    <small>
+                      {tr(locale, "runtime.row.interface_detail", {
+                        kind: label(
+                          locale,
+                          `interface.kind.${iface.kind}`,
+                        ),
+                        ownership: label(
+                          locale,
+                          `interface.ownership.${iface.ownership}`,
+                        ),
+                        status: label(
+                          locale,
+                          `interface.status.${iface.status}`,
+                        ),
+                        mtu: iface.mtu,
+                        addresses,
+                      })}
+                    </small>
+                    <small>{defaults}</small>
+                  </span>
+                </div>
+              );
+            })}
+      </section>
+
+      {interfaceProblems.length > 0 ? (
+        <section
+          className="surface-card"
+          data-testid="runtime-interface-problems"
+        >
+          <div className="card-heading">
+            <h3>{label(locale, "runtime.section.interface_problems")}</h3>
+            <AlertTriangle size={17} />
+          </div>
+          {interfaceProblems.map((problem, index) => {
+            const localized = tr(
+              locale,
+              problem.message_key,
+              problem.params ?? {},
+            );
+            return (
+              <div className="compact-row" key={`${problem.message_key}-${index}`}>
+                <AlertTriangle size={15} className="bad" />
+                <span>
+                  <strong>
+                    {problem.network_name ??
+                      label(locale, "runtime.interface.host")}
+                  </strong>
+                  <small>
+                    {localized === problem.message_key
+                      ? problem.message
+                      : localized}
+                  </small>
+                </span>
+              </div>
+            );
+          })}
+        </section>
+      ) : null}
 
       <section className="surface-card" data-testid="runtime-services">
         <div className="card-heading">

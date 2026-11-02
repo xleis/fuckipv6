@@ -428,6 +428,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         NodeCommandKind::StartNetworks
         | NodeCommandKind::StopNetworks
         | NodeCommandKind::RestartNetworks
+        | NodeCommandKind::RebuildTun
         | NodeCommandKind::CleanupResiduals
         | NodeCommandKind::CreateNetwork
         | NodeCommandKind::JoinNetwork
@@ -601,6 +602,9 @@ mod tests {
             NodeCommand::RestartNetworks {
                 networks: Vec::new(),
                 all: true,
+            },
+            NodeCommand::RebuildTun {
+                network_name: "home".into(),
             },
             NodeCommand::StartNode,
             NodeCommand::StopNode,

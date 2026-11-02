@@ -249,6 +249,66 @@ describe("React WebUI shell", () => {
     await expectModuleTabs("settings", ["settings"]);
   });
 
+  it("renders authoritative interfaces and diagnostics on node runtime", async () => {
+    if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
+    window.FuckIPV6I18n.tr = (_locale, key, params) =>
+      `translated:${key}:${JSON.stringify(params ?? {})}`;
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+      interfaces: [
+        {
+          index: 7,
+          name: "fk-home",
+          kind: "tun",
+          ownership: "product",
+          status: "up",
+          mtu: 1420,
+          addresses: [{ address: "fd00::2", prefix_len: 64 }],
+          default_ipv4: false,
+          default_ipv6: true,
+        },
+      ],
+      interface_problems: [
+        {
+          code: "unavailable",
+          category: "dependency",
+          message: "raw host interface error",
+          message_key: "error.operation_unavailable",
+          params: {},
+          network_name: "home",
+          retryable: true,
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
+    );
+
+    const interfaces = await screen.findByTestId("runtime-interfaces");
+    expect(within(interfaces).getByText("fk-home")).toBeInTheDocument();
+    expect(interfaces).toHaveTextContent('"kind":"translated:interface.kind.tun"');
+    expect(interfaces).toHaveTextContent(
+      '"ownership":"translated:interface.ownership.product"',
+    );
+    expect(interfaces).toHaveTextContent('"addresses":"fd00::2/64"');
+    expect(interfaces).toHaveTextContent("translated:runtime.row.interface_defaults");
+
+    const problems = screen.getByTestId("runtime-interface-problems");
+    expect(within(problems).getByText("home")).toBeInTheDocument();
+    expect(problems).toHaveTextContent(
+      "translated:error.operation_unavailable",
+    );
+    expect(problems).not.toHaveTextContent("raw host interface error");
+  });
+
   it("renders one authoritative page state with node failure ahead of control failure", async () => {
     authenticate({
       ...populatedSnapshot,

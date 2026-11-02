@@ -178,6 +178,10 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "重启网络需要运行中的多网络监督器控制通道"),
                 },
+                super::NodeCommand::RebuildTun { network_name } => match runtime {
+                    Some(runtime) => rebuild_runtime_tun(&runtime, request_id, network_name).await,
+                    None => unavailable(request_id, "重建 TUN 需要运行中的多网络监督器控制通道"),
+                },
                 super::NodeCommand::ProbePeer(command) => {
                     probe_peer(&registry, request_id, command).await
                 }
@@ -745,6 +749,44 @@ async fn restart_runtime_networks(
     }
 }
 
+async fn rebuild_runtime_tun(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    network_name: String,
+) -> NodeCommandResult {
+    match runtime.restart(vec![network_name.clone()], false).await {
+        Ok(summary)
+            if summary.failed.is_empty()
+                && summary.restarted.as_slice() == std::slice::from_ref(&network_name) =>
+        {
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::Completed {
+                    message: format!("网络 [{network_name}] 的 TUN 已重建"),
+                },
+            )
+        }
+        Ok(_) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(
+                NodeProblemCode::Unavailable,
+                format!("网络 [{network_name}] 的 TUN 重建未完成"),
+            )
+            .for_network(network_name)
+            .retryable(true),
+        ),
+        Err(error) => {
+            let code = runtime_problem_code(&error);
+            NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(code, format!("网络 [{network_name}] 的 TUN 重建失败"))
+                    .for_network(network_name)
+                    .retryable(matches!(code, NodeProblemCode::Unavailable)),
+            )
+        }
+    }
+}
+
 async fn update_runtime_routing(
     runtime: &NetworkRuntimeManager,
     request_id: u64,
@@ -815,7 +857,17 @@ fn runtime_rejection_scoped(
     error: RuntimeControlError,
     network_name: Option<String>,
 ) -> NodeCommandResult {
-    let code = match &error {
+    let code = runtime_problem_code(&error);
+    let mut problem = NodeProblem::new(code, error.to_string())
+        .retryable(matches!(code, NodeProblemCode::Unavailable));
+    if let Some(network_name) = network_name {
+        problem = problem.for_network(network_name);
+    }
+    NodeCommandResult::rejected(request_id, problem)
+}
+
+fn runtime_problem_code(error: &RuntimeControlError) -> NodeProblemCode {
+    match error {
         RuntimeControlError::Invalid(_) => NodeProblemCode::InvalidRequest,
         RuntimeControlError::Conflict(_) => NodeProblemCode::Conflict,
         RuntimeControlError::NotFound(_) => NodeProblemCode::NotFound,
@@ -824,13 +876,7 @@ fn runtime_rejection_scoped(
         | RuntimeControlError::Persistence(_)
         | RuntimeControlError::Launch(_)
         | RuntimeControlError::Timeout(_) => NodeProblemCode::Unavailable,
-    };
-    let mut problem = NodeProblem::new(code, error.to_string())
-        .retryable(matches!(code, NodeProblemCode::Unavailable));
-    if let Some(network_name) = network_name {
-        problem = problem.for_network(network_name);
     }
-    NodeCommandResult::rejected(request_id, problem)
 }
 
 async fn stop_networks(
@@ -1032,8 +1078,8 @@ mod tests {
             })
             .await;
         let registry = MultiNetworkRegistry::new();
+        let stored_revision = state.snapshot().await.revision;
         let bus = spawn_command_bus(state, registry, NodeEventBus::default());
-
         let result = bus
             .execute_test(NodeCommandRequest::new(1, NodeCommand::GetSnapshot))
             .await
@@ -1041,7 +1087,10 @@ mod tests {
 
         match result.outcome {
             NodeCommandOutcome::Snapshot(snapshot) => {
-                assert_eq!(snapshot.revision, 1);
+                // GetSnapshot refreshes the authoritative host-interface
+                // projection and may legitimately advance the revision when
+                // the first real capture differs from the default snapshot.
+                assert!(snapshot.revision >= stored_revision);
                 assert_eq!(snapshot.logs[0].message, "shared");
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
@@ -1400,6 +1449,26 @@ mod tests {
             let problem = execute_rejected(&bus, 41 + offset as u64, command).await;
             assert_problem(&problem, NodeProblemCode::Unavailable, true);
         }
+    }
+
+    #[tokio::test]
+    async fn tun_rebuild_fails_explicitly_without_a_runtime() {
+        let bus = spawn_command_bus(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+        let problem = execute_rejected(
+            &bus,
+            39,
+            NodeCommand::RebuildTun {
+                network_name: "home".into(),
+            },
+        )
+        .await;
+
+        assert_problem(&problem, NodeProblemCode::Unavailable, true);
+        assert_eq!(problem.message, "重建 TUN 需要运行中的多网络监督器控制通道");
     }
 
     #[tokio::test]

@@ -427,6 +427,31 @@
       "type": "object"
     },
     {
+      "description": "Recreate one network's TUN under the actor-owned lifecycle transition.",
+      "properties": {
+        "command": {
+          "const": "rebuild_tun",
+          "type": "string"
+        },
+        "payload": {
+          "properties": {
+            "network_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network_name"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
       "properties": {
         "command": {
           "const": "create_network",

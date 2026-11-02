@@ -51,6 +51,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   start_networks: "start_networks",
   stop_networks: "stop_networks",
   restart_networks: "restart_networks",
+  rebuild_tun: "rebuild_tun",
   probe_peer: "probe_peer",
   get_blacklist: "get_blacklist",
   ban_client: "ban_client",
@@ -934,6 +935,11 @@ export function buildCommand(
         payload: { networks: all ? [] : splitNames(values.networks), all },
       };
     }
+    case "rebuild_tun":
+      return {
+        command: "rebuild_tun",
+        payload: { network_name: requiredString("network_name") },
+      };
     case "cleanup_node_residuals": {
       const all = booleanValue(requireValue("all"), locale);
       return {

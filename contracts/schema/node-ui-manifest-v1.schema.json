@@ -32,6 +32,7 @@
             "start_networks",
             "stop_networks",
             "restart_networks",
+            "rebuild_tun",
             "create_network",
             "join_network",
             "update_routing",

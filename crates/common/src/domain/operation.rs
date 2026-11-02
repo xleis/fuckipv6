@@ -68,6 +68,7 @@ pub enum OperationKind {
     NodeCleanup,
     NetworkCreate,
     NetworkApply,
+    TunRebuild,
     NetworkLeave,
     MembershipApprove,
     MembershipReject,

@@ -240,6 +240,9 @@ mod tests {
                 networks: vec!["home".into()],
                 all: false,
             },
+            NodeCommand::RebuildTun {
+                network_name: "home".into(),
+            },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
                 signaling_port: 41000,

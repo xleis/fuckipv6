@@ -1865,6 +1865,8 @@ public final class NodeContractV1 {
     public static final class NodeOperationSnapshot {
         public final DomainActorRef actor;
         public final Long attempt;
+        public final String cancel_blocked_reason;
+        public final Boolean cancellable;
         public final Long created_at_unix_ms;
         public final OperationError error;
         public final String idempotency_key;
@@ -1877,9 +1879,11 @@ public final class NodeContractV1 {
         public final DomainObjectRef target;
         public final Long updated_at_unix_ms;
 
-        public NodeOperationSnapshot(DomainActorRef actor, Long attempt, Long created_at_unix_ms, OperationError error, String idempotency_key, OperationKind kind, Long max_attempts, String operation_id, NodeCommandResult result, String stage, OperationState state, DomainObjectRef target, Long updated_at_unix_ms) {
+        public NodeOperationSnapshot(DomainActorRef actor, Long attempt, String cancel_blocked_reason, Boolean cancellable, Long created_at_unix_ms, OperationError error, String idempotency_key, OperationKind kind, Long max_attempts, String operation_id, NodeCommandResult result, String stage, OperationState state, DomainObjectRef target, Long updated_at_unix_ms) {
             this.actor = actor;
             this.attempt = attempt;
+            this.cancel_blocked_reason = cancel_blocked_reason;
+            this.cancellable = cancellable;
             this.created_at_unix_ms = created_at_unix_ms;
             this.error = error;
             this.idempotency_key = idempotency_key;

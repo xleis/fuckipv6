@@ -214,6 +214,14 @@ pub struct Operation {
     pub attempt: u32,
     pub max_attempts: u32,
     pub error: Option<OperationError>,
+    /// Whether this operation may be cancelled without guessing from its kind
+    /// or current stage. Transport adapters must project this value verbatim.
+    #[serde(default)]
+    pub cancellable: bool,
+    /// Stable localization key explaining why cancellation is unavailable.
+    /// Terminal operations may omit it because there is no action to explain.
+    #[serde(default)]
+    pub cancel_blocked_reason: Option<String>,
 }
 
 impl Operation {
@@ -244,6 +252,23 @@ impl Operation {
         }
         if let Some(error) = &self.error {
             error.validate()?;
+        }
+        if self.cancellable && self.cancel_blocked_reason.is_some() {
+            return Err(DomainError::invariant(
+                "cancellable operation cannot have a cancellation blocker",
+            ));
+        }
+        if let Some(reason) = &self.cancel_blocked_reason {
+            if !is_stable_symbol(reason, 128) {
+                return Err(DomainError::invalid_value(
+                    "operation cancellation blocker is invalid",
+                ));
+            }
+        }
+        if !self.cancellable && !self.state.is_terminal() && self.cancel_blocked_reason.is_none() {
+            return Err(DomainError::invariant(
+                "non-terminal non-cancellable operation requires a cancellation blocker",
+            ));
         }
         Ok(())
     }
@@ -286,6 +311,10 @@ impl Operation {
         self.state = state;
         self.stage = stage;
         self.updated_at_unix_ms = now_unix_ms;
+        if state.is_terminal() {
+            self.cancellable = false;
+            self.cancel_blocked_reason = None;
+        }
         Ok(())
     }
 
@@ -339,6 +368,8 @@ impl Operation {
         self.state = target;
         self.stage = if timed_out { "timed_out" } else { "failed" }.into();
         self.updated_at_unix_ms = now_unix_ms;
+        self.cancellable = false;
+        self.cancel_blocked_reason = None;
         Ok(())
     }
 
@@ -377,10 +408,17 @@ impl Operation {
         self.stage = "retrying".into();
         self.updated_at_unix_ms = now_unix_ms;
         self.error = None;
+        self.cancellable = false;
+        self.cancel_blocked_reason = Some("operation.cancel.not_supported".into());
         Ok(())
     }
 
     pub fn cancel(&mut self, reason: Option<OperationError>, now_unix_ms: u64) -> DomainResult<()> {
+        if !self.cancellable {
+            return Err(DomainError::invalid_transition(
+                "operation is not cancellable",
+            ));
+        }
         if !self.state.can_transition_to(OperationState::Cancelled) {
             return Err(DomainError::invalid_transition(format!(
                 "operation cannot transition from {:?} to {:?}",
@@ -400,6 +438,8 @@ impl Operation {
         self.state = OperationState::Cancelled;
         self.stage = "cancelled".into();
         self.updated_at_unix_ms = now_unix_ms;
+        self.cancellable = false;
+        self.cancel_blocked_reason = None;
         Ok(())
     }
 }
@@ -504,6 +544,8 @@ mod tests {
             attempt: 0,
             max_attempts: 3,
             error: None,
+            cancellable: false,
+            cancel_blocked_reason: Some("operation.cancel.not_supported".into()),
         }
     }
 
@@ -587,12 +629,39 @@ mod tests {
         operation.fail(error, false, 12).unwrap();
         assert_eq!(operation.state, OperationState::Failed);
         assert!(operation.error.is_some());
+        assert!(!operation.cancellable);
+        assert!(operation.cancel_blocked_reason.is_none());
+        operation.validate().unwrap();
+    }
+
+    #[test]
+    fn cancellation_capability_is_explicit_and_cleared_at_terminal_state() {
+        let mut operation = operation();
+        operation.cancellable = true;
+        operation.cancel_blocked_reason = None;
+        operation.validate().unwrap();
+
+        operation.cancel_blocked_reason = Some("operation.cancel.not_supported".into());
+        assert!(operation.validate().is_err());
+
+        operation.cancellable = false;
+        operation.validate().unwrap();
+        operation
+            .transition(OperationState::Running, "applying", 11)
+            .unwrap();
+        operation
+            .transition(OperationState::Succeeded, "committed", 12)
+            .unwrap();
+        assert!(!operation.cancellable);
+        assert!(operation.cancel_blocked_reason.is_none());
         operation.validate().unwrap();
     }
 
     #[test]
     fn cancellation_reports_partial_changes() {
         let mut operation = operation();
+        operation.cancellable = true;
+        operation.cancel_blocked_reason = None;
         operation
             .transition(OperationState::Running, "applying", 11)
             .unwrap();

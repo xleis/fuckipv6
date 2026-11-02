@@ -3008,6 +3008,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cancel_blocked_reason": {
+          "default": null,
+          "description": "Stable localization key explaining why cancellation is unavailable.\nTerminal operations may omit it because there is no action to explain.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cancellable": {
+          "default": false,
+          "description": "Whether this operation may be cancelled without guessing from its kind\nor current stage. Transport adapters must project this value verbatim.",
+          "type": "boolean"
+        },
         "created_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,

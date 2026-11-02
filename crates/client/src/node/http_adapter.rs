@@ -744,6 +744,8 @@ impl NodeHttpAdapter {
             attempt: 0,
             max_attempts: 3,
             error: None,
+            cancellable: false,
+            cancel_blocked_reason: Some("operation.cancel.not_supported".into()),
         };
         operation
             .validate()

@@ -663,6 +663,8 @@ export type NodeNetworkStatus = "offline" | "connecting" | "online" | "degraded"
 export type NodeOperationSnapshot = {
   "actor": DomainActorRef;
   "attempt": number;
+  "cancel_blocked_reason"?: string | null;
+  "cancellable"?: boolean;
   "created_at_unix_ms": number;
   "error"?: OperationError | null;
   "idempotency_key": IdempotencyKey;

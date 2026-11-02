@@ -12,9 +12,10 @@ use crate::node::{
     NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
     NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProbePeerCommand,
     NodeRollbackConfigurationCommand, NodeRoutingDefaultAction, NodeRoutingMode,
-    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetNetworkRoleCommand, NodeSnapshot,
-    NodeUiAction, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
-    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetNetworkRoleCommand,
+    NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability,
+    NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
+    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
@@ -112,6 +113,7 @@ pub enum ActionBinding {
     UpdateRouting,
     SetExitNodeRole,
     SetRelayRole,
+    SetNodeDisplayName,
     StartNode,
     StopNode,
     RestartNode,
@@ -125,7 +127,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -143,6 +145,7 @@ impl ActionBinding {
         Self::UpdateRouting,
         Self::SetExitNodeRole,
         Self::SetRelayRole,
+        Self::SetNodeDisplayName,
         Self::StartNode,
         Self::StopNode,
         Self::RestartNode,
@@ -174,6 +177,7 @@ impl ActionBinding {
             Self::UpdateRouting => "update_routing",
             Self::SetExitNodeRole => "set_exit_node_role",
             Self::SetRelayRole => "set_relay_role",
+            Self::SetNodeDisplayName => "set_node_display_name",
             Self::StartNode => "start_node",
             Self::StopNode => "stop_node",
             Self::RestartNode => "restart_node",
@@ -724,6 +728,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::SetNetworkRole,
         ),
         "set_relay_role" => (ActionBinding::SetRelayRole, NodeCommandKind::SetNetworkRole),
+        "set_node_display_name" => (
+            ActionBinding::SetNodeDisplayName,
+            NodeCommandKind::SetNodeDisplayName,
+        ),
         "start_node" => (ActionBinding::StartNode, NodeCommandKind::StartNode),
         "stop_node" => (ActionBinding::StopNode, NodeCommandKind::StopNode),
         "restart_node" => (ActionBinding::RestartNode, NodeCommandKind::RestartNode),
@@ -966,6 +974,11 @@ pub fn build_command(
                 enabled: parse_bool(action, "enabled", &required("enabled")?)?,
             }))
         }
+        Ok(ActionBinding::SetNodeDisplayName) => Ok(NodeCommand::SetNodeDisplayName(
+            NodeSetNodeDisplayNameCommand {
+                display_name: optional_non_empty(field("display_name")),
+            },
+        )),
         Ok(ActionBinding::StartNode) => Ok(NodeCommand::StartNode),
         Ok(ActionBinding::StopNode) => Ok(NodeCommand::StopNode),
         Ok(ActionBinding::RestartNode) => Ok(NodeCommand::RestartNode),
@@ -1049,6 +1062,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "set_exit_node_role" | "set_relay_role" => {
             HashSet::from(["network_name", "role", "enabled"])
         }
+        "set_node_display_name" => HashSet::from(["display_name"]),
         "get_configuration" | "get_configuration_history" => HashSet::from([]),
         "preview_configuration" | "apply_configuration" => {
             HashSet::from(["expected_revision", "networks"])
@@ -2503,6 +2517,10 @@ fn project_identity(
                 row(
                     t(locale, "identity.row.fingerprint"),
                     identity.public_key_fingerprint.clone(),
+                ),
+                row(
+                    t(locale, "identity.row.created_at"),
+                    routing_timestamp_label(identity.created_at_unix_ms, locale),
                 ),
             ]
         })

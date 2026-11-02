@@ -112,6 +112,12 @@ impl NodeRuntimeHandler {
                 super::NodeCommand::GetUiManifest => {
                     NodeCommandResult::ui_manifest(request_id, super::node_ui_manifest())
                 }
+                super::NodeCommand::SetNodeDisplayName(command) => match configs {
+                    Some(configs) => {
+                        set_node_display_name(&state, &configs, request_id, command).await
+                    }
+                    None => unavailable(request_id, "修改节点显示名需要节点配置管理器"),
+                },
                 super::NodeCommand::GetConfiguration => match configs {
                     Some(configs) => configuration_document(&configs, request_id).await,
                     None => unavailable(request_id, "读取配置需要节点配置管理器"),
@@ -373,6 +379,41 @@ impl NodeCommandHandler for NodeRuntimeHandler {
             request,
         )
     }
+}
+
+async fn set_node_display_name(
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+    request_id: u64,
+    command: super::NodeSetNodeDisplayNameCommand,
+) -> NodeCommandResult {
+    if state.snapshot().await.identity.is_none() {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::NotFound, "节点身份尚未初始化"),
+        );
+    }
+
+    let configs = configs.clone();
+    let persisted = tokio::task::spawn_blocking(move || {
+        configs.set_node_display_name(command.display_name.as_deref())?;
+        configs.node_display_name()
+    })
+    .await;
+    let display_name = match persisted {
+        Ok(Ok(display_name)) => display_name,
+        Ok(Err(_)) => return configuration_io_rejection(request_id, "保存节点显示名失败"),
+        Err(_) => return configuration_io_rejection(request_id, "保存节点显示名任务异常终止"),
+    };
+
+    let snapshot = state
+        .update(|snapshot| {
+            if let Some(identity) = snapshot.identity.as_mut() {
+                identity.display_name = display_name;
+            }
+        })
+        .await;
+    NodeCommandResult::snapshot(request_id, snapshot)
 }
 
 async fn configuration_document(configs: &ConfigManager, request_id: u64) -> NodeCommandResult {

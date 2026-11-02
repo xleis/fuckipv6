@@ -292,6 +292,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::RebuildTun => NodeUiAudit::record("node.tun.rebuild"),
         NodeCommandKind::UpdateRouting => NodeUiAudit::record("routing.update"),
         NodeCommandKind::SetNetworkRole => NodeUiAudit::record("network.role.set"),
+        NodeCommandKind::SetNodeDisplayName => NodeUiAudit::record("node.identity.rename"),
         NodeCommandKind::GetBlacklist => NodeUiAudit::none(),
         NodeCommandKind::BanClient => NodeUiAudit::record("network.blacklist.ban"),
         NodeCommandKind::UnbanClient => NodeUiAudit::record("network.blacklist.unban"),
@@ -334,6 +335,7 @@ pub enum NodeUiInputKind {
     Boolean,
     ClientId,
     ConfigurationJson,
+    DisplayName,
     ExternalHost,
     NetworkMode,
     NetworkName,
@@ -362,6 +364,7 @@ pub enum NodeUiValidation {
     PositiveTimeout,
     Revision,
     ConfigurationJson,
+    DisplayName,
 }
 
 pub fn node_ui_manifest() -> NodeUiManifest {
@@ -876,7 +879,27 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 )],
             ),
             page("logs", "nav.logs", "page.logs", vec![]),
-            page("identity", "nav.identity", "page.identity", vec![]),
+            page(
+                "identity",
+                "nav.identity",
+                "page.identity",
+                vec![action(
+                    "set_node_display_name",
+                    "action.set_node_display_name",
+                    NodeCommandKind::SetNodeDisplayName,
+                    NodeUiBackendStatus::Implemented,
+                    NodePermission::ManageNetworks,
+                    NodeUiAvailability::Always,
+                    vec![field(
+                        "display_name",
+                        "field.display_name",
+                        NodeUiInputKind::DisplayName,
+                        false,
+                        NodeUiValidation::DisplayName,
+                    )],
+                    None,
+                )],
+            ),
             page(
                 "settings",
                 "nav.settings",

@@ -78,6 +78,7 @@ pub enum OperationKind {
     PolicyRollback,
     TrafficRulesApply,
     NetworkRoleUpdate,
+    IdentityUpdate,
     ClientBlacklistUpdate,
     NetworkAllocationUpdate,
     CapabilityEnable,

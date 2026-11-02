@@ -1230,6 +1230,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
+        NodeCommand::SetNodeDisplayName(_) => OperationKind::IdentityUpdate,
         NodeCommand::BanClient(_) | NodeCommand::UnbanClient(_) => {
             OperationKind::ClientBlacklistUpdate
         }
@@ -1292,6 +1293,7 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::ApplyConfiguration(_)
         | NodeCommand::RollbackConfiguration(_)
         | NodeCommand::GetConfigurationHistory
+        | NodeCommand::SetNodeDisplayName(_)
         | NodeCommand::Shutdown => node_target(),
     }
 }

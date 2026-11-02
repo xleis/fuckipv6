@@ -257,6 +257,17 @@
       ],
       "type": "object"
     },
+    "NodeSetNodeDisplayNameCommand": {
+      "properties": {
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "NodeUpdateNetworkAllocationCommand": {
       "properties": {
         "allocation": {
@@ -507,6 +518,22 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeSetNetworkRoleCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "set_node_display_name",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeSetNodeDisplayNameCommand"
         }
       },
       "required": [

@@ -227,7 +227,6 @@ impl ConfigManager {
     }
 
     /// Persist a node-wide display name. Empty or whitespace-only values clear it.
-    #[cfg(test)]
     pub(crate) fn set_node_display_name(&self, display_name: Option<&str>) -> Result<()> {
         let mut metadata = self.load_node_metadata()?;
         metadata.display_name = normalize_display_name(display_name.map(str::to_string))?;
@@ -606,6 +605,9 @@ fn normalize_display_name(display_name: Option<String>) -> Result<Option<String>
     if display_name.chars().any(char::is_control) {
         anyhow::bail!("节点显示名不能包含控制字符");
     }
+    if display_name.chars().count() > 80 {
+        anyhow::bail!("节点显示名不能超过 80 个字符");
+    }
     Ok(Some(display_name.to_string()))
 }
 
@@ -827,6 +829,22 @@ mod tests {
         manager.set_node_display_name(Some("gateway"))?;
         manager.set_node_display_name(Some("   "))?;
         assert_eq!(manager.node_display_name()?, None);
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn node_display_name_counts_unicode_code_points_and_enforces_the_limit() -> anyhow::Result<()> {
+        let dir = temp_config_dir("display-name-unicode");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+
+        manager.set_node_display_name(Some(&"界".repeat(80)))?;
+        assert_eq!(manager.node_display_name()?, Some("界".repeat(80)));
+        assert!(manager
+            .set_node_display_name(Some(&"界".repeat(81)))
+            .is_err());
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

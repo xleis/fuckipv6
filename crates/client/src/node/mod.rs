@@ -31,8 +31,8 @@ pub use command::{
     NodeCreatedNetwork, NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodeNetworkAllocation,
     NodeNetworkAllocationSnapshot, NodePeerProbeSnapshot, NodePreviewConfigurationCommand,
     NodeProbePeerCommand, NodeResidualCleanupResult, NodeRollbackConfigurationCommand,
-    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand,
-    NodeUpdateRoutingCommand,
+    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 pub use event::{
     NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,

@@ -621,7 +621,30 @@
       "id": "identity",
       "nav_label_key": "nav.identity",
       "title_key": "page.identity",
-      "actions": []
+      "actions": [
+        {
+          "id": "set_node_display_name",
+          "label_key": "action.set_node_display_name",
+          "command": "set_node_display_name",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.identity.rename"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "display_name",
+              "label_key": "field.display_name",
+              "input": "display_name",
+              "required": false,
+              "validation": "display_name"
+            }
+          ],
+          "confirmation": null
+        }
+      ]
     },
     {
       "id": "settings",

@@ -1386,6 +1386,22 @@
         {
           "properties": {
             "command": {
+              "const": "set_node_display_name",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeSetNodeDisplayNameCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command": {
               "const": "get_blacklist",
               "type": "string"
             },
@@ -3826,6 +3842,17 @@
       ],
       "type": "object"
     },
+    "NodeSetNodeDisplayNameCommand": {
+      "properties": {
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "NodeSnapshot": {
       "description": "Stable, transport-neutral state rendered by every node UI adapter.",
       "properties": {
@@ -4111,6 +4138,7 @@
             "join_network",
             "update_routing",
             "set_network_role",
+            "set_node_display_name",
             "get_blacklist",
             "ban_client",
             "unban_client",
@@ -4267,6 +4295,7 @@
         "boolean",
         "client_id",
         "configuration_json",
+        "display_name",
         "external_host",
         "network_mode",
         "network_name",
@@ -4342,7 +4371,8 @@
         "routing_mode",
         "positive_timeout",
         "revision",
-        "configuration_json"
+        "configuration_json",
+        "display_name"
       ],
       "type": "string"
     },
@@ -4657,6 +4687,7 @@
         "policy_rollback",
         "traffic_rules_apply",
         "network_role_update",
+        "identity_update",
         "client_blacklist_update",
         "network_allocation_update",
         "capability_enable",

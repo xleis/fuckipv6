@@ -59,6 +59,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   update_routing: "update_routing",
   set_exit_node_role: "set_network_role",
   set_relay_role: "set_network_role",
+  set_node_display_name: "set_node_display_name",
   get_network_allocation: "get_network_allocation",
   update_network_allocation: "update_network_allocation",
   get_configuration: "get_configuration",
@@ -115,6 +116,7 @@ const INPUT_KINDS = new Set([
   "timeout_ms",
   "revision",
   "configuration_json",
+  "display_name",
 ]);
 const VALIDATIONS = new Set([
   "none",
@@ -129,6 +131,7 @@ const VALIDATIONS = new Set([
   "positive_timeout",
   "revision",
   "configuration_json",
+  "display_name",
 ]);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
@@ -583,6 +586,8 @@ export function defaultFieldValue(
   if (field.id === "exit_node") return config?.exit_node ?? "";
   if (field.id === "role")
     return action.id === "set_relay_role" ? "relay" : "exit_node";
+  if (field.id === "display_name")
+    return snapshot.identity?.display_name ?? "";
   return "";
 }
 
@@ -857,6 +862,14 @@ export function validateActionValues(
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
       }
+    } else if (field.validation === "display_name") {
+      const displayName = String(value).trim();
+      if (/\p{Cc}/u.test(displayName)) {
+        errors.push(label(locale, "validation.display_name_control_character"));
+      }
+      if ([...displayName].length > 80) {
+        errors.push(label(locale, "validation.display_name_too_long"));
+      }
     }
   }
   if (
@@ -1029,6 +1042,13 @@ export function buildCommand(
           role: requiredString("role") as
             "member" | "discovery" | "relay" | "exit_node",
           enabled: booleanValue(requireValue("enabled"), locale),
+        },
+      };
+    case "set_node_display_name":
+      return {
+        command: "set_node_display_name",
+        payload: {
+          display_name: optional(values, "display_name"),
         },
       };
     case "get_configuration":

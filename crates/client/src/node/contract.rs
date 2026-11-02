@@ -219,7 +219,8 @@ mod tests {
         NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateNetworkCommand,
         NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection,
         NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
-        NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+        NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+        NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use fuckipv6_common::NetworkMode;
     use std::path::PathBuf;
@@ -265,6 +266,9 @@ mod tests {
                 network_name: "home".into(),
                 role: NodeNetworkRole::Relay,
                 enabled: true,
+            }),
+            NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
+                display_name: Some("edge-gateway".into()),
             }),
             NodeCommand::GetBlacklist {
                 network_name: "home".into(),

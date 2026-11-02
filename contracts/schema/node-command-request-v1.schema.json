@@ -272,6 +272,22 @@
         {
           "properties": {
             "command": {
+              "const": "set_node_display_name",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeSetNodeDisplayNameCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command": {
               "const": "get_blacklist",
               "type": "string"
             },
@@ -745,6 +761,17 @@
         "role",
         "enabled"
       ],
+      "type": "object"
+    },
+    "NodeSetNodeDisplayNameCommand": {
+      "properties": {
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "NodeUpdateNetworkAllocationCommand": {

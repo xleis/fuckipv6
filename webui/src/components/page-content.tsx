@@ -1369,6 +1369,14 @@ function Identity({
               <code>{identity.public_key_fingerprint}</code>
             </dd>
           </div>
+          <div>
+            <dt>{label(locale, "identity.row.created_at")}</dt>
+            <dd>
+              {identity.created_at_unix_ms != null
+                ? formatTimestamp(locale, identity.created_at_unix_ms)
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
         </dl>
       </div>
     </section>

@@ -446,6 +446,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::UpdateRouting
         | NodeCommandKind::SetNetworkRole
+        | NodeCommandKind::SetNodeDisplayName
         | NodeCommandKind::ProbePeer
         | NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
@@ -614,6 +615,14 @@ mod tests {
             assert_eq!(command_timeout(&command), LIFECYCLE_COMMAND_TIMEOUT);
         }
         assert_eq!(command_timeout(&NodeCommand::GetSnapshot), COMMAND_TIMEOUT);
+        assert_eq!(
+            command_timeout(&NodeCommand::SetNodeDisplayName(
+                crate::node::NodeSetNodeDisplayNameCommand {
+                    display_name: Some("edge-gateway".into()),
+                },
+            )),
+            COMMAND_TIMEOUT
+        );
     }
 
     struct EchoHandler;

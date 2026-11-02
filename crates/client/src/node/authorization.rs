@@ -427,6 +427,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
         | NodeCommandKind::UpdateNetworkAllocation
+        | NodeCommandKind::SetNodeDisplayName
         | NodeCommandKind::StartNode
         | NodeCommandKind::RestartNode
         | NodeCommandKind::CleanupResiduals
@@ -444,6 +445,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::RebuildTun
             | NodeCommandKind::CreateNetwork
             | NodeCommandKind::JoinNetwork
+            | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::StartNode
             | NodeCommandKind::StopNode
             | NodeCommandKind::RestartNode
@@ -467,7 +469,9 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
-        NodeCommandKind::ApplyConfiguration => (PolicyAction::Update, ResourceKind::Keys),
+        NodeCommandKind::ApplyConfiguration | NodeCommandKind::SetNodeDisplayName => {
+            (PolicyAction::Update, ResourceKind::Keys)
+        }
         NodeCommandKind::RollbackConfiguration => (PolicyAction::Recover, ResourceKind::Keys),
         NodeCommandKind::StartNetworks => (PolicyAction::Enable, ResourceKind::Network),
         NodeCommandKind::StopNetworks => (PolicyAction::Disable, ResourceKind::Network),
@@ -506,6 +510,7 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::GetDiagnostics
         | NodeCommand::CreateNetwork(_)
         | NodeCommand::JoinNetwork(_)
+        | NodeCommand::SetNodeDisplayName(_)
         | NodeCommand::StartNode
         | NodeCommand::StopNode
         | NodeCommand::RestartNode
@@ -906,6 +911,32 @@ mod tests {
     }
 
     #[test]
+    fn node_display_name_changes_are_reserved_for_the_local_owner() {
+        let command = NodeCommand::SetNodeDisplayName(crate::node::NodeSetNodeDisplayNameCommand {
+            display_name: Some("edge-gateway".into()),
+        });
+        let (local_policy, network_policy) = start_policies();
+        assert_denied(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            command.clone(),
+            "permission.local_owner_required",
+        );
+
+        authorize_command(
+            &NodeCommandContext::local_owner(actor(), "local-owner-test"),
+            &command,
+        )
+        .expect("local owner can rename the node identity");
+    }
+
+    #[test]
     fn desktop_local_owner_executes_sensitive_commands_without_web_authentication() {
         // GPUI is reachable only after the operating-system user session has
         // authenticated. Its local-owner context therefore carries the OS
@@ -927,6 +958,13 @@ mod tests {
             },
         )
         .expect("desktop owner can start networks without a WebUI session");
+        authorize_command(
+            &desktop_context,
+            &NodeCommand::SetNodeDisplayName(crate::node::NodeSetNodeDisplayNameCommand {
+                display_name: Some("desktop-owner".into()),
+            }),
+        )
+        .expect("desktop owner can rename the node without a WebUI session");
     }
 
     #[test]

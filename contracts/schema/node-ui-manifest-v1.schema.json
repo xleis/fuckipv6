@@ -37,6 +37,7 @@
             "join_network",
             "update_routing",
             "set_network_role",
+            "set_node_display_name",
             "get_blacklist",
             "ban_client",
             "unban_client",
@@ -193,6 +194,7 @@
         "boolean",
         "client_id",
         "configuration_json",
+        "display_name",
         "external_host",
         "network_mode",
         "network_name",
@@ -246,7 +248,8 @@
         "routing_mode",
         "positive_timeout",
         "revision",
-        "configuration_json"
+        "configuration_json",
+        "display_name"
       ],
       "type": "string"
     }

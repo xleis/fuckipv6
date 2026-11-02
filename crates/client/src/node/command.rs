@@ -63,6 +63,7 @@ pub enum NodeCommandKind {
     JoinNetwork,
     UpdateRouting,
     SetNetworkRole,
+    SetNodeDisplayName,
     GetBlacklist,
     BanClient,
     UnbanClient,
@@ -83,7 +84,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -95,6 +96,7 @@ impl NodeCommandKind {
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
+        Self::SetNodeDisplayName,
         Self::GetBlacklist,
         Self::BanClient,
         Self::UnbanClient,
@@ -115,7 +117,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 26] = [
+    pub const ACTIONS: [Self; 27] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -126,6 +128,7 @@ impl NodeCommandKind {
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
+        Self::SetNodeDisplayName,
         Self::GetBlacklist,
         Self::BanClient,
         Self::UnbanClient,
@@ -157,6 +160,7 @@ impl NodeCommandKind {
             Self::JoinNetwork => "join_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
+            Self::SetNodeDisplayName => "set_node_display_name",
             Self::GetBlacklist => "get_blacklist",
             Self::BanClient => "ban_client",
             Self::UnbanClient => "unban_client",
@@ -190,6 +194,7 @@ impl NodeCommandKind {
                 | Self::JoinNetwork
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
+                | Self::SetNodeDisplayName
                 | Self::BanClient
                 | Self::UnbanClient
                 | Self::UpdateNetworkAllocation
@@ -236,6 +241,7 @@ pub enum NodeCommand {
     JoinNetwork(NodeJoinNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
+    SetNodeDisplayName(NodeSetNodeDisplayNameCommand),
     GetBlacklist {
         network_name: String,
     },
@@ -289,6 +295,7 @@ impl NodeCommand {
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
+            Self::SetNodeDisplayName(_) => NodeCommandKind::SetNodeDisplayName,
             Self::GetBlacklist { .. } => NodeCommandKind::GetBlacklist,
             Self::BanClient(_) => NodeCommandKind::BanClient,
             Self::UnbanClient(_) => NodeCommandKind::UnbanClient,
@@ -367,6 +374,7 @@ impl NodeCommand {
             Self::JoinNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
+            Self::SetNodeDisplayName(command) => command.validate(),
             Self::GetBlacklist { network_name } | Self::GetNetworkAllocation { network_name } => {
                 validate_network_name(network_name)
             }
@@ -516,6 +524,27 @@ impl NodeSetNetworkRoleCommand {
         if self.role == NodeNetworkRole::Member && !self.enabled {
             return Err(invalid("成员角色是节点网络内的基线能力，不能禁用")
                 .for_network(self.network_name.clone()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeSetNodeDisplayNameCommand {
+    pub display_name: Option<String>,
+}
+
+impl NodeSetNodeDisplayNameCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        let Some(display_name) = self.display_name.as_deref() else {
+            return Ok(());
+        };
+        let display_name = display_name.trim();
+        if display_name.chars().any(char::is_control) {
+            return Err(invalid("节点显示名不能包含控制字符"));
+        }
+        if display_name.chars().count() > 80 {
+            return Err(invalid("节点显示名不能超过 80 个字符"));
         }
         Ok(())
     }
@@ -1237,6 +1266,9 @@ mod tests {
                 role: NodeNetworkRole::ExitNode,
                 enabled: true,
             }),
+            NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
+                display_name: Some("edge-gateway".into()),
+            }),
             NodeCommand::GetBlacklist {
                 network_name: "home".into(),
             },
@@ -1505,6 +1537,12 @@ mod tests {
                 network_name: "home/office".into(),
                 role: NodeNetworkRole::Relay,
                 enabled: true,
+            }),
+            NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
+                display_name: Some("bad\nname".into()),
+            }),
+            NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
+                display_name: Some("界".repeat(81)),
             }),
             NodeCommand::ProbePeer(NodeProbePeerCommand {
                 network_name: "home".into(),

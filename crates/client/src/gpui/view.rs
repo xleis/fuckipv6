@@ -4779,6 +4779,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "update_routing" => "action.update_routing",
         "set_exit_node_role" => "action.set_exit_node_role",
         "set_relay_role" => "action.set_relay_role",
+        "set_node_display_name" => "action.set_node_display_name",
         "start_node" => "action.start_node",
         "stop_node" => "action.stop_node",
         "restart_node" => "action.restart_node",

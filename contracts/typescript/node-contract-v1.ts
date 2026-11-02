@@ -816,6 +816,7 @@ export type NodeSnapshot = {
   "permissions"?: NodePermissionSnapshot;
   "recent_activity"?: Array<ActivityEntry>;
   "revision": number;
+  "tun_capabilities"?: TunCapabilities;
   "ui_mode"?: UiModeResolution | null;
 };
 
@@ -957,6 +958,18 @@ export type OperationRecovery = {
 };
 
 export type OperationState = "queued" | "running" | "waiting_for_reauth" | "succeeded" | "failed" | "cancelled" | "timed_out";
+
+export type TunCapabilities = {
+  "can_rebuild": boolean;
+  "platform": TunPlatform;
+  "reasons"?: Array<TunCapabilityReason>;
+  "schema_version": number;
+  "supported": boolean;
+};
+
+export type TunCapabilityReason = "platform_unsupported" | "permission_denied" | "device_unavailable" | "tool_unavailable" | "unknown";
+
+export type TunPlatform = "linux" | "macos" | "windows" | "other";
 
 export type UiMode = "gpui" | "web_ui" | "headless";
 

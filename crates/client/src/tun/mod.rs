@@ -1,3 +1,5 @@
+mod capabilities;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -9,6 +11,12 @@ mod windows;
 
 use anyhow::Result;
 use fuckipv6_common::VirtualIps;
+
+use crate::network_setup::{self, NetworkSetupStage};
+
+pub use capabilities::{
+    TunCapabilities, TunCapabilityReason, TunPlatform, TUN_CAPABILITY_SCHEMA_VERSION,
+};
 use std::net::Ipv6Addr;
 
 /// TUN设备抽象
@@ -43,7 +51,10 @@ impl TunDevice {
                     ipv6_prefix,
                     mtu,
                 )
-                .await?,
+                .await
+                .map_err(|error| {
+                    network_setup::ensure_stage(error, NetworkSetupStage::TunCreate)
+                })?,
             })
         }
 
@@ -57,7 +68,10 @@ impl TunDevice {
                     ipv6_prefix,
                     mtu,
                 )
-                .await?,
+                .await
+                .map_err(|error| {
+                    network_setup::ensure_stage(error, NetworkSetupStage::TunCreate)
+                })?,
             })
         }
 
@@ -71,7 +85,10 @@ impl TunDevice {
                     ipv6_prefix,
                     mtu,
                 )
-                .await?,
+                .await
+                .map_err(|error| {
+                    network_setup::ensure_stage(error, NetworkSetupStage::TunCreate)
+                })?,
             })
         }
     }

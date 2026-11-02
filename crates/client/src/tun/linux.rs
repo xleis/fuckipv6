@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::VirtualIps;
+
+use crate::network_setup::{self, NetworkSetupError, NetworkSetupStage};
 use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -112,7 +114,12 @@ impl LinuxTun {
             virtual_ips
         );
 
-        validate_tun_inputs(name, mtu)?;
+        validate_tun_inputs(name, mtu).map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::TunCreate,
+                error.to_string(),
+            ))
+        })?;
 
         // 用 ip tuntap 命令创建设备（这样会有 IPv6/IPv4 支持）
         let create_output = tokio::process::Command::new("ip")
@@ -123,17 +130,23 @@ impl LinuxTun {
         let create_output = match create_output {
             Ok(output) => output,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                anyhow::bail!("无法执行 ip 命令：请安装 iproute2 后重试");
+                return Err(anyhow::Error::new(NetworkSetupError::new(
+                    NetworkSetupStage::ToolUnavailable,
+                    "ip command not found",
+                )));
             }
             Err(e) => {
-                return Err(e).context("执行 ip tuntap add 命令失败");
+                return Err(anyhow::Error::new(NetworkSetupError::new(
+                    NetworkSetupStage::TunCreate,
+                    format!("execute ip tuntap add: {e}"),
+                )));
             }
         };
 
         if !create_output.status.success() {
             let stderr = String::from_utf8_lossy(&create_output.stderr);
             tracing::error!("创建 TUN 网卡失败: {}", stderr);
-            anyhow::bail!("{}", classify_create_error(&stderr, name));
+            return Err(anyhow::Error::new(classify_create_error(&stderr, name)));
         }
         tracing::debug!("已通过 ip tuntap 成功创建 TUN 虚拟设备");
 
@@ -142,12 +155,12 @@ impl LinuxTun {
             configure_link(name, mtu).await?;
             if let Some(ipv4) = ips.ipv4 {
                 configure_ipv4_address(name, ipv4, ipv4_prefix).await?;
-                configure_ipv4_route(name, ipv4, ipv4_prefix).await;
+                configure_ipv4_route(name, ipv4, ipv4_prefix).await?;
             }
             if let Some(ipv6) = ips.ipv6 {
                 configure_ipv6_address(name, ipv6).await?;
                 bring_link_up(name).await?;
-                configure_ipv6_route(name, ipv6, ipv6_prefix).await;
+                configure_ipv6_route(name, ipv6, ipv6_prefix).await?;
             } else {
                 bring_link_up(name).await?;
             }
@@ -180,7 +193,8 @@ impl LinuxTun {
                 tracing::error!(%error, "删除初始化失败的 TUN 设备时出错: {}", name);
             }
         })
-        .await?;
+        .await
+        .map_err(|error| network_setup::ensure_stage(error, NetworkSetupStage::TunCreate))?;
 
         tracing::info!("TUN 设备已完全配置并打开: {}", name);
 
@@ -484,28 +498,22 @@ fn duplicate_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
     }
 }
 
-fn classify_create_error(stderr: &str, name: &str) -> String {
-    let lower = stderr.to_ascii_lowercase();
-
-    if lower.contains("operation not permitted")
-        || lower.contains("permission denied")
-        || lower.contains("not permitted")
-    {
-        return "创建 TUN 设备失败：权限不足，请使用 root 运行或授予 CAP_NET_ADMIN".to_string();
+fn classify_create_error(stderr: &str, name: &str) -> NetworkSetupError {
+    let classified = network_setup::command_failure(NetworkSetupStage::TunCreate, stderr);
+    match classified.stage() {
+        NetworkSetupStage::DeviceUnavailable => NetworkSetupError::new(
+            NetworkSetupStage::DeviceUnavailable,
+            format!("TUN device {name} is unavailable: {}", stderr.trim()),
+        ),
+        NetworkSetupStage::PermissionDenied => NetworkSetupError::new(
+            NetworkSetupStage::PermissionDenied,
+            format!("permission denied creating TUN device {name}"),
+        ),
+        _ => NetworkSetupError::new(
+            NetworkSetupStage::TunCreate,
+            format!("TUN device {name} creation failed: {}", stderr.trim()),
+        ),
     }
-
-    if lower.contains("file exists") || lower.contains("already exists") {
-        return format!(
-            "创建 TUN 设备失败：设备 {} 已存在，请先运行 `ip link delete {}` 清理残留设备",
-            name, name
-        );
-    }
-
-    if lower.contains("no such file or directory") || lower.contains("/dev/net/tun") {
-        return "创建 TUN 设备失败：/dev/net/tun 不可用，请加载 tun 内核模块".to_string();
-    }
-
-    format!("创建 TUN 设备失败：{}", stderr.trim())
 }
 
 async fn configure_link(name: &str, mtu: u16) -> Result<()> {
@@ -513,12 +521,20 @@ async fn configure_link(name: &str, mtu: u16) -> Result<()> {
         .args(["link", "set", name, "mtu", &mtu.to_string()])
         .output()
         .await
-        .context("设置 TUN MTU 失败")?;
+        .map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::RouteSetup,
+                format!("set TUN MTU: {error}"),
+            ))
+        })?;
 
     if !mtu_output.status.success() {
         let stderr = String::from_utf8_lossy(&mtu_output.stderr);
         tracing::error!("设置 TUN MTU 失败: {}", stderr);
-        anyhow::bail!("设置 TUN MTU 失败：{}", stderr.trim());
+        return Err(anyhow::Error::new(network_setup::command_failure(
+            NetworkSetupStage::RouteSetup,
+            stderr.as_ref(),
+        )));
     }
 
     tracing::debug!("TUN 设备 MTU 已设置为 {}", mtu);
@@ -533,7 +549,12 @@ async fn configure_ipv6_address(name: &str, ip: Ipv6Addr) -> Result<()> {
         .args(["-6", "addr", "add", &addr_cmd, "dev", name])
         .output()
         .await
-        .context("执行 ip -6 addr add 命令失败")?;
+        .map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::AddressConflict,
+                format!("add IPv6 address: {error}"),
+            ))
+        })?;
 
     if addr_status.status.success() {
         tracing::info!("IPv6 地址配置成功: {}", addr_cmd);
@@ -550,7 +571,10 @@ async fn configure_ipv6_address(name: &str, ip: Ipv6Addr) -> Result<()> {
         tracing::error!("stdout: {}", stdout.trim());
     }
 
-    anyhow::bail!("配置 TUN IPv6 地址失败：{}", stderr.trim());
+    Err(anyhow::Error::new(network_setup::command_failure(
+        NetworkSetupStage::AddressConflict,
+        stderr.as_ref(),
+    )))
 }
 
 async fn configure_ipv4_address(name: &str, ip: Ipv4Addr, prefix_len: u8) -> Result<()> {
@@ -561,7 +585,12 @@ async fn configure_ipv4_address(name: &str, ip: Ipv4Addr, prefix_len: u8) -> Res
         .args(["addr", "add", &addr_cmd, "dev", name])
         .output()
         .await
-        .context("执行 ip addr add 命令失败")?;
+        .map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::AddressConflict,
+                format!("add IPv4 address: {error}"),
+            ))
+        })?;
 
     if status.status.success() {
         tracing::info!("IPv4 地址配置成功: {}", addr_cmd);
@@ -578,7 +607,10 @@ async fn configure_ipv4_address(name: &str, ip: Ipv4Addr, prefix_len: u8) -> Res
         tracing::error!("stdout: {}", stdout.trim());
     }
 
-    anyhow::bail!("配置 TUN IPv4 地址失败：{}", stderr.trim());
+    Err(anyhow::Error::new(network_setup::command_failure(
+        NetworkSetupStage::AddressConflict,
+        stderr.as_ref(),
+    )))
 }
 
 async fn bring_link_up(name: &str) -> Result<()> {
@@ -587,12 +619,20 @@ async fn bring_link_up(name: &str) -> Result<()> {
         .args(["link", "set", name, "up"])
         .output()
         .await
-        .context("启用 TUN 设备失败")?;
+        .map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::RouteSetup,
+                format!("bring TUN link up: {error}"),
+            ))
+        })?;
 
     if !up_output.status.success() {
         let stderr = String::from_utf8_lossy(&up_output.stderr);
         tracing::error!("启用 TUN 网卡失败: {}", stderr);
-        anyhow::bail!("启用 TUN 设备失败：{}", stderr.trim());
+        return Err(anyhow::Error::new(network_setup::command_failure(
+            NetworkSetupStage::RouteSetup,
+            stderr.as_ref(),
+        )));
     }
 
     tracing::debug!("TUN 网卡 {} 已就绪 (UP)", name);
@@ -607,7 +647,7 @@ fn metric_for_device(name: &str) -> u32 {
     1000 + (hash % 1000)
 }
 
-async fn configure_ipv6_route(name: &str, ip: Ipv6Addr, prefix_len: u8) {
+async fn configure_ipv6_route(name: &str, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
     let mask = if prefix_len == 0 {
         0
     } else {
@@ -637,21 +677,24 @@ async fn configure_ipv6_route(name: &str, ip: Ipv6Addr, prefix_len: u8) {
                 name,
                 metric
             );
+            Ok(())
         }
         Ok(output) => {
-            tracing::warn!("配置路由失败，退出码: {} (可能路由已存在)", output.status);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                tracing::warn!("错误信息: {}", stderr.trim());
-            }
+            tracing::warn!("配置 IPv6 路由失败: {}", stderr.trim());
+            Err(anyhow::Error::new(network_setup::command_failure(
+                NetworkSetupStage::RouteSetup,
+                stderr.as_ref(),
+            )))
         }
-        Err(e) => {
-            tracing::warn!("执行 ip route 命令失败: {:?}", e);
-        }
+        Err(error) => Err(anyhow::Error::new(NetworkSetupError::new(
+            NetworkSetupStage::RouteSetup,
+            format!("execute ip -6 route add: {error}"),
+        ))),
     }
 }
 
-async fn configure_ipv4_route(name: &str, ip: Ipv4Addr, prefix_len: u8) {
+async fn configure_ipv4_route(name: &str, ip: Ipv4Addr, prefix_len: u8) -> Result<()> {
     let mask = if prefix_len == 0 {
         0
     } else {
@@ -675,13 +718,20 @@ async fn configure_ipv4_route(name: &str, ip: Ipv4Addr, prefix_len: u8) {
     match route_status {
         Ok(output) if output.status.success() => {
             tracing::info!("IPv4 路由配置成功: {}", route_cmd);
+            Ok(())
         }
         Ok(output) => {
-            tracing::debug!("配置 IPv4 路由返回: {} (可能路由已自动生成)", output.status);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("配置 IPv4 路由失败: {}", stderr.trim());
+            Err(anyhow::Error::new(network_setup::command_failure(
+                NetworkSetupStage::RouteSetup,
+                stderr.as_ref(),
+            )))
         }
-        Err(e) => {
-            tracing::warn!("执行 ip route 命令失败: {:?}", e);
-        }
+        Err(error) => Err(anyhow::Error::new(NetworkSetupError::new(
+            NetworkSetupStage::RouteSetup,
+            format!("execute ip route add: {error}"),
+        ))),
     }
 }
 
@@ -789,16 +839,15 @@ mod tests {
 
     #[test]
     fn classify_permission_error() {
-        let message = classify_create_error("RTNETLINK answers: Operation not permitted", "tun0");
-        assert!(message.contains("权限不足"));
-        assert!(message.contains("CAP_NET_ADMIN"));
+        let error = classify_create_error("RTNETLINK answers: Operation not permitted", "tun0");
+        assert_eq!(error.stage(), NetworkSetupStage::PermissionDenied);
     }
 
     #[test]
     fn classify_existing_device_error() {
-        let message = classify_create_error("ioctl(TUNSETIFF): File exists", "fuckipv6");
-        assert!(message.contains("已存在"));
-        assert!(message.contains("ip link delete fuckipv6"));
+        let error = classify_create_error("ioctl(TUNSETIFF): File exists", "fuckipv6");
+        assert_eq!(error.stage(), NetworkSetupStage::TunCreate);
+        assert!(error.to_string().contains("File exists"));
     }
 
     #[test]

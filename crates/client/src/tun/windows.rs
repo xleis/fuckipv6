@@ -303,7 +303,7 @@ mod ip_helper {
 
 /// 检查是否以管理员权限运行
 #[cfg(windows)]
-fn is_elevated() -> bool {
+pub(super) fn is_elevated() -> bool {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,

@@ -23,6 +23,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
 
+use crate::network_setup::{ensure_stage, NetworkSetupStage};
+
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.2:53";
 const DEFAULT_UPSTREAMS: &str = "https://1.1.1.1/dns-query,https://8.8.8.8/dns-query";
 const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
@@ -50,6 +52,12 @@ impl DohDnsGuard {
     /// configuration; in that case `Ok(None)` is returned so it can continue
     /// using the bridge installed by the first runtime.
     pub(crate) async fn install() -> Result<Option<Self>> {
+        Self::install_inner()
+            .await
+            .map_err(|error| ensure_stage(error, NetworkSetupStage::DnsSetup))
+    }
+
+    async fn install_inner() -> Result<Option<Self>> {
         let Some(lock) = acquire_lock()? else {
             return Ok(None);
         };

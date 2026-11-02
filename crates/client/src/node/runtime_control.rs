@@ -24,6 +24,7 @@ use super::{
 use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
 use crate::config_manager::{ConfigManager, NetworkConfig};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
+use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -80,14 +81,72 @@ pub(crate) enum RuntimeControlError {
     Persistence(String),
     #[error("{0}")]
     Launch(String),
+    #[error("{message}")]
+    NetworkSetup {
+        stage: NetworkSetupStage,
+        message: String,
+    },
     #[error("{0}")]
     Timeout(String),
+}
+
+impl RuntimeControlError {
+    pub(crate) fn problem_code(&self) -> NodeProblemCode {
+        match self {
+            Self::Invalid(_) => NodeProblemCode::InvalidRequest,
+            Self::Conflict(_) => NodeProblemCode::Conflict,
+            Self::NotFound(_) => NodeProblemCode::NotFound,
+            Self::NetworkSetup { stage, .. } => network_setup_problem_code(*stage),
+            Self::ActorClosed
+            | Self::Unavailable(_)
+            | Self::Persistence(_)
+            | Self::Launch(_)
+            | Self::Timeout(_) => NodeProblemCode::Unavailable,
+        }
+    }
+
+    pub(crate) fn message_key(&self) -> &'static str {
+        match self {
+            Self::NetworkSetup { stage, .. } => stage.message_key(),
+            _ => self.problem_code().message_key(),
+        }
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Invalid(_)
+                | Self::Conflict(_)
+                | Self::NotFound(_)
+                | Self::NetworkSetup {
+                    stage: NetworkSetupStage::PermissionDenied
+                        | NetworkSetupStage::PlatformUnsupported,
+                    ..
+                }
+        )
+    }
+
+    pub(crate) fn network_setup_stage(&self) -> Option<NetworkSetupStage> {
+        match self {
+            Self::NetworkSetup { stage, .. } => Some(*stage),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn network_setup_problem_code(stage: NetworkSetupStage) -> NodeProblemCode {
+    match stage {
+        NetworkSetupStage::PermissionDenied => NodeProblemCode::PermissionDenied,
+        NetworkSetupStage::PlatformUnsupported => NodeProblemCode::Unsupported,
+        _ => NodeProblemCode::Unavailable,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartFailure {
     pub network_name: String,
     pub message: String,
+    pub stage: Option<NetworkSetupStage>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -214,6 +273,7 @@ pub(crate) struct RestartFailure {
     pub network_name: String,
     pub phase: RestartPhase,
     pub message: String,
+    pub stage: Option<NetworkSetupStage>,
 }
 
 /// Registry/state/service checks performed after an explicit stop. These counts
@@ -529,10 +589,23 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             )
             .await
             .map_err(|error| {
-                RuntimeControlError::Launch(format!(
-                    "网络 [{}] 初始化失败: {error:#}",
-                    request.network_name
-                ))
+                if let Some(stage) = network_setup::stage_from_error(&error) {
+                    tracing::warn!(
+                        network = %request.network_name,
+                        ?stage,
+                        error = %format!("{error:#}"),
+                        "网络初始化因主机网络配置失败"
+                    );
+                    RuntimeControlError::NetworkSetup {
+                        stage,
+                        message: stage.fallback_message().into(),
+                    }
+                } else {
+                    RuntimeControlError::Launch(format!(
+                        "网络 [{}] 初始化失败: {error:#}",
+                        request.network_name
+                    ))
+                }
             })?;
 
             let tun_name = runtime.tun_name().to_string();
@@ -780,6 +853,11 @@ enum RuntimeControlCommand {
     Restart {
         networks: Vec<String>,
         all: bool,
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<RestartSummary, RuntimeControlError>>,
+    },
+    RebuildTun {
+        network_name: String,
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<RestartSummary, RuntimeControlError>>,
     },
@@ -1053,6 +1131,23 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn rebuild_tun(
+        &self,
+        network_name: String,
+    ) -> Result<RestartSummary, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::RebuildTun {
+            network_name,
+            _operation: operation,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     /// Restore every persisted network while retaining the node IPC process.
     pub async fn start_node(&self) -> Result<StartSummary, RuntimeControlError> {
         let operation = self.operation_gate.try_acquire()?;
@@ -1229,6 +1324,14 @@ async fn run_actor(
                 let result = actor.restart(networks, all).await;
                 let _ = reply.send(result);
             }
+            RuntimeControlCommand::RebuildTun {
+                network_name,
+                _operation,
+                reply,
+            } => {
+                let result = actor.rebuild_tun(network_name).await;
+                let _ = reply.send(result);
+            }
             RuntimeControlCommand::StartNode { _operation, reply } => {
                 let result = actor.start_node().await;
                 let _ = reply.send(result);
@@ -1382,6 +1485,7 @@ impl NetworkRuntimeActor {
                 summary.failed.push(StartFailure {
                     network_name: spec.name,
                     message: error.to_string(),
+                    stage: error.network_setup_stage(),
                 });
                 continue;
             }
@@ -1391,6 +1495,7 @@ impl NetworkRuntimeActor {
                 Err(error) => summary.failed.push(StartFailure {
                     network_name,
                     message: error.to_string(),
+                    stage: error.network_setup_stage(),
                 }),
             }
         }
@@ -1557,6 +1662,7 @@ impl NetworkRuntimeActor {
                 network_name: failure.network_name,
                 phase: RestartPhase::Stop,
                 message: failure.message,
+                stage: None,
             });
         }
 
@@ -1578,6 +1684,7 @@ impl NetworkRuntimeActor {
                     network_name: name.clone(),
                     phase: RestartPhase::Cleanup,
                     message: cleanup_block_message(&summary.cleanup, name),
+                    stage: None,
                 });
                 blocked.insert(name.clone());
             }
@@ -1598,6 +1705,7 @@ impl NetworkRuntimeActor {
                 network_name: failure.network_name,
                 phase: RestartPhase::Start,
                 message: failure.message,
+                stage: failure.stage,
             });
         }
         summary.cleanup = match self.inspect_cleanup(&names).await {
@@ -1654,6 +1762,7 @@ impl NetworkRuntimeActor {
                     summary.failed.push(StartFailure {
                         network_name,
                         message: error.to_string(),
+                        stage: error.network_setup_stage(),
                     });
                 }
             }
@@ -2544,6 +2653,7 @@ impl NetworkRuntimeActor {
                 network_name: failure.network_name,
                 phase: RestartPhase::Stop,
                 message: failure.message,
+                stage: None,
             });
         }
 
@@ -2561,6 +2671,7 @@ impl NetworkRuntimeActor {
                 network_name: name.clone(),
                 phase: RestartPhase::Cleanup,
                 message: cleanup_block_message(&summary.cleanup, name),
+                stage: None,
             });
         }
 
@@ -2575,12 +2686,32 @@ impl NetworkRuntimeActor {
                     network_name,
                     phase: RestartPhase::Start,
                     message: error.to_string(),
+                    stage: error.network_setup_stage(),
                 }),
             }
         }
 
         self.publish_restart_lifecycle(&summary).await;
         Ok(summary)
+    }
+
+    async fn rebuild_tun(
+        &mut self,
+        network_name: String,
+    ) -> Result<RestartSummary, RuntimeControlError> {
+        let capabilities = self.state.snapshot().await.tun_capabilities;
+        if !capabilities.can_rebuild {
+            let reason = capabilities
+                .blocking_reason()
+                .unwrap_or(crate::tun::TunCapabilityReason::Unknown);
+            let stage = reason.network_setup_stage();
+            return Err(RuntimeControlError::NetworkSetup {
+                stage,
+                message: stage.fallback_message().into(),
+            });
+        }
+
+        self.restart(vec![network_name], false).await
     }
 
     async fn cleanup_residuals(
@@ -3558,6 +3689,9 @@ mod tests {
     };
     use crate::p2p::connection::P2pEngine;
     use crate::stats::StatsCollector;
+    use crate::tun::{
+        TunCapabilities, TunCapabilityReason, TunPlatform, TUN_CAPABILITY_SCHEMA_VERSION,
+    };
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
@@ -5884,6 +6018,79 @@ mod tests {
             ]
         );
         assert_eq!(harness.fake.shutdown_count(), 1);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rebuild_tun_fails_closed_without_mutating_the_live_session() {
+        let harness = TestHarness::new("rebuild-tun-blocked").await;
+        start_fake_network(&harness, "blocked-rebuild").await;
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.tun_capabilities = TunCapabilities {
+                    schema_version: TUN_CAPABILITY_SCHEMA_VERSION,
+                    platform: TunPlatform::Linux,
+                    supported: true,
+                    can_rebuild: false,
+                    reasons: vec![TunCapabilityReason::PermissionDenied],
+                };
+            })
+            .await;
+        let launches_before = harness.fake.launch_attempts();
+
+        let error = harness
+            .runtime
+            .rebuild_tun("blocked-rebuild".into())
+            .await
+            .expect_err("unready TUN must reject rebuild");
+        assert_eq!(error.message_key(), "error.network.permission_denied");
+        assert_eq!(
+            error.network_setup_stage(),
+            Some(NetworkSetupStage::PermissionDenied)
+        );
+        assert_eq!(harness.fake.launch_attempts(), launches_before);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(snapshot.networks[0].status, NodeNetworkStatus::Online);
+        assert_eq!(harness.registry.get_all().await.len(), 1);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rebuild_tun_restarts_the_same_network_when_capability_is_ready() {
+        let harness = TestHarness::new("rebuild-tun-ready").await;
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.tun_capabilities = TunCapabilities {
+                    schema_version: TUN_CAPABILITY_SCHEMA_VERSION,
+                    platform: TunPlatform::Linux,
+                    supported: true,
+                    can_rebuild: true,
+                    reasons: Vec::new(),
+                };
+            })
+            .await;
+        start_fake_network(&harness, "ready-rebuild").await;
+
+        let summary = harness
+            .runtime
+            .rebuild_tun("ready-rebuild".into())
+            .await
+            .expect("rebuildable TUN should restart the network");
+        assert_eq!(summary.requested, 1);
+        assert_eq!(summary.restarted, vec!["ready-rebuild"]);
+        assert!(summary.failed.is_empty());
+        assert_eq!(harness.fake.shutdown_count(), 1);
+        assert_eq!(
+            harness.fake.launches(),
+            vec!["ready-rebuild".to_string(), "ready-rebuild".to_string()]
+        );
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(snapshot.networks[0].status, NodeNetworkStatus::Online);
 
         harness.shutdown().await;
     }

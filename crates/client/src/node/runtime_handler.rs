@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::runtime_control::{network_setup_problem_code, RestartSummary};
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
     NodeCommandContext, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome,
@@ -10,6 +11,7 @@ use super::{
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{ConfigurationTransactionError, ConfigurationValidationCode};
 use crate::ipc::MultiNetworkRegistry;
+use crate::network_setup::NetworkSetupStage;
 use crate::symmetric::EmbeddedServiceManager;
 
 /// Production handler for operations backed by the live node runtime.
@@ -556,15 +558,8 @@ async fn start_runtime_networks(
                 message: "没有需要启动的网络".into(),
             },
         ),
-        Ok(summary) if summary.started.is_empty() && !summary.failed.is_empty() => {
-            NodeCommandResult::rejected(
-                request_id,
-                NodeProblem::new(
-                    NodeProblemCode::Unavailable,
-                    summary.message("启动网络失败"),
-                )
-                .retryable(true),
-            )
+        Ok(summary) if !summary.failed.is_empty() => {
+            NodeCommandResult::rejected(request_id, start_failure_problem(&summary, "启动网络失败"))
         }
         Ok(summary) => completed_summary(request_id, summary, "启动网络"),
         Err(error) => runtime_rejection(request_id, error),
@@ -573,19 +568,8 @@ async fn start_runtime_networks(
 
 async fn start_runtime_node(runtime: &NetworkRuntimeManager, request_id: u64) -> NodeCommandResult {
     match runtime.start_node().await {
-        Ok(summary)
-            if summary.requested > 0
-                && summary.started.is_empty()
-                && summary.already_running.is_empty() =>
-        {
-            NodeCommandResult::rejected(
-                request_id,
-                NodeProblem::new(
-                    NodeProblemCode::Unavailable,
-                    summary.message("启动节点失败"),
-                )
-                .retryable(true),
-            )
+        Ok(summary) if !summary.failed.is_empty() => {
+            NodeCommandResult::rejected(request_id, start_failure_problem(&summary, "启动节点失败"))
         }
         Ok(summary) => completed_summary(request_id, summary, "启动节点"),
         Err(error) => runtime_rejection(request_id, error),
@@ -619,10 +603,7 @@ async fn restart_runtime_node(
                 message: summary.message(),
             },
         ),
-        Ok(summary) => NodeCommandResult::rejected(
-            request_id,
-            NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
-        ),
+        Ok(summary) => NodeCommandResult::rejected(request_id, restart_failure_problem(&summary)),
         Err(error) => runtime_rejection(request_id, error),
     }
 }
@@ -741,10 +722,7 @@ async fn restart_runtime_networks(
                 message: summary.message(),
             },
         ),
-        Ok(summary) => NodeCommandResult::rejected(
-            request_id,
-            NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true),
-        ),
+        Ok(summary) => NodeCommandResult::rejected(request_id, restart_failure_problem(&summary)),
         Err(error) => runtime_rejection(request_id, error),
     }
 }
@@ -754,7 +732,7 @@ async fn rebuild_runtime_tun(
     request_id: u64,
     network_name: String,
 ) -> NodeCommandResult {
-    match runtime.restart(vec![network_name.clone()], false).await {
+    match runtime.rebuild_tun(network_name.clone()).await {
         Ok(summary)
             if summary.failed.is_empty()
                 && summary.restarted.as_slice() == std::slice::from_ref(&network_name) =>
@@ -766,24 +744,11 @@ async fn rebuild_runtime_tun(
                 },
             )
         }
-        Ok(_) => NodeCommandResult::rejected(
+        Ok(summary) => NodeCommandResult::rejected(
             request_id,
-            NodeProblem::new(
-                NodeProblemCode::Unavailable,
-                format!("网络 [{network_name}] 的 TUN 重建未完成"),
-            )
-            .for_network(network_name)
-            .retryable(true),
+            restart_failure_problem(&summary).for_network(network_name),
         ),
-        Err(error) => {
-            let code = runtime_problem_code(&error);
-            NodeCommandResult::rejected(
-                request_id,
-                NodeProblem::new(code, format!("网络 [{network_name}] 的 TUN 重建失败"))
-                    .for_network(network_name)
-                    .retryable(matches!(code, NodeProblemCode::Unavailable)),
-            )
-        }
+        Err(error) => runtime_rejection_for_network(request_id, error, network_name),
     }
 }
 
@@ -857,26 +822,63 @@ fn runtime_rejection_scoped(
     error: RuntimeControlError,
     network_name: Option<String>,
 ) -> NodeCommandResult {
-    let code = runtime_problem_code(&error);
-    let mut problem = NodeProblem::new(code, error.to_string())
-        .retryable(matches!(code, NodeProblemCode::Unavailable));
+    let mut problem = NodeProblem::new(error.problem_code(), error.to_string())
+        .with_message_key(error.message_key())
+        .retryable(error.retryable());
     if let Some(network_name) = network_name {
         problem = problem.for_network(network_name);
     }
     NodeCommandResult::rejected(request_id, problem)
 }
 
-fn runtime_problem_code(error: &RuntimeControlError) -> NodeProblemCode {
-    match error {
-        RuntimeControlError::Invalid(_) => NodeProblemCode::InvalidRequest,
-        RuntimeControlError::Conflict(_) => NodeProblemCode::Conflict,
-        RuntimeControlError::NotFound(_) => NodeProblemCode::NotFound,
-        RuntimeControlError::ActorClosed
-        | RuntimeControlError::Unavailable(_)
-        | RuntimeControlError::Persistence(_)
-        | RuntimeControlError::Launch(_)
-        | RuntimeControlError::Timeout(_) => NodeProblemCode::Unavailable,
+fn network_setup_problem(
+    stage: NetworkSetupStage,
+    message: impl Into<String>,
+    network_name: Option<String>,
+) -> NodeProblem {
+    let code = network_setup_problem_code(stage);
+    let mut problem = NodeProblem::new(code, message)
+        .with_message_key(stage.message_key())
+        .retryable(!matches!(
+            stage,
+            NetworkSetupStage::PermissionDenied | NetworkSetupStage::PlatformUnsupported
+        ));
+    if let Some(network_name) = network_name {
+        problem = problem.for_network(network_name);
     }
+    problem
+}
+
+fn start_failure_problem(summary: &StartSummary, action: &str) -> NodeProblem {
+    if let Some(failure) = summary
+        .failed
+        .iter()
+        .find(|failure| failure.stage.is_some())
+    {
+        return network_setup_problem(
+            failure.stage.expect("checked above"),
+            failure.message.clone(),
+            Some(failure.network_name.clone()),
+        );
+    }
+
+    NodeProblem::new(NodeProblemCode::Unavailable, summary.message(action)).retryable(true)
+}
+
+fn restart_failure_problem(summary: &RestartSummary) -> NodeProblem {
+    if let Some(failure) = summary
+        .failed
+        .iter()
+        .find(|failure| failure.stage.is_some())
+    {
+        return network_setup_problem(
+            failure.stage.expect("checked above"),
+            failure.message.clone(),
+            Some(failure.network_name.clone()),
+        );
+    }
+
+    NodeProblem::new(NodeProblemCode::Unavailable, summary.message()).retryable(true)
 }
 
 async fn stop_networks(

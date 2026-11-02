@@ -11,6 +11,8 @@ import cc.xlei.fuckipv6.contract.NodeContractV1.NodeEventReplayReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
 import cc.xlei.fuckipv6.contract.NodeContractV1.OperationKind;
 import cc.xlei.fuckipv6.contract.NodeContractV1.OperationState;
+import cc.xlei.fuckipv6.contract.NodeContractV1.TunCapabilityReason;
+import cc.xlei.fuckipv6.contract.NodeContractV1.TunPlatform;
 
 /** Dependency-free executable checks for Android-safe contract bindings. */
 public final class NodeContractV1Test {
@@ -41,7 +43,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 81,
+                NodeContractV1.DTO_CLASS_NAMES.length == 82,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -95,6 +97,7 @@ public final class NodeContractV1Test {
             "permissions",
             "embedded_services",
             "ui_mode",
+            "tun_capabilities",
             "interfaces",
             "interface_problems",
             "networks",
@@ -158,6 +161,17 @@ public final class NodeContractV1Test {
                 NodeProblemCode.UNSUPPORTED,
                 NodeProblemCode.fromWireName("unsupported"),
                 "platform-unsupported problem code");
+        assertSame(
+                TunPlatform.LINUX,
+                TunPlatform.fromWireName("linux"),
+                "TUN platform");
+        assertSame(
+                TunCapabilityReason.PERMISSION_DENIED,
+                TunCapabilityReason.fromWireName("permission_denied"),
+                "TUN capability reason");
+        expectIllegalArgument(
+                () -> TunCapabilityReason.fromWireName("invented"),
+                "unknown TUN capability reason");
         assertSame(
                 NodeCleanupFailureReason.OWNER_UNAVAILABLE,
                 NodeCleanupFailureReason.fromWireName("owner_unavailable"),

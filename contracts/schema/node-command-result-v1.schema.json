@@ -1925,6 +1925,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "tun_capabilities": {
+          "$ref": "#/$defs/TunCapabilities",
+          "default": {
+            "can_rebuild": false,
+            "platform": "linux",
+            "reasons": [
+              "unknown"
+            ],
+            "schema_version": 1,
+            "supported": true
+          },
+          "description": "Redacted TUN readiness for this node process. Missing or malformed\ncapability data must disable host-network mutations in every adapter."
+        },
         "ui_mode": {
           "anyOf": [
             {
@@ -2303,6 +2316,58 @@
         "hint_key"
       ],
       "type": "object"
+    },
+    "TunCapabilities": {
+      "description": "Redacted TUN readiness for the current node process. This is deliberately\nderived from capability metadata rather than a real TUN creation probe.",
+      "properties": {
+        "can_rebuild": {
+          "type": "boolean"
+        },
+        "platform": {
+          "$ref": "#/$defs/TunPlatform"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/$defs/TunCapabilityReason"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "platform",
+        "supported",
+        "can_rebuild"
+      ],
+      "type": "object"
+    },
+    "TunCapabilityReason": {
+      "enum": [
+        "platform_unsupported",
+        "permission_denied",
+        "device_unavailable",
+        "tool_unavailable",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "TunPlatform": {
+      "enum": [
+        "linux",
+        "macos",
+        "windows",
+        "other"
+      ],
+      "type": "string"
     },
     "UiMode": {
       "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane for headless hosts. A process\nwith a desktop session must use `Gpui`; it must not expose the WebUI as a\nsecond desktop surface.",

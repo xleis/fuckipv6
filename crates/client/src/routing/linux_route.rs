@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Instant};
 
 use super::doh_dns::DohDnsGuard;
+use crate::network_setup::{self, ensure_stage, NetworkSetupError, NetworkSetupStage};
 
 const ROUTE_PROTOCOL: &str = "99";
 const STATIC_PREFERENCE_START: u32 = 1_000;
@@ -118,6 +119,26 @@ impl LinuxRouteManager {
     ///
     /// MeshOnly returns an inactive manager and never changes host routing.
     pub async fn install(
+        mode: RoutingMode,
+        tun_name: impl Into<String>,
+        assigned_ips: &VirtualIps,
+        virtual_cidrs: &[IpNet],
+        direct_cidrs: &[IpNet],
+        control_endpoints: &[SocketAddr],
+    ) -> Result<Self> {
+        Self::install_inner(
+            mode,
+            tun_name,
+            assigned_ips,
+            virtual_cidrs,
+            direct_cidrs,
+            control_endpoints,
+        )
+        .await
+        .map_err(|error| ensure_stage(error, NetworkSetupStage::RouteSetup))
+    }
+
+    async fn install_inner(
         mode: RoutingMode,
         tun_name: impl Into<String>,
         assigned_ips: &VirtualIps,
@@ -923,8 +944,18 @@ async fn run_command(mut command: Command, operation: &str, missing_ok: bool) ->
     command.kill_on_drop(true);
     let output = timeout(COMMAND_TIMEOUT, command.output())
         .await
-        .map_err(|_| anyhow::anyhow!("{operation}超过 {:?}", COMMAND_TIMEOUT))?
-        .with_context(|| format!("{operation}: 无法执行 ip 命令"))?;
+        .map_err(|_| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::RouteSetup,
+                format!("{operation}超过 {:?}", COMMAND_TIMEOUT),
+            ))
+        })?
+        .map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::RouteSetup,
+                format!("{operation}: 无法执行 ip 命令: {error}"),
+            ))
+        })?;
     if output.status.success() {
         return Ok(());
     }
@@ -933,7 +964,10 @@ async fn run_command(mut command: Command, operation: &str, missing_ok: bool) ->
     if missing_ok && ip_resource_is_missing(&stderr) {
         return Ok(());
     }
-    anyhow::bail!("{operation}失败: {}", stderr.trim())
+    Err(anyhow::Error::new(network_setup::command_failure(
+        NetworkSetupStage::RouteSetup,
+        stderr.as_ref(),
+    )))
 }
 
 fn run_sync_command(
@@ -946,9 +980,12 @@ fn run_sync_command(
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     command.stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("{operation}: 无法执行 ip 命令"))?;
+    let mut child = command.spawn().map_err(|error| {
+        anyhow::Error::new(NetworkSetupError::new(
+            NetworkSetupStage::RouteSetup,
+            format!("{operation}: 无法执行 ip 命令: {error}"),
+        ))
+    })?;
     let deadline = StdInstant::now() + SYNC_COMMAND_TIMEOUT;
     let status = loop {
         if let Some(status) = child
@@ -960,7 +997,10 @@ fn run_sync_command(
         if StdInstant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("{operation}超过 {:?}", SYNC_COMMAND_TIMEOUT);
+            return Err(anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::RouteSetup,
+                format!("{operation}超过 {:?}", SYNC_COMMAND_TIMEOUT),
+            )));
         }
         std::thread::sleep(StdDuration::from_millis(10));
     };
@@ -975,7 +1015,10 @@ fn run_sync_command(
     if missing_ok && ip_resource_is_missing(&stderr) {
         return Ok(());
     }
-    anyhow::bail!("{operation}失败: {}", stderr.trim())
+    Err(anyhow::Error::new(network_setup::command_failure(
+        NetworkSetupStage::RouteSetup,
+        stderr,
+    )))
 }
 
 fn ip_resource_is_missing(stderr: &str) -> bool {

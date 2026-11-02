@@ -9,6 +9,7 @@ use fuckipv6_common::domain::{ActivityEntry, CapabilityKind, CapabilityState, Op
 use fuckipv6_common::ExitNodeCapabilities;
 
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodePhase};
+use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
 
 /// Stable, transport-neutral state rendered by every node UI adapter.
@@ -39,6 +40,10 @@ pub struct NodeSnapshot {
     pub embedded_services: Vec<NodeEmbeddedServiceSnapshot>,
     #[serde(default)]
     pub ui_mode: Option<UiModeResolution>,
+    /// Redacted TUN readiness for this node process. Missing or malformed
+    /// capability data must disable host-network mutations in every adapter.
+    #[serde(default)]
+    pub tun_capabilities: TunCapabilities,
     /// Authoritative host interface capture for the node page. This is filled
     /// by the node process from OS network state; UI adapters never probe the
     /// host themselves. Missing data deserializes as an empty capture.
@@ -866,6 +871,13 @@ impl NodeProblem {
         }
     }
 
+    /// Override the stable catalog key while keeping the problem category and
+    /// code unchanged. Human-readable `message` is never used as a key.
+    pub fn with_message_key(mut self, key: impl Into<String>) -> Self {
+        self.message_key = key.into();
+        self
+    }
+
     pub fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.params.insert(key.into(), value.into());
         self
@@ -937,6 +949,7 @@ impl NodeStateStore {
         let mut snapshot = NodeSnapshot {
             identity,
             ui_mode,
+            tun_capabilities: TunCapabilities::detect(),
             ..NodeSnapshot::default()
         };
         snapshot.refresh_capability_states();

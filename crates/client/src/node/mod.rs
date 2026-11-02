@@ -4,6 +4,7 @@ pub mod contract;
 mod event;
 mod http_adapter;
 mod lifecycle;
+mod network_interfaces;
 mod operation_service;
 mod plan;
 mod runtime_control;
@@ -59,11 +60,12 @@ pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, No
 pub use state::{
     NodeAccessModel, NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot,
     NodeConfigurationSnapshot, NodeControlHealth, NodeEmbeddedServiceSnapshot,
-    NodeEmbeddedServiceStatus, NodeErrorCategory, NodeIdentitySnapshot, NodeLogEntry, NodeLogLevel,
-    NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
-    NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission, NodePermissionSnapshot,
-    NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeProblemDetails, NodeRoutingMode,
-    NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
+    NodeEmbeddedServiceStatus, NodeErrorCategory, NodeIdentitySnapshot, NodeInterfaceAddress,
+    NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceSnapshot, NodeInterfaceStatus,
+    NodeLogEntry, NodeLogLevel, NodeNetworkConfigSnapshot, NodeNetworkRole, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission,
+    NodePermissionSnapshot, NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeProblemDetails,
+    NodeRoutingMode, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
 };
 pub use ui_manifest::{
     audit_for_command, node_ui_manifest, NodeUiAction, NodeUiAudit, NodeUiAuditPolicy,

@@ -694,6 +694,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
 }
 
 struct NetworkRuntimeSession {
+    tun_name: String,
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
     handle: JoinHandle<NetworkRuntimeExit>,
@@ -738,6 +739,9 @@ impl Drop for OperationGuard {
 enum RuntimeControlCommand {
     Diagnostics {
         reply: oneshot::Sender<Result<NodeDiagnosticsSnapshot, RuntimeControlError>>,
+    },
+    LiveTunNames {
+        reply: oneshot::Sender<Result<BTreeMap<String, String>, RuntimeControlError>>,
     },
     StartPlan {
         plan: NodeRuntimePlan,
@@ -1112,6 +1116,17 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    /// Return the exact network-to-TUN mapping owned by live runtime sessions.
+    /// This is authoritative for classifying product interfaces.
+    pub async fn live_tun_names(&self) -> Result<BTreeMap<String, String>, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::LiveTunNames { reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn diagnostics(&self) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
         let (reply, response) = oneshot::channel();
         self.send(RuntimeControlCommand::Diagnostics { reply })
@@ -1150,6 +1165,10 @@ async fn run_actor(
         match command {
             RuntimeControlCommand::Diagnostics { reply } => {
                 let result = actor.diagnostics().await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::LiveTunNames { reply } => {
+                let result = actor.live_tun_names().await;
                 let _ = reply.send(result);
             }
             RuntimeControlCommand::StartPlan {
@@ -1257,6 +1276,15 @@ struct NetworkRuntimeActor {
 }
 
 impl NetworkRuntimeActor {
+    async fn live_tun_names(&mut self) -> Result<BTreeMap<String, String>, RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        Ok(self
+            .sessions
+            .iter()
+            .map(|(network_name, session)| (network_name.clone(), session.tun_name.clone()))
+            .collect())
+    }
+
     async fn start_node(&mut self) -> Result<StartSummary, RuntimeControlError> {
         self.start_node_until(Instant::now() + self.timeouts.start)
             .await
@@ -1724,7 +1752,7 @@ impl NetworkRuntimeActor {
         self.record_identity(started.identity).await;
         self.record_network(NodeNetworkSnapshot {
             name: network_name.clone(),
-            tun_name: started.tun_name,
+            tun_name: started.tun_name.clone(),
             status: NodeNetworkStatus::Online,
             assigned_ipv6: Some(started.assigned_ipv6),
             assigned_ipv4: started.assigned_ipv4,
@@ -1752,6 +1780,7 @@ impl NetworkRuntimeActor {
         self.sessions.insert(
             network_name,
             NetworkRuntimeSession {
+                tun_name: started.tun_name,
                 routing_control: started.routing_control,
                 shutdown: started.shutdown,
                 handle: started.handle,
@@ -3221,6 +3250,7 @@ async fn wait_for_session_shutdown(
     deadline: Instant,
 ) -> SessionShutdownResult {
     let NetworkRuntimeSession {
+        tun_name,
         routing_control,
         shutdown,
         mut handle,
@@ -3234,6 +3264,7 @@ async fn wait_for_session_shutdown(
                     "stop/timeout: 网络 [{network_name}] 的关闭通道已断开且任务未退出；清理结果未知"
                 ))),
                 retry_session: Some(NetworkRuntimeSession {
+                    tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
                     handle,
@@ -3259,6 +3290,7 @@ async fn wait_for_session_shutdown(
                     "stop/timeout: 网络 [{network_name}] 的关闭通道已断开且任务未退出；清理结果未知"
                 ))),
                 retry_session: Some(NetworkRuntimeSession {
+                    tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
                     handle,
@@ -3275,6 +3307,7 @@ async fn wait_for_session_shutdown(
                 "stop/timeout: 网络 [{network_name}] 未在期限内退出；清理结果未知，任务继续执行清理"
             ))),
             retry_session: Some(NetworkRuntimeSession {
+                tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
                 handle,
@@ -3301,6 +3334,7 @@ async fn wait_for_session_shutdown(
                 "stop/timeout: 网络 [{network_name}] 未在期限内退出；清理结果未知，任务继续执行清理"
             ))),
             retry_session: Some(NetworkRuntimeSession {
+                tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
                 handle,

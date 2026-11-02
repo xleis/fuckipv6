@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
@@ -39,6 +39,16 @@ pub struct NodeSnapshot {
     pub embedded_services: Vec<NodeEmbeddedServiceSnapshot>,
     #[serde(default)]
     pub ui_mode: Option<UiModeResolution>,
+    /// Authoritative host interface capture for the node page. This is filled
+    /// by the node process from OS network state; UI adapters never probe the
+    /// host themselves. Missing data deserializes as an empty capture.
+    #[serde(default)]
+    pub interfaces: Vec<NodeInterfaceSnapshot>,
+    /// Redacted problems encountered while collecting or reconciling host
+    /// interfaces. Command and runtime failures remain in `last_error` when
+    /// they are tied to a network lifecycle transition.
+    #[serde(default)]
+    pub interface_problems: Vec<NodeProblem>,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     /// The five most recent user-meaningful command outcomes. Entries are
@@ -132,6 +142,18 @@ impl NodeSnapshot {
             "duplicate_embedded_service",
             &mut violations,
         );
+        collect_duplicate_values(
+            self.interfaces.iter().map(|interface| interface.index),
+            "duplicate_interface_index",
+            &mut violations,
+        );
+        collect_duplicate_names(
+            self.interfaces
+                .iter()
+                .map(|interface| interface.name.as_str()),
+            "duplicate_interface_name",
+            &mut violations,
+        );
 
         let configured = self
             .configuration
@@ -176,7 +198,59 @@ impl NodeSnapshot {
             }
         }
 
+        let product_interfaces = self
+            .interfaces
+            .iter()
+            .filter(|interface| interface.ownership == NodeInterfaceOwnership::Product)
+            .map(|interface| interface.name.as_str())
+            .collect::<HashSet<_>>();
+        for interface in self
+            .interfaces
+            .iter()
+            .filter(|interface| interface.ownership == NodeInterfaceOwnership::Product)
+        {
+            if interface.kind != NodeInterfaceKind::Tun {
+                violations.push(format!("product_interface_not_tun:{}", interface.name));
+            }
+            let has_live_network = self.networks.iter().any(|network| {
+                network.status == NodeNetworkStatus::Online && network.tun_name == interface.name
+            });
+            if !has_live_network {
+                violations.push(format!(
+                    "product_interface_without_live_network:{}",
+                    interface.name
+                ));
+            }
+        }
+        for network in self
+            .networks
+            .iter()
+            .filter(|network| network.status == NodeNetworkStatus::Online)
+        {
+            if !product_interfaces.contains(network.tun_name.as_str()) {
+                violations.push(format!(
+                    "online_network_without_product_interface:{}",
+                    network.name
+                ));
+            }
+        }
+
         violations
+    }
+}
+
+fn collect_duplicate_values<T>(
+    values: impl IntoIterator<Item = T>,
+    prefix: &str,
+    violations: &mut Vec<String>,
+) where
+    T: Copy + std::hash::Hash + Eq + std::fmt::Display,
+{
+    let mut seen = HashSet::new();
+    for value in values {
+        if !seen.insert(value) {
+            violations.push(format!("{prefix}:{value}"));
+        }
     }
 }
 
@@ -560,6 +634,58 @@ pub enum NodeNetworkStatus {
     Failed,
 }
 
+/// One redacted host network interface captured by the node process.
+///
+/// The snapshot intentionally omits hardware addresses, routes, policy rules
+/// and operating-system diagnostics. UI adapters render this projection and
+/// never query or mutate host networking themselves.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeInterfaceSnapshot {
+    pub index: u32,
+    pub name: String,
+    pub kind: NodeInterfaceKind,
+    pub ownership: NodeInterfaceOwnership,
+    pub status: NodeInterfaceStatus,
+    pub mtu: u32,
+    pub addresses: Vec<NodeInterfaceAddress>,
+    pub default_ipv4: bool,
+    pub default_ipv6: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeInterfaceAddress {
+    pub address: IpAddr,
+    pub prefix_len: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeInterfaceKind {
+    Loopback,
+    Physical,
+    Virtual,
+    Tun,
+    Unknown,
+}
+
+/// Product ownership is established by an exact match against the live
+/// runtime's TUN name. Interface naming conventions never establish ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeInterfaceOwnership {
+    System,
+    Product,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeInterfaceStatus {
+    Up,
+    Down,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeTrafficSnapshot {
     pub tun_rx_packets: u64,
@@ -863,6 +989,66 @@ impl NodeStateStore {
             .await;
     }
 
+    /// Refresh the host-interface projection and reconcile live TUN names.
+    ///
+    /// Interface polling happens on every snapshot request, but an unchanged
+    /// capture must not manufacture state revisions or wake every UI renderer.
+    pub(crate) async fn refresh_interface_capture(
+        &self,
+        mut capture: super::network_interfaces::InterfaceCapture,
+        live_tun_names: Option<&BTreeMap<String, String>>,
+    ) -> NodeSnapshot {
+        let mut snapshot = self.snapshot.write().await;
+        if let Some(live_tun_names) = live_tun_names {
+            for network in &mut snapshot.networks {
+                if network.status != NodeNetworkStatus::Online {
+                    continue;
+                }
+                match live_tun_names.get(&network.name) {
+                    Some(tun_name) => network.tun_name = tun_name.clone(),
+                    None => {
+                        network.status = NodeNetworkStatus::Degraded;
+                        if !capture.problems.iter().any(|problem| {
+                            problem.network_name.as_deref() == Some(network.name.as_str())
+                                && problem.message_key == "error.operation_unavailable"
+                        }) {
+                            capture.problems.push(
+                                NodeProblem::new(
+                                    NodeProblemCode::Unavailable,
+                                    format!(
+                                        "网络 [{}] 标记在线，但没有存活的运行时 TUN",
+                                        network.name
+                                    ),
+                                )
+                                .for_network(network.name.clone())
+                                .retryable(true),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if snapshot.interfaces == capture.interfaces
+            && snapshot.interface_problems == capture.problems
+        {
+            return snapshot.clone();
+        }
+        snapshot.interfaces = capture.interfaces;
+        snapshot.interface_problems = capture.problems;
+        snapshot.refresh_capability_states();
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        let published = snapshot.clone();
+        self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.advance_snapshot_revision(published.revision);
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
+        published
+    }
+
     /// Update local control-plane reachability without changing the
     /// authoritative node revision or emitting a node state-change event.
     pub async fn set_control_health(&self, health: NodeControlHealth) {
@@ -1068,6 +1254,58 @@ mod tests {
             updates.borrow().networks[0].roles,
             vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_interface_capture_does_not_create_revisions() {
+        let state = NodeStateStore::new();
+        let capture = super::super::network_interfaces::InterfaceCapture {
+            interfaces: vec![NodeInterfaceSnapshot {
+                index: 1,
+                name: "lo".into(),
+                kind: NodeInterfaceKind::Loopback,
+                ownership: NodeInterfaceOwnership::System,
+                status: NodeInterfaceStatus::Up,
+                mtu: 65_536,
+                addresses: vec![NodeInterfaceAddress {
+                    address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    prefix_len: 8,
+                }],
+                default_ipv4: false,
+                default_ipv6: false,
+            }],
+            problems: Vec::new(),
+        };
+
+        let first = state.refresh_interface_capture(capture.clone(), None).await;
+        let second = state.refresh_interface_capture(capture, None).await;
+        assert_eq!(first.revision, 1);
+        assert_eq!(second.revision, 1);
+        assert_eq!(second.interfaces.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_tun_reconciliation_marks_stale_online_network_degraded() {
+        let state = NodeStateStore::new();
+        state
+            .update(|snapshot| {
+                snapshot.configuration.networks.push(configuration("home"));
+                snapshot
+                    .networks
+                    .push(network("home", NodeNetworkStatus::Online));
+            })
+            .await;
+        let capture = super::super::network_interfaces::InterfaceCapture::default();
+
+        let refreshed = state
+            .refresh_interface_capture(capture, Some(&BTreeMap::new()))
+            .await;
+        assert_eq!(refreshed.networks[0].status, NodeNetworkStatus::Degraded);
+        assert!(refreshed
+            .interface_problems
+            .iter()
+            .any(|problem| problem.network_name.as_deref() == Some("home")));
+        assert!(refreshed.invariant_violations().is_empty());
     }
 
     #[tokio::test]

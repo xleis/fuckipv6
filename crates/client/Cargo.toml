@@ -50,6 +50,7 @@ tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
 interprocess = { workspace = true }
 fs2 = { workspace = true }
+getifs = "0.8"
 
 clap = { workspace = true }
 tracing = { workspace = true }

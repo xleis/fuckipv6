@@ -79,7 +79,33 @@ impl NodeRuntimeHandler {
 
             match request.command {
                 super::NodeCommand::GetSnapshot => {
-                    NodeCommandResult::snapshot(request_id, state.snapshot().await)
+                    let (live_tun_names, runtime_problem) = match runtime.as_ref() {
+                        Some(runtime) => match runtime.live_tun_names().await {
+                            Ok(names) => (Some(names), None),
+                            Err(_) => (
+                                None,
+                                Some(
+                                    super::NodeProblem::new(
+                                        NodeProblemCode::Unavailable,
+                                        "无法从节点运行时读取活动 TUN 信息",
+                                    )
+                                    .with_param("operation", "live_tun_names")
+                                    .retryable(true),
+                                ),
+                            ),
+                        },
+                        None => (None, None),
+                    };
+                    let product_names = live_tun_names.clone().unwrap_or_default();
+                    let mut capture =
+                        super::network_interfaces::collect_interfaces(product_names).await;
+                    if let Some(problem) = runtime_problem {
+                        capture.problems.push(problem);
+                    }
+                    let snapshot = state
+                        .refresh_interface_capture(capture, live_tun_names.as_ref())
+                        .await;
+                    NodeCommandResult::snapshot(request_id, snapshot)
                 }
                 super::NodeCommand::GetUiManifest => {
                     NodeCommandResult::ui_manifest(request_id, super::node_ui_manifest())

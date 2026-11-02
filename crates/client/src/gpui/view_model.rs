@@ -2661,7 +2661,7 @@ fn project_settings(
         .join(t(locale, "common.list_separator"));
     let owner_rows = vec![
         row(
-            t(locale, "settings.row.owner_identity"),
+            t(locale, "settings.row.local_identity"),
             snapshot
                 .identity
                 .as_ref()
@@ -2863,7 +2863,7 @@ fn project_settings(
     ];
     let mut sections = vec![
         section(
-            t(locale, "settings.section.owner_security"),
+            t(locale, "settings.section.local_identity"),
             t(locale, "common.no_data"),
             owner_rows,
         ),
@@ -3326,9 +3326,9 @@ mod tests {
         let mut snapshot = populated_snapshot();
         snapshot.ui_mode = Some(crate::ui::UiModeResolution {
             requested: crate::ui::UiModeRequest::Auto,
-            effective: UiMode::WebUi,
-            display: crate::ui::DisplayEnvironment::Headless,
-            gpui_available: false,
+            effective: UiMode::Gpui,
+            display: crate::ui::DisplayEnvironment::LinuxX11,
+            gpui_available: true,
         });
         snapshot.networks[0].roles.push(NodeNetworkRole::Discovery);
         snapshot.refresh_capability_states();
@@ -3343,7 +3343,7 @@ mod tests {
                 .map(|section| section.title.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                t(Locale::ZhCn, "settings.section.owner_security"),
+                t(Locale::ZhCn, "settings.section.local_identity"),
                 t(Locale::ZhCn, "settings.section.remote_access"),
                 t(Locale::ZhCn, "settings.section.services_updates"),
                 t(Locale::ZhCn, "settings.section.discovery_index"),
@@ -3448,6 +3448,74 @@ mod tests {
                 !rendered.contains(t(Locale::ZhCn, removed)),
                 "desktop settings must not expose WebUI-only authentication surface: {removed}"
             );
+        }
+    }
+
+    #[test]
+    fn every_gpui_page_omits_webui_authentication_copy() {
+        let manifest = node_ui_manifest();
+        let snapshot = populated_snapshot();
+        let forbidden = [
+            "settings.section.owner_security",
+            "settings.section.web_security",
+            "settings.row.web_authentication",
+            "settings.row.owner_recovery",
+            "settings.row.session_security",
+            "settings.row.webui_configuration",
+            "settings.row.webui_listener",
+            "settings.advanced.webui_session.detail",
+            "owner_auth.identity.section_title",
+            "owner_auth.local_identity.title",
+            "owner_auth.local_identity.detail",
+            "owner_auth.web_identity.title",
+            "owner_auth.recovery_row.title",
+            "owner_auth.passkey_recovery.help",
+        ];
+
+        for locale in [Locale::ZhCn, Locale::En] {
+            for page in &manifest.pages {
+                let model = build_page_model_for_page(page, &snapshot, locale)
+                    .expect("every manifest page must project");
+                let mut visible = Vec::new();
+                for section in &model.sections {
+                    visible.push(section.title.as_str());
+                    for row in &section.rows {
+                        visible.extend([row.title.as_str(), row.detail.as_str()]);
+                    }
+                }
+                for metric in &model.metrics {
+                    visible.extend([metric.label.as_str(), metric.value.as_str()]);
+                }
+                if let Some(overview) = &model.overview {
+                    visible.push(overview.node_name.as_str());
+                    visible.extend(overview.issues.iter().map(String::as_str));
+                    for network in &overview.networks {
+                        visible.extend([
+                            network.name.as_str(),
+                            network.tun_name.as_str(),
+                            network.routing.as_str(),
+                            network.exit.as_str(),
+                        ]);
+                        visible.extend(network.roles.iter().map(String::as_str));
+                    }
+                    for activity in &overview.activity {
+                        visible.extend([activity.action.as_str(), activity.detail.as_str()]);
+                        visible.extend(activity.command.as_deref());
+                    }
+                    for shortcut in &overview.shortcuts {
+                        visible.push(shortcut.label.as_str());
+                        visible.extend(shortcut.unavailable_reason.as_deref());
+                    }
+                }
+                let rendered = visible.join("\n");
+                for key in forbidden {
+                    assert!(
+                        !rendered.contains(t(locale, key)),
+                        "GPUI page {} must not expose WebUI-only authentication copy in {locale:?}: {key}",
+                        page.id
+                    );
+                }
+            }
         }
     }
 

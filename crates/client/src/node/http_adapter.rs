@@ -2706,7 +2706,7 @@ mod tests {
             manifest.manifest.schema_version,
             NODE_UI_MANIFEST_SCHEMA_VERSION
         );
-        assert_eq!(manifest.manifest.pages.len(), 11);
+        assert_eq!(manifest.manifest.pages.len(), 12);
     }
 
     #[tokio::test]
@@ -2751,7 +2751,7 @@ mod tests {
         let manifest: NodeApiManifestResponse = json_body(manifest_response).await;
         assert_eq!(manifest.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
         assert!(manifest.meta.request_id > snapshot.meta.request_id);
-        assert_eq!(manifest.manifest.pages.len(), 11);
+        assert_eq!(manifest.manifest.pages.len(), 12);
     }
 
     #[tokio::test]

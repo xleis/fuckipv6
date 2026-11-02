@@ -28,6 +28,7 @@ export const REQUIRED_PAGES = [
   "overview",
   "networks",
   "peers",
+  "node_runtime",
   "topology",
   "traffic",
   "routing",

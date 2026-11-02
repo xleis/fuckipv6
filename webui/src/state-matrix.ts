@@ -225,6 +225,7 @@ export function pageHasContent(
     case "identity":
       return snapshot.identity != null;
     case "overview":
+    case "node_runtime":
     case "settings":
     default:
       return true;

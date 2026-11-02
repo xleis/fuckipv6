@@ -59,12 +59,13 @@ beforeEach(() => {
 });
 
 describe("node UI contract invariants", () => {
-  it("accepts the frozen eleven-page manifest fixture", () => {
+  it("accepts the frozen twelve-page manifest fixture", () => {
     const validated = validateManifestResponse(manifestResponse(manifest));
     expect(validated.pages.map((page) => page.id)).toEqual([
       "overview",
       "networks",
       "peers",
+      "node_runtime",
       "topology",
       "traffic",
       "routing",

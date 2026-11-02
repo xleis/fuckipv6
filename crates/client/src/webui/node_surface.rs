@@ -60,7 +60,7 @@ mod tests {
         assert_eq!(fixture_manifest(), canonical);
         assert_eq!(
             canonical["pages"].as_array().expect("manifest pages").len(),
-            11
+            12
         );
     }
 

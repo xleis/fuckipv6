@@ -11,7 +11,7 @@
       "id": "nodes",
       "label_key": "nav.nodes",
       "default_page_id": "peers",
-      "page_ids": ["peers", "routing", "identity"]
+      "page_ids": ["peers", "node_runtime", "routing", "identity"]
     },
     {
       "id": "networks",

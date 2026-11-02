@@ -5,111 +5,7 @@
       "id": "overview",
       "nav_label_key": "nav.overview",
       "title_key": "page.overview",
-      "actions": [
-        {
-          "id": "refresh_snapshot",
-          "label_key": "action.refresh_snapshot",
-          "command": "get_snapshot",
-          "backend_status": "implemented",
-          "permission": "view_state",
-          "audit": {
-            "policy": "none",
-            "action": null
-          },
-          "availability": "always",
-          "fields": [],
-          "confirmation": null
-        },
-        {
-          "id": "get_node_diagnostics",
-          "label_key": "action.get_node_diagnostics",
-          "command": "get_node_diagnostics",
-          "backend_status": "implemented",
-          "permission": "view_state",
-          "audit": {
-            "policy": "none",
-            "action": null
-          },
-          "availability": "always",
-          "fields": [],
-          "confirmation": null
-        },
-        {
-          "id": "start_node",
-          "label_key": "action.start_node",
-          "command": "start_node",
-          "backend_status": "implemented",
-          "permission": "manage_networks",
-          "audit": {
-            "policy": "record_outcome",
-            "action": "node.start"
-          },
-          "availability": "always",
-          "fields": [],
-          "confirmation": null
-        },
-        {
-          "id": "stop_node",
-          "label_key": "action.stop_node",
-          "command": "stop_node",
-          "backend_status": "implemented",
-          "permission": "stop_node",
-          "audit": {
-            "policy": "record_outcome",
-            "action": "node.stop"
-          },
-          "availability": "node_running",
-          "fields": [],
-          "confirmation": null
-        },
-        {
-          "id": "restart_node",
-          "label_key": "action.restart_node",
-          "command": "restart_node",
-          "backend_status": "implemented",
-          "permission": "manage_networks",
-          "audit": {
-            "policy": "record_outcome",
-            "action": "node.restart"
-          },
-          "availability": "node_running",
-          "fields": [],
-          "confirmation": {
-            "title_key": "confirm.restart_node.title",
-            "consequence_key": "confirm.restart_node.consequence",
-            "destructive": true
-          }
-        },
-        {
-          "id": "cleanup_node_residuals",
-          "label_key": "action.cleanup_node_residuals",
-          "command": "cleanup_node_residuals",
-          "backend_status": "implemented",
-          "permission": "manage_networks",
-          "audit": {
-            "policy": "record_outcome",
-            "action": "node.cleanup_residuals"
-          },
-          "availability": "always",
-          "fields": [
-            {
-              "id": "networks",
-              "label_key": "field.network_names",
-              "input": "network_selection",
-              "required": false,
-              "validation": "network_selection"
-            },
-            {
-              "id": "all",
-              "label_key": "field.all_networks",
-              "input": "boolean",
-              "required": true,
-              "validation": "none"
-            }
-          ],
-          "confirmation": null
-        }
-      ]
+      "actions": []
     },
     {
       "id": "networks",
@@ -413,6 +309,116 @@
               "input": "client_id",
               "required": true,
               "validation": "non_empty"
+            }
+          ],
+          "confirmation": null
+        }
+      ]
+    },
+    {
+      "id": "node_runtime",
+      "nav_label_key": "nav.node_runtime",
+      "title_key": "page.node_runtime",
+      "actions": [
+        {
+          "id": "refresh_snapshot",
+          "label_key": "action.refresh_snapshot",
+          "command": "get_snapshot",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "get_node_diagnostics",
+          "label_key": "action.get_node_diagnostics",
+          "command": "get_node_diagnostics",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "start_node",
+          "label_key": "action.start_node",
+          "command": "start_node",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.start"
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "stop_node",
+          "label_key": "action.stop_node",
+          "command": "stop_node",
+          "backend_status": "implemented",
+          "permission": "stop_node",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.stop"
+          },
+          "availability": "node_running",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "restart_node",
+          "label_key": "action.restart_node",
+          "command": "restart_node",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.restart"
+          },
+          "availability": "node_running",
+          "fields": [],
+          "confirmation": {
+            "title_key": "confirm.restart_node.title",
+            "consequence_key": "confirm.restart_node.consequence",
+            "destructive": true
+          }
+        },
+        {
+          "id": "cleanup_node_residuals",
+          "label_key": "action.cleanup_node_residuals",
+          "command": "cleanup_node_residuals",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.cleanup_residuals"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "networks",
+              "label_key": "field.network_names",
+              "input": "network_selection",
+              "required": false,
+              "validation": "network_selection"
+            },
+            {
+              "id": "all",
+              "label_key": "field.all_networks",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
             }
           ],
           "confirmation": null

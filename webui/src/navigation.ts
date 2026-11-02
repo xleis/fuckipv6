@@ -53,8 +53,8 @@ function parseNavigationContract(contract: RawNavigationContract): NavigationMod
     };
   });
 
-  if (modules.length !== 5 || pageIds.size !== 11) {
-    throw new Error("The navigation contract must contain five modules and eleven pages");
+  if (modules.length !== 5 || pageIds.size !== 12) {
+    throw new Error("The navigation contract must contain five modules and twelve pages");
   }
   return modules;
 }

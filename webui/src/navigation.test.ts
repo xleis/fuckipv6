@@ -17,6 +17,7 @@ describe("shared navigation contract", () => {
     expect(pages).toEqual([
       "overview",
       "peers",
+      "node_runtime",
       "routing",
       "identity",
       "networks",
@@ -27,7 +28,7 @@ describe("shared navigation contract", () => {
       "logs",
       "settings",
     ]);
-    expect(new Set(pages).size).toBe(11);
+    expect(new Set(pages).size).toBe(12);
     expect(navigationModuleForPage("identity").id).toBe("nodes");
     expect(navigationModuleForPage("missing").id).toBe("overview");
   });

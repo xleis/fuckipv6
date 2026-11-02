@@ -17,6 +17,7 @@ const SURFACE_LOCK_FILE: &str = "ui-surface.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiSurfaceKind {
+    #[cfg_attr(not(feature = "gpui-shell"), allow(dead_code))]
     Gpui,
     WebUi,
 }

@@ -1,6 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 /// The actual control surface selected for this node process.
 ///
@@ -129,8 +131,75 @@ impl DisplayEnvironment {
     }
 
     pub fn detect() -> Self {
-        Self::detect_with(|key| std::env::var(key).ok())
+        let environment = Self::detect_with(|key| std::env::var(key).ok());
+        if environment.has_desktop() {
+            return environment;
+        }
+
+        // A system service starts outside the graphical user's environment, so
+        // DISPLAY/WAYLAND_DISPLAY are usually absent even when the machine has
+        // an active desktop session. Fall back to the display-server sockets so
+        // a desktop host still fails closed instead of exposing WebUI.
+        #[cfg(target_os = "linux")]
+        if let Some(desktop) =
+            detect_linux_desktop_sockets(Path::new("/run/user"), Path::new("/tmp/.X11-unix"))
+        {
+            return desktop;
+        }
+
+        environment
     }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_desktop_sockets(
+    runtime_root: &Path,
+    x11_socket_root: &Path,
+) -> Option<DisplayEnvironment> {
+    use std::os::unix::fs::FileTypeExt;
+
+    if let Ok(entries) = std::fs::read_dir(runtime_root) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Ok(session_entries) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            if session_entries.flatten().any(|candidate| {
+                candidate
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("wayland-") && !name.ends_with(".lock"))
+                    && candidate
+                        .file_type()
+                        .map(|kind| kind.is_socket())
+                        .unwrap_or(false)
+            }) {
+                return Some(DisplayEnvironment::LinuxWayland);
+            }
+        }
+    }
+
+    std::fs::read_dir(x11_socket_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|candidate| {
+            candidate
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with('X') && name.len() > 1)
+                && candidate
+                    .file_type()
+                    .map(|kind| kind.is_socket())
+                    .unwrap_or(false)
+        })
+        .then_some(DisplayEnvironment::LinuxX11)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +651,49 @@ mod tests {
             desktop_session_without_display_variables,
             DisplayEnvironment::LinuxWayland
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_session_socket_detection_survives_a_headless_service_environment() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        fn temporary_directory(label: &str) -> std::path::PathBuf {
+            let path = std::env::temp_dir().join(format!(
+                "fuckipv6-ui-mode-{label}-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("temporary UI mode directory");
+            path
+        }
+
+        let runtime_root = temporary_directory("wayland-run");
+        let wayland_session = runtime_root.join("1000");
+        std::fs::create_dir_all(&wayland_session).expect("Wayland session directory");
+        let _wayland_socket =
+            UnixListener::bind(wayland_session.join("wayland-1")).expect("Wayland session socket");
+        let empty_x11 = temporary_directory("empty-x11");
+        assert_eq!(
+            detect_linux_desktop_sockets(&runtime_root, &empty_x11),
+            Some(DisplayEnvironment::LinuxWayland)
+        );
+        drop(_wayland_socket);
+        let _ = std::fs::remove_dir_all(runtime_root);
+
+        let empty_runtime = temporary_directory("empty-run");
+        let x11_root = temporary_directory("x11");
+        let _x11_socket = UnixListener::bind(x11_root.join("X0")).expect("X11 session socket");
+        assert_eq!(
+            detect_linux_desktop_sockets(&empty_runtime, &x11_root),
+            Some(DisplayEnvironment::LinuxX11)
+        );
+        drop(_x11_socket);
+        let _ = std::fs::remove_dir_all(empty_runtime);
+        let _ = std::fs::remove_dir_all(empty_x11);
+        let _ = std::fs::remove_dir_all(x11_root);
     }
 
     #[cfg(windows)]

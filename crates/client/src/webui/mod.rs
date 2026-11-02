@@ -13,6 +13,7 @@ use crate::owner_security::service::{
     AuthenticatedOwnerSession, IssuedOwnerSession, OwnerBootstrapChannel, OwnerSecurityError,
     OwnerSecurityService,
 };
+use crate::ui::{resolve_ui_mode, UiCapabilities, UiModeRequest};
 use anyhow::{Context, Result};
 use axum::{
     extract::{
@@ -214,6 +215,13 @@ fn create_app_web_router_with_mutation_limiter(
         ))
 }
 
+fn ensure_webui_start_allowed(capabilities: UiCapabilities) -> Result<()> {
+    let resolution = resolve_ui_mode(UiModeRequest::WebUi, capabilities)
+        .context("当前主机存在桌面会话，拒绝启动 WebUI")?;
+    debug_assert!(resolution.effective.is_web_ui());
+    Ok(())
+}
+
 /// Start the only production WebUI surface: a manifest-driven view backed by
 /// the authenticated node command/state/event adapters.
 pub async fn start_app_webui_with_node(
@@ -221,6 +229,9 @@ pub async fn start_app_webui_with_node(
     controller: Arc<AppController>,
     node_adapter: NodeHttpAdapter,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    // Keep this gate at the actual listener boundary, not only in CLI option
+    // parsing, so every future caller is subject to the same desktop policy.
+    ensure_webui_start_allowed(UiCapabilities::detect())?;
     let tls_config = WebUiTlsConfig::from_process_env()?;
     let direct_tls = tls_config.is_some();
     let config = WebUiConfig::from_process_env_with_direct_tls(port, direct_tls)?;
@@ -4164,9 +4175,26 @@ mod tests {
         assert_eq!(payload["auth_required"], false);
     }
 
+    #[test]
+    fn production_webui_start_is_rejected_on_desktop_hosts() {
+        let desktop = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::LinuxWayland,
+            gpui_available: true,
+        };
+        let error = ensure_webui_start_allowed(desktop)
+            .expect_err("a desktop host must never expose a second WebUI surface");
+        assert!(error.to_string().contains("桌面会话"));
+
+        let headless = UiCapabilities {
+            display: crate::ui::DisplayEnvironment::Headless,
+            gpui_available: false,
+        };
+        ensure_webui_start_allowed(headless).expect("headless WebUI should be allowed");
+    }
+
     #[tokio::test]
     async fn owner_router_requires_a_local_session_even_over_loopback() {
-        let (adapter, _commands) = node_adapter_fixture(node_ui_manifest());
+        let (adapter, commands) = node_adapter_fixture(node_ui_manifest());
         let fixture = owner_node_app_fixture(8080, Some(adapter));
         let anonymous = fixture
             .app
@@ -4195,6 +4223,25 @@ mod tests {
             .await
             .expect("anonymous node snapshot response");
         assert_eq!(anonymous_node_api.status(), StatusCode::UNAUTHORIZED);
+
+        let anonymous_mutation = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/node/commands")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"schema_version":1,"request":{"request_id":30,"command":{"command":"shutdown"}}}"#,
+                    ))
+                    .expect("anonymous command request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("anonymous command response");
+        assert_eq!(anonymous_mutation.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(commands.load(Ordering::SeqCst), 0);
 
         initialize_owner(&fixture);
         let unauthenticated = fixture

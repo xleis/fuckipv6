@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fuckipv6_client::local_ipc::{self, LocalCommand, LocalEndpoint, LocalRequest, LocalResponse};
+use fuckipv6_client::ui::DisplayEnvironment;
 
 struct ProcessGuard {
     child: Child,
@@ -41,6 +42,14 @@ fn temp_dir(label: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(directory.join("home"))?;
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
     Ok(directory)
+}
+
+fn skip_webui_lifetime_test_on_desktop(test: &str) -> bool {
+    if !DisplayEnvironment::detect().has_desktop() {
+        return false;
+    }
+    eprintln!("跳过 {test}: 当前主机存在桌面会话；按产品策略 WebUI 进程只能在隔离的无头主机上测试");
+    true
 }
 
 fn headless_test_command(directory: &Path) -> Command {
@@ -311,6 +320,11 @@ async fn control_supervises_one_node_and_ui_disconnect_leaves_it_running() -> Re
 
 #[tokio::test]
 async fn service_process_owns_control_and_stops_node_on_termination() -> Result<()> {
+    if skip_webui_lifetime_test_on_desktop(
+        "service_process_owns_control_and_stops_node_on_termination",
+    ) {
+        return Ok(());
+    }
     let directory = temp_dir("service-lifecycle")?;
     let runtime_dir = directory.join("runtime");
     let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
@@ -349,6 +363,9 @@ async fn service_process_owns_control_and_stops_node_on_termination() -> Result<
 
 #[tokio::test]
 async fn closing_headless_webui_does_not_stop_the_node() -> Result<()> {
+    if skip_webui_lifetime_test_on_desktop("closing_headless_webui_does_not_stop_the_node") {
+        return Ok(());
+    }
     let directory = temp_dir("webui-lifetime")?;
     let runtime_dir = directory.join("runtime");
     let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
@@ -437,6 +454,11 @@ async fn replacement_control_adopts_node_after_control_sigkill() -> Result<()> {
 
 #[tokio::test]
 async fn new_headless_ui_restarts_crashed_control_and_adopts_live_node() -> Result<()> {
+    if skip_webui_lifetime_test_on_desktop(
+        "new_headless_ui_restarts_crashed_control_and_adopts_live_node",
+    ) {
+        return Ok(());
+    }
     let directory = temp_dir("ui-control-recovery")?;
     let runtime_dir = directory.join("runtime");
     let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
@@ -515,6 +537,10 @@ async fn new_headless_ui_restarts_crashed_control_and_adopts_live_node() -> Resu
 
 #[tokio::test]
 async fn headless_command_entrypoint_reexports_the_same_control() -> Result<()> {
+    if skip_webui_lifetime_test_on_desktop("headless_command_entrypoint_reexports_the_same_control")
+    {
+        return Ok(());
+    }
     let directory = temp_dir("command-ui-entrypoint")?;
     let runtime_dir = directory.join("runtime");
     let node_endpoint = LocalEndpoint::Path(runtime_dir.join("node.sock"));
@@ -557,6 +583,44 @@ async fn headless_command_entrypoint_reexports_the_same_control() -> Result<()> 
     send_signal(control_pid, "TERM")?;
     wait_for_process_exit(control_pid).await?;
     wait_for_process_exit(node_pid).await?;
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn desktop_hosts_refuse_webui_before_starting_the_node() -> Result<()> {
+    if !DisplayEnvironment::detect().has_desktop() {
+        eprintln!("跳过 desktop_hosts_refuse_webui_before_starting_the_node: 当前主机没有桌面会话");
+        return Ok(());
+    }
+
+    let directory = temp_dir("desktop-webui-rejection")?;
+    let runtime_dir = directory.join("runtime");
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+    let mut ui = spawn_headless_ui(&directory, port)?;
+    let status = wait_for_exit(&mut ui).await?;
+    assert!(
+        !status.success(),
+        "desktop host unexpectedly started a WebUI process"
+    );
+
+    let stderr = ui
+        .child
+        .stderr
+        .take()
+        .map(|mut stream| std::io::read_to_string(&mut stream))
+        .transpose()?
+        .unwrap_or_default();
+    assert!(
+        stderr.contains("desktop session") || stderr.contains("桌面会话"),
+        "desktop WebUI rejection did not explain the policy: {stderr}"
+    );
+    assert!(
+        !endpoint_path(&LocalEndpoint::Path(runtime_dir.join("node.sock"))).exists(),
+        "desktop WebUI rejection started a node before failing"
+    );
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }

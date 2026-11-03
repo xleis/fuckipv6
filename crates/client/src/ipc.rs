@@ -38,7 +38,7 @@ pub enum IpcRequest {
         is_exit_node: bool,
     },
     Disconnect,
-    NodeCommand(NodeCommandRequest),
+    NodeCommand(Box<NodeCommandRequest>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -641,7 +641,7 @@ async fn handle_client(
             Some(commands) => match commands
                 .execute(
                     NodeCommandContext::untrusted("legacy_loopback_tcp"),
-                    request,
+                    *request,
                 )
                 .await
             {
@@ -1233,10 +1233,10 @@ mod tests {
 
         let response = request_at(
             &local_addr,
-            IpcRequest::NodeCommand(NodeCommandRequest::new(
+            IpcRequest::NodeCommand(Box::new(NodeCommandRequest::new(
                 77,
                 crate::node::NodeCommand::GetSnapshot,
-            )),
+            ))),
         )
         .await?;
 

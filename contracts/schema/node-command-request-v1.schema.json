@@ -10,6 +10,145 @@
       ],
       "type": "string"
     },
+    "DiscoveryTransport": {
+      "enum": [
+        "quic",
+        "tcp",
+        "local"
+      ],
+      "type": "string"
+    },
+    "NetworkDiscoveryDocument": {
+      "description": "Signed discovery data. Endpoints may change between revisions; the stable\nnetwork ID remains bound to the immutable network public key.",
+      "properties": {
+        "capability_summary": {
+          "description": "Canonical capability declaration summary. This is discoverability\nmetadata, not proof that a capability is currently operational.",
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "endpoints": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NetworkEndpoint"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "owner": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "public_key": {
+          "$ref": "#/$defs/PublicKey"
+        },
+        "publisher": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Node that published this revision. Schema v1 binds the publisher to the\nnetwork owner so another member cannot publish an owner-authorized card."
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revoked_at_unix_ms": {
+          "description": "A signed tombstone is a normal revision with this timestamp set. Once a\nclient accepts one, every older or non-identical successor is rejected.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility"
+        }
+      },
+      "required": [
+        "schema_version",
+        "network_id",
+        "public_key",
+        "publisher",
+        "name",
+        "purpose",
+        "visibility",
+        "join_mode",
+        "owner",
+        "revision",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "capability_summary"
+      ],
+      "type": "object"
+    },
+    "NetworkDiscoveryRecord": {
+      "properties": {
+        "document": {
+          "$ref": "#/$defs/NetworkDiscoveryDocument"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        }
+      },
+      "required": [
+        "document",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "NetworkEndpoint": {
+      "description": "A decoupled discovery hint. It is never part of the stable network identity.",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "transport": {
+          "$ref": "#/$defs/DiscoveryTransport"
+        }
+      },
+      "required": [
+        "transport",
+        "host",
+        "port"
+      ],
+      "type": "object"
+    },
+    "NetworkId": {
+      "type": "string"
+    },
     "NetworkJoinMode": {
       "description": "Admission policy selected by the network owner.",
       "oneOf": [
@@ -341,6 +480,96 @@
           "type": "object"
         },
         {
+          "description": "Sign and publish the current public profile to a discovery index.",
+          "properties": {
+            "command": {
+              "const": "publish_network_discovery",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkDiscoveryCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Sign a newer discovery revision and publish it.",
+          "properties": {
+            "command": {
+              "const": "update_network_discovery",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkDiscoveryCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Sign and publish a terminal revocation for a discovery record.",
+          "properties": {
+            "command": {
+              "const": "unpublish_network_discovery",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkDiscoveryCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Fetch and verify the signed discovery index without changing any data plane.",
+          "properties": {
+            "command": {
+              "const": "refresh_discovery_index",
+              "type": "string"
+            },
+            "payload": {
+              "properties": {
+                "index_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Retry the last configured discovery index after an outage.",
+          "properties": {
+            "command": {
+              "const": "retry_discovery_index",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Join using signed discovery material that is revalidated against the\npersisted revision/revocation watermark before any network mutation.",
           "properties": {
             "command": {
               "const": "join_network",
@@ -767,8 +996,22 @@
       ],
       "type": "object"
     },
+    "NodeId": {
+      "type": "string"
+    },
     "NodeJoinNetworkCommand": {
       "properties": {
+        "discovery_record": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkDiscoveryRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Public signed discovery material selected by the user. It is never\ntrusted as cached authority: the handler revalidates it immediately."
+        },
         "network_name": {
           "type": [
             "string",
@@ -805,6 +1048,21 @@
         "mode",
         "ipv4_pool",
         "ipv6_pool"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkDiscoveryCommand": {
+      "properties": {
+        "index_url": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "index_url"
       ],
       "type": "object"
     },
@@ -1019,6 +1277,14 @@
         "is_exit_node"
       ],
       "type": "object"
+    },
+    "PublicKey": {
+      "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
+      "type": "string"
+    },
+    "Signature": {
+      "description": "Signature bytes encoded as URL-safe base64 without padding.",
+      "type": "string"
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-command-request-v1.schema.json",

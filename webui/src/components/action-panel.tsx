@@ -183,7 +183,8 @@ function FieldControl({
         type={
           numberInputs.has(field.input)
             ? "number"
-            : field.input === "url_or_ticket"
+            : field.input === "url_or_ticket" ||
+                field.input === "discovery_index_url"
               ? "url"
               : "text"
         }

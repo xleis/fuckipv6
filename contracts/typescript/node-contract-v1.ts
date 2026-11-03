@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "preview_configuration", "preview_network_profile", "probe_peer", "rebuild_tun", "restart_networks", "restart_node", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_network_profile", "update_routing"] as const;
+export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "preview_configuration", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "refresh_discovery_index", "restart_networks", "restart_node", "retry_discovery_index", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "preview_configuration", "preview_network_profile", "probe_peer", "rebuild_tun", "restart_networks", "restart_node", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_network_profile", "update_routing"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "preview_configuration", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "refresh_discovery_index", "restart_networks", "restart_node", "retry_discovery_index", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -90,6 +90,8 @@ export type ConfigurationValidationIssue = {
   "path": string;
 };
 
+export type DiscoveryTransport = "quic" | "tcp" | "local";
+
 export type DisplayEnvironment = "linux_x11" | "linux_wayland" | "windows_desktop" | "macos_desktop" | "headless";
 
 export type DomainActorRef = {
@@ -127,6 +129,35 @@ export type NetworkAdminProfileProjection = {
   "policy_revision": number;
   "profile": NetworkPublicProfileDocument;
   "revision": number;
+};
+
+export type NetworkDiscoveryDocument = {
+  "capability_summary": Array<CapabilityKind>;
+  "endpoints"?: Array<NetworkEndpoint>;
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "join_mode": NetworkJoinMode;
+  "name": string;
+  "network_id": NetworkId;
+  "owner": NodeId;
+  "public_key": PublicKey;
+  "publisher": NodeId;
+  "purpose": string;
+  "revision": number;
+  "revoked_at_unix_ms"?: number | null;
+  "schema_version": number;
+  "visibility": NetworkVisibility;
+};
+
+export type NetworkDiscoveryRecord = {
+  "document": NetworkDiscoveryDocument;
+  "signature": Signature;
+};
+
+export type NetworkEndpoint = {
+  "host": string;
+  "port": number;
+  "transport": DiscoveryTransport;
 };
 
 export type NetworkId = string;
@@ -419,6 +450,22 @@ export type NodeCommand = {
   "command": "update_network_profile";
   "payload": NodeNetworkProfileCommand;
 } | {
+  "command": "publish_network_discovery";
+  "payload": NodeNetworkDiscoveryCommand;
+} | {
+  "command": "update_network_discovery";
+  "payload": NodeNetworkDiscoveryCommand;
+} | {
+  "command": "unpublish_network_discovery";
+  "payload": NodeNetworkDiscoveryCommand;
+} | {
+  "command": "refresh_discovery_index";
+  "payload": {
+  "index_url"?: string | null;
+};
+} | {
+  "command": "retry_discovery_index";
+} | {
   "command": "join_network";
   "payload": NodeJoinNetworkCommand;
 } | {
@@ -632,6 +679,35 @@ export type NodeDiagnosticsSnapshot = {
   "timed_out": boolean;
 };
 
+export type NodeDiscoveryIndexError = {
+  "category": NodeDiscoveryIndexErrorCategory;
+  "retryable": boolean;
+};
+
+export type NodeDiscoveryIndexErrorCategory = "offline" | "timeout" | "unsupported" | "rejected" | "invalid_response" | "storage" | "server";
+
+export type NodeDiscoveryIndexRecordSnapshot = {
+  "accepted_at_unix_ms": number;
+  "digest": string;
+  "discoverable": boolean;
+  "invalid_reason"?: string | null;
+  "record": NetworkDiscoveryRecord;
+};
+
+export type NodeDiscoveryIndexSnapshot = {
+  "data_plane_affected": boolean;
+  "index_url"?: string | null;
+  "last_attempt_unix_ms"?: number | null;
+  "last_error"?: NodeDiscoveryIndexError | null;
+  "last_success_unix_ms"?: number | null;
+  "records": Array<NodeDiscoveryIndexRecordSnapshot>;
+  "rejected_record_count": number;
+  "search_history_stored": boolean;
+  "state": NodeDiscoveryIndexState;
+};
+
+export type NodeDiscoveryIndexState = "idle" | "pending" | "ready" | "degraded" | "failed" | "unsupported";
+
 export type NodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
@@ -787,6 +863,7 @@ export type NodeInterfaceSnapshot = {
 export type NodeInterfaceStatus = "up" | "down" | "unknown";
 
 export type NodeJoinNetworkCommand = {
+  "discovery_record"?: NetworkDiscoveryRecord | null;
   "network_name"?: string | null;
   "start": boolean;
   "target": string;
@@ -854,6 +931,11 @@ export type NodeNetworkConfigSnapshot = {
 };
 
 export type NodeNetworkCreationNextStep = "invite_members" | "configure_policy" | "contribute_capabilities";
+
+export type NodeNetworkDiscoveryCommand = {
+  "index_url": string;
+  "network_name": string;
+};
 
 export type NodeNetworkProfileCommand = {
   "expected_revision": number;
@@ -1059,6 +1141,7 @@ export type NodeSnapshot = {
   "capabilities"?: NodeCapabilityRegistrySnapshot;
   "configuration"?: NodeConfigurationSnapshot;
   "control_health"?: NodeControlHealth;
+  "discovery_index"?: NodeDiscoveryIndexSnapshot;
   "embedded_services"?: Array<NodeEmbeddedServiceSnapshot>;
   "exit_node_capabilities"?: ExitNodeCapabilities;
   "identity"?: NodeIdentitySnapshot | null;
@@ -1099,7 +1182,7 @@ export type NodeUiAction = {
   "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
   "backend_status": NodeUiBackendStatus;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "join_network" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "join_network" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
   "fields": Array<NodeUiField>;
   "id": string;
@@ -1135,7 +1218,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -1215,7 +1298,7 @@ export type OperationError = {
 
 export type OperationId = string;
 
-export type OperationKind = "node_start" | "node_stop" | "node_restart" | "node_cleanup" | "diagnostics" | "network_create" | "network_profile_update" | "network_apply" | "tun_rebuild" | "network_leave" | "membership_approve" | "membership_reject" | "membership_remove" | "policy_test" | "policy_apply" | "policy_rollback" | "traffic_rules_apply" | "network_role_update" | "identity_update" | "client_blacklist_update" | "network_allocation_update" | "capability_enable" | "capability_disable" | "exit_select" | "exit_revoke" | "coordinator_candidates_update" | "coordinator_recover" | "file_share_update" | "file_upload_start" | "file_download_start" | "owner_passkey_register" | "owner_passkey_revoke" | "certificate_reload";
+export type OperationKind = "node_start" | "node_stop" | "node_restart" | "node_cleanup" | "diagnostics" | "network_create" | "network_profile_update" | "discovery_index_update" | "network_apply" | "tun_rebuild" | "network_leave" | "membership_approve" | "membership_reject" | "membership_remove" | "policy_test" | "policy_apply" | "policy_rollback" | "traffic_rules_apply" | "network_role_update" | "identity_update" | "client_blacklist_update" | "network_allocation_update" | "capability_enable" | "capability_disable" | "exit_select" | "exit_revoke" | "coordinator_candidates_update" | "coordinator_recover" | "file_share_update" | "file_upload_start" | "file_download_start" | "owner_passkey_register" | "owner_passkey_revoke" | "certificate_reload";
 
 export type OperationRecovery = {
   "hint_key": string;

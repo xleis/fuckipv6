@@ -217,11 +217,11 @@ mod tests {
     use super::*;
     use crate::node::{
         NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateNetworkCommand,
-        NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkProfileCommand, NodeNetworkRole,
-        NodeNetworkSelection, NodePreviewConfigurationCommand, NodeProbePeerCommand,
-        NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand,
-        NodeSetNodeDisplayNameCommand, NodeUpdateNetworkAllocationCommand,
-        NodeUpdateRoutingCommand,
+        NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
+        NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
+        NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
+        NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+        NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use fuckipv6_common::{domain::NetworkProfileUpdate, NetworkMode};
     use std::path::PathBuf;
@@ -288,10 +288,27 @@ mod tests {
                     join_mode: Default::default(),
                 },
             }),
+            NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.com".into(),
+            }),
+            NodeCommand::UpdateNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.com".into(),
+            }),
+            NodeCommand::UnpublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.com".into(),
+            }),
+            NodeCommand::RefreshDiscoveryIndex {
+                index_url: Some("https://discovery.example.com".into()),
+            },
+            NodeCommand::RetryDiscoveryIndex,
             NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
                 target: "ticket".into(),
                 network_name: None,
                 start: false,
+                discovery_record: None,
             }),
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),

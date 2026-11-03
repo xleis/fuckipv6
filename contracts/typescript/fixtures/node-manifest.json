@@ -323,6 +323,144 @@
           }
         },
         {
+          "id": "publish_network_discovery",
+          "label_key": "action.publish_network_discovery",
+          "command": "publish_network_discovery",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.discovery.publish"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "index_url",
+              "label_key": "field.discovery_index_url",
+              "input": "discovery_index_url",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.publish_network_discovery.title",
+            "consequence_key": "confirm.publish_network_discovery.consequence",
+            "destructive": false,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "update_network_discovery",
+          "label_key": "action.update_network_discovery",
+          "command": "update_network_discovery",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.discovery.update"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "index_url",
+              "label_key": "field.discovery_index_url",
+              "input": "discovery_index_url",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.update_network_discovery.title",
+            "consequence_key": "confirm.update_network_discovery.consequence",
+            "destructive": false,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "unpublish_network_discovery",
+          "label_key": "action.unpublish_network_discovery",
+          "command": "unpublish_network_discovery",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.discovery.unpublish"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "index_url",
+              "label_key": "field.discovery_index_url",
+              "input": "discovery_index_url",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.unpublish_network_discovery.title",
+            "consequence_key": "confirm.unpublish_network_discovery.consequence",
+            "destructive": true,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "refresh_discovery_index",
+          "label_key": "action.refresh_discovery_index",
+          "command": "refresh_discovery_index",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "index_url",
+              "label_key": "field.discovery_index_url",
+              "input": "discovery_index_url",
+              "required": false,
+              "validation": "none"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "retry_discovery_index",
+          "label_key": "action.retry_discovery_index",
+          "command": "retry_discovery_index",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
           "id": "join_network",
           "label_key": "action.join_network",
           "command": "join_network",

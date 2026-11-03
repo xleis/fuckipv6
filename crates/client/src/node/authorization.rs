@@ -433,6 +433,8 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::RefreshDiscoveryIndex
+        | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::GetConfigurationHistory => NodePermission::ViewState,
         NodeCommandKind::UpdateRouting => NodePermission::ChangeRouting,
         NodeCommandKind::SetNetworkRole => NodePermission::ManageRoles,
@@ -444,6 +446,9 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::RebuildTun
         | NodeCommandKind::CreateNetwork
         | NodeCommandKind::UpdateNetworkProfile
+        | NodeCommandKind::PublishNetworkDiscovery
+        | NodeCommandKind::UpdateNetworkDiscovery
+        | NodeCommandKind::UnpublishNetworkDiscovery
         | NodeCommandKind::JoinNetwork
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
@@ -468,6 +473,11 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::CreateNetwork
             | NodeCommandKind::PreviewNetworkProfile
             | NodeCommandKind::UpdateNetworkProfile
+            | NodeCommandKind::PublishNetworkDiscovery
+            | NodeCommandKind::UpdateNetworkDiscovery
+            | NodeCommandKind::UnpublishNetworkDiscovery
+            | NodeCommandKind::RefreshDiscoveryIndex
+            | NodeCommandKind::RetryDiscoveryIndex
             | NodeCommandKind::JoinNetwork
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
@@ -491,7 +501,9 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::GetDiagnostics
         | NodeCommandKind::GetBlacklist
         | NodeCommandKind::GetNetworkAllocation
-        | NodeCommandKind::PreviewNetworkProfile => (PolicyAction::Read, ResourceKind::Network),
+        | NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::RefreshDiscoveryIndex
+        | NodeCommandKind::RetryDiscoveryIndex => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
@@ -505,6 +517,9 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::RebuildTun
         | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::UpdateNetworkProfile
+        | NodeCommandKind::PublishNetworkDiscovery
+        | NodeCommandKind::UpdateNetworkDiscovery
+        | NodeCommandKind::UnpublishNetworkDiscovery
         | NodeCommandKind::RestartNode => (PolicyAction::Update, ResourceKind::Network),
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
             (PolicyAction::Create, ResourceKind::Network)
@@ -547,6 +562,8 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::PreviewConfiguration(_)
         | NodeCommand::ApplyConfiguration(_)
         | NodeCommand::RollbackConfiguration(_)
+        | NodeCommand::RefreshDiscoveryIndex { .. }
+        | NodeCommand::RetryDiscoveryIndex
         | NodeCommand::GetConfigurationHistory => NetworkTargets::None,
         NodeCommand::StartNetworks { selection } => match selection {
             super::NodeNetworkSelection::Named(names) => NetworkTargets::Named(names.clone()),
@@ -578,6 +595,11 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::PreviewNetworkProfile(command)
         | NodeCommand::UpdateNetworkProfile(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::PublishNetworkDiscovery(command)
+        | NodeCommand::UpdateNetworkDiscovery(command)
+        | NodeCommand::UnpublishNetworkDiscovery(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
         }
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {

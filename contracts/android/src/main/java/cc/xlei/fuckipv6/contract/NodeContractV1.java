@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NetworkAdminProfileProjection", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -189,6 +189,31 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown ConfigurationValidationCode wire value: " + value);
+        }
+    }
+
+    public enum DiscoveryTransport {
+        QUIC("quic"),
+        TCP("tcp"),
+        LOCAL("local");
+
+        private final String wireName;
+
+        DiscoveryTransport(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static DiscoveryTransport fromWireName(String value) {
+            for (DiscoveryTransport candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown DiscoveryTransport wire value: " + value);
         }
     }
 
@@ -492,9 +517,12 @@ public final class NodeContractV1 {
         PREVIEW_CONFIGURATION("preview_configuration"),
         PREVIEW_NETWORK_PROFILE("preview_network_profile"),
         PROBE_PEER("probe_peer"),
+        PUBLISH_NETWORK_DISCOVERY("publish_network_discovery"),
         REBUILD_TUN("rebuild_tun"),
+        REFRESH_DISCOVERY_INDEX("refresh_discovery_index"),
         RESTART_NETWORKS("restart_networks"),
         RESTART_NODE("restart_node"),
+        RETRY_DISCOVERY_INDEX("retry_discovery_index"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
         ROTATE_NODE_IDENTITY("rotate_node_identity"),
         SET_NETWORK_ROLE("set_network_role"),
@@ -505,7 +533,9 @@ public final class NodeContractV1 {
         STOP_NETWORKS("stop_networks"),
         STOP_NODE("stop_node"),
         UNBAN_CLIENT("unban_client"),
+        UNPUBLISH_NETWORK_DISCOVERY("unpublish_network_discovery"),
         UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
+        UPDATE_NETWORK_DISCOVERY("update_network_discovery"),
         UPDATE_NETWORK_PROFILE("update_network_profile"),
         UPDATE_ROUTING("update_routing");
 
@@ -606,6 +636,63 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeDiagnosticState wire value: " + value);
+        }
+    }
+
+    public enum NodeDiscoveryIndexErrorCategory {
+        OFFLINE("offline"),
+        TIMEOUT("timeout"),
+        UNSUPPORTED("unsupported"),
+        REJECTED("rejected"),
+        INVALID_RESPONSE("invalid_response"),
+        STORAGE("storage"),
+        SERVER("server");
+
+        private final String wireName;
+
+        NodeDiscoveryIndexErrorCategory(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeDiscoveryIndexErrorCategory fromWireName(String value) {
+            for (NodeDiscoveryIndexErrorCategory candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeDiscoveryIndexErrorCategory wire value: " + value);
+        }
+    }
+
+    public enum NodeDiscoveryIndexState {
+        IDLE("idle"),
+        PENDING("pending"),
+        READY("ready"),
+        DEGRADED("degraded"),
+        FAILED("failed"),
+        UNSUPPORTED("unsupported");
+
+        private final String wireName;
+
+        NodeDiscoveryIndexState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeDiscoveryIndexState fromWireName(String value) {
+            for (NodeDiscoveryIndexState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeDiscoveryIndexState wire value: " + value);
         }
     }
 
@@ -1185,6 +1272,7 @@ public final class NodeContractV1 {
         ROLE("role"),
         ROUTING_MODE("routing_mode"),
         URL_OR_TICKET("url_or_ticket"),
+        DISCOVERY_INDEX_URL("discovery_index_url"),
         TIMEOUT_MS("timeout_ms");
 
         private final String wireName;
@@ -1352,6 +1440,7 @@ public final class NodeContractV1 {
         DIAGNOSTICS("diagnostics"),
         NETWORK_CREATE("network_create"),
         NETWORK_PROFILE_UPDATE("network_profile_update"),
+        DISCOVERY_INDEX_UPDATE("discovery_index_update"),
         NETWORK_APPLY("network_apply"),
         TUN_REBUILD("tun_rebuild"),
         NETWORK_LEAVE("network_leave"),
@@ -1730,6 +1819,67 @@ public final class NodeContractV1 {
             this.policy_revision = policy_revision;
             this.profile = profile;
             this.revision = revision;
+        }
+    }
+
+    /** DTO for NetworkDiscoveryDocument. */
+    public static final class NetworkDiscoveryDocument {
+        public final List<CapabilityKind> capability_summary;
+        public final List<NetworkEndpoint> endpoints;
+        public final Long expires_at_unix_ms;
+        public final Long issued_at_unix_ms;
+        public final String join_mode;
+        public final String name;
+        public final String network_id;
+        public final String owner;
+        public final String public_key;
+        public final String publisher;
+        public final String purpose;
+        public final Long revision;
+        public final Long revoked_at_unix_ms;
+        public final Integer schema_version;
+        public final NetworkVisibility visibility;
+
+        public NetworkDiscoveryDocument(List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String name, String network_id, String owner, String public_key, String publisher, String purpose, Long revision, Long revoked_at_unix_ms, Integer schema_version, NetworkVisibility visibility) {
+            this.capability_summary = capability_summary;
+            this.endpoints = endpoints;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.join_mode = join_mode;
+            this.name = name;
+            this.network_id = network_id;
+            this.owner = owner;
+            this.public_key = public_key;
+            this.publisher = publisher;
+            this.purpose = purpose;
+            this.revision = revision;
+            this.revoked_at_unix_ms = revoked_at_unix_ms;
+            this.schema_version = schema_version;
+            this.visibility = visibility;
+        }
+    }
+
+    /** DTO for NetworkDiscoveryRecord. */
+    public static final class NetworkDiscoveryRecord {
+        public final NetworkDiscoveryDocument document;
+        public final String signature;
+
+        public NetworkDiscoveryRecord(NetworkDiscoveryDocument document, String signature) {
+            this.document = document;
+            this.signature = signature;
+        }
+    }
+
+    /** DTO for NetworkEndpoint. */
+    public static final class NetworkEndpoint {
+        public final String host;
+        public final Integer port;
+        public final DiscoveryTransport transport;
+
+        public NetworkEndpoint(String host, Integer port, DiscoveryTransport transport) {
+            this.host = host;
+            this.port = port;
+            this.transport = transport;
         }
     }
 
@@ -2313,6 +2463,59 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeDiscoveryIndexError. */
+    public static final class NodeDiscoveryIndexError {
+        public final NodeDiscoveryIndexErrorCategory category;
+        public final Boolean retryable;
+
+        public NodeDiscoveryIndexError(NodeDiscoveryIndexErrorCategory category, Boolean retryable) {
+            this.category = category;
+            this.retryable = retryable;
+        }
+    }
+
+    /** DTO for NodeDiscoveryIndexRecordSnapshot. */
+    public static final class NodeDiscoveryIndexRecordSnapshot {
+        public final Long accepted_at_unix_ms;
+        public final String digest;
+        public final Boolean discoverable;
+        public final String invalid_reason;
+        public final NetworkDiscoveryRecord record;
+
+        public NodeDiscoveryIndexRecordSnapshot(Long accepted_at_unix_ms, String digest, Boolean discoverable, String invalid_reason, NetworkDiscoveryRecord record) {
+            this.accepted_at_unix_ms = accepted_at_unix_ms;
+            this.digest = digest;
+            this.discoverable = discoverable;
+            this.invalid_reason = invalid_reason;
+            this.record = record;
+        }
+    }
+
+    /** DTO for NodeDiscoveryIndexSnapshot. */
+    public static final class NodeDiscoveryIndexSnapshot {
+        public final Boolean data_plane_affected;
+        public final String index_url;
+        public final Long last_attempt_unix_ms;
+        public final NodeDiscoveryIndexError last_error;
+        public final Long last_success_unix_ms;
+        public final List<NodeDiscoveryIndexRecordSnapshot> records;
+        public final Long rejected_record_count;
+        public final Boolean search_history_stored;
+        public final NodeDiscoveryIndexState state;
+
+        public NodeDiscoveryIndexSnapshot(Boolean data_plane_affected, String index_url, Long last_attempt_unix_ms, NodeDiscoveryIndexError last_error, Long last_success_unix_ms, List<NodeDiscoveryIndexRecordSnapshot> records, Long rejected_record_count, Boolean search_history_stored, NodeDiscoveryIndexState state) {
+            this.data_plane_affected = data_plane_affected;
+            this.index_url = index_url;
+            this.last_attempt_unix_ms = last_attempt_unix_ms;
+            this.last_error = last_error;
+            this.last_success_unix_ms = last_success_unix_ms;
+            this.records = records;
+            this.rejected_record_count = rejected_record_count;
+            this.search_history_stored = search_history_stored;
+            this.state = state;
+        }
+    }
+
     /** DTO for NodeEmbeddedServiceSnapshot. */
     public static final class NodeEmbeddedServiceSnapshot {
         public final String network_name;
@@ -2492,11 +2695,13 @@ public final class NodeContractV1 {
 
     /** DTO for NodeJoinNetworkCommand. */
     public static final class NodeJoinNetworkCommand {
+        public final NetworkDiscoveryRecord discovery_record;
         public final String network_name;
         public final Boolean start;
         public final String target;
 
-        public NodeJoinNetworkCommand(String network_name, Boolean start, String target) {
+        public NodeJoinNetworkCommand(NetworkDiscoveryRecord discovery_record, String network_name, Boolean start, String target) {
+            this.discovery_record = discovery_record;
             this.network_name = network_name;
             this.start = start;
             this.target = target;
@@ -2624,6 +2829,17 @@ public final class NodeContractV1 {
             this.tun_name = tun_name;
             this.virtual_mode = virtual_mode;
             this.virtual_network = virtual_network;
+        }
+    }
+
+    /** DTO for NodeNetworkDiscoveryCommand. */
+    public static final class NodeNetworkDiscoveryCommand {
+        public final String index_url;
+        public final String network_name;
+
+        public NodeNetworkDiscoveryCommand(String index_url, String network_name) {
+            this.index_url = index_url;
+            this.network_name = network_name;
         }
     }
 
@@ -2977,6 +3193,7 @@ public final class NodeContractV1 {
         public final NodeCapabilityRegistrySnapshot capabilities;
         public final NodeConfigurationSnapshot configuration;
         public final NodeControlHealth control_health;
+        public final NodeDiscoveryIndexSnapshot discovery_index;
         public final List<NodeEmbeddedServiceSnapshot> embedded_services;
         public final ExitNodeCapabilities exit_node_capabilities;
         public final NodeIdentitySnapshot identity;
@@ -2995,10 +3212,11 @@ public final class NodeContractV1 {
         public final TunCapabilities tun_capabilities;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
             this.configuration = configuration;
             this.control_health = control_health;
+            this.discovery_index = discovery_index;
             this.embedded_services = embedded_services;
             this.exit_node_capabilities = exit_node_capabilities;
             this.identity = identity;
@@ -3502,6 +3720,56 @@ public final class NodeContractV1 {
             public UpdateNetworkProfile(NodeNetworkProfileCommand payload) {
                 super(NodeCommandKind.UPDATE_NETWORK_PROFILE);
                 this.payload = payload;
+            }
+        }
+
+        public static final class PublishNetworkDiscovery extends NodeCommand {
+            public final NodeNetworkDiscoveryCommand payload;
+
+            public PublishNetworkDiscovery(NodeNetworkDiscoveryCommand payload) {
+                super(NodeCommandKind.PUBLISH_NETWORK_DISCOVERY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class UpdateNetworkDiscovery extends NodeCommand {
+            public final NodeNetworkDiscoveryCommand payload;
+
+            public UpdateNetworkDiscovery(NodeNetworkDiscoveryCommand payload) {
+                super(NodeCommandKind.UPDATE_NETWORK_DISCOVERY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class UnpublishNetworkDiscovery extends NodeCommand {
+            public final NodeNetworkDiscoveryCommand payload;
+
+            public UnpublishNetworkDiscovery(NodeNetworkDiscoveryCommand payload) {
+                super(NodeCommandKind.UNPUBLISH_NETWORK_DISCOVERY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RefreshDiscoveryIndex extends NodeCommand {
+            public final RefreshDiscoveryIndexPayload payload;
+
+            public RefreshDiscoveryIndex(RefreshDiscoveryIndexPayload payload) {
+                super(NodeCommandKind.REFRESH_DISCOVERY_INDEX);
+                this.payload = payload;
+            }
+            /** DTO for RefreshDiscoveryIndexPayload. */
+            public static final class RefreshDiscoveryIndexPayload {
+                public final String index_url;
+
+                public RefreshDiscoveryIndexPayload(String index_url) {
+                    this.index_url = index_url;
+                }
+            }
+        }
+
+        public static final class RetryDiscoveryIndex extends NodeCommand {
+            public RetryDiscoveryIndex() {
+                super(NodeCommandKind.RETRY_DISCOVERY_INDEX);
             }
         }
 
@@ -4271,9 +4539,12 @@ public final class NodeContractV1 {
             command == NodeCommandKind.PREVIEW_CONFIGURATION ||
             command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
             command == NodeCommandKind.PROBE_PEER ||
+            command == NodeCommandKind.PUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.REBUILD_TUN ||
+            command == NodeCommandKind.REFRESH_DISCOVERY_INDEX ||
             command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.RESTART_NODE ||
+            command == NodeCommandKind.RETRY_DISCOVERY_INDEX ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
             command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
@@ -4284,7 +4555,9 @@ public final class NodeContractV1 {
             command == NodeCommandKind.STOP_NETWORKS ||
             command == NodeCommandKind.STOP_NODE ||
             command == NodeCommandKind.UNBAN_CLIENT ||
+            command == NodeCommandKind.UNPUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||
+            command == NodeCommandKind.UPDATE_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_PROFILE ||
             command == NodeCommandKind.UPDATE_ROUTING;
     }

@@ -573,6 +573,7 @@ impl AppController {
             target,
             network_name: Some(network_name.clone()),
             start: true,
+            discovery_record: None,
         }))
         .await?;
 

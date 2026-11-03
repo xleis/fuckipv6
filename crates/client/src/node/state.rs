@@ -12,6 +12,7 @@ use fuckipv6_common::domain::{
 use fuckipv6_common::ExitNodeCapabilities;
 
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodePhase};
+use crate::discovery_index::NodeDiscoveryIndexSnapshot;
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
 
@@ -67,6 +68,10 @@ pub struct NodeSnapshot {
     /// addresses, topology, activity, invitation tickets or secret material.
     #[serde(default)]
     pub network_profiles: Vec<NodeNetworkProfileSnapshot>,
+    /// Signed public discovery-index projection. This control-plane state is
+    /// isolated from joined network lifecycle and forwarding data planes.
+    #[serde(default)]
+    pub discovery_index: NodeDiscoveryIndexSnapshot,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     /// The five most recent user-meaningful command outcomes. Entries are
@@ -1238,6 +1243,29 @@ impl NodeStateStore {
         snapshot.interfaces = capture.interfaces;
         snapshot.interface_problems = capture.problems;
         snapshot.refresh_capability_states();
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        let published = snapshot.clone();
+        self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.advance_snapshot_revision(published.revision);
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
+        published
+    }
+
+    /// Replace the signed discovery-index projection. Discovery is a
+    /// control-plane convenience and must never alter joined network state.
+    pub(crate) async fn replace_discovery_index(
+        &self,
+        discovery: NodeDiscoveryIndexSnapshot,
+    ) -> NodeSnapshot {
+        let mut snapshot = self.snapshot.write().await;
+        if snapshot.discovery_index == discovery {
+            return snapshot.clone();
+        }
+        snapshot.discovery_index = discovery;
         snapshot.revision = snapshot.revision.saturating_add(1);
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());

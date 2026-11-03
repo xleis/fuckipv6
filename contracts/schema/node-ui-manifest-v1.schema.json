@@ -36,6 +36,11 @@
             "create_network",
             "preview_network_profile",
             "update_network_profile",
+            "publish_network_discovery",
+            "update_network_discovery",
+            "unpublish_network_discovery",
+            "refresh_discovery_index",
+            "retry_discovery_index",
             "join_network",
             "update_routing",
             "set_network_role",
@@ -240,6 +245,7 @@
         "role",
         "routing_mode",
         "url_or_ticket",
+        "discovery_index_url",
         "timeout_ms"
       ],
       "type": "string"

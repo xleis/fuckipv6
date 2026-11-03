@@ -7037,6 +7037,7 @@ mod tests {
                 target: ticket,
                 network_name: None,
                 start: false,
+                discovery_record: None,
             })
             .await
             .expect("join ticket");
@@ -7222,6 +7223,7 @@ mod tests {
                     target: ticket,
                     network_name: None,
                     start: false,
+                    discovery_record: None,
                 })
                 .await,
             Err(RuntimeControlError::Conflict(_))

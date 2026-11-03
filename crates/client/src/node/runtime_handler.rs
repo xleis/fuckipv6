@@ -17,6 +17,10 @@ use super::{
 };
 use crate::config_manager::{ConfigManager, NetworkProfileError};
 use crate::config_transaction::{ConfigurationTransactionError, ConfigurationValidationCode};
+use crate::discovery_index::{
+    DiscoveryIndexError, DiscoveryIndexManager, NodeDiscoveryIndexErrorCategory,
+    NodeDiscoveryIndexSnapshot,
+};
 use crate::ipc::MultiNetworkRegistry;
 use crate::network_setup::NetworkSetupStage;
 use crate::node::command::NodeNetworkProfileCommand;
@@ -40,6 +44,7 @@ pub struct NodeRuntimeHandler {
     services: EmbeddedServiceManager,
     runtime: Option<NetworkRuntimeManager>,
     configs: Option<ConfigManager>,
+    discovery: Option<DiscoveryIndexManager>,
 }
 
 impl NodeRuntimeHandler {
@@ -58,6 +63,7 @@ impl NodeRuntimeHandler {
             services,
             runtime: None,
             configs: None,
+            discovery: None,
         }
     }
 
@@ -68,12 +74,14 @@ impl NodeRuntimeHandler {
         runtime: NetworkRuntimeManager,
         configs: ConfigManager,
     ) -> Self {
+        let discovery = DiscoveryIndexManager::production(&configs);
         Self {
             state,
             registry,
             services,
             runtime: Some(runtime),
             configs: Some(configs),
+            discovery: Some(discovery),
         }
     }
 
@@ -88,6 +96,7 @@ impl NodeRuntimeHandler {
         let services = self.services.clone();
         let runtime = self.runtime.clone();
         let configs = self.configs.clone();
+        let discovery = self.discovery.clone();
 
         Box::pin(async move {
             let request_id = request.request_id;
@@ -97,6 +106,9 @@ impl NodeRuntimeHandler {
 
             match request.command {
                 super::NodeCommand::GetSnapshot => {
+                    if let Some(discovery) = discovery.as_ref() {
+                        state.replace_discovery_index(discovery.snapshot()).await;
+                    }
                     if let Some(configs) = configs.as_ref() {
                         refresh_network_profiles(&state, configs).await;
                     }
@@ -293,8 +305,92 @@ impl NodeRuntimeHandler {
                     (None, _) => unavailable(request_id, "更新网络资料需要节点配置管理器"),
                     (_, None) => unavailable(request_id, "更新网络资料缺少受信任的认证上下文"),
                 },
+                super::NodeCommand::PublishNetworkDiscovery(command) => {
+                    match (configs, discovery) {
+                        (Some(configs), Some(discovery)) => {
+                            let operation_id = context
+                                .as_ref()
+                                .and_then(|context| context.operation_id.clone());
+                            let result = discovery
+                                .publish(
+                                    &state,
+                                    &configs,
+                                    &command.network_name,
+                                    &command.index_url,
+                                    operation_id,
+                                )
+                                .await;
+                            discovery_command_result(request_id, result)
+                        }
+                        (None, _) => unavailable(request_id, "发布发现索引需要节点配置管理器"),
+                        (_, None) => unavailable(request_id, "发现索引管理器尚未初始化"),
+                    }
+                }
+                super::NodeCommand::UpdateNetworkDiscovery(command) => match (configs, discovery) {
+                    (Some(configs), Some(discovery)) => {
+                        let operation_id = context
+                            .as_ref()
+                            .and_then(|context| context.operation_id.clone());
+                        let result = discovery
+                            .update(
+                                &state,
+                                &configs,
+                                &command.network_name,
+                                &command.index_url,
+                                operation_id,
+                            )
+                            .await;
+                        discovery_command_result(request_id, result)
+                    }
+                    (None, _) => unavailable(request_id, "更新发现索引需要节点配置管理器"),
+                    (_, None) => unavailable(request_id, "发现索引管理器尚未初始化"),
+                },
+                super::NodeCommand::UnpublishNetworkDiscovery(command) => {
+                    match (configs, discovery) {
+                        (Some(configs), Some(discovery)) => {
+                            let operation_id = context
+                                .as_ref()
+                                .and_then(|context| context.operation_id.clone());
+                            let result = discovery
+                                .unpublish(
+                                    &state,
+                                    &configs,
+                                    &command.network_name,
+                                    &command.index_url,
+                                    operation_id,
+                                )
+                                .await;
+                            discovery_command_result(request_id, result)
+                        }
+                        (None, _) => unavailable(request_id, "下线发现索引需要节点配置管理器"),
+                        (_, None) => unavailable(request_id, "发现索引管理器尚未初始化"),
+                    }
+                }
+                super::NodeCommand::RefreshDiscoveryIndex { index_url } => match discovery {
+                    Some(discovery) => {
+                        let result = discovery.refresh(&state, index_url.as_deref()).await;
+                        discovery_command_result(request_id, result)
+                    }
+                    None => unavailable(request_id, "发现索引管理器尚未初始化"),
+                },
+                super::NodeCommand::RetryDiscoveryIndex => match discovery {
+                    Some(discovery) => {
+                        let result = discovery.retry(&state).await;
+                        discovery_command_result(request_id, result)
+                    }
+                    None => unavailable(request_id, "发现索引管理器尚未初始化"),
+                },
                 super::NodeCommand::JoinNetwork(command) => match runtime {
-                    Some(runtime) => join_runtime_network(&runtime, request_id, command).await,
+                    Some(runtime) => {
+                        join_runtime_network(
+                            &runtime,
+                            discovery.as_ref(),
+                            &state,
+                            request_id,
+                            command,
+                        )
+                        .await
+                    }
                     None => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
                 },
                 super::NodeCommand::UpdateRouting(command) => {
@@ -1049,11 +1145,60 @@ async fn create_runtime_network(
     }
 }
 
+fn discovery_command_result(
+    request_id: u64,
+    result: Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError>,
+) -> NodeCommandResult {
+    match result {
+        Ok(snapshot) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Completed {
+                message: format!(
+                    "发现索引状态: {}；已验证记录: {}；数据面受影响: {}",
+                    snapshot.state.as_str(),
+                    snapshot.records.len(),
+                    snapshot.data_plane_affected
+                ),
+            },
+        ),
+        Err(error) => NodeCommandResult::rejected(request_id, discovery_problem(error)),
+    }
+}
+
+fn discovery_problem(error: DiscoveryIndexError) -> NodeProblem {
+    let code = match error.category {
+        NodeDiscoveryIndexErrorCategory::Unsupported => NodeProblemCode::Unsupported,
+        NodeDiscoveryIndexErrorCategory::Rejected => NodeProblemCode::InvalidRequest,
+        NodeDiscoveryIndexErrorCategory::Storage => NodeProblemCode::Internal,
+        NodeDiscoveryIndexErrorCategory::Offline
+        | NodeDiscoveryIndexErrorCategory::Timeout
+        | NodeDiscoveryIndexErrorCategory::InvalidResponse
+        | NodeDiscoveryIndexErrorCategory::Server => NodeProblemCode::Unavailable,
+    };
+    NodeProblem::new(
+        code,
+        format!("发现索引请求失败: {}", error.category.as_str()),
+    )
+    .with_message_key(error.message_key())
+    .with_param("discovery_error", error.category.as_str())
+    .retryable(error.retryable())
+}
+
 async fn join_runtime_network(
     runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    state: &NodeStateStore,
     request_id: u64,
-    command: super::NodeJoinNetworkCommand,
+    mut command: super::NodeJoinNetworkCommand,
 ) -> NodeCommandResult {
+    if let Some(record) = command.discovery_record.take() {
+        let Some(discovery) = discovery else {
+            return unavailable(request_id, "加入网络前无法验证签名发现记录");
+        };
+        if let Err(error) = discovery.accept_join_record(state, record).await {
+            return NodeCommandResult::rejected(request_id, discovery_problem(error));
+        }
+    }
     match runtime.join(command).await {
         Ok(result) => NodeCommandResult::completed(
             request_id,
@@ -1901,6 +2046,7 @@ mod tests {
                 target: "fk://invite".into(),
                 network_name: Some("office".into()),
                 start: true,
+                discovery_record: None,
             }),
         ];
 

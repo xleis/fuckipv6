@@ -1224,7 +1224,7 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     let content = serde_json::to_vec_pretty(value).context("无法序列化 JSON")?;
     write_bytes_atomic(path, &content)
 }

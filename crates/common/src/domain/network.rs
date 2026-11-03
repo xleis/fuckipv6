@@ -399,6 +399,8 @@ pub const DEFAULT_NETWORK_LANGUAGE: &str = "und";
 pub const DEFAULT_NETWORK_REGION: &str = "ZZ";
 pub const NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION: u16 = 1;
 pub const NETWORK_PUBLIC_PROFILE_VALIDITY_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+pub const NETWORK_DISCOVERY_SCHEMA_VERSION: u16 = 1;
+pub const NETWORK_DISCOVERY_VALIDITY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 pub const NETWORK_PROFILE_MAX_TAGS: usize = 12;
 pub const NETWORK_PROFILE_MAX_TAG_CHARS: usize = 32;
 
@@ -968,8 +970,12 @@ pub fn network_profile_projections(
 /// network ID remains bound to the immutable network public key.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NetworkDiscoveryDocument {
+    pub schema_version: u16,
     pub network_id: NetworkId,
     pub public_key: PublicKey,
+    /// Node that published this revision. Schema v1 binds the publisher to the
+    /// network owner so another member cannot publish an owner-authorized card.
+    pub publisher: NodeId,
     pub name: String,
     pub purpose: String,
     pub visibility: NetworkVisibility,
@@ -978,16 +984,35 @@ pub struct NetworkDiscoveryDocument {
     pub revision: u64,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+    /// Canonical capability declaration summary. This is discoverability
+    /// metadata, not proof that a capability is currently operational.
+    pub capability_summary: Vec<CapabilityKind>,
     #[serde(default)]
     pub endpoints: Vec<NetworkEndpoint>,
+    /// A signed tombstone is a normal revision with this timestamp set. Once a
+    /// client accepts one, every older or non-identical successor is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at_unix_ms: Option<u64>,
 }
 
 impl NetworkDiscoveryDocument {
     pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
+        if self.schema_version != NETWORK_DISCOVERY_SCHEMA_VERSION {
+            return Err(DomainError::new(
+                "domain.discovery_unsupported_version",
+                "network discovery schema version is unsupported",
+            ));
+        }
         let expected = NetworkId::from_public_key(self.public_key.as_str().as_bytes());
         if self.network_id != expected {
             return Err(DomainError::invariant(
                 "discovery network id does not match its public key",
+            ));
+        }
+        if self.publisher != self.owner {
+            return Err(DomainError::new(
+                "domain.discovery_publisher_mismatch",
+                "network discovery publisher does not match the network owner",
             ));
         }
         if self.name.is_empty() || self.name.len() > 80 {
@@ -1008,6 +1033,24 @@ impl NetworkDiscoveryDocument {
                 "discovery validity interval is empty",
             ));
         }
+        validate_capability_declarations(&self.capability_summary)?;
+        let mut canonical_capabilities = self.capability_summary.clone();
+        canonical_capabilities.sort();
+        if canonical_capabilities != self.capability_summary {
+            return Err(DomainError::invalid_value(
+                "discovery capability summary must use canonical order",
+            ));
+        }
+        if let Some(revoked_at_unix_ms) = self.revoked_at_unix_ms {
+            if revoked_at_unix_ms < self.issued_at_unix_ms
+                || revoked_at_unix_ms > now_unix_ms
+                || revoked_at_unix_ms >= self.expires_at_unix_ms
+            {
+                return Err(DomainError::invalid_value(
+                    "discovery revocation timestamp is invalid",
+                ));
+            }
+        }
         if now_unix_ms >= self.expires_at_unix_ms {
             return Err(DomainError::new(
                 "domain.discovery_expired",
@@ -1025,6 +1068,51 @@ impl NetworkDiscoveryDocument {
         Ok(())
     }
 
+    /// Build a discovery document from the exact signed public profile that is
+    /// persisted for an owner-created network. Discovery revision is managed by
+    /// the index and may advance independently of the profile revision.
+    pub fn from_record(
+        record: &NetworkRecord,
+        revision: u64,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        revoked_at_unix_ms: Option<u64>,
+    ) -> DomainResult<Self> {
+        record.validate()?;
+        let signed_profile = record.signed_profile.as_ref().ok_or_else(|| {
+            DomainError::new(
+                "domain.discovery_profile_unsigned",
+                "network discovery requires a signed public profile",
+            )
+        })?;
+        signed_profile.validate_against_record(record)?;
+        if signed_profile.document.is_expired_at(issued_at_unix_ms) {
+            return Err(DomainError::new(
+                "domain.discovery_profile_expired",
+                "network public profile has expired",
+            ));
+        }
+        let document = Self {
+            schema_version: NETWORK_DISCOVERY_SCHEMA_VERSION,
+            network_id: record.network_id.clone(),
+            public_key: record.public_key.clone(),
+            publisher: record.owner.clone(),
+            name: record.name.clone(),
+            purpose: record.purpose.clone(),
+            visibility: record.visibility,
+            join_mode: record.join_mode,
+            owner: record.owner.clone(),
+            revision,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            capability_summary: record.capability_declarations.clone(),
+            endpoints: Vec::new(),
+            revoked_at_unix_ms,
+        };
+        document.validate_at(issued_at_unix_ms)?;
+        Ok(document)
+    }
+
     pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
         serde_json::to_vec(self)
             .map_err(|_| DomainError::invalid_value("discovery payload cannot be encoded"))
@@ -1038,6 +1126,26 @@ pub struct NetworkDiscoveryRecord {
 }
 
 impl NetworkDiscoveryRecord {
+    pub fn digest(&self) -> DomainResult<String> {
+        Ok(blake3::hash(&self.document.signing_payload()?)
+            .to_hex()
+            .to_string())
+    }
+
+    pub fn sign(document: NetworkDiscoveryDocument, identity: &Identity) -> DomainResult<Self> {
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        if public_key != document.public_key {
+            return Err(DomainError::invariant(
+                "network discovery signing identity does not match the network public key",
+            ));
+        }
+        let signature = identity.sign(&document.signing_payload()?);
+        Ok(Self {
+            document,
+            signature: Signature::from_bytes(signature.to_bytes()),
+        })
+    }
+
     pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
         self.document.validate_at(now_unix_ms)?;
         let key = VerifyingKey::from_bytes(&self.document.public_key.to_bytes()?)
@@ -1058,25 +1166,34 @@ impl NetworkDiscoveryRecord {
         &self,
         current_revision: u64,
         current_digest: Option<&str>,
+        current_revoked: bool,
         now_unix_ms: u64,
     ) -> DomainResult<()> {
         self.validate_at(now_unix_ms)?;
+        let digest = self.digest()?;
+        if current_revoked {
+            if self.document.revoked_at_unix_ms.is_some()
+                && self.document.revision == current_revision
+                && current_digest == Some(digest.as_str())
+            {
+                return Ok(());
+            }
+            return Err(DomainError::new(
+                "domain.discovery_already_revoked",
+                "network discovery record has already been revoked",
+            ));
+        }
         if self.document.revision < current_revision {
             return Err(DomainError::new(
                 "domain.discovery_rollback",
                 "network discovery revision moved backwards",
             ));
         }
-        if self.document.revision == current_revision {
-            let digest = blake3::hash(&self.document.signing_payload()?)
-                .to_hex()
-                .to_string();
-            if current_digest != Some(digest.as_str()) {
-                return Err(DomainError::new(
-                    "domain.discovery_conflict",
-                    "network discovery revision conflicts with the accepted record",
-                ));
-            }
+        if self.document.revision == current_revision && current_digest != Some(digest.as_str()) {
+            return Err(DomainError::new(
+                "domain.discovery_conflict",
+                "network discovery revision conflicts with the accepted record",
+            ));
         }
         Ok(())
     }
@@ -1090,28 +1207,96 @@ mod tests {
 
     fn signed_record(revision: u64, now: u64, signing_key: &SigningKey) -> NetworkDiscoveryRecord {
         let public_key = PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
+        let owner = NodeId::from_public_key(b"owner");
         let document = NetworkDiscoveryDocument {
+            schema_version: NETWORK_DISCOVERY_SCHEMA_VERSION,
             network_id: NetworkId::from_public_key(public_key.as_str().as_bytes()),
             public_key,
+            publisher: owner.clone(),
             name: "home".into(),
             purpose: "private mesh".into(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::ApprovalRequired,
-            owner: NodeId::from_public_key(b"owner"),
+            owner,
             revision,
             issued_at_unix_ms: now.saturating_sub(1),
             expires_at_unix_ms: now + 60_000,
+            capability_summary: vec![CapabilityKind::Relay],
             endpoints: vec![NetworkEndpoint {
                 transport: DiscoveryTransport::Quic,
                 host: "relay.example".into(),
                 port: 443,
             }],
+            revoked_at_unix_ms: None,
         };
         let signature = signing_key.sign(&document.signing_payload().unwrap());
         NetworkDiscoveryRecord {
             document,
             signature: Signature::from_bytes(signature.to_bytes()),
         }
+    }
+
+    fn signed_network_record(identity: &Identity, issued_at_unix_ms: u64) -> NetworkRecord {
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, issued_at_unix_ms)
+                .unwrap();
+        network
+            .sign_public_profile(
+                identity,
+                issued_at_unix_ms,
+                issued_at_unix_ms + NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
+            )
+            .unwrap();
+        network
+    }
+
+    #[test]
+    fn discovery_from_signed_profile_is_verifiable_and_bound_to_network() {
+        let identity = Identity::generate().unwrap();
+        let network = signed_network_record(&identity, 100);
+        let document = NetworkDiscoveryDocument::from_record(&network, 3, 200, 5_000, None)
+            .expect("signed profile should produce discovery metadata");
+        assert_eq!(document.network_id, network.network_id);
+        assert_eq!(document.public_key, network.public_key);
+        assert_eq!(document.publisher, network.owner);
+        assert_eq!(document.owner, network.owner);
+        assert_eq!(document.name, network.name);
+        assert_eq!(document.capability_summary, network.capability_declarations);
+        assert!(document.endpoints.is_empty());
+
+        let discovery = NetworkDiscoveryRecord::sign(document, &identity).unwrap();
+        discovery.validate_at(500).unwrap();
+        assert_eq!(discovery.document.revision, 3);
+    }
+
+    #[test]
+    fn discovery_from_record_rejects_unsigned_expired_and_mismatched_profiles() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let unsigned =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        assert_eq!(
+            NetworkDiscoveryDocument::from_record(&unsigned, 1, 100, 5_000, None)
+                .unwrap_err()
+                .code(),
+            "domain.discovery_profile_unsigned"
+        );
+
+        let mut expired = signed_network_record(&identity, 100);
+        expired.sign_public_profile(&identity, 100, 200).unwrap();
+        assert_eq!(
+            NetworkDiscoveryDocument::from_record(&expired, 1, 200, 5_000, None)
+                .unwrap_err()
+                .code(),
+            "domain.discovery_profile_expired"
+        );
+
+        let mut mismatched = signed_network_record(&identity, 100);
+        mismatched.name = "different-network".into();
+        assert!(NetworkDiscoveryDocument::from_record(&mismatched, 1, 200, 5_000, None).is_err());
     }
 
     #[test]
@@ -1144,19 +1329,71 @@ mod tests {
         let key = SigningKey::from_bytes(&[7; 32]);
         let record = signed_record(2, 100, &key);
         assert_eq!(
-            record.validate_successor(3, None, 100).unwrap_err().code(),
+            record
+                .validate_successor(3, None, false, 100)
+                .unwrap_err()
+                .code(),
             "domain.discovery_rollback"
         );
         assert!(record
-            .validate_successor(2, Some("different"), 100)
+            .validate_successor(2, Some("different"), false, 100)
             .is_err());
         let digest = blake3::hash(&record.document.signing_payload().unwrap())
             .to_hex()
             .to_string();
-        record.validate_successor(2, Some(&digest), 100).unwrap();
+        record
+            .validate_successor(2, Some(&digest), false, 100)
+            .unwrap();
         assert_eq!(
             record.validate_at(60_100).unwrap_err().code(),
             "domain.discovery_expired"
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_unsupported_schema_publisher_and_noncanonical_capabilities() {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let mut record = signed_record(1, 100, &key);
+        record.document.schema_version = NETWORK_DISCOVERY_SCHEMA_VERSION + 1;
+        assert_eq!(
+            record.validate_at(100).unwrap_err().code(),
+            "domain.discovery_unsupported_version"
+        );
+
+        let mut record = signed_record(1, 100, &key);
+        record.document.publisher = NodeId::from_public_key(b"attacker");
+        assert_eq!(
+            record.validate_at(100).unwrap_err().code(),
+            "domain.discovery_publisher_mismatch"
+        );
+
+        let mut record = signed_record(1, 100, &key);
+        record.document.capability_summary =
+            vec![CapabilityKind::Relay, CapabilityKind::Coordinator];
+        assert!(record.validate_at(100).is_err());
+        record.document.capability_summary = vec![CapabilityKind::Relay, CapabilityKind::Relay];
+        assert!(record.validate_at(100).is_err());
+    }
+
+    #[test]
+    fn tombstone_is_terminal_and_identical_retry_is_idempotent() {
+        let key = SigningKey::from_bytes(&[10; 32]);
+        let mut tombstone = signed_record(3, 100, &key);
+        tombstone.document.revoked_at_unix_ms = Some(100);
+        let signature = key.sign(&tombstone.document.signing_payload().unwrap());
+        tombstone.signature = Signature::from_bytes(signature.to_bytes());
+        let digest = tombstone.digest().unwrap();
+        tombstone
+            .validate_successor(3, Some(&digest), true, 100)
+            .unwrap();
+
+        let replay = signed_record(4, 100, &key);
+        assert_eq!(
+            replay
+                .validate_successor(3, Some(&digest), true, 100)
+                .unwrap_err()
+                .code(),
+            "domain.discovery_already_revoked"
         );
     }
 

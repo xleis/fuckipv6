@@ -1364,6 +1364,11 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
         NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
         NodeCommand::UpdateNetworkProfile(_) => OperationKind::NetworkProfileUpdate,
+        NodeCommand::PublishNetworkDiscovery(_)
+        | NodeCommand::UpdateNetworkDiscovery(_)
+        | NodeCommand::UnpublishNetworkDiscovery(_)
+        | NodeCommand::RefreshDiscoveryIndex { .. }
+        | NodeCommand::RetryDiscoveryIndex => OperationKind::DiscoveryIndexUpdate,
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -1405,6 +1410,9 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         NodeCommand::CreateNetwork(command) => network_target(&command.name),
         NodeCommand::PreviewNetworkProfile(command)
         | NodeCommand::UpdateNetworkProfile(command) => network_target(&command.network_name),
+        NodeCommand::PublishNetworkDiscovery(command)
+        | NodeCommand::UpdateNetworkDiscovery(command)
+        | NodeCommand::UnpublishNetworkDiscovery(command) => network_target(&command.network_name),
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()
@@ -1435,6 +1443,8 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::ApplyConfiguration(_)
         | NodeCommand::RollbackConfiguration(_)
         | NodeCommand::GetConfigurationHistory
+        | NodeCommand::RefreshDiscoveryIndex { .. }
+        | NodeCommand::RetryDiscoveryIndex
         | NodeCommand::SetNodeDisplayName(_)
         | NodeCommand::RotateNodeIdentity(_)
         | NodeCommand::Shutdown => node_target(),
@@ -3570,6 +3580,7 @@ mod tests {
                     target: invitation.into(),
                     network_name: Some("home".into()),
                     start: false,
+                    discovery_record: None,
                 }),
             ),
             idempotency_key: Some(IdempotencyKey::from_public_key(b"audit-operation-link")),

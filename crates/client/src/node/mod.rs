@@ -31,11 +31,11 @@ pub use command::{
     NodeCreatedNetwork, NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticRecoveryAction,
     NodeDiagnosticState, NodeDiagnosticsSnapshot, NodeIdentityRotationSnapshot,
     NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkAllocationSnapshot,
-    NodeNetworkCreationNextStep, NodeNetworkProfileCommand, NodePeerProbeSnapshot,
-    NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeResidualCleanupResult,
-    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot,
-    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeUpdateNetworkAllocationCommand,
-    NodeUpdateRoutingCommand,
+    NodeNetworkCreationNextStep, NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand,
+    NodePeerProbeSnapshot, NodePreviewConfigurationCommand, NodeProbePeerCommand,
+    NodeResidualCleanupResult, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 pub use event::{
     NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,

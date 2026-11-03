@@ -85,6 +85,11 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   create_network: "create_network",
   preview_network_profile: "preview_network_profile",
   update_network_profile: "update_network_profile",
+  publish_network_discovery: "publish_network_discovery",
+  update_network_discovery: "update_network_discovery",
+  unpublish_network_discovery: "unpublish_network_discovery",
+  refresh_discovery_index: "refresh_discovery_index",
+  retry_discovery_index: "retry_discovery_index",
   join_network: "join_network",
   start_networks: "start_networks",
   stop_networks: "stop_networks",
@@ -165,6 +170,7 @@ const INPUT_KINDS = new Set([
   "configuration_json",
   "display_name",
   "fingerprint",
+  "discovery_index_url",
 ]);
 const VALIDATIONS = new Set([
   "none",
@@ -738,6 +744,8 @@ export function defaultFieldValue(
   if (field.id === "region") return "ZZ";
   if (field.id === "tags") return "";
   if (field.id === "capability_declarations") return "";
+  if (field.id === "index_url")
+    return snapshot.discovery_index?.index_url ?? "";
   if (field.id === "visibility") return "unlisted";
   if (field.id === "join_mode") return "invite_only";
   if (field.id === "signaling_port") return "6666";
@@ -1474,6 +1482,26 @@ export function buildCommand(
         ? { command: "preview_network_profile", payload: command }
         : { command: "update_network_profile", payload: command };
     }
+    case "publish_network_discovery":
+    case "update_network_discovery":
+    case "unpublish_network_discovery": {
+      const command = {
+        network_name: requiredString("network_name"),
+        index_url: requiredString("index_url"),
+      };
+      if (action.id === "publish_network_discovery")
+        return { command: "publish_network_discovery", payload: command };
+      if (action.id === "update_network_discovery")
+        return { command: "update_network_discovery", payload: command };
+      return { command: "unpublish_network_discovery", payload: command };
+    }
+    case "refresh_discovery_index":
+      return {
+        command: "refresh_discovery_index",
+        payload: { index_url: optional(values, "index_url") },
+      };
+    case "retry_discovery_index":
+      return { command: "retry_discovery_index" };
     case "join_network":
       return {
         command: "join_network",

@@ -67,6 +67,7 @@ pub async fn join(
             target: server.to_string(),
             network_name: Some(network_name.clone()),
             start: auto_start,
+            discovery_record: None,
         }),
     )
     .await?;

@@ -7,8 +7,9 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind,
-    MembershipRole, NetworkCreateProfile, NetworkJoinMode, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, NETWORK_PROFILE_MAX_TAG_CHARS,
+    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkJoinMode,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
+    NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -71,6 +72,11 @@ pub enum NodeCommandKind {
     CreateNetwork,
     PreviewNetworkProfile,
     UpdateNetworkProfile,
+    PublishNetworkDiscovery,
+    UpdateNetworkDiscovery,
+    UnpublishNetworkDiscovery,
+    RefreshDiscoveryIndex,
+    RetryDiscoveryIndex,
     JoinNetwork,
     UpdateRouting,
     SetNetworkRole,
@@ -96,7 +102,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 36] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -107,6 +113,11 @@ impl NodeCommandKind {
         Self::CreateNetwork,
         Self::PreviewNetworkProfile,
         Self::UpdateNetworkProfile,
+        Self::PublishNetworkDiscovery,
+        Self::UpdateNetworkDiscovery,
+        Self::UnpublishNetworkDiscovery,
+        Self::RefreshDiscoveryIndex,
+        Self::RetryDiscoveryIndex,
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -132,7 +143,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 30] = [
+    pub const ACTIONS: [Self; 35] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -142,6 +153,11 @@ impl NodeCommandKind {
         Self::CreateNetwork,
         Self::PreviewNetworkProfile,
         Self::UpdateNetworkProfile,
+        Self::PublishNetworkDiscovery,
+        Self::UpdateNetworkDiscovery,
+        Self::UnpublishNetworkDiscovery,
+        Self::RefreshDiscoveryIndex,
+        Self::RetryDiscoveryIndex,
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -195,6 +211,11 @@ impl NodeCommandKind {
             Self::CreateNetwork => "create_network",
             Self::PreviewNetworkProfile => "preview_network_profile",
             Self::UpdateNetworkProfile => "update_network_profile",
+            Self::PublishNetworkDiscovery => "publish_network_discovery",
+            Self::UpdateNetworkDiscovery => "update_network_discovery",
+            Self::UnpublishNetworkDiscovery => "unpublish_network_discovery",
+            Self::RefreshDiscoveryIndex => "refresh_discovery_index",
+            Self::RetryDiscoveryIndex => "retry_discovery_index",
             Self::JoinNetwork => "join_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
@@ -232,6 +253,11 @@ impl NodeCommandKind {
                 | Self::RebuildTun
                 | Self::CreateNetwork
                 | Self::UpdateNetworkProfile
+                | Self::PublishNetworkDiscovery
+                | Self::UpdateNetworkDiscovery
+                | Self::UnpublishNetworkDiscovery
+                | Self::RefreshDiscoveryIndex
+                | Self::RetryDiscoveryIndex
                 | Self::JoinNetwork
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
@@ -291,6 +317,21 @@ pub enum NodeCommand {
     PreviewNetworkProfile(NodeNetworkProfileCommand),
     /// Atomically apply, re-sign and audit a public profile update.
     UpdateNetworkProfile(NodeNetworkProfileCommand),
+    /// Sign and publish the current public profile to a discovery index.
+    PublishNetworkDiscovery(NodeNetworkDiscoveryCommand),
+    /// Sign a newer discovery revision and publish it.
+    UpdateNetworkDiscovery(NodeNetworkDiscoveryCommand),
+    /// Sign and publish a terminal revocation for a discovery record.
+    UnpublishNetworkDiscovery(NodeNetworkDiscoveryCommand),
+    /// Fetch and verify the signed discovery index without changing any data plane.
+    RefreshDiscoveryIndex {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index_url: Option<String>,
+    },
+    /// Retry the last configured discovery index after an outage.
+    RetryDiscoveryIndex,
+    /// Join using signed discovery material that is revalidated against the
+    /// persisted revision/revocation watermark before any network mutation.
     JoinNetwork(NodeJoinNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
@@ -348,6 +389,11 @@ impl NodeCommand {
             Self::CreateNetwork(_) => NodeCommandKind::CreateNetwork,
             Self::PreviewNetworkProfile(_) => NodeCommandKind::PreviewNetworkProfile,
             Self::UpdateNetworkProfile(_) => NodeCommandKind::UpdateNetworkProfile,
+            Self::PublishNetworkDiscovery(_) => NodeCommandKind::PublishNetworkDiscovery,
+            Self::UpdateNetworkDiscovery(_) => NodeCommandKind::UpdateNetworkDiscovery,
+            Self::UnpublishNetworkDiscovery(_) => NodeCommandKind::UnpublishNetworkDiscovery,
+            Self::RefreshDiscoveryIndex { .. } => NodeCommandKind::RefreshDiscoveryIndex,
+            Self::RetryDiscoveryIndex => NodeCommandKind::RetryDiscoveryIndex,
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
@@ -431,6 +477,21 @@ impl NodeCommand {
             Self::PreviewNetworkProfile(command) | Self::UpdateNetworkProfile(command) => {
                 command.validate()
             }
+            Self::PublishNetworkDiscovery(command)
+            | Self::UpdateNetworkDiscovery(command)
+            | Self::UnpublishNetworkDiscovery(command) => command.validate(),
+            Self::RefreshDiscoveryIndex { index_url } => {
+                if index_url
+                    .as_deref()
+                    .is_some_and(|url| url.trim().is_empty())
+                {
+                    return Err(invalid(
+                        "发现索引 URL 不能为空字符串；使用省略值重试已保存的索引",
+                    ));
+                }
+                Ok(())
+            }
+            Self::RetryDiscoveryIndex => Ok(()),
             Self::JoinNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
@@ -769,10 +830,30 @@ impl NodeNetworkProfileCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkDiscoveryCommand {
+    pub network_name: String,
+    pub index_url: String,
+}
+
+impl NodeNetworkDiscoveryCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        if self.index_url.trim().is_empty() {
+            return Err(invalid("发现索引 URL 不能为空").for_network(self.network_name.clone()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeJoinNetworkCommand {
     pub target: String,
     pub network_name: Option<String>,
     pub start: bool,
+    /// Public signed discovery material selected by the user. It is never
+    /// trusted as cached authority: the handler revalidates it immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_record: Option<NetworkDiscoveryRecord>,
 }
 
 impl NodeJoinNetworkCommand {
@@ -782,6 +863,15 @@ impl NodeJoinNetworkCommand {
         }
         if let Some(name) = self.network_name.as_deref() {
             validate_network_name(name)?;
+        }
+        if let (Some(name), Some(record)) =
+            (self.network_name.as_deref(), self.discovery_record.as_ref())
+        {
+            if name != record.document.name {
+                return Err(
+                    invalid("加入网络名称与签名发现记录不一致").for_network(name.to_owned())
+                );
+            }
         }
         Ok(())
     }
@@ -1779,10 +1869,27 @@ mod tests {
                     join_mode: NetworkJoinMode::InviteOnly,
                 },
             }),
+            NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.com".into(),
+            }),
+            NodeCommand::UpdateNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.com".into(),
+            }),
+            NodeCommand::UnpublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.com".into(),
+            }),
+            NodeCommand::RefreshDiscoveryIndex {
+                index_url: Some("https://discovery.example.com".into()),
+            },
+            NodeCommand::RetryDiscoveryIndex,
             NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
                 target: "fk://invite".into(),
                 network_name: Some("office".into()),
                 start: true,
+                discovery_record: None,
             }),
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),
@@ -2192,11 +2299,13 @@ mod tests {
                 target: "  ".into(),
                 network_name: None,
                 start: false,
+                discovery_record: None,
             }),
             NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
                 target: "ws://127.0.0.1:6666".into(),
                 network_name: Some("../office".into()),
                 start: false,
+                discovery_record: None,
             }),
             NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
                 network_name: "home/office".into(),
@@ -2553,6 +2662,7 @@ mod tests {
                         target: invitation.into(),
                         network_name: Some("home".into()),
                         start: false,
+                        discovery_record: None,
                     }),
                 ),
             )

@@ -471,6 +471,9 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::CreateNetwork
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::UpdateNetworkProfile
+        | NodeCommandKind::PublishNetworkDiscovery
+        | NodeCommandKind::UpdateNetworkDiscovery
+        | NodeCommandKind::UnpublishNetworkDiscovery
         | NodeCommandKind::JoinNetwork
         | NodeCommandKind::StartNode
         | NodeCommandKind::StopNode
@@ -479,6 +482,8 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         NodeCommandKind::GetSnapshot
         | NodeCommandKind::GetUiManifest
         | NodeCommandKind::GetDiagnostics
+        | NodeCommandKind::RefreshDiscoveryIndex
+        | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::GetBlacklist
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient

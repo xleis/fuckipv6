@@ -413,6 +413,16 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::GetConfigurationHistory => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
+        NodeCommandKind::PublishNetworkDiscovery => {
+            NodeUiAudit::record("network.discovery.publish")
+        }
+        NodeCommandKind::UpdateNetworkDiscovery => NodeUiAudit::record("network.discovery.update"),
+        NodeCommandKind::UnpublishNetworkDiscovery => {
+            NodeUiAudit::record("network.discovery.unpublish")
+        }
+        NodeCommandKind::RefreshDiscoveryIndex | NodeCommandKind::RetryDiscoveryIndex => {
+            NodeUiAudit::none()
+        }
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
         NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),
@@ -484,6 +494,7 @@ pub enum NodeUiInputKind {
     Role,
     RoutingMode,
     UrlOrTicket,
+    DiscoveryIndexUrl,
     TimeoutMs,
 }
 
@@ -794,6 +805,122 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             "confirm.update_network_profile.consequence",
                             false,
                         )),
+                    ),
+                    action(
+                        "publish_network_discovery",
+                        "action.publish_network_discovery",
+                        NodeCommandKind::PublishNetworkDiscovery,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "index_url",
+                                "field.discovery_index_url",
+                                NodeUiInputKind::DiscoveryIndexUrl,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::PublishNetworkDiscovery,
+                            "confirm.publish_network_discovery.title",
+                            "confirm.publish_network_discovery.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "update_network_discovery",
+                        "action.update_network_discovery",
+                        NodeCommandKind::UpdateNetworkDiscovery,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "index_url",
+                                "field.discovery_index_url",
+                                NodeUiInputKind::DiscoveryIndexUrl,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::UpdateNetworkDiscovery,
+                            "confirm.update_network_discovery.title",
+                            "confirm.update_network_discovery.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "unpublish_network_discovery",
+                        "action.unpublish_network_discovery",
+                        NodeCommandKind::UnpublishNetworkDiscovery,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "index_url",
+                                "field.discovery_index_url",
+                                NodeUiInputKind::DiscoveryIndexUrl,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::UnpublishNetworkDiscovery,
+                            "confirm.unpublish_network_discovery.title",
+                            "confirm.unpublish_network_discovery.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "refresh_discovery_index",
+                        "action.refresh_discovery_index",
+                        NodeCommandKind::RefreshDiscoveryIndex,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![field(
+                            "index_url",
+                            "field.discovery_index_url",
+                            NodeUiInputKind::DiscoveryIndexUrl,
+                            false,
+                            NodeUiValidation::None,
+                        )],
+                        None,
+                    ),
+                    action(
+                        "retry_discovery_index",
+                        "action.retry_discovery_index",
+                        NodeCommandKind::RetryDiscoveryIndex,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
                     ),
                     action(
                         "join_network",

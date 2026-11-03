@@ -1300,6 +1300,10 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::NetworkProfileUpdated(_)
         | NodeCommandOutcome::NetworkJoinPreview(_)
         | NodeCommandOutcome::NetworkJoined(_)
+        | NodeCommandOutcome::JoinRequestSubmitted(_)
+        | NodeCommandOutcome::JoinRequests(_)
+        | NodeCommandOutcome::JoinRequestsReviewed(_)
+        | NodeCommandOutcome::JoinRequestUpdated(_)
         | NodeCommandOutcome::NetworkLeft(_)
         | NodeCommandOutcome::IdentityRotated(_)
         | NodeCommandOutcome::Configuration(_)
@@ -1372,7 +1376,12 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::UnpublishNetworkDiscovery(_)
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex => OperationKind::DiscoveryIndexUpdate,
-        NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
+        NodeCommand::JoinNetwork(_)
+        | NodeCommand::SubmitJoinRequest(_)
+        | NodeCommand::ReviewJoinRequest(_)
+        | NodeCommand::BatchReviewJoinRequests(_)
+        | NodeCommand::WithdrawJoinRequest(_)
+        | NodeCommand::ResubmitJoinRequest(_) => OperationKind::NetworkApply,
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -1398,6 +1407,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::PreviewConfiguration(_)
         | NodeCommand::PreviewNetworkProfile(_)
         | NodeCommand::PreviewJoinNetwork(_)
+        | NodeCommand::ListJoinRequests(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
@@ -1419,6 +1429,12 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::UpdateNetworkDiscovery(command)
         | NodeCommand::UnpublishNetworkDiscovery(command) => network_target(&command.network_name),
         NodeCommand::PreviewJoinNetwork(command) => network_target(&command.network_id),
+        NodeCommand::ListJoinRequests(command) => network_target(&command.network_id),
+        NodeCommand::SubmitJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::ReviewJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::BatchReviewJoinRequests(command) => network_target(&command.network_id),
+        NodeCommand::WithdrawJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::ResubmitJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()

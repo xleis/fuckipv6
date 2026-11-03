@@ -411,6 +411,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
+        | NodeCommandKind::ListJoinRequests
         | NodeCommandKind::GetConfigurationHistory => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
@@ -425,6 +426,17 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
             NodeUiAudit::none()
         }
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
+        NodeCommandKind::SubmitJoinRequest => NodeUiAudit::record("network.join_request.submit"),
+        NodeCommandKind::ReviewJoinRequest => NodeUiAudit::record("network.join_request.review"),
+        NodeCommandKind::BatchReviewJoinRequests => {
+            NodeUiAudit::record("network.join_request.batch_review")
+        }
+        NodeCommandKind::WithdrawJoinRequest => {
+            NodeUiAudit::record("network.join_request.withdraw")
+        }
+        NodeCommandKind::ResubmitJoinRequest => {
+            NodeUiAudit::record("network.join_request.resubmit")
+        }
         NodeCommandKind::LeaveNetwork => NodeUiAudit::record("network.leave"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
         NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),

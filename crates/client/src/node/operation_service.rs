@@ -686,7 +686,12 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::UnpublishNetworkDiscovery(_)
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex => OperationKind::DiscoveryIndexUpdate,
-        NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
+        NodeCommand::JoinNetwork(_)
+        | NodeCommand::SubmitJoinRequest(_)
+        | NodeCommand::ReviewJoinRequest(_)
+        | NodeCommand::BatchReviewJoinRequests(_)
+        | NodeCommand::WithdrawJoinRequest(_)
+        | NodeCommand::ResubmitJoinRequest(_) => OperationKind::NetworkApply,
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -708,6 +713,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::PreviewConfiguration(_)
         | NodeCommand::PreviewNetworkProfile(_)
         | NodeCommand::PreviewJoinNetwork(_)
+        | NodeCommand::ListJoinRequests(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
@@ -729,6 +735,12 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
         | NodeCommand::UpdateNetworkDiscovery(command)
         | NodeCommand::UnpublishNetworkDiscovery(command) => network_target(&command.network_name),
         NodeCommand::PreviewJoinNetwork(command) => network_target(&command.network_id),
+        NodeCommand::ListJoinRequests(command) => network_target(&command.network_id),
+        NodeCommand::SubmitJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::ReviewJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::BatchReviewJoinRequests(command) => network_target(&command.network_id),
+        NodeCommand::WithdrawJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::ResubmitJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()

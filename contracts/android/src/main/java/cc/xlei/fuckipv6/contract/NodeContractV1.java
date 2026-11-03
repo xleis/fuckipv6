@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -322,6 +322,82 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum JoinRequestReasonVisibility {
+        OWNERS_AND_ADMINISTRATORS("owners_and_administrators");
+
+        private final String wireName;
+
+        JoinRequestReasonVisibility(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static JoinRequestReasonVisibility fromWireName(String value) {
+            for (JoinRequestReasonVisibility candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown JoinRequestReasonVisibility wire value: " + value);
+        }
+    }
+
+    public enum JoinRequestReviewAction {
+        APPROVE("approve"),
+        REJECT("reject"),
+        REQUEST_INFORMATION("request_information");
+
+        private final String wireName;
+
+        JoinRequestReviewAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static JoinRequestReviewAction fromWireName(String value) {
+            for (JoinRequestReviewAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown JoinRequestReviewAction wire value: " + value);
+        }
+    }
+
+    public enum JoinRequestState {
+        PENDING("pending"),
+        NEEDS_INFORMATION("needs_information"),
+        APPROVED("approved"),
+        REJECTED("rejected"),
+        WITHDRAWN("withdrawn"),
+        EXPIRED("expired");
+
+        private final String wireName;
+
+        JoinRequestState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static JoinRequestState fromWireName(String value) {
+            for (JoinRequestState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown JoinRequestState wire value: " + value);
+        }
+    }
+
     public enum MembershipRole {
         OWNER("owner"),
         ADMINISTRATOR("administrator"),
@@ -564,6 +640,7 @@ public final class NodeContractV1 {
     public enum NodeCommandKind {
         APPLY_CONFIGURATION("apply_configuration"),
         BAN_CLIENT("ban_client"),
+        BATCH_REVIEW_JOIN_REQUESTS("batch_review_join_requests"),
         CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
         CREATE_NETWORK("create_network"),
         GET_BLACKLIST("get_blacklist"),
@@ -575,6 +652,7 @@ public final class NodeContractV1 {
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
         LEAVE_NETWORK("leave_network"),
+        LIST_JOIN_REQUESTS("list_join_requests"),
         PREVIEW_CONFIGURATION("preview_configuration"),
         PREVIEW_JOIN_NETWORK("preview_join_network"),
         PREVIEW_NETWORK_PROFILE("preview_network_profile"),
@@ -584,7 +662,9 @@ public final class NodeContractV1 {
         REFRESH_DISCOVERY_INDEX("refresh_discovery_index"),
         RESTART_NETWORKS("restart_networks"),
         RESTART_NODE("restart_node"),
+        RESUBMIT_JOIN_REQUEST("resubmit_join_request"),
         RETRY_DISCOVERY_INDEX("retry_discovery_index"),
+        REVIEW_JOIN_REQUEST("review_join_request"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
         ROTATE_NODE_IDENTITY("rotate_node_identity"),
         SET_NETWORK_ROLE("set_network_role"),
@@ -594,12 +674,14 @@ public final class NodeContractV1 {
         START_NODE("start_node"),
         STOP_NETWORKS("stop_networks"),
         STOP_NODE("stop_node"),
+        SUBMIT_JOIN_REQUEST("submit_join_request"),
         UNBAN_CLIENT("unban_client"),
         UNPUBLISH_NETWORK_DISCOVERY("unpublish_network_discovery"),
         UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
         UPDATE_NETWORK_DISCOVERY("update_network_discovery"),
         UPDATE_NETWORK_PROFILE("update_network_profile"),
-        UPDATE_ROUTING("update_routing");
+        UPDATE_ROUTING("update_routing"),
+        WITHDRAW_JOIN_REQUEST("withdraw_join_request");
 
         private final String wireName;
 
@@ -1867,6 +1949,92 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for JoinApplicantProfile. */
+    public static final class JoinApplicantProfile {
+        public final String display_name;
+        public final String node_id;
+        public final String public_key_fingerprint;
+
+        public JoinApplicantProfile(String display_name, String node_id, String public_key_fingerprint) {
+            this.display_name = display_name;
+            this.node_id = node_id;
+            this.public_key_fingerprint = public_key_fingerprint;
+        }
+    }
+
+    /** DTO for JoinRequest. */
+    public static final class JoinRequest {
+        public final JoinApplicantProfile applicant;
+        public final Long created_at_unix_ms;
+        public final Long decided_at_unix_ms;
+        public final Long expires_at_unix_ms;
+        public final JoinRequestGrantPreview grant_preview;
+        public final String information_request;
+        public final String network_id;
+        public final String reason;
+        public final Long reason_retention_until_unix_ms;
+        public final JoinRequestReasonVisibility reason_visibility;
+        public final String request_id;
+        public final String reviewer_node_id;
+        public final Long revision;
+        public final Integer schema_version;
+        public final JoinRequestState state;
+        public final MembershipTerms terms;
+        public final Long updated_at_unix_ms;
+
+        public JoinRequest(JoinApplicantProfile applicant, Long created_at_unix_ms, Long decided_at_unix_ms, Long expires_at_unix_ms, JoinRequestGrantPreview grant_preview, String information_request, String network_id, String reason, Long reason_retention_until_unix_ms, JoinRequestReasonVisibility reason_visibility, String request_id, String reviewer_node_id, Long revision, Integer schema_version, JoinRequestState state, MembershipTerms terms, Long updated_at_unix_ms) {
+            this.applicant = applicant;
+            this.created_at_unix_ms = created_at_unix_ms;
+            this.decided_at_unix_ms = decided_at_unix_ms;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.grant_preview = grant_preview;
+            this.information_request = information_request;
+            this.network_id = network_id;
+            this.reason = reason;
+            this.reason_retention_until_unix_ms = reason_retention_until_unix_ms;
+            this.reason_visibility = reason_visibility;
+            this.request_id = request_id;
+            this.reviewer_node_id = reviewer_node_id;
+            this.revision = revision;
+            this.schema_version = schema_version;
+            this.state = state;
+            this.terms = terms;
+            this.updated_at_unix_ms = updated_at_unix_ms;
+        }
+    }
+
+    /** DTO for JoinRequestGrantPreview. */
+    public static final class JoinRequestGrantPreview {
+        public final List<CapabilityKind> capabilities;
+        public final ExitContributionObligation exit_contribution;
+        public final Boolean file_access;
+        public final Boolean grants_data_plane_access;
+        public final MembershipRole role;
+
+        public JoinRequestGrantPreview(List<CapabilityKind> capabilities, ExitContributionObligation exit_contribution, Boolean file_access, Boolean grants_data_plane_access, MembershipRole role) {
+            this.capabilities = capabilities;
+            this.exit_contribution = exit_contribution;
+            this.file_access = file_access;
+            this.grants_data_plane_access = grants_data_plane_access;
+            this.role = role;
+        }
+    }
+
+    /** DTO for MembershipTerms. */
+    public static final class MembershipTerms {
+        public final ExitContributionObligation exit_contribution;
+        public final Long member_limit;
+        public final Long network_policy_revision;
+        public final Long privacy_policy_revision;
+
+        public MembershipTerms(ExitContributionObligation exit_contribution, Long member_limit, Long network_policy_revision, Long privacy_policy_revision) {
+            this.exit_contribution = exit_contribution;
+            this.member_limit = member_limit;
+            this.network_policy_revision = network_policy_revision;
+            this.privacy_policy_revision = privacy_policy_revision;
+        }
+    }
+
     /** DTO for NetworkAdminProfileProjection. */
     public static final class NetworkAdminProfileProjection {
         public final Long administrator_count;
@@ -2298,6 +2466,17 @@ public final class NodeContractV1 {
         public NodeApplyConfigurationCommand(Long expected_revision, Map<String, Object> networks) {
             this.expected_revision = expected_revision;
             this.networks = networks;
+        }
+    }
+
+    /** DTO for NodeBatchReviewJoinRequestsCommand. */
+    public static final class NodeBatchReviewJoinRequestsCommand {
+        public final String network_id;
+        public final List<NodeJoinRequestReviewItem> reviews;
+
+        public NodeBatchReviewJoinRequestsCommand(String network_id, List<NodeJoinRequestReviewItem> reviews) {
+            this.network_id = network_id;
+            this.reviews = reviews;
         }
     }
 
@@ -2802,6 +2981,56 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeJoinRequestListResult. */
+    public static final class NodeJoinRequestListResult {
+        public final String network_id;
+        public final List<JoinRequest> requests;
+
+        public NodeJoinRequestListResult(String network_id, List<JoinRequest> requests) {
+            this.network_id = network_id;
+            this.requests = requests;
+        }
+    }
+
+    /** DTO for NodeJoinRequestReviewAck. */
+    public static final class NodeJoinRequestReviewAck {
+        public final String network_id;
+        public final List<NodeJoinRequestReviewOutcome> reviews;
+
+        public NodeJoinRequestReviewAck(String network_id, List<NodeJoinRequestReviewOutcome> reviews) {
+            this.network_id = network_id;
+            this.reviews = reviews;
+        }
+    }
+
+    /** DTO for NodeJoinRequestReviewItem. */
+    public static final class NodeJoinRequestReviewItem {
+        public final JoinRequestReviewAction action;
+        public final Long expected_revision;
+        public final String note;
+        public final String request_id;
+
+        public NodeJoinRequestReviewItem(JoinRequestReviewAction action, Long expected_revision, String note, String request_id) {
+            this.action = action;
+            this.expected_revision = expected_revision;
+            this.note = note;
+            this.request_id = request_id;
+        }
+    }
+
+    /** DTO for NodeJoinRequestReviewOutcome. */
+    public static final class NodeJoinRequestReviewOutcome {
+        public final String request_id;
+        public final Long revision;
+        public final JoinRequestState state;
+
+        public NodeJoinRequestReviewOutcome(String request_id, Long revision, JoinRequestState state) {
+            this.request_id = request_id;
+            this.revision = revision;
+            this.state = state;
+        }
+    }
+
     /** DTO for NodeLeaveNetworkCommand. */
     public static final class NodeLeaveNetworkCommand {
         public final String network_name;
@@ -2823,6 +3052,15 @@ public final class NodeContractV1 {
             this.configured_networks = configured_networks;
             this.failed_networks = failed_networks;
             this.phase = phase;
+        }
+    }
+
+    /** DTO for NodeListJoinRequestsCommand. */
+    public static final class NodeListJoinRequestsCommand {
+        public final String network_id;
+
+        public NodeListJoinRequestsCommand(String network_id) {
+            this.network_id = network_id;
         }
     }
 
@@ -3323,6 +3561,32 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeResubmitJoinRequestCommand. */
+    public static final class NodeResubmitJoinRequestCommand {
+        public final Long expected_revision;
+        public final String network_id;
+        public final String reason;
+        public final String request_id;
+
+        public NodeResubmitJoinRequestCommand(Long expected_revision, String network_id, String reason, String request_id) {
+            this.expected_revision = expected_revision;
+            this.network_id = network_id;
+            this.reason = reason;
+            this.request_id = request_id;
+        }
+    }
+
+    /** DTO for NodeReviewJoinRequestCommand. */
+    public static final class NodeReviewJoinRequestCommand {
+        public final String network_id;
+        public final NodeJoinRequestReviewItem review;
+
+        public NodeReviewJoinRequestCommand(String network_id, NodeJoinRequestReviewItem review) {
+            this.network_id = network_id;
+            this.review = review;
+        }
+    }
+
     /** DTO for NodeRollbackConfigurationCommand. */
     public static final class NodeRollbackConfigurationCommand {
         public final Long expected_revision;
@@ -3486,6 +3750,17 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeSubmitJoinRequestCommand. */
+    public static final class NodeSubmitJoinRequestCommand {
+        public final String network_id;
+        public final String reason;
+
+        public NodeSubmitJoinRequestCommand(String network_id, String reason) {
+            this.network_id = network_id;
+            this.reason = reason;
+        }
+    }
+
     /** DTO for NodeTrafficSnapshot. */
     public static final class NodeTrafficSnapshot {
         public final Long error_count;
@@ -3645,6 +3920,17 @@ public final class NodeContractV1 {
             this.code = code;
             this.message = message;
             this.path = path;
+        }
+    }
+
+    /** DTO for NodeWithdrawJoinRequestCommand. */
+    public static final class NodeWithdrawJoinRequestCommand {
+        public final String network_id;
+        public final String request_id;
+
+        public NodeWithdrawJoinRequestCommand(String network_id, String request_id) {
+            this.network_id = network_id;
+            this.request_id = request_id;
         }
     }
 
@@ -4029,6 +4315,60 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class SubmitJoinRequest extends NodeCommand {
+            public final NodeSubmitJoinRequestCommand payload;
+
+            public SubmitJoinRequest(NodeSubmitJoinRequestCommand payload) {
+                super(NodeCommandKind.SUBMIT_JOIN_REQUEST);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ListJoinRequests extends NodeCommand {
+            public final NodeListJoinRequestsCommand payload;
+
+            public ListJoinRequests(NodeListJoinRequestsCommand payload) {
+                super(NodeCommandKind.LIST_JOIN_REQUESTS);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ReviewJoinRequest extends NodeCommand {
+            public final NodeReviewJoinRequestCommand payload;
+
+            public ReviewJoinRequest(NodeReviewJoinRequestCommand payload) {
+                super(NodeCommandKind.REVIEW_JOIN_REQUEST);
+                this.payload = payload;
+            }
+        }
+
+        public static final class BatchReviewJoinRequests extends NodeCommand {
+            public final NodeBatchReviewJoinRequestsCommand payload;
+
+            public BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand payload) {
+                super(NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS);
+                this.payload = payload;
+            }
+        }
+
+        public static final class WithdrawJoinRequest extends NodeCommand {
+            public final NodeWithdrawJoinRequestCommand payload;
+
+            public WithdrawJoinRequest(NodeWithdrawJoinRequestCommand payload) {
+                super(NodeCommandKind.WITHDRAW_JOIN_REQUEST);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ResubmitJoinRequest extends NodeCommand {
+            public final NodeResubmitJoinRequestCommand payload;
+
+            public ResubmitJoinRequest(NodeResubmitJoinRequestCommand payload) {
+                super(NodeCommandKind.RESUBMIT_JOIN_REQUEST);
+                this.payload = payload;
+            }
+        }
+
         public static final class LeaveNetwork extends NodeCommand {
             public final NodeLeaveNetworkCommand payload;
 
@@ -4339,6 +4679,42 @@ public final class NodeContractV1 {
 
             public NetworkJoined(NodeNetworkJoinResult data) {
                 super("network_joined");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequestSubmitted extends NodeCommandOutcome {
+            public final JoinRequest data;
+
+            public JoinRequestSubmitted(JoinRequest data) {
+                super("join_request_submitted");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequests extends NodeCommandOutcome {
+            public final NodeJoinRequestListResult data;
+
+            public JoinRequests(NodeJoinRequestListResult data) {
+                super("join_requests");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequestsReviewed extends NodeCommandOutcome {
+            public final NodeJoinRequestReviewAck data;
+
+            public JoinRequestsReviewed(NodeJoinRequestReviewAck data) {
+                super("join_requests_reviewed");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequestUpdated extends NodeCommandOutcome {
+            public final JoinRequest data;
+
+            public JoinRequestUpdated(JoinRequest data) {
+                super("join_request_updated");
                 this.data = data;
             }
         }

@@ -1196,6 +1196,40 @@ impl GpuiShell {
                     result.membership.network_name
                 ));
             }
+            NodeCommandOutcome::JoinRequestSubmitted(request) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.join_request_submitted",
+                    &[
+                        ("request_id", request.request_id.as_str()),
+                        ("state", &format!("{:?}", request.state)),
+                    ],
+                ));
+            }
+            NodeCommandOutcome::JoinRequests(result) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.join_requests_loaded",
+                    &[("count", &result.requests.len().to_string())],
+                ));
+            }
+            NodeCommandOutcome::JoinRequestsReviewed(result) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.join_requests_reviewed",
+                    &[("count", &result.reviews.len().to_string())],
+                ));
+            }
+            NodeCommandOutcome::JoinRequestUpdated(request) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.join_request_updated",
+                    &[
+                        ("request_id", request.request_id.as_str()),
+                        ("state", &format!("{:?}", request.state)),
+                    ],
+                ));
+            }
             NodeCommandOutcome::NetworkLeft(result) => {
                 self.apply_snapshot(result.snapshot, cx);
                 self.notice = Some(format!(

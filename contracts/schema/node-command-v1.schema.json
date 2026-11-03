@@ -31,6 +31,14 @@
       ],
       "type": "string"
     },
+    "JoinRequestReviewAction": {
+      "enum": [
+        "approve",
+        "reject",
+        "request_information"
+      ],
+      "type": "string"
+    },
     "NetworkDiscoveryDocument": {
       "description": "Signed discovery data. Endpoints may change between revisions; the stable\nnetwork ID remains bound to the immutable network public key.",
       "properties": {
@@ -336,6 +344,24 @@
       ],
       "type": "object"
     },
+    "NodeBatchReviewJoinRequestsCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "reviews": {
+          "items": {
+            "$ref": "#/$defs/NodeJoinRequestReviewItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "reviews"
+      ],
+      "type": "object"
+    },
     "NodeClientBlacklistCommand": {
       "properties": {
         "client_id": {
@@ -507,6 +533,33 @@
       ],
       "type": "object"
     },
+    "NodeJoinRequestReviewItem": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/JoinRequestReviewAction"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "expected_revision",
+        "action"
+      ],
+      "type": "object"
+    },
     "NodeLeaveNetworkCommand": {
       "properties": {
         "network_name": {
@@ -515,6 +568,17 @@
       },
       "required": [
         "network_name"
+      ],
+      "type": "object"
+    },
+    "NodeListJoinRequestsCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id"
       ],
       "type": "object"
     },
@@ -667,6 +731,46 @@
       ],
       "type": "object"
     },
+    "NodeResubmitJoinRequestCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "request_id",
+        "expected_revision",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "NodeReviewJoinRequestCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "review": {
+          "$ref": "#/$defs/NodeJoinRequestReviewItem"
+        }
+      },
+      "required": [
+        "network_id",
+        "review"
+      ],
+      "type": "object"
+    },
     "NodeRollbackConfigurationCommand": {
       "properties": {
         "expected_revision": {
@@ -736,6 +840,21 @@
       },
       "type": "object"
     },
+    "NodeSubmitJoinRequestCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "reason"
+      ],
+      "type": "object"
+    },
     "NodeUpdateNetworkAllocationCommand": {
       "properties": {
         "allocation": {
@@ -773,6 +892,21 @@
         "network_name",
         "mode",
         "is_exit_node"
+      ],
+      "type": "object"
+    },
+    "NodeWithdrawJoinRequestCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "request_id"
       ],
       "type": "object"
     },
@@ -1103,6 +1237,108 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeJoinNetworkCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Submit an owner-authored request to join an approval-required network.",
+      "properties": {
+        "command": {
+          "const": "submit_join_request",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeSubmitJoinRequestCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "List the caller's own requests or every request when the caller is a\ncurrent network owner/administrator.",
+      "properties": {
+        "command": {
+          "const": "list_join_requests",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeListJoinRequestsCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Apply one revision-checked approval decision.",
+      "properties": {
+        "command": {
+          "const": "review_join_request",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeReviewJoinRequestCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Apply a revision-checked approval batch atomically.",
+      "properties": {
+        "command": {
+          "const": "batch_review_join_requests",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeBatchReviewJoinRequestsCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Withdraw the caller's own pending request.",
+      "properties": {
+        "command": {
+          "const": "withdraw_join_request",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeWithdrawJoinRequestCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Answer an information request and return it to pending review.",
+      "properties": {
+        "command": {
+          "const": "resubmit_join_request",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeResubmitJoinRequestCommand"
         }
       },
       "required": [

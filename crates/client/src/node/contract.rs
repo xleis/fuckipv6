@@ -320,6 +320,77 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
             })),
+            NodeCommand::SubmitJoinRequest(crate::node::command::NodeSubmitJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                reason: "Please allow this node to join.".into(),
+            }),
+            NodeCommand::ListJoinRequests(crate::node::command::NodeListJoinRequestsCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+            }),
+            NodeCommand::ReviewJoinRequest(crate::node::command::NodeReviewJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                review: crate::node::command::NodeJoinRequestReviewItem {
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"join-request-review",
+                    )
+                    .to_string(),
+                    expected_revision: 1,
+                    action: fuckipv6_common::domain::JoinRequestReviewAction::RequestInformation,
+                    note: Some("Please provide the requested details.".into()),
+                },
+            }),
+            NodeCommand::BatchReviewJoinRequests(
+                crate::node::command::NodeBatchReviewJoinRequestsCommand {
+                    network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                        b"join-request-network",
+                    )
+                    .to_string(),
+                    reviews: vec![crate::node::command::NodeJoinRequestReviewItem {
+                        request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                            b"join-request-batch-review",
+                        )
+                        .to_string(),
+                        expected_revision: 1,
+                        action: fuckipv6_common::domain::JoinRequestReviewAction::Approve,
+                        note: None,
+                    }],
+                },
+            ),
+            NodeCommand::WithdrawJoinRequest(
+                crate::node::command::NodeWithdrawJoinRequestCommand {
+                    network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                        b"join-request-network",
+                    )
+                    .to_string(),
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"join-request-withdraw",
+                    )
+                    .to_string(),
+                },
+            ),
+            NodeCommand::ResubmitJoinRequest(
+                crate::node::command::NodeResubmitJoinRequestCommand {
+                    network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                        b"join-request-network",
+                    )
+                    .to_string(),
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"join-request-resubmit",
+                    )
+                    .to_string(),
+                    expected_revision: 2,
+                    reason: "The requested details are attached.".into(),
+                },
+            ),
             NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
                 network_name: "office".into(),
             }),

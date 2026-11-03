@@ -2,7 +2,7 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "preview_configuration", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "refresh_discovery_index", "restart_networks", "restart_node", "retry_discovery_index", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing"] as const;
+export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "batch_review_join_requests", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "list_join_requests", "preview_configuration", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
 export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "leave_network", "preview_configuration", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "refresh_discovery_index", "restart_networks", "restart_node", "retry_discovery_index", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing"] as const;
 export type NodeManifestActionCommandKind =
@@ -125,9 +125,58 @@ export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_requi
 
 export type IdempotencyKey = string;
 
+export type JoinApplicantProfile = {
+  "display_name"?: string | null;
+  "node_id": NodeId;
+  "public_key_fingerprint": string;
+};
+
+export type JoinRequest = {
+  "applicant": JoinApplicantProfile;
+  "created_at_unix_ms": number;
+  "decided_at_unix_ms"?: number | null;
+  "expires_at_unix_ms": number;
+  "grant_preview": JoinRequestGrantPreview;
+  "information_request"?: string | null;
+  "network_id": NetworkId;
+  "reason"?: string | null;
+  "reason_retention_until_unix_ms"?: number | null;
+  "reason_visibility"?: JoinRequestReasonVisibility;
+  "request_id": JoinRequestId;
+  "reviewer_node_id"?: NodeId | null;
+  "revision": number;
+  "schema_version": number;
+  "state": JoinRequestState;
+  "terms": MembershipTerms;
+  "updated_at_unix_ms": number;
+};
+
+export type JoinRequestGrantPreview = {
+  "capabilities"?: Array<CapabilityKind>;
+  "exit_contribution"?: ExitContributionObligation;
+  "file_access"?: boolean;
+  "grants_data_plane_access"?: boolean;
+  "role": MembershipRole;
+};
+
+export type JoinRequestId = string;
+
+export type JoinRequestReasonVisibility = "owners_and_administrators";
+
+export type JoinRequestReviewAction = "approve" | "reject" | "request_information";
+
+export type JoinRequestState = "pending" | "needs_information" | "approved" | "rejected" | "withdrawn" | "expired";
+
 export type MembershipRole = "owner" | "administrator" | "member";
 
 export type MembershipState = "discovered" | "applying" | "pending_approval" | "accepted" | "key_ready" | "connecting" | "active" | "degraded" | "leaving" | "left" | "rejected" | "suspended" | "cancelled";
+
+export type MembershipTerms = {
+  "exit_contribution": ExitContributionObligation;
+  "member_limit"?: number | null;
+  "network_policy_revision": number;
+  "privacy_policy_revision": number;
+};
 
 export type NetworkAdminProfileProjection = {
   "administrator_count": number;
@@ -392,6 +441,11 @@ export type NodeApplyConfigurationCommand = {
   "networks": Record<string, unknown>;
 };
 
+export type NodeBatchReviewJoinRequestsCommand = {
+  "network_id": string;
+  "reviews": Array<NodeJoinRequestReviewItem>;
+};
+
 export type NodeBlacklistSnapshot = {
   "changed": boolean;
   "clients": Array<string>;
@@ -487,6 +541,24 @@ export type NodeCommand = {
 } | {
   "command": "join_network";
   "payload": NodeJoinNetworkCommand;
+} | {
+  "command": "submit_join_request";
+  "payload": NodeSubmitJoinRequestCommand;
+} | {
+  "command": "list_join_requests";
+  "payload": NodeListJoinRequestsCommand;
+} | {
+  "command": "review_join_request";
+  "payload": NodeReviewJoinRequestCommand;
+} | {
+  "command": "batch_review_join_requests";
+  "payload": NodeBatchReviewJoinRequestsCommand;
+} | {
+  "command": "withdraw_join_request";
+  "payload": NodeWithdrawJoinRequestCommand;
+} | {
+  "command": "resubmit_join_request";
+  "payload": NodeResubmitJoinRequestCommand;
 } | {
   "command": "leave_network";
   "payload": NodeLeaveNetworkCommand;
@@ -600,6 +672,18 @@ export type NodeCommandOutcome = {
 } | {
   "data": NodeNetworkJoinResult;
   "status": "network_joined";
+} | {
+  "data": JoinRequest;
+  "status": "join_request_submitted";
+} | {
+  "data": NodeJoinRequestListResult;
+  "status": "join_requests";
+} | {
+  "data": NodeJoinRequestReviewAck;
+  "status": "join_requests_reviewed";
+} | {
+  "data": JoinRequest;
+  "status": "join_request_updated";
 } | {
   "data": NodeNetworkLeaveResult;
   "status": "network_left";
@@ -906,6 +990,29 @@ export type NodeJoinNetworkCommand = {
   "terms_hash"?: ContentHash | null;
 };
 
+export type NodeJoinRequestListResult = {
+  "network_id": string;
+  "requests": Array<JoinRequest>;
+};
+
+export type NodeJoinRequestReviewAck = {
+  "network_id": string;
+  "reviews": Array<NodeJoinRequestReviewOutcome>;
+};
+
+export type NodeJoinRequestReviewItem = {
+  "action": JoinRequestReviewAction;
+  "expected_revision": number;
+  "note"?: string | null;
+  "request_id": string;
+};
+
+export type NodeJoinRequestReviewOutcome = {
+  "request_id": string;
+  "revision": number;
+  "state": JoinRequestState;
+};
+
 export type NodeLeaveNetworkCommand = {
   "network_name": string;
 };
@@ -915,6 +1022,10 @@ export type NodeLifecycleSnapshot = {
   "configured_networks": number;
   "failed_networks": Array<string>;
   "phase": NodePhase;
+};
+
+export type NodeListJoinRequestsCommand = {
+  "network_id": string;
 };
 
 export type NodeLogEntry = {
@@ -1172,6 +1283,18 @@ export type NodeResidualCleanupResult = {
   "residue": NodeRuntimeResidueSnapshot;
 };
 
+export type NodeResubmitJoinRequestCommand = {
+  "expected_revision": number;
+  "network_id": string;
+  "reason": string;
+  "request_id": string;
+};
+
+export type NodeReviewJoinRequestCommand = {
+  "network_id": string;
+  "review": NodeJoinRequestReviewItem;
+};
+
 export type NodeRollbackConfigurationCommand = {
   "expected_revision": number;
   "target_revision": number;
@@ -1272,6 +1395,11 @@ export type NodeSnapshotResponse = {
   "snapshot": NodeSnapshot;
 };
 
+export type NodeSubmitJoinRequestCommand = {
+  "network_id": string;
+  "reason": string;
+};
+
 export type NodeTrafficSnapshot = {
   "error_count": number;
   "p2p_rx_bytes": number;
@@ -1360,6 +1488,11 @@ export type NodeValidationIssue = {
   "code": string;
   "message": string;
   "path": string;
+};
+
+export type NodeWithdrawJoinRequestCommand = {
+  "network_id": string;
+  "request_id": string;
 };
 
 export type NodeWsMessage = {

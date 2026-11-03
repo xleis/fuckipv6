@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 118,
+                NodeContractV1.DTO_CLASS_NAMES.length == 132,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -321,7 +321,13 @@ public final class NodeContractV1Test {
                 "unknown envelope command");
 
         for (NodeCommandKind command : NodeCommandKind.values()) {
-            boolean expected = command != NodeCommandKind.GET_UI_MANIFEST;
+            boolean expected = command != NodeCommandKind.GET_UI_MANIFEST
+                    && command != NodeCommandKind.SUBMIT_JOIN_REQUEST
+                    && command != NodeCommandKind.LIST_JOIN_REQUESTS
+                    && command != NodeCommandKind.REVIEW_JOIN_REQUEST
+                    && command != NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS
+                    && command != NodeCommandKind.WITHDRAW_JOIN_REQUEST
+                    && command != NodeCommandKind.RESUBMIT_JOIN_REQUEST;
             assertTrue(
                     NodeContractV1.isManifestAction(command) == expected,
                     "unexpected manifest action classification for " + command.wireName());

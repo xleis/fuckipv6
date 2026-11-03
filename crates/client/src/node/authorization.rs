@@ -434,6 +434,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
+        | NodeCommandKind::ListJoinRequests
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::GetConfigurationHistory => NodePermission::ViewState,
@@ -451,6 +452,11 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::UpdateNetworkDiscovery
         | NodeCommandKind::UnpublishNetworkDiscovery
         | NodeCommandKind::JoinNetwork
+        | NodeCommandKind::SubmitJoinRequest
+        | NodeCommandKind::ReviewJoinRequest
+        | NodeCommandKind::BatchReviewJoinRequests
+        | NodeCommandKind::WithdrawJoinRequest
+        | NodeCommandKind::ResubmitJoinRequest
         | NodeCommandKind::LeaveNetwork
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
@@ -482,6 +488,9 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::RetryDiscoveryIndex
             | NodeCommandKind::PreviewJoinNetwork
             | NodeCommandKind::JoinNetwork
+            | NodeCommandKind::SubmitJoinRequest
+            | NodeCommandKind::WithdrawJoinRequest
+            | NodeCommandKind::ResubmitJoinRequest
             | NodeCommandKind::LeaveNetwork
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
@@ -507,6 +516,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::GetNetworkAllocation
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
+        | NodeCommandKind::ListJoinRequests
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
@@ -529,7 +539,13 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
             (PolicyAction::Create, ResourceKind::Network)
         }
-        NodeCommandKind::JoinNetwork => (PolicyAction::Create, ResourceKind::Membership),
+        NodeCommandKind::JoinNetwork | NodeCommandKind::SubmitJoinRequest => {
+            (PolicyAction::Create, ResourceKind::Membership)
+        }
+        NodeCommandKind::ReviewJoinRequest
+        | NodeCommandKind::BatchReviewJoinRequests
+        | NodeCommandKind::WithdrawJoinRequest
+        | NodeCommandKind::ResubmitJoinRequest => (PolicyAction::Update, ResourceKind::Membership),
         NodeCommandKind::LeaveNetwork => (PolicyAction::Remove, ResourceKind::Membership),
         NodeCommandKind::UpdateRouting => (PolicyAction::Update, ResourceKind::TrafficPolicy),
         NodeCommandKind::SetNetworkRole => (PolicyAction::Update, ResourceKind::Capability),
@@ -589,6 +605,24 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::RebuildTun { network_name } => {
             NetworkTargets::Named(vec![network_name.clone()])
+        }
+        NodeCommand::ListJoinRequests(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::SubmitJoinRequest(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::ReviewJoinRequest(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::BatchReviewJoinRequests(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::WithdrawJoinRequest(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::ResubmitJoinRequest(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
         }
         NodeCommand::LeaveNetwork(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
@@ -772,6 +806,38 @@ mod tests {
         })
     }
 
+    fn membership_policies(action: PolicyAction) -> (Vec<PermissionRule>, Vec<PermissionRule>) {
+        (
+            vec![allow(
+                b"local-membership-policy",
+                SubjectSelector::AnyMember,
+                action,
+                ResourceKind::Membership,
+            )],
+            vec![allow(
+                b"network-membership-policy",
+                SubjectSelector::AnyMember,
+                action,
+                ResourceKind::Membership,
+            )],
+        )
+    }
+
+    fn review_join_request() -> NodeCommand {
+        NodeCommand::ReviewJoinRequest(crate::node::command::NodeReviewJoinRequestCommand {
+            network_id: "home".into(),
+            review: crate::node::command::NodeJoinRequestReviewItem {
+                request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                    b"authorization-review-request",
+                )
+                .to_string(),
+                expected_revision: 1,
+                action: fuckipv6_common::domain::JoinRequestReviewAction::Approve,
+                note: None,
+            },
+        })
+    }
+
     fn start_policies() -> (Vec<PermissionRule>, Vec<PermissionRule>) {
         (
             vec![allow(
@@ -890,6 +956,95 @@ mod tests {
             &create_home(),
         )
         .expect("local node owner can create a network");
+    }
+
+    #[test]
+    fn join_request_owner_actions_are_reserved_for_the_local_owner() {
+        let (local_policy, network_policy) = membership_policies(PolicyAction::Create);
+        let admin = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy,
+            network_policy,
+        );
+        let commands = [
+            NodeCommand::SubmitJoinRequest(crate::node::command::NodeSubmitJoinRequestCommand {
+                network_id: "home".into(),
+                reason: "Please allow this node to join.".into(),
+            }),
+            NodeCommand::WithdrawJoinRequest(
+                crate::node::command::NodeWithdrawJoinRequestCommand {
+                    network_id: "home".into(),
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"authorization-withdraw-request",
+                    )
+                    .to_string(),
+                },
+            ),
+            NodeCommand::ResubmitJoinRequest(
+                crate::node::command::NodeResubmitJoinRequestCommand {
+                    network_id: "home".into(),
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"authorization-resubmit-request",
+                    )
+                    .to_string(),
+                    expected_revision: 2,
+                    reason: "Updated information requested by the reviewer.".into(),
+                },
+            ),
+        ];
+        for command in commands {
+            assert_denied(&admin, command.clone(), "permission.local_owner_required");
+            authorize_command(
+                &NodeCommandContext::local_owner(actor(), "local-owner-join-request"),
+                &command,
+            )
+            .expect("the local owner can manage its own join request");
+        }
+    }
+
+    #[test]
+    fn join_request_review_requires_network_membership_management_scope() {
+        let (local_policy, network_policy) = membership_policies(PolicyAction::Update);
+        authorize_command(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy.clone(),
+                network_policy.clone(),
+            ),
+            &review_join_request(),
+        )
+        .expect("an active network administrator can review membership requests");
+
+        assert_denied(
+            &network_context(
+                NetworkRole::Member,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy.clone(),
+                network_policy.clone(),
+            ),
+            review_join_request(),
+            "permission.role_ceiling_exceeded",
+        );
+        assert_denied(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["office"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            review_join_request(),
+            "permission.network_scope_denied",
+        );
     }
 
     #[test]

@@ -7,9 +7,11 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionObligation, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
-    NetworkEndpoint, NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview,
-    NetworkProfileUpdate, NetworkVisibility, NETWORK_PROFILE_MAX_TAG_CHARS,
+    ExitContributionObligation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
+    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkJoinMode,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
+    JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
+    NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -79,6 +81,12 @@ pub enum NodeCommandKind {
     RetryDiscoveryIndex,
     PreviewJoinNetwork,
     JoinNetwork,
+    SubmitJoinRequest,
+    ListJoinRequests,
+    ReviewJoinRequest,
+    BatchReviewJoinRequests,
+    WithdrawJoinRequest,
+    ResubmitJoinRequest,
     LeaveNetwork,
     UpdateRouting,
     SetNetworkRole,
@@ -104,7 +112,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 44] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -122,6 +130,12 @@ impl NodeCommandKind {
         Self::RetryDiscoveryIndex,
         Self::PreviewJoinNetwork,
         Self::JoinNetwork,
+        Self::SubmitJoinRequest,
+        Self::ListJoinRequests,
+        Self::ReviewJoinRequest,
+        Self::BatchReviewJoinRequests,
+        Self::WithdrawJoinRequest,
+        Self::ResubmitJoinRequest,
         Self::LeaveNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -224,6 +238,12 @@ impl NodeCommandKind {
             Self::RetryDiscoveryIndex => "retry_discovery_index",
             Self::PreviewJoinNetwork => "preview_join_network",
             Self::JoinNetwork => "join_network",
+            Self::SubmitJoinRequest => "submit_join_request",
+            Self::ListJoinRequests => "list_join_requests",
+            Self::ReviewJoinRequest => "review_join_request",
+            Self::BatchReviewJoinRequests => "batch_review_join_requests",
+            Self::WithdrawJoinRequest => "withdraw_join_request",
+            Self::ResubmitJoinRequest => "resubmit_join_request",
             Self::LeaveNetwork => "leave_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
@@ -267,6 +287,11 @@ impl NodeCommandKind {
                 | Self::RefreshDiscoveryIndex
                 | Self::RetryDiscoveryIndex
                 | Self::JoinNetwork
+                | Self::SubmitJoinRequest
+                | Self::ReviewJoinRequest
+                | Self::BatchReviewJoinRequests
+                | Self::WithdrawJoinRequest
+                | Self::ResubmitJoinRequest
                 | Self::LeaveNetwork
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
@@ -344,6 +369,19 @@ pub enum NodeCommand {
     /// Confirm and directly join a network using signed discovery material that
     /// is revalidated against the persisted revision/revocation watermark.
     JoinNetwork(Box<NodeJoinNetworkCommand>),
+    /// Submit an owner-authored request to join an approval-required network.
+    SubmitJoinRequest(NodeSubmitJoinRequestCommand),
+    /// List the caller's own requests or every request when the caller is a
+    /// current network owner/administrator.
+    ListJoinRequests(NodeListJoinRequestsCommand),
+    /// Apply one revision-checked approval decision.
+    ReviewJoinRequest(NodeReviewJoinRequestCommand),
+    /// Apply a revision-checked approval batch atomically.
+    BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand),
+    /// Withdraw the caller's own pending request.
+    WithdrawJoinRequest(NodeWithdrawJoinRequestCommand),
+    /// Answer an information request and return it to pending review.
+    ResubmitJoinRequest(NodeResubmitJoinRequestCommand),
     /// Remove only this network's local configuration and membership.
     LeaveNetwork(NodeLeaveNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
@@ -409,6 +447,12 @@ impl NodeCommand {
             Self::RetryDiscoveryIndex => NodeCommandKind::RetryDiscoveryIndex,
             Self::PreviewJoinNetwork(_) => NodeCommandKind::PreviewJoinNetwork,
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
+            Self::SubmitJoinRequest(_) => NodeCommandKind::SubmitJoinRequest,
+            Self::ListJoinRequests(_) => NodeCommandKind::ListJoinRequests,
+            Self::ReviewJoinRequest(_) => NodeCommandKind::ReviewJoinRequest,
+            Self::BatchReviewJoinRequests(_) => NodeCommandKind::BatchReviewJoinRequests,
+            Self::WithdrawJoinRequest(_) => NodeCommandKind::WithdrawJoinRequest,
+            Self::ResubmitJoinRequest(_) => NodeCommandKind::ResubmitJoinRequest,
             Self::LeaveNetwork(_) => NodeCommandKind::LeaveNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
@@ -509,6 +553,12 @@ impl NodeCommand {
             Self::RetryDiscoveryIndex => Ok(()),
             Self::PreviewJoinNetwork(command) => command.validate(),
             Self::JoinNetwork(command) => command.validate(),
+            Self::SubmitJoinRequest(command) => command.validate(),
+            Self::ListJoinRequests(command) => command.validate(),
+            Self::ReviewJoinRequest(command) => command.validate(),
+            Self::BatchReviewJoinRequests(command) => command.validate(),
+            Self::WithdrawJoinRequest(command) => command.validate(),
+            Self::ResubmitJoinRequest(command) => command.validate(),
             Self::LeaveNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
@@ -948,6 +998,249 @@ impl NodeJoinNetworkCommand {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeSubmitJoinRequestCommand {
+    pub network_id: String,
+    pub reason: String,
+}
+
+impl NodeSubmitJoinRequestCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        validate_join_request_reason_field(&self.reason)
+    }
+}
+
+impl std::fmt::Debug for NodeSubmitJoinRequestCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeSubmitJoinRequestCommand")
+            .field("network_id", &self.network_id)
+            .field("reason", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeListJoinRequestsCommand {
+    pub network_id: String,
+}
+
+impl NodeListJoinRequestsCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeJoinRequestReviewItem {
+    pub request_id: String,
+    pub expected_revision: u64,
+    pub action: JoinRequestReviewAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl std::fmt::Debug for NodeJoinRequestReviewItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeJoinRequestReviewItem")
+            .field("request_id", &self.request_id)
+            .field("expected_revision", &self.expected_revision)
+            .field("action", &self.action)
+            .field("note", &self.note.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+impl NodeJoinRequestReviewItem {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_join_request_id_field(&self.request_id)?;
+        validate_join_request_revision(self.expected_revision)?;
+        match self.action {
+            JoinRequestReviewAction::Approve => {
+                if self.note.is_some() {
+                    return Err(join_request_invalid(
+                        "join_request.error.invalid_action_note",
+                        "批准申请时不能附带补充信息或拒绝说明",
+                    ));
+                }
+            }
+            JoinRequestReviewAction::Reject => {
+                validate_optional_join_request_note(self.note.as_deref())?;
+            }
+            JoinRequestReviewAction::RequestInformation => {
+                let note = self.note.as_deref().ok_or_else(|| {
+                    join_request_invalid(
+                        "join_request.error.information_required",
+                        "要求申请人补充信息时必须填写说明",
+                    )
+                })?;
+                validate_optional_join_request_note(Some(note))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeReviewJoinRequestCommand {
+    pub network_id: String,
+    pub review: NodeJoinRequestReviewItem,
+}
+
+impl NodeReviewJoinRequestCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        self.review.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeBatchReviewJoinRequestsCommand {
+    pub network_id: String,
+    pub reviews: Vec<NodeJoinRequestReviewItem>,
+}
+
+impl NodeBatchReviewJoinRequestsCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        if self.reviews.is_empty() {
+            return Err(join_request_invalid(
+                "join_request.error.batch_empty",
+                "批量审批至少需要选择一条申请",
+            ));
+        }
+        if self.reviews.len() > 100 {
+            return Err(join_request_invalid(
+                "join_request.error.batch_too_large",
+                "批量审批一次最多处理 100 条申请",
+            ));
+        }
+        let mut request_ids = HashSet::new();
+        for review in &self.reviews {
+            review.validate()?;
+            if !request_ids.insert(review.request_id.as_str()) {
+                return Err(join_request_invalid(
+                    "join_request.error.batch_duplicate",
+                    "批量审批不能重复选择同一申请",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeWithdrawJoinRequestCommand {
+    pub network_id: String,
+    pub request_id: String,
+}
+
+impl NodeWithdrawJoinRequestCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        validate_join_request_id_field(&self.request_id)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeResubmitJoinRequestCommand {
+    pub network_id: String,
+    pub request_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+}
+
+impl NodeResubmitJoinRequestCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        validate_join_request_id_field(&self.request_id)?;
+        validate_join_request_revision(self.expected_revision)?;
+        validate_join_request_reason_field(&self.reason)
+    }
+}
+
+impl std::fmt::Debug for NodeResubmitJoinRequestCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeResubmitJoinRequestCommand")
+            .field("network_id", &self.network_id)
+            .field("request_id", &self.request_id)
+            .field("expected_revision", &self.expected_revision)
+            .field("reason", &"[redacted]")
+            .finish()
+    }
+}
+
+fn validate_network_id_field(network_id: &str) -> Result<(), NodeProblem> {
+    if network_id.trim().is_empty()
+        || fuckipv6_common::domain::NetworkId::parse(network_id.to_owned()).is_err()
+    {
+        return Err(join_request_invalid(
+            "join_request.error.invalid_network_id",
+            "网络 ID 格式无效",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_join_request_id_field(request_id: &str) -> Result<(), NodeProblem> {
+    if request_id.trim().is_empty()
+        || fuckipv6_common::domain::JoinRequestId::parse(request_id.to_owned()).is_err()
+    {
+        return Err(join_request_invalid(
+            "join_request.error.invalid_request_id",
+            "加入申请 ID 格式无效",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_join_request_revision(expected_revision: u64) -> Result<(), NodeProblem> {
+    if expected_revision == 0 {
+        return Err(join_request_invalid(
+            "join_request.error.invalid_revision",
+            "加入申请 revision 必须大于零",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_join_request_reason_field(reason: &str) -> Result<(), NodeProblem> {
+    fuckipv6_common::domain::validate_join_request_reason(reason).map_err(|_| {
+        join_request_invalid(
+            "join_request.error.invalid_reason",
+            format!(
+                "申请理由必须非空、去除首尾空白、不含控制字符，且不超过 {JOIN_REQUEST_MAX_REASON_CHARS} 个字符"
+            ),
+        )
+    })
+}
+
+fn validate_optional_join_request_note(note: Option<&str>) -> Result<(), NodeProblem> {
+    let Some(note) = note else {
+        return Ok(());
+    };
+    if note.trim().is_empty()
+        || note.trim() != note
+        || note.chars().count() > JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS
+        || note.chars().any(char::is_control)
+    {
+        return Err(join_request_invalid(
+            "join_request.error.invalid_action_note",
+            format!(
+                "审批说明必须非空、去除首尾空白、不含控制字符，且不超过 {JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS} 个字符"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn join_request_invalid(key: &'static str, message: impl Into<String>) -> NodeProblem {
+    invalid(message).with_message_key(key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -1564,6 +1857,27 @@ pub struct NodeNetworkLeaveResult {
     pub snapshot: NodeSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeJoinRequestListResult {
+    pub network_id: String,
+    /// Reviewer callers receive every network request; other callers receive
+    /// only their own requests. Reason and notes remain private fields.
+    pub requests: Vec<JoinRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeJoinRequestReviewOutcome {
+    pub request_id: String,
+    pub state: JoinRequestState,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeJoinRequestReviewAck {
+    pub network_id: String,
+    pub reviews: Vec<NodeJoinRequestReviewOutcome>,
+}
+
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
@@ -1579,6 +1893,10 @@ pub enum NodeCommandOutcome {
     NetworkProfileUpdated(Box<NetworkProfileApplyResult>),
     NetworkJoinPreview(Box<NodeNetworkJoinPreview>),
     NetworkJoined(Box<NodeNetworkJoinResult>),
+    JoinRequestSubmitted(Box<JoinRequest>),
+    JoinRequests(Box<NodeJoinRequestListResult>),
+    JoinRequestsReviewed(Box<NodeJoinRequestReviewAck>),
+    JoinRequestUpdated(Box<JoinRequest>),
     NetworkLeft(Box<NodeNetworkLeaveResult>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
@@ -2047,6 +2365,71 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
             })),
+            NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                reason: "Please allow this node to join for file collaboration.".into(),
+            }),
+            NodeCommand::ListJoinRequests(NodeListJoinRequestsCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+            }),
+            NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                review: NodeJoinRequestReviewItem {
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"join-request",
+                    )
+                    .to_string(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                },
+            }),
+            NodeCommand::BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                reviews: vec![NodeJoinRequestReviewItem {
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"join-request-batch",
+                    )
+                    .to_string(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::RequestInformation,
+                    note: Some("Please confirm the intended file-sharing scope.".into()),
+                }],
+            }),
+            NodeCommand::WithdrawJoinRequest(NodeWithdrawJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                    b"withdraw-join-request",
+                )
+                .to_string(),
+            }),
+            NodeCommand::ResubmitJoinRequest(NodeResubmitJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                    b"resubmit-join-request",
+                )
+                .to_string(),
+                expected_revision: 2,
+                reason: "Updated reason after the reviewer requested clarification.".into(),
+            }),
             NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
                 network_name: "office".into(),
             }),
@@ -2478,6 +2861,61 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
             })),
+            NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+                network_id: "not-a-network-id".into(),
+                reason: "A valid reason".into(),
+            }),
+            NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                reason: "  ".into(),
+            }),
+            NodeCommand::ListJoinRequests(NodeListJoinRequestsCommand {
+                network_id: String::new(),
+            }),
+            NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                review: NodeJoinRequestReviewItem {
+                    request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"join-request",
+                    )
+                    .to_string(),
+                    expected_revision: 0,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                },
+            }),
+            NodeCommand::BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                reviews: Vec::new(),
+            }),
+            NodeCommand::WithdrawJoinRequest(NodeWithdrawJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                request_id: "not-a-request-id".into(),
+            }),
+            NodeCommand::ResubmitJoinRequest(NodeResubmitJoinRequestCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                request_id: fuckipv6_common::domain::JoinRequestId::from_public_key(
+                    b"resubmit-join-request",
+                )
+                .to_string(),
+                expected_revision: 2,
+                reason: "界".repeat(JOIN_REQUEST_MAX_REASON_CHARS + 1),
+            }),
             NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
                 network_name: "home/office".into(),
                 role: NodeNetworkRole::Relay,
@@ -2541,6 +2979,168 @@ mod tests {
         assert!(encoded.contains("exit_node"));
         assert!(!encoded.contains("client_mode"));
         assert!(!encoded.contains("server_mode"));
+    }
+
+    fn join_request_network_id() -> String {
+        fuckipv6_common::domain::NetworkId::from_public_key(b"join-request-command-network")
+            .to_string()
+    }
+
+    fn join_request_id(label: &str) -> String {
+        fuckipv6_common::domain::JoinRequestId::from_public_key(label.as_bytes()).to_string()
+    }
+
+    fn review_item(
+        request_id: String,
+        action: JoinRequestReviewAction,
+        note: Option<&str>,
+    ) -> NodeJoinRequestReviewItem {
+        NodeJoinRequestReviewItem {
+            request_id,
+            expected_revision: 1,
+            action,
+            note: note.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn join_request_commands_enforce_bounded_review_contract() {
+        let network_id = join_request_network_id();
+        let request_id = join_request_id("bounded-request");
+        let exact_reason = "界".repeat(JOIN_REQUEST_MAX_REASON_CHARS);
+        NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+            network_id: network_id.clone(),
+            reason: exact_reason,
+        })
+        .validate()
+        .expect("Unicode reason at the scalar-value limit is accepted");
+
+        let problem = NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+            network_id: network_id.clone(),
+            reason: "界".repeat(JOIN_REQUEST_MAX_REASON_CHARS + 1),
+        })
+        .validate()
+        .expect_err("Unicode reason above the scalar-value limit is rejected");
+        assert_eq!(problem.message_key, "join_request.error.invalid_reason");
+
+        let exact_note = "审".repeat(JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS);
+        NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+            network_id: network_id.clone(),
+            review: review_item(
+                request_id.clone(),
+                JoinRequestReviewAction::RequestInformation,
+                Some(&exact_note),
+            ),
+        })
+        .validate()
+        .expect("information request at the scalar-value limit is accepted");
+
+        for review in [
+            review_item(
+                request_id.clone(),
+                JoinRequestReviewAction::Approve,
+                Some("approval note"),
+            ),
+            review_item(
+                request_id.clone(),
+                JoinRequestReviewAction::RequestInformation,
+                None,
+            ),
+            review_item(
+                request_id.clone(),
+                JoinRequestReviewAction::RequestInformation,
+                Some("  padded  "),
+            ),
+        ] {
+            assert!(
+                NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                    network_id: network_id.clone(),
+                    review,
+                })
+                .validate()
+                .is_err()
+            );
+        }
+
+        let problem = NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+            network_id: network_id.clone(),
+            review: NodeJoinRequestReviewItem {
+                expected_revision: 0,
+                ..review_item(request_id, JoinRequestReviewAction::Approve, None)
+            },
+        })
+        .validate()
+        .expect_err("revision zero is rejected");
+        assert_eq!(problem.message_key, "join_request.error.invalid_revision");
+    }
+
+    #[test]
+    fn batch_join_request_review_rejects_duplicates_and_unbounded_batches() {
+        let network_id = join_request_network_id();
+        let request_id = join_request_id("duplicate-batch-request");
+        let duplicate = review_item(request_id.clone(), JoinRequestReviewAction::Approve, None);
+        let problem = NodeCommand::BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand {
+            network_id: network_id.clone(),
+            reviews: vec![duplicate.clone(), duplicate],
+        })
+        .validate()
+        .expect_err("duplicate request IDs are rejected");
+        assert_eq!(problem.message_key, "join_request.error.batch_duplicate");
+
+        let reviews = (0..101)
+            .map(|index| {
+                review_item(
+                    join_request_id(&format!("large-batch-request-{index}")),
+                    JoinRequestReviewAction::Approve,
+                    None,
+                )
+            })
+            .collect();
+        let problem = NodeCommand::BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand {
+            network_id,
+            reviews,
+        })
+        .validate()
+        .expect_err("batches above 100 requests are rejected");
+        assert_eq!(problem.message_key, "join_request.error.batch_too_large");
+    }
+
+    #[test]
+    fn join_request_command_debug_redacts_prose() {
+        let network_id = join_request_network_id();
+        let request_id = join_request_id("debug-request");
+        let submit = NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+            network_id: network_id.clone(),
+            reason: "SECRET-SUBMISSION-REASON".into(),
+        });
+        let review = NodeCommand::BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand {
+            network_id: network_id.clone(),
+            reviews: vec![review_item(
+                request_id.clone(),
+                JoinRequestReviewAction::RequestInformation,
+                Some("SECRET-REVIEWER-NOTE"),
+            )],
+        });
+        let resubmit = NodeCommand::ResubmitJoinRequest(NodeResubmitJoinRequestCommand {
+            network_id,
+            request_id,
+            expected_revision: 2,
+            reason: "SECRET-RESUBMISSION-REASON".into(),
+        });
+
+        let debug = format!(
+            "{submit:?}
+{review:?}
+{resubmit:?}"
+        );
+        assert!(debug.contains("[redacted]"));
+        for secret in [
+            "SECRET-SUBMISSION-REASON",
+            "SECRET-REVIEWER-NOTE",
+            "SECRET-RESUBMISSION-REASON",
+        ] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
     }
 
     #[test]
@@ -2859,6 +3459,51 @@ mod tests {
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].details["command"], "join_network");
         assert!(!format!("{activity:?}").contains("owner-secret-invitation"));
+    }
+
+    #[tokio::test]
+    async fn join_request_audit_is_canonical_and_redacts_prose() {
+        let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
+        let network_id = join_request_network_id();
+        let request_id = join_request_id("audit-request");
+        let context = || NodeCommandContext::local_owner(actor(), "local-ipc:owner");
+
+        bus.execute(
+            context(),
+            NodeCommandRequest::new(
+                60,
+                NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+                    network_id: network_id.clone(),
+                    reason: "SECRET-AUDIT-REASON".into(),
+                }),
+            ),
+        )
+        .await
+        .expect("submit command result");
+        bus.execute(
+            context(),
+            NodeCommandRequest::new(
+                61,
+                NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                    network_id,
+                    review: review_item(
+                        request_id,
+                        JoinRequestReviewAction::Reject,
+                        Some("SECRET-AUDIT-NOTE"),
+                    ),
+                }),
+            ),
+        )
+        .await
+        .expect("review command result");
+
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0].action, "network.join_request.submit");
+        assert_eq!(audit[1].action, "network.join_request.review");
+        let debug = format!("{audit:?}");
+        assert!(!debug.contains("SECRET-AUDIT-REASON"));
+        assert!(!debug.contains("SECRET-AUDIT-NOTE"));
     }
 
     #[tokio::test]

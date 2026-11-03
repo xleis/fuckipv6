@@ -426,6 +426,14 @@ impl NodeRuntimeHandler {
                     }
                     (None, _) => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
                 },
+                super::NodeCommand::SubmitJoinRequest(_)
+                | super::NodeCommand::ListJoinRequests(_)
+                | super::NodeCommand::ReviewJoinRequest(_)
+                | super::NodeCommand::BatchReviewJoinRequests(_)
+                | super::NodeCommand::WithdrawJoinRequest(_)
+                | super::NodeCommand::ResubmitJoinRequest(_) => {
+                    unavailable(request_id, "审批加入运行时尚未初始化")
+                }
                 super::NodeCommand::UpdateRouting(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
                     if command.is_exit_node && !capabilities.supported {

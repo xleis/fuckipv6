@@ -467,6 +467,186 @@
       ],
       "type": "string"
     },
+    "JoinApplicantProfile": {
+      "description": "Public applicant metadata shown to authorized reviewers. It contains no\nprivate network address, endpoint, activity or credential material.",
+      "properties": {
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "public_key_fingerprint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "public_key_fingerprint"
+      ],
+      "type": "object"
+    },
+    "JoinRequest": {
+      "description": "Durable approval request. The prose reason is optional solely so retention\ncleanup can redact it after the terminal retention deadline; a live pending\nrequest always has a non-empty reason.",
+      "properties": {
+        "applicant": {
+          "$ref": "#/$defs/JoinApplicantProfile"
+        },
+        "created_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "decided_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grant_preview": {
+          "$ref": "#/$defs/JoinRequestGrantPreview"
+        },
+        "information_request": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_retention_until_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason_visibility": {
+          "$ref": "#/$defs/JoinRequestReasonVisibility",
+          "default": "owners_and_administrators"
+        },
+        "request_id": {
+          "$ref": "#/$defs/JoinRequestId"
+        },
+        "reviewer_node_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "description": "Optimistic concurrency token. A review must supply the revision it was\ndisplayed with so two administrators cannot both approve stale copies.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/JoinRequestState"
+        },
+        "terms": {
+          "$ref": "#/$defs/MembershipTerms"
+        },
+        "updated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "network_id",
+        "applicant",
+        "state",
+        "revision",
+        "terms",
+        "grant_preview",
+        "created_at_unix_ms",
+        "updated_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "JoinRequestGrantPreview": {
+      "description": "Exact authority the member would receive if this request is approved. This\nis persisted at submission time so reviewers cannot approve terms different\nfrom those shown in the approval dialog.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
+        },
+        "file_access": {
+          "default": false,
+          "type": "boolean"
+        },
+        "grants_data_plane_access": {
+          "default": false,
+          "type": "boolean"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "type": "object"
+    },
+    "JoinRequestId": {
+      "type": "string"
+    },
+    "JoinRequestReasonVisibility": {
+      "description": "The only supported visibility for request prose. The reason is deliberately\nrepresented in the durable request record, not in discovery, snapshots,\nactivities, audit details or event payloads.",
+      "enum": [
+        "owners_and_administrators"
+      ],
+      "type": "string"
+    },
+    "JoinRequestState": {
+      "enum": [
+        "pending",
+        "needs_information",
+        "approved",
+        "rejected",
+        "withdrawn",
+        "expired"
+      ],
+      "type": "string"
+    },
     "MembershipRole": {
       "description": "A member's governance role. Temporary Coordinator authority is intentionally\nrepresented by `CoordinatorTerm`, never by mutating this durable role.",
       "enum": [
@@ -494,6 +674,38 @@
         "cancelled"
       ],
       "type": "string"
+    },
+    "MembershipTerms": {
+      "properties": {
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "member_limit": {
+          "description": "Capacity shown when these terms were acknowledged. Omitted for legacy\nmemberships so their content hash remains stable.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_policy_revision",
+        "privacy_policy_revision",
+        "exit_contribution"
+      ],
+      "type": "object"
     },
     "NetworkAdminProfileProjection": {
       "properties": {
@@ -1462,6 +1674,70 @@
         {
           "properties": {
             "data": {
+              "$ref": "#/$defs/JoinRequest"
+            },
+            "status": {
+              "const": "join_request_submitted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeJoinRequestListResult"
+            },
+            "status": {
+              "const": "join_requests",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeJoinRequestReviewAck"
+            },
+            "status": {
+              "const": "join_requests_reviewed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/JoinRequest"
+            },
+            "status": {
+              "const": "join_request_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
               "$ref": "#/$defs/NodeNetworkLeaveResult"
             },
             "status": {
@@ -2212,6 +2488,64 @@
         "unknown"
       ],
       "type": "string"
+    },
+    "NodeJoinRequestListResult": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "requests": {
+          "description": "Reviewer callers receive every network request; other callers receive\nonly their own requests. Reason and notes remain private fields.",
+          "items": {
+            "$ref": "#/$defs/JoinRequest"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "requests"
+      ],
+      "type": "object"
+    },
+    "NodeJoinRequestReviewAck": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "reviews": {
+          "items": {
+            "$ref": "#/$defs/NodeJoinRequestReviewOutcome"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "reviews"
+      ],
+      "type": "object"
+    },
+    "NodeJoinRequestReviewOutcome": {
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/JoinRequestState"
+        }
+      },
+      "required": [
+        "request_id",
+        "state",
+        "revision"
+      ],
+      "type": "object"
     },
     "NodeLifecycleSnapshot": {
       "description": "Shared lifecycle snapshot consumed by CLI, IPC, WebUI, and (later) GPUI.",

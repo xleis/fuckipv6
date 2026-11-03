@@ -247,6 +247,18 @@ pub fn choice_control(
     choice_surface(id, label.into(), selected, Role::RadioButton)
 }
 
+pub fn checkbox_control(
+    id: SharedString,
+    label: impl Into<SharedString>,
+    selected: bool,
+    disabled: bool,
+) -> Stateful<Div> {
+    let control = choice_surface(id, label.into(), selected, Role::CheckBox);
+    control
+        .tab_stop(!disabled)
+        .opacity(if disabled { 0.62 } else { 1.0 })
+}
+
 pub fn tab_control(
     id: SharedString,
     label: impl Into<SharedString>,

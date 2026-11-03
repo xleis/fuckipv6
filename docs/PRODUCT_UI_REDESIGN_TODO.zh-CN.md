@@ -1108,20 +1108,22 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 支持从发现结果进入申请或邀请流程；
 - [x] 完成键盘和移动端等价操作。
 
-**证据（2026-11-04）**：WebUI 与 GPUI 的 Networks 页面均将“已加入网络”和“发现结果”分成独立区域；即使没有已加入网络，发现结果仍可独立展示。搜索统一覆盖名称、简介、标签、能力摘要、加入模式和语言/地区文本，并支持公开/私有、开放/审批/邀请、语言和地区筛选。验证记录按 schema、时效、可发现性、吊销和摘要签名过滤，结果按名称精确度、名称和网络 ID 稳定排序；详情展示网络 ID、能力、标签、加入模式、隐私摘要、最近验证时间和陈旧原因。状态区分 `idle/pending/empty/no_matches/degraded/failed/unsupported`，部分索引不会误报为完整空结果，只有完整响应才显示“无更多结果”。WebUI 搜索本地防抖 250ms，GPUI 同样使用 250ms 本地防抖，二者均不发送命令、不上传、不持久化搜索文本或写入活动日志；WebUI 快捷入口与 GPUI 对齐为进入 Networks 并打开真实的 `refresh_discovery_index` 动作。发现卡 CTA 仅预填 `join_network.network_name` 后打开真实加入动作，不预填 `target`、不直接提交；实际开放加入、`target` 获取/验证和 JoinRequest 状态机属于 W8-05。WebUI 使用原生搜索框、筛选控件、可键盘展开的详情和响应式布局；GPUI 使用原生输入/按钮及同一断点布局。新增 GPUI 测试覆盖双区与验证详情、无已加入网络时发现结果仍显示、本地防抖/筛选且零命令、空/无匹配/失败/部分/陈旧状态区分，以及 CTA 仅预填网络名称。验证通过：`cargo test -p fuckipv6-common --all-features`（182 passed）、`cargo test -p fuckipv6-client --all-features`（库 761 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；特权生命周期测试 1 ignored）、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 9 个测试文件 101/101、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`（含 Rust、TypeScript、Android DTO 测试）、`cargo fmt --all -- --check` 和 `git diff --check`。Android Compose 等价界面属于 W16，不在本项重复实现。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
+**证据（2026-11-04）**：WebUI 与 GPUI 的 Networks 页面均将“已加入网络”和“发现结果”分成独立区域；即使没有已加入网络，发现结果仍可独立展示。搜索统一覆盖名称、简介、标签、能力摘要、加入模式和语言/地区文本，并支持公开/私有、开放/审批/邀请、语言和地区筛选。验证记录按 schema、时效、可发现性、吊销和摘要签名过滤，结果按名称精确度、名称和网络 ID 稳定排序；详情展示网络 ID、能力、标签、加入模式、隐私摘要、最近验证时间和陈旧原因。状态区分 `idle/pending/empty/no_matches/degraded/failed/unsupported`，部分索引不会误报为完整空结果，只有完整响应才显示“无更多结果”。WebUI 搜索本地防抖 250ms，GPUI 同样使用 250ms 本地防抖，二者均不发送命令、不上传、不持久化搜索文本或写入活动日志；WebUI 快捷入口与 GPUI 对齐为进入 Networks 并打开真实的 `refresh_discovery_index` 动作。发现卡 CTA 进入真实的开放加入流程；W8-05 已将其升级为先调用 `preview_join_network` 获取签名预览，再由用户确认条款后提交，而不是信任搜索结果缓存直接加入。WebUI 使用原生搜索框、筛选控件、可键盘展开的详情和响应式布局；GPUI 使用原生输入/按钮及同一断点布局。新增 GPUI 测试覆盖双区与验证详情、无已加入网络时发现结果仍显示、本地防抖/筛选且零命令、空/无匹配/失败/部分/陈旧状态区分，以及 CTA 打开签名预览且不直接提交。验证通过：`cargo test -p fuckipv6-common --all-features`（182 passed）、`cargo test -p fuckipv6-client --all-features`（库 761 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；特权生命周期测试 1 ignored）、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 9 个测试文件 101/101、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`（含 Rust、TypeScript、Android DTO 测试）、`cargo fmt --all -- --check` 和 `git diff --check`。Android Compose 等价界面属于 W16，不在本项重复实现。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 **验收**：搜索只展示可验证对象；无结果不会被误报为索引失败，陈旧结果有明确标识。
 
-### W8-05 开放加入流程 `[ ]`
+### W8-05 开放加入流程 `[x]`
 
-- [ ] 加入前展示网络身份、管理员、策略、Exit 贡献要求和隐私变化；
-- [ ] 用户可以查看本机将贡献的能力及可撤回方式；
-- [ ] 要求确认后提交 JoinRequest/直接加入 operation；
-- [ ] 服务端验证签名、策略版本、成员上限和重复加入；
-- [ ] 加入成功产生成员状态和活动，刷新所有相关视图；
-- [ ] 加入失败保留用户选择并提供可重试错误；
-- [ ] 退出网络不误删其他网络成员关系；
-- [ ] 覆盖并发加入、网络关闭加入、策略变化和版本竞争测试。
+- [x] 加入前展示网络身份、管理员、策略、Exit 贡献要求和隐私变化；
+- [x] 用户可以查看本机将贡献的能力及可撤回方式；
+- [x] 要求确认后提交 JoinRequest/直接加入 operation；
+- [x] 服务端验证签名、策略版本、成员上限和重复加入；
+- [x] 加入成功产生成员状态和活动，刷新所有相关视图；
+- [x] 加入失败保留用户选择并提供可重试错误；
+- [x] 退出网络不误删其他网络成员关系；
+- [x] 覆盖并发加入、网络关闭加入、策略变化和版本竞争测试。
+
+**证据（2026-11-04）**：WebUI 与 GPUI 均把发现结果接入公开加入流程；GPUI 的发现结果 CTA 先调用 `preview_join_network`，按 Network ID 取得只读签名预览，再打开真实的 `join_network` 动作。预览展示 Network ID、网络公钥、Owner 与管理员、发现/网络/隐私策略版本、成员数与上限、加入模式、可见性、Exit 贡献要求、隐私变化、网络声明能力、本机将贡献的能力、能力仍由本机控制且可随时撤回、公开端点、签发/过期时间和预览摘要；`already_member`、不可加入原因及条款确认状态有明确文案。用户必须勾选条款后才能确认，确认时把预览摘要、策略版本、隐私版本、条款哈希和确认时间填入内部命令字段；存在签名预览时隐藏通用 ticket 表单，避免绕过确认。无预览的直接 ticket/URL 加入仍保留兼容路径，但会先剥离内部确认字段并校验目标。运行时在 `join_gate` 下串行完成重新验证、成员上限检查、成员关系持久化和启动，避免并发 UI 提交竞争；`confirm_join_record` 重新校验签名发现记录、预览摘要、网络/隐私策略版本、条款哈希、加入模式、端点、成员上限、重复加入和 revision，网络关闭、满员、策略变化及预览后 revision 竞争均返回可恢复的具体错误。成功后写入 accepted membership 并刷新成员投影和活动；失败时保留预览、条款勾选和确认字段，可直接重试，且 GPUI 回归测试验证具体 `join.error.*` 文案和重试提示仍可见。退出使用稳定 Network ID 删除单条成员关系，`accepted_memberships_are_idempotent_and_removed_by_stable_id` 验证不会误删其他网络，`concurrent_membership_updates_do_not_overwrite_each_other` 验证并发写入不丢更新；WebUI `leaves the selected network without touching other memberships` 覆盖 UI 隔离。后端测试还包括 `join_preview_is_complete_read_only_and_digest_is_stable`、`join_confirmation_rejects_tampered_digest_and_terms`、`join_preview_blocks_closed_and_full_networks` 和 `join_confirmation_rejects_revision_race_after_preview`。验证通过：`cargo test -p fuckipv6-common --all-features`（182 passed）、`cargo test -p fuckipv6-client --all-features`（库 771 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；特权生命周期测试 1 ignored）、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 9 个测试文件 107/107、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`（含 Rust、TypeScript、Android DTO 测试）、`node scripts/test_webui_accessibility.mjs`、`cargo fmt --all -- --check` 和 `git diff --check`。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。Android Compose 等价界面属于 W16，不在本项重复实现。
 
 **验收**：用户清楚知道加入后发生什么；加入操作幂等，跨网络状态互不污染。
 

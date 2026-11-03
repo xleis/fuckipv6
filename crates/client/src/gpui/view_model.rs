@@ -1116,17 +1116,79 @@ pub fn build_command(
             },
         )),
         Ok(ActionBinding::JoinNetwork) => {
+            let target = field("target");
+            let network_id = optional_non_empty(field("network_id"));
+            let (
+                network_id,
+                preview_digest,
+                network_policy_revision,
+                privacy_policy_revision,
+                terms_hash,
+                acknowledged_at_unix_ms,
+            ) = if let Some(network_id) = network_id {
+                fuckipv6_common::domain::NetworkId::parse(network_id.clone()).map_err(|_| {
+                    CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "network_id".into(),
+                        value: network_id.clone(),
+                    }
+                })?;
+                let preview_digest = required("preview_digest")?;
+                if preview_digest.trim().is_empty() {
+                    return Err(CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "preview_digest".into(),
+                        value: preview_digest,
+                    });
+                }
+                let terms_hash = required("terms_hash")?;
+                let terms_hash = fuckipv6_common::domain::ContentHash::parse(terms_hash.clone())
+                    .map_err(|_| CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "terms_hash".into(),
+                        value: terms_hash.clone(),
+                    })?;
+                (
+                    Some(network_id),
+                    Some(preview_digest),
+                    Some(parse_number::<u64>(
+                        action,
+                        "network_policy_revision",
+                        &required("network_policy_revision")?,
+                    )?),
+                    Some(parse_number::<u64>(
+                        action,
+                        "privacy_policy_revision",
+                        &required("privacy_policy_revision")?,
+                    )?),
+                    Some(terms_hash),
+                    Some(parse_number::<u64>(
+                        action,
+                        "acknowledged_at_unix_ms",
+                        &required("acknowledged_at_unix_ms")?,
+                    )?),
+                )
+            } else {
+                if target.trim().is_empty() {
+                    return Err(CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "target".into(),
+                        value: target,
+                    });
+                }
+                (None, None, None, None, None, None)
+            };
             Ok(NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
-                target: field("target"),
+                target,
                 network_name: optional_non_empty(field("network_name")),
                 start: parse_bool(action, "start", &required("start")?)?,
                 discovery_record: None,
-                network_id: None,
-                preview_digest: None,
-                network_policy_revision: None,
-                privacy_policy_revision: None,
-                terms_hash: None,
-                acknowledged_at_unix_ms: None,
+                network_id,
+                preview_digest,
+                network_policy_revision,
+                privacy_policy_revision,
+                terms_hash,
+                acknowledged_at_unix_ms,
             })))
         }
         Ok(ActionBinding::LeaveNetwork) => Ok(NodeCommand::LeaveNetwork(NodeLeaveNetworkCommand {
@@ -1298,6 +1360,8 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "refresh_discovery_index" => HashSet::from(["index_url"]),
         "retry_discovery_index" => HashSet::from([]),
         "preview_join_network" => HashSet::from(["network_id"]),
+        // The signed preview confirmation fields are populated internally by
+        // the GPUI workflow rather than declared as ordinary manifest inputs.
         "join_network" => HashSet::from(["target", "network_name", "start"]),
         "leave_network" => HashSet::from(["network_name"]),
         "start_networks" => HashSet::from(["selection"]),
@@ -4559,11 +4623,63 @@ mod tests {
                         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
                     );
                 }
+                if action.id == "join_network" {
+                    values.insert(
+                        "target".into(),
+                        "https://coordinator.example.test/session".into(),
+                    );
+                }
                 let command = build_command(action, &values).expect("typed command");
                 assert_ne!(action.id, "");
                 assert!(!format!("{command:?}").is_empty());
             }
         }
+    }
+
+    #[test]
+    fn discovery_join_builder_requires_and_preserves_confirmed_preview_fields() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.id == "join_network")
+            .expect("join action");
+        let network_id =
+            fuckipv6_common::domain::NetworkId::from_public_key(b"preview-network").to_string();
+        let terms_hash = fuckipv6_common::domain::ContentHash::from_bytes(b"join terms")
+            .as_str()
+            .to_string();
+        let values = HashMap::from([
+            ("target".into(), String::new()),
+            ("network_name".into(), "atlas".into()),
+            ("start".into(), "true".into()),
+            ("network_id".into(), network_id.clone()),
+            ("preview_digest".into(), "signed-preview-digest".into()),
+            ("network_policy_revision".into(), "7".into()),
+            ("privacy_policy_revision".into(), "3".into()),
+            ("terms_hash".into(), terms_hash.clone()),
+            ("acknowledged_at_unix_ms".into(), "1700000000000".into()),
+        ]);
+
+        let command = build_command(action, &values).expect("confirmed discovery join");
+        assert!(matches!(
+            command,
+            NodeCommand::JoinNetwork(command)
+                if command.network_id.as_deref() == Some(network_id.as_str())
+                    && command.preview_digest.as_deref() == Some("signed-preview-digest")
+                    && command.network_policy_revision == Some(7)
+                    && command.privacy_policy_revision == Some(3)
+                    && command.terms_hash.as_ref().is_some_and(|hash| hash.as_str() == terms_hash)
+                    && command.acknowledged_at_unix_ms == Some(1_700_000_000_000)
+        ));
+
+        let mut missing_terms = values;
+        missing_terms.remove("terms_hash");
+        assert!(matches!(
+            build_command(action, &missing_terms),
+            Err(CommandBuildError::MissingField { field_id, .. }) if field_id == "terms_hash"
+        ));
     }
 
     #[test]

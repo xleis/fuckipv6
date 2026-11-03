@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    CapabilityKind, IdempotencyKey, NetworkJoinMode, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
-    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
+    CapabilityKind, ExitContributionObligation, IdempotencyKey, NetworkJoinMode,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
+    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
+    OperationState,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -25,8 +26,8 @@ use gpui::{
 use gpui_base::input::{InputEvent, Textarea, TextareaState};
 
 use super::components::{
-    button, choice_control, error_state as component_error_state, nav_tab, semantic_palette, tabs,
-    toast as component_toast, ButtonVariant,
+    button, checkbox_control, choice_control, error_state as component_error_state, nav_tab,
+    semantic_palette, tabs, toast as component_toast, ButtonVariant,
 };
 use super::configuration_workflow::{
     is_configuration_action, json_pointer_selection, ConfigurationOperation,
@@ -51,7 +52,7 @@ use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
-    NodeNetworkCreationNextStep, NodeNetworkStatus, NodeOperationSnapshot,
+    NodeNetworkCreationNextStep, NodeNetworkJoinPreview, NodeNetworkStatus, NodeOperationSnapshot,
     NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProblem,
     NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
     NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
@@ -246,6 +247,8 @@ struct GpuiShell {
     diagnostic_copy_notice: Option<String>,
     recent_network_profile_preview: Option<NetworkProfilePreview>,
     recent_network_profile_updated: Option<NetworkProfileApplyResult>,
+    recent_network_join_preview: Option<NodeNetworkJoinPreview>,
+    network_join_terms_confirmed: bool,
     error: Option<String>,
     notice: Option<String>,
     pending_notice_after_snapshot: Option<String>,
@@ -308,6 +311,8 @@ impl GpuiShell {
             diagnostic_copy_notice: None,
             recent_network_profile_preview: None,
             recent_network_profile_updated: None,
+            recent_network_join_preview: None,
+            network_join_terms_confirmed: false,
             error: None,
             notice: None,
             pending_notice_after_snapshot: None,
@@ -1136,11 +1141,9 @@ impl GpuiShell {
                         .map(|network| format!(" · {network}"))
                         .unwrap_or_default();
                     self.error = Some(format!(
-                        "{}{} ({:?}, retryable={})",
-                        t(self.locale, problem.code.message_key()),
-                        network,
-                        problem.code,
-                        problem.retryable
+                        "{}{}",
+                        format_operation_problem(self.locale, &problem),
+                        network
                     ));
                 }
             }
@@ -1171,6 +1174,7 @@ impl GpuiShell {
                 self.recent_network_profile_updated = None;
             }
             NodeCommandOutcome::NetworkJoinPreview(preview) => {
+                let preview = *preview;
                 self.notice = Some(format!(
                     "{}: {} · {} {}",
                     t(self.locale, "action.preview_join_network"),
@@ -1178,9 +1182,14 @@ impl GpuiShell {
                     preview.member_count,
                     t(self.locale, "network.member_count")
                 ));
+                self.network_join_terms_confirmed = false;
+                self.set_join_preview_fields(&preview);
+                self.recent_network_join_preview = Some(preview);
+                self.open_action("networks", "join_network", cx);
             }
             NodeCommandOutcome::NetworkJoined(result) => {
                 self.apply_snapshot(result.snapshot, cx);
+                self.clear_join_preview_state();
                 self.notice = Some(format!(
                     "{}: {}",
                     t(self.locale, "action.join_network"),
@@ -1597,9 +1606,72 @@ impl GpuiShell {
     }
 
     fn request_discovery_join(&mut self, result: &DiscoveryResult, cx: &mut Context<Self>) {
-        self.set_field_value("join_network", "network_name", result.title.clone());
+        self.clear_join_preview_state();
+        self.set_field_value(
+            "preview_join_network",
+            "network_id",
+            result.network_id.as_str(),
+        );
         self.sync_text_inputs(cx);
-        self.open_action("networks", "join_network", cx);
+        self.open_action("networks", "preview_join_network", cx);
+    }
+
+    fn set_join_preview_fields(&mut self, preview: &NodeNetworkJoinPreview) {
+        self.set_field_value("join_network", "target", "");
+        self.set_field_value("join_network", "network_id", preview.network_id.clone());
+        self.set_field_value("join_network", "network_name", preview.network_name.clone());
+        self.set_field_value(
+            "join_network",
+            "preview_digest",
+            preview.preview_digest.clone(),
+        );
+        self.set_field_value(
+            "join_network",
+            "network_policy_revision",
+            preview.network_policy_revision.to_string(),
+        );
+        self.set_field_value(
+            "join_network",
+            "privacy_policy_revision",
+            preview.privacy_policy_revision.to_string(),
+        );
+        self.set_field_value("join_network", "terms_hash", preview.terms_hash.as_str());
+        self.set_field_value("join_network", "acknowledged_at_unix_ms", "");
+        self.set_field_value("join_network", "start", "true");
+    }
+
+    fn clear_join_preview_state(&mut self) {
+        self.recent_network_join_preview = None;
+        self.network_join_terms_confirmed = false;
+        for field in [
+            "network_id",
+            "preview_digest",
+            "network_policy_revision",
+            "privacy_policy_revision",
+            "terms_hash",
+            "acknowledged_at_unix_ms",
+        ] {
+            self.set_field_value("join_network", field, "");
+        }
+    }
+
+    fn confirm_join_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.recent_network_join_preview.as_ref() else {
+            self.error = Some(t(self.locale, "join.error.unavailable").to_string());
+            cx.notify();
+            return;
+        };
+        if !preview.can_join || preview.already_member || !self.network_join_terms_confirmed {
+            self.error = Some(t(self.locale, "join.error.terms_required").to_string());
+            cx.notify();
+            return;
+        }
+        self.set_field_value(
+            "join_network",
+            "acknowledged_at_unix_ms",
+            unix_time_ms().to_string(),
+        );
+        self.submit_manifest_action("join_network", cx);
     }
 
     fn fill_empty_network_fields(&mut self) {
@@ -5701,6 +5773,10 @@ impl GpuiShell {
             .iter()
             .map(|field| self.field_editor(&action, field, cx))
             .collect::<Vec<_>>();
+        let join_preview_card = (action.id == "join_network")
+            .then_some(self.recent_network_join_preview.as_ref())
+            .flatten()
+            .map(|preview| self.join_preview_card(preview, cx));
         let status = match action.backend_status {
             NodeUiBackendStatus::Implemented => t(self.locale, "status.backend.implemented"),
             NodeUiBackendStatus::Unavailable => t(self.locale, "status.backend.unavailable"),
@@ -5761,49 +5837,49 @@ impl GpuiShell {
             );
 
         if expanded {
-            card = card.child(
+            let mut body = div().flex().flex_col().gap_3().px_4().pb_4().child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .px_4()
-                    .pb_4()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(format!("{} · {}", action.id, status)),
-                    )
-                    .children(fields)
-                    .children(block_reason.map(|reason| {
-                        div()
-                            .text_xs()
-                            .text_color(rgba(COLOR_WARNING))
-                            .child(tr(
-                                self.locale,
-                                "gpui.action_blocked",
-                                &[
-                                    ("action", &action.id),
-                                    ("reason", t(self.locale, reason.message_key())),
-                                ],
-                            ))
-                            .into_any_element()
-                    }))
-                    .child(
-                        button(
-                            SharedString::from(format!("action-{}", action.id)),
-                            button_label,
-                            button_variant,
-                            disabled,
-                        )
-                        .w_full()
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            if shell.pending_commands == 0 && !blocked {
-                                shell.submit_manifest_action(&action_id, cx);
-                            }
-                        })),
-                    ),
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(format!("{} · {}", action.id, status)),
             );
+            if let Some(preview_card) = join_preview_card {
+                // A discovery-backed join must always pass through the
+                // signed preview and explicit terms acknowledgement. Hide the
+                // generic ticket fields so they cannot be mistaken for the
+                // final confirmation path.
+                body = body.child(preview_card);
+            } else {
+                body = body.children(fields).child(
+                    button(
+                        SharedString::from(format!("action-{}", action.id)),
+                        button_label,
+                        button_variant,
+                        disabled,
+                    )
+                    .w_full()
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if shell.pending_commands == 0 && !blocked {
+                            shell.submit_manifest_action(&action_id, cx);
+                        }
+                    })),
+                );
+            }
+            body = body.children(block_reason.map(|reason| {
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_WARNING))
+                    .child(tr(
+                        self.locale,
+                        "gpui.action_blocked",
+                        &[
+                            ("action", &action.id),
+                            ("reason", t(self.locale, reason.message_key())),
+                        ],
+                    ))
+                    .into_any_element()
+            }));
+            card = card.child(body);
         }
 
         card.into_any_element()
@@ -5950,6 +6026,294 @@ impl GpuiShell {
                 .into_any_element()
             }))
             .into_any_element()
+    }
+
+    fn join_preview_card(
+        &self,
+        preview: &NodeNetworkJoinPreview,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let pending = self.pending_commands > 0;
+        let can_join = preview.can_join && !preview.already_member;
+        let checked = self.network_join_terms_confirmed;
+        let blocked_reason = if preview.can_join {
+            None
+        } else {
+            Some(
+                t(
+                    self.locale,
+                    preview
+                        .blocked_reason_key
+                        .as_deref()
+                        .unwrap_or("join.error.unavailable"),
+                )
+                .to_string(),
+            )
+        };
+        let administrators = if preview.administrators.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            preview.administrators.join(" · ")
+        };
+        let capabilities = if preview.capability_summary.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            preview
+                .capability_summary
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let local_capabilities = if preview.locally_contributed_capabilities.is_empty() {
+            t(self.locale, "join.local_capabilities_none").to_string()
+        } else {
+            preview
+                .locally_contributed_capabilities
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let privacy_changes = if preview.privacy_changes.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            preview.privacy_changes.join(" · ")
+        };
+        let endpoints = if preview.endpoints.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            preview
+                .endpoints
+                .iter()
+                .map(|endpoint| {
+                    format!(
+                        "{}://{}:{}",
+                        discovery_transport_name(endpoint.transport),
+                        endpoint.host,
+                        endpoint.port
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let member_limit = preview
+            .member_limit
+            .map(|limit| format_integer(self.locale, i64::from(limit)))
+            .unwrap_or_else(|| t(self.locale, "common.unlimited").to_string());
+        let member_count = tr(
+            self.locale,
+            "join.member_count",
+            &[
+                (
+                    "count",
+                    &format_integer(self.locale, i64::from(preview.member_count)),
+                ),
+                ("limit", &member_limit),
+            ],
+        );
+        let issued_at = format_diagnostic_timestamp(self.locale, preview.issued_at_unix_ms);
+        let expires_at = format_diagnostic_timestamp(self.locale, preview.expires_at_unix_ms);
+        let terms_control = checkbox_control(
+            SharedString::from("join-network-terms"),
+            t(self.locale, "join.terms_checkbox"),
+            checked,
+            !can_join || pending,
+        )
+        .debug_selector(|| "visual-join-network-terms".into())
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if shell.pending_commands > 0 {
+                return;
+            }
+            let can_join = shell
+                .recent_network_join_preview
+                .as_ref()
+                .is_some_and(|preview| preview.can_join && !preview.already_member);
+            if can_join {
+                shell.network_join_terms_confirmed = !shell.network_join_terms_confirmed;
+                cx.notify();
+            }
+        }));
+        let confirm = button(
+            SharedString::from("join-network-confirm"),
+            t(self.locale, "join.confirm"),
+            ButtonVariant::Primary,
+            !can_join || !checked || pending,
+        )
+        .debug_selector(|| "visual-join-network-confirm".into())
+        .w_full()
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if shell.pending_commands == 0
+                && shell.network_join_terms_confirmed
+                && shell
+                    .recent_network_join_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.can_join && !preview.already_member)
+            {
+                shell.confirm_join_preview(cx);
+            }
+        }));
+        let status_color = if can_join {
+            COLOR_ACCENT
+        } else {
+            COLOR_WARNING
+        };
+
+        let mut card = div()
+            .id("join-network-preview")
+            .debug_selector(|| "visual-join-network-preview".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "join.preview_title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(status_color))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "join.preview_title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(preview.network_name.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(profile_status_chip(t(
+                        self.locale,
+                        if can_join {
+                            "join.can_join"
+                        } else {
+                            "join.cannot_join"
+                        },
+                    )))
+                    .when(preview.already_member, |chips| {
+                        chips.child(profile_status_chip(
+                            t(self.locale, "join.already_member").to_string(),
+                        ))
+                    })
+                    .child(profile_status_chip(
+                        t(self.locale, profile_join_mode_key(preview.join_mode)).to_string(),
+                    ))
+                    .child(profile_status_chip(
+                        t(self.locale, profile_visibility_key(preview.visibility)).to_string(),
+                    )),
+            );
+        if let Some(message) = blocked_reason {
+            card = card.child(discovery_notice(
+                "visual-join-network-blocked",
+                message,
+                SemanticState::Danger,
+            ));
+        }
+        card = card
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.network_id"),
+                        preview.network_id.clone(),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.public_key"),
+                        preview.public_key.clone(),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.owner"),
+                        preview.owner.clone(),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.administrators"),
+                        administrators,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.discovery_revision"),
+                        format_integer(self.locale, preview.discovery_revision as i64),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.network_policy_revision"),
+                        format_integer(self.locale, preview.network_policy_revision as i64),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.privacy_policy_revision"),
+                        format_integer(self.locale, preview.privacy_policy_revision as i64),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.members"),
+                        member_count,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.exit_contribution"),
+                        t(
+                            self.locale,
+                            match preview.exit_contribution {
+                                ExitContributionObligation::Required => "join.exit.required",
+                                ExitContributionObligation::NotRequired => "join.exit.not_required",
+                            },
+                        ),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.privacy_changes"),
+                        privacy_changes,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.capabilities"),
+                        capabilities,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.local_capabilities"),
+                        local_capabilities,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.contribution_policy"),
+                        t(self.locale, "join.contribution.local_control"),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.endpoints"),
+                        endpoints,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.issued_at"),
+                        issued_at,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.expires_at"),
+                        expires_at,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join.preview_digest"),
+                        preview.preview_digest.clone(),
+                    )),
+            )
+            .child(discovery_notice(
+                "visual-join-network-local-control",
+                t(self.locale, "join.local_revocable").to_string(),
+                SemanticState::Info,
+            ))
+            .child(terms_control)
+            .child(confirm);
+
+        card.into_any_element()
     }
 
     fn network_profile_result_card(&self) -> Option<gpui::AnyElement> {
@@ -7088,6 +7452,17 @@ fn profile_capability_key(capability: CapabilityKind) -> &'static str {
     }
 }
 
+fn discovery_transport_name(
+    transport: fuckipv6_common::domain::DiscoveryTransport,
+) -> &'static str {
+    match transport {
+        fuckipv6_common::domain::DiscoveryTransport::Quic => "quic",
+        fuckipv6_common::domain::DiscoveryTransport::Tcp => "tcp",
+        fuckipv6_common::domain::DiscoveryTransport::Websocket => "ws",
+        fuckipv6_common::domain::DiscoveryTransport::Local => "local",
+    }
+}
+
 fn profile_document_selector(title_key: &str) -> &'static str {
     match title_key {
         "profile.public_card" => "visual-network-profile-public-card",
@@ -7693,6 +8068,42 @@ mod tests {
             tags: &[],
             capabilities: Vec::new(),
             accepted_at_unix_ms,
+        }
+    }
+
+    fn join_preview_fixture() -> NodeNetworkJoinPreview {
+        let now = unix_time_ms();
+        NodeNetworkJoinPreview {
+            network_id: fuckipv6_common::domain::NetworkId::from_public_key(b"gpui-join-preview")
+                .to_string(),
+            network_name: "atlas".into(),
+            public_key: "public-key-atlas".into(),
+            owner: "node-owner-atlas".into(),
+            administrators: vec!["node-admin-atlas".into()],
+            discovery_revision: 9,
+            network_policy_revision: 7,
+            privacy_policy_revision: 3,
+            join_mode: NetworkJoinMode::Open,
+            visibility: NetworkVisibility::Public,
+            capability_summary: vec![CapabilityKind::Exit],
+            endpoints: vec![fuckipv6_common::domain::NetworkEndpoint {
+                transport: fuckipv6_common::domain::DiscoveryTransport::Websocket,
+                host: "coordinator.example.test".into(),
+                port: 443,
+            }],
+            member_count: 4,
+            member_limit: Some(8),
+            exit_contribution: ExitContributionObligation::Required,
+            privacy_changes: vec!["No member activity is published".into()],
+            already_member: false,
+            can_join: true,
+            blocked_reason_key: None,
+            terms_hash: fuckipv6_common::domain::ContentHash::from_bytes(b"atlas join terms"),
+            preview_digest: "signed-preview-digest".into(),
+            issued_at_unix_ms: now.saturating_sub(60_000),
+            expires_at_unix_ms: now.saturating_add(3_600_000),
+            locally_contributed_capabilities: vec![CapabilityKind::Exit],
+            contribution_policy_key: "join.contribution.local_control".into(),
         }
     }
 
@@ -8317,9 +8728,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn discovery_cta_only_prefills_join_network_name_and_opens_the_real_action(
-        cx: &mut TestAppContext,
-    ) {
+    fn discovery_cta_opens_signed_preview_without_submitting(cx: &mut TestAppContext) {
         let now = unix_time_ms();
         let record = discovery_record("atlas", now).build();
         let window = open_shell_window(cx, 1200.0, 900.0);
@@ -8349,22 +8758,120 @@ mod tests {
 
                 shell.request_discovery_join(&result, cx);
 
-                assert_eq!(shell.field_value("join_network", "network_name"), "atlas");
-                assert!(shell
-                    .form_values
-                    .get("join_network.target")
-                    .is_none_or(String::is_empty));
-                assert_ne!(
-                    shell.field_value("join_network", "network_name"),
+                assert_eq!(
+                    shell.field_value("preview_join_network", "network_id"),
                     network_id
                 );
                 assert_eq!(shell.pending_commands, pending_commands);
                 assert_eq!(shell.selected_page, "networks");
-                assert!(shell.expanded_actions.contains_key("join_network"));
+                assert!(shell.expanded_actions.contains_key("preview_join_network"));
+                assert!(shell.recent_network_join_preview.is_none());
                 assert!(shell.notice.is_none());
                 assert!(shell.error.is_none());
             })
             .expect("open discovery join action");
+    }
+
+    #[gpui::test]
+    fn join_preview_requires_explicit_terms_confirmation_before_submitting(
+        cx: &mut TestAppContext,
+    ) {
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot::default();
+                shell.snapshot.lifecycle.phase = crate::node::NodePhase::Running;
+                shell
+                    .snapshot
+                    .permissions
+                    .permissions
+                    .extend(crate::node::NodePermission::ALL);
+                shell.locale = Locale::En;
+                let preview = join_preview_fixture();
+                shell.set_join_preview_fields(&preview);
+                shell.recent_network_join_preview = Some(preview);
+                shell.open_action("networks", "join_network", cx);
+
+                assert!(!shell.network_join_terms_confirmed);
+                assert_eq!(shell.pending_commands, 0);
+                shell.confirm_join_preview(cx);
+                assert_eq!(shell.pending_commands, 0);
+                assert_eq!(
+                    shell.error.as_deref(),
+                    Some("Confirm the join terms first.")
+                );
+            })
+            .expect("install join preview fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-join-network-preview",
+            "visual-join-network-terms",
+            "visual-join-network-confirm",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing join preview element {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn rejected_join_keeps_preview_terms_and_confirmation_fields_for_retry(
+        cx: &mut TestAppContext,
+    ) {
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                let preview = join_preview_fixture();
+                shell.set_join_preview_fields(&preview);
+                shell.set_field_value(
+                    "join_network",
+                    "acknowledged_at_unix_ms",
+                    "1700000000000",
+                );
+                shell.recent_network_join_preview = Some(preview.clone());
+                shell.network_join_terms_confirmed = true;
+
+                shell.apply_command_result(
+                    Ok(NodeCommandResult::rejected(
+                        91,
+                        crate::node::NodeProblem::new(
+                            crate::node::NodeProblemCode::Conflict,
+                            "signed preview changed",
+                        )
+                        .with_message_key("join.error.preview_changed")
+                        .retryable(true),
+                    )),
+                    cx,
+                );
+
+                assert_eq!(shell.recent_network_join_preview.as_ref(), Some(&preview));
+                assert!(shell.network_join_terms_confirmed);
+                assert_eq!(
+                    shell.field_value("join_network", "network_id"),
+                    preview.network_id
+                );
+                assert_eq!(
+                    shell.field_value("join_network", "preview_digest"),
+                    preview.preview_digest
+                );
+                assert_eq!(
+                    shell.field_value("join_network", "acknowledged_at_unix_ms"),
+                    "1700000000000"
+                );
+                assert_eq!(
+                    shell.error.as_deref(),
+                    Some(
+                        "The network preview changed. Preview it again and confirm the terms. · Refresh the state and retry."
+                    )
+                );
+            })
+            .expect("apply rejected join result");
     }
 
     #[gpui::test]

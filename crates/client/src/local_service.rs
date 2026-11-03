@@ -20,7 +20,7 @@ use crate::local_ipc::{
 };
 use crate::node::{
     NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeEventBus, NodeStateStore,
-    OperationService,
+    OperationClientError, OperationService,
 };
 
 /// Commands may perform persistence and runtime transitions, so they get a
@@ -304,7 +304,7 @@ async fn serve_connection(
                     continue;
                 }
                 connection
-                    .send_response(&LocalResponse::NodeCommand(result))
+                    .send_response(&LocalResponse::NodeCommand(Box::new(result)))
                     .await?;
             }
             crate::local_ipc::LocalCommand::SubmitOperation {
@@ -372,6 +372,44 @@ async fn serve_connection(
                                 IpcErrorCode::NotFound,
                                 format!("节点操作不存在: {operation_id}"),
                             ),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::CancelOperation {
+                operation_id,
+                source,
+            } => {
+                let snapshot = state.snapshot().await;
+                let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, source);
+                match operations.cancel(&context, &operation_id) {
+                    Ok(operation) => {
+                        connection
+                            .send_response(&LocalResponse::Operation(Box::new(operation)))
+                            .await?;
+                    }
+                    Err(OperationClientError::NotFound(_)) => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(
+                                crate::local_ipc::IpcErrorCode::NotFound,
+                                format!("节点操作不存在: {operation_id}"),
+                            ),
+                        )
+                        .await?;
+                    }
+                    Err(OperationClientError::CancelRejected(problem)) => {
+                        send_local_error(connection, LocalError::problem(problem)).await?;
+                    }
+                    Err(error) => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(
+                                crate::local_ipc::IpcErrorCode::BackendUnavailable,
+                                error.to_string(),
+                            )
+                            .retryable(true),
                         )
                         .await?;
                     }
@@ -579,13 +617,13 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::local_ipc::{
-        connect, execute, lookup_operation, request, submit_operation, IpcRole, LocalEndpoint,
-        LocalRequest,
+        cancel_operation, connect, execute, lookup_operation, request, submit_operation,
+        IpcErrorCode, IpcRole, LocalEndpoint, LocalError, LocalRequest,
     };
     use crate::node::{
         NodeCommand, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome, NodeCommandRequest,
-        NodeCommandResult, NodeEventKind, NodeLogLevel, RESTART_TIMEOUT, START_TIMEOUT,
-        STOP_TIMEOUT,
+        NodeCommandResult, NodeEventKind, NodeLogLevel, NodeProblem, NodeProblemCode,
+        OperationClientError, RESTART_TIMEOUT, START_TIMEOUT, STOP_TIMEOUT,
     };
     use fuckipv6_common::domain::{IdempotencyKey, OperationState};
 
@@ -626,11 +664,48 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
     struct EchoHandler;
 
     impl NodeCommandHandler for EchoHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            self.run(request, None)
+        }
+
+        fn handle_authorized_cancellable(
+            &self,
+            _context: NodeCommandContext,
+            request: NodeCommandRequest,
+            cancel: watch::Receiver<bool>,
+        ) -> NodeCommandFuture {
+            self.run(request, Some(cancel))
+        }
+    }
+
+    impl EchoHandler {
+        fn run(
+            &self,
+            request: NodeCommandRequest,
+            mut cancel: Option<watch::Receiver<bool>>,
+        ) -> NodeCommandFuture {
             Box::pin(async move {
+                if matches!(request.command, NodeCommand::GetDiagnostics) {
+                    if let Some(cancel) = cancel.as_mut() {
+                        if !*cancel.borrow() {
+                            let _ = cancel.changed().await;
+                        }
+                        return NodeCommandResult::rejected(
+                            request.request_id,
+                            NodeProblem::new(
+                                NodeProblemCode::Cancelled,
+                                "diagnostics cancelled through IPC",
+                            ),
+                        );
+                    }
+                }
+                if matches!(request.command, NodeCommand::StartNode) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
                 NodeCommandResult::completed(
                     request.request_id,
                     NodeCommandOutcome::Completed {
@@ -802,6 +877,144 @@ mod tests {
         ));
 
         fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn diagnostics_cancel_round_trips_and_terminal_rejection_is_typed() -> Result<()> {
+        let fixture = Fixture::new("diagnostics-cancel", 8).await?;
+        let submitted = submit_operation(
+            &fixture.endpoint,
+            IpcRole::Gpui,
+            NodeCommandRequest::new(9, NodeCommand::GetDiagnostics),
+            IdempotencyKey::from_public_key(b"ipc-diagnostics-cancel"),
+            "local_ipc:gpui".into(),
+        )
+        .await?;
+        let operation_id = submitted.operation.operation_id.as_str().to_owned();
+        assert!(submitted.operation.cancellable);
+
+        let requested = cancel_operation(
+            &fixture.endpoint,
+            IpcRole::Gpui,
+            &operation_id,
+            "local_ipc:gpui".into(),
+        )
+        .await?;
+        assert!(!requested.operation.state.is_terminal());
+
+        let terminal = timeout(Duration::from_secs(2), async {
+            loop {
+                let operation =
+                    lookup_operation(&fixture.endpoint, IpcRole::Gpui, &operation_id).await?;
+                if operation.operation.state.is_terminal() {
+                    return Ok::<_, anyhow::Error>(operation);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("cancelled IPC operation did not reach a terminal state")??;
+        assert_eq!(terminal.operation.state, OperationState::Cancelled);
+        assert!(matches!(
+            terminal.result.as_ref().map(|result| &result.outcome),
+            Some(NodeCommandOutcome::Rejected(problem))
+                if problem.code == NodeProblemCode::Cancelled
+        ));
+
+        let error = cancel_operation(
+            &fixture.endpoint,
+            IpcRole::Gpui,
+            &operation_id,
+            "local_ipc:gpui".into(),
+        )
+        .await
+        .expect_err("terminal operation cancellation must conflict");
+        let local = error
+            .downcast_ref::<LocalError>()
+            .expect("IPC cancellation conflict must be typed");
+        assert_eq!(local.code, IpcErrorCode::Conflict);
+        assert_eq!(
+            local
+                .problem
+                .as_ref()
+                .map(|problem| problem.message_key.as_str()),
+            Some("operation.cancel.already_terminal")
+        );
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn cancellation_errors_preserve_not_found_and_non_cancellable_semantics() -> Result<()> {
+        let fixture = Fixture::new("cancel-errors", 8).await?;
+        let missing = cancel_operation(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            "missing-operation",
+            "local_ipc:cli".into(),
+        )
+        .await
+        .expect_err("unknown operation cancellation must fail");
+        assert_eq!(
+            missing
+                .downcast_ref::<LocalError>()
+                .expect("unknown operation error must be typed")
+                .code,
+            IpcErrorCode::NotFound
+        );
+
+        let write = submit_operation(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            NodeCommandRequest::new(10, NodeCommand::StartNode),
+            IdempotencyKey::from_public_key(b"ipc-non-cancellable-write"),
+            "local_ipc:cli".into(),
+        )
+        .await?;
+        let rejected = cancel_operation(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            write.operation.operation_id.as_str(),
+            "local_ipc:cli".into(),
+        )
+        .await
+        .expect_err("non-cancellable operation must reject cancellation");
+        let local = rejected
+            .downcast_ref::<LocalError>()
+            .expect("non-cancellable operation error must be typed");
+        assert_eq!(local.code, IpcErrorCode::Conflict);
+        assert!(matches!(
+            local.problem.as_ref(),
+            Some(problem)
+                if problem.code == NodeProblemCode::Conflict
+                    && problem.message_key == "operation.cancel.not_supported"
+        ));
+        assert!(!matches!(
+            OperationClientError::CancelRejected(
+                local.problem.clone().expect("typed cancellation problem")
+            ),
+            OperationClientError::NotFound(_)
+        ));
+
+        wait_for_ipc_terminal(&fixture.endpoint, write.operation.operation_id.as_str()).await?;
+        fixture.finish().await
+    }
+
+    async fn wait_for_ipc_terminal(
+        endpoint: &LocalEndpoint,
+        operation_id: &str,
+    ) -> Result<crate::node::NodeOperationSnapshot> {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let operation = lookup_operation(endpoint, IpcRole::Cli, operation_id).await?;
+                if operation.operation.state.is_terminal() {
+                    return Ok::<_, anyhow::Error>(operation);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("IPC operation did not reach a terminal state")?
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ use fuckipv6_common::domain::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::local_ipc::{self, IpcRole, LocalEndpoint, LocalError};
 use crate::node::{
@@ -75,6 +76,7 @@ impl std::error::Error for OperationSubmitError {}
 pub enum OperationClientError {
     Invalid(NodeProblem),
     Conflict(OperationId),
+    CancelRejected(NodeProblem),
     NotFound(String),
     Unavailable(String),
     Internal(String),
@@ -85,6 +87,7 @@ impl fmt::Display for OperationClientError {
         match self {
             Self::Invalid(problem) => write!(formatter, "{}", problem.message),
             Self::Conflict(id) => write!(formatter, "幂等键冲突；原操作: {}", id.as_str()),
+            Self::CancelRejected(problem) => write!(formatter, "{}", problem.message),
             Self::NotFound(id) => write!(formatter, "operation not found: {id}"),
             Self::Unavailable(message) | Self::Internal(message) => formatter.write_str(message),
         }
@@ -109,6 +112,7 @@ pub struct OperationService {
     state: NodeStateStore,
     events: NodeEventBus,
     registry: Arc<Mutex<OperationRegistry>>,
+    cancel_senders: Arc<Mutex<BTreeMap<String, watch::Sender<bool>>>>,
     store_path: Option<PathBuf>,
 }
 
@@ -137,6 +141,7 @@ impl OperationService {
             state,
             events,
             registry: Arc::new(Mutex::new(OperationRegistry::default())),
+            cancel_senders: Arc::new(Mutex::new(BTreeMap::new())),
             store_path: None,
         }
     }
@@ -187,6 +192,7 @@ impl OperationService {
             state,
             events,
             registry: Arc::new(Mutex::new(registry)),
+            cancel_senders: Arc::new(Mutex::new(BTreeMap::new())),
             store_path: Some(store_path),
         })
     }
@@ -195,7 +201,7 @@ impl OperationService {
         OperationClient::Local(self.clone())
     }
 
-    /// Register and launch a mutating command. Registration, idempotency
+    /// Register and launch an operation command. Registration, idempotency
     /// resolution and durable persistence happen before the task is spawned.
     pub async fn submit(
         &self,
@@ -210,9 +216,9 @@ impl OperationService {
                 "request_id 必须大于 0",
             )));
         }
-        if !request.command.kind().is_write() {
+        if !request.command.kind().is_operation() {
             return Err(OperationSubmitError::Internal(
-                "read-only command cannot be registered as an operation".into(),
+                "command cannot be registered as an operation".into(),
             ));
         }
 
@@ -226,6 +232,7 @@ impl OperationService {
         };
         let operation_id = new_operation_id()?;
         let now = unix_time_ms();
+        let cancellable = request.command.kind() == super::NodeCommandKind::GetDiagnostics;
         let operation = Operation {
             operation_id: operation_id.clone(),
             kind: operation_kind(&request.command),
@@ -239,8 +246,8 @@ impl OperationService {
             attempt: 0,
             max_attempts: 3,
             error: None,
-            cancellable: false,
-            cancel_blocked_reason: Some(CANCEL_NOT_SUPPORTED.into()),
+            cancellable,
+            cancel_blocked_reason: (!cancellable).then(|| CANCEL_NOT_SUPPORTED.into()),
         };
         operation
             .validate()
@@ -298,6 +305,13 @@ impl OperationService {
 
         if created {
             self.publish(&snapshot.operation);
+            if snapshot.operation.cancellable {
+                let (cancel, _) = watch::channel(false);
+                self.cancel_senders
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(operation_id.as_str().to_owned(), cancel);
+            }
             let service = self.clone();
             let context = context.with_audit_operation_id(operation_id.clone());
             tokio::spawn(async move {
@@ -305,6 +319,65 @@ impl OperationService {
             });
         }
         Ok((snapshot, created))
+    }
+
+    /// Request cooperative cancellation. The operation remains running until
+    /// the command handler has released its actor-owned resources and reports
+    /// `Cancelled`; this method never fabricates a terminal state.
+    pub fn cancel(
+        &self,
+        context: &NodeCommandContext,
+        operation_id: &str,
+    ) -> Result<NodeOperationSnapshot, OperationClientError> {
+        let snapshot = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(operation) = registry.records.get(operation_id) else {
+                return Err(OperationClientError::NotFound(operation_id.to_owned()));
+            };
+            if &operation.actor.node_id != context.actor() {
+                return Err(OperationClientError::NotFound(operation_id.to_owned()));
+            }
+            if operation.state.is_terminal() {
+                return Err(OperationClientError::CancelRejected(
+                    NodeProblem::new(NodeProblemCode::Conflict, "操作已结束，无法取消")
+                        .with_message_key("operation.cancel.already_terminal"),
+                ));
+            }
+            if !operation.cancellable {
+                return Err(OperationClientError::CancelRejected(
+                    NodeProblem::new(NodeProblemCode::Conflict, "此操作不支持取消")
+                        .with_message_key(
+                            operation
+                                .cancel_blocked_reason
+                                .clone()
+                                .unwrap_or_else(|| CANCEL_NOT_SUPPORTED.into()),
+                        ),
+                ));
+            }
+            NodeOperationSnapshot {
+                operation: operation.clone(),
+                result: registry.results.get(operation_id).cloned(),
+            }
+        };
+
+        let sender = self
+            .cancel_senders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| {
+                OperationClientError::Unavailable(
+                    "operation cancellation channel unavailable".into(),
+                )
+            })?;
+        sender.send_replace(true);
+        self.progress(&snapshot.operation.operation_id, "cancelling");
+        self.lookup(operation_id)
+            .ok_or_else(|| OperationClientError::NotFound(operation_id.to_owned()))
     }
 
     pub fn lookup(&self, operation_id: &str) -> Option<NodeOperationSnapshot> {
@@ -341,7 +414,21 @@ impl OperationService {
         if !self.progress(&operation_id, "executing") {
             return;
         }
-        match self.commands.execute(context, request).await {
+        let cancel = self
+            .cancel_senders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(operation_id.as_str())
+            .map(watch::Sender::subscribe);
+        let command_result = match cancel {
+            Some(cancel) => {
+                self.commands
+                    .execute_cancellable(context, request, cancel)
+                    .await
+            }
+            None => self.commands.execute(context, request).await,
+        };
+        match command_result {
             Ok(result) => {
                 let result = result_for_control_client(result);
                 let finished = match result.outcome.clone() {
@@ -362,6 +449,13 @@ impl OperationService {
                 };
                 if finished {
                     self.remember_result(&operation_id, result);
+                    // The terminal transition is published before the
+                    // ephemeral result is attached. Publish once more so
+                    // event-driven clients do not retain a terminal snapshot
+                    // with a permanently missing result.
+                    if let Some(snapshot) = self.lookup(operation_id.as_str()) {
+                        self.publish(&snapshot.operation);
+                    }
                 }
             }
             Err(error) => {
@@ -437,6 +531,12 @@ impl OperationService {
             *current = next;
             operation
         };
+        if changed.state.is_terminal() {
+            self.cancel_senders
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(id.as_str());
+        }
         self.publish(&changed);
         true
     }
@@ -526,10 +626,31 @@ impl OperationClient {
             }
         }
     }
+
+    pub async fn cancel(
+        &self,
+        context: &NodeCommandContext,
+        operation_id: &str,
+    ) -> Result<NodeOperationSnapshot, OperationClientError> {
+        match self {
+            Self::Local(service) => service.cancel(context, operation_id),
+            Self::Ipc { endpoint, role } => local_ipc::cancel_operation(
+                endpoint,
+                role.clone(),
+                operation_id,
+                context.source().to_owned(),
+            )
+            .await
+            .map_err(operation_client_error_from_ipc),
+        }
+    }
 }
 
 fn operation_client_error_from_ipc(error: anyhow::Error) -> OperationClientError {
     if let Some(local) = error.downcast_ref::<LocalError>() {
+        if let Some(problem) = &local.problem {
+            return OperationClientError::CancelRejected(problem.clone());
+        }
         if let Some(submit_error) = &local.operation_error {
             return submit_error.clone().into();
         }
@@ -555,6 +676,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::RestartNetworks { .. } | NodeCommand::RestartNode => {
             OperationKind::NodeRestart
         }
+        NodeCommand::GetDiagnostics => OperationKind::Diagnostics,
         NodeCommand::RebuildTun { .. } => OperationKind::TunRebuild,
         NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
         NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
@@ -572,7 +694,6 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::RollbackConfiguration(_) => OperationKind::PolicyRollback,
         NodeCommand::GetSnapshot
         | NodeCommand::GetUiManifest
-        | NodeCommand::GetDiagnostics
         | NodeCommand::GetBlacklist { .. }
         | NodeCommand::GetNetworkAllocation { .. }
         | NodeCommand::ProbePeer(_)
@@ -866,12 +987,51 @@ mod tests {
 
     impl NodeCommandHandler for TestHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            self.run(request, None)
+        }
+
+        fn handle_authorized_cancellable(
+            &self,
+            _context: NodeCommandContext,
+            request: NodeCommandRequest,
+            cancel: watch::Receiver<bool>,
+        ) -> NodeCommandFuture {
+            self.run(request, Some(cancel))
+        }
+    }
+
+    impl TestHandler {
+        fn run(
+            &self,
+            request: NodeCommandRequest,
+            mut cancel: Option<watch::Receiver<bool>>,
+        ) -> NodeCommandFuture {
             let write_count = self.write_count.clone();
             let invitation_ticket = self.invitation_ticket.clone();
             Box::pin(async move {
                 let request_id = request.request_id;
                 write_count.fetch_add(1, Ordering::SeqCst);
                 match request.command {
+                    NodeCommand::GetDiagnostics => {
+                        if let Some(cancel) = cancel.as_mut() {
+                            if !*cancel.borrow() {
+                                let _ = cancel.changed().await;
+                            }
+                            return NodeCommandResult::rejected(
+                                request_id,
+                                NodeProblem::new(
+                                    NodeProblemCode::Cancelled,
+                                    "diagnostic probe cancelled",
+                                ),
+                            );
+                        }
+                        NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::Completed {
+                                message: "diagnostics are cancellable in tests".into(),
+                            },
+                        )
+                    }
                     NodeCommand::CreateNetwork(command) => NodeCommandResult::completed(
                         request_id,
                         NodeCommandOutcome::NetworkCreated(NodeCreatedNetwork {
@@ -990,6 +1150,99 @@ mod tests {
                 id: "home".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_cancellable_and_reach_terminal_only_after_handler_exits() {
+        let directory = TestDirectory::new("diagnostics-cancel");
+        let store_path = directory.path.join(STORE_FILE);
+        let (service, state, _) = service_fixture(store_path, "ticket");
+        let context = context(&state).await;
+        let (submitted, _) = service
+            .submit(
+                context.clone(),
+                NodeCommandRequest::new(20, NodeCommand::GetDiagnostics),
+                IdempotencyKey::from_public_key(b"diagnostics-cancel"),
+            )
+            .await
+            .expect("submit diagnostics");
+        assert_eq!(submitted.operation.kind, OperationKind::Diagnostics);
+        assert!(submitted.operation.cancellable);
+
+        let requested = service
+            .cancel(&context, submitted.operation.operation_id.as_str())
+            .expect("request diagnostic cancellation");
+        assert!(!requested.operation.state.is_terminal());
+
+        let terminal = wait_for_terminal(&service, submitted.operation.operation_id.as_str()).await;
+        assert_eq!(terminal.operation.state, OperationState::Cancelled);
+        assert!(matches!(
+            terminal.result.as_ref().map(|result| &result.outcome),
+            Some(NodeCommandOutcome::Rejected(problem))
+                if problem.code == NodeProblemCode::Cancelled
+        ));
+
+        let repeated = service
+            .cancel(&context, submitted.operation.operation_id.as_str())
+            .expect_err("terminal cancellation must conflict");
+        assert!(matches!(
+            repeated,
+            OperationClientError::CancelRejected(problem)
+                if problem.code == NodeProblemCode::Conflict
+                    && problem.message_key == "operation.cancel.already_terminal"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_rejects_unknown_operations_other_actors_and_non_cancellable_work() {
+        let directory = TestDirectory::new("cancel-errors");
+        let store_path = directory.path.join(STORE_FILE);
+        let (service, state, _) = service_fixture(store_path, "ticket");
+        let context = context(&state).await;
+
+        assert!(matches!(
+            service.cancel(&context, "missing-operation"),
+            Err(OperationClientError::NotFound(id)) if id == "missing-operation"
+        ));
+
+        let (diagnostics, _) = service
+            .submit(
+                context.clone(),
+                NodeCommandRequest::new(21, NodeCommand::GetDiagnostics),
+                IdempotencyKey::from_public_key(b"diagnostics-owner-check"),
+            )
+            .await
+            .expect("submit diagnostics");
+        let other_actor = NodeCommandContext::local_owner(
+            NodeId::from_public_key(b"different-operation-owner"),
+            "other-owner",
+        );
+        assert!(matches!(
+            service.cancel(&other_actor, diagnostics.operation.operation_id.as_str()),
+            Err(OperationClientError::NotFound(_))
+        ));
+        service
+            .cancel(&context, diagnostics.operation.operation_id.as_str())
+            .expect("owner can still cancel after rejected attempt");
+        wait_for_terminal(&service, diagnostics.operation.operation_id.as_str()).await;
+
+        let (write, _) = service
+            .submit(
+                context.clone(),
+                NodeCommandRequest::new(22, NodeCommand::StartNode),
+                IdempotencyKey::from_public_key(b"non-cancellable-write"),
+            )
+            .await
+            .expect("submit non-cancellable operation");
+        let rejected = service
+            .cancel(&context, write.operation.operation_id.as_str())
+            .expect_err("non-cancellable operation must reject cancellation");
+        assert!(matches!(
+            rejected,
+            OperationClientError::CancelRejected(problem)
+                if problem.code == NodeProblemCode::Conflict
+                    && problem.message_key == CANCEL_NOT_SUPPORTED
+        ));
     }
 
     #[tokio::test]

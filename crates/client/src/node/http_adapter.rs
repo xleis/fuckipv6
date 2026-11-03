@@ -32,7 +32,7 @@ use fuckipv6_common::domain::{
 use futures::SinkExt as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
@@ -640,6 +640,7 @@ pub enum NodeHttpAdapterError {
 struct OperationRecord {
     operation: Operation,
     result: Option<NodeCommandResult>,
+    cancel: Option<watch::Sender<bool>>,
 }
 
 #[derive(Default)]
@@ -651,6 +652,12 @@ struct OperationRegistry {
 enum OperationSubmitError {
     Invalid(NodeProblem),
     Conflict(OperationId),
+    Internal(String),
+}
+
+enum OperationCancellationError {
+    NotFound,
+    Conflict(NodeProblem),
     Internal(String),
 }
 
@@ -718,6 +725,60 @@ impl NodeHttpAdapter {
             })
     }
 
+    fn request_operation_cancellation(
+        &self,
+        context: &NodeCommandContext,
+        id: &str,
+    ) -> Result<NodeOperationSnapshot, OperationCancellationError> {
+        let snapshot = {
+            let mut registry = self
+                .operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = registry.records.get_mut(id) else {
+                return Err(OperationCancellationError::NotFound);
+            };
+            // Operations are private to their submitting principal. Returning
+            // not-found for another actor avoids leaking operation existence.
+            if &record.operation.actor.node_id != context.actor() {
+                return Err(OperationCancellationError::NotFound);
+            }
+            if record.operation.state.is_terminal() {
+                return Err(OperationCancellationError::Conflict(
+                    NodeProblem::new(NodeProblemCode::Conflict, "操作已结束，无法取消")
+                        .with_message_key("operation.cancel.already_terminal"),
+                ));
+            }
+            if !record.operation.cancellable {
+                return Err(OperationCancellationError::Conflict(
+                    NodeProblem::new(NodeProblemCode::Conflict, "此操作不支持取消")
+                        .with_message_key(
+                            record
+                                .operation
+                                .cancel_blocked_reason
+                                .clone()
+                                .unwrap_or_else(|| "operation.cancel.not_supported".into()),
+                        ),
+                ));
+            }
+            let sender = record.cancel.as_ref().ok_or_else(|| {
+                OperationCancellationError::Internal(
+                    "operation cancellation channel unavailable".into(),
+                )
+            })?;
+            sender.send_replace(true);
+            // Progress is best-effort here because cancellation may arrive
+            // while queued. The terminal state still waits for the handler.
+            let _ = record.operation.progress("cancelling", unix_time_ms());
+            NodeOperationSnapshot {
+                operation: record.operation.clone(),
+                result: record.result.clone(),
+            }
+        };
+        self.publish_operation(&snapshot.operation);
+        Ok(snapshot)
+    }
+
     async fn wait_for_operation_terminal(
         &self,
         id: &OperationId,
@@ -738,9 +799,9 @@ impl NodeHttpAdapter {
         }
     }
 
-    /// Register and launch one mutating command. Registration and idempotency
+    /// Register and launch one operation command. Registration and idempotency
     /// resolution happen under the same lock, so concurrent retries cannot
-    /// dispatch duplicate side effects.
+    /// dispatch duplicate work.
     async fn submit_operation(
         &self,
         context: NodeCommandContext,
@@ -748,9 +809,9 @@ impl NodeHttpAdapter {
         idempotency_key: IdempotencyKey,
     ) -> Result<(NodeOperationSnapshot, bool), OperationSubmitError> {
         request.validate().map_err(OperationSubmitError::Invalid)?;
-        if !request.command.kind().is_write() {
+        if !request.command.kind().is_operation() {
             return Err(OperationSubmitError::Internal(
-                "read-only command cannot be registered as an operation".into(),
+                "command cannot be registered as an operation".into(),
             ));
         }
 
@@ -764,6 +825,7 @@ impl NodeHttpAdapter {
         };
         let operation_id = new_operation_id()?;
         let now = unix_time_ms();
+        let cancellable = matches!(&request.command, NodeCommand::GetDiagnostics);
         let operation = Operation {
             operation_id: operation_id.clone(),
             kind: operation_kind(&request.command),
@@ -777,12 +839,20 @@ impl NodeHttpAdapter {
             attempt: 0,
             max_attempts: 3,
             error: None,
-            cancellable: false,
-            cancel_blocked_reason: Some("operation.cancel.not_supported".into()),
+            cancellable,
+            cancel_blocked_reason: (!cancellable)
+                .then(|| "operation.cancel.not_supported".to_owned()),
         };
         operation
             .validate()
             .map_err(|error| OperationSubmitError::Internal(error.to_string()))?;
+
+        let (cancel_sender, cancel) = if cancellable {
+            let (sender, receiver) = watch::channel(false);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
 
         let (snapshot, created) = {
             let mut registry = self
@@ -801,6 +871,7 @@ impl NodeHttpAdapter {
                         OperationRecord {
                             operation,
                             result: None,
+                            cancel: cancel_sender.clone(),
                         },
                     );
                     let snapshot = registry
@@ -840,7 +911,9 @@ impl NodeHttpAdapter {
             let operation_id = snapshot.operation.operation_id.clone();
             let context = context.with_audit_operation_id(operation_id.clone());
             tokio::spawn(async move {
-                adapter.run_operation(operation_id, context, request).await;
+                adapter
+                    .run_operation(operation_id, context, request, cancel)
+                    .await;
             });
         }
         Ok((snapshot, created))
@@ -851,13 +924,21 @@ impl NodeHttpAdapter {
         operation_id: OperationId,
         context: NodeCommandContext,
         request: NodeCommandRequest,
+        cancel: Option<watch::Receiver<bool>>,
     ) {
         let request_id = request.request_id;
         if !self.transition_operation(&operation_id, OperationState::Running, "dispatching") {
             return;
         }
         self.progress_operation(&operation_id, "executing");
-        let result = self.commands.execute(context, request).await;
+        let result = match cancel {
+            Some(cancel) => {
+                self.commands
+                    .execute_cancellable(context, request, cancel)
+                    .await
+            }
+            None => self.commands.execute(context, request).await,
+        };
         match result {
             Ok(result) => {
                 let result = result_for_control_client(result);
@@ -961,6 +1042,7 @@ impl NodeHttpAdapter {
                 result: record.result.clone(),
             }
         };
+        self.clear_cancel_sender(id);
         self.publish_operation(&snapshot.operation);
     }
 
@@ -993,6 +1075,7 @@ impl NodeHttpAdapter {
                 result: record.result.clone(),
             }
         };
+        self.clear_cancel_sender(id);
         self.publish_operation(&snapshot.operation);
     }
 
@@ -1019,7 +1102,20 @@ impl NodeHttpAdapter {
                 result: record.result.clone(),
             }
         };
+        self.clear_cancel_sender(id);
         self.publish_operation(&snapshot.operation);
+    }
+
+    fn clear_cancel_sender(&self, id: &OperationId) {
+        if let Some(record) = self
+            .operations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .get_mut(id.as_str())
+        {
+            record.cancel.take();
+        }
     }
 
     fn publish_operation(&self, operation: &Operation) {
@@ -1066,6 +1162,10 @@ impl NodeHttpAdapter {
             .route(
                 &format!("{NODE_HTTP_V1_API_PREFIX}/operations/{{id}}"),
                 get(handle_v1_operation),
+            )
+            .route(
+                &format!("{NODE_HTTP_V1_API_PREFIX}/operations/{{id}}/cancel"),
+                post(handle_v1_cancel_operation),
             )
             .route(
                 &format!("{NODE_HTTP_V1_API_PREFIX}/objects/{{kind}}/{{id}}"),
@@ -1273,12 +1373,12 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::UpdateNetworkAllocation(_) => OperationKind::NetworkAllocationUpdate,
         NodeCommand::ApplyConfiguration(_) => OperationKind::PolicyApply,
         NodeCommand::RollbackConfiguration(_) => OperationKind::PolicyRollback,
-        // Read-only commands never enter the operation registry. Keeping a
-        // total mapping avoids a panic if a future caller violates that
-        // invariant before the command is rejected by `submit_operation`.
+        NodeCommand::GetDiagnostics => OperationKind::Diagnostics,
+        // Synchronous read-only commands never enter the operation registry.
+        // Keeping a total mapping avoids a panic if a future caller violates
+        // that invariant before the command is rejected by `submit_operation`.
         NodeCommand::GetSnapshot
         | NodeCommand::GetUiManifest
-        | NodeCommand::GetDiagnostics
         | NodeCommand::GetBlacklist { .. }
         | NodeCommand::GetNetworkAllocation { .. }
         | NodeCommand::ProbePeer(_)
@@ -1496,7 +1596,7 @@ async fn handle_v1_command(
         return HttpApiError::invalid_request(request_id, "request_id 必须大于 0").into_response();
     }
 
-    // Mutating operations are registered before they execute. Authorize them
+    // Operation commands are registered before they execute. Authorize them
     // here as well so a stale WebUI owner cannot create an operation record (or
     // reach a handler) before the command bus rejects the request.
     if let Err(denial) = super::authorization::authorize_command(&context, &payload.request.command)
@@ -1524,11 +1624,11 @@ async fn handle_v1_command(
         }
     };
 
-    if payload.request.command.kind().is_write() {
+    if payload.request.command.kind().is_operation() {
         let Some(idempotency_key) = payload.idempotency_key else {
             return HttpApiError::invalid_request(
                 request_id,
-                "写命令必须提供 idempotency_key，防止重试产生重复副作用",
+                "operation 命令必须提供 idempotency_key，防止重试产生重复操作",
             )
             .into_response();
         };
@@ -1690,6 +1790,45 @@ async fn handle_v1_operation(
         .into_response(),
         None => HttpApiError::not_found(request_id, format!("operation not found: {id}"))
             .into_response(),
+    }
+}
+
+async fn handle_v1_cancel_operation(
+    State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
+    Path(id): Path<String>,
+    query: Result<Query<NodeApiQuery>, QueryRejection>,
+) -> Response {
+    let request_id = adapter.allocate_request_id();
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(error) => {
+            return HttpApiError::invalid_request(request_id, error.body_text()).into_response();
+        }
+    };
+    if let Err(error) = validate_api_query(&query, request_id) {
+        return (*error).into_response();
+    }
+
+    match adapter.request_operation_cancellation(&context, &id) {
+        Ok(operation) => (
+            StatusCode::ACCEPTED,
+            Json(NodeApiOperationResponse {
+                meta: NodeApiResponseMeta::new(request_id),
+                operation,
+            }),
+        )
+            .into_response(),
+        Err(OperationCancellationError::NotFound) => {
+            HttpApiError::not_found(request_id, format!("operation not found: {id}"))
+                .into_response()
+        }
+        Err(OperationCancellationError::Conflict(problem)) => {
+            HttpApiError::from_problem(request_id, StatusCode::CONFLICT, problem).into_response()
+        }
+        Err(OperationCancellationError::Internal(message)) => {
+            HttpApiError::internal(request_id, message).into_response()
+        }
     }
 }
 
@@ -2556,6 +2695,25 @@ mod tests {
 
     impl NodeCommandHandler for StubHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            self.run(request, None)
+        }
+
+        fn handle_authorized_cancellable(
+            &self,
+            _context: NodeCommandContext,
+            request: NodeCommandRequest,
+            cancel: watch::Receiver<bool>,
+        ) -> NodeCommandFuture {
+            self.run(request, Some(cancel))
+        }
+    }
+
+    impl StubHandler {
+        fn run(
+            &self,
+            request: NodeCommandRequest,
+            mut cancel: Option<watch::Receiver<bool>>,
+        ) -> NodeCommandFuture {
             let state = self.state.clone();
             let manifest = self.manifest.clone();
             let write_behavior = self.write_behavior.clone();
@@ -2572,7 +2730,37 @@ mod tests {
                     }
                     _ => {
                         write_count.fetch_add(1, Ordering::SeqCst);
-                        if !write_delay.is_zero() {
+                        if cancel.as_ref().is_some_and(|cancel| *cancel.borrow()) {
+                            tokio::time::sleep(write_delay).await;
+                            return NodeCommandResult::rejected(
+                                request_id,
+                                NodeProblem::new(
+                                    NodeProblemCode::Cancelled,
+                                    "stub operation cancelled",
+                                ),
+                            );
+                        }
+                        if let Some(cancel) = cancel.as_mut() {
+                            if !write_delay.is_zero() {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(write_delay) => {}
+                                    _ = cancel.changed() => {
+                                        if *cancel.borrow() {
+                                            // Model actor-owned cleanup before the
+                                            // terminal cancellation is reported.
+                                            tokio::time::sleep(write_delay).await;
+                                            return NodeCommandResult::rejected(
+                                                request_id,
+                                                NodeProblem::new(
+                                                    NodeProblemCode::Cancelled,
+                                                    "stub operation cancelled",
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else if !write_delay.is_zero() {
                             tokio::time::sleep(write_delay).await;
                         }
                         match write_behavior {
@@ -2739,6 +2927,45 @@ mod tests {
             )
             .await
             .expect("operation lookup response")
+    }
+
+    async fn post_v1_cancel(adapter: &NodeHttpAdapter, operation_id: &str) -> Response {
+        adapter
+            .clone()
+            .test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/v1/operations/{operation_id}/cancel?schema_version=1"
+                    ))
+                    .body(Body::empty())
+                    .expect("operation cancellation request"),
+            )
+            .await
+            .expect("operation cancellation response")
+    }
+
+    async fn post_v1_cancel_as(
+        adapter: &NodeHttpAdapter,
+        operation_id: &str,
+        context: NodeCommandContext,
+    ) -> Response {
+        adapter
+            .clone()
+            .router()
+            .layer(Extension(context))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/v1/operations/{operation_id}/cancel?schema_version=1"
+                    ))
+                    .body(Body::empty())
+                    .expect("operation cancellation request"),
+            )
+            .await
+            .expect("operation cancellation response")
     }
 
     async fn wait_for_terminal_operation(
@@ -3072,6 +3299,130 @@ mod tests {
             NodeCommandOutcome::Completed { .. }
         ));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_submit_as_cancellable_operations_and_cancel_is_idempotent() {
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::from_millis(200),
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(79, NodeCommand::GetDiagnostics),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"diagnostics-http-cancel")),
+        };
+
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let submitted: NodeApiCommandResponse = json_body(response).await;
+        let operation = submitted
+            .operation
+            .expect("diagnostics return an operation");
+        assert_eq!(operation.operation.kind, OperationKind::Diagnostics);
+        assert!(operation.operation.cancellable);
+        assert!(operation.operation.cancel_blocked_reason.is_none());
+
+        let first_cancel =
+            post_v1_cancel(&adapter, operation.operation.operation_id.as_str()).await;
+        assert_eq!(first_cancel.status(), StatusCode::ACCEPTED);
+        let first_cancel: NodeApiOperationResponse = json_body(first_cancel).await;
+        assert!(!first_cancel.operation.operation.state.is_terminal());
+
+        let repeated = post_v1_cancel(&adapter, operation.operation.operation_id.as_str()).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+
+        let terminal =
+            wait_for_terminal_operation(&adapter, operation.operation.operation_id.as_str()).await;
+        assert_eq!(
+            terminal.operation.operation.state,
+            OperationState::Cancelled
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+
+        let after_terminal =
+            post_v1_cancel(&adapter, operation.operation.operation_id.as_str()).await;
+        assert_eq!(after_terminal.status(), StatusCode::CONFLICT);
+        let error: NodeApiErrorResponse = json_body(after_terminal).await;
+        assert_eq!(error.error.code, NodeHttpErrorCode::OperationConflict);
+        assert_eq!(error.error.message_key, "operation.cancel.already_terminal");
+    }
+
+    #[tokio::test]
+    async fn operation_cancel_rejects_non_cancellable_running_work() {
+        let (adapter, _state, _events, _writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::from_millis(200),
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(81, NodeCommand::StartNode),
+            idempotency_key: Some(IdempotencyKey::from_public_key(
+                b"non-cancellable-http-start",
+            )),
+        };
+        let submitted: NodeApiCommandResponse =
+            json_body(post_v1_command(adapter.clone(), &payload).await).await;
+        let operation = submitted
+            .operation
+            .expect("start node returns an operation");
+        assert!(!operation.operation.cancellable);
+        assert_eq!(
+            operation.operation.cancel_blocked_reason.as_deref(),
+            Some("operation.cancel.not_supported")
+        );
+
+        let rejected = post_v1_cancel(&adapter, operation.operation.operation_id.as_str()).await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        let error: NodeApiErrorResponse = json_body(rejected).await;
+        assert_eq!(error.error.code, NodeHttpErrorCode::OperationConflict);
+        assert_eq!(error.error.message_key, "operation.cancel.not_supported");
+
+        wait_for_terminal_operation(&adapter, operation.operation.operation_id.as_str()).await;
+    }
+
+    #[tokio::test]
+    async fn operation_cancel_hides_other_owners_and_rejects_unknown_ids() {
+        let (adapter, _state, _events, _writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::Completed,
+            Duration::from_millis(100),
+        );
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(80, NodeCommand::GetDiagnostics),
+            idempotency_key: Some(IdempotencyKey::from_public_key(b"diagnostics-http-owner")),
+        };
+        let submitted: NodeApiCommandResponse =
+            json_body(post_v1_command(adapter.clone(), &payload).await).await;
+        let operation = submitted
+            .operation
+            .expect("diagnostics return an operation");
+
+        let other_owner = NodeCommandContext::owner_session(
+            NodeId::from_public_key(b"another-webui-owner"),
+            "other-owner",
+            true,
+        );
+        let hidden = post_v1_cancel_as(
+            &adapter,
+            operation.operation.operation_id.as_str(),
+            other_owner,
+        )
+        .await;
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        let hidden: NodeApiErrorResponse = json_body(hidden).await;
+        assert_eq!(hidden.error.code, NodeHttpErrorCode::NotFound);
+
+        let missing = post_v1_cancel(&adapter, "missing-operation").await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let owner_cancel =
+            post_v1_cancel(&adapter, operation.operation.operation_id.as_str()).await;
+        assert_eq!(owner_cancel.status(), StatusCode::ACCEPTED);
+        wait_for_terminal_operation(&adapter, operation.operation.operation_id.as_str()).await;
     }
 
     #[tokio::test]

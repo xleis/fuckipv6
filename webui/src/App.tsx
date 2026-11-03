@@ -30,6 +30,7 @@ import type {
   NodeApiCommandResponse,
   NodeCommandHttpRequest,
   NodeCommandOutcome,
+  NodeDiagnosticsSnapshot,
   NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiAction,
@@ -38,6 +39,7 @@ import type {
 } from "../../contracts/typescript/node-contract-v1";
 import {
   AuthenticationError,
+  cancelOperation,
   HttpError,
   ReauthenticationRequiredError,
   loadManifest,
@@ -664,6 +666,8 @@ function AppShell({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [activeOperation, setActiveOperation] =
     useState<NodeOperationSnapshot | null>(null);
+  const [recentDiagnostics, setRecentDiagnostics] =
+    useState<NodeDiagnosticsSnapshot | null>(null);
   const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const idempotencyKeys = useRef(new Map<string, string>());
@@ -770,6 +774,7 @@ function AppShell({
     const operation = operationStateIsTerminal(submitted.state)
       ? submitted
       : await waitForOperation(submitted.operation_id, {
+          intervalMs: 1000,
           onOperation,
         });
     onOperation(operation);
@@ -886,7 +891,9 @@ function AppShell({
         setActiveOperation(submission.operation);
         onOperation(submission.operation);
       }
-      if (submission.outcome?.status === "identity_rotated") {
+      if (submission.outcome?.status === "diagnostics") {
+        setRecentDiagnostics(submission.outcome.data);
+      } else if (submission.outcome?.status === "identity_rotated") {
         const rotation = submission.outcome.data;
         const current =
           queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY) ?? snapshot;
@@ -919,6 +926,11 @@ function AppShell({
     } finally {
       setPendingAction(null);
     }
+  }
+
+  async function cancelActiveOperation(operationId: string): Promise<void> {
+    const operation = await cancelOperation(operationId);
+    setActiveOperation(operation);
   }
 
   async function submitConfigurationAction(
@@ -1232,6 +1244,7 @@ function AppShell({
                   snapshot={snapshot}
                   locale={locale}
                   selectedNetwork={selectedNetwork}
+                  recentDiagnostics={recentDiagnostics}
                   footer={
                     activePage.actions.some((action) =>
                       CONFIGURATION_ACTION_IDS.has(action.id),
@@ -1268,6 +1281,7 @@ function AppShell({
                 requestedActionId={requestedActionId}
                 operation={activeOperation}
                 onRequestedActionOpened={() => setRequestedActionId(null)}
+                onCancel={cancelActiveOperation}
                 onSubmit={submitAction}
               />
             </>

@@ -184,6 +184,16 @@ export async function loadOperation(operationId: string): Promise<NodeOperationS
   return validateOperationResponse(payload, operationId);
 }
 
+export async function cancelOperation(
+  operationId: string,
+): Promise<NodeOperationSnapshot> {
+  const payload = await apiRequest<NodeApiOperationResponse>(
+    `/api/v1/operations/${encodeURIComponent(operationId)}/cancel?schema_version=${NODE_CONTRACT_SCHEMA_VERSION}`,
+    { method: "POST" },
+  );
+  return validateOperationResponse(payload, operationId);
+}
+
 function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {

@@ -2135,17 +2135,125 @@
       ],
       "type": "object"
     },
-    "NodeDiagnosticsSnapshot": {
-      "description": "Live actor-owned diagnostics. Counts describe observed runtime ownership,\nnot merely configuration or UI snapshot projections.",
+    "NodeDiagnosticCheck": {
+      "description": "One sanitized layered probe. Raw process output, host paths, interface MAC\naddresses, tokens, keys, full topology and peer addresses are excluded.",
       "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_code": {
+          "description": "Stable machine code, never raw stderr.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layer": {
+          "$ref": "#/$defs/NodeDiagnosticLayer"
+        },
+        "message_key": {
+          "type": "string"
+        },
+        "started_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/NodeDiagnosticState"
+        },
+        "suggestion_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "layer",
+        "state",
+        "started_at_unix_ms",
+        "duration_ms",
+        "message_key"
+      ],
+      "type": "object"
+    },
+    "NodeDiagnosticLayer": {
+      "description": "Stable diagnostic layers shown in a fixed order by every adapter.",
+      "enum": [
+        "network",
+        "dns",
+        "tun",
+        "coordinator",
+        "relay",
+        "exit"
+      ],
+      "type": "string"
+    },
+    "NodeDiagnosticRecoveryAction": {
+      "description": "A recovery action that is safe to render from untrusted UI input. The UI\nmust request explicit confirmation when `confirmation_required` is true and\nshow the impact key before dispatching any command.",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "confirmation_required": {
+          "type": "boolean"
+        },
+        "impact_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "impact_key",
+        "confirmation_required"
+      ],
+      "type": "object"
+    },
+    "NodeDiagnosticState": {
+      "description": "Five-state result deliberately richer than a boolean. Adapters must render\nevery state verbatim and must not infer `passed` from missing probe data.",
+      "enum": [
+        "not_tested",
+        "passed",
+        "failed",
+        "unsupported",
+        "no_permission"
+      ],
+      "type": "string"
+    },
+    "NodeDiagnosticsSnapshot": {
+      "description": "Live actor-owned diagnostics plus a bounded layered probe report.",
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/NodeDiagnosticCheck"
+          },
+          "type": "array"
+        },
         "cleanup_candidate_networks": {
           "items": {
             "type": "string"
           },
           "type": "array"
         },
+        "completed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diagnostic_id": {
+          "type": "string"
+        },
         "lifecycle": {
           "$ref": "#/$defs/NodeLifecycleSnapshot"
+        },
+        "recovery_actions": {
+          "items": {
+            "$ref": "#/$defs/NodeDiagnosticRecoveryAction"
+          },
+          "type": "array"
         },
         "residue": {
           "$ref": "#/$defs/NodeRuntimeResidueSnapshot"
@@ -2155,13 +2263,32 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "sanitized_report": {
+          "description": "Canonical redacted report suitable for clipboard/export. It is generated\nserver-side from stable fields, never from raw stderr.",
+          "type": "string"
+        },
+        "started_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timed_out": {
+          "type": "boolean"
         }
       },
       "required": [
+        "diagnostic_id",
+        "started_at_unix_ms",
+        "completed_at_unix_ms",
+        "timed_out",
         "lifecycle",
         "retained_owner_networks",
         "cleanup_candidate_networks",
-        "residue"
+        "residue",
+        "checks",
+        "recovery_actions",
+        "sanitized_report"
       ],
       "type": "object"
     },
@@ -4766,6 +4893,7 @@
         "node_stop",
         "node_restart",
         "node_cleanup",
+        "diagnostics",
         "network_create",
         "network_apply",
         "tun_rebuild",

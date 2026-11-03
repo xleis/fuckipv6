@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -447,6 +447,61 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeControlHealth wire value: " + value);
+        }
+    }
+
+    public enum NodeDiagnosticLayer {
+        NETWORK("network"),
+        DNS("dns"),
+        TUN("tun"),
+        COORDINATOR("coordinator"),
+        RELAY("relay"),
+        EXIT("exit");
+
+        private final String wireName;
+
+        NodeDiagnosticLayer(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeDiagnosticLayer fromWireName(String value) {
+            for (NodeDiagnosticLayer candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeDiagnosticLayer wire value: " + value);
+        }
+    }
+
+    public enum NodeDiagnosticState {
+        NOT_TESTED("not_tested"),
+        PASSED("passed"),
+        FAILED("failed"),
+        UNSUPPORTED("unsupported"),
+        NO_PERMISSION("no_permission");
+
+        private final String wireName;
+
+        NodeDiagnosticState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeDiagnosticState fromWireName(String value) {
+            for (NodeDiagnosticState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeDiagnosticState wire value: " + value);
         }
     }
 
@@ -1080,6 +1135,7 @@ public final class NodeContractV1 {
         NODE_STOP("node_stop"),
         NODE_RESTART("node_restart"),
         NODE_CLEANUP("node_cleanup"),
+        DIAGNOSTICS("diagnostics"),
         NETWORK_CREATE("network_create"),
         NETWORK_APPLY("network_apply"),
         TUN_REBUILD("tun_rebuild"),
@@ -1731,18 +1787,66 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeDiagnosticCheck. */
+    public static final class NodeDiagnosticCheck {
+        public final Long duration_ms;
+        public final String error_code;
+        public final NodeDiagnosticLayer layer;
+        public final String message_key;
+        public final Long started_at_unix_ms;
+        public final NodeDiagnosticState state;
+        public final String suggestion_key;
+
+        public NodeDiagnosticCheck(Long duration_ms, String error_code, NodeDiagnosticLayer layer, String message_key, Long started_at_unix_ms, NodeDiagnosticState state, String suggestion_key) {
+            this.duration_ms = duration_ms;
+            this.error_code = error_code;
+            this.layer = layer;
+            this.message_key = message_key;
+            this.started_at_unix_ms = started_at_unix_ms;
+            this.state = state;
+            this.suggestion_key = suggestion_key;
+        }
+    }
+
+    /** DTO for NodeDiagnosticRecoveryAction. */
+    public static final class NodeDiagnosticRecoveryAction {
+        public final String action_id;
+        public final Boolean confirmation_required;
+        public final String impact_key;
+
+        public NodeDiagnosticRecoveryAction(String action_id, Boolean confirmation_required, String impact_key) {
+            this.action_id = action_id;
+            this.confirmation_required = confirmation_required;
+            this.impact_key = impact_key;
+        }
+    }
+
     /** DTO for NodeDiagnosticsSnapshot. */
     public static final class NodeDiagnosticsSnapshot {
+        public final List<NodeDiagnosticCheck> checks;
         public final List<String> cleanup_candidate_networks;
+        public final Long completed_at_unix_ms;
+        public final String diagnostic_id;
         public final NodeLifecycleSnapshot lifecycle;
+        public final List<NodeDiagnosticRecoveryAction> recovery_actions;
         public final NodeRuntimeResidueSnapshot residue;
         public final List<String> retained_owner_networks;
+        public final String sanitized_report;
+        public final Long started_at_unix_ms;
+        public final Boolean timed_out;
 
-        public NodeDiagnosticsSnapshot(List<String> cleanup_candidate_networks, NodeLifecycleSnapshot lifecycle, NodeRuntimeResidueSnapshot residue, List<String> retained_owner_networks) {
+        public NodeDiagnosticsSnapshot(List<NodeDiagnosticCheck> checks, List<String> cleanup_candidate_networks, Long completed_at_unix_ms, String diagnostic_id, NodeLifecycleSnapshot lifecycle, List<NodeDiagnosticRecoveryAction> recovery_actions, NodeRuntimeResidueSnapshot residue, List<String> retained_owner_networks, String sanitized_report, Long started_at_unix_ms, Boolean timed_out) {
+            this.checks = checks;
             this.cleanup_candidate_networks = cleanup_candidate_networks;
+            this.completed_at_unix_ms = completed_at_unix_ms;
+            this.diagnostic_id = diagnostic_id;
             this.lifecycle = lifecycle;
+            this.recovery_actions = recovery_actions;
             this.residue = residue;
             this.retained_owner_networks = retained_owner_networks;
+            this.sanitized_report = sanitized_report;
+            this.started_at_unix_ms = started_at_unix_ms;
+            this.timed_out = timed_out;
         }
     }
 

@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::authorization::{authorize_command, CommandDenial};
 use super::ui_manifest::audit_for_command;
@@ -186,9 +186,10 @@ impl NodeCommandKind {
         }
     }
 
-    /// Whether this command can change node or network state. Read-only and
-    /// diagnostic commands keep the synchronous command response; mutations
-    /// must be submitted as idempotent operations by the v1 control API.
+    /// Whether this command can change node or network state. Mutation and
+    /// host-fix actions remain subject to the authorization and audit policy
+    /// attached to `is_write`; diagnostics are read-only but are long-running
+    /// operations so they can be cancelled and observed.
     pub const fn is_write(self) -> bool {
         matches!(
             self,
@@ -213,6 +214,13 @@ impl NodeCommandKind {
                 | Self::ApplyConfiguration
                 | Self::RollbackConfiguration
         )
+    }
+
+    /// Commands that must be submitted through an operation registry. This
+    /// deliberately extends mutation semantics only for diagnostics; it does
+    /// not grant write authorization or make diagnostics auditable as changes.
+    pub const fn is_operation(self) -> bool {
+        self.is_write() || matches!(self, Self::GetDiagnostics)
     }
 }
 
@@ -882,14 +890,104 @@ impl NodeRuntimeResidueSnapshot {
     }
 }
 
-/// Live actor-owned diagnostics. Counts describe observed runtime ownership,
-/// not merely configuration or UI snapshot projections.
+/// Stable diagnostic layers shown in a fixed order by every adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeDiagnosticLayer {
+    Network,
+    Dns,
+    Tun,
+    Coordinator,
+    Relay,
+    Exit,
+}
+
+impl NodeDiagnosticLayer {
+    pub const ALL: [Self; 6] = [
+        Self::Network,
+        Self::Dns,
+        Self::Tun,
+        Self::Coordinator,
+        Self::Relay,
+        Self::Exit,
+    ];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Dns => "dns",
+            Self::Tun => "tun",
+            Self::Coordinator => "coordinator",
+            Self::Relay => "relay",
+            Self::Exit => "exit",
+        }
+    }
+}
+
+/// Five-state result deliberately richer than a boolean. Adapters must render
+/// every state verbatim and must not infer `passed` from missing probe data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeDiagnosticState {
+    NotTested,
+    Passed,
+    Failed,
+    Unsupported,
+    NoPermission,
+}
+
+impl NodeDiagnosticState {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::NotTested => "not_tested",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Unsupported => "unsupported",
+            Self::NoPermission => "no_permission",
+        }
+    }
+}
+
+/// One sanitized layered probe. Raw process output, host paths, interface MAC
+/// addresses, tokens, keys, full topology and peer addresses are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeDiagnosticCheck {
+    pub layer: NodeDiagnosticLayer,
+    pub state: NodeDiagnosticState,
+    pub started_at_unix_ms: u64,
+    pub duration_ms: u64,
+    /// Stable machine code, never raw stderr.
+    pub error_code: Option<String>,
+    pub message_key: String,
+    pub suggestion_key: Option<String>,
+}
+
+/// A recovery action that is safe to render from untrusted UI input. The UI
+/// must request explicit confirmation when `confirmation_required` is true and
+/// show the impact key before dispatching any command.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeDiagnosticRecoveryAction {
+    pub action_id: String,
+    pub impact_key: String,
+    pub confirmation_required: bool,
+}
+
+/// Live actor-owned diagnostics plus a bounded layered probe report.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeDiagnosticsSnapshot {
+    pub diagnostic_id: String,
+    pub started_at_unix_ms: u64,
+    pub completed_at_unix_ms: u64,
+    pub timed_out: bool,
     pub lifecycle: NodeLifecycleSnapshot,
     pub retained_owner_networks: Vec<String>,
     pub cleanup_candidate_networks: Vec<String>,
     pub residue: NodeRuntimeResidueSnapshot,
+    pub checks: Vec<NodeDiagnosticCheck>,
+    pub recovery_actions: Vec<NodeDiagnosticRecoveryAction>,
+    /// Canonical redacted report suitable for clipboard/export. It is generated
+    /// server-side from stable fields, never from raw stderr.
+    pub sanitized_report: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -968,11 +1066,24 @@ pub trait NodeCommandHandler: Send + Sync + 'static {
     ) -> NodeCommandFuture {
         self.handle(request)
     }
+
+    /// Cancellable variant used by operation execution. The default preserves
+    /// compatibility for handlers without cancellable work; the runtime
+    /// handler overrides it for diagnostics.
+    fn handle_authorized_cancellable(
+        &self,
+        context: NodeCommandContext,
+        request: NodeCommandRequest,
+        _cancel: watch::Receiver<bool>,
+    ) -> NodeCommandFuture {
+        self.handle_authorized(context, request)
+    }
 }
 
 struct CommandEnvelope {
     context: NodeCommandContext,
     request: NodeCommandRequest,
+    cancel: watch::Receiver<bool>,
     response: oneshot::Sender<NodeCommandResult>,
 }
 
@@ -1115,7 +1226,11 @@ impl NodeCommandBus {
                         in_flight.spawn(async move {
                             let request_id = envelope.request.request_id;
                             let result = handler
-                                .handle_authorized(envelope.context, envelope.request)
+                                .handle_authorized_cancellable(
+                                    envelope.context,
+                                    envelope.request,
+                                    envelope.cancel,
+                                )
                                 .await;
                             events.publish(NodeEventKind::CommandCompleted {
                                 request_id,
@@ -1146,6 +1261,19 @@ impl NodeCommandBus {
         context: NodeCommandContext,
         request: NodeCommandRequest,
     ) -> Result<NodeCommandResult, NodeCommandBusError> {
+        let (_cancel_sender, cancel) = watch::channel(false);
+        self.execute_cancellable(context, request, cancel).await
+    }
+
+    /// Execute one command with a cancellation signal that reaches the active
+    /// handler. Cancellation is cooperative: the operation is not marked
+    /// terminal until the handler has released child processes and temp state.
+    pub async fn execute_cancellable(
+        &self,
+        context: NodeCommandContext,
+        request: NodeCommandRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<NodeCommandResult, NodeCommandBusError> {
         request.validate().map_err(NodeCommandBusError::Invalid)?;
         let request_id = request.request_id;
         if let Err(denial) = authorize_command(&context, &request.command).map(|_| ()) {
@@ -1171,6 +1299,7 @@ impl NodeCommandBus {
             .send(CommandEnvelope {
                 context: context.clone(),
                 request,
+                cancel,
                 response,
             })
             .await

@@ -23,12 +23,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::node::{
-    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeOperationSnapshot, NodeSnapshot,
-    OperationSubmitError,
+    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeOperationSnapshot, NodeProblem,
+    NodeSnapshot, OperationSubmitError,
 };
 use fuckipv6_common::domain::IdempotencyKey;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,6 +110,10 @@ pub enum LocalCommand {
     LookupOperation {
         operation_id: String,
     },
+    CancelOperation {
+        operation_id: String,
+        source: String,
+    },
     StopNode,
 }
 
@@ -120,7 +124,7 @@ pub enum LocalResponse {
         snapshot: Box<NodeSnapshot>,
         event_sequence: u64,
     },
-    NodeCommand(NodeCommandResult),
+    NodeCommand(Box<NodeCommandResult>),
     Operation(Box<NodeOperationSnapshot>),
     Subscribed {
         snapshot: Box<NodeSnapshot>,
@@ -148,6 +152,7 @@ pub enum IpcErrorCode {
     RequestIdMismatch,
     BackendUnavailable,
     NotFound,
+    Conflict,
     EventGap,
     Unsupported,
     Timeout,
@@ -161,6 +166,8 @@ pub struct LocalError {
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_error: Option<OperationSubmitError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<NodeProblem>,
 }
 
 impl LocalError {
@@ -170,6 +177,7 @@ impl LocalError {
             message: message.into(),
             retryable: false,
             operation_error: None,
+            problem: None,
         }
     }
 
@@ -194,6 +202,27 @@ impl LocalError {
             message,
             retryable,
             operation_error: Some(error),
+            problem: None,
+        }
+    }
+
+    pub fn problem(problem: NodeProblem) -> Self {
+        let (code, retryable) = match problem.code {
+            crate::node::NodeProblemCode::NotFound => (IpcErrorCode::NotFound, false),
+            crate::node::NodeProblemCode::Conflict => (IpcErrorCode::Conflict, false),
+            crate::node::NodeProblemCode::Cancelled => (IpcErrorCode::Unsupported, false),
+            crate::node::NodeProblemCode::PermissionDenied => (IpcErrorCode::Unauthorized, false),
+            crate::node::NodeProblemCode::TimedOut => (IpcErrorCode::Timeout, true),
+            crate::node::NodeProblemCode::Unavailable => (IpcErrorCode::BackendUnavailable, true),
+            crate::node::NodeProblemCode::InvalidRequest => (IpcErrorCode::MalformedRequest, false),
+            _ => (IpcErrorCode::Internal, problem.retryable),
+        };
+        Self {
+            code,
+            message: problem.message.clone(),
+            retryable,
+            operation_error: None,
+            problem: Some(problem),
         }
     }
 
@@ -609,7 +638,7 @@ pub async fn execute(
     )
     .await?;
     match response {
-        LocalResponse::NodeCommand(result) if result.request_id == request_id => Ok(result),
+        LocalResponse::NodeCommand(result) if result.request_id == request_id => Ok(*result),
         LocalResponse::NodeCommand(result) => bail!(
             "本地 IPC 响应 request_id 不匹配: expected={request_id}, actual={}",
             result.request_id
@@ -664,6 +693,30 @@ pub async fn lookup_operation(
     match response {
         LocalResponse::Operation(operation) => Ok(*operation),
         other => bail!("本地 IPC 返回了意外 operation 查询响应: {other:?}"),
+    }
+}
+
+pub async fn cancel_operation(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    operation_id: &str,
+    source: String,
+) -> Result<NodeOperationSnapshot> {
+    let response = request(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::CancelOperation {
+                operation_id: operation_id.to_owned(),
+                source,
+            },
+        },
+    )
+    .await?;
+    match response {
+        LocalResponse::Operation(operation) => Ok(*operation),
+        other => bail!("本地 IPC 返回了意外 operation 取消响应: {other:?}"),
     }
 }
 
@@ -1003,7 +1056,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_explicit() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
         const { assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024) };
     }
 

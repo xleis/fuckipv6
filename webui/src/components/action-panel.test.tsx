@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
@@ -52,6 +52,7 @@ function renderPanel(
       requestedActionId={null}
       operation={null}
       onRequestedActionOpened={() => {}}
+      onCancel={vi.fn(async () => {})}
       onSubmit={onSubmit}
     />,
   );
@@ -94,6 +95,7 @@ describe("action panel interaction gate", () => {
         requestedActionId={null}
         operation={null}
         onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
         onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
           outcome: { status: "completed", data: {} } as NodeCommandOutcome,
         }))}
@@ -121,6 +123,7 @@ describe("action panel field synchronization", () => {
         requestedActionId={null}
         operation={null}
         onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
         onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
           outcome: { status: "completed", data: {} } as NodeCommandOutcome,
         }))}
@@ -154,6 +157,7 @@ describe("action panel field synchronization", () => {
         requestedActionId={null}
         operation={null}
         onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
         onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
           outcome: { status: "completed", data: {} } as NodeCommandOutcome,
         }))}
@@ -174,6 +178,7 @@ describe("action panel field synchronization", () => {
         requestedActionId={null}
         operation={null}
         onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
         onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
           outcome: { status: "completed", data: {} } as NodeCommandOutcome,
         }))}
@@ -219,6 +224,7 @@ describe("action panel operation status", () => {
         requestedActionId={null}
         operation={operation}
         onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
         onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({ operation }))}
       />,
     );
@@ -246,5 +252,113 @@ describe("action panel operation status", () => {
     expect(
       within(status).getByRole("status"),
     ).toHaveTextContent("translated:operation.diagnostic_copied");
+  });
+
+  it("only offers cancellation for a non-terminal cancellable operation", async () => {
+    const user = userEvent.setup();
+    const onCancel = vi.fn(async () => {});
+    const operation = {
+      operation_id: "op-cancellable",
+      state: "running",
+      stage: "probing",
+      attempt: 1,
+      max_attempts: 1,
+      cancellable: true,
+    } as NodeOperationSnapshot;
+
+    const view = render(
+      <ActionPanel
+        actions={[restart]}
+        snapshot={snapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={operation}
+        onRequestedActionOpened={() => {}}
+        onCancel={onCancel}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({ operation }))}
+      />,
+    );
+
+    const status = screen.getByTestId("operation-status");
+    await user.click(
+      within(status).getByRole("button", {
+        name: "translated:operation.cancel",
+      }),
+    );
+    expect(onCancel).toHaveBeenCalledWith("op-cancellable");
+
+    view.rerender(
+      <ActionPanel
+        actions={[restart]}
+        snapshot={snapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={{ ...operation, state: "cancelled" }}
+        onRequestedActionOpened={() => {}}
+        onCancel={onCancel}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({ operation }))}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "translated:operation.cancel" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a localized cancellation failure without replacing the operation error", async () => {
+    if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
+    window.FuckIPV6I18n.tr = (_locale, key, params) =>
+      `translated:${key}:${JSON.stringify(params ?? {})}`;
+    const user = userEvent.setup();
+    const operation = {
+      operation_id: "op-cancel-failed",
+      state: "running",
+      stage: "probing",
+      attempt: 1,
+      max_attempts: 1,
+      cancellable: true,
+      error: {
+        code: "node.diagnostic_progress",
+        message_key: "diagnostic.state.failed",
+        retryable: false,
+      },
+    } as NodeOperationSnapshot;
+
+    render(
+      <ActionPanel
+        actions={[restart]}
+        snapshot={snapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={operation}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {
+          throw new Error("cancel conflict");
+        })}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({ operation }))}
+      />,
+    );
+
+    await user.click(
+      within(screen.getByTestId("operation-status")).getByRole("button", {
+        name: "translated:operation.cancel",
+      }),
+    );
+
+    const status = screen.getByTestId("operation-status");
+    await waitFor(() => {
+      expect(status.querySelector(".inline-notice")).toHaveTextContent(
+        'translated:operation.cancel_failed:{"error":"cancel conflict"}',
+      );
+    });
+    expect(status).toHaveTextContent("translated:diagnostic.state.failed");
   });
 });

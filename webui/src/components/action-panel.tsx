@@ -20,6 +20,7 @@ import {
   executionBlockReason,
   initialActionValues,
   label,
+  operationStateIsTerminal,
   outcomeSummary,
   validateActionValues,
   type ActionValues,
@@ -37,6 +38,7 @@ type ActionPanelProps = {
   requestedActionId: string | null;
   operation: NodeOperationSnapshot | null;
   onRequestedActionOpened(): void;
+  onCancel(operationId: string): Promise<void>;
   onSubmit(
     action: NodeUiAction,
     values: ActionValues,
@@ -186,11 +188,16 @@ function operationFailureSummary(
 function OperationStatusCard({
   operation,
   locale,
+  onCancel,
 }: {
   operation: NodeOperationSnapshot;
   locale: Locale;
+  onCancel(operationId: string): Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copyFailure, setCopyFailure] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
+  const [cancelFailure, setCancelFailure] = useState("");
   const cancellation = operation.cancellable
     ? label(locale, "operation.cancellable_yes")
     : tr(locale, "operation.cancellable_no", {
@@ -203,10 +210,32 @@ function OperationStatusCard({
     try {
       await navigator.clipboard.writeText(operation.operation_id);
       setCopied(true);
+      setCopyFailure(false);
     } catch {
       setCopied(false);
+      setCopyFailure(true);
     }
   }
+
+  async function cancel(): Promise<void> {
+    if (cancelPending) return;
+    setCancelPending(true);
+    setCancelFailure("");
+    try {
+      await onCancel(operation.operation_id);
+    } catch (error) {
+      setCancelFailure(
+        tr(locale, "operation.cancel_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } finally {
+      setCancelPending(false);
+    }
+  }
+
+  const showCancel =
+    operation.cancellable && !operationStateIsTerminal(operation.state);
 
   return (
     <section className="operation-status" data-testid="operation-status">
@@ -215,19 +244,36 @@ function OperationStatusCard({
           <span>{label(locale, "operation.title")}</span>
           <strong>{label(locale, `operation.state.${operation.state}`)}</strong>
         </div>
-        <button
-          className="secondary-button operation-copy"
-          type="button"
-          onClick={() => void copyDiagnosticId()}
-        >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-          {label(
-            locale,
-            copied
-              ? "operation.diagnostic_copied"
-              : "operation.copy_diagnostic_id",
-          )}
-        </button>
+        <div className="operation-status-actions">
+          {showCancel ? (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={cancelPending}
+              onClick={() => void cancel()}
+            >
+              {cancelPending
+                ? label(locale, "operation.cancelling")
+                : label(locale, "operation.cancel")}
+            </button>
+          ) : null}
+          <button
+            className="secondary-button operation-copy"
+            type="button"
+            onClick={() => {
+              setCopyFailure(false);
+              void copyDiagnosticId();
+            }}
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {label(
+              locale,
+              copied
+                ? "operation.diagnostic_copied"
+                : "operation.copy_diagnostic_id",
+            )}
+          </button>
+        </div>
       </div>
       <div className="operation-metadata">
         <span>
@@ -256,6 +302,17 @@ function OperationStatusCard({
             )}
           </span>
         </div>
+      ) : null}
+      {cancelFailure ? (
+        <div className="inline-notice warning" role="alert">
+          <AlertTriangle size={15} />
+          <span>{cancelFailure}</span>
+        </div>
+      ) : null}
+      {copyFailure ? (
+        <p className="form-error" role="alert">
+          {label(locale, "diagnostic.copy_failed")}
+        </p>
       ) : null}
       <div className="operation-diagnostic-id">
         <span>{label(locale, "operation.diagnostic_id")}</span>
@@ -558,7 +615,11 @@ export function ActionPanel(props: ActionPanelProps) {
         {label(locale, "common.shared_actions")}
       </div>
       {props.operation ? (
-        <OperationStatusCard operation={props.operation} locale={locale} />
+        <OperationStatusCard
+          operation={props.operation}
+          locale={locale}
+          onCancel={props.onCancel}
+        />
       ) : null}
       <div className="action-list">
         {actions.map((action) => (

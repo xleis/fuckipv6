@@ -3,6 +3,7 @@ import type { NodeCommandHttpRequest } from "../../../contracts/typescript/node-
 import {
   AuthenticationError,
   ReauthenticationRequiredError,
+  cancelOperation,
   newIdempotencyKey,
   nextRequestId,
   sendCommand,
@@ -130,5 +131,37 @@ describe("request identities", () => {
     expect(poll).toBe(2);
     expect(observed).toEqual(["running", "succeeded"]);
     expect(terminal.state).toBe("succeeded");
+  });
+
+  it("cancels an operation through the versioned POST endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          schema_version: 1,
+          request_id: 41,
+          server_time: "2026-11-03T00:00:00Z",
+          operation: {
+            operation_id: "op/with space",
+            state: "running",
+            stage: "cancelling",
+            attempt: 1,
+            max_attempts: 1,
+            cancellable: true,
+          },
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const operation = await cancelOperation("op/with space");
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/operations/op%2Fwith%20space/cancel?schema_version=1",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(operation.operation_id).toBe("op/with space");
+    expect(operation.stage).toBe("cancelling");
   });
 });

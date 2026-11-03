@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::watch;
+
 use super::runtime_control::{network_setup_problem_code, RestartSummary};
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
@@ -66,6 +68,7 @@ impl NodeRuntimeHandler {
         &self,
         actor: Option<(String, String)>,
         request: NodeCommandRequest,
+        cancel: Option<watch::Receiver<bool>>,
     ) -> NodeCommandFuture {
         let state = self.state.clone();
         let registry = self.registry.clone();
@@ -175,7 +178,7 @@ impl NodeRuntimeHandler {
                     None => unavailable(request_id, "读取配置历史需要节点配置管理器"),
                 },
                 super::NodeCommand::GetDiagnostics => match runtime {
-                    Some(runtime) => diagnostics_runtime(&runtime, request_id).await,
+                    Some(runtime) => diagnostics_runtime(&runtime, request_id, cancel).await,
                     None => {
                         unavailable(request_id, "读取运行时诊断需要运行中的多网络监督器控制通道")
                     }
@@ -369,7 +372,7 @@ impl NodeRuntimeHandler {
 
 impl NodeCommandHandler for NodeRuntimeHandler {
     fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
-        self.execute(None, request)
+        self.execute(None, request, None)
     }
 
     fn handle_authorized(
@@ -383,6 +386,23 @@ impl NodeCommandHandler for NodeRuntimeHandler {
                 context.source().to_owned(),
             )),
             request,
+            None,
+        )
+    }
+
+    fn handle_authorized_cancellable(
+        &self,
+        context: NodeCommandContext,
+        request: NodeCommandRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> NodeCommandFuture {
+        self.execute(
+            Some((
+                context.actor().as_str().to_owned(),
+                context.source().to_owned(),
+            )),
+            request,
+            Some(cancel),
         )
     }
 }
@@ -756,8 +776,13 @@ async fn restart_runtime_node(
 async fn diagnostics_runtime(
     runtime: &NetworkRuntimeManager,
     request_id: u64,
+    cancel: Option<watch::Receiver<bool>>,
 ) -> NodeCommandResult {
-    match runtime.diagnostics().await {
+    let result = match cancel {
+        Some(cancel) => runtime.diagnostics_cancellable(cancel).await,
+        None => runtime.diagnostics().await,
+    };
+    match result {
         Ok(diagnostics) => {
             NodeCommandResult::completed(request_id, NodeCommandOutcome::Diagnostics(diagnostics))
         }
@@ -1709,7 +1734,7 @@ mod tests {
             ),
             (
                 RuntimeControlError::Timeout("timeout".into()),
-                NodeProblemCode::Unavailable,
+                NodeProblemCode::TimedOut,
                 true,
             ),
         ];

@@ -53,7 +53,7 @@
 | W4 控制 API | `[x]` | P0 | W1,W2 | W4-01 至 W4-07 已完成；版本化 API、operation/SSE、稳定错误、服务端授权、生成客户端、限额与自动化攻击面门禁均有测试证据。未进行真实公网环境实机压测 |
 | W5 设计系统 | `[~]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[~]` | P1 | W4,W5 | 五导航与单一主状态已落地；概览、设置和状态矩阵待完成 |
-| W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要与 W7-04 身份和密钥已完成；W7-02 接口/TUN 进行中，W7-05/06 诊断与状态权限矩阵待完成 |
+| W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥与 W7-05 诊断恢复已完成；W7-02 接口/TUN 进行中，W7-06 状态权限矩阵待完成 |
 | W8 网络创建与发现 | `[ ]` | P1 | W3,W4,W5 | 创建、发现、申请、审批 |
 | W9 成员、组与拓扑 | `[ ]` | P1 | W8 | 拓扑、列表、邀请、批量操作 |
 | W10 安全与隐私 | `[ ]` | P1 | W9 | ACL、字段权限、测试器、审计 |
@@ -999,16 +999,18 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：身份信息可核验，轮换有明确影响说明和恢复路径，秘密不越过服务端安全边界。
 
-### W7-05 诊断与恢复 `[ ]`
+### W7-05 诊断与恢复 `[x]`
 
-- [ ] 提供网络、DNS、TUN、Coordinator、Relay、Exit 的分层诊断；
-- [ ] 诊断每项展示开始时间、结果、耗时、错误码和修复建议；
-- [ ] 支持复制脱敏报告和诊断 ID；
-- [ ] 支持取消诊断并清理子进程与临时文件；
-- [ ] 区分“未测试”“通过”“失败”“不支持”“无权限”；
-- [ ] 不在页面常驻无价值的实时曲线或高频轮询；
-- [ ] 诊断失败不得静默修改系统配置；
-- [ ] 对恢复动作展示影响范围和确认要求。
+- [x] 提供网络、DNS、TUN、Coordinator、Relay、Exit 的分层诊断；
+- [x] 诊断每项展示开始时间、结果、耗时、错误码和修复建议；
+- [x] 支持复制脱敏报告和诊断 ID；
+- [x] 支持取消诊断并清理子进程与临时文件；
+- [x] 区分“未测试”“通过”“失败”“不支持”“无权限”；
+- [x] 不在页面常驻无价值的实时曲线或高频轮询；
+- [x] 诊断失败不得静默修改系统配置；
+- [x] 对恢复动作展示影响范围和确认要求。
+
+**证据（2026-11-03）**：GPUI 与 WebUI 节点运行页按固定的 Network、DNS、TUN、Coordinator、Relay、Exit 六层顺序投影诊断结果；服务端缺失的层显式显示为“未测试”，每层展示开始时间、结果、耗时、稳定错误码、消息键和修复建议。诊断由统一 operation 服务执行，支持 HTTP 与本地 IPC 协作取消、硬超时和 120 秒 UI 查询截止时间；取消请求不会提前伪造终态，只有 handler 释放子进程、临时状态并返回权威结果后才进入 `cancelled`。结果包含诊断 ID、脱敏报告、恢复动作的影响范围及确认要求，以及会话、监听、peer、内嵌服务和残留网络摘要；复制入口只使用服务端生成的脱敏报告，诊断失败不会静默修改系统配置。WebUI 仅在活动 operation 期间轮询并支持取消，GPUI 仅对活动 operation 查询，不常驻实时曲线。契约新增固定诊断层、五态、检查项、恢复动作和扩展报告字段，并同步 TypeScript、JSON Schema 与 Android DTO/fail-closed 枚举测试。验证通过：`cargo test -p fuckipv6-client --all-features`（lib 722 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 11 passed；`lifecycle_cleanup_linux` 1 ignored）、`cargo test -p fuckipv6-common i18n` 9/9、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 8 个测试文件 83/83、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`、`cargo fmt --all -- --check` 和 `git diff --check`。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 **验收**：用户能定位是节点、网络还是出口故障；诊断有硬超时、可取消、可脱敏导出且无残留。
 

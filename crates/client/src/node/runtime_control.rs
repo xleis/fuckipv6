@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,15 +13,16 @@ use tokio::time::{timeout, Instant};
 
 use super::{
     NodeCleanupFailureReason, NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot,
-    NodeCleanupStepStatus, NodeCreateNetworkCommand, NodeDiagnosticsSnapshot,
+    NodeCleanupStepStatus, NodeCreateNetworkCommand, NodeDiagnosticCheck, NodeDiagnosticLayer,
+    NodeDiagnosticRecoveryAction, NodeDiagnosticState, NodeDiagnosticsSnapshot,
     NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus, NodeEventKind,
-    NodeIdentitySnapshot, NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot,
-    NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase,
-    NodeProblem, NodeProblemCode, NodeResidualCleanupResult, NodeRoutingDefaultAction,
-    NodeRoutingMode, NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus,
-    NodeRoutingTargetSnapshot, NodeRuntimePlan, NodeRuntimeResidueSnapshot,
-    NodeSetNetworkRoleCommand, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
-    NodeUpdateRoutingCommand,
+    NodeIdentitySnapshot, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
+    NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot, NodeNetworkRole,
+    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase, NodeProblem,
+    NodeProblemCode, NodeResidualCleanupResult, NodeRoutingDefaultAction, NodeRoutingMode,
+    NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeRuntimePlan, NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSnapshot,
+    NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
 use crate::config_manager::{ConfigManager, NetworkConfig};
@@ -37,6 +38,7 @@ pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
+const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimeTimeouts {
@@ -44,6 +46,7 @@ struct RuntimeTimeouts {
     start: Duration,
     restart: Duration,
     routing_update: Duration,
+    diagnostics: Duration,
 }
 
 impl Default for RuntimeTimeouts {
@@ -53,6 +56,7 @@ impl Default for RuntimeTimeouts {
             start: START_TIMEOUT,
             restart: RESTART_TIMEOUT,
             routing_update: ROUTING_UPDATE_TIMEOUT,
+            diagnostics: DIAGNOSTICS_TIMEOUT,
         }
     }
 }
@@ -76,6 +80,8 @@ pub(crate) enum RuntimeControlError {
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
+    Cancelled(String),
+    #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
     Unavailable(String),
@@ -97,13 +103,13 @@ impl RuntimeControlError {
         match self {
             Self::Invalid(_) => NodeProblemCode::InvalidRequest,
             Self::Conflict(_) => NodeProblemCode::Conflict,
+            Self::Cancelled(_) => NodeProblemCode::Cancelled,
             Self::NotFound(_) => NodeProblemCode::NotFound,
             Self::NetworkSetup { stage, .. } => network_setup_problem_code(*stage),
-            Self::ActorClosed
-            | Self::Unavailable(_)
-            | Self::Persistence(_)
-            | Self::Launch(_)
-            | Self::Timeout(_) => NodeProblemCode::Unavailable,
+            Self::ActorClosed | Self::Unavailable(_) | Self::Persistence(_) | Self::Launch(_) => {
+                NodeProblemCode::Unavailable
+            }
+            Self::Timeout(_) => NodeProblemCode::TimedOut,
         }
     }
 
@@ -119,6 +125,7 @@ impl RuntimeControlError {
             self,
             Self::Invalid(_)
                 | Self::Conflict(_)
+                | Self::Cancelled(_)
                 | Self::NotFound(_)
                 | Self::NetworkSetup {
                     stage: NetworkSetupStage::PermissionDenied
@@ -775,6 +782,453 @@ struct NetworkRuntimeSession {
     handle: JoinHandle<NetworkRuntimeExit>,
 }
 
+async fn wait_for_cancellation(mut cancel: watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    loop {
+        if cancel.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        if *cancel.borrow() {
+            return;
+        }
+    }
+}
+
+async fn run_diagnostic_collection<T>(
+    budget: Duration,
+    cancel: watch::Receiver<bool>,
+    collection: impl Future<Output = Result<T, RuntimeControlError>>,
+) -> Result<T, RuntimeControlError> {
+    let collection = timeout(budget, collection);
+    tokio::pin!(collection);
+    tokio::select! {
+        result = &mut collection => match result {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeControlError::Timeout(
+                "分层诊断超过硬超时，已停止采集并释放临时状态".into(),
+            )),
+        },
+        _ = wait_for_cancellation(cancel) => Err(RuntimeControlError::Cancelled(
+            "诊断已取消，临时状态已释放".into(),
+        )),
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn next_diagnostic_id(started_at_unix_ms: u64) -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("diag-{started_at_unix_ms}-{sequence:08x}")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiagnosticResult {
+    state: NodeDiagnosticState,
+    error_code: Option<&'static str>,
+    message_key: &'static str,
+    suggestion_key: Option<&'static str>,
+}
+
+impl DiagnosticResult {
+    const fn new(state: NodeDiagnosticState, message_key: &'static str) -> Self {
+        Self {
+            state,
+            error_code: None,
+            message_key,
+            suggestion_key: None,
+        }
+    }
+
+    const fn failed(error_code: &'static str, suggestion_key: &'static str) -> Self {
+        Self {
+            state: NodeDiagnosticState::Failed,
+            error_code: Some(error_code),
+            message_key: "diagnostic.state.failed",
+            suggestion_key: Some(suggestion_key),
+        }
+    }
+
+    const fn unsupported(error_code: &'static str, suggestion_key: &'static str) -> Self {
+        Self {
+            state: NodeDiagnosticState::Unsupported,
+            error_code: Some(error_code),
+            message_key: "diagnostic.state.unsupported",
+            suggestion_key: Some(suggestion_key),
+        }
+    }
+
+    const fn no_permission(error_code: &'static str, suggestion_key: &'static str) -> Self {
+        Self {
+            state: NodeDiagnosticState::NoPermission,
+            error_code: Some(error_code),
+            message_key: "diagnostic.state.no_permission",
+            suggestion_key: Some(suggestion_key),
+        }
+    }
+}
+
+fn build_diagnostic_checks(
+    snapshot: &NodeSnapshot,
+    residue: &NodeRuntimeResidueSnapshot,
+    report_started_at_unix_ms: u64,
+) -> Vec<NodeDiagnosticCheck> {
+    NodeDiagnosticLayer::ALL
+        .into_iter()
+        .map(|layer| {
+            let started_at_unix_ms = unix_time_ms().max(report_started_at_unix_ms);
+            let timer = Instant::now();
+            let result = diagnostic_result(layer, snapshot, residue);
+            NodeDiagnosticCheck {
+                layer,
+                state: result.state,
+                started_at_unix_ms,
+                duration_ms: timer.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                error_code: result.error_code.map(str::to_owned),
+                message_key: result.message_key.to_owned(),
+                suggestion_key: result.suggestion_key.map(str::to_owned),
+            }
+        })
+        .collect()
+}
+
+fn diagnostic_result(
+    layer: NodeDiagnosticLayer,
+    snapshot: &NodeSnapshot,
+    residue: &NodeRuntimeResidueSnapshot,
+) -> DiagnosticResult {
+    match layer {
+        NodeDiagnosticLayer::Network => network_diagnostic(snapshot),
+        NodeDiagnosticLayer::Dns => {
+            DiagnosticResult::new(NodeDiagnosticState::NotTested, "diagnostic.dns.not_tested")
+        }
+        NodeDiagnosticLayer::Tun => tun_diagnostic(snapshot, residue),
+        NodeDiagnosticLayer::Coordinator => service_diagnostic(snapshot, layer),
+        NodeDiagnosticLayer::Relay => service_diagnostic(snapshot, layer),
+        NodeDiagnosticLayer::Exit => exit_diagnostic(snapshot),
+    }
+}
+
+fn network_diagnostic(snapshot: &NodeSnapshot) -> DiagnosticResult {
+    if snapshot.lifecycle.phase == NodePhase::Failed
+        || !snapshot.lifecycle.failed_networks.is_empty()
+    {
+        return DiagnosticResult::failed(
+            "diagnostic.network.lifecycle_failed",
+            "diagnostic.suggestion.restart_node",
+        );
+    }
+    if snapshot.lifecycle.phase == NodePhase::Running && snapshot.lifecycle.active_networks > 0 {
+        return DiagnosticResult::new(NodeDiagnosticState::Passed, "diagnostic.network.passed");
+    }
+    DiagnosticResult::new(
+        NodeDiagnosticState::NotTested,
+        "diagnostic.network.not_running",
+    )
+}
+
+fn tun_diagnostic(
+    snapshot: &NodeSnapshot,
+    residue: &NodeRuntimeResidueSnapshot,
+) -> DiagnosticResult {
+    use crate::tun::TunCapabilityReason;
+
+    if !snapshot.tun_capabilities.supported {
+        return DiagnosticResult::unsupported(
+            "diagnostic.tun.platform_unsupported",
+            "diagnostic.suggestion.use_supported_platform",
+        );
+    }
+    if snapshot
+        .tun_capabilities
+        .reasons
+        .contains(&TunCapabilityReason::PermissionDenied)
+    {
+        return DiagnosticResult::no_permission(
+            "diagnostic.tun.permission_denied",
+            "diagnostic.suggestion.grant_network_privileges",
+        );
+    }
+
+    let online_networks = snapshot
+        .networks
+        .iter()
+        .filter(|network| {
+            matches!(
+                network.status,
+                NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+            )
+        })
+        .collect::<Vec<_>>();
+    if online_networks.is_empty() {
+        return DiagnosticResult::new(NodeDiagnosticState::NotTested, "diagnostic.tun.not_running");
+    }
+
+    let runtime_is_healthy = residue.sessions_remaining > 0 || residue.configuration_retained;
+    let tun_mapping_is_healthy = online_networks.iter().all(|network| {
+        network.status == NodeNetworkStatus::Online
+            && snapshot.interfaces.iter().any(|interface| {
+                interface.name == network.tun_name
+                    && interface.kind == NodeInterfaceKind::Tun
+                    && interface.ownership == NodeInterfaceOwnership::Product
+                    && interface.status == NodeInterfaceStatus::Up
+            })
+    });
+    if tun_mapping_is_healthy && runtime_is_healthy {
+        DiagnosticResult::new(NodeDiagnosticState::Passed, "diagnostic.tun.passed")
+    } else {
+        DiagnosticResult::failed(
+            "diagnostic.tun.runtime_mapping_invalid",
+            "diagnostic.suggestion.rebuild_tun",
+        )
+    }
+}
+
+fn service_diagnostic(snapshot: &NodeSnapshot, layer: NodeDiagnosticLayer) -> DiagnosticResult {
+    let services = snapshot.embedded_services.iter().collect::<Vec<_>>();
+    if services.is_empty() {
+        return DiagnosticResult::new(
+            NodeDiagnosticState::NotTested,
+            if layer == NodeDiagnosticLayer::Coordinator {
+                "diagnostic.coordinator.not_running"
+            } else {
+                "diagnostic.relay.not_running"
+            },
+        );
+    }
+    if services
+        .iter()
+        .any(|service| service.status == NodeEmbeddedServiceStatus::Failed)
+    {
+        return DiagnosticResult::failed(
+            if layer == NodeDiagnosticLayer::Coordinator {
+                "diagnostic.coordinator.service_failed"
+            } else {
+                "diagnostic.relay.service_failed"
+            },
+            "diagnostic.suggestion.restart_node",
+        );
+    }
+    let running_address_present = services.iter().any(|service| {
+        service.status == NodeEmbeddedServiceStatus::Running
+            && match layer {
+                NodeDiagnosticLayer::Coordinator => service.signaling_addr.is_some(),
+                NodeDiagnosticLayer::Relay => service.relay_addr.is_some(),
+                _ => false,
+            }
+    });
+    if running_address_present {
+        return DiagnosticResult::new(
+            NodeDiagnosticState::Passed,
+            if layer == NodeDiagnosticLayer::Coordinator {
+                "diagnostic.coordinator.passed"
+            } else {
+                "diagnostic.relay.passed"
+            },
+        );
+    }
+    if services.iter().any(|service| {
+        matches!(
+            service.status,
+            NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
+        )
+    }) {
+        return DiagnosticResult::new(
+            NodeDiagnosticState::NotTested,
+            if layer == NodeDiagnosticLayer::Coordinator {
+                "diagnostic.coordinator.transitioning"
+            } else {
+                "diagnostic.relay.transitioning"
+            },
+        );
+    }
+    DiagnosticResult::failed(
+        if layer == NodeDiagnosticLayer::Coordinator {
+            "diagnostic.coordinator.address_missing"
+        } else {
+            "diagnostic.relay.address_missing"
+        },
+        "diagnostic.suggestion.restart_node",
+    )
+}
+
+fn exit_diagnostic(snapshot: &NodeSnapshot) -> DiagnosticResult {
+    use fuckipv6_common::ExitNodeUnsupportedReason;
+
+    let local_exit_networks = snapshot
+        .networks
+        .iter()
+        .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
+        .collect::<Vec<_>>();
+    if !local_exit_networks.is_empty() {
+        if !snapshot.exit_node_capabilities.supported {
+            if snapshot
+                .exit_node_capabilities
+                .unsupported_reasons
+                .contains(&ExitNodeUnsupportedReason::PrivilegesRequired)
+            {
+                return DiagnosticResult::no_permission(
+                    "diagnostic.exit.permission_denied",
+                    "diagnostic.suggestion.grant_network_privileges",
+                );
+            }
+            return DiagnosticResult::unsupported(
+                "diagnostic.exit.platform_unsupported",
+                "diagnostic.suggestion.use_supported_platform",
+            );
+        }
+        if local_exit_networks
+            .iter()
+            .any(|network| network.status == NodeNetworkStatus::Failed)
+        {
+            return DiagnosticResult::failed(
+                "diagnostic.exit.runtime_failed",
+                "diagnostic.suggestion.restart_node",
+            );
+        }
+        if local_exit_networks.iter().any(|network| {
+            matches!(
+                network.status,
+                NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+            )
+        }) {
+            return DiagnosticResult::new(NodeDiagnosticState::Passed, "diagnostic.exit.passed");
+        }
+    }
+
+    let exit_routes = snapshot
+        .routing_summaries
+        .iter()
+        .filter(|summary| matches!(summary.default_action, NodeRoutingDefaultAction::Exit(_)))
+        .collect::<Vec<_>>();
+    if exit_routes.is_empty() {
+        return DiagnosticResult::new(
+            NodeDiagnosticState::NotTested,
+            "diagnostic.exit.not_configured",
+        );
+    }
+    if exit_routes.iter().any(|summary| {
+        summary.status == NodeRoutingSummaryStatus::Invalid
+            || summary.status == NodeRoutingSummaryStatus::ApplyFailed
+            || (summary.status == NodeRoutingSummaryStatus::Current
+                && !matches!(
+                    summary.effective_target.as_ref(),
+                    Some(NodeRoutingTargetSnapshot::Exit { .. })
+                ))
+    }) {
+        return DiagnosticResult::failed(
+            "diagnostic.exit.route_apply_failed",
+            "diagnostic.suggestion.review_exit_route",
+        );
+    }
+    if exit_routes.iter().any(|summary| {
+        summary.status == NodeRoutingSummaryStatus::Current
+            && matches!(
+                summary.effective_target.as_ref(),
+                Some(NodeRoutingTargetSnapshot::Exit { .. })
+            )
+    }) {
+        return DiagnosticResult::new(NodeDiagnosticState::Passed, "diagnostic.exit.passed");
+    }
+    DiagnosticResult::new(NodeDiagnosticState::NotTested, "diagnostic.exit.stale")
+}
+
+fn diagnostic_recovery_actions(
+    checks: &[NodeDiagnosticCheck],
+    residue: &NodeRuntimeResidueSnapshot,
+) -> Vec<NodeDiagnosticRecoveryAction> {
+    let mut actions = Vec::new();
+    let needs_restart = checks.iter().any(|check| {
+        check.state == NodeDiagnosticState::Failed
+            && matches!(
+                check.layer,
+                NodeDiagnosticLayer::Network
+                    | NodeDiagnosticLayer::Coordinator
+                    | NodeDiagnosticLayer::Relay
+                    | NodeDiagnosticLayer::Exit
+            )
+    });
+    if needs_restart {
+        actions.push(NodeDiagnosticRecoveryAction {
+            action_id: "restart_node".into(),
+            impact_key: "diagnostic.recovery.restart_node.impact".into(),
+            confirmation_required: true,
+        });
+    }
+    let needs_tun_rebuild = checks.iter().any(|check| {
+        check.layer == NodeDiagnosticLayer::Tun
+            && matches!(
+                check.state,
+                NodeDiagnosticState::Failed | NodeDiagnosticState::NoPermission
+            )
+    });
+    if needs_tun_rebuild {
+        actions.push(NodeDiagnosticRecoveryAction {
+            action_id: "rebuild_tun".into(),
+            impact_key: "diagnostic.recovery.rebuild_tun.impact".into(),
+            confirmation_required: true,
+        });
+    }
+    if !residue.is_clean() {
+        actions.push(NodeDiagnosticRecoveryAction {
+            action_id: "cleanup_residuals".into(),
+            impact_key: "diagnostic.recovery.cleanup_residuals.impact".into(),
+            confirmation_required: true,
+        });
+    }
+    actions
+}
+
+fn build_sanitized_diagnostic_report(
+    diagnostic_id: &str,
+    started_at_unix_ms: u64,
+    completed_at_unix_ms: u64,
+    timed_out: bool,
+    checks: &[NodeDiagnosticCheck],
+    recovery_actions: &[NodeDiagnosticRecoveryAction],
+    residue: &NodeRuntimeResidueSnapshot,
+) -> String {
+    let mut report = format!(
+        "FuckIPv6 diagnostics\nid: {diagnostic_id}\nstarted_at_unix_ms: {started_at_unix_ms}\ncompleted_at_unix_ms: {completed_at_unix_ms}\ntimed_out: {timed_out}\nchecks:\n"
+    );
+    for check in checks {
+        report.push_str(&format!(
+            "- {}: {} duration_ms={} error_code={} message_key={} suggestion_key={}\n",
+            check.layer.key(),
+            check.state.key(),
+            check.duration_ms,
+            check.error_code.as_deref().unwrap_or("none"),
+            check.message_key,
+            check.suggestion_key.as_deref().unwrap_or("none"),
+        ));
+    }
+    report.push_str(&format!(
+        "residue: sessions={} listeners={} peers={} services={} residual_networks={}\n",
+        residue.sessions_remaining,
+        residue.listeners_remaining,
+        residue.peers_remaining,
+        residue.embedded_services_remaining,
+        residue.residual_networks.len(),
+    ));
+    report.push_str("recovery_actions:\n");
+    for action in recovery_actions {
+        report.push_str(&format!(
+            "- {}: impact_key={} confirmation_required={}\n",
+            action.action_id, action.impact_key, action.confirmation_required,
+        ));
+    }
+    report
+}
+
 /// A manager-wide single-flight gate for lifecycle operations. The permit is
 /// moved into the actor command, so cancellation of the caller cannot release
 /// it while the actor is still changing runtime state.
@@ -813,6 +1267,7 @@ impl Drop for OperationGuard {
 
 enum RuntimeControlCommand {
     Diagnostics {
+        cancel: watch::Receiver<bool>,
         reply: oneshot::Sender<Result<NodeDiagnosticsSnapshot, RuntimeControlError>>,
     },
     LiveTunNames {
@@ -1339,8 +1794,16 @@ impl NetworkRuntimeManager {
     }
 
     pub async fn diagnostics(&self) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
+        let (_cancel_sender, cancel) = watch::channel(false);
+        self.diagnostics_cancellable(cancel).await
+    }
+
+    pub async fn diagnostics_cancellable(
+        &self,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
         let (reply, response) = oneshot::channel();
-        self.send(RuntimeControlCommand::Diagnostics { reply })
+        self.send(RuntimeControlCommand::Diagnostics { cancel, reply })
             .await?;
         response
             .await
@@ -1374,8 +1837,8 @@ async fn run_actor(
 ) {
     while let Some(command) = receiver.recv().await {
         match command {
-            RuntimeControlCommand::Diagnostics { reply } => {
-                let result = actor.diagnostics().await;
+            RuntimeControlCommand::Diagnostics { cancel, reply } => {
+                let result = actor.diagnostics_cancellable(cancel).await;
                 let _ = reply.send(result);
             }
             RuntimeControlCommand::LiveTunNames { reply } => {
@@ -3089,7 +3552,27 @@ impl NetworkRuntimeActor {
         })
     }
 
+    async fn diagnostics_cancellable(
+        &mut self,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
+        let result =
+            run_diagnostic_collection(self.timeouts.diagnostics, cancel, self.diagnostics()).await;
+
+        // Diagnostics currently use only in-memory snapshots. Keep this explicit
+        // completion step so cancellation and timeout cannot mark an operation
+        // terminal before actor-owned collection state has been released.
+        self.finish_diagnostic_run().await;
+        result
+    }
+
+    async fn finish_diagnostic_run(&mut self) {
+        self.reconcile_finished_sessions().await;
+    }
+
     async fn diagnostics(&mut self) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
+        let started_at_unix_ms = unix_time_ms();
+        let diagnostic_id = next_diagnostic_id(started_at_unix_ms);
         self.reconcile_finished_sessions().await;
         let lifecycle = self.lifecycle.snapshot().await;
         let snapshot = self.state.snapshot().await;
@@ -3140,11 +3623,31 @@ impl NetworkRuntimeActor {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let residue = cleanup.to_public();
+        let checks = build_diagnostic_checks(&snapshot, &residue, started_at_unix_ms);
+        let recovery_actions = diagnostic_recovery_actions(&checks, &residue);
+        let completed_at_unix_ms = unix_time_ms();
+        let sanitized_report = build_sanitized_diagnostic_report(
+            &diagnostic_id,
+            started_at_unix_ms,
+            completed_at_unix_ms,
+            false,
+            &checks,
+            &recovery_actions,
+            &residue,
+        );
         Ok(NodeDiagnosticsSnapshot {
+            diagnostic_id,
+            started_at_unix_ms,
+            completed_at_unix_ms,
+            timed_out: false,
             lifecycle,
             retained_owner_networks,
             cleanup_candidate_networks,
-            residue: cleanup.to_public(),
+            residue,
+            checks,
+            recovery_actions,
+            sanitized_report,
         })
     }
 
@@ -4041,6 +4544,7 @@ mod tests {
     use crate::tun::{
         TunCapabilities, TunCapabilityReason, TunPlatform, TUN_CAPABILITY_SCHEMA_VERSION,
     };
+    use futures::FutureExt;
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
@@ -6813,6 +7317,168 @@ mod tests {
         assert_eq!(harness.registry.get_all().await.len(), 1);
 
         harness.shutdown().await;
+    }
+
+    #[test]
+    fn diagnostic_projection_uses_fixed_layers_and_all_five_states() {
+        let clean_residue = NodeRuntimeResidueSnapshot::default();
+        let mut snapshot = NodeSnapshot {
+            lifecycle: crate::node::NodeLifecycleSnapshot {
+                phase: NodePhase::Running,
+                configured_networks: 1,
+                active_networks: 1,
+                failed_networks: Vec::new(),
+            },
+            ..NodeSnapshot::default()
+        };
+
+        let checks = build_diagnostic_checks(&snapshot, &clean_residue, 0);
+        assert_eq!(
+            checks.iter().map(|check| check.layer).collect::<Vec<_>>(),
+            NodeDiagnosticLayer::ALL
+        );
+        assert_eq!(checks[0].state, NodeDiagnosticState::Passed);
+        assert_eq!(checks[1].state, NodeDiagnosticState::NotTested);
+        assert_eq!(checks[1].message_key, "diagnostic.dns.not_tested");
+        assert!(checks.iter().all(|check| {
+            check.started_at_unix_ms >= 1 && check.message_key.starts_with("diagnostic.")
+        }));
+
+        snapshot.lifecycle.phase = NodePhase::Failed;
+        assert_eq!(
+            diagnostic_result(NodeDiagnosticLayer::Network, &snapshot, &clean_residue).state,
+            NodeDiagnosticState::Failed
+        );
+
+        snapshot.tun_capabilities.supported = false;
+        assert_eq!(
+            diagnostic_result(NodeDiagnosticLayer::Tun, &snapshot, &clean_residue).state,
+            NodeDiagnosticState::Unsupported
+        );
+
+        snapshot.tun_capabilities = TunCapabilities {
+            schema_version: TUN_CAPABILITY_SCHEMA_VERSION,
+            platform: TunPlatform::current(),
+            supported: true,
+            can_rebuild: true,
+            reasons: vec![TunCapabilityReason::PermissionDenied],
+        };
+        assert_eq!(
+            diagnostic_result(NodeDiagnosticLayer::Tun, &snapshot, &clean_residue).state,
+            NodeDiagnosticState::NoPermission
+        );
+
+        let stopped = NodeSnapshot::default();
+        assert_eq!(
+            diagnostic_result(NodeDiagnosticLayer::Network, &stopped, &clean_residue).state,
+            NodeDiagnosticState::NotTested
+        );
+    }
+
+    #[test]
+    fn diagnostic_recovery_and_report_are_actionable_and_sanitized() {
+        let checks = vec![
+            NodeDiagnosticCheck {
+                layer: NodeDiagnosticLayer::Network,
+                state: NodeDiagnosticState::Failed,
+                started_at_unix_ms: 10,
+                duration_ms: 2,
+                error_code: Some("diagnostic.network.lifecycle_failed".into()),
+                message_key: "diagnostic.state.failed".into(),
+                suggestion_key: Some("diagnostic.suggestion.restart_node".into()),
+            },
+            NodeDiagnosticCheck {
+                layer: NodeDiagnosticLayer::Tun,
+                state: NodeDiagnosticState::NoPermission,
+                started_at_unix_ms: 11,
+                duration_ms: 1,
+                error_code: Some("diagnostic.tun.permission_denied".into()),
+                message_key: "diagnostic.state.no_permission".into(),
+                suggestion_key: Some("diagnostic.suggestion.grant_network_privileges".into()),
+            },
+        ];
+        let residue = NodeRuntimeResidueSnapshot {
+            sessions_remaining: 1,
+            residual_networks: vec!["private-home-network".into()],
+            ..NodeRuntimeResidueSnapshot::default()
+        };
+        let actions = diagnostic_recovery_actions(&checks, &residue);
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.action_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["restart_node", "rebuild_tun", "cleanup_residuals"]
+        );
+        assert!(actions.iter().all(|action| {
+            action.confirmation_required && action.impact_key.starts_with("diagnostic.recovery.")
+        }));
+
+        let report = build_sanitized_diagnostic_report(
+            "diag-10-00000001",
+            10,
+            12,
+            false,
+            &checks,
+            &actions,
+            &residue,
+        );
+        assert!(report.contains("diag-10-00000001"));
+        assert!(report.contains("network: failed"));
+        assert!(report.contains("tun: no_permission"));
+        assert!(report.contains("confirmation_required=true"));
+        assert!(!report.contains("private-home-network"));
+        assert!(!report.contains("/home/"));
+        assert!(!report.contains("token"));
+        assert!(!report.contains("private-key"));
+    }
+
+    #[tokio::test]
+    async fn diagnostic_timeout_and_cancellation_release_actor_state() {
+        let (_timeout_sender, timeout_cancel) = watch::channel(false);
+        let timed_out = run_diagnostic_collection(
+            Duration::from_millis(1),
+            timeout_cancel,
+            std::future::pending::<Result<(), RuntimeControlError>>(),
+        )
+        .await;
+        assert!(matches!(timed_out, Err(RuntimeControlError::Timeout(_))));
+
+        let (cancel_sender, cancel) = watch::channel(false);
+        let cancelled_run = run_diagnostic_collection(
+            Duration::from_secs(1),
+            cancel,
+            std::future::pending::<Result<(), RuntimeControlError>>(),
+        );
+        tokio::pin!(cancelled_run);
+        assert!(!cancelled_run.as_mut().now_or_never().is_some());
+        cancel_sender.send_replace(true);
+        assert!(matches!(
+            cancelled_run.await,
+            Err(RuntimeControlError::Cancelled(_))
+        ));
+
+        let cancelled = TestHarness::new("diagnostic-cancelled").await;
+        let launches_before = cancelled.fake.launch_attempts();
+        let (_cancel_sender, cancel) = watch::channel(true);
+        assert!(matches!(
+            cancelled.runtime.diagnostics_cancellable(cancel).await,
+            Err(RuntimeControlError::Cancelled(_))
+        ));
+        assert_eq!(cancelled.fake.launch_attempts(), launches_before);
+        assert!(cancelled.registry.get_all().await.is_empty());
+
+        let diagnostics = cancelled
+            .runtime
+            .diagnostics()
+            .await
+            .expect("cancellation must leave diagnostics available");
+        assert_eq!(diagnostics.checks.len(), NodeDiagnosticLayer::ALL.len());
+        assert!(diagnostics.residue.is_clean());
+        assert!(diagnostics.recovery_actions.iter().all(|action| {
+            action.confirmation_required && action.impact_key.starts_with("diagnostic.recovery.")
+        }));
+        cancelled.shutdown().await;
     }
 
     #[tokio::test]

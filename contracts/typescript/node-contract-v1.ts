@@ -460,11 +460,38 @@ export type NodeCreatedNetwork = {
   "started": boolean;
 };
 
+export type NodeDiagnosticCheck = {
+  "duration_ms": number;
+  "error_code"?: string | null;
+  "layer": NodeDiagnosticLayer;
+  "message_key": string;
+  "started_at_unix_ms": number;
+  "state": NodeDiagnosticState;
+  "suggestion_key"?: string | null;
+};
+
+export type NodeDiagnosticLayer = "network" | "dns" | "tun" | "coordinator" | "relay" | "exit";
+
+export type NodeDiagnosticRecoveryAction = {
+  "action_id": string;
+  "confirmation_required": boolean;
+  "impact_key": string;
+};
+
+export type NodeDiagnosticState = "not_tested" | "passed" | "failed" | "unsupported" | "no_permission";
+
 export type NodeDiagnosticsSnapshot = {
+  "checks": Array<NodeDiagnosticCheck>;
   "cleanup_candidate_networks": Array<string>;
+  "completed_at_unix_ms": number;
+  "diagnostic_id": string;
   "lifecycle": NodeLifecycleSnapshot;
+  "recovery_actions": Array<NodeDiagnosticRecoveryAction>;
   "residue": NodeRuntimeResidueSnapshot;
   "retained_owner_networks": Array<string>;
+  "sanitized_report": string;
+  "started_at_unix_ms": number;
+  "timed_out": boolean;
 };
 
 export type NodeEmbeddedServiceSnapshot = {
@@ -1012,7 +1039,7 @@ export type OperationError = {
 
 export type OperationId = string;
 
-export type OperationKind = "node_start" | "node_stop" | "node_restart" | "node_cleanup" | "network_create" | "network_apply" | "tun_rebuild" | "network_leave" | "membership_approve" | "membership_reject" | "membership_remove" | "policy_test" | "policy_apply" | "policy_rollback" | "traffic_rules_apply" | "network_role_update" | "identity_update" | "client_blacklist_update" | "network_allocation_update" | "capability_enable" | "capability_disable" | "exit_select" | "exit_revoke" | "coordinator_candidates_update" | "coordinator_recover" | "file_share_update" | "file_upload_start" | "file_download_start" | "owner_passkey_register" | "owner_passkey_revoke" | "certificate_reload";
+export type OperationKind = "node_start" | "node_stop" | "node_restart" | "node_cleanup" | "diagnostics" | "network_create" | "network_apply" | "tun_rebuild" | "network_leave" | "membership_approve" | "membership_reject" | "membership_remove" | "policy_test" | "policy_apply" | "policy_rollback" | "traffic_rules_apply" | "network_role_update" | "identity_update" | "client_blacklist_update" | "network_allocation_update" | "capability_enable" | "capability_disable" | "exit_select" | "exit_revoke" | "coordinator_candidates_update" | "coordinator_recover" | "file_share_update" | "file_upload_start" | "file_download_start" | "owner_passkey_register" | "owner_passkey_revoke" | "certificate_reload";
 
 export type OperationRecovery = {
   "hint_key": string;

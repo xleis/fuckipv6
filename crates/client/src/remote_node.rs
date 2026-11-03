@@ -216,6 +216,22 @@ impl RemoteOperationClient {
             None => future.await,
         }
     }
+
+    pub async fn cancel(
+        &self,
+        context: crate::node::NodeCommandContext,
+        operation_id: &str,
+    ) -> std::result::Result<NodeOperationSnapshot, OperationClientError> {
+        let client = self.client.clone();
+        let operation_id = operation_id.to_owned();
+        let future = async move { client.cancel(&context, &operation_id).await };
+        match &self.runtime {
+            Some(runtime) => runtime.spawn(future).await.map_err(|error| {
+                OperationClientError::Unavailable(format!("operation task failed: {error}"))
+            })?,
+            None => future.await,
+        }
+    }
 }
 
 impl Drop for RemoteNodeSession {
@@ -266,6 +282,7 @@ fn remote_problem(request_id: u64, error: anyhow::Error) -> NodeProblem {
                 NodeProblemCode::Unavailable
             }
             IpcErrorCode::NotFound => NodeProblemCode::NotFound,
+            IpcErrorCode::Conflict => NodeProblemCode::Conflict,
             IpcErrorCode::Unsupported => NodeProblemCode::Unsupported,
             IpcErrorCode::Internal => NodeProblemCode::Internal,
         })

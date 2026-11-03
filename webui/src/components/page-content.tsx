@@ -12,8 +12,10 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Boxes,
+  Check,
   CheckCircle2,
   CircleDot,
+  Copy,
   Cpu,
   Database,
   DoorOpen,
@@ -30,9 +32,12 @@ import {
   WifiOff,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useRef, type JSX, type ReactNode } from "react";
+import { useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 import type {
   ActivityEntry,
+  NodeDiagnosticLayer,
+  NodeDiagnosticState,
+  NodeDiagnosticsSnapshot,
   NodeLogEntry,
   NodeNetworkSnapshot,
   NodePeerSnapshot,
@@ -56,6 +61,7 @@ type PageContentProps = {
   snapshot: NodeSnapshot;
   locale: Locale;
   selectedNetwork: string;
+  recentDiagnostics: NodeDiagnosticsSnapshot | null;
   footer?: ReactNode;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
@@ -505,11 +511,323 @@ function Overview({
   );
 }
 
+function diagnosticStateTone(state: NodeDiagnosticState): string {
+  if (state === "passed") return "good";
+  if (state === "failed") return "bad";
+  if (state === "unsupported" || state === "no_permission") return "warn";
+  return "neutral";
+}
+
+function diagnosticDuration(locale: Locale, durationMs: number): string {
+  if (durationMs < 1000) {
+    return tr(locale, "diagnostic.duration_ms_value", {
+      duration: formatInteger(locale, durationMs),
+    });
+  }
+  const seconds = Math.round((durationMs / 1000) * 10) / 10;
+  return tr(locale, "diagnostic.duration_value", {
+    duration: seconds.toFixed(Number.isInteger(seconds) ? 0 : 1),
+  });
+}
+
+const DIAGNOSTIC_LAYERS: NodeDiagnosticLayer[] = [
+  "network",
+  "dns",
+  "tun",
+  "coordinator",
+  "relay",
+  "exit",
+];
+
+function DiagnosticsPanel({
+  diagnostics,
+  locale,
+  onRequestAction,
+}: {
+  diagnostics: NodeDiagnosticsSnapshot | null;
+  locale: Locale;
+  onRequestAction(actionId: string): void;
+}) {
+  const [copyFeedback, setCopyFeedback] = useState<
+    "id" | "report" | "failed" | null
+  >(null);
+
+  async function copy(value: string, kind: "id" | "report"): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyFeedback(kind);
+    } catch {
+      setCopyFeedback("failed");
+    }
+  }
+
+  if (!diagnostics) {
+    return (
+      <section className="surface-card" data-testid="runtime-diagnostics">
+        <div className="card-heading">
+          <h3>{label(locale, "diagnostic.title")}</h3>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => onRequestAction("get_node_diagnostics")}
+          >
+            {label(locale, "diagnostic.run")}
+          </button>
+        </div>
+        <div className="empty-state">
+          <strong>{label(locale, "diagnostic.empty_title")}</strong>
+          <span>{label(locale, "diagnostic.empty_detail")}</span>
+        </div>
+      </section>
+    );
+  }
+
+  const duration = Math.max(
+    0,
+    diagnostics.completed_at_unix_ms - diagnostics.started_at_unix_ms,
+  );
+  const residue = diagnostics.residue;
+  const residueSummary =
+    residue.sessions_remaining === 0 &&
+    residue.listeners_remaining === 0 &&
+    residue.peers_remaining === 0 &&
+    residue.embedded_services_remaining === 0 &&
+    residue.residual_networks.length === 0 &&
+    residue.issues.length === 0
+      ? label(locale, "diagnostic.residue_clean")
+      : tr(locale, "diagnostic.residue_counts", {
+          sessions: String(residue.sessions_remaining),
+          listeners: String(residue.listeners_remaining),
+          peers: String(residue.peers_remaining),
+          services: String(residue.embedded_services_remaining),
+          networks: String(residue.residual_networks.length),
+        });
+
+  return (
+    <section className="surface-card" data-testid="runtime-diagnostics">
+      <div className="card-heading">
+        <h3>{label(locale, "diagnostic.title")}</h3>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => onRequestAction("get_node_diagnostics")}
+        >
+          {label(locale, "diagnostic.run")}
+        </button>
+      </div>
+
+      <dl className="detail-list diagnostic-metadata">
+        <div>
+          <dt>{label(locale, "diagnostic.id")}</dt>
+          <dd>
+            <span className="diagnostic-copy-value">
+              <code>{diagnostics.diagnostic_id}</code>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label={label(locale, "operation.copy_diagnostic_id")}
+                onClick={() => void copy(diagnostics.diagnostic_id, "id")}
+              >
+                {copyFeedback === "id" ? (
+                  <Check size={15} />
+                ) : (
+                  <Copy size={15} />
+                )}
+              </button>
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "diagnostic.started_at")}</dt>
+          <dd>{formatTimestamp(locale, diagnostics.started_at_unix_ms)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "diagnostic.completed_at")}</dt>
+          <dd>{formatTimestamp(locale, diagnostics.completed_at_unix_ms)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "diagnostic.duration")}</dt>
+          <dd>{diagnosticDuration(locale, duration)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "diagnostic.timeout")}</dt>
+          <dd>
+            {label(
+              locale,
+              diagnostics.timed_out
+                ? "diagnostic.timed_out_yes"
+                : "diagnostic.timed_out_no",
+            )}
+          </dd>
+        </div>
+      </dl>
+
+      <div className="diagnostic-checks">
+        {DIAGNOSTIC_LAYERS.map((layer) => {
+          const check = diagnostics.checks.find(
+            (candidate) => candidate.layer === layer,
+          );
+          if (!check) {
+            const stateLabel = label(locale, "diagnostic.state.not_tested");
+            return (
+              <article
+                className="diagnostic-check neutral"
+                data-diagnostic-layer={layer}
+                data-diagnostic-state="not_tested"
+                key={layer}
+              >
+                <div className="diagnostic-check-heading">
+                  <strong>{label(locale, `diagnostic.layer.${layer}`)}</strong>
+                  <span className="status-pill neutral">{stateLabel}</span>
+                </div>
+                <p>{label(locale, "diagnostic.check_missing")}</p>
+              </article>
+            );
+          }
+          const message = label(locale, check.message_key);
+          const suggestion = check.suggestion_key
+            ? label(locale, check.suggestion_key)
+            : label(locale, "diagnostic.no_suggestion");
+          return (
+            <article
+              className={`diagnostic-check ${diagnosticStateTone(check.state)}`}
+              data-diagnostic-layer={check.layer}
+              data-diagnostic-state={check.state}
+              key={layer}
+            >
+              <div className="diagnostic-check-heading">
+                <strong>{label(locale, `diagnostic.layer.${check.layer}`)}</strong>
+                <span
+                  className={`status-pill ${diagnosticStateTone(check.state)}`}
+                >
+                  {label(locale, `diagnostic.state.${check.state}`)}
+                </span>
+              </div>
+              <p>{message}</p>
+              <dl className="diagnostic-check-meta">
+                <div>
+                  <dt>{label(locale, "diagnostic.started_at")}</dt>
+                  <dd>{formatTimestamp(locale, check.started_at_unix_ms)}</dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "diagnostic.duration")}</dt>
+                  <dd>{diagnosticDuration(locale, check.duration_ms)}</dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "diagnostic.error_code")}</dt>
+                  <dd>
+                    <code>{check.error_code ?? label(locale, "common.none")}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "diagnostic.suggestion")}</dt>
+                  <dd>{suggestion}</dd>
+                </div>
+              </dl>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="diagnostic-residue">
+        <strong>{label(locale, "diagnostic.residue")}</strong>
+        <span>{residueSummary}</span>
+        {diagnostics.cleanup_candidate_networks.length > 0 ? (
+          <span>
+            {tr(locale, "diagnostic.cleanup_candidates", {
+              networks: diagnostics.cleanup_candidate_networks.join(
+                label(locale, "common.list_separator"),
+              ),
+            })}
+          </span>
+        ) : null}
+      </div>
+
+      <section className="diagnostic-recovery">
+        <div>
+          <h4>{label(locale, "diagnostic.recovery.title")}</h4>
+          <p>{label(locale, "diagnostic.recovery.disclaimer")}</p>
+        </div>
+        {diagnostics.recovery_actions.length === 0 ? (
+          <p className="empty-copy">
+            {label(locale, "diagnostic.recovery.none")}
+          </p>
+        ) : (
+          <div className="diagnostic-recovery-list">
+            {diagnostics.recovery_actions.map((action) => (
+              <article
+                className="diagnostic-recovery-action"
+                data-recovery-action-id={action.action_id}
+                key={action.action_id}
+              >
+                <div className="diagnostic-recovery-heading">
+                  <strong>{label(locale, `action.${action.action_id}`)}</strong>
+                  <code>{action.action_id}</code>
+                </div>
+                <dl className="detail-list">
+                  <div>
+                    <dt>{label(locale, "diagnostic.recovery.impact")}</dt>
+                    <dd>{label(locale, action.impact_key)}</dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.recovery.action")}</dt>
+                    <dd>
+                      {label(
+                        locale,
+                        action.confirmation_required
+                          ? "diagnostic.recovery.confirmation_required"
+                          : "diagnostic.recovery.no_confirmation",
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <details className="diagnostic-report">
+        <summary>{label(locale, "diagnostic.report")}</summary>
+        <div className="diagnostic-report-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() =>
+              void copy(diagnostics.sanitized_report, "report")
+            }
+          >
+            {copyFeedback === "report" ? (
+              <Check size={14} />
+            ) : (
+              <Copy size={14} />
+            )}
+            {label(locale, "diagnostic.copy_report")}
+          </button>
+          {copyFeedback === "report" ? (
+            <span role="status">
+              {label(locale, "diagnostic.report_copied")}
+            </span>
+          ) : null}
+        </div>
+        <pre>{diagnostics.sanitized_report}</pre>
+      </details>
+
+      {copyFeedback === "failed" ? (
+        <p className="form-error" role="alert">
+          {label(locale, "diagnostic.copy_failed")}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 function NodeRuntime({
   page,
   snapshot,
   locale,
   selectedNetwork,
+  recentDiagnostics,
   onSelectNetwork,
   onNavigate,
   onRequestAction,
@@ -628,6 +946,12 @@ function NodeRuntime({
           <strong>{snapshot.lifecycle.configured_networks}</strong>
         </div>
       </div>
+
+      <DiagnosticsPanel
+        diagnostics={recentDiagnostics}
+        locale={locale}
+        onRequestAction={onRequestAction}
+      />
 
       <section className="surface-card" data-testid="runtime-state">
         <div className="card-heading">

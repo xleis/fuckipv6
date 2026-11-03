@@ -20,6 +20,7 @@ import type {
   ConfigurationHistoryEntry,
   NodeApiCommandResponse,
   NodeCommandOutcome,
+  NodeDiagnosticsSnapshot,
   NodeOperationSnapshot,
   NodeRoutingSummarySnapshot,
   NodeSnapshot,
@@ -28,12 +29,14 @@ import type {
 import { App } from "./App";
 import {
   AuthenticationError,
+  cancelOperation,
   HttpError,
   ReauthenticationRequiredError,
   loadManifest,
   loadOperation,
   loadSnapshot,
   sendCommand,
+  waitForOperation,
 } from "./api/client";
 import {
   loadLanguagePreference,
@@ -46,10 +49,12 @@ vi.mock("./api/client", async (importOriginal) => {
   const original = await importOriginal<typeof import("./api/client")>();
   return {
     ...original,
+    cancelOperation: vi.fn(),
     loadManifest: vi.fn(),
     loadOperation: vi.fn(),
     loadSnapshot: vi.fn(),
     sendCommand: vi.fn(),
+    waitForOperation: vi.fn(),
   };
 });
 
@@ -184,6 +189,100 @@ function configurationHistory(revision: number): ConfigurationHistoryEntry {
     occurred_at: "2026-11-02T00:00:00Z",
     changed_paths: ["/networks/home/mtu"],
   };
+}
+
+function diagnosticsFixture(): NodeDiagnosticsSnapshot {
+  return {
+    diagnostic_id: "diagnostic-w7-05",
+    started_at_unix_ms: 1_700_000_000_000,
+    completed_at_unix_ms: 1_700_000_001_250,
+    timed_out: false,
+    lifecycle: snapshot.lifecycle,
+    retained_owner_networks: [],
+    cleanup_candidate_networks: ["home"],
+    residue: {
+      sessions_remaining: 1,
+      listeners_remaining: 0,
+      peers_remaining: 0,
+      embedded_services_remaining: 0,
+      configuration_retained: true,
+      residual_networks: ["home"],
+      cleanup_steps: [],
+      issues: ["cleanup_incomplete"],
+    },
+    checks: [
+      {
+        layer: "exit",
+        state: "failed",
+        started_at_unix_ms: 1_700_000_000_900,
+        duration_ms: 120,
+        error_code: "diagnostic.exit.unreachable",
+        message_key: "diagnostic.message.exit_failed",
+        suggestion_key: "diagnostic.suggestion.exit_retry",
+      },
+      {
+        layer: "network",
+        state: "passed",
+        started_at_unix_ms: 1_700_000_000_100,
+        duration_ms: 15,
+        error_code: null,
+        message_key: "diagnostic.message.network_passed",
+        suggestion_key: null,
+      },
+      {
+        layer: "coordinator",
+        state: "unsupported",
+        started_at_unix_ms: 1_700_000_000_500,
+        duration_ms: 30,
+        error_code: "diagnostic.coordinator.unsupported",
+        message_key: "diagnostic.message.coordinator_unsupported",
+        suggestion_key: "diagnostic.suggestion.self_hosted",
+      },
+      {
+        layer: "tun",
+        state: "no_permission",
+        started_at_unix_ms: 1_700_000_000_300,
+        duration_ms: 45,
+        error_code: "diagnostic.tun.permission_denied",
+        message_key: "diagnostic.message.tun_no_permission",
+        suggestion_key: "diagnostic.suggestion.tun_permission",
+      },
+      {
+        layer: "relay",
+        state: "passed",
+        started_at_unix_ms: 1_700_000_000_700,
+        duration_ms: 40,
+        error_code: null,
+        message_key: "diagnostic.message.relay_passed",
+        suggestion_key: null,
+      },
+    ],
+    recovery_actions: [
+      {
+        action_id: "cleanup_residuals",
+        impact_key: "diagnostic.recovery.impact.cleanup_residuals",
+        confirmation_required: true,
+      },
+    ],
+    sanitized_report:
+      "diagnostic_id=diagnostic-w7-05\nnetwork=passed\ndns=not_tested\nexit=failed",
+  };
+}
+
+function operationFixture(
+  overrides: Partial<NodeOperationSnapshot> = {},
+): NodeOperationSnapshot {
+  return {
+    operation_id: "op-w7-05-diagnostics",
+    kind: "diagnostics",
+    state: "succeeded",
+    stage: "complete",
+    attempt: 1,
+    max_attempts: 1,
+    cancellable: false,
+    cancel_blocked_reason: "operation.cancel.not_supported",
+    ...overrides,
+  } as NodeOperationSnapshot;
 }
 
 function mockConfigurationCommands(): void {
@@ -510,6 +609,199 @@ describe("React WebUI shell", () => {
     expect(tun).toHaveTextContent(
       "translated:runtime.value.tun_reason.device_unavailable",
     );
+  });
+
+  it("renders a fixed, sanitized diagnostic report with explicit recovery impact", async () => {
+    const writeText = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockResolvedValue(undefined);
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+    });
+    const diagnostics = diagnosticsFixture();
+    vi.mocked(sendCommand).mockImplementation(
+      async (request): Promise<NodeApiCommandResponse> => {
+        const outcome: NodeCommandOutcome = {
+          status: "diagnostics",
+          data: diagnostics,
+        };
+        const operation = operationFixture({
+          result: {
+            request_id: request.request.request_id,
+            outcome,
+          },
+        });
+        return {
+          schema_version: 1,
+          request_id: request.request.request_id,
+          server_time: "2026-11-03T00:00:00Z",
+          result: { request_id: request.request.request_id, outcome },
+          operation,
+        };
+      },
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
+    );
+    const panel = await screen.findByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    await user.click(
+      within(panel).getByRole("button", {
+        name: "translated:action.get_node_diagnostics",
+      }),
+    );
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    const diagnosticsPanel = await screen.findByTestId("runtime-diagnostics");
+    await waitFor(() =>
+      expect(diagnosticsPanel).toHaveTextContent("diagnostic-w7-05"),
+    );
+    expect(
+      Array.from(
+        diagnosticsPanel.querySelectorAll("[data-diagnostic-layer]"),
+      ).map((row) => [
+        row.getAttribute("data-diagnostic-layer"),
+        row.getAttribute("data-diagnostic-state"),
+      ]),
+    ).toEqual([
+      ["network", "passed"],
+      ["dns", "not_tested"],
+      ["tun", "no_permission"],
+      ["coordinator", "unsupported"],
+      ["relay", "passed"],
+      ["exit", "failed"],
+    ]);
+    expect(diagnosticsPanel).toHaveTextContent(
+      "translated:diagnostic.message.tun_no_permission",
+    );
+    expect(diagnosticsPanel).toHaveTextContent(
+      "translated:diagnostic.suggestion.exit_retry",
+    );
+
+    const recovery = diagnosticsPanel.querySelector(
+      '[data-recovery-action-id="cleanup_residuals"]',
+    );
+    expect(recovery).toHaveTextContent(
+      "translated:diagnostic.recovery.impact.cleanup_residuals",
+    );
+    expect(recovery).toHaveTextContent(
+      "translated:diagnostic.recovery.confirmation_required",
+    );
+    expect(diagnosticsPanel).not.toHaveTextContent(
+      /Bearer|secret|password|token|raw stderr|\/home\//i,
+    );
+
+    await user.click(
+      within(diagnosticsPanel).getByText("translated:diagnostic.report"),
+    );
+    await user.click(
+      within(diagnosticsPanel).getByRole("button", {
+        name: "translated:diagnostic.copy_report",
+      }),
+    );
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(diagnostics.sanitized_report),
+    );
+    expect(
+      within(diagnosticsPanel).getByRole("status"),
+    ).toHaveTextContent("translated:diagnostic.report_copied");
+    expect(sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps cancellation non-terminal until the authoritative operation lookup finishes", async () => {
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+    });
+    const running = operationFixture({
+      operation_id: "op-cancel-diagnostics",
+      state: "running",
+      cancellable: true,
+      cancel_blocked_reason: null,
+    });
+    let resolveLookup!: (operation: NodeOperationSnapshot) => void;
+    const lookup = new Promise<NodeOperationSnapshot>((resolve) => {
+      resolveLookup = resolve;
+    });
+    vi.mocked(sendCommand).mockImplementation(
+      async (request): Promise<NodeApiCommandResponse> => ({
+        schema_version: 1,
+        request_id: request.request.request_id,
+        server_time: "2026-11-03T00:00:00Z",
+        operation: running,
+      }),
+    );
+    vi.mocked(waitForOperation).mockReturnValue(lookup);
+    vi.mocked(cancelOperation).mockResolvedValue(running);
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
+    );
+    const panel = await screen.findByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    await user.click(
+      within(panel).getByRole("button", {
+        name: "translated:action.get_node_diagnostics",
+      }),
+    );
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    await waitFor(() =>
+      expect(waitForOperation).toHaveBeenCalledWith(
+        "op-cancel-diagnostics",
+        expect.objectContaining({ intervalMs: 1000 }),
+      ),
+    );
+    const status = await screen.findByTestId("operation-status");
+    expect(status).toHaveTextContent("translated:operation.state.running");
+    await user.click(
+      within(status).getByRole("button", {
+        name: "translated:operation.cancel",
+      }),
+    );
+    await waitFor(() =>
+      expect(cancelOperation).toHaveBeenCalledWith("op-cancel-diagnostics"),
+    );
+    expect(status).toHaveTextContent("translated:operation.state.running");
+
+    await act(async () => {
+      resolveLookup({
+        ...running,
+        state: "cancelled",
+        stage: "cancelled",
+      });
+      await lookup;
+    });
+
+    await waitFor(() =>
+      expect(status).toHaveTextContent("translated:operation.state.cancelled"),
+    );
+    expect(
+      within(status).queryByRole("button", {
+        name: "translated:operation.cancel",
+      }),
+    ).not.toBeInTheDocument();
+    expect(sendCommand).toHaveBeenCalledTimes(1);
   });
 
   it("renders authoritative routing summaries and navigates with the route identity", async () => {

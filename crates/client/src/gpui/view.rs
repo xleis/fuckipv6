@@ -5,7 +5,8 @@ use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{IdempotencyKey, OperationError, OperationState};
 use fuckipv6_common::i18n::{
-    detect_system_locale, resolve_language, t, tr, LanguagePreference, Locale,
+    detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
+    tr, LanguagePreference, Locale,
 };
 use fuckipv6_common::ui_components::SemanticState;
 use fuckipv6_common::ui_layout::{
@@ -41,6 +42,7 @@ use crate::config_transaction::{
 use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
+    NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
     NodeNetworkStatus, NodeOperationSnapshot, NodePreviewConfigurationCommand, NodePrimaryStatus,
     NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
     NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
@@ -217,6 +219,10 @@ struct GpuiShell {
     operation: Option<NodeOperationSnapshot>,
     operation_fingerprint: Option<String>,
     operation_idempotency_key: Option<IdempotencyKey>,
+    operation_cancel_pending: bool,
+    operation_cancel_error: Option<String>,
+    recent_diagnostics: Option<NodeDiagnosticsSnapshot>,
+    diagnostic_copy_notice: Option<String>,
     error: Option<String>,
     notice: Option<String>,
     pending_notice_after_snapshot: Option<String>,
@@ -267,6 +273,10 @@ impl GpuiShell {
             operation: None,
             operation_fingerprint: None,
             operation_idempotency_key: None,
+            operation_cancel_pending: false,
+            operation_cancel_error: None,
+            recent_diagnostics: None,
+            diagnostic_copy_notice: None,
             error: None,
             notice: None,
             pending_notice_after_snapshot: None,
@@ -368,7 +378,7 @@ impl GpuiShell {
     }
 
     fn submit_raw(&mut self, command: NodeCommand, cx: &mut Context<Self>) {
-        if command.kind().is_write() {
+        if command.kind().is_operation() {
             self.submit_operation(command, cx);
             return;
         }
@@ -407,6 +417,8 @@ impl GpuiShell {
             self.operation_idempotency_key = None;
             self.operation_fingerprint = Some(fingerprint);
         }
+        self.operation_cancel_pending = false;
+        self.operation_cancel_error = None;
         let idempotency_key = self
             .operation_idempotency_key
             .clone()
@@ -528,6 +540,50 @@ impl GpuiShell {
             "gpui.operation_failed",
             &[("error", &message)],
         ));
+    }
+
+    fn cancel_operation(&mut self, cx: &mut Context<Self>) {
+        let Some(operation) = self.operation.as_ref() else {
+            return;
+        };
+        if self.operation_cancel_pending
+            || !operation.operation.cancellable
+            || operation_state_is_terminal(operation.operation.state)
+        {
+            return;
+        }
+        let Some(operations) = self.operations.clone() else {
+            self.operation_cancel_error =
+                Some(t(self.locale, "gpui.operations_unavailable").to_string());
+            cx.notify();
+            return;
+        };
+        let operation_id = operation.operation.operation_id.as_str().to_owned();
+        let context = NodeCommandContext::local_owner_for_snapshot(&self.snapshot, "gpui");
+        self.operation_cancel_pending = true;
+        self.operation_cancel_error = None;
+        cx.notify();
+
+        cx.spawn(async move |weak, cx| {
+            let result = operations.cancel(context, &operation_id).await;
+            let _ = weak.update(cx, |shell, cx| {
+                shell.operation_cancel_pending = false;
+                match result {
+                    Ok(operation) => shell.operation = Some(operation),
+                    Err(OperationClientError::Invalid(problem)) => {
+                        shell.operation_cancel_error =
+                            Some(format_operation_problem(shell.locale, &problem));
+                    }
+                    Err(OperationClientError::CancelRejected(problem)) => {
+                        shell.operation_cancel_error =
+                            Some(format_operation_problem(shell.locale, &problem));
+                    }
+                    Err(error) => shell.operation_cancel_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn finish_operation(&mut self, operation: NodeOperationSnapshot, cx: &mut Context<Self>) {
@@ -1073,6 +1129,7 @@ impl GpuiShell {
                         ("summary", &summary),
                     ],
                 ));
+                self.recent_diagnostics = Some(diagnostics);
             }
             NodeCommandOutcome::Cleanup(cleanup) => {
                 let summary = if cleanup.residue.issues.is_empty() {
@@ -3792,21 +3849,562 @@ impl GpuiShell {
         workspace.into_any_element()
     }
 
-    fn operation_status_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn diagnostics_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let busy = self.pending_commands > 0;
+        let copy_notice = self.diagnostic_copy_notice.clone();
+        let run_button = |busy| {
+            button(
+                SharedString::from("run-node-diagnostics"),
+                t(self.locale, "diagnostic.run"),
+                ButtonVariant::Secondary,
+                busy,
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.diagnostic_copy_notice = None;
+                shell.submit_raw(NodeCommand::GetDiagnostics, cx);
+            }))
+        };
+
+        let Some(diagnostics) = self.recent_diagnostics.clone() else {
+            return div()
+                .id("runtime-diagnostics")
+                .debug_selector(|| "visual-runtime-diagnostics".into())
+                .role(Role::Article)
+                .aria_label(t(self.locale, "diagnostic.title").to_string())
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_4()
+                .rounded_lg()
+                .bg(rgba(COLOR_PANEL))
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(t(self.locale, "diagnostic.title").to_string()),
+                        )
+                        .child(run_button(busy)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_4()
+                        .rounded_md()
+                        .border_1()
+                        .border_dashed()
+                        .border_color(rgba(COLOR_BORDER))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                .child(t(self.locale, "diagnostic.empty_title").to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(t(self.locale, "diagnostic.empty_detail").to_string()),
+                        ),
+                )
+                .into_any_element();
+        };
+
+        let copy_id_button = button(
+            SharedString::from("copy-node-diagnostic-id"),
+            t(self.locale, "operation.copy_diagnostic_id"),
+            ButtonVariant::Secondary,
+            false,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if let Some(diagnostics) = &shell.recent_diagnostics {
+                cx.write_to_clipboard(ClipboardItem::new_string(diagnostics.diagnostic_id.clone()));
+                shell.diagnostic_copy_notice =
+                    Some(t(shell.locale, "operation.diagnostic_copied").to_string());
+                cx.notify();
+            }
+        }));
+        let copy_report_button = button(
+            SharedString::from("copy-node-diagnostic-report"),
+            t(self.locale, "diagnostic.copy_report"),
+            ButtonVariant::Secondary,
+            false,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if let Some(diagnostics) = &shell.recent_diagnostics {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    diagnostics.sanitized_report.clone(),
+                ));
+                shell.diagnostic_copy_notice =
+                    Some(t(shell.locale, "diagnostic.report_copied").to_string());
+                cx.notify();
+            }
+        }));
+
+        let duration = diagnostics
+            .completed_at_unix_ms
+            .saturating_sub(diagnostics.started_at_unix_ms);
+        let timeout = t(
+            self.locale,
+            if diagnostics.timed_out {
+                "diagnostic.timed_out_yes"
+            } else {
+                "diagnostic.timed_out_no"
+            },
+        )
+        .to_string();
+        let metadata = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.id"),
+                diagnostics.diagnostic_id.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.started_at"),
+                format_diagnostic_timestamp(self.locale, diagnostics.started_at_unix_ms),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.completed_at"),
+                format_diagnostic_timestamp(self.locale, diagnostics.completed_at_unix_ms),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.duration"),
+                format_diagnostic_duration(self.locale, duration),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.timeout"),
+                timeout,
+            ));
+
+        let checks = diagnostic_checks_in_fixed_order(&diagnostics)
+            .into_iter()
+            .map(|(layer, check)| {
+                let layer_label = t(self.locale, diagnostic_layer_label_key(layer)).to_string();
+                if let Some(check) = check {
+                    let palette = semantic_palette(diagnostic_state_semantic(check.state));
+                    let state_label =
+                        t(self.locale, diagnostic_state_label_key(check.state)).to_string();
+                    let message = t(self.locale, &check.message_key).to_string();
+                    let suggestion = check
+                        .suggestion_key
+                        .as_deref()
+                        .map(|key| t(self.locale, key).to_string())
+                        .unwrap_or_else(|| t(self.locale, "diagnostic.no_suggestion").to_string());
+                    let error_code = check
+                        .error_code
+                        .clone()
+                        .unwrap_or_else(|| t(self.locale, "common.none").to_string());
+                    return div()
+                        .id(SharedString::from(format!(
+                            "diagnostic-layer-{}",
+                            layer.key()
+                        )))
+                        .debug_selector(move || diagnostic_layer_selector(layer).into())
+                        .role(if matches!(check.state, NodeDiagnosticState::Failed) {
+                            Role::Alert
+                        } else {
+                            Role::Status
+                        })
+                        .aria_label(format!("{layer_label}: {state_label}"))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgba(palette.background.rgba_hex()))
+                        .border_1()
+                        .border_color(rgba(palette.border.rgba_hex()))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_TEXT))
+                                        .child(layer_label),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_full()
+                                        .bg(rgba(COLOR_PANEL_RAISED))
+                                        .text_color(rgba(palette.foreground.rgba_hex()))
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .child(state_label),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                .child(message),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(diagnostic_metadata_row(
+                                    t(self.locale, "diagnostic.started_at"),
+                                    format_diagnostic_timestamp(
+                                        self.locale,
+                                        check.started_at_unix_ms,
+                                    ),
+                                ))
+                                .child(diagnostic_metadata_row(
+                                    t(self.locale, "diagnostic.duration"),
+                                    format_diagnostic_duration(self.locale, check.duration_ms),
+                                ))
+                                .child(diagnostic_metadata_row(
+                                    t(self.locale, "diagnostic.error_code"),
+                                    error_code,
+                                ))
+                                .child(diagnostic_metadata_row(
+                                    t(self.locale, "diagnostic.suggestion"),
+                                    suggestion,
+                                )),
+                        )
+                        .into_any_element();
+                }
+
+                let state_label = t(self.locale, "diagnostic.state.not_tested").to_string();
+                div()
+                    .id(SharedString::from(format!(
+                        "diagnostic-layer-{}",
+                        layer.key()
+                    )))
+                    .debug_selector(move || diagnostic_layer_selector(layer).into())
+                    .role(Role::Status)
+                    .aria_label(format!("{layer_label}: {state_label}"))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(layer_label),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(state_label),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "diagnostic.check_missing").to_string()),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        let residue_summary = if diagnostics.residue.is_clean() {
+            t(self.locale, "diagnostic.residue_clean").to_string()
+        } else {
+            let residue = &diagnostics.residue;
+            tr(
+                self.locale,
+                "diagnostic.residue_counts",
+                &[
+                    (
+                        "sessions",
+                        &format_integer(self.locale, residue.sessions_remaining as i64),
+                    ),
+                    (
+                        "listeners",
+                        &format_integer(self.locale, residue.listeners_remaining as i64),
+                    ),
+                    (
+                        "peers",
+                        &format_integer(self.locale, residue.peers_remaining as i64),
+                    ),
+                    (
+                        "services",
+                        &format_integer(self.locale, residue.embedded_services_remaining as i64),
+                    ),
+                    (
+                        "networks",
+                        &format_integer(self.locale, residue.residual_networks.len() as i64),
+                    ),
+                ],
+            )
+        };
+        let separator = t(self.locale, "common.list_separator");
+        let residue = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(t(self.locale, "diagnostic.residue").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(residue_summary),
+            )
+            .when(
+                !diagnostics.cleanup_candidate_networks.is_empty(),
+                |residue| {
+                    residue.child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                        self.locale,
+                        "diagnostic.cleanup_candidates",
+                        &[(
+                            "networks",
+                            &diagnostics.cleanup_candidate_networks.join(separator),
+                        )],
+                    )))
+                },
+            );
+
+        let recovery_actions = diagnostics
+            .recovery_actions
+            .iter()
+            .map(|action| {
+                let action_name = action_label(self.locale, &action.action_id);
+                let confirmation = t(
+                    self.locale,
+                    if action.confirmation_required {
+                        "diagnostic.recovery.confirmation_required"
+                    } else {
+                        "diagnostic.recovery.no_confirmation"
+                    },
+                )
+                .to_string();
+                div()
+                    .id(SharedString::from(format!(
+                        "diagnostic-recovery-{}",
+                        action.action_id
+                    )))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(action_name),
+                            )
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(action.action_id.clone()),
+                            ),
+                    )
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.recovery.impact"),
+                        t(self.locale, &action.impact_key).to_string(),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.recovery.action"),
+                        confirmation,
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let recovery = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(t(self.locale, "diagnostic.recovery.title").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "diagnostic.recovery.disclaimer").to_string()),
+            )
+            .when(recovery_actions.is_empty(), |recovery| {
+                recovery.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "diagnostic.recovery.none").to_string()),
+                )
+            })
+            .children(recovery_actions);
+
+        div()
+            .id("runtime-diagnostics")
+            .debug_selector(|| "visual-runtime-diagnostics".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "diagnostic.title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "diagnostic.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(run_button(busy))
+                            .child(copy_id_button)
+                            .child(copy_report_button),
+                    ),
+            )
+            .when_some(copy_notice, |card, notice| {
+                card.child(
+                    div()
+                        .id("diagnostic-copy-notice")
+                        .role(Role::Status)
+                        .text_xs()
+                        .text_color(rgba(DARK_THEME.colors.success.rgba_hex()))
+                        .child(notice),
+                )
+            })
+            .child(metadata)
+            .child(div().flex().flex_col().gap_2().children(checks))
+            .child(residue)
+            .child(recovery)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "diagnostic.report").to_string()),
+                    )
+                    .child(
+                        div()
+                            .id("diagnostic-sanitized-report")
+                            .max_h(px(180.0))
+                            .overflow_y_scroll()
+                            .rounded_md()
+                            .bg(rgba(COLOR_BG))
+                            .p_2()
+                            .font_family("monospace")
+                            .text_xs()
+                            .line_height(px(18.0))
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(diagnostics.sanitized_report.clone()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn operation_status_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(operation) = self.operation.as_ref() else {
             return div().into_any_element();
         };
         let state = t(self.locale, operation_state_key(operation.operation.state)).to_string();
         let diagnostic_id = operation.diagnostic_id().to_owned();
-        let cancellability = if operation.operation.cancellable {
+        let terminal = operation_state_is_terminal(operation.operation.state);
+        let can_cancel = operation.operation.cancellable && !terminal;
+        let cancellability = if operation.operation.cancellable && !terminal {
             t(self.locale, "operation.cancellable_yes").to_string()
         } else {
-            let reason = operation
-                .operation
-                .cancel_blocked_reason
-                .as_deref()
-                .map(|key| t(self.locale, key))
-                .unwrap_or_else(|| t(self.locale, "operation.cancellable_unknown"));
+            let reason = if terminal {
+                t(self.locale, "operation.cancel.already_terminal")
+            } else {
+                operation
+                    .operation
+                    .cancel_blocked_reason
+                    .as_deref()
+                    .map(|key| t(self.locale, key))
+                    .unwrap_or_else(|| t(self.locale, "operation.cancellable_unknown"))
+            };
             tr(
                 self.locale,
                 "operation.cancellable_no",
@@ -3835,6 +4433,45 @@ impl GpuiShell {
                 ("max", &operation.operation.max_attempts.to_string()),
             ],
         );
+        let cancel_pending = self.operation_cancel_pending;
+        let cancel_error = self.operation_cancel_error.clone();
+
+        let mut actions = div().flex().flex_wrap().items_center().gap_2();
+        if can_cancel {
+            actions = actions.child(
+                button(
+                    SharedString::from("cancel-operation"),
+                    t(
+                        self.locale,
+                        if cancel_pending {
+                            "operation.cancelling"
+                        } else {
+                            "operation.cancel"
+                        },
+                    ),
+                    ButtonVariant::Secondary,
+                    cancel_pending,
+                )
+                .on_click(cx.listener(|shell, _, _, cx| shell.cancel_operation(cx)))
+                .debug_selector(|| "visual-operation-cancel".into()),
+            );
+        }
+        actions = actions.child(
+            button(
+                SharedString::from("copy-operation-diagnostic-id"),
+                t(self.locale, "operation.copy_diagnostic_id"),
+                ButtonVariant::Secondary,
+                false,
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                if let Some(operation) = &shell.operation {
+                    let diagnostic_id = operation.diagnostic_id().to_owned();
+                    cx.write_to_clipboard(ClipboardItem::new_string(diagnostic_id));
+                    shell.notice = Some(t(shell.locale, "operation.diagnostic_copied").to_string());
+                    cx.notify();
+                }
+            })),
+        );
 
         div()
             .id("node-operation-status")
@@ -3854,6 +4491,7 @@ impl GpuiShell {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap_3()
@@ -3864,24 +4502,7 @@ impl GpuiShell {
                             .text_color(rgba(COLOR_TEXT))
                             .child(t(self.locale, "operation.title").to_string()),
                     )
-                    .child(
-                        button(
-                            SharedString::from("copy-operation-diagnostic-id"),
-                            t(self.locale, "operation.copy_diagnostic_id"),
-                            ButtonVariant::Secondary,
-                            false,
-                        )
-                        .on_click(cx.listener(|shell, _, _, cx| {
-                            if let Some(operation) = &shell.operation {
-                                let diagnostic_id = operation.diagnostic_id().to_owned();
-                                cx.write_to_clipboard(ClipboardItem::new_string(diagnostic_id));
-                                shell.notice = Some(
-                                    t(shell.locale, "operation.diagnostic_copied").to_string(),
-                                );
-                                cx.notify();
-                            }
-                        })),
-                    ),
+                    .child(actions),
             )
             .child(
                 div()
@@ -3906,6 +4527,19 @@ impl GpuiShell {
                         .line_height(px(18.0))
                         .text_color(rgba(COLOR_WARNING))
                         .child(error),
+                )
+            })
+            .when_some(cancel_error, |card, error| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(rgba(COLOR_WARNING))
+                        .child(tr(
+                            self.locale,
+                            "operation.cancel_failed",
+                            &[("error", &error)],
+                        )),
                 )
             })
             .child(
@@ -3960,6 +4594,11 @@ impl GpuiShell {
         let page_title = selected_page
             .map(|page| t(self.locale, &page.title_key).to_string())
             .unwrap_or_else(|| t(self.locale, "common.unknown_page").to_string());
+        let has_configuration_actions = selected_page.is_some_and(|page| {
+            page.actions
+                .iter()
+                .any(|action| is_configuration_action(&action.id))
+        });
         let page_icon = lucide_icon(page_icon_data(&self.selected_page), 20.0, COLOR_ACCENT);
 
         let mut content = div()
@@ -4035,6 +4674,7 @@ impl GpuiShell {
 
         if self.selected_page == "node_runtime" {
             content = content.child(self.operation_status_card(cx));
+            content = content.child(self.diagnostics_card(cx));
         }
 
         if !model.metrics.is_empty() {
@@ -4053,11 +4693,6 @@ impl GpuiShell {
             .map(|section| self.section_card(section, cx))
             .collect::<Vec<_>>();
         content = content.child(div().flex().flex_col().gap_4().children(section_cards));
-        let has_configuration_actions = selected_page.is_some_and(|page| {
-            page.actions
-                .iter()
-                .any(|action| is_configuration_action(&action.id))
-        });
         if has_configuration_actions {
             content = content.child(self.configuration_workspace(cx));
         }
@@ -4727,6 +5362,116 @@ fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
         )
 }
 
+fn diagnostic_state_semantic(state: NodeDiagnosticState) -> SemanticState {
+    match state {
+        NodeDiagnosticState::Passed => SemanticState::Success,
+        NodeDiagnosticState::Failed => SemanticState::Danger,
+        NodeDiagnosticState::Unsupported => SemanticState::Unsupported,
+        NodeDiagnosticState::NoPermission => SemanticState::PermissionDenied,
+        NodeDiagnosticState::NotTested => SemanticState::Neutral,
+    }
+}
+
+fn diagnostic_state_label_key(state: NodeDiagnosticState) -> &'static str {
+    match state {
+        NodeDiagnosticState::NotTested => "diagnostic.state.not_tested",
+        NodeDiagnosticState::Passed => "diagnostic.state.passed",
+        NodeDiagnosticState::Failed => "diagnostic.state.failed",
+        NodeDiagnosticState::Unsupported => "diagnostic.state.unsupported",
+        NodeDiagnosticState::NoPermission => "diagnostic.state.no_permission",
+    }
+}
+
+fn diagnostic_layer_label_key(layer: NodeDiagnosticLayer) -> &'static str {
+    match layer {
+        NodeDiagnosticLayer::Network => "diagnostic.layer.network",
+        NodeDiagnosticLayer::Dns => "diagnostic.layer.dns",
+        NodeDiagnosticLayer::Tun => "diagnostic.layer.tun",
+        NodeDiagnosticLayer::Coordinator => "diagnostic.layer.coordinator",
+        NodeDiagnosticLayer::Relay => "diagnostic.layer.relay",
+        NodeDiagnosticLayer::Exit => "diagnostic.layer.exit",
+    }
+}
+
+fn diagnostic_layer_selector(layer: NodeDiagnosticLayer) -> &'static str {
+    match layer {
+        NodeDiagnosticLayer::Network => "visual-diagnostic-layer-network",
+        NodeDiagnosticLayer::Dns => "visual-diagnostic-layer-dns",
+        NodeDiagnosticLayer::Tun => "visual-diagnostic-layer-tun",
+        NodeDiagnosticLayer::Coordinator => "visual-diagnostic-layer-coordinator",
+        NodeDiagnosticLayer::Relay => "visual-diagnostic-layer-relay",
+        NodeDiagnosticLayer::Exit => "visual-diagnostic-layer-exit",
+    }
+}
+
+fn diagnostic_checks_in_fixed_order(
+    diagnostics: &NodeDiagnosticsSnapshot,
+) -> Vec<(NodeDiagnosticLayer, Option<&NodeDiagnosticCheck>)> {
+    NodeDiagnosticLayer::ALL
+        .into_iter()
+        .map(|layer| {
+            (
+                layer,
+                diagnostics.checks.iter().find(|check| check.layer == layer),
+            )
+        })
+        .collect()
+}
+
+fn format_diagnostic_duration(locale: Locale, duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return tr(
+            locale,
+            "diagnostic.duration_ms_value",
+            &[("duration", &format_integer(locale, duration_ms as i64))],
+        );
+    }
+    let precision = if duration_ms.is_multiple_of(1_000) {
+        0
+    } else {
+        1
+    };
+    let duration = format_decimal(locale, duration_ms as f64 / 1_000.0, precision);
+    tr(
+        locale,
+        "diagnostic.duration_value",
+        &[("duration", &duration)],
+    )
+}
+
+fn format_diagnostic_timestamp(locale: Locale, unix_ms: u64) -> String {
+    i64::try_from(unix_ms)
+        .ok()
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Local).fixed_offset())
+        .map(|timestamp| format_timestamp(locale, &timestamp))
+        .unwrap_or_else(|| t(locale, "common.not_available").to_string())
+}
+
+fn diagnostic_metadata_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_start()
+        .gap_2()
+        .text_xs()
+        .line_height(px(18.0))
+        .child(
+            div()
+                .w(px(84.0))
+                .flex_shrink_0()
+                .text_color(rgba(COLOR_MUTED))
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                .child(value.into()),
+        )
+}
+
 fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
     match status {
         NodePrimaryStatus::Running => SemanticState::Success,
@@ -4827,6 +5572,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "stop_networks" => "action.stop_networks",
         "restart_networks" => "action.restart_networks",
         "rebuild_tun" => "action.rebuild_tun",
+        "cleanup_residuals" => "action.cleanup_residuals",
         "probe_peer" => "action.probe_peer",
         "get_blacklist" => "action.get_blacklist",
         "ban_client" => "action.ban_client",
@@ -5111,6 +5857,223 @@ mod tests {
     #[derive(serde::Deserialize)]
     struct ProductVisualFixture {
         snapshot: NodeSnapshot,
+    }
+
+    fn diagnostics_fixture(snapshot: &NodeSnapshot) -> NodeDiagnosticsSnapshot {
+        NodeDiagnosticsSnapshot {
+            diagnostic_id: "diagnostic-gpui-fixed-layers".into(),
+            started_at_unix_ms: 1_700_000_000_000,
+            completed_at_unix_ms: 1_700_000_001_250,
+            timed_out: false,
+            lifecycle: snapshot.lifecycle.clone(),
+            retained_owner_networks: Vec::new(),
+            cleanup_candidate_networks: Vec::new(),
+            residue: crate::node::NodeRuntimeResidueSnapshot::default(),
+            checks: vec![
+                NodeDiagnosticCheck {
+                    layer: NodeDiagnosticLayer::Exit,
+                    state: NodeDiagnosticState::Failed,
+                    started_at_unix_ms: 1_700_000_000_900,
+                    duration_ms: 120,
+                    error_code: Some("diagnostic.exit.unreachable".into()),
+                    message_key: "diagnostic.message.exit_failed".into(),
+                    suggestion_key: Some("diagnostic.suggestion.exit_retry".into()),
+                },
+                NodeDiagnosticCheck {
+                    layer: NodeDiagnosticLayer::Network,
+                    state: NodeDiagnosticState::Passed,
+                    started_at_unix_ms: 1_700_000_000_100,
+                    duration_ms: 15,
+                    error_code: None,
+                    message_key: "diagnostic.message.network_passed".into(),
+                    suggestion_key: None,
+                },
+                NodeDiagnosticCheck {
+                    layer: NodeDiagnosticLayer::Coordinator,
+                    state: NodeDiagnosticState::Unsupported,
+                    started_at_unix_ms: 1_700_000_000_500,
+                    duration_ms: 30,
+                    error_code: Some("diagnostic.coordinator.unsupported".into()),
+                    message_key: "diagnostic.message.coordinator_unsupported".into(),
+                    suggestion_key: Some("diagnostic.suggestion.self_hosted".into()),
+                },
+                NodeDiagnosticCheck {
+                    layer: NodeDiagnosticLayer::Tun,
+                    state: NodeDiagnosticState::NoPermission,
+                    started_at_unix_ms: 1_700_000_000_300,
+                    duration_ms: 45,
+                    error_code: Some("diagnostic.tun.permission_denied".into()),
+                    message_key: "diagnostic.message.tun_no_permission".into(),
+                    suggestion_key: Some("diagnostic.suggestion.tun_permission".into()),
+                },
+                NodeDiagnosticCheck {
+                    layer: NodeDiagnosticLayer::Relay,
+                    state: NodeDiagnosticState::Passed,
+                    started_at_unix_ms: 1_700_000_000_700,
+                    duration_ms: 40,
+                    error_code: None,
+                    message_key: "diagnostic.message.relay_passed".into(),
+                    suggestion_key: None,
+                },
+            ],
+            recovery_actions: vec![crate::node::NodeDiagnosticRecoveryAction {
+                action_id: "cleanup_residuals".into(),
+                impact_key: "diagnostic.recovery.impact.cleanup_residuals".into(),
+                confirmation_required: true,
+            }],
+            sanitized_report: "diagnostic-gpui-fixed-layers\nnetwork=passed\ndns=not_tested".into(),
+        }
+    }
+
+    fn operation_fixture(state: OperationState, cancellable: bool) -> NodeOperationSnapshot {
+        use fuckipv6_common::domain::{
+            DomainActorRef, DomainObjectRef, IdempotencyKey as DomainIdempotencyKey, NodeId,
+            ObjectKind, Operation, OperationId, OperationKind,
+        };
+
+        let node_id = NodeId::from_public_key(b"gpui-operation-owner");
+        NodeOperationSnapshot {
+            operation: Operation {
+                operation_id: OperationId::from_public_key(b"gpui-diagnostics-operation"),
+                kind: OperationKind::Diagnostics,
+                actor: DomainActorRef {
+                    node_id: node_id.clone(),
+                    display: "gpui-test".into(),
+                },
+                target: DomainObjectRef {
+                    kind: ObjectKind::Node,
+                    id: node_id.as_str().to_owned(),
+                },
+                idempotency_key: DomainIdempotencyKey::from_public_key(
+                    b"gpui-diagnostics-idempotency",
+                ),
+                state,
+                stage: "probing".into(),
+                created_at_unix_ms: 1_700_000_000_000,
+                updated_at_unix_ms: 1_700_000_000_100,
+                attempt: 1,
+                max_attempts: 1,
+                error: None,
+                cancellable,
+                cancel_blocked_reason: (!cancellable)
+                    .then(|| "operation.cancel.not_supported".into()),
+            },
+            result: None,
+        }
+    }
+
+    #[test]
+    fn diagnostics_keep_all_five_user_visible_states() {
+        use NodeDiagnosticState::{Failed, NoPermission, NotTested, Passed, Unsupported};
+
+        assert_eq!(diagnostic_state_semantic(NotTested), SemanticState::Neutral);
+        assert_eq!(diagnostic_state_semantic(Passed), SemanticState::Success);
+        assert_eq!(diagnostic_state_semantic(Failed), SemanticState::Danger);
+        assert_eq!(
+            diagnostic_state_semantic(Unsupported),
+            SemanticState::Unsupported
+        );
+        assert_eq!(
+            diagnostic_state_semantic(NoPermission),
+            SemanticState::PermissionDenied
+        );
+        assert_eq!(
+            diagnostic_state_label_key(NotTested),
+            "diagnostic.state.not_tested"
+        );
+        assert_eq!(
+            diagnostic_state_label_key(Passed),
+            "diagnostic.state.passed"
+        );
+        assert_eq!(
+            diagnostic_state_label_key(Failed),
+            "diagnostic.state.failed"
+        );
+        assert_eq!(
+            diagnostic_state_label_key(Unsupported),
+            "diagnostic.state.unsupported"
+        );
+        assert_eq!(
+            diagnostic_state_label_key(NoPermission),
+            "diagnostic.state.no_permission"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_operations_but_snapshot_reads_are_not() {
+        assert!(NodeCommand::GetDiagnostics.kind().is_operation());
+        assert!(!NodeCommand::GetSnapshot.kind().is_operation());
+    }
+
+    #[gpui::test]
+    fn diagnostics_card_projects_six_layers_in_fixed_order(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let diagnostics = diagnostics_fixture(&fixture.snapshot);
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "node_runtime".into();
+                shell.recent_diagnostics = Some(diagnostics);
+                cx.notify();
+            })
+            .expect("install diagnostics fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-runtime-diagnostics").is_some());
+        for selector in [
+            "visual-diagnostic-layer-network",
+            "visual-diagnostic-layer-dns",
+            "visual-diagnostic-layer-tun",
+            "visual-diagnostic-layer-coordinator",
+            "visual-diagnostic-layer-relay",
+            "visual-diagnostic-layer-exit",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing fixed diagnostic layer {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn operation_card_offers_cancel_only_for_an_active_cancellable_operation(
+        cx: &mut TestAppContext,
+    ) {
+        for (state, cancellable, expected) in [
+            (OperationState::Running, true, true),
+            (OperationState::Running, false, false),
+            (OperationState::Cancelled, true, false),
+        ] {
+            let fixture: ProductVisualFixture =
+                serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+                    .expect("parse shared product visual fixture");
+            let operation = operation_fixture(state, cancellable);
+            let window = open_shell_window(cx, 1200.0, 900.0);
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.manifest = Some(crate::node::node_ui_manifest());
+                    shell.snapshot = fixture.snapshot;
+                    shell.locale = Locale::En;
+                    shell.selected_page = "node_runtime".into();
+                    shell.operation = Some(operation);
+                    cx.notify();
+                })
+                .expect("install operation fixture");
+
+            let mut visible = VisualTestContext::from_window(window.into(), cx);
+            visible.run_until_parked();
+            assert!(visible.debug_bounds("visual-node-operation").is_some());
+            assert_eq!(
+                visible.debug_bounds("visual-operation-cancel").is_some(),
+                expected,
+                "unexpected cancel visibility for state={state:?} cancellable={cancellable}"
+            );
+        }
     }
 
     fn visual_geometry(visible: &mut VisualTestContext) -> Value {

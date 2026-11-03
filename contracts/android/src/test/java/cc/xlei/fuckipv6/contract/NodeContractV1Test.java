@@ -7,6 +7,8 @@ import cc.xlei.fuckipv6.contract.NodeContractV1.CapabilityState;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupFailureReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
+import cc.xlei.fuckipv6.contract.NodeContractV1.NodeDiagnosticLayer;
+import cc.xlei.fuckipv6.contract.NodeContractV1.NodeDiagnosticState;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeEventReplayReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeProblemCode;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeRoutingSummaryStatus;
@@ -44,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 88,
+                NodeContractV1.DTO_CLASS_NAMES.length == 90,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -158,6 +160,35 @@ public final class NodeContractV1Test {
         NodeContractV1.NodeRotateNodeIdentityCommand.class.getDeclaredField(
                 "expected_fingerprint");
         for (String field : new String[] {
+            "checks",
+            "cleanup_candidate_networks",
+            "completed_at_unix_ms",
+            "diagnostic_id",
+            "lifecycle",
+            "recovery_actions",
+            "residue",
+            "retained_owner_networks",
+            "sanitized_report",
+            "started_at_unix_ms",
+            "timed_out"
+        }) {
+            NodeContractV1.NodeDiagnosticsSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "duration_ms",
+            "error_code",
+            "layer",
+            "message_key",
+            "started_at_unix_ms",
+            "state",
+            "suggestion_key"
+        }) {
+            NodeContractV1.NodeDiagnosticCheck.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"action_id", "confirmation_required", "impact_key"}) {
+            NodeContractV1.NodeDiagnosticRecoveryAction.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
             "affected_configured_network_count",
             "created_at_unix_ms",
             "new_fingerprint",
@@ -185,6 +216,20 @@ public final class NodeContractV1Test {
                 TunPlatform.LINUX,
                 TunPlatform.fromWireName("linux"),
                 "TUN platform");
+        assertSame(
+                NodeDiagnosticLayer.COORDINATOR,
+                NodeDiagnosticLayer.fromWireName("coordinator"),
+                "diagnostic coordinator layer");
+        assertSame(
+                NodeDiagnosticState.NO_PERMISSION,
+                NodeDiagnosticState.fromWireName("no_permission"),
+                "diagnostic no-permission state");
+        expectIllegalArgument(
+                () -> NodeDiagnosticLayer.fromWireName("invented"),
+                "unknown diagnostic layer");
+        expectIllegalArgument(
+                () -> NodeDiagnosticState.fromWireName("invented"),
+                "unknown diagnostic state");
         assertSame(
                 NodeRoutingSummaryStatus.APPLY_FAILED,
                 NodeRoutingSummaryStatus.fromWireName("apply_failed"),

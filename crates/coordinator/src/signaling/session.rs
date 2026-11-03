@@ -51,10 +51,8 @@ struct DataPlaneMembershipAuthority {
 }
 
 impl DataPlaneMembershipAuthority {
-    fn new(path: PathBuf) -> Result<Self> {
-        let authority = Self { path };
-        authority.load_members()?;
-        Ok(authority)
+    fn new(path: PathBuf) -> Self {
+        Self { path }
     }
 
     fn is_member(&self, public_key: &[u8]) -> Result<bool> {
@@ -412,7 +410,7 @@ impl SessionManager {
     /// pending applicants, but QUIC certificates, relay packets and topology
     /// broadcasts are gated on a live member lookup.
     pub fn attach_data_plane_membership(&self, path: impl Into<PathBuf>) -> Result<()> {
-        let authority = Arc::new(DataPlaneMembershipAuthority::new(path.into())?);
+        let authority = Arc::new(DataPlaneMembershipAuthority::new(path.into()));
         *self
             .data_plane_membership
             .write()
@@ -2697,10 +2695,16 @@ mod tests {
             owner_id.clone(),
             1_000,
         )?;
-        write_membership_record(&record_path, &record);
-
         let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
         manager.attach_data_plane_membership(&record_path)?;
+        assert!(
+            manager
+                .is_data_plane_member(&applicant_identity.public_key())
+                .is_err(),
+            "an attached but not-yet-created roster must fail closed"
+        );
+        write_membership_record(&record_path, &record);
+
         let (applicant_tx, mut applicant_rx) = mpsc::unbounded_channel();
         manager
             .register_client(

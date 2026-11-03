@@ -28,6 +28,7 @@ pub mod logging;
 #[cfg(target_os = "linux")]
 pub(crate) mod lxt_rescue;
 pub mod multi_network;
+pub mod network_discovery;
 mod network_setup;
 pub mod node;
 pub mod owner_security;

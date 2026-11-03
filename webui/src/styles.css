@@ -897,6 +897,250 @@ button:disabled {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
 }
+.network-page-stack {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-4);
+}
+.discovery-section-heading > div,
+.card-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.discovery-section-heading p,
+.card-heading > div > p {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--font-size-xs);
+}
+.discovery-toolbar {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-raised) 70%, transparent);
+}
+.discovery-search {
+  display: grid;
+  gap: var(--space-1);
+}
+.discovery-search > label,
+.discovery-filters label > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+}
+.discovery-search > small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+.discovery-search-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--text-faint);
+}
+.discovery-search-control:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.discovery-search-control input {
+  min-width: 0;
+  height: 36px;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+}
+.discovery-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.discovery-filters label {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+.discovery-filters select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--text);
+}
+.discovery-status-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-block: var(--space-3);
+}
+.discovery-state-stack {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.discovery-state-notice {
+  display: grid;
+  width: 100%;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+}
+.discovery-state-notice.failed {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.discovery-state-notice.degraded,
+.discovery-state-notice.pending {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.discovery-state-notice small {
+  color: var(--text-muted);
+}
+.discovery-last-success {
+  color: var(--text-faint);
+}
+.discovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.discovery-actions .secondary-button {
+  gap: var(--space-1);
+}
+.discovery-result-list {
+  display: grid;
+  gap: var(--space-3);
+}
+.discovery-result-card {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+}
+.discovery-result-card.stale {
+  border-color: color-mix(in srgb, var(--warning) 30%, var(--border));
+}
+.discovery-result-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.discovery-result-title {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.discovery-result-title > div:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.discovery-result-title strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--font-size-md);
+}
+.discovery-result-title small {
+  color: var(--text-secondary);
+}
+.discovery-badges {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+.discovery-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  color: var(--text-faint);
+  font-size: var(--font-size-xs);
+}
+.discovery-result-meta span:last-child {
+  color: var(--warning);
+}
+.discovery-result-details {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+.discovery-result-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: var(--font-weight-semibold);
+}
+.discovery-result-details dl {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+.discovery-result-details dl > div {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.25fr) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+.discovery-result-details dt {
+  color: var(--text-faint);
+}
+.discovery-result-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+.discovery-result-details code {
+  overflow-wrap: anywhere;
+}
+.discovery-result-details p {
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+.discovery-result-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.discovery-complete {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 0;
+  color: var(--success);
+  font-size: var(--font-size-xs);
+}
 .network-card {
   padding: var(--space-3);
 }
@@ -3114,10 +3358,24 @@ button:disabled {
   }
   .metric-grid,
   .network-grid,
+  .discovery-filters,
   .capability-grid,
   .diagnostic-metadata,
   .diagnostic-check-meta {
     grid-template-columns: 1fr;
+  }
+  .discovery-status-row,
+  .discovery-result-heading {
+    flex-direction: column;
+  }
+  .discovery-actions,
+  .discovery-badges {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .discovery-result-details dl > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
   .operation-status-heading {
     flex-direction: column;

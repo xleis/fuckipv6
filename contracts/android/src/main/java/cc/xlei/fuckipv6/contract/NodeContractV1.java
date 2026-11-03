@@ -1829,32 +1829,38 @@ public final class NodeContractV1 {
         public final Long expires_at_unix_ms;
         public final Long issued_at_unix_ms;
         public final String join_mode;
+        public final String language;
         public final String name;
         public final String network_id;
         public final String owner;
         public final String public_key;
         public final String publisher;
         public final String purpose;
+        public final String region;
         public final Long revision;
         public final Long revoked_at_unix_ms;
         public final Integer schema_version;
+        public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NetworkDiscoveryDocument(List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String name, String network_id, String owner, String public_key, String publisher, String purpose, Long revision, Long revoked_at_unix_ms, Integer schema_version, NetworkVisibility visibility) {
+        public NetworkDiscoveryDocument(List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String language, String name, String network_id, String owner, String public_key, String publisher, String purpose, String region, Long revision, Long revoked_at_unix_ms, Integer schema_version, List<String> tags, NetworkVisibility visibility) {
             this.capability_summary = capability_summary;
             this.endpoints = endpoints;
             this.expires_at_unix_ms = expires_at_unix_ms;
             this.issued_at_unix_ms = issued_at_unix_ms;
             this.join_mode = join_mode;
+            this.language = language;
             this.name = name;
             this.network_id = network_id;
             this.owner = owner;
             this.public_key = public_key;
             this.publisher = publisher;
             this.purpose = purpose;
+            this.region = region;
             this.revision = revision;
             this.revoked_at_unix_ms = revoked_at_unix_ms;
             this.schema_version = schema_version;
+            this.tags = tags;
             this.visibility = visibility;
         }
     }

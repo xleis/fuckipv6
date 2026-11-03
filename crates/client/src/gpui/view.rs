@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -42,6 +42,10 @@ use super::view_model::{
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
     ConfigurationChangeAction, ConfigurationHistoryEntry, ConfigurationImpact,
+};
+use crate::network_discovery::{
+    project_discovery, DiscoveryFilters, DiscoveryProjection, DiscoveryProjectionState,
+    DiscoveryResult, DiscoveryVisibilityFilter,
 };
 use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
@@ -219,6 +223,12 @@ struct GpuiShell {
     text_inputs: HashMap<String, Entity<NativeTextInput>>,
     search_query: String,
     search_input: Option<Entity<NativeTextInput>>,
+    discovery_search_input: Option<Entity<NativeTextInput>>,
+    discovery_query: String,
+    discovery_debounced_query: String,
+    discovery_search_generation: u64,
+    discovery_filters: DiscoveryFilters,
+    expanded_discovery: HashMap<String, bool>,
     configuration: GpuiConfigurationWorkflow,
     configuration_editor: Option<Entity<TextareaState>>,
     configuration_editor_placeholder: Option<String>,
@@ -275,6 +285,12 @@ impl GpuiShell {
             text_inputs: HashMap::new(),
             search_query: String::new(),
             search_input: None,
+            discovery_search_input: None,
+            discovery_query: String::new(),
+            discovery_debounced_query: String::new(),
+            discovery_search_generation: 0,
+            discovery_filters: DiscoveryFilters::default(),
+            expanded_discovery: HashMap::new(),
             configuration: GpuiConfigurationWorkflow::default(),
             configuration_editor: None,
             configuration_editor_placeholder: None,
@@ -319,6 +335,25 @@ impl GpuiShell {
         .detach();
         shell.search_input = Some(search_input);
 
+        let discovery_search_input = cx.new(|cx| {
+            NativeTextInput::new(
+                "discovery-search-input",
+                t(locale, "discovery.search.label"),
+                t(locale, "discovery.search.placeholder"),
+                "",
+                cx,
+            )
+            .compact()
+        });
+        cx.subscribe(
+            &discovery_search_input,
+            |shell: &mut Self, _, event: &TextInputEvent, cx| {
+                shell.set_discovery_query(event.value.clone(), cx);
+            },
+        )
+        .detach();
+        shell.discovery_search_input = Some(discovery_search_input);
+
         shell.watch_state(updates, cx);
         shell.submit_raw(NodeCommand::GetUiManifest, cx);
         shell.submit_raw(NodeCommand::GetSnapshot, cx);
@@ -357,6 +392,15 @@ impl GpuiShell {
                 input.set_accessibility_copy(
                     t(self.locale, "common.search"),
                     t(self.locale, "common.search_placeholder"),
+                    cx,
+                );
+            });
+        }
+        if let Some(input) = &self.discovery_search_input {
+            input.update(cx, |input, cx| {
+                input.set_accessibility_copy(
+                    t(self.locale, "discovery.search.label"),
+                    t(self.locale, "discovery.search.placeholder"),
                     cx,
                 );
             });
@@ -1461,6 +1505,76 @@ impl GpuiShell {
                 input.update(cx, |input, cx| input.set_value(value, cx));
             }
         }
+    }
+
+    /// Discovery search is local-only. Keep the raw input in memory, then
+    /// publish it to the projection after a short quiet period so each
+    /// keystroke does not rebuild the result list.
+    fn set_discovery_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.discovery_query = query;
+        self.discovery_search_generation = self.discovery_search_generation.wrapping_add(1);
+        let generation = self.discovery_search_generation;
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let _ = weak.update(cx, |shell, cx| {
+                if shell.discovery_search_generation == generation {
+                    shell.discovery_debounced_query = shell.discovery_query.clone();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn clear_discovery_search(&mut self, cx: &mut Context<Self>) {
+        self.discovery_query.clear();
+        self.discovery_debounced_query.clear();
+        self.discovery_search_generation = self.discovery_search_generation.wrapping_add(1);
+        if let Some(input) = &self.discovery_search_input {
+            input.update(cx, |input, cx| input.set_value("", cx));
+        }
+        cx.notify();
+    }
+
+    fn discovery_projection(&self) -> DiscoveryProjection {
+        project_discovery(
+            &self.snapshot,
+            &self.discovery_debounced_query,
+            &self.discovery_filters,
+            unix_time_ms(),
+        )
+    }
+
+    fn discovery_filter_options(&self) -> (Vec<String>, Vec<String>) {
+        let projection = project_discovery(
+            &self.snapshot,
+            "",
+            &DiscoveryFilters::default(),
+            unix_time_ms(),
+        );
+        let languages = projection
+            .results
+            .iter()
+            .map(|result| result.language.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let regions = projection
+            .results
+            .iter()
+            .map(|result| result.region.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        (languages, regions)
+    }
+
+    fn request_discovery_join(&mut self, result: &DiscoveryResult, cx: &mut Context<Self>) {
+        self.set_field_value("join_network", "network_name", result.title.clone());
+        self.sync_text_inputs(cx);
+        self.open_action("networks", "join_network", cx);
     }
 
     fn fill_empty_network_fields(&mut self) {
@@ -4650,7 +4764,748 @@ impl GpuiShell {
             .into_any_element()
     }
 
-    fn page_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn networks_content(
+        &mut self,
+        layout: LayoutClass,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let compact = matches!(layout, LayoutClass::Mobile | LayoutClass::Compact);
+        let projection = self.discovery_projection();
+        let (languages, regions) = self.discovery_filter_options();
+        let joined_names = self
+            .snapshot
+            .networks
+            .iter()
+            .map(|network| network.name.clone())
+            .chain(
+                self.snapshot
+                    .configuration
+                    .networks
+                    .iter()
+                    .map(|network| network.network_name.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let joined_cards = joined_names
+            .iter()
+            .map(|network_name| {
+                let runtime = self
+                    .snapshot
+                    .networks
+                    .iter()
+                    .find(|network| &network.name == network_name);
+                let configured = self
+                    .snapshot
+                    .configuration
+                    .networks
+                    .iter()
+                    .find(|network| &network.network_name == network_name);
+                let status = runtime
+                    .map(|network| t(self.locale, network_status_key(network.status)).to_string())
+                    .unwrap_or_else(|| {
+                        t(self.locale, network_status_key(NodeNetworkStatus::Offline)).to_string()
+                    });
+                let detail = runtime
+                    .map(|network| {
+                        tr(
+                            self.locale,
+                            "overview.network.detail",
+                            &[
+                                ("peers", &network.peer_count.to_string()),
+                                ("tun", &network.tun_name),
+                            ],
+                        )
+                    })
+                    .or_else(|| {
+                        configured.map(|network| {
+                            format!(
+                                "{status} · {} · {}",
+                                network.tun_name, network.coordinator_url
+                            )
+                        })
+                    })
+                    .unwrap_or(status);
+                div()
+                    .debug_selector(|| "visual-discovery-joined-network".into())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(network_name.clone()),
+                    )
+                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(detail))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        let joined_section = surface_card()
+            .id("discovery-joined")
+            .debug_selector(|| "visual-discovery-joined".into())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "discovery.section.joined").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "discovery.section.joined_detail").to_string()),
+                    ),
+            )
+            .when(joined_cards.is_empty(), |section| {
+                section.child(
+                    empty_state(t(self.locale, "discovery.empty.joined"))
+                        .debug_selector(|| "visual-discovery-joined-empty".into()),
+                )
+            })
+            .children(joined_cards);
+
+        let search_input = self
+            .discovery_search_input
+            .as_ref()
+            .map(|input| input.clone().into_any_element());
+        let clear_search = (!self.discovery_query.trim().is_empty()).then(|| {
+            button(
+                SharedString::from("clear-discovery-search"),
+                "",
+                ButtonVariant::Ghost,
+                false,
+            )
+            .absolute()
+            .right(px(4.0))
+            .top(px(3.0))
+            .w(px(28.0))
+            .h(px(28.0))
+            .px_0()
+            .border_0()
+            .aria_label(t(self.locale, "common.search_clear").to_string())
+            .child(lucide_icon(
+                include_bytes!("../../assets/icons/x.svg"),
+                14.0,
+                COLOR_MUTED,
+            ))
+            .on_click(cx.listener(|shell, _, _, cx| shell.clear_discovery_search(cx)))
+        });
+        let search_control = div()
+            .id("discovery-search")
+            .debug_selector(|| "visual-discovery-search".into())
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(34.0))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(11.0))
+                    .top(px(9.0))
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/search.svg"),
+                        15.0,
+                        COLOR_FAINT,
+                    )),
+            )
+            .children(search_input)
+            .children(clear_search);
+
+        let mut visibility_controls = Vec::new();
+        for (value, label_key, selected) in [
+            (
+                None,
+                "discovery.filter.all",
+                self.discovery_filters.visibility.is_none(),
+            ),
+            (
+                Some(DiscoveryVisibilityFilter::Public),
+                "discovery.filter.public",
+                self.discovery_filters.visibility == Some(DiscoveryVisibilityFilter::Public),
+            ),
+            (
+                Some(DiscoveryVisibilityFilter::Private),
+                "discovery.filter.private",
+                self.discovery_filters.visibility == Some(DiscoveryVisibilityFilter::Private),
+            ),
+        ] {
+            let label = t(self.locale, label_key).to_string();
+            let id = format!(
+                "discovery-filter-visibility-{}",
+                value.map(discovery_visibility_filter_name).unwrap_or("all")
+            );
+            visibility_controls.push(
+                choice_control(SharedString::from(id), label, selected)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.discovery_filters.visibility = value;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        let mut join_mode_controls = Vec::new();
+        for (value, label_key, selected) in [
+            (
+                None,
+                "discovery.filter.all",
+                self.discovery_filters.join_mode.is_none(),
+            ),
+            (
+                Some(NetworkJoinMode::Open),
+                "choice.join_mode.open",
+                self.discovery_filters.join_mode == Some(NetworkJoinMode::Open),
+            ),
+            (
+                Some(NetworkJoinMode::ApprovalRequired),
+                "choice.join_mode.approval_required",
+                self.discovery_filters.join_mode == Some(NetworkJoinMode::ApprovalRequired),
+            ),
+            (
+                Some(NetworkJoinMode::InviteOnly),
+                "choice.join_mode.invite_only",
+                self.discovery_filters.join_mode == Some(NetworkJoinMode::InviteOnly),
+            ),
+        ] {
+            let label = t(self.locale, label_key).to_string();
+            let id = format!(
+                "discovery-filter-join-mode-{}",
+                value.map(join_mode_filter_name).unwrap_or("all")
+            );
+            join_mode_controls.push(
+                choice_control(SharedString::from(id), label, selected)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.discovery_filters.join_mode = value;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        let mut language_controls = Vec::new();
+        language_controls.push(
+            choice_control(
+                "discovery-filter-language-all".into(),
+                t(self.locale, "discovery.filter.all").to_string(),
+                self.discovery_filters.language.is_none(),
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.discovery_filters.language = None;
+                cx.notify();
+            }))
+            .into_any_element(),
+        );
+        for language in languages {
+            let selected = self.discovery_filters.language.as_deref() == Some(&language);
+            let filter_value = language.clone();
+            language_controls.push(
+                choice_control(
+                    SharedString::from(format!("discovery-filter-language-{language}")),
+                    language,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.discovery_filters.language = Some(filter_value.clone());
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut region_controls = Vec::new();
+        region_controls.push(
+            choice_control(
+                "discovery-filter-region-all".into(),
+                t(self.locale, "discovery.filter.all").to_string(),
+                self.discovery_filters.region.is_none(),
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.discovery_filters.region = None;
+                cx.notify();
+            }))
+            .into_any_element(),
+        );
+        for region in regions {
+            let selected = self.discovery_filters.region.as_deref() == Some(&region);
+            let filter_value = region.clone();
+            region_controls.push(
+                choice_control(
+                    SharedString::from(format!("discovery-filter-region-{region}")),
+                    region,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.discovery_filters.region = Some(filter_value.clone());
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let filter_group = |title: SharedString, controls: Vec<gpui::AnyElement>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w(px(150.0))
+                .flex_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight(600.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(title),
+                )
+                .child(div().flex().flex_wrap().gap_2().children(controls))
+        };
+        let filters = div()
+            .debug_selector(|| "visual-discovery-filters".into())
+            .flex()
+            .flex_wrap()
+            .gap_3()
+            .child(filter_group(
+                t(self.locale, "discovery.filter.visibility")
+                    .to_string()
+                    .into(),
+                visibility_controls,
+            ))
+            .child(filter_group(
+                t(self.locale, "discovery.filter.join_mode")
+                    .to_string()
+                    .into(),
+                join_mode_controls,
+            ))
+            .child(filter_group(
+                t(self.locale, "discovery.filter.language")
+                    .to_string()
+                    .into(),
+                language_controls,
+            ))
+            .child(filter_group(
+                t(self.locale, "discovery.filter.region").to_string().into(),
+                region_controls,
+            ));
+
+        let refresh = button(
+            "discovery-refresh".into(),
+            t(self.locale, "discovery.action.refresh"),
+            ButtonVariant::Secondary,
+            self.pending_commands > 0,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| {
+            shell.open_action("networks", "refresh_discovery_index", cx);
+        }));
+        let retry = projection
+            .error_category
+            .is_some_and(|category| category.retryable())
+            .then(|| {
+                button(
+                    "discovery-retry".into(),
+                    t(self.locale, "discovery.action.retry"),
+                    ButtonVariant::Primary,
+                    self.pending_commands > 0,
+                )
+                .debug_selector(|| "visual-discovery-retry".into())
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.open_action("networks", "retry_discovery_index", cx);
+                }))
+            });
+
+        let notices = self.discovery_notices(&projection);
+        let result_cards = projection
+            .results
+            .iter()
+            .map(|result| self.discovery_result_card(result, cx))
+            .collect::<Vec<_>>();
+
+        let discovery_section = surface_card()
+            .id("discovery-results")
+            .debug_selector(|| "visual-discovery-results".into())
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(t(self.locale, "discovery.section.results").to_string()),
+                            )
+                            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(
+                                t(self.locale, "discovery.section.results_detail").to_string(),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(refresh)
+                            .children(retry),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(t(self.locale, "discovery.search.label").to_string()),
+                    )
+                    .child(search_control)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "discovery.search.private_note").to_string()),
+                    ),
+            )
+            .child(filters)
+            .children(notices)
+            .when(result_cards.is_empty(), |section| {
+                section.child(
+                    empty_state(t(self.locale, discovery_empty_key(&projection)).to_string())
+                        .debug_selector(|| "visual-discovery-empty-results".into()),
+                )
+            })
+            .child(
+                div()
+                    .debug_selector(|| "visual-discovery-result-list".into())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .children(result_cards),
+            )
+            .when(projection.no_more_results, |section| {
+                section.child(
+                    div()
+                        .debug_selector(|| "visual-discovery-no-more".into())
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "discovery.result.no_more_results").to_string()),
+                )
+            });
+
+        div()
+            .debug_selector(|| "visual-discovery-networks".into())
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when(compact, |page| page.w_full())
+            .child(joined_section)
+            .child(discovery_section)
+            .into_any_element()
+    }
+
+    fn discovery_notices(&self, projection: &DiscoveryProjection) -> Vec<gpui::AnyElement> {
+        let mut notices = Vec::new();
+        let state = match projection.state {
+            DiscoveryProjectionState::Idle => Some((
+                t(self.locale, "discovery.state.idle").to_string(),
+                SemanticState::Neutral,
+            )),
+            DiscoveryProjectionState::Pending => Some((
+                t(self.locale, "discovery.state.pending").to_string(),
+                SemanticState::Info,
+            )),
+            DiscoveryProjectionState::Empty => Some((
+                t(self.locale, "discovery.state.empty").to_string(),
+                SemanticState::Neutral,
+            )),
+            DiscoveryProjectionState::NoMatches => Some((
+                t(self.locale, "discovery.state.no_matches").to_string(),
+                SemanticState::Neutral,
+            )),
+            DiscoveryProjectionState::Degraded => Some((
+                t(self.locale, "discovery.state.degraded").to_string(),
+                SemanticState::Warning,
+            )),
+            DiscoveryProjectionState::Failed => Some((
+                t(self.locale, "discovery.state.failed").to_string(),
+                SemanticState::Danger,
+            )),
+            DiscoveryProjectionState::Unsupported => Some((
+                t(self.locale, "discovery.state.unsupported").to_string(),
+                SemanticState::Unsupported,
+            )),
+            DiscoveryProjectionState::Ready => None,
+        };
+        if let Some((message, semantic)) = state {
+            notices.push(discovery_notice(
+                "visual-discovery-state",
+                message,
+                semantic,
+            ));
+        }
+        if projection.rejected_record_count > 0 {
+            notices.push(discovery_notice(
+                "visual-discovery-rejected",
+                tr(
+                    self.locale,
+                    "discovery.state.rejected",
+                    &[("count", &projection.rejected_record_count.to_string())],
+                ),
+                SemanticState::Warning,
+            ));
+        }
+        if projection.has_stale_results() {
+            notices.push(discovery_notice(
+                "visual-discovery-stale",
+                t(self.locale, "discovery.state.stale").to_string(),
+                SemanticState::Warning,
+            ));
+        }
+        if let Some(category) = projection.error_category {
+            notices.push(discovery_notice(
+                "visual-discovery-error",
+                tr(
+                    self.locale,
+                    "discovery.error.detail",
+                    &[("message", t(self.locale, category.message_key()))],
+                ),
+                SemanticState::Danger,
+            ));
+        }
+        if let Some(last_success) = projection.last_success_unix_ms {
+            notices.push(discovery_notice(
+                "visual-discovery-last-success",
+                tr(
+                    self.locale,
+                    "discovery.last_success",
+                    &[(
+                        "time",
+                        &format_diagnostic_timestamp(self.locale, last_success),
+                    )],
+                ),
+                SemanticState::Neutral,
+            ));
+        }
+        notices
+    }
+
+    fn discovery_result_card(
+        &self,
+        result: &DiscoveryResult,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let network_id = result.network_id.as_str().to_string();
+        let expanded = self
+            .expanded_discovery
+            .get(&network_id)
+            .copied()
+            .unwrap_or(false);
+        let toggle_id = network_id.clone();
+        let cta_label = match result.join_mode {
+            NetworkJoinMode::Open => "discovery.result.open_join",
+            NetworkJoinMode::ApprovalRequired => "discovery.result.request_join",
+            NetworkJoinMode::InviteOnly => "discovery.result.use_invite",
+        };
+        let capabilities = result
+            .capabilities
+            .iter()
+            .map(|capability| t(self.locale, profile_capability_key(*capability)).to_string())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let tags = if result.tags.is_empty() {
+            t(self.locale, "common.not_available").to_string()
+        } else {
+            result.tags.join(" · ")
+        };
+        let verified_at = format_diagnostic_timestamp(self.locale, result.verified_at_unix_ms);
+        let join_mode = t(self.locale, profile_join_mode_key(result.join_mode)).to_string();
+        let visibility = t(self.locale, profile_visibility_key(result.visibility)).to_string();
+        let mut card = surface_card()
+            .id(SharedString::from(format!("discovery-result-{network_id}")))
+            .debug_selector(|| "visual-discovery-result".into())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "discovery-result-toggle-{network_id}"
+                    )))
+                    .role(Role::Button)
+                    .aria_label(t(self.locale, "discovery.result.details").to_string())
+                    .aria_expanded(expanded)
+                    .focusable()
+                    .tab_stop(true)
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .p_4()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        let expanded = shell
+                            .expanded_discovery
+                            .entry(toggle_id.clone())
+                            .or_insert(false);
+                        *expanded = !*expanded;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(result.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .line_height(px(18.0))
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(result.purpose.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(profile_status_chip(join_mode))
+                            .child(profile_status_chip(visibility))
+                            .when(result.stale, |chips| {
+                                chips.child(
+                                    div()
+                                        .debug_selector(|| "visual-discovery-result-stale".into())
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(rgba(COLOR_WARNING))
+                                        .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                                        .px_2()
+                                        .py_1()
+                                        .text_xs()
+                                        .text_color(rgba(COLOR_WARNING))
+                                        .child(
+                                            t(self.locale, "discovery.result.stale").to_string(),
+                                        ),
+                                )
+                            }),
+                    ),
+            );
+
+        if expanded {
+            card = card.child(
+                div()
+                    .debug_selector(|| "visual-discovery-result-details".into())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .px_4()
+                    .py_3()
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(format!(
+                        "{}: {network_id}",
+                        t(self.locale, "discovery.result.network_id")
+                    ))
+                    .child(format!(
+                        "{}: {capabilities}",
+                        t(self.locale, "discovery.result.capabilities")
+                    ))
+                    .child(format!(
+                        "{}: {tags}",
+                        t(self.locale, "discovery.result.tags")
+                    ))
+                    .child(tr(
+                        self.locale,
+                        "discovery.result.last_verified",
+                        &[("time", &verified_at)],
+                    ))
+                    .child(
+                        div()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "discovery.result.privacy_summary").to_string()),
+                    )
+                    .when(result.stale, |details| {
+                        details.child(
+                            div()
+                                .text_color(rgba(COLOR_WARNING))
+                                .child(t(self.locale, "discovery.result.stale_detail").to_string()),
+                        )
+                    }),
+            );
+        }
+
+        let result = result.clone();
+        card.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .border_t_1()
+                .border_color(rgba(COLOR_BORDER))
+                .px_4()
+                .py_3()
+                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                    self.locale,
+                    "discovery.result.last_verified",
+                    &[("time", &verified_at)],
+                )))
+                .child(
+                    button(
+                        SharedString::from(format!("discovery-join-{network_id}")),
+                        t(self.locale, cta_label),
+                        ButtonVariant::Primary,
+                        self.pending_commands > 0,
+                    )
+                    .debug_selector(|| "visual-discovery-cta".into())
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.request_discovery_join(&result, cx);
+                    })),
+                ),
+        )
+        .into_any_element()
+    }
+
+    fn page_content(&mut self, layout: LayoutClass, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
                 .id(app_region_id(AppRegion::Content))
@@ -4759,6 +5614,12 @@ impl GpuiShell {
         if let Some(overview) = model.overview.as_ref() {
             return content
                 .child(self.overview_content(overview, cx))
+                .into_any_element();
+        }
+
+        if self.selected_page == "networks" {
+            return content
+                .child(self.networks_content(layout, cx))
                 .into_any_element();
         }
 
@@ -5730,7 +6591,7 @@ impl Render for GpuiShell {
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
         let presentation = ActionPanelPresentation::for_layout(layout);
         self.sync_configuration_editor(window, cx);
-        let content = self.page_content(cx);
+        let content = self.page_content(layout, cx);
         let action_panel = self.action_panel(layout, cx);
         let workspace = if presentation == ActionPanelPresentation::Stacked {
             div()
@@ -6241,6 +7102,63 @@ fn profile_join_mode_key(join_mode: NetworkJoinMode) -> &'static str {
     }
 }
 
+fn discovery_visibility_filter_name(value: DiscoveryVisibilityFilter) -> &'static str {
+    match value {
+        DiscoveryVisibilityFilter::Public => "public",
+        DiscoveryVisibilityFilter::Private => "private",
+    }
+}
+
+fn join_mode_filter_name(value: NetworkJoinMode) -> &'static str {
+    match value {
+        NetworkJoinMode::Open => "open",
+        NetworkJoinMode::ApprovalRequired => "approval-required",
+        NetworkJoinMode::InviteOnly => "invite-only",
+    }
+}
+
+fn discovery_empty_key(projection: &DiscoveryProjection) -> &'static str {
+    match projection.state {
+        DiscoveryProjectionState::Idle => "discovery.state.idle",
+        DiscoveryProjectionState::Pending => "discovery.state.pending",
+        DiscoveryProjectionState::Ready | DiscoveryProjectionState::Empty => {
+            "discovery.state.empty"
+        }
+        DiscoveryProjectionState::NoMatches => "discovery.state.no_matches",
+        DiscoveryProjectionState::Degraded => "discovery.state.degraded",
+        DiscoveryProjectionState::Failed => "discovery.state.failed",
+        DiscoveryProjectionState::Unsupported => "discovery.state.unsupported",
+    }
+}
+
+fn discovery_notice(
+    selector: &'static str,
+    message: String,
+    semantic: SemanticState,
+) -> gpui::AnyElement {
+    let palette = semantic_palette(semantic);
+    div()
+        .debug_selector(move || selector.into())
+        .rounded_md()
+        .border_1()
+        .border_color(rgba(palette.border.rgba_hex()))
+        .bg(rgba(palette.background.rgba_hex()))
+        .px_3()
+        .py_2()
+        .text_xs()
+        .line_height(px(18.0))
+        .text_color(rgba(palette.foreground.rgba_hex()))
+        .child(message)
+        .into_any_element()
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
     match status {
         NodePrimaryStatus::Running => SemanticState::Success,
@@ -6578,12 +7496,22 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::discovery_index::{
+        NodeDiscoveryIndexError, NodeDiscoveryIndexErrorCategory, NodeDiscoveryIndexRecordSnapshot,
+        NodeDiscoveryIndexSnapshot, NodeDiscoveryIndexState,
+    };
     use crate::gpui::view_model::{ActionBlockReason, SearchResultKind};
+    use crate::network_discovery::DISCOVERY_RESULT_STALE_AFTER_MS;
     use crate::node::{
         NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult, NodeEventBus,
         NodeUiValidation,
     };
     use crate::tun::TunCapabilityReason;
+    use fuckipv6_common::crypto::Identity;
+    use fuckipv6_common::domain::{
+        DiscoveryTransport, NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkEndpoint,
+        NetworkId, Signature,
+    };
     use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
 
@@ -6637,6 +7565,101 @@ mod tests {
     #[derive(serde::Deserialize)]
     struct ProductVisualFixture {
         snapshot: NodeSnapshot,
+    }
+
+    struct DiscoveryRecordFixture<'a> {
+        name: &'a str,
+        visibility: NetworkVisibility,
+        join_mode: NetworkJoinMode,
+        language: &'a str,
+        region: &'a str,
+        tags: &'a [&'a str],
+        capabilities: Vec<CapabilityKind>,
+        accepted_at_unix_ms: u64,
+    }
+
+    impl<'a> DiscoveryRecordFixture<'a> {
+        fn visibility(mut self, visibility: NetworkVisibility) -> Self {
+            self.visibility = visibility;
+            self
+        }
+
+        fn join_mode(mut self, join_mode: NetworkJoinMode) -> Self {
+            self.join_mode = join_mode;
+            self
+        }
+
+        fn place(mut self, language: &'a str, region: &'a str) -> Self {
+            self.language = language;
+            self.region = region;
+            self
+        }
+
+        fn tags(mut self, tags: &'a [&'a str]) -> Self {
+            self.tags = tags;
+            self
+        }
+
+        fn capabilities(mut self, capabilities: Vec<CapabilityKind>) -> Self {
+            self.capabilities = capabilities;
+            self
+        }
+
+        fn build(self) -> NodeDiscoveryIndexRecordSnapshot {
+            let identity = Identity::generate().expect("discovery test identity");
+            let public_key =
+                fuckipv6_common::domain::PublicKey::from_bytes(identity.public_key_bytes());
+            let owner = fuckipv6_common::domain::NodeId::from_public_key(self.name.as_bytes());
+            let document = NetworkDiscoveryDocument {
+                schema_version: fuckipv6_common::domain::NETWORK_DISCOVERY_SCHEMA_VERSION,
+                network_id: NetworkId::from_public_key(public_key.as_str().as_bytes()),
+                public_key,
+                publisher: owner.clone(),
+                name: self.name.into(),
+                purpose: format!("{} purpose", self.name),
+                language: self.language.into(),
+                region: self.region.into(),
+                tags: self.tags.iter().map(|tag| tag.to_string()).collect(),
+                visibility: self.visibility,
+                join_mode: self.join_mode,
+                owner,
+                revision: 1,
+                issued_at_unix_ms: self.accepted_at_unix_ms.saturating_sub(1_000),
+                expires_at_unix_ms: self.accepted_at_unix_ms.saturating_add(3_600_000),
+                capability_summary: self.capabilities,
+                endpoints: vec![NetworkEndpoint {
+                    transport: DiscoveryTransport::Quic,
+                    host: "relay.example".into(),
+                    port: 443,
+                }],
+                revoked_at_unix_ms: None,
+            };
+            let signature = identity.sign(&document.signing_payload().expect("signing payload"));
+            let record = NetworkDiscoveryRecord {
+                document,
+                signature: Signature::from_bytes(signature.to_bytes()),
+            };
+            NodeDiscoveryIndexRecordSnapshot {
+                digest: record.digest().expect("discovery digest"),
+                record,
+                accepted_at_unix_ms: self.accepted_at_unix_ms,
+                discoverable: true,
+                invalid_reason: None,
+            }
+        }
+    }
+
+    fn discovery_record(name: &str, accepted_at_unix_ms: u64) -> DiscoveryRecordFixture<'_> {
+        DiscoveryRecordFixture {
+            name,
+            visibility: NetworkVisibility::Public,
+            join_mode: NetworkJoinMode::Open,
+            language: "en",
+            region: "US",
+            tags: &[],
+            capabilities: Vec::new(),
+            accepted_at_unix_ms,
+        }
     }
 
     fn diagnostics_fixture(snapshot: &NodeSnapshot) -> NodeDiagnosticsSnapshot {
@@ -7007,6 +8030,307 @@ mod tests {
         assert!(visible
             .debug_bounds("visual-network-profile-preview")
             .is_none());
+    }
+
+    #[gpui::test]
+    fn networks_page_separates_joined_and_discovery_and_renders_verified_details(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let now = unix_time_ms();
+        let result = discovery_record(
+            "atlas",
+            now.saturating_sub(DISCOVERY_RESULT_STALE_AFTER_MS + 1),
+        )
+        .join_mode(NetworkJoinMode::ApprovalRequired)
+        .tags(&["research"])
+        .capabilities(vec![CapabilityKind::Relay])
+        .build();
+        let expanded_network_id = result.record.document.network_id.as_str().to_string();
+        let mut snapshot = fixture.snapshot;
+        snapshot.discovery_index = NodeDiscoveryIndexSnapshot {
+            state: NodeDiscoveryIndexState::Ready,
+            records: vec![result],
+            last_success_unix_ms: Some(now.saturating_sub(2_000)),
+            ..NodeDiscoveryIndexSnapshot::default()
+        };
+        let window = open_shell_window(cx, 1200.0, 1_200.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.expanded_discovery.insert(expanded_network_id, true);
+                cx.notify();
+            })
+            .expect("install discovery page fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-discovery-networks",
+            "visual-discovery-joined",
+            "visual-discovery-joined-network",
+            "visual-discovery-results",
+            "visual-discovery-search",
+            "visual-discovery-filters",
+            "visual-discovery-result",
+            "visual-discovery-result-details",
+            "visual-discovery-result-stale",
+            "visual-discovery-cta",
+            "visual-discovery-stale",
+            "visual-discovery-last-success",
+            "visual-discovery-no-more",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing discovery element {selector}"
+            );
+        }
+        assert!(visible
+            .debug_bounds("visual-discovery-joined-empty")
+            .is_none());
+        assert!(visible
+            .debug_bounds("visual-discovery-empty-results")
+            .is_none());
+    }
+
+    #[gpui::test]
+    fn discovery_search_debounces_and_filters_local_records_without_commands(
+        cx: &mut TestAppContext,
+    ) {
+        let now = unix_time_ms();
+        let studio = discovery_record("studio", now)
+            .join_mode(NetworkJoinMode::ApprovalRequired)
+            .tags(&["creative"])
+            .capabilities(vec![CapabilityKind::Relay])
+            .build();
+        let family = discovery_record("family", now)
+            .visibility(NetworkVisibility::Private)
+            .join_mode(NetworkJoinMode::InviteOnly)
+            .place("zh-CN", "CN")
+            .tags(&["home"])
+            .capabilities(vec![CapabilityKind::Exit])
+            .build();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot {
+                    discovery_index: NodeDiscoveryIndexSnapshot {
+                        state: NodeDiscoveryIndexState::Ready,
+                        records: vec![studio, family],
+                        ..NodeDiscoveryIndexSnapshot::default()
+                    },
+                    ..NodeSnapshot::default()
+                };
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.notice = None;
+                shell.error = None;
+                shell.set_discovery_query("relay".into(), cx);
+                assert_eq!(shell.pending_commands, 0);
+                assert_eq!(shell.discovery_query, "relay");
+                assert!(shell.discovery_debounced_query.is_empty());
+                cx.notify();
+            })
+            .expect("install debounced discovery fixture");
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(249));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.discovery_debounced_query.is_empty());
+            })
+            .expect("check debounce before deadline");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(2));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.discovery_debounced_query, "relay");
+                assert_eq!(shell.pending_commands, 0);
+                assert!(shell.notice.is_none());
+                assert!(shell.error.is_none());
+                let projection = shell.discovery_projection();
+                assert_eq!(projection.results.len(), 1);
+                assert_eq!(projection.results[0].title, "studio");
+
+                shell.discovery_filters = DiscoveryFilters {
+                    visibility: Some(DiscoveryVisibilityFilter::Private),
+                    join_mode: Some(NetworkJoinMode::InviteOnly),
+                    language: Some("ZH-CN".into()),
+                    region: Some("cn".into()),
+                };
+                shell.discovery_debounced_query.clear();
+                let projection = shell.discovery_projection();
+                assert_eq!(projection.results.len(), 1);
+                assert_eq!(projection.results[0].title, "family");
+            })
+            .expect("check debounced discovery projection");
+    }
+
+    #[gpui::test]
+    fn discovery_states_distinguish_empty_no_matches_failure_partial_and_stale(
+        cx: &mut TestAppContext,
+    ) {
+        let now = unix_time_ms();
+        let current = discovery_record(
+            "current",
+            now.saturating_sub(DISCOVERY_RESULT_STALE_AFTER_MS + 1),
+        )
+        .build();
+        let ready = NodeSnapshot {
+            discovery_index: NodeDiscoveryIndexSnapshot {
+                state: NodeDiscoveryIndexState::Ready,
+                records: vec![current.clone()],
+                ..NodeDiscoveryIndexSnapshot::default()
+            },
+            ..NodeSnapshot::default()
+        };
+        assert_eq!(
+            project_discovery(&ready, "", &DiscoveryFilters::default(), now).state,
+            DiscoveryProjectionState::Ready
+        );
+        assert_eq!(
+            project_discovery(&ready, "missing", &DiscoveryFilters::default(), now).state,
+            DiscoveryProjectionState::NoMatches
+        );
+        let empty = NodeSnapshot {
+            discovery_index: NodeDiscoveryIndexSnapshot {
+                state: NodeDiscoveryIndexState::Ready,
+                ..NodeDiscoveryIndexSnapshot::default()
+            },
+            ..NodeSnapshot::default()
+        };
+        assert_eq!(
+            project_discovery(&empty, "", &DiscoveryFilters::default(), now).state,
+            DiscoveryProjectionState::Empty
+        );
+
+        let mut partial = ready.clone();
+        partial.discovery_index.rejected_record_count = 2;
+        let partial_projection = project_discovery(&partial, "", &DiscoveryFilters::default(), now);
+        assert_eq!(partial_projection.state, DiscoveryProjectionState::Degraded);
+        assert!(partial_projection.partial);
+        assert!(!partial_projection.no_more_results);
+
+        let failed = NodeSnapshot {
+            discovery_index: NodeDiscoveryIndexSnapshot {
+                state: NodeDiscoveryIndexState::Failed,
+                ..NodeDiscoveryIndexSnapshot::default()
+            },
+            ..NodeSnapshot::default()
+        };
+        assert_eq!(
+            project_discovery(&failed, "", &DiscoveryFilters::default(), now).state,
+            DiscoveryProjectionState::Failed
+        );
+
+        let mut degraded = ready;
+        degraded.discovery_index.state = NodeDiscoveryIndexState::Degraded;
+        degraded.discovery_index.rejected_record_count = 1;
+        degraded.discovery_index.last_success_unix_ms = Some(now.saturating_sub(3_000));
+        degraded.discovery_index.last_error = Some(NodeDiscoveryIndexError::new(
+            NodeDiscoveryIndexErrorCategory::Timeout,
+        ));
+        let degraded_projection =
+            project_discovery(&degraded, "", &DiscoveryFilters::default(), now);
+        assert_eq!(
+            degraded_projection.state,
+            DiscoveryProjectionState::Degraded
+        );
+        assert!(degraded_projection.has_stale_results());
+        assert_eq!(
+            degraded_projection.error_category,
+            Some(NodeDiscoveryIndexErrorCategory::Timeout)
+        );
+        assert!(!degraded_projection.no_more_results);
+
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = degraded;
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                cx.notify();
+            })
+            .expect("install degraded discovery fixture");
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-discovery-state",
+            "visual-discovery-rejected",
+            "visual-discovery-joined-empty",
+            "visual-discovery-stale",
+            "visual-discovery-error",
+            "visual-discovery-last-success",
+            "visual-discovery-result",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing degraded discovery element {selector}"
+            );
+        }
+        assert!(visible.debug_bounds("visual-discovery-no-more").is_none());
+        assert!(visible
+            .debug_bounds("visual-discovery-joined-network")
+            .is_none());
+    }
+
+    #[gpui::test]
+    fn discovery_cta_only_prefills_join_network_name_and_opens_the_real_action(
+        cx: &mut TestAppContext,
+    ) {
+        let now = unix_time_ms();
+        let record = discovery_record("atlas", now).build();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot {
+                    discovery_index: NodeDiscoveryIndexSnapshot {
+                        state: NodeDiscoveryIndexState::Ready,
+                        records: vec![record],
+                        ..NodeDiscoveryIndexSnapshot::default()
+                    },
+                    ..NodeSnapshot::default()
+                };
+                shell.locale = Locale::En;
+                shell.selected_page = "overview".into();
+                shell.notice = None;
+                shell.error = None;
+                let result = shell
+                    .discovery_projection()
+                    .results
+                    .into_iter()
+                    .next()
+                    .expect("discovery result");
+                let network_id = result.network_id.as_str().to_string();
+                let pending_commands = shell.pending_commands;
+
+                shell.request_discovery_join(&result, cx);
+
+                assert_eq!(shell.field_value("join_network", "network_name"), "atlas");
+                assert!(shell
+                    .form_values
+                    .get("join_network.target")
+                    .is_none_or(String::is_empty));
+                assert_ne!(
+                    shell.field_value("join_network", "network_name"),
+                    network_id
+                );
+                assert_eq!(shell.pending_commands, pending_commands);
+                assert_eq!(shell.selected_page, "networks");
+                assert!(shell.expanded_actions.contains_key("join_network"));
+                assert!(shell.notice.is_none());
+                assert!(shell.error.is_none());
+            })
+            .expect("open discovery join action");
     }
 
     #[gpui::test]

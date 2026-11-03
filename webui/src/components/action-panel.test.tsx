@@ -193,7 +193,7 @@ function renderPanel(
       locale="zh-CN"
       pendingAction={null}
       interactionBlocked={interactionBlocked}
-      requestedActionId={null}
+      requestedAction={null}
       operation={null}
       onRequestedActionOpened={() => {}}
       onCancel={vi.fn(async () => {})}
@@ -238,7 +238,7 @@ describe("action panel interaction gate", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked="stale"
-        requestedActionId={null}
+        requestedAction={null}
         operation={null}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
@@ -266,7 +266,7 @@ describe("action panel field synchronization", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={null}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
@@ -300,7 +300,7 @@ describe("action panel field synchronization", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={null}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
@@ -321,7 +321,7 @@ describe("action panel field synchronization", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={null}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
@@ -367,7 +367,7 @@ describe("action panel operation status", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={operation}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
@@ -420,7 +420,7 @@ describe("action panel operation status", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={operation}
         onRequestedActionOpened={() => {}}
         onCancel={onCancel}
@@ -444,7 +444,7 @@ describe("action panel operation status", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={{ ...operation, state: "cancelled" }}
         onRequestedActionOpened={() => {}}
         onCancel={onCancel}
@@ -483,7 +483,7 @@ describe("action panel operation status", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={operation}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {
@@ -518,7 +518,7 @@ describe("action panel operation status", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={null}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
@@ -574,7 +574,7 @@ describe("action panel operation status", () => {
         locale="zh-CN"
         pendingAction={null}
         interactionBlocked={null}
-        requestedActionId={null}
+        requestedAction={null}
         operation={null}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}

@@ -1847,8 +1847,8 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
             OverviewShortcut {
                 id: "discover_networks".into(),
                 label: t(locale, "shortcut.discover_networks").to_string(),
-                action_id: None,
-                unavailable_reason: Some(t(locale, "shortcut.discovery_unavailable").to_string()),
+                action_id: Some("refresh_discovery_index".into()),
+                unavailable_reason: None,
             },
             OverviewShortcut {
                 id: "join_network".into(),
@@ -3892,6 +3892,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["create_network", "discover_networks", "join_network"]
         );
+        let discover = overview
+            .shortcuts
+            .iter()
+            .find(|shortcut| shortcut.id == "discover_networks")
+            .expect("discover shortcut");
+        assert_eq!(
+            discover.action_id.as_deref(),
+            Some("refresh_discovery_index")
+        );
+        assert!(discover.unavailable_reason.is_none());
     }
 
     #[test]
@@ -4305,7 +4315,7 @@ mod tests {
             shortcuts,
             vec![
                 ("create_network", Some("create_network"), false),
-                ("discover_networks", None, true),
+                ("discover_networks", Some("refresh_discovery_index"), false),
                 ("join_network", Some("join_network"), false),
             ]
         );

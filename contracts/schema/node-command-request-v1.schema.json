@@ -48,6 +48,11 @@
         "join_mode": {
           "$ref": "#/$defs/NetworkJoinMode"
         },
+        "language": {
+          "default": "und",
+          "description": "Public discovery facets. Schema v2 includes these fields in the signed\npayload. Defaults keep older local JSON readable while validation still\nrejects records created under a different document schema.",
+          "type": "string"
+        },
         "name": {
           "type": "string"
         },
@@ -65,6 +70,10 @@
           "description": "Node that published this revision. Schema v1 binds the publisher to the\nnetwork owner so another member cannot publish an owner-authorized card."
         },
         "purpose": {
+          "type": "string"
+        },
+        "region": {
+          "default": "ZZ",
           "type": "string"
         },
         "revision": {
@@ -86,6 +95,13 @@
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "visibility": {
           "$ref": "#/$defs/NetworkVisibility"

@@ -24,6 +24,8 @@ import {
   KeyRound,
   Network,
   RadioTower,
+  RefreshCw,
+  Search,
   Server,
   ShieldCheck,
   SlidersHorizontal,
@@ -32,7 +34,14 @@ import {
   WifiOff,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useRef, useState, type JSX, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type JSX,
+  type ReactNode,
+} from "react";
 import type {
   ActivityEntry,
   NodeDiagnosticLayer,
@@ -52,7 +61,17 @@ import {
   executionBlockReason,
   label,
   primaryStatus,
+  type ActionValues,
 } from "../contract/invariants";
+import {
+  EMPTY_DISCOVERY_FILTERS,
+  discoveryFacets,
+  discoveryHasStaleResults,
+  projectDiscovery,
+  type DiscoveryFilters,
+  type DiscoveryProjection,
+  type DiscoveryResult,
+} from "../discovery";
 import { t, tr } from "../i18n";
 import { advancedSettingsGroups } from "../settings";
 
@@ -65,7 +84,10 @@ type PageContentProps = {
   footer?: ReactNode;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
-  onRequestAction(actionId: string): void;
+  onRequestAction(
+    actionId: string,
+    initialValues?: ActionValues,
+  ): void;
 };
 
 function empty(text: string): JSX.Element {
@@ -492,11 +514,9 @@ function Overview({
           <button
             className="secondary-button"
             type="button"
-            disabled
-            title={label(locale, "shortcut.discovery_unavailable")}
+            onClick={() => shortcut("refresh_discovery_index")}
           >
             <span>{label(locale, "shortcut.discover_networks")}</span>
-            <small>{label(locale, "shortcut.discovery_unavailable")}</small>
           </button>
           <button
             className="secondary-button"
@@ -1234,25 +1254,387 @@ function NodeRuntime({
   );
 }
 
+function discoveryStateMessage(
+  locale: Locale,
+  projection: DiscoveryProjection,
+): string {
+  return label(locale, `discovery.state.${projection.state}`);
+}
+
+function discoveryJoinLabel(locale: Locale, mode: DiscoveryResult["joinMode"]): string {
+  switch (mode) {
+    case "open":
+      return label(locale, "discovery.result.open_join");
+    case "approval_required":
+      return label(locale, "discovery.result.request_join");
+    case "invite_only":
+      return label(locale, "discovery.result.use_invite");
+  }
+}
+
+function DiscoveryResultCard({
+  result,
+  locale,
+  onRequestAction,
+}: {
+  result: DiscoveryResult;
+  locale: Locale;
+  onRequestAction(
+    actionId: string,
+    initialValues?: ActionValues,
+  ): void;
+}) {
+  return (
+    <article
+      className={`discovery-result-card${result.stale ? " stale" : ""}`}
+      data-testid="discovery-result"
+      data-discovery-network-id={result.networkId}
+    >
+      <div className="discovery-result-heading">
+        <div className="discovery-result-title">
+          <div className="network-icon">
+            <Network size={18} />
+          </div>
+          <div>
+            <strong>{result.title}</strong>
+            <small>{result.purpose}</small>
+          </div>
+        </div>
+        <div className="discovery-badges">
+          {result.stale ? (
+            <span className="status-pill warn">
+              {label(locale, "discovery.result.stale")}
+            </span>
+          ) : null}
+          <span className="status-pill neutral">
+            {label(locale, `choice.visibility.${result.visibility}`)}
+          </span>
+          <span className="status-pill neutral">
+            {label(locale, `choice.join_mode.${result.joinMode}`)}
+          </span>
+        </div>
+      </div>
+      <div className="discovery-result-meta">
+        <span>{tr(locale, "discovery.result.last_verified", {
+          time: formatTimestamp(locale, result.verifiedAtUnixMs),
+        })}</span>
+        {result.stale ? (
+          <span>{label(locale, "discovery.result.stale_detail")}</span>
+        ) : null}
+      </div>
+      <details className="discovery-result-details">
+        <summary>{label(locale, "discovery.result.details")}</summary>
+        <dl>
+          <div>
+            <dt>{label(locale, "discovery.result.network_id")}</dt>
+            <dd>
+              <code>{result.networkId}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "discovery.filter.language")}</dt>
+            <dd>{result.language}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "discovery.filter.region")}</dt>
+            <dd>{result.region}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "discovery.result.capabilities")}</dt>
+            <dd>
+              {result.capabilities.length > 0
+                ? result.capabilities
+                    .map((capability) =>
+                      label(locale, `capability.${capability}`),
+                    )
+                    .join(" · ")
+                : label(locale, "common.none")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "discovery.result.tags")}</dt>
+            <dd>
+              {result.tags.length > 0
+                ? result.tags.join(" · ")
+                : label(locale, "common.none")}
+            </dd>
+          </div>
+        </dl>
+        <p>{label(locale, "discovery.result.privacy_summary")}</p>
+      </details>
+      <div className="discovery-result-actions">
+        <button
+          className="primary-button"
+          type="button"
+          onClick={() =>
+            onRequestAction("join_network", { network_name: result.title })
+          }
+        >
+          {discoveryJoinLabel(locale, result.joinMode)}
+        </button>
+      </div>
+    </article>
+  );
+}
+
 function Networks({
   snapshot,
   locale,
   onSelectNetwork,
   onNavigate,
-}: Omit<PageContentProps, "page">) {
-  if (snapshot.networks.length === 0)
-    return empty(label(locale, "common.no_running_networks"));
+  onRequestAction,
+}: Omit<PageContentProps, "page" | "selectedNetwork">) {
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filters, setFilters] = useState<DiscoveryFilters>({
+    ...EMPTY_DISCOVERY_FILTERS,
+  });
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearchQuery(searchInput), 250);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  const projection = useMemo(
+    () => projectDiscovery(snapshot, searchQuery, filters),
+    [filters, searchQuery, snapshot],
+  );
+  const facets = useMemo(() => discoveryFacets(snapshot), [snapshot]);
+  const staleResults = discoveryHasStaleResults(projection);
+  const discoveryActionPending = projection.state === "pending";
+
+  function updateFilter<Key extends keyof DiscoveryFilters>(
+    key: Key,
+    value: DiscoveryFilters[Key],
+  ): void {
+    setFilters((current) => ({ ...current, [key]: value }));
+  }
+
   return (
-    <div className="network-grid">
-      {snapshot.networks.map((network) => (
-        <NetworkContextMenu
-          key={network.name}
-          network={network}
-          locale={locale}
-          onSelectNetwork={onSelectNetwork}
-          onNavigate={onNavigate}
-        />
-      ))}
+    <div className="network-page-stack">
+      <section
+        className="surface-card discovery-section"
+        data-testid="joined-networks-section"
+      >
+        <div className="card-heading">
+          <div>
+            <h3>{label(locale, "discovery.section.joined")}</h3>
+            <p>{label(locale, "discovery.section.joined_detail")}</p>
+          </div>
+          <span>{snapshot.networks.length}</span>
+        </div>
+        {snapshot.networks.length === 0 ? (
+          <div className="empty-state">
+            {label(locale, "discovery.empty.joined")}
+          </div>
+        ) : (
+          <div className="network-grid">
+            {snapshot.networks.map((network) => (
+              <NetworkContextMenu
+                key={network.name}
+                network={network}
+                locale={locale}
+                onSelectNetwork={onSelectNetwork}
+                onNavigate={onNavigate}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section
+        className="surface-card discovery-section"
+        data-testid="discovery-results-section"
+      >
+        <div className="card-heading discovery-section-heading">
+          <div>
+            <h3>{label(locale, "discovery.section.results")}</h3>
+            <p>{label(locale, "discovery.section.results_detail")}</p>
+          </div>
+          <span>{projection.results.length}</span>
+        </div>
+
+        <div className="discovery-toolbar">
+          <div className="discovery-search">
+            <label htmlFor="discovery-query-input">
+              {label(locale, "discovery.search.label")}
+            </label>
+            <span className="discovery-search-control">
+              <Search size={15} aria-hidden="true" />
+              <input
+                id="discovery-query-input"
+                type="search"
+                value={searchInput}
+                placeholder={label(locale, "discovery.search.placeholder")}
+                aria-describedby="discovery-search-private-note"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => setSearchInput(event.target.value)}
+              />
+            </span>
+            <small id="discovery-search-private-note">
+              {label(locale, "discovery.search.private_note")}
+            </small>
+          </div>
+
+          <div className="discovery-filters" role="group" aria-label={label(locale, "discovery.section.results")}>
+            <label>
+              <span>{label(locale, "discovery.filter.visibility")}</span>
+              <select
+                value={filters.visibility}
+                onChange={(event) =>
+                  updateFilter(
+                    "visibility",
+                    event.target.value as DiscoveryFilters["visibility"],
+                  )
+                }
+              >
+                <option value="all">{label(locale, "discovery.filter.all")}</option>
+                <option value="public">{label(locale, "discovery.filter.public")}</option>
+                <option value="private">{label(locale, "discovery.filter.private")}</option>
+              </select>
+            </label>
+            <label>
+              <span>{label(locale, "discovery.filter.join_mode")}</span>
+              <select
+                value={filters.join_mode}
+                onChange={(event) =>
+                  updateFilter(
+                    "join_mode",
+                    event.target.value as DiscoveryFilters["join_mode"],
+                  )
+                }
+              >
+                <option value="all">{label(locale, "discovery.filter.all")}</option>
+                <option value="open">{label(locale, "choice.join_mode.open")}</option>
+                <option value="approval_required">
+                  {label(locale, "choice.join_mode.approval_required")}
+                </option>
+                <option value="invite_only">
+                  {label(locale, "choice.join_mode.invite_only")}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>{label(locale, "discovery.filter.language")}</span>
+              <select
+                value={filters.language}
+                onChange={(event) => updateFilter("language", event.target.value)}
+              >
+                <option value="all">{label(locale, "discovery.filter.all")}</option>
+                {facets.languages.map((language) => (
+                  <option key={language} value={language}>
+                    {language}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>{label(locale, "discovery.filter.region")}</span>
+              <select
+                value={filters.region}
+                onChange={(event) => updateFilter("region", event.target.value)}
+              >
+                <option value="all">{label(locale, "discovery.filter.all")}</option>
+                {facets.regions.map((region) => (
+                  <option key={region} value={region}>
+                    {region}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div className="discovery-status-row">
+          <div className="discovery-state-stack" aria-live="polite">
+            {projection.state !== "ready" ? (
+              <div
+                className={`discovery-state-notice ${projection.state}`}
+                role={projection.state === "failed" ? "alert" : "status"}
+                data-testid="discovery-state"
+              >
+                <span>{discoveryStateMessage(locale, projection)}</span>
+                {projection.errorCategory ? (
+                  <small>
+                    {tr(locale, "discovery.error.detail", {
+                      message: label(
+                        locale,
+                        `discovery.error.${projection.errorCategory}`,
+                      ),
+                    })}
+                  </small>
+                ) : null}
+              </div>
+            ) : null}
+            {projection.partial ? (
+              <span className="status-pill warn" data-testid="discovery-partial">
+                {projection.rejectedRecordCount > 0
+                  ? tr(locale, "discovery.state.rejected", {
+                      count: String(projection.rejectedRecordCount),
+                    })
+                  : label(locale, "discovery.state.degraded")}
+              </span>
+            ) : null}
+            {staleResults ? (
+              <span className="status-pill warn" data-testid="discovery-stale">
+                {label(locale, "discovery.state.stale")}
+              </span>
+            ) : null}
+            {projection.lastSuccessUnixMs != null ? (
+              <small className="discovery-last-success">
+                {tr(locale, "discovery.last_success", {
+                  time: formatTimestamp(locale, projection.lastSuccessUnixMs),
+                })}
+              </small>
+            ) : null}
+          </div>
+          <div className="discovery-actions">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={discoveryActionPending}
+              onClick={() => onRequestAction("refresh_discovery_index")}
+            >
+              <RefreshCw
+                size={15}
+                className={discoveryActionPending ? "spin" : undefined}
+              />
+              {label(locale, "discovery.action.refresh")}
+            </button>
+            {projection.state === "failed" ||
+            projection.state === "degraded" ? (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={discoveryActionPending}
+                onClick={() => onRequestAction("retry_discovery_index")}
+              >
+                {label(locale, "discovery.action.retry")}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {projection.results.length > 0 ? (
+          <div className="discovery-result-list">
+            {projection.results.map((result) => (
+              <DiscoveryResultCard
+                key={result.networkId}
+                result={result}
+                locale={locale}
+                onRequestAction={onRequestAction}
+              />
+            ))}
+          </div>
+        ) : null}
+        {projection.noMoreResults ? (
+          <p className="discovery-complete">
+            <CheckCircle2 size={15} />
+            {label(locale, "discovery.result.no_more_results")}
+          </p>
+        ) : null}
+      </section>
     </div>
   );
 }

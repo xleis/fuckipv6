@@ -21,6 +21,8 @@ import type {
   NodeApiCommandResponse,
   NodeCommandOutcome,
   NodeDiagnosticsSnapshot,
+  NodeDiscoveryIndexRecordSnapshot,
+  NodeDiscoveryIndexSnapshot,
   NodeOperationSnapshot,
   NodeRoutingSummarySnapshot,
   NodeSnapshot,
@@ -151,6 +153,69 @@ function authenticate(snapshotValue: NodeSnapshot = snapshot): void {
   vi.mocked(loadLanguagePreference).mockResolvedValue("zh-CN");
   vi.mocked(loadManifest).mockResolvedValue(manifest);
   vi.mocked(loadSnapshot).mockResolvedValue(snapshotValue);
+}
+
+function discoveryRecord(
+  name: string,
+  overrides: {
+    acceptedAtUnixMs?: number;
+    visibility?: "public" | "unlisted" | "private";
+    joinMode?: "open" | "approval_required" | "invite_only";
+    language?: string;
+    region?: string;
+    tags?: string[];
+  } = {},
+): NodeDiscoveryIndexRecordSnapshot {
+  const now = Date.now();
+  return {
+    accepted_at_unix_ms: overrides.acceptedAtUnixMs ?? now - 1_000,
+    digest: `digest-${name}`,
+    discoverable: true,
+    invalid_reason: null,
+    record: {
+      document: {
+        schema_version: 2,
+        network_id: `network-${name}`,
+        public_key: `public-key-${name}`,
+        publisher: `publisher-${name}`,
+        name,
+        purpose: `${name} purpose`,
+        language: overrides.language ?? "en",
+        region: overrides.region ?? "US",
+        tags: overrides.tags ?? ["community"],
+        visibility: overrides.visibility ?? "public",
+        join_mode: overrides.joinMode ?? "open",
+        owner: `owner-${name}`,
+        revision: 1,
+        issued_at_unix_ms: now - 2_000,
+        expires_at_unix_ms: now + 86_400_000,
+        capability_summary: ["relay"],
+        endpoints: [],
+      },
+      signature: `signature-${name}`,
+    },
+  };
+}
+
+function discoverySnapshot(
+  records: NodeDiscoveryIndexRecordSnapshot[],
+  overrides: Partial<NodeDiscoveryIndexSnapshot> = {},
+): NodeSnapshot {
+  return {
+    ...snapshot,
+    discovery_index: {
+      data_plane_affected: false,
+      index_url: "https://discovery.example.test/index",
+      last_attempt_unix_ms: Date.now() - 500,
+      last_error: null,
+      last_success_unix_ms: Date.now() - 1_000,
+      records,
+      rejected_record_count: 0,
+      search_history_stored: false,
+      state: "ready",
+      ...overrides,
+    },
+  };
 }
 
 function activityAt(index: number): ActivityEntry {
@@ -1870,20 +1935,174 @@ describe("React WebUI shell", () => {
     },
   );
 
-  it("explains why network discovery is unavailable", async () => {
-    authenticate();
+  it("searches discovery locally and separates joined networks from results", async () => {
+    authenticate(
+      discoverySnapshot([
+        discoveryRecord("family", {
+          tags: ["smart-home"],
+          joinMode: "approval_required",
+        }),
+        discoveryRecord("studio", {
+          language: "zh-CN",
+          region: "CN",
+          joinMode: "invite_only",
+        }),
+      ]),
+    );
+    const user = userEvent.setup();
     renderApp();
 
-    const discovery = await screen.findByRole("button", {
-      name: /translated:shortcut\.discover_networks/,
+    await user.click(
+      await screen.findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      }),
+    );
+
+    const joined = await screen.findByTestId("joined-networks-section");
+    const results = screen.getByTestId("discovery-results-section");
+    expect(joined).toHaveTextContent("translated:discovery.empty.joined");
+    expect(
+      within(results).getByText("translated:discovery.search.private_note"),
+    ).toBeInTheDocument();
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
     });
-    expect(discovery).toBeDisabled();
-    expect(discovery).toHaveAttribute(
-      "title",
-      "translated:shortcut.discovery_unavailable",
+    expect(
+      within(panel).getByRole("button", {
+        name: "translated:action.refresh_discovery_index",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(within(results).getByText("family")).toBeInTheDocument();
+    expect(within(results).getByText("studio")).toBeInTheDocument();
+
+    const search = within(results).getByRole("searchbox", {
+      name: "translated:discovery.search.label",
+    });
+    await user.type(search, "studio");
+    await waitFor(() =>
+      expect(within(results).queryByText("family")).not.toBeInTheDocument(),
     );
-    expect(discovery).toHaveTextContent(
-      "translated:shortcut.discovery_unavailable",
+    expect(within(results).getByText("studio")).toBeInTheDocument();
+
+    await user.clear(search);
+    await waitFor(() =>
+      expect(within(results).getByText("family")).toBeInTheDocument(),
     );
+    await user.selectOptions(
+      within(results).getByLabelText("translated:discovery.filter.language"),
+      "zh-CN",
+    );
+    expect(within(results).queryByText("family")).not.toBeInTheDocument();
+    expect(within(results).getByText("studio")).toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "does-not-exist");
+    await waitFor(() =>
+      expect(screen.getByTestId("discovery-state")).toHaveTextContent(
+        "translated:discovery.state.no_matches",
+      ),
+    );
+    expect(sendCommand).not.toHaveBeenCalled();
+  });
+
+  it("opens network details and pre-fills only the join network name", async () => {
+    authenticate(discoverySnapshot([discoveryRecord("family")]));
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      }),
+    );
+    const result = await screen.findByTestId("discovery-result");
+    await user.click(
+      within(result).getByText("translated:discovery.result.details"),
+    );
+    expect(result).toHaveTextContent("network-family");
+    expect(result).toHaveTextContent("translated:discovery.result.privacy_summary");
+
+    await user.click(
+      within(result).getByRole("button", {
+        name: "translated:discovery.result.open_join",
+      }),
+    );
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    expect(
+      within(panel).getByLabelText("translated:field.network_name"),
+    ).toHaveValue("family");
+    expect(
+      within(panel).getByLabelText("translated:field.ticket_or_url"),
+    ).toHaveValue("");
+  });
+
+  it("shows degraded partial and stale discovery without calling it empty", async () => {
+    authenticate(
+      discoverySnapshot(
+        [
+          discoveryRecord("cached", {
+            acceptedAtUnixMs: Date.now() - 11 * 60 * 1000,
+          }),
+        ],
+        { rejected_record_count: 2 },
+      ),
+    );
+    renderApp();
+
+    await screen.findByRole("button", {
+      name: /translated:shortcut\.discover_networks/,
+    }).then((button) => button.click());
+
+    expect(await screen.findByTestId("discovery-state")).toHaveTextContent(
+      "translated:discovery.state.degraded",
+    );
+    expect(screen.getByTestId("discovery-partial")).toHaveTextContent(
+      "translated:discovery.state.rejected",
+    );
+    expect(screen.getByTestId("discovery-stale")).toHaveTextContent(
+      "translated:discovery.state.stale",
+    );
+    expect(screen.getByTestId("discovery-result")).toHaveTextContent("cached");
+    expect(screen.getByTestId("discovery-results-section")).not.toHaveTextContent(
+      "translated:discovery.state.empty",
+    );
+  });
+
+  it("distinguishes discovery failure from an empty result and exposes retry", async () => {
+    authenticate(
+      discoverySnapshot([], {
+        state: "failed",
+        last_success_unix_ms: null,
+        last_error: { category: "timeout", retryable: true },
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      }),
+    );
+    const state = await screen.findByTestId("discovery-state");
+    expect(state).toHaveTextContent("translated:discovery.state.failed");
+    expect(state).toHaveTextContent("translated:discovery.error.detail");
+    expect(state).toHaveAttribute("role", "alert");
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:discovery.action.retry",
+      }),
+    );
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    expect(
+      within(panel).getByRole("button", {
+        name: "translated:action.retry_discovery_index",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
   });
 });

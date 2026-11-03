@@ -399,7 +399,7 @@ pub const DEFAULT_NETWORK_LANGUAGE: &str = "und";
 pub const DEFAULT_NETWORK_REGION: &str = "ZZ";
 pub const NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION: u16 = 1;
 pub const NETWORK_PUBLIC_PROFILE_VALIDITY_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-pub const NETWORK_DISCOVERY_SCHEMA_VERSION: u16 = 1;
+pub const NETWORK_DISCOVERY_SCHEMA_VERSION: u16 = 2;
 pub const NETWORK_DISCOVERY_VALIDITY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 pub const NETWORK_PROFILE_MAX_TAGS: usize = 12;
 pub const NETWORK_PROFILE_MAX_TAG_CHARS: usize = 32;
@@ -978,6 +978,15 @@ pub struct NetworkDiscoveryDocument {
     pub publisher: NodeId,
     pub name: String,
     pub purpose: String,
+    /// Public discovery facets. Schema v2 includes these fields in the signed
+    /// payload. Defaults keep older local JSON readable while validation still
+    /// rejects records created under a different document schema.
+    #[serde(default = "default_network_language")]
+    pub language: String,
+    #[serde(default = "default_network_region")]
+    pub region: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
     pub owner: NodeId,
@@ -1022,6 +1031,13 @@ impl NetworkDiscoveryDocument {
         }
         if self.purpose.is_empty() || self.purpose.len() > 512 {
             return Err(DomainError::invalid_value("discovery purpose is invalid"));
+        }
+        validate_network_language(&self.language)?;
+        validate_network_region(&self.region)?;
+        if canonical_tags(&self.tags)? != self.tags {
+            return Err(DomainError::invalid_value(
+                "discovery tags must use canonical order",
+            ));
         }
         if self.revision == 0 {
             return Err(DomainError::invalid_value(
@@ -1099,6 +1115,9 @@ impl NetworkDiscoveryDocument {
             publisher: record.owner.clone(),
             name: record.name.clone(),
             purpose: record.purpose.clone(),
+            language: record.language.clone(),
+            region: record.region.clone(),
+            tags: record.tags.clone(),
             visibility: record.visibility,
             join_mode: record.join_mode,
             owner: record.owner.clone(),
@@ -1215,6 +1234,9 @@ mod tests {
             publisher: owner.clone(),
             name: "home".into(),
             purpose: "private mesh".into(),
+            language: "en".into(),
+            region: "US".into(),
+            tags: vec!["home".into(), "privacy".into()],
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::ApprovalRequired,
             owner,
@@ -1261,6 +1283,9 @@ mod tests {
         assert_eq!(document.network_id, network.network_id);
         assert_eq!(document.public_key, network.public_key);
         assert_eq!(document.publisher, network.owner);
+        assert_eq!(document.language, network.language);
+        assert_eq!(document.region, network.region);
+        assert_eq!(document.tags, network.tags);
         assert_eq!(document.owner, network.owner);
         assert_eq!(document.name, network.name);
         assert_eq!(document.capability_summary, network.capability_declarations);
@@ -1372,6 +1397,14 @@ mod tests {
             vec![CapabilityKind::Relay, CapabilityKind::Coordinator];
         assert!(record.validate_at(100).is_err());
         record.document.capability_summary = vec![CapabilityKind::Relay, CapabilityKind::Relay];
+        assert!(record.validate_at(100).is_err());
+
+        let mut record = signed_record(1, 100, &key);
+        record.document.language = "not a language".into();
+        assert!(record.validate_at(100).is_err());
+
+        let mut record = signed_record(1, 100, &key);
+        record.document.tags = vec!["privacy".into(), "home".into()];
         assert!(record.validate_at(100).is_err());
     }
 

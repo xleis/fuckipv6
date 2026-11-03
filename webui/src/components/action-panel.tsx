@@ -40,7 +40,10 @@ type ActionPanelProps = {
   locale: Locale;
   pendingAction: string | null;
   interactionBlocked: PageStateKind | null;
-  requestedActionId: string | null;
+  requestedAction: {
+    actionId: string;
+    values?: ActionValues;
+  } | null;
   operation: NodeOperationSnapshot | null;
   onRequestedActionOpened(): void;
   onCancel(operationId: string): Promise<void>;
@@ -759,6 +762,7 @@ function ActionCard({
   pending,
   interactionBlocked,
   requested,
+  requestedValues,
   onRequestedActionOpened,
   onSubmit,
 }: {
@@ -769,6 +773,7 @@ function ActionCard({
   pending: boolean;
   interactionBlocked: PageStateKind | null;
   requested: boolean;
+  requestedValues?: ActionValues;
   onRequestedActionOpened(): void;
   onSubmit(
     action: NodeUiAction,
@@ -778,9 +783,10 @@ function ActionCard({
 }) {
   const [open, setOpen] = useState(requested);
   const [confirming, setConfirming] = useState(false);
-  const [values, setValues] = useState<ActionValues>(() =>
-    initialActionValues(action, snapshot, selectedNetwork),
-  );
+  const [values, setValues] = useState<ActionValues>(() => ({
+    ...initialActionValues(action, snapshot, selectedNetwork),
+    ...requestedValues,
+  }));
   const [errors, setErrors] = useState<string[]>([]);
   const [result, setResult] = useState("");
   const [profileOutcome, setProfileOutcome] =
@@ -809,13 +815,23 @@ function ActionCard({
 
   if (requested !== previousRequested) {
     setPreviousRequested(requested);
-    if (requested) setOpen(true);
+    if (requested) {
+      setOpen(true);
+      setConfirming(false);
+      setValues({
+        ...initialActionValues(action, snapshot, selectedNetwork),
+        ...requestedValues,
+      });
+      setErrors([]);
+      setFailure("");
+      setResult("");
+      setProfileOutcome(null);
+    }
   }
 
   useEffect(() => {
-    if (!requested) return;
-    onRequestedActionOpened();
-  }, [requested, onRequestedActionOpened]);
+    if (requested) onRequestedActionOpened();
+  }, [onRequestedActionOpened, requested]);
 
   useEffect(() => {
     if (fingerprint === previousFingerprint.current) return;
@@ -1072,7 +1088,12 @@ export function ActionPanel(props: ActionPanelProps) {
             locale={locale}
             pending={pendingAction === action.id}
             interactionBlocked={props.interactionBlocked}
-            requested={props.requestedActionId === action.id}
+            requested={props.requestedAction?.actionId === action.id}
+            requestedValues={
+              props.requestedAction?.actionId === action.id
+                ? props.requestedAction.values
+                : undefined
+            }
             onRequestedActionOpened={props.onRequestedActionOpened}
             onSubmit={onSubmit}
           />

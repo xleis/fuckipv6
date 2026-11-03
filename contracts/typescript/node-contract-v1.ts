@@ -137,15 +137,18 @@ export type NetworkDiscoveryDocument = {
   "expires_at_unix_ms": number;
   "issued_at_unix_ms": number;
   "join_mode": NetworkJoinMode;
+  "language"?: string;
   "name": string;
   "network_id": NetworkId;
   "owner": NodeId;
   "public_key": PublicKey;
   "publisher": NodeId;
   "purpose": string;
+  "region"?: string;
   "revision": number;
   "revoked_at_unix_ms"?: number | null;
   "schema_version": number;
+  "tags"?: Array<string>;
   "visibility": NetworkVisibility;
 };
 

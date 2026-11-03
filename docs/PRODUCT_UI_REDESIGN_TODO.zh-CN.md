@@ -1097,16 +1097,18 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：伪造、过期、重放记录无法作为有效网络展示或加入；索引故障与已加入网络故障隔离。
 
-### W8-04 搜索、筛选与网络详情 `[ ]`
+### W8-04 搜索、筛选与网络详情 `[x]`
 
-- [ ] 支持按名称、标签、能力和加入模式搜索；
-- [ ] 支持公开/私有、开放/审批、语言、地区筛选；
-- [ ] 明确“发现结果”和“已加入网络”的区别；
-- [ ] 网络详情展示能力声明、加入模式、隐私摘要和最近验证时间；
-- [ ] 空结果、无更多结果、索引超时、部分结果和陈旧结果可区分；
-- [ ] 搜索输入防抖且不被写入永久活动日志；
-- [ ] 支持从发现结果进入申请或邀请流程；
-- [ ] 完成键盘和移动端等价操作。
+- [x] 支持按名称、标签、能力和加入模式搜索；
+- [x] 支持公开/私有、开放/审批、语言、地区筛选；
+- [x] 明确“发现结果”和“已加入网络”的区别；
+- [x] 网络详情展示能力声明、加入模式、隐私摘要和最近验证时间；
+- [x] 空结果、无更多结果、索引超时、部分结果和陈旧结果可区分；
+- [x] 搜索输入防抖且不被写入永久活动日志；
+- [x] 支持从发现结果进入申请或邀请流程；
+- [x] 完成键盘和移动端等价操作。
+
+**证据（2026-11-04）**：WebUI 与 GPUI 的 Networks 页面均将“已加入网络”和“发现结果”分成独立区域；即使没有已加入网络，发现结果仍可独立展示。搜索统一覆盖名称、简介、标签、能力摘要、加入模式和语言/地区文本，并支持公开/私有、开放/审批/邀请、语言和地区筛选。验证记录按 schema、时效、可发现性、吊销和摘要签名过滤，结果按名称精确度、名称和网络 ID 稳定排序；详情展示网络 ID、能力、标签、加入模式、隐私摘要、最近验证时间和陈旧原因。状态区分 `idle/pending/empty/no_matches/degraded/failed/unsupported`，部分索引不会误报为完整空结果，只有完整响应才显示“无更多结果”。WebUI 搜索本地防抖 250ms，GPUI 同样使用 250ms 本地防抖，二者均不发送命令、不上传、不持久化搜索文本或写入活动日志；WebUI 快捷入口与 GPUI 对齐为进入 Networks 并打开真实的 `refresh_discovery_index` 动作。发现卡 CTA 仅预填 `join_network.network_name` 后打开真实加入动作，不预填 `target`、不直接提交；实际开放加入、`target` 获取/验证和 JoinRequest 状态机属于 W8-05。WebUI 使用原生搜索框、筛选控件、可键盘展开的详情和响应式布局；GPUI 使用原生输入/按钮及同一断点布局。新增 GPUI 测试覆盖双区与验证详情、无已加入网络时发现结果仍显示、本地防抖/筛选且零命令、空/无匹配/失败/部分/陈旧状态区分，以及 CTA 仅预填网络名称。验证通过：`cargo test -p fuckipv6-common --all-features`（182 passed）、`cargo test -p fuckipv6-client --all-features`（库 761 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；特权生命周期测试 1 ignored）、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 9 个测试文件 101/101、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`（含 Rust、TypeScript、Android DTO 测试）、`cargo fmt --all -- --check` 和 `git diff --check`。Android Compose 等价界面属于 W16，不在本项重复实现。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 **验收**：搜索只展示可验证对象；无结果不会被误报为索引失败，陈旧结果有明确标识。
 

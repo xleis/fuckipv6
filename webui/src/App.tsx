@@ -129,11 +129,16 @@ const LANGUAGE_QUERY_KEY = ["language-preference"] as const;
 const MANIFEST_QUERY_KEY = ["node-manifest", 1] as const;
 const SNAPSHOT_QUERY_KEY = ["node-snapshot", 1] as const;
 
+type RequestedActionMemo = {
+  actionId: string;
+  values?: ActionValues;
+};
+
 type UiSessionMemo = {
   pageId: string;
   selectedNetwork: string;
   searchQuery: string;
-  requestedActionId: string | null;
+  requestedAction: RequestedActionMemo | null;
   configurationDraft: ConfigurationDraftMemo | null;
 };
 
@@ -141,7 +146,7 @@ const EMPTY_UI_SESSION: UiSessionMemo = {
   pageId: "",
   selectedNetwork: "",
   searchQuery: "",
-  requestedActionId: null,
+  requestedAction: null,
   configurationDraft: null,
 };
 
@@ -662,7 +667,7 @@ function AppShell({
   const pageId = uiSession.pageId || (initialPage?.id ?? "overview");
   const selectedNetworkState = uiSession.selectedNetwork;
   const searchQuery = uiSession.searchQuery;
-  const requestedActionId = uiSession.requestedActionId;
+  const requestedAction = uiSession.requestedAction;
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [activeOperation, setActiveOperation] =
     useState<NodeOperationSnapshot | null>(null);
@@ -681,8 +686,8 @@ function AppShell({
     onUiSessionChange({ selectedNetwork: value });
   const setSearchQuery = (value: string) =>
     onUiSessionChange({ searchQuery: value });
-  const setRequestedActionId = (value: string | null) =>
-    onUiSessionChange({ requestedActionId: value });
+  const setRequestedAction = (value: RequestedActionMemo | null) =>
+    onUiSessionChange({ requestedAction: value });
   const handleConfigurationDraftChange = useCallback(
     (configurationDraft: ConfigurationDraftMemo | null) => {
       onUiSessionChange({ configurationDraft });
@@ -950,7 +955,7 @@ function AppShell({
     ) {
       setSelectedNetworkState(networkName);
     }
-    setRequestedActionId(null);
+    setRequestedAction(null);
     setPageId(nextPage);
     setSearchQuery("");
     document.getElementById("page-content")?.focus();
@@ -965,8 +970,11 @@ function AppShell({
     if (focusInput) searchInputRef.current?.focus();
   }
 
-  function requestAction(actionId: string): void {
-    setRequestedActionId(actionId);
+  function requestAction(
+    actionId: string,
+    initialValues?: ActionValues,
+  ): void {
+    setRequestedAction({ actionId, values: initialValues });
   }
 
   function selectModule(module: ModuleDefinition): void {
@@ -1278,9 +1286,9 @@ function AppShell({
                 locale={locale}
                 pendingAction={pendingAction}
                 interactionBlocked={interactionBlocked}
-                requestedActionId={requestedActionId}
+                requestedAction={requestedAction}
                 operation={activeOperation}
-                onRequestedActionOpened={() => setRequestedActionId(null)}
+                onRequestedActionOpened={() => setRequestedAction(null)}
                 onCancel={cancelActiveOperation}
                 onSubmit={submitAction}
               />

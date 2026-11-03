@@ -10,7 +10,7 @@ import type {
 
 /** Mirrors crates/client/src/network_discovery.rs. */
 export const DISCOVERY_RESULT_STALE_AFTER_MS = 10 * 60 * 1000;
-export const DISCOVERY_SCHEMA_VERSION = 2;
+export const DISCOVERY_SCHEMA_VERSION = 3;
 
 export type DiscoveryVisibilityFilter = "public" | "private";
 

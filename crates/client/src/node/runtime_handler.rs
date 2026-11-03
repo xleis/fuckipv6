@@ -380,24 +380,35 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "发现索引管理器尚未初始化"),
                 },
-                super::NodeCommand::PreviewJoinNetwork(_) => {
-                    unavailable(request_id, "加入预览需要持久化签名发现记录")
-                }
+                super::NodeCommand::PreviewJoinNetwork(command) => match discovery {
+                    Some(discovery) => {
+                        preview_discovery_join(
+                            &discovery,
+                            &state,
+                            configs.as_ref(),
+                            request_id,
+                            command.network_id,
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "加入预览需要持久化签名发现记录"),
+                },
                 super::NodeCommand::LeaveNetwork(_) => {
                     unavailable(request_id, "退出网络需要节点配置和运行时可回滚清理")
                 }
-                super::NodeCommand::JoinNetwork(command) => match runtime {
-                    Some(runtime) => {
+                super::NodeCommand::JoinNetwork(command) => match (runtime, discovery) {
+                    (Some(runtime), discovery) => {
                         join_runtime_network(
                             &runtime,
                             discovery.as_ref(),
                             &state,
+                            configs.as_ref(),
                             request_id,
                             command,
                         )
                         .await
                     }
-                    None => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
+                    (None, _) => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
                 },
                 super::NodeCommand::UpdateRouting(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
@@ -1190,18 +1201,145 @@ fn discovery_problem(error: DiscoveryIndexError) -> NodeProblem {
     .retryable(error.retryable())
 }
 
+async fn preview_discovery_join(
+    discovery: &DiscoveryIndexManager,
+    state: &NodeStateStore,
+    configs: Option<&ConfigManager>,
+    request_id: u64,
+    network_id: String,
+) -> NodeCommandResult {
+    let already_member = join_membership_exists(state, configs, &network_id).await;
+    let mut preview = match discovery
+        .preview_join_record(&network_id, already_member)
+        .await
+    {
+        Ok(preview) => preview,
+        Err(error) => return NodeCommandResult::rejected(request_id, discovery_problem(error)),
+    };
+    let snapshot = state.snapshot().await;
+    preview.locally_contributed_capabilities = snapshot
+        .capabilities
+        .capabilities
+        .iter()
+        .filter(|capability| capability.state.is_operational())
+        .map(|capability| capability.kind)
+        .collect();
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::NetworkJoinPreview(Box::new(preview)),
+    )
+}
+
+async fn join_membership_exists(
+    state: &NodeStateStore,
+    configs: Option<&ConfigManager>,
+    network_id: &str,
+) -> bool {
+    if state
+        .snapshot()
+        .await
+        .memberships
+        .iter()
+        .any(|membership| membership.network_id == network_id)
+    {
+        return true;
+    }
+    configs.is_some_and(|configs| {
+        configs.list_networks().is_ok_and(|networks| {
+            networks
+                .iter()
+                .any(|network| network.network_id.as_deref() == Some(network_id))
+        })
+    })
+}
+
+fn join_target_from_record(
+    record: &fuckipv6_common::domain::NetworkDiscoveryRecord,
+) -> Option<String> {
+    record
+        .document
+        .endpoints
+        .iter()
+        .find(|endpoint| {
+            endpoint.transport == fuckipv6_common::domain::DiscoveryTransport::Websocket
+        })
+        .map(|endpoint| {
+            let host = endpoint.host.trim();
+            let host = if host.contains(':') && !host.starts_with('[') {
+                format!("[{host}]")
+            } else {
+                host.to_owned()
+            };
+            format!("ws://{host}:{}", endpoint.port)
+        })
+}
+
 async fn join_runtime_network(
     runtime: &NetworkRuntimeManager,
     discovery: Option<&DiscoveryIndexManager>,
     state: &NodeStateStore,
+    configs: Option<&ConfigManager>,
     request_id: u64,
     mut command: Box<super::NodeJoinNetworkCommand>,
 ) -> NodeCommandResult {
-    if let Some(record) = command.discovery_record.take() {
+    if let Some(network_id) = command.network_id.as_deref() {
+        let Some(discovery) = discovery else {
+            return unavailable(request_id, "加入网络前无法验证持久化签名发现记录");
+        };
+        let already_member = join_membership_exists(state, configs, network_id).await;
+        let record = match discovery
+            .confirm_join_record(
+                network_id,
+                command.preview_digest.as_deref().unwrap_or_default(),
+                command.network_policy_revision.unwrap_or_default(),
+                command.privacy_policy_revision.unwrap_or_default(),
+                command
+                    .terms_hash
+                    .as_ref()
+                    .expect("validated join command has terms hash"),
+                already_member,
+            )
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                return NodeCommandResult::rejected(request_id, discovery_problem(error));
+            }
+        };
+        if command
+            .network_name
+            .as_deref()
+            .is_some_and(|name| name != record.document.name)
+        {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::InvalidRequest,
+                    "加入网络名称与已确认的签名发现记录不一致",
+                )
+                .with_message_key("join.error.name_changed")
+                .for_network(record.document.name.clone()),
+            );
+        }
+        let Some(target) = join_target_from_record(&record) else {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::InvalidRequest,
+                    "已确认网络没有可用的 Websocket 协调端点",
+                )
+                .with_message_key("join.error.endpoint_unavailable")
+                .for_network(record.document.name.clone()),
+            );
+        };
+        command.network_name = Some(record.document.name.clone());
+        command.target = target;
+        command.discovery_record = None;
+    } else if let Some(record) = command.discovery_record.take() {
         let Some(discovery) = discovery else {
             return unavailable(request_id, "加入网络前无法验证签名发现记录");
         };
-        if let Err(error) = discovery.accept_join_record(state, record).await {
+        if let Err(error) = discovery.validate_join_record(&record) {
             return NodeCommandResult::rejected(request_id, discovery_problem(error));
         }
     }

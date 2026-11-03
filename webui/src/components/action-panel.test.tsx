@@ -45,6 +45,17 @@ const leaveNetwork = manifest.pages
 const listJoinRequests = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "list_join_requests") as NodeUiAction;
+const reviewJoinRequest = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "review_join_request") as NodeUiAction;
+const batchReviewJoinRequests = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "batch_review_join_requests") as NodeUiAction;
+const joinRequestReviewActions = [
+  listJoinRequests,
+  reviewJoinRequest,
+  batchReviewJoinRequests,
+];
 const currentFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const nextFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
@@ -1029,5 +1040,324 @@ describe("action panel join request review list", () => {
     expect(await screen.findByTestId("join-request-empty")).toHaveTextContent(
       "translated:join_requests.empty",
     );
+  });
+
+  it("reviews one request with the pinned revision and inline approval controls", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      async (
+        action: NodeUiAction,
+        values: ActionValues,
+      ): Promise<ActionSubmission> => {
+        void values;
+        if (action.id === "list_join_requests") {
+          return { outcome: joinRequestsOutcome as NodeCommandOutcome };
+        }
+        return {
+          outcome: {
+            status: "join_requests_reviewed",
+            data: {
+              network_id: "net_stable_home",
+              reviews: [
+                {
+                  request_id: joinRequest.request_id,
+                  revision: joinRequest.revision + 1,
+                  state: "approved",
+                },
+              ],
+            },
+          } as NodeCommandOutcome,
+        };
+      },
+    );
+    render(
+      <ActionPanel
+        actions={joinRequestReviewActions}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_join_requests",
+      }),
+    );
+    const network = screen.getByLabelText("translated:field.network_id");
+    await user.clear(network);
+    await user.type(network, "net_stable_home");
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const list = await screen.findByTestId("join-request-list");
+    expect(
+      screen.queryByRole("button", {
+        name: "translated:action.review_join_request",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "translated:action.batch_review_join_requests",
+      }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      within(list).getByRole("button", {
+        name: "translated:choice.join_request_review.approve",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "translated:join_requests.review_dialog_title",
+    );
+    expect(dialog).toHaveTextContent("Branch office router");
+    expect(dialog).toHaveTextContent("translated:join_requests.revision_pinned");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:join_requests.confirm_review",
+      }),
+    );
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1][0].id).toBe("review_join_request");
+    expect(onSubmit.mock.calls[1][1]).toMatchObject({
+      network_id: "net_stable_home",
+      request_id: joinRequest.request_id,
+      expected_revision: String(joinRequest.revision),
+      action: "approve",
+    });
+    expect(onSubmit.mock.calls[1][1]).not.toHaveProperty("note");
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("join-request-list")).getByText(
+          "translated:join_request.state.approved",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("requires a note before requesting more information", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      async (
+        action: NodeUiAction,
+        values: ActionValues,
+      ): Promise<ActionSubmission> => {
+        void values;
+        if (action.id === "list_join_requests") {
+          return { outcome: joinRequestsOutcome as NodeCommandOutcome };
+        }
+        return {
+          outcome: {
+            status: "join_requests_reviewed",
+            data: {
+              network_id: "net_stable_home",
+              reviews: [
+                {
+                  request_id: joinRequest.request_id,
+                  revision: joinRequest.revision + 1,
+                  state: "needs_information",
+                },
+              ],
+            },
+          } as NodeCommandOutcome,
+        };
+      },
+    );
+    render(
+      <ActionPanel
+        actions={joinRequestReviewActions}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_join_requests",
+      }),
+    );
+    const network = screen.getByLabelText("translated:field.network_id");
+    await user.clear(network);
+    await user.type(network, "net_stable_home");
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const list = await screen.findByTestId("join-request-list");
+    await user.click(
+      within(list).getByRole("button", {
+        name: "translated:choice.join_request_review.request_information",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:join_requests.confirm_review",
+      }),
+    );
+    expect(
+      await within(dialog).findByText(
+        "translated:join_request.error.information_required",
+      ),
+    ).toBeInTheDocument();
+    expect(onSubmit).toHaveBeenCalledOnce();
+
+    await user.type(
+      within(dialog).getByRole("textbox", {
+        name: "translated:field.join_request_note",
+      }),
+      "Please list the devices and file-sharing scope.",
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:join_requests.confirm_review",
+      }),
+    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1][1]).toMatchObject({
+      action: "request_information",
+      note: "Please list the devices and file-sharing scope.",
+    });
+  });
+
+  it("batch approves selected requests and updates their pinned revisions", async () => {
+    const user = userEvent.setup();
+    const secondRequest: JoinRequest = {
+      ...joinRequest,
+      request_id: `join_${"C".repeat(43)}`,
+      applicant: {
+        ...joinRequest.applicant,
+        node_id: `node_${"D".repeat(43)}`,
+        display_name: "Warehouse gateway",
+      },
+      revision: 5,
+    };
+    const batchListOutcome = {
+      status: "join_requests" as const,
+      data: {
+        network_id: "net_stable_home",
+        requests: [joinRequest, secondRequest],
+      },
+    };
+    const onSubmit = vi.fn(
+      async (
+        action: NodeUiAction,
+        values: ActionValues,
+      ): Promise<ActionSubmission> => {
+        if (action.id === "list_join_requests") {
+          return { outcome: batchListOutcome as NodeCommandOutcome };
+        }
+        expect(action.id).toBe("batch_review_join_requests");
+        const reviews = JSON.parse(String(values.reviews)) as Array<{
+          request_id: string;
+          revision?: number;
+          expected_revision?: number;
+          action?: string;
+        }>;
+        return {
+          outcome: {
+            status: "join_requests_reviewed",
+            data: {
+              network_id: "net_stable_home",
+              reviews: reviews.map((review) => ({
+                request_id: review.request_id,
+                revision: (review.expected_revision ?? 0) + 1,
+                state: "approved",
+              })),
+            },
+          } as NodeCommandOutcome,
+        };
+      },
+    );
+    render(
+      <ActionPanel
+        actions={joinRequestReviewActions}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_join_requests",
+      }),
+    );
+    const network = screen.getByLabelText("translated:field.network_id");
+    await user.clear(network);
+    await user.type(network, "net_stable_home");
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const list = await screen.findByTestId("join-request-list");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "translated:join_requests.select_all",
+      }),
+    );
+    expect(screen.getByTestId("join-request-selection-bar")).toHaveTextContent(
+      "translated:join_requests.selected_count",
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:join_requests.batch.approve",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "translated:join_requests.batch_dialog_title",
+    );
+    expect(dialog).toHaveTextContent("Warehouse gateway");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:join_requests.confirm_review",
+      }),
+    );
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1][0].id).toBe("batch_review_join_requests");
+    expect(JSON.parse(String(onSubmit.mock.calls[1][1].reviews))).toEqual([
+      {
+        request_id: joinRequest.request_id,
+        expected_revision: joinRequest.revision,
+        action: "approve",
+      },
+      {
+        request_id: secondRequest.request_id,
+        expected_revision: secondRequest.revision,
+        action: "approve",
+      },
+    ]);
+    await waitFor(() => {
+      expect(
+        within(list).getAllByText("translated:join_request.state.approved"),
+      ).toHaveLength(2);
+    });
+    expect(
+      screen.queryByTestId("join-request-selection-bar"),
+    ).not.toBeInTheDocument();
   });
 });

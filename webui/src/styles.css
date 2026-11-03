@@ -2255,6 +2255,144 @@ button:disabled {
   border-radius: var(--radius-sm);
   text-align: center;
 }
+.join-request-review-feedback,
+.join-request-review-blocked {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--success) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+  color: var(--success);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+.join-request-review-feedback > svg {
+  flex: 0 0 auto;
+}
+.join-request-review-blocked {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.join-request-selection-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--surface));
+}
+.join-request-select-all,
+.join-request-row-select {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.join-request-select-all input,
+.join-request-row-select input {
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.join-request-select-all span {
+  overflow-wrap: anywhere;
+}
+.join-request-row-select {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-raised);
+}
+.join-request-row-select span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+.join-request-selected-count {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.join-request-batch-actions,
+.join-request-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.join-request-batch-actions {
+  grid-column: 1 / -1;
+}
+.join-request-action-button {
+  min-height: 30px;
+  padding-inline: var(--space-2);
+  font-size: var(--font-size-xs);
+}
+.join-request-row-actions {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.join-request-review-dialog {
+  width: min(600px, calc(100vw - 32px));
+}
+.join-request-review-dialog > * + * {
+  margin-top: var(--space-3);
+}
+.join-request-review-targets {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.join-request-review-targets > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+}
+.join-request-review-targets ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.join-request-review-targets li {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.join-request-review-targets strong,
+.join-request-review-targets li span {
+  overflow-wrap: anywhere;
+}
+.join-request-review-targets strong {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+}
+.join-request-review-targets li span {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-align: right;
+}
+.join-request-revision-notice {
+  margin: 0;
+  padding: var(--space-2);
+  border-left: 2px solid var(--accent);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
 .join-request-items {
   display: grid;
   gap: var(--space-3);
@@ -3577,6 +3715,24 @@ button:disabled {
   }
   .profile-diff-list > li {
     grid-template-columns: 1fr;
+  }
+  .join-request-selection-bar {
+    grid-template-columns: 1fr;
+  }
+  .join-request-selected-count {
+    text-align: left;
+  }
+  .join-request-list-heading,
+  .join-request-item-heading,
+  .join-request-review-targets li {
+    flex-direction: column;
+  }
+  .join-request-status-chips {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .join-request-review-targets li span {
+    text-align: left;
   }
   .page-heading {
     align-items: flex-start;

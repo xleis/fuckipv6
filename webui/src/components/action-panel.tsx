@@ -10,11 +10,13 @@ import {
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type {
   JoinRequest,
+  JoinRequestReviewAction,
   NetworkProfileApplyResult,
   NetworkProfilePreview,
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeCommandOutcome,
+  NodeJoinRequestReviewAck,
   NodeNetworkJoinPreview,
   NodeOperationSnapshot,
   NodeSnapshot,
@@ -991,6 +993,16 @@ function OperationStatusCard({
 
 const joinRequestSoonToExpireMs = 24 * 60 * 60 * 1000;
 
+function joinRequestIsReviewable(request: JoinRequest): boolean {
+  return request.state === "pending" || request.state === "needs_information";
+}
+
+type JoinRequestReviewDialogState = {
+  action: JoinRequestReviewAction;
+  batch: boolean;
+  requests: JoinRequest[];
+};
+
 function JoinRequestRisk({
   request,
   locale,
@@ -1077,112 +1089,473 @@ function JoinRequestListCard({
   result,
   locale,
   loadedAtUnixMs,
+  reviewAction,
+  batchReviewAction,
+  reviewBlockedReason,
+  batchReviewBlockedReason,
+  activePendingAction,
+  onSubmit,
+  onReviewed,
 }: {
   result: NodeJoinRequestListResult;
   locale: Locale;
   loadedAtUnixMs: number;
+  reviewAction?: NodeUiAction;
+  batchReviewAction?: NodeUiAction;
+  reviewBlockedReason: string;
+  batchReviewBlockedReason: string;
+  activePendingAction: string | null;
+  onSubmit: ActionPanelProps["onSubmit"];
+  onReviewed(ack: NodeJoinRequestReviewAck): void;
 }) {
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [dialog, setDialog] = useState<JoinRequestReviewDialogState | null>(
+    null,
+  );
+  const [note, setNote] = useState("");
+  const [reviewErrors, setReviewErrors] = useState<string[]>([]);
+  const [reviewFailure, setReviewFailure] = useState("");
+  const [reviewFeedback, setReviewFeedback] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const reviewableRequests = result.requests.filter(joinRequestIsReviewable);
+  const selectedRequests = reviewableRequests.filter((request) =>
+    selectedIds.includes(request.request_id),
+  );
+  const reviewPending = activePendingAction === "review_join_request";
+  const batchReviewPending =
+    activePendingAction === "batch_review_join_requests";
+  const pending = reviewPending || batchReviewPending || submitting;
+
+  function toggleRequest(requestId: string): void {
+    setSelectedIds((current) =>
+      current.includes(requestId)
+        ? current.filter((id) => id !== requestId)
+        : [...current, requestId],
+    );
+  }
+
+  function openReview(
+    requests: JoinRequest[],
+    action: JoinRequestReviewAction,
+    batch: boolean,
+  ): void {
+    const blockedReason = batch
+      ? batchReviewBlockedReason
+      : reviewBlockedReason;
+    if (blockedReason || pending || requests.length === 0) return;
+    setDialog({ requests, action, batch });
+    setNote("");
+    setReviewErrors([]);
+    setReviewFailure("");
+    setReviewFeedback("");
+  }
+
+  async function submitReview(): Promise<void> {
+    if (!dialog || pending) return;
+    const blockedReason = dialog.batch
+      ? batchReviewBlockedReason
+      : reviewBlockedReason;
+    if (blockedReason) return;
+    const action = dialog.batch ? batchReviewAction : reviewAction;
+    if (!action) {
+      setReviewFailure(label(locale, "join_requests.actions_unavailable"));
+      return;
+    }
+    const values: ActionValues = dialog.batch
+      ? {
+          network_id: result.network_id,
+          reviews: JSON.stringify(
+            dialog.requests.map((request) => ({
+              request_id: request.request_id,
+              expected_revision: request.revision,
+              action: dialog.action,
+              ...(dialog.action === "approve" || !note
+                ? {}
+                : { note }),
+            })),
+          ),
+        }
+      : {
+          network_id: result.network_id,
+          request_id: dialog.requests[0].request_id,
+          expected_revision: String(dialog.requests[0].revision),
+          action: dialog.action,
+          ...(dialog.action === "approve" ? {} : { note }),
+        };
+    const validation = validateActionValues(action, values, locale);
+    if (validation.length > 0) {
+      setReviewErrors(validation);
+      return;
+    }
+
+    setSubmitting(true);
+    setReviewErrors([]);
+    setReviewFailure("");
+    try {
+      const submission = await onSubmit(action, values, () => {});
+      if (submission.outcome?.status === "rejected") {
+        setReviewFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome?.status === "join_requests_reviewed") {
+        onReviewed(submission.outcome.data);
+        setReviewFeedback(
+          tr(locale, "join_requests.review_succeeded", {
+            count: String(submission.outcome.data.reviews.length),
+          }),
+        );
+        setSelectedIds((current) =>
+          current.filter(
+            (id) =>
+              !submission.outcome?.status ||
+              submission.outcome.status !== "join_requests_reviewed" ||
+              !submission.outcome.data.reviews.some(
+                (review) => review.request_id === id,
+              ),
+          ),
+        );
+        setDialog(null);
+      } else if (submission.operation) {
+        setReviewFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setReviewFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setReviewFailure(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <section
-      className="join-request-list"
-      data-testid="join-request-list"
-      aria-label={label(locale, "join_requests.title")}
-    >
-      <div className="join-request-list-heading">
-        <div>
-          <span>{label(locale, "join_requests.title")}</span>
-          <strong>
-            {tr(locale, "join_requests.count", {
-              count: String(result.requests.length),
-            })}
-          </strong>
+    <>
+      <section
+        className="join-request-list"
+        data-testid="join-request-list"
+        aria-label={label(locale, "join_requests.title")}
+      >
+        <div className="join-request-list-heading">
+          <div>
+            <span>{label(locale, "join_requests.title")}</span>
+            <strong>
+              {tr(locale, "join_requests.count", {
+                count: String(result.requests.length),
+              })}
+            </strong>
+          </div>
+          <code>{result.network_id}</code>
         </div>
-        <code>{result.network_id}</code>
-      </div>
-      <p className="join-request-privacy">
-        {label(locale, "join_requests.privacy_boundary")}
-      </p>
-      {result.requests.length === 0 ? (
-        <p className="join-request-empty" data-testid="join-request-empty">
-          {label(locale, "join_requests.empty")}
+        <p className="join-request-privacy">
+          {label(locale, "join_requests.privacy_boundary")}
         </p>
-      ) : (
-        <div className="join-request-items">
-          {result.requests.map((request) => {
-            const visibility =
-              request.reason_visibility ?? "owners_and_administrators";
-            return (
-              <article
-                className="join-request-item"
-                data-testid="join-request-item"
-                key={request.request_id}
-              >
-                <header className="join-request-item-heading">
-                  <div>
-                    <span>{label(locale, "join_requests.applicant")}</span>
+        {reviewFeedback ? (
+          <p className="join-request-review-feedback" role="status">
+            <Check size={15} />
+            <span>{reviewFeedback}</span>
+          </p>
+        ) : null}
+        {reviewBlockedReason || batchReviewBlockedReason ? (
+          <p className="join-request-review-blocked">
+            {reviewBlockedReason || batchReviewBlockedReason}
+          </p>
+        ) : null}
+        {reviewableRequests.length > 1 &&
+        reviewAction &&
+        batchReviewAction ? (
+          <div
+            className="join-request-selection-bar"
+            data-testid="join-request-selection-bar"
+          >
+            <label className="join-request-select-all">
+              <input
+                type="checkbox"
+                checked={selectedRequests.length === reviewableRequests.length}
+                onChange={(event) =>
+                  setSelectedIds(
+                    event.target.checked
+                      ? reviewableRequests.map((request) => request.request_id)
+                      : [],
+                  )
+                }
+              />
+              <span>{label(locale, "join_requests.select_all")}</span>
+            </label>
+            <span className="join-request-selected-count">
+              {tr(locale, "join_requests.selected_count", {
+                count: String(selectedRequests.length),
+              })}
+            </span>
+            <div className="join-request-batch-actions">
+              {(["approve", "reject", "request_information"] as const).map(
+                (reviewActionValue) => (
+                  <button
+                    key={reviewActionValue}
+                    type="button"
+                    className="secondary-button join-request-action-button"
+                    disabled={
+                      pending ||
+                      Boolean(batchReviewBlockedReason) ||
+                      selectedRequests.length === 0
+                    }
+                    onClick={() =>
+                      openReview(selectedRequests, reviewActionValue, true)
+                    }
+                  >
+                    {label(
+                      locale,
+                      `join_requests.batch.${reviewActionValue}`,
+                    )}
+                  </button>
+                ),
+              )}
+            </div>
+          </div>
+        ) : null}
+        {result.requests.length === 0 ? (
+          <p className="join-request-empty" data-testid="join-request-empty">
+            {label(locale, "join_requests.empty")}
+          </p>
+        ) : (
+          <div className="join-request-items">
+            {result.requests.map((request) => {
+              const visibility =
+                request.reason_visibility ?? "owners_and_administrators";
+              const reviewable = joinRequestIsReviewable(request);
+              return (
+                <article
+                  className="join-request-item"
+                  data-testid="join-request-item"
+                  key={request.request_id}
+                >
+                  <header className="join-request-item-heading">
+                    <div>
+                      <span>{label(locale, "join_requests.applicant")}</span>
+                      <strong>
+                        {request.applicant.display_name ??
+                          request.applicant.node_id}
+                      </strong>
+                    </div>
+                    <div className="join-request-status-chips">
+                      <span>
+                        {label(locale, `join_request.state.${request.state}`)}
+                      </span>
+                      <span>
+                        {label(locale, "join_requests.revision")}:{" "}
+                        {request.revision}
+                      </span>
+                      {reviewable && reviewAction ? (
+                        <label className="join-request-row-select">
+                          <input
+                            type="checkbox"
+                            aria-label={tr(locale, "join_requests.select_request", {
+                              applicant:
+                                request.applicant.display_name ??
+                                request.applicant.node_id,
+                            })}
+                            checked={selectedIds.includes(request.request_id)}
+                            onChange={() => toggleRequest(request.request_id)}
+                          />
+                          <span>{label(locale, "join_requests.select")}</span>
+                        </label>
+                      ) : null}
+                    </div>
+                  </header>
+                  <dl className="join-request-applicant">
+                    <div>
+                      <dt>{label(locale, "join_requests.node_id")}</dt>
+                      <dd>
+                        <code>{request.applicant.node_id}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{label(locale, "join_requests.fingerprint")}</dt>
+                      <dd>
+                        <code>{request.applicant.public_key_fingerprint}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{label(locale, "join_requests.request_id")}</dt>
+                      <dd>
+                        <code>{request.request_id}</code>
+                      </dd>
+                    </div>
+                  </dl>
+                  <section className="join-request-reason">
+                    <h4>{label(locale, "join_requests.reason")}</h4>
+                    <blockquote>
+                      {request.reason ?? label(locale, "join_requests.reason_redacted")}
+                    </blockquote>
+                    <p>
+                      {label(locale, `join_requests.reason_visibility.${visibility}`)}
+                    </p>
+                  </section>
+                  {request.information_request ? (
+                    <p className="join-request-information">
+                      <strong>
+                        {label(locale, "join_requests.information_request")}
+                      </strong>{" "}
+                      {request.information_request}
+                    </p>
+                  ) : null}
+                  <JoinRequestRisk
+                    request={request}
+                    locale={locale}
+                    loadedAtUnixMs={loadedAtUnixMs}
+                  />
+                  {reviewable && reviewAction ? (
+                    <div
+                      className="join-request-row-actions"
+                      aria-label={label(locale, "join_requests.review_actions")}
+                    >
+                      {(["approve", "reject", "request_information"] as const).map(
+                        (reviewActionValue) => (
+                          <button
+                            key={reviewActionValue}
+                            type="button"
+                            className="secondary-button join-request-action-button"
+                            disabled={pending || Boolean(reviewBlockedReason)}
+                            onClick={() =>
+                              openReview([request], reviewActionValue, false)
+                            }
+                          >
+                            {label(
+                              locale,
+                              `choice.join_request_review.${reviewActionValue}`,
+                            )}
+                          </button>
+                        ),
+                      )}
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+      <Dialog.Root
+        open={Boolean(dialog)}
+        onOpenChange={(open) => {
+          if (!open && !submitting) {
+            setDialog(null);
+            setReviewErrors([]);
+            setReviewFailure("");
+          }
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content join-request-review-dialog">
+            <Dialog.Title>
+              {dialog?.batch
+                ? tr(locale, "join_requests.batch_dialog_title", {
+                    count: String(dialog.requests.length),
+                  })
+                : label(locale, "join_requests.review_dialog_title")}
+            </Dialog.Title>
+            <Dialog.Description>
+              {label(
+                locale,
+                dialog?.batch
+                  ? "confirm.batch_review_join_requests.consequence"
+                  : "confirm.review_join_request.consequence",
+              )}
+            </Dialog.Description>
+            <div className="join-request-review-targets">
+              <span>{label(locale, "join_requests.review_targets")}</span>
+              <ul>
+                {dialog?.requests.map((request) => (
+                  <li key={request.request_id}>
                     <strong>
                       {request.applicant.display_name ??
                         request.applicant.node_id}
                     </strong>
-                  </div>
-                  <div className="join-request-status-chips">
                     <span>
-                      {label(locale, `join_request.state.${request.state}`)}
+                      {label(locale, `choice.join_request_review.${dialog.action}`)}
+                      {" · "}
+                      {label(locale, "join_requests.revision")} {request.revision}
                     </span>
-                    <span>
-                      {label(locale, "join_requests.revision")}:{" "}
-                      {request.revision}
-                    </span>
-                  </div>
-                </header>
-                <dl className="join-request-applicant">
-                  <div>
-                    <dt>{label(locale, "join_requests.node_id")}</dt>
-                    <dd>
-                      <code>{request.applicant.node_id}</code>
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{label(locale, "join_requests.fingerprint")}</dt>
-                    <dd>
-                      <code>{request.applicant.public_key_fingerprint}</code>
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{label(locale, "join_requests.request_id")}</dt>
-                    <dd>
-                      <code>{request.request_id}</code>
-                    </dd>
-                  </div>
-                </dl>
-                <section className="join-request-reason">
-                  <h4>{label(locale, "join_requests.reason")}</h4>
-                  <blockquote>
-                    {request.reason ?? label(locale, "join_requests.reason_redacted")}
-                  </blockquote>
-                  <p>
-                    {label(locale, `join_requests.reason_visibility.${visibility}`)}
-                  </p>
-                </section>
-                {request.information_request ? (
-                  <p className="join-request-information">
-                    <strong>
-                      {label(locale, "join_requests.information_request")}
-                    </strong>{" "}
-                    {request.information_request}
-                  </p>
-                ) : null}
-                <JoinRequestRisk
-                  request={request}
-                  locale={locale}
-                  loadedAtUnixMs={loadedAtUnixMs}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <p className="join-request-revision-notice">
+              {label(locale, "join_requests.revision_pinned")}
+            </p>
+            {dialog?.action !== "approve" ? (
+              <label className="form-field" htmlFor="join-request-review-note">
+                <span id="join-request-review-note-label">
+                  {label(locale, "field.join_request_note")}
+                </span>
+                <textarea
+                  id="join-request-review-note"
+                  aria-labelledby="join-request-review-note-label"
+                  aria-describedby="join-request-review-note-hint"
+                  value={note}
+                  rows={4}
+                  maxLength={500}
+                  required={dialog?.action === "request_information"}
+                  placeholder={label(locale, "placeholder.join_request_note")}
+                  onChange={(event) => setNote(event.target.value)}
                 />
-              </article>
-            );
-          })}
-        </div>
-      )}
-    </section>
+                <small id="join-request-review-note-hint">
+                  {label(
+                    locale,
+                    dialog?.action === "request_information"
+                      ? "join_requests.note_required"
+                      : "join_requests.note_optional",
+                  )}
+                </small>
+              </label>
+            ) : null}
+            {reviewErrors.length > 0 ? (
+              <ul className="form-errors" role="alert">
+                {reviewErrors.map((error) => (
+                  <li key={error}>{error}</li>
+                ))}
+              </ul>
+            ) : null}
+            {reviewFailure ? (
+              <p className="form-error" role="alert">
+                {reviewFailure}
+              </p>
+            ) : null}
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={submitting}
+                >
+                  {label(locale, "common.cancel")}
+                </button>
+              </Dialog.Close>
+              <button
+                className={
+                  dialog?.action === "reject"
+                    ? "danger-button"
+                    : "primary-button"
+                }
+                type="button"
+                disabled={pending || Boolean(reviewBlockedReason || batchReviewBlockedReason)}
+                onClick={() => void submitReview()}
+              >
+                {submitting
+                  ? label(locale, "common.operation_in_progress")
+                  : label(locale, "join_requests.confirm_review")}
+              </button>
+            </div>
+            <Dialog.Close asChild>
+              <button
+                className="icon-button dialog-close"
+                type="button"
+                aria-label={label(locale, "common.close")}
+              >
+                <X size={17} />
+              </button>
+            </Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </>
   );
 }
 
@@ -1197,6 +1570,9 @@ function ActionCard({
   requestedValues,
   joinAction,
   joinPending,
+  activePendingAction,
+  reviewJoinRequestAction,
+  batchReviewJoinRequestsAction,
   onRequestedActionOpened,
   onSubmit,
 }: {
@@ -1210,6 +1586,9 @@ function ActionCard({
   requestedValues?: ActionValues;
   joinAction?: NodeUiAction;
   joinPending: boolean;
+  activePendingAction: string | null;
+  reviewJoinRequestAction?: NodeUiAction;
+  batchReviewJoinRequestsAction?: NodeUiAction;
   onRequestedActionOpened(): void;
   onSubmit(
     action: NodeUiAction,
@@ -1262,6 +1641,20 @@ function ActionCard({
           locale,
         )
       : "";
+  function joinRequestReviewBlockedReason(
+    reviewAction?: NodeUiAction,
+  ): string {
+    if (pageBlocked) return label(locale, pageBlocked.titleKey);
+    if (!reviewAction)
+      return label(locale, "join_requests.actions_unavailable");
+    const reason = executionBlockReason(reviewAction, snapshot, selectedNetwork);
+    return reason ? blockReasonText(reason, locale) : "";
+  }
+  const reviewBlockedReason =
+    joinRequestReviewBlockedReason(reviewJoinRequestAction);
+  const batchReviewBlockedReason = joinRequestReviewBlockedReason(
+    batchReviewJoinRequestsAction,
+  );
   const [previousRequested, setPreviousRequested] = useState(requested);
   const previousSelectedNetwork = useRef(selectedNetwork);
 
@@ -1400,6 +1793,31 @@ function ActionCard({
     }
   }
 
+  function handleJoinRequestsReviewed(ack: NodeJoinRequestReviewAck): void {
+    setJoinRequests((current) => {
+      if (!current) return current;
+      const reviewed = new Map(
+        ack.reviews.map((review) => [review.request_id, review]),
+      );
+      return {
+        ...current,
+        result: {
+          ...current.result,
+          requests: current.result.requests.map((request) => {
+            const result = reviewed.get(request.request_id);
+            return result
+              ? {
+                  ...request,
+                  state: result.state,
+                  revision: result.revision,
+                }
+              : request;
+          }),
+        },
+      };
+    });
+  }
+
   function handleSubmit(event: FormEvent): void {
     event.preventDefault();
     if (blocked || pending) return;
@@ -1448,9 +1866,17 @@ function ActionCard({
       ) : null}
       {joinRequests ? (
         <JoinRequestListCard
+          key={`${joinRequests.result.network_id}:${joinRequests.loadedAtUnixMs}`}
           result={joinRequests.result}
           locale={locale}
           loadedAtUnixMs={joinRequests.loadedAtUnixMs}
+          reviewAction={reviewJoinRequestAction}
+          batchReviewAction={batchReviewJoinRequestsAction}
+          reviewBlockedReason={reviewBlockedReason}
+          batchReviewBlockedReason={batchReviewBlockedReason}
+          activePendingAction={activePendingAction}
+          onSubmit={onSubmit}
+          onReviewed={handleJoinRequestsReviewed}
         />
       ) : null}
       {open ? (
@@ -1587,7 +2013,17 @@ function ActionCard({
 
 export function ActionPanel(props: ActionPanelProps) {
   const { actions, locale, pendingAction, onSubmit } = props;
-  if (actions.length === 0) {
+  const hasIntegratedJoinReview = actions.some(
+    (action) => action.id === "list_join_requests",
+  );
+  const renderedActions = hasIntegratedJoinReview
+    ? actions.filter(
+        (action) =>
+          action.id !== "review_join_request" &&
+          action.id !== "batch_review_join_requests",
+      )
+    : actions;
+  if (renderedActions.length === 0) {
     return (
       <aside
         className="actions-panel"
@@ -1620,7 +2056,7 @@ export function ActionPanel(props: ActionPanelProps) {
         />
       ) : null}
       <div className="action-list">
-        {actions.map((action) => (
+        {renderedActions.map((action) => (
           <ActionCard
             key={action.id}
             action={action}
@@ -1639,6 +2075,13 @@ export function ActionPanel(props: ActionPanelProps) {
               (candidate) => candidate.id === "join_network",
             )}
             joinPending={pendingAction === "join_network"}
+            activePendingAction={pendingAction}
+            reviewJoinRequestAction={actions.find(
+              (candidate) => candidate.id === "review_join_request",
+            )}
+            batchReviewJoinRequestsAction={actions.find(
+              (candidate) => candidate.id === "batch_review_join_requests",
+            )}
             onRequestedActionOpened={props.onRequestedActionOpened}
             onSubmit={onSubmit}
           />

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinRequestState, MembershipRole,
-    NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
-    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
-    OperationState,
+    CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinRequestReviewAction,
+    JoinRequestState, MembershipRole, NetworkJoinMode, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
+    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -52,9 +52,10 @@ use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
-    NodeJoinRequestListResult, NodeNetworkCreationNextStep, NodeNetworkJoinPreview,
-    NodeNetworkStatus, NodeOperationSnapshot, NodePreviewConfigurationCommand, NodePrimaryStatus,
-    NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
+    NodeJoinRequestListResult, NodeJoinRequestReviewAck, NodeJoinRequestReviewItem,
+    NodeNetworkCreationNextStep, NodeNetworkJoinPreview, NodeNetworkStatus, NodeOperationSnapshot,
+    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProblem,
+    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
     NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError,
 };
@@ -249,6 +250,7 @@ struct GpuiShell {
     recent_network_profile_updated: Option<NetworkProfileApplyResult>,
     recent_network_join_preview: Option<NodeNetworkJoinPreview>,
     recent_join_requests: Option<NodeJoinRequestListResult>,
+    join_request_selection: BTreeSet<String>,
     network_join_terms_confirmed: bool,
     error: Option<String>,
     notice: Option<String>,
@@ -314,6 +316,7 @@ impl GpuiShell {
             recent_network_profile_updated: None,
             recent_network_join_preview: None,
             recent_join_requests: None,
+            join_request_selection: BTreeSet::new(),
             network_join_terms_confirmed: false,
             error: None,
             notice: None,
@@ -793,6 +796,22 @@ impl GpuiShell {
             && self.configuration_action_blocked(action_id).is_none()
     }
 
+    fn join_request_action_available(&self, action_id: &str) -> bool {
+        let Some(action) = self.manifest.as_ref().and_then(|manifest| {
+            manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .find(|action| action.id == action_id)
+        }) else {
+            return false;
+        };
+        self.pending_commands == 0
+            && action.backend_status == NodeUiBackendStatus::Implemented
+            && action_block_reason(action, &self.snapshot, self.selected_network.as_deref())
+                .is_none()
+    }
+
     fn selected_page_has_configuration_actions(&self) -> bool {
         self.manifest
             .as_ref()
@@ -1215,9 +1234,15 @@ impl GpuiShell {
                     "gpui.join_requests_loaded",
                     &[("count", &result.requests.len().to_string())],
                 ));
+                self.join_request_selection.retain(|request_id| {
+                    result.requests.iter().any(|request| {
+                        request.request_id.as_str() == request_id && !request.state.is_terminal()
+                    })
+                });
                 self.recent_join_requests = Some(result);
             }
             NodeCommandOutcome::JoinRequestsReviewed(result) => {
+                self.apply_join_request_review_ack(&result);
                 self.notice = Some(tr(
                     self.locale,
                     "gpui.join_requests_reviewed",
@@ -1653,6 +1678,109 @@ impl GpuiShell {
         );
         self.sync_text_inputs(cx);
         self.open_action("networks", "preview_join_network", cx);
+    }
+
+    fn prepare_join_request_review(
+        &mut self,
+        network_id: String,
+        request_id: String,
+        expected_revision: u64,
+        action: JoinRequestReviewAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_field_value("review_join_request", "network_id", network_id);
+        self.set_field_value("review_join_request", "request_id", request_id);
+        self.set_field_value(
+            "review_join_request",
+            "expected_revision",
+            expected_revision.to_string(),
+        );
+        self.set_field_value(
+            "review_join_request",
+            "action",
+            join_request_review_action_value(action),
+        );
+        self.set_field_value("review_join_request", "note", "");
+        self.sync_text_inputs(cx);
+        self.open_action("networks", "review_join_request", cx);
+    }
+
+    fn prepare_batch_join_request_review(
+        &mut self,
+        network_id: String,
+        requests: &[(String, u64)],
+        action: JoinRequestReviewAction,
+        cx: &mut Context<Self>,
+    ) {
+        let reviews = requests
+            .iter()
+            .map(
+                |(request_id, expected_revision)| NodeJoinRequestReviewItem {
+                    request_id: request_id.clone(),
+                    expected_revision: *expected_revision,
+                    action,
+                    note: None,
+                },
+            )
+            .collect::<Vec<_>>();
+        let reviews = serde_json::to_string(&reviews).unwrap_or_else(|_| "[]".into());
+        self.set_field_value("batch_review_join_requests", "network_id", network_id);
+        self.set_field_value("batch_review_join_requests", "reviews", reviews);
+        self.set_field_value("batch_review_join_requests", "note", "");
+        self.sync_text_inputs(cx);
+        self.open_action("networks", "batch_review_join_requests", cx);
+    }
+
+    fn toggle_join_request_selection(&mut self, request_id: String, cx: &mut Context<Self>) {
+        if !self.join_request_selection.insert(request_id.clone()) {
+            self.join_request_selection.remove(&request_id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_all_join_request_selection(
+        &mut self,
+        request_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let all_selected = !request_ids.is_empty()
+            && request_ids
+                .iter()
+                .all(|request_id| self.join_request_selection.contains(request_id));
+        if all_selected {
+            for request_id in request_ids {
+                self.join_request_selection.remove(request_id);
+            }
+        } else {
+            self.join_request_selection
+                .extend(request_ids.iter().cloned());
+        }
+        cx.notify();
+    }
+
+    fn apply_join_request_review_ack(&mut self, ack: &NodeJoinRequestReviewAck) {
+        if let Some(result) = self
+            .recent_join_requests
+            .as_mut()
+            .filter(|result| result.network_id == ack.network_id)
+        {
+            let now = unix_time_ms();
+            for request in &mut result.requests {
+                let Some(review) = ack
+                    .reviews
+                    .iter()
+                    .find(|review| review.request_id == request.request_id.as_str())
+                else {
+                    continue;
+                };
+                request.state = review.state;
+                request.revision = review.revision;
+                request.updated_at_unix_ms = now;
+            }
+        }
+        for review in &ack.reviews {
+            self.join_request_selection.remove(&review.request_id);
+        }
     }
 
     fn set_join_preview_fields(&mut self, preview: &NodeNetworkJoinPreview) {
@@ -2449,6 +2577,7 @@ impl GpuiShell {
     fn select_network_context(&mut self, network_name: String, cx: &mut Context<Self>) {
         self.selected_network = Some(network_name.clone());
         self.recent_join_requests = None;
+        self.join_request_selection.clear();
         if let Some(manifest) = &self.manifest {
             let network_fields = manifest
                 .pages
@@ -5791,6 +5920,11 @@ impl GpuiShell {
     fn action_card(&self, action: NodeUiAction, cx: &mut Context<Self>) -> gpui::AnyElement {
         let action_id = action.id.clone();
         let toggle_action_id = action.id.clone();
+        let guided_join_request_review = self.recent_join_requests.is_some()
+            && matches!(
+                action.id.as_str(),
+                "review_join_request" | "batch_review_join_requests"
+            );
         let block_reason =
             action_block_reason(&action, &self.snapshot, self.selected_network.as_deref());
         let blocked = block_reason.is_some();
@@ -5811,6 +5945,21 @@ impl GpuiShell {
         let fields = action
             .fields
             .iter()
+            .filter(|field| {
+                if !guided_join_request_review {
+                    return true;
+                }
+                match action.id.as_str() {
+                    "review_join_request" => !matches!(
+                        field.id.as_str(),
+                        "network_id" | "request_id" | "expected_revision" | "action"
+                    ),
+                    "batch_review_join_requests" => {
+                        !matches!(field.id.as_str(), "network_id" | "reviews")
+                    }
+                    _ => true,
+                }
+            })
             .map(|field| self.field_editor(&action, field, cx))
             .collect::<Vec<_>>();
         let join_preview_card = (action.id == "join_network")
@@ -5820,7 +5969,10 @@ impl GpuiShell {
         let join_requests_card = (action.id == "list_join_requests")
             .then_some(self.recent_join_requests.as_ref())
             .flatten()
-            .map(|result| self.join_requests_card(result));
+            .cloned()
+            .map(|result| self.join_requests_card(&result, cx));
+        let join_request_review_summary =
+            guided_join_request_review.then(|| self.join_request_review_form_summary(&action.id));
         let status = match action.backend_status {
             NodeUiBackendStatus::Implemented => t(self.locale, "status.backend.implemented"),
             NodeUiBackendStatus::Unavailable => t(self.locale, "status.backend.unavailable"),
@@ -5889,6 +6041,9 @@ impl GpuiShell {
             );
             if let Some(requests_card) = join_requests_card {
                 body = body.child(requests_card);
+            }
+            if let Some(review_summary) = join_request_review_summary {
+                body = body.child(review_summary);
             }
             if let Some(preview_card) = join_preview_card {
                 // A discovery-backed join must always pass through the
@@ -6089,17 +6244,105 @@ impl GpuiShell {
             .into_any_element()
     }
 
-    fn join_requests_card(&self, result: &NodeJoinRequestListResult) -> gpui::AnyElement {
+    fn join_request_review_form_summary(&self, action_id: &str) -> gpui::AnyElement {
+        let detail = if action_id == "batch_review_join_requests" {
+            let count = serde_json::from_str::<Vec<NodeJoinRequestReviewItem>>(
+                &self.field_value(action_id, "reviews"),
+            )
+            .map(|reviews| reviews.len())
+            .unwrap_or(0);
+            tr(
+                self.locale,
+                "join_requests.selected_count",
+                &[("count", &count.to_string())],
+            )
+        } else {
+            let request_id = self.field_value(action_id, "request_id");
+            let revision = self.field_value(action_id, "expected_revision");
+            let action = match self.field_value(action_id, "action").as_str() {
+                "approve" => t(self.locale, "choice.join_request_review.approve"),
+                "reject" => t(self.locale, "choice.join_request_review.reject"),
+                "request_information" => t(
+                    self.locale,
+                    "choice.join_request_review.request_information",
+                ),
+                _ => t(self.locale, "join_requests.actions_unavailable"),
+            };
+            format!(
+                "{}: {request_id} · {}: {revision} · {}",
+                t(self.locale, "join_requests.request_id"),
+                t(self.locale, "join_requests.revision"),
+                action
+            )
+        };
+        div()
+            .debug_selector(|| "visual-join-request-review-summary".into())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "join_requests.review_targets").to_string()),
+            )
+            .child(div().text_sm().text_color(rgba(COLOR_TEXT)).child(detail))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "join_requests.revision_pinned").to_string()),
+            )
+            .into_any_element()
+    }
+
+    fn join_requests_card(
+        &self,
+        result: &NodeJoinRequestListResult,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let count = tr(
             self.locale,
             "join_requests.count",
             &[("count", &result.requests.len().to_string())],
         );
+        let review_action_available = self.join_request_action_available("review_join_request");
+        let batch_action_available =
+            self.join_request_action_available("batch_review_join_requests");
+        let reviewable_ids = result
+            .requests
+            .iter()
+            .filter(|request| !request.state.is_terminal())
+            .map(|request| request.request_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let selected_requests = result
+            .requests
+            .iter()
+            .filter(|request| {
+                !request.state.is_terminal()
+                    && self
+                        .join_request_selection
+                        .contains(request.request_id.as_str())
+            })
+            .map(|request| (request.request_id.as_str().to_string(), request.revision))
+            .collect::<Vec<_>>();
+        let selected_count = selected_requests.len();
+        let all_selected = !reviewable_ids.is_empty() && reviewable_ids.len() == selected_count;
         let requests = result
             .requests
             .iter()
             .enumerate()
             .map(|(index, request)| {
+                let network_id = result.network_id.clone();
+                let request_id = request.request_id.as_str().to_string();
+                let request_revision = request.revision;
+                let reviewable = !request.state.is_terminal();
+                let selected = self.join_request_selection.contains(&request_id);
                 let applicant = request
                     .applicant
                     .display_name
@@ -6166,6 +6409,69 @@ impl GpuiShell {
                 let expiring = request.expires_at_unix_ms
                     <= unix_time_ms().saturating_add(24 * 60 * 60 * 1000);
                 let information_request = request.information_request.clone();
+                let selection_label = tr(
+                    self.locale,
+                    "join_requests.select_request",
+                    &[("applicant", &applicant)],
+                );
+                let review_actions = div()
+                    .debug_selector(|| "visual-join-request-review-actions".into())
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(
+                        [
+                            (
+                                JoinRequestReviewAction::Approve,
+                                "approve",
+                                ButtonVariant::Primary,
+                                "choice.join_request_review.approve",
+                            ),
+                            (
+                                JoinRequestReviewAction::Reject,
+                                "reject",
+                                ButtonVariant::Danger,
+                                "choice.join_request_review.reject",
+                            ),
+                            (
+                                JoinRequestReviewAction::RequestInformation,
+                                "request-information",
+                                ButtonVariant::Secondary,
+                                "choice.join_request_review.request_information",
+                            ),
+                        ]
+                        .into_iter()
+                        .map(
+                            |(review_action, action_key, variant, label_key)| {
+                                let network_id = network_id.clone();
+                                let request_id = request_id.clone();
+                                button(
+                                    SharedString::from(format!(
+                                        "join-request-review-{index}-{action_key}"
+                                    )),
+                                    t(self.locale, label_key),
+                                    variant,
+                                    !review_action_available,
+                                )
+                                .debug_selector(move || {
+                                    format!("visual-join-request-review-{index}-{action_key}")
+                                        .into()
+                                })
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    if shell.join_request_action_available("review_join_request") {
+                                        shell.prepare_join_request_review(
+                                            network_id.clone(),
+                                            request_id.clone(),
+                                            request_revision,
+                                            review_action,
+                                            cx,
+                                        );
+                                    }
+                                }))
+                                .into_any_element()
+                            },
+                        ),
+                    );
 
                 div()
                     .id(SharedString::from(format!(
@@ -6333,6 +6639,44 @@ impl GpuiShell {
                                 ))
                             }),
                     )
+                    .when(reviewable, |item| {
+                        item.child(
+                            div()
+                                .debug_selector(|| "visual-join-request-actions".into())
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .border_t_1()
+                                .border_color(rgba(COLOR_BORDER))
+                                .pt_3()
+                                .child(
+                                    checkbox_control(
+                                        SharedString::from(format!("join-request-select-{index}")),
+                                        selection_label,
+                                        selected,
+                                        !review_action_available,
+                                    )
+                                    .debug_selector(move || {
+                                        format!("visual-join-request-select-{index}").into()
+                                    })
+                                    .on_click(cx.listener(
+                                        move |shell, _, _, cx| {
+                                            if shell.join_request_action_available(
+                                                "review_join_request",
+                                            ) {
+                                                shell.toggle_join_request_selection(
+                                                    request_id.clone(),
+                                                    cx,
+                                                );
+                                            }
+                                        },
+                                    )),
+                                )
+                                .child(review_actions),
+                        )
+                    })
             })
             .collect::<Vec<_>>();
 
@@ -6391,6 +6735,119 @@ impl GpuiShell {
                     .text_color(rgba(COLOR_MUTED))
                     .child(t(self.locale, "join_requests.privacy_boundary").to_string()),
             );
+
+        if !reviewable_ids.is_empty() {
+            let select_all_ids = reviewable_ids.clone();
+            let selected_count_label = tr(
+                self.locale,
+                "join_requests.selected_count",
+                &[("count", &selected_count.to_string())],
+            );
+            let batch_controls = div()
+                .debug_selector(|| "visual-join-request-batch-actions".into())
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .children(
+                    [
+                        (
+                            JoinRequestReviewAction::Approve,
+                            "approve",
+                            ButtonVariant::Primary,
+                            "join_requests.batch.approve",
+                        ),
+                        (
+                            JoinRequestReviewAction::Reject,
+                            "reject",
+                            ButtonVariant::Danger,
+                            "join_requests.batch.reject",
+                        ),
+                        (
+                            JoinRequestReviewAction::RequestInformation,
+                            "request-information",
+                            ButtonVariant::Secondary,
+                            "join_requests.batch.request_information",
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(review_action, action_key, variant, label_key)| {
+                        let network_id = result.network_id.clone();
+                        let requests = selected_requests.clone();
+                        button(
+                            SharedString::from(format!("join-request-batch-{action_key}")),
+                            t(self.locale, label_key),
+                            variant,
+                            selected_count == 0 || !batch_action_available,
+                        )
+                        .debug_selector(move || {
+                            format!("visual-join-request-batch-{action_key}").into()
+                        })
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            if !requests.is_empty()
+                                && shell.join_request_action_available("batch_review_join_requests")
+                            {
+                                shell.prepare_batch_join_request_review(
+                                    network_id.clone(),
+                                    &requests,
+                                    review_action,
+                                    cx,
+                                );
+                            }
+                        }))
+                        .into_any_element()
+                    }),
+                );
+            card = card.child(
+                div()
+                    .debug_selector(|| "visual-join-request-selection-bar".into())
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                checkbox_control(
+                                    SharedString::from("join-request-select-all"),
+                                    t(self.locale, "join_requests.select_all"),
+                                    all_selected,
+                                    !review_action_available,
+                                )
+                                .debug_selector(|| "visual-join-request-select-all".into())
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        if shell
+                                            .join_request_action_available("review_join_request")
+                                        {
+                                            shell.toggle_all_join_request_selection(
+                                                &select_all_ids,
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                )),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(selected_count_label),
+                            ),
+                    )
+                    .child(batch_controls),
+            );
+        }
 
         if requests.is_empty() {
             card = card.child(
@@ -7839,6 +8296,14 @@ fn join_request_state_key(state: JoinRequestState) -> &'static str {
     }
 }
 
+fn join_request_review_action_value(action: JoinRequestReviewAction) -> &'static str {
+    match action {
+        JoinRequestReviewAction::Approve => "approve",
+        JoinRequestReviewAction::Reject => "reject",
+        JoinRequestReviewAction::RequestInformation => "request_information",
+    }
+}
+
 fn join_request_role_key(role: MembershipRole) -> &'static str {
     match role {
         MembershipRole::Owner => "join_request.role.owner",
@@ -8879,6 +9344,16 @@ mod tests {
             "visual-join-request-applicant",
             "visual-join-request-reason",
             "visual-join-request-risk",
+            "visual-join-request-actions",
+            "visual-join-request-select-0",
+            "visual-join-request-review-0-approve",
+            "visual-join-request-review-0-reject",
+            "visual-join-request-review-0-request-information",
+            "visual-join-request-selection-bar",
+            "visual-join-request-select-all",
+            "visual-join-request-batch-approve",
+            "visual-join-request-batch-reject",
+            "visual-join-request-batch-request-information",
         ] {
             assert!(
                 visible.debug_bounds(selector).is_some(),
@@ -8908,6 +9383,83 @@ mod tests {
         assert!(visible.debug_bounds("visual-join-requests-list").is_some());
         assert!(visible.debug_bounds("visual-join-requests-empty").is_some());
         assert!(visible.debug_bounds("visual-join-request-first").is_none());
+    }
+
+    #[gpui::test]
+    fn join_request_review_actions_pin_revisions_and_apply_review_results(cx: &mut TestAppContext) {
+        let fixture = join_requests_fixture(false);
+        let request = fixture.requests[0].clone();
+        let request_id = request.request_id.as_str().to_string();
+        let network_id = fixture.network_id.clone();
+        let revision = request.revision;
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.recent_join_requests = Some(fixture);
+                shell.join_request_selection.insert(request_id.clone());
+
+                shell.prepare_join_request_review(
+                    network_id.clone(),
+                    request_id.clone(),
+                    revision,
+                    JoinRequestReviewAction::RequestInformation,
+                    cx,
+                );
+                assert_eq!(
+                    shell.field_value("review_join_request", "network_id"),
+                    network_id
+                );
+                assert_eq!(
+                    shell.field_value("review_join_request", "request_id"),
+                    request_id
+                );
+                assert_eq!(
+                    shell.field_value("review_join_request", "expected_revision"),
+                    revision.to_string()
+                );
+                assert_eq!(
+                    shell.field_value("review_join_request", "action"),
+                    "request_information"
+                );
+                assert_eq!(shell.field_value("review_join_request", "note"), "");
+                assert!(shell.expanded_actions.contains_key("review_join_request"));
+
+                shell.prepare_batch_join_request_review(
+                    network_id.clone(),
+                    &[(request_id.clone(), revision)],
+                    JoinRequestReviewAction::Approve,
+                    cx,
+                );
+                let reviews = serde_json::from_str::<Vec<NodeJoinRequestReviewItem>>(
+                    &shell.field_value("batch_review_join_requests", "reviews"),
+                )
+                .expect("parse internally generated batch review");
+                assert_eq!(reviews.len(), 1);
+                assert_eq!(reviews[0].request_id, request_id);
+                assert_eq!(reviews[0].expected_revision, revision);
+                assert_eq!(reviews[0].action, JoinRequestReviewAction::Approve);
+                assert_eq!(reviews[0].note, None);
+                assert!(shell
+                    .expanded_actions
+                    .contains_key("batch_review_join_requests"));
+
+                shell.apply_join_request_review_ack(&NodeJoinRequestReviewAck {
+                    network_id,
+                    reviews: vec![crate::node::NodeJoinRequestReviewOutcome {
+                        request_id: request_id.clone(),
+                        state: JoinRequestState::Approved,
+                        revision: revision + 1,
+                    }],
+                });
+                let updated = &shell.recent_join_requests.as_ref().unwrap().requests[0];
+                assert_eq!(updated.state, JoinRequestState::Approved);
+                assert_eq!(updated.revision, revision + 1);
+                assert!(!shell.join_request_selection.contains(&request_id));
+            })
+            .expect("exercise guided join request review actions");
     }
 
     #[gpui::test]

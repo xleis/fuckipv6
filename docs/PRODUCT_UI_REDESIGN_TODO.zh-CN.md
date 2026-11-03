@@ -1131,7 +1131,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 - [ ] 提供申请理由字段、可见范围说明和长度限制；
 - [x] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
-- [ ] 支持批准、拒绝、要求补充信息和批量审批；
+- [x] 支持批准、拒绝、要求补充信息和批量审批；
 - [ ] 审批前显示将授予的成员权限和 Exit/File 影响；
 - [ ] 并发审批只能产生一个最终成员状态；
 - [ ] 申请过期、撤回、管理员撤权时有一致状态；
@@ -1163,9 +1163,26 @@ WebUI 新增 `shows applicant details, reason visibility and approval risks` 与
 `renders an explicit empty review list` 测试，GPUI 新增两条 visual-selector 回归测试；
 同时修复 GPUI 六个加入申请动作的中文标签映射。
 
-尚未完成完整审批产品表面：审批前对话框尚未复用该风险摘要；WebUI 批量审批仍使用 JSON
-输入而非选择式工作流；并发冲突的原地恢复、申请理由保留策略专属 UI 以及统一活动/通知视图
-仍需实现。因此本项保持进行中，不能因列表与命令已可达而标记完成。
+本轮完成审批操作表面：WebUI 与 GPUI 为 `pending` / `needs_information` 申请提供批准、
+拒绝和要求补充信息按钮；WebUI 支持逐行复选、全选及批量批准/拒绝/要求补充信息，GPUI 同步
+提供复选、全选和批量操作。确认对话框或引导卡片固定展示本次 request ID、revision 与动作，
+成功响应原地更新列表中的状态和 revision 并清除对应选择；revision 冲突等拒绝结果显示在
+操作表面内，可刷新后重试。批准不发送说明，拒绝可附可选说明，要求补充信息必须填写说明；
+批量说明只复制到拒绝/要求补充信息的条目，不会污染批准记录。WebUI 在集成审批列表可用时
+隐藏原始 `review_join_request` / `batch_review_join_requests` 表单，GPUI 引导卡片隐藏原始
+request ID、revision、动作和 reviews 字段，避免用户绕过固定目标与 revision。回归测试包括
+WebUI `reviews one request with the pinned revision and inline approval controls`、
+`requires a note before requesting more information`、`batch approves selected requests and
+updates their pinned revisions`，GPUI
+`join_request_review_actions_pin_revisions_and_apply_review_results`，以及批量说明仅作用于
+非批准动作的 `batch_join_request_note_applies_to_non_approval_actions_only`。验证通过：
+`cargo test -p fuckipv6-client --all-features --lib gpui::view`（71 passed）、
+`cargo test -p fuckipv6-common i18n`（9 passed）、WebUI 9 个测试文件 113/113、
+`npm run typecheck`、`npm run lint`、`npm run build`、
+`node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
+`cargo fmt --all -- --check` 和 `git diff --check`；生成的 `app.js` / `app.css` 已同步刷新。
+构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。W8-06 其余项仍需继续完成，
+因此章节状态保持进行中。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

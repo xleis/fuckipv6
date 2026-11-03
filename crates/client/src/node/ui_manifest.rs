@@ -1108,6 +1108,13 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                                 true,
                                 NodeUiValidation::JoinRequestReviews,
                             ),
+                            field(
+                                "note",
+                                "field.join_request_note",
+                                NodeUiInputKind::JoinRequestNote,
+                                false,
+                                NodeUiValidation::JoinRequestNote,
+                            ),
                         ],
                         Some(confirmation(
                             NodeCommandKind::BatchReviewJoinRequests,

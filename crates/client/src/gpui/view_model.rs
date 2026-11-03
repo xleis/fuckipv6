@@ -1305,12 +1305,21 @@ pub fn build_command(
             ))
         }
         Ok(ActionBinding::BatchReviewJoinRequests) => {
-            let reviews = serde_json::from_str::<Vec<NodeJoinRequestReviewItem>>(&field("reviews"))
-                .map_err(|_| CommandBuildError::InvalidField {
-                    action_id: action.id.clone(),
-                    field_id: "reviews".into(),
-                    value: "[invalid review batch]".into(),
-                })?;
+            let mut reviews = serde_json::from_str::<Vec<NodeJoinRequestReviewItem>>(&field(
+                "reviews",
+            ))
+            .map_err(|_| CommandBuildError::InvalidField {
+                action_id: action.id.clone(),
+                field_id: "reviews".into(),
+                value: "[invalid review batch]".into(),
+            })?;
+            if let Some(note) = optional_non_empty(field("note")) {
+                for review in &mut reviews {
+                    if review.action != JoinRequestReviewAction::Approve {
+                        review.note = Some(note.clone());
+                    }
+                }
+            }
             Ok(NodeCommand::BatchReviewJoinRequests(
                 NodeBatchReviewJoinRequestsCommand {
                     network_id: field("network_id"),
@@ -1517,7 +1526,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "action",
             "note",
         ]),
-        "batch_review_join_requests" => HashSet::from(["network_id", "reviews"]),
+        "batch_review_join_requests" => HashSet::from(["network_id", "reviews", "note"]),
         "withdraw_join_request" => HashSet::from(["network_id", "request_id"]),
         "resubmit_join_request" => {
             HashSet::from(["network_id", "request_id", "expected_revision", "reason"])
@@ -4839,6 +4848,62 @@ mod tests {
             build_command(action, &missing_terms),
             Err(CommandBuildError::MissingField { field_id, .. }) if field_id == "terms_hash"
         ));
+    }
+
+    #[test]
+    fn batch_join_request_note_applies_to_non_approval_actions_only() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.id == "batch_review_join_requests")
+            .expect("batch review action");
+        let reviews = serde_json::json!([
+            {
+                "request_id": "approve-request",
+                "expected_revision": 3,
+                "action": "approve",
+                "note": "stale approval note"
+            },
+            {
+                "request_id": "reject-request",
+                "expected_revision": 4,
+                "action": "reject"
+            },
+            {
+                "request_id": "information-request",
+                "expected_revision": 5,
+                "action": "request_information"
+            }
+        ])
+        .to_string();
+        let command = build_command(
+            action,
+            &HashMap::from([
+                ("network_id".into(), "network-id".into()),
+                ("reviews".into(), reviews),
+                ("note".into(), "Explain the requested access".into()),
+            ]),
+        )
+        .expect("batch review command");
+
+        let NodeCommand::BatchReviewJoinRequests(command) = command else {
+            panic!("expected batch review command");
+        };
+        assert_eq!(command.reviews.len(), 3);
+        assert_eq!(
+            command.reviews[0].note.as_deref(),
+            Some("stale approval note")
+        );
+        assert_eq!(
+            command.reviews[1].note.as_deref(),
+            Some("Explain the requested access")
+        );
+        assert_eq!(
+            command.reviews[2].note.as_deref(),
+            Some("Explain the requested access")
+        );
     }
 
     #[test]

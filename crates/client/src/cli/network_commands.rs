@@ -63,12 +63,18 @@ pub async fn join(
     let session = commands::cli_node_session().await?;
     let outcome = commands::execute_cli_node_command(
         &session,
-        NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+        NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
             target: server.to_string(),
             network_name: Some(network_name.clone()),
             start: auto_start,
             discovery_record: None,
-        }),
+            network_id: None,
+            preview_digest: None,
+            network_policy_revision: None,
+            privacy_policy_revision: None,
+            terms_hash: None,
+            acknowledged_at_unix_ms: None,
+        })),
     )
     .await?;
     let message = completed_message(outcome)?;

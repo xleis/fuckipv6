@@ -90,7 +90,9 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   unpublish_network_discovery: "unpublish_network_discovery",
   refresh_discovery_index: "refresh_discovery_index",
   retry_discovery_index: "retry_discovery_index",
+  preview_join_network: "preview_join_network",
   join_network: "join_network",
+  leave_network: "leave_network",
   start_networks: "start_networks",
   stop_networks: "stop_networks",
   restart_networks: "restart_networks",
@@ -207,6 +209,9 @@ const OUTCOME_STATUSES = new Set([
   "network_created",
   "network_profile_preview",
   "network_profile_updated",
+  "network_join_preview",
+  "network_joined",
+  "network_left",
   "configuration",
   "configuration_preview",
   "configuration_applied",
@@ -1502,6 +1507,11 @@ export function buildCommand(
       };
     case "retry_discovery_index":
       return { command: "retry_discovery_index" };
+    case "preview_join_network":
+      return {
+        command: "preview_join_network",
+        payload: { network_id: requiredString("network_id") },
+      };
     case "join_network":
       return {
         command: "join_network",
@@ -1510,6 +1520,11 @@ export function buildCommand(
           network_name: optional(values, "network_name"),
           start: booleanValue(values.start, locale),
         },
+      };
+    case "leave_network":
+      return {
+        command: "leave_network",
+        payload: { network_name: requiredString("network_name") },
       };
     case "start_networks":
       return {

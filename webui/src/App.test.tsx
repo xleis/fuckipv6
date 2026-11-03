@@ -174,10 +174,17 @@ function discoveryRecord(
     invalid_reason: null,
     record: {
       document: {
-        schema_version: 2,
+        schema_version: 3,
         network_id: `network-${name}`,
         public_key: `public-key-${name}`,
         publisher: `publisher-${name}`,
+        administrators: [],
+        policy_revision: 1,
+        privacy_policy_revision: 1,
+        member_limit: null,
+        member_count: 1,
+        exit_contribution: "not_required",
+        privacy_changes: [],
         name,
         purpose: `${name} purpose`,
         language: overrides.language ?? "en",

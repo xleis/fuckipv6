@@ -1298,6 +1298,9 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::NetworkCreated(_)
         | NodeCommandOutcome::NetworkProfilePreview(_)
         | NodeCommandOutcome::NetworkProfileUpdated(_)
+        | NodeCommandOutcome::NetworkJoinPreview(_)
+        | NodeCommandOutcome::NetworkJoined(_)
+        | NodeCommandOutcome::NetworkLeft(_)
         | NodeCommandOutcome::IdentityRotated(_)
         | NodeCommandOutcome::Configuration(_)
         | NodeCommandOutcome::ConfigurationPreview(_)
@@ -1370,6 +1373,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex => OperationKind::DiscoveryIndexUpdate,
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
+        NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
         NodeCommand::SetNodeDisplayName(_) | NodeCommand::RotateNodeIdentity(_) => {
@@ -1393,6 +1397,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::GetConfiguration
         | NodeCommand::PreviewConfiguration(_)
         | NodeCommand::PreviewNetworkProfile(_)
+        | NodeCommand::PreviewJoinNetwork(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
@@ -1413,11 +1418,14 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         NodeCommand::PublishNetworkDiscovery(command)
         | NodeCommand::UpdateNetworkDiscovery(command)
         | NodeCommand::UnpublishNetworkDiscovery(command) => network_target(&command.network_name),
+        NodeCommand::PreviewJoinNetwork(command) => network_target(&command.network_id),
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()
+            .or(command.network_id.as_deref())
             .map(network_target)
             .unwrap_or_else(node_target),
+        NodeCommand::LeaveNetwork(command) => network_target(&command.network_name),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
@@ -3576,12 +3584,18 @@ mod tests {
             schema_version: NODE_HTTP_SCHEMA_VERSION,
             request: NodeCommandRequest::new(
                 77,
-                NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                     target: invitation.into(),
                     network_name: Some("home".into()),
                     start: false,
                     discovery_record: None,
-                }),
+                    network_id: None,
+                    preview_digest: None,
+                    network_policy_revision: None,
+                    privacy_policy_revision: None,
+                    terms_hash: None,
+                    acknowledged_at_unix_ms: None,
+                })),
             ),
             idempotency_key: Some(IdempotencyKey::from_public_key(b"audit-operation-link")),
         };

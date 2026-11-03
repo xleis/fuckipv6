@@ -1322,7 +1322,7 @@ enum RuntimeControlCommand {
         reply: oneshot::Sender<Result<CreateResult, RuntimeControlError>>,
     },
     Join {
-        command: NodeJoinNetworkCommand,
+        command: Box<NodeJoinNetworkCommand>,
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<JoinResult, RuntimeControlError>>,
     },
@@ -1663,7 +1663,7 @@ impl NetworkRuntimeManager {
         let operation = self.operation_gate.try_acquire()?;
         let (reply, response) = oneshot::channel();
         self.send(RuntimeControlCommand::Join {
-            command,
+            command: Box::new(command),
             _operation: operation,
             reply,
         })
@@ -2663,7 +2663,7 @@ impl NetworkRuntimeActor {
 
     async fn join(
         &mut self,
-        command: NodeJoinNetworkCommand,
+        command: Box<NodeJoinNetworkCommand>,
     ) -> Result<JoinResult, RuntimeControlError> {
         let (coordinator_url, default_name) = parse_join_target(&command.target)?;
         let network_name = command.network_name.unwrap_or(default_name);
@@ -7038,6 +7038,12 @@ mod tests {
                 network_name: None,
                 start: false,
                 discovery_record: None,
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
             })
             .await
             .expect("join ticket");
@@ -7224,6 +7230,12 @@ mod tests {
                     network_name: None,
                     start: false,
                     discovery_record: None,
+                    network_id: None,
+                    preview_digest: None,
+                    network_policy_revision: None,
+                    privacy_policy_revision: None,
+                    terms_hash: None,
+                    acknowledged_at_unix_ms: None,
                 })
                 .await,
             Err(RuntimeControlError::Conflict(_))

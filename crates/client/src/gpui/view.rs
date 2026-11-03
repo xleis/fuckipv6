@@ -1170,6 +1170,31 @@ impl GpuiShell {
                 self.recent_network_profile_preview = Some(*preview);
                 self.recent_network_profile_updated = None;
             }
+            NodeCommandOutcome::NetworkJoinPreview(preview) => {
+                self.notice = Some(format!(
+                    "{}: {} · {} {}",
+                    t(self.locale, "action.preview_join_network"),
+                    preview.network_name,
+                    preview.member_count,
+                    t(self.locale, "network.member_count")
+                ));
+            }
+            NodeCommandOutcome::NetworkJoined(result) => {
+                self.apply_snapshot(result.snapshot, cx);
+                self.notice = Some(format!(
+                    "{}: {}",
+                    t(self.locale, "action.join_network"),
+                    result.membership.network_name
+                ));
+            }
+            NodeCommandOutcome::NetworkLeft(result) => {
+                self.apply_snapshot(result.snapshot, cx);
+                self.notice = Some(format!(
+                    "{}: {}",
+                    t(self.locale, "action.leave_network"),
+                    result.network_name
+                ));
+            }
             NodeCommandOutcome::NetworkProfileUpdated(result) => {
                 self.notice = Some(tr(
                     self.locale,
@@ -7261,7 +7286,9 @@ fn action_label(locale: Locale, id: &str) -> String {
         "unpublish_network_discovery" => "action.unpublish_network_discovery",
         "refresh_discovery_index" => "action.refresh_discovery_index",
         "retry_discovery_index" => "action.retry_discovery_index",
+        "preview_join_network" => "action.preview_join_network",
         "join_network" => "action.join_network",
+        "leave_network" => "action.leave_network",
         "start_networks" => "action.start_networks",
         "stop_networks" => "action.stop_networks",
         "restart_networks" => "action.restart_networks",
@@ -7623,7 +7650,14 @@ mod tests {
                 visibility: self.visibility,
                 join_mode: self.join_mode,
                 owner,
+                administrators: Vec::new(),
                 revision: 1,
+                policy_revision: 1,
+                privacy_policy_revision: 1,
+                member_limit: None,
+                member_count: 1,
+                exit_contribution: fuckipv6_common::domain::ExitContributionObligation::NotRequired,
+                privacy_changes: Vec::new(),
                 issued_at_unix_ms: self.accepted_at_unix_ms.saturating_sub(1_000),
                 expires_at_unix_ms: self.accepted_at_unix_ms.saturating_add(3_600_000),
                 capability_summary: self.capabilities,

@@ -410,6 +410,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::GetConfigurationHistory => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
@@ -424,6 +425,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
             NodeUiAudit::none()
         }
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
+        NodeCommandKind::LeaveNetwork => NodeUiAudit::record("network.leave"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
         NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),
         NodeCommandKind::RestartNetworks => NodeUiAudit::record("network.restart"),
@@ -923,6 +925,22 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         None,
                     ),
                     action(
+                        "preview_join_network",
+                        "action.preview_join_network",
+                        NodeCommandKind::PreviewJoinNetwork,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NodeRunning,
+                        vec![field(
+                            "network_id",
+                            "field.network_id",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NonEmpty,
+                        )],
+                        None,
+                    ),
+                    action(
                         "join_network",
                         "action.join_network",
                         NodeCommandKind::JoinNetwork,
@@ -953,6 +971,27 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         None,
+                    ),
+                    action(
+                        "leave_network",
+                        "action.leave_network",
+                        NodeCommandKind::LeaveNetwork,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        )],
+                        Some(confirmation(
+                            NodeCommandKind::LeaveNetwork,
+                            "confirm.leave_network.title",
+                            "confirm.leave_network.consequence",
+                            true,
+                        )),
                     ),
                     action(
                         "start_networks",

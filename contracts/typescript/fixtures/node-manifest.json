@@ -461,6 +461,28 @@
           "confirmation": null
         },
         {
+          "id": "preview_join_network",
+          "label_key": "action.preview_join_network",
+          "command": "preview_join_network",
+          "backend_status": "unavailable",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": null
+        },
+        {
           "id": "join_network",
           "label_key": "action.join_network",
           "command": "join_network",
@@ -495,6 +517,33 @@
             }
           ],
           "confirmation": null
+        },
+        {
+          "id": "leave_network",
+          "label_key": "action.leave_network",
+          "command": "leave_network",
+          "backend_status": "unavailable",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.leave"
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.leave_network.title",
+            "consequence_key": "confirm.leave_network.consequence",
+            "destructive": true,
+            "recent_authentication_required": false
+          }
         },
         {
           "id": "start_networks",

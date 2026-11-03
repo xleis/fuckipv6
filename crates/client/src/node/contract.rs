@@ -304,11 +304,24 @@ mod tests {
                 index_url: Some("https://discovery.example.com".into()),
             },
             NodeCommand::RetryDiscoveryIndex,
-            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+            NodeCommand::PreviewJoinNetwork(crate::node::NodePreviewJoinNetworkCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(b"preview-network")
+                    .to_string(),
+            }),
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "ticket".into(),
                 network_name: None,
                 start: false,
                 discovery_record: None,
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+            })),
+            NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
+                network_name: "office".into(),
             }),
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),

@@ -569,12 +569,18 @@ impl AppController {
             "default".to_string()
         };
 
-        self.execute_node_command(NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+        self.execute_node_command(NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
             target,
             network_name: Some(network_name.clone()),
             start: true,
             discovery_record: None,
-        }))
+            network_id: None,
+            preview_digest: None,
+            network_policy_revision: None,
+            privacy_policy_revision: None,
+            terms_hash: None,
+            acknowledged_at_unix_ms: None,
+        })))
         .await?;
 
         let snapshot = self.node_snapshot().await?;

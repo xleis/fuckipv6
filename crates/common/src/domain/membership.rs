@@ -75,10 +75,11 @@ impl MembershipState {
 
 /// Exit contribution is an explicit network admission obligation, not a
 /// capability silently enabled by joining.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitContributionObligation {
     Required,
+    #[default]
     NotRequired,
 }
 
@@ -87,6 +88,10 @@ pub struct MembershipTerms {
     pub network_policy_revision: u64,
     pub privacy_policy_revision: u64,
     pub exit_contribution: ExitContributionObligation,
+    /// Capacity shown when these terms were acknowledged. Omitted for legacy
+    /// memberships so their content hash remains stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_limit: Option<u32>,
 }
 
 impl MembershipTerms {
@@ -100,6 +105,11 @@ impl MembershipTerms {
         if self.network_policy_revision == 0 || self.privacy_policy_revision == 0 {
             return Err(DomainError::invalid_value(
                 "membership policy revisions must be positive",
+            ));
+        }
+        if self.member_limit == Some(0) {
+            return Err(DomainError::invalid_value(
+                "membership member limit must be positive when set",
             ));
         }
         Ok(())
@@ -307,6 +317,7 @@ mod tests {
             network_policy_revision: 1,
             privacy_policy_revision: 1,
             exit_contribution: ExitContributionObligation::Required,
+            member_limit: None,
         }
     }
 

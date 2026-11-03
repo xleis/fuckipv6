@@ -12,15 +12,15 @@ use fuckipv6_common::NetworkMode;
 use crate::node::{
     NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
     NodeControlHealth, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeInterfaceKind,
-    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
-    NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
-    NodeNetworkStatus, NodePermission, NodePhase, NodePreviewConfigurationCommand,
-    NodePrimaryStatus, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
-    NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction, NodeRoutingMode,
-    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetNetworkRoleCommand,
-    NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction, NodeUiActionBlockReason,
-    NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
-    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeLeaveNetworkCommand,
+    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand, NodeNetworkRole,
+    NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
+    NodePreviewConfigurationCommand, NodePreviewJoinNetworkCommand, NodePrimaryStatus,
+    NodeProbePeerCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction,
+    NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
+    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
@@ -111,7 +111,9 @@ pub enum ActionBinding {
     UnpublishNetworkDiscovery,
     RefreshDiscoveryIndex,
     RetryDiscoveryIndex,
+    PreviewJoinNetwork,
     JoinNetwork,
+    LeaveNetwork,
     StartNetworks,
     StopNetworks,
     RestartNetworks,
@@ -140,7 +142,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 38] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -151,7 +153,9 @@ impl ActionBinding {
         Self::UnpublishNetworkDiscovery,
         Self::RefreshDiscoveryIndex,
         Self::RetryDiscoveryIndex,
+        Self::PreviewJoinNetwork,
         Self::JoinNetwork,
+        Self::LeaveNetwork,
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
@@ -191,7 +195,9 @@ impl ActionBinding {
             Self::UnpublishNetworkDiscovery => "unpublish_network_discovery",
             Self::RefreshDiscoveryIndex => "refresh_discovery_index",
             Self::RetryDiscoveryIndex => "retry_discovery_index",
+            Self::PreviewJoinNetwork => "preview_join_network",
             Self::JoinNetwork => "join_network",
+            Self::LeaveNetwork => "leave_network",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
             Self::RestartNetworks => "restart_networks",
@@ -771,7 +777,12 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::RetryDiscoveryIndex,
             NodeCommandKind::RetryDiscoveryIndex,
         ),
+        "preview_join_network" => (
+            ActionBinding::PreviewJoinNetwork,
+            NodeCommandKind::PreviewJoinNetwork,
+        ),
         "join_network" => (ActionBinding::JoinNetwork, NodeCommandKind::JoinNetwork),
+        "leave_network" => (ActionBinding::LeaveNetwork, NodeCommandKind::LeaveNetwork),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
         "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
         "restart_networks" => (
@@ -1099,11 +1110,27 @@ pub fn build_command(
             index_url: optional_non_empty(field("index_url")),
         }),
         Ok(ActionBinding::RetryDiscoveryIndex) => Ok(NodeCommand::RetryDiscoveryIndex),
-        Ok(ActionBinding::JoinNetwork) => Ok(NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
-            target: field("target"),
-            network_name: optional_non_empty(field("network_name")),
-            start: parse_bool(action, "start", &required("start")?)?,
-            discovery_record: None,
+        Ok(ActionBinding::PreviewJoinNetwork) => Ok(NodeCommand::PreviewJoinNetwork(
+            NodePreviewJoinNetworkCommand {
+                network_id: field("network_id"),
+            },
+        )),
+        Ok(ActionBinding::JoinNetwork) => {
+            Ok(NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
+                target: field("target"),
+                network_name: optional_non_empty(field("network_name")),
+                start: parse_bool(action, "start", &required("start")?)?,
+                discovery_record: None,
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+            })))
+        }
+        Ok(ActionBinding::LeaveNetwork) => Ok(NodeCommand::LeaveNetwork(NodeLeaveNetworkCommand {
+            network_name: field("network_name"),
         })),
         Ok(ActionBinding::StartNetworks) => Ok(NodeCommand::StartNetworks {
             selection: parse_selection(action, "selection", &required("selection")?)?,
@@ -1270,7 +1297,9 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         | "unpublish_network_discovery" => HashSet::from(["network_name", "index_url"]),
         "refresh_discovery_index" => HashSet::from(["index_url"]),
         "retry_discovery_index" => HashSet::from([]),
+        "preview_join_network" => HashSet::from(["network_id"]),
         "join_network" => HashSet::from(["target", "network_name", "start"]),
+        "leave_network" => HashSet::from(["network_name"]),
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
         "restart_networks" => HashSet::from(["networks", "all"]),
@@ -4476,7 +4505,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 36);
+        assert_eq!(ActionBinding::ALL.len(), 38);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages

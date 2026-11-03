@@ -380,6 +380,12 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "发现索引管理器尚未初始化"),
                 },
+                super::NodeCommand::PreviewJoinNetwork(_) => {
+                    unavailable(request_id, "加入预览需要持久化签名发现记录")
+                }
+                super::NodeCommand::LeaveNetwork(_) => {
+                    unavailable(request_id, "退出网络需要节点配置和运行时可回滚清理")
+                }
                 super::NodeCommand::JoinNetwork(command) => match runtime {
                     Some(runtime) => {
                         join_runtime_network(
@@ -1189,7 +1195,7 @@ async fn join_runtime_network(
     discovery: Option<&DiscoveryIndexManager>,
     state: &NodeStateStore,
     request_id: u64,
-    mut command: super::NodeJoinNetworkCommand,
+    mut command: Box<super::NodeJoinNetworkCommand>,
 ) -> NodeCommandResult {
     if let Some(record) = command.discovery_record.take() {
         let Some(discovery) = discovery else {
@@ -1199,7 +1205,7 @@ async fn join_runtime_network(
             return NodeCommandResult::rejected(request_id, discovery_problem(error));
         }
     }
-    match runtime.join(command).await {
+    match runtime.join(*command).await {
         Ok(result) => NodeCommandResult::completed(
             request_id,
             NodeCommandOutcome::Completed {
@@ -2042,12 +2048,18 @@ mod tests {
                 external_host: None,
                 auto_connect: true,
             }),
-            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "fk://invite".into(),
                 network_name: Some("office".into()),
                 start: true,
                 discovery_record: None,
-            }),
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+            })),
         ];
 
         for (offset, command) in commands.into_iter().enumerate() {

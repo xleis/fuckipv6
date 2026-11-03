@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::capability::CapabilityKind;
 use super::ids::{NetworkId, NodeId, PublicKey, Signature};
+use super::membership::ExitContributionObligation;
 use super::{DomainError, DomainResult};
 
 /// How much of a network's public profile is discoverable without membership.
@@ -38,6 +39,7 @@ pub enum NetworkJoinMode {
 pub enum DiscoveryTransport {
     Quic,
     Tcp,
+    Websocket,
     Local,
 }
 
@@ -94,6 +96,20 @@ pub struct NetworkRecord {
     pub members: Vec<NodeId>,
     pub revision: u64,
     pub policy_revision: u64,
+    /// Revision of the privacy notice shown before joining. Defaults preserve
+    /// readable legacy owner records while new records can advance it.
+    #[serde(default = "default_policy_revision")]
+    pub privacy_policy_revision: u64,
+    /// Optional hard cap on active members. `None` means no configured cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_limit: Option<u32>,
+    /// Admission obligation disclosed before joining. This is a policy claim,
+    /// never proof that this node has enabled its local Exit service.
+    #[serde(default)]
+    pub exit_contribution: ExitContributionObligation,
+    /// Plain-language privacy-policy changes disclosed on the join preview.
+    #[serde(default)]
+    pub privacy_changes: Vec<String>,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
     /// Signed public profile. Legacy owner records may omit this field; UI
@@ -118,9 +134,24 @@ impl NetworkRecord {
         validate_network_region(&self.region)?;
         validate_network_tags(&self.tags)?;
         validate_capability_declarations(&self.capability_declarations)?;
-        if self.revision == 0 || self.policy_revision == 0 {
+        if self.revision == 0 || self.policy_revision == 0 || self.privacy_policy_revision == 0 {
             return Err(DomainError::invalid_value(
-                "network and policy revisions must be positive",
+                "network, policy and privacy revisions must be positive",
+            ));
+        }
+        if self.member_limit == Some(0) {
+            return Err(DomainError::invalid_value(
+                "network member limit must be positive when set",
+            ));
+        }
+        if self.privacy_changes.len() > 32
+            || self
+                .privacy_changes
+                .iter()
+                .any(|change| change.is_empty() || change.chars().count() > 256)
+        {
+            return Err(DomainError::invalid_value(
+                "network privacy changes are invalid",
             ));
         }
         if self.updated_at_unix_ms < self.created_at_unix_ms {
@@ -279,6 +310,10 @@ impl NetworkRecord {
             members: vec![owner],
             revision: 1,
             policy_revision: 1,
+            privacy_policy_revision: 1,
+            member_limit: None,
+            exit_contribution: ExitContributionObligation::NotRequired,
+            privacy_changes: Vec::new(),
             created_at_unix_ms: now_unix_ms,
             updated_at_unix_ms: now_unix_ms,
             signed_profile: None,
@@ -399,7 +434,7 @@ pub const DEFAULT_NETWORK_LANGUAGE: &str = "und";
 pub const DEFAULT_NETWORK_REGION: &str = "ZZ";
 pub const NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION: u16 = 1;
 pub const NETWORK_PUBLIC_PROFILE_VALIDITY_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-pub const NETWORK_DISCOVERY_SCHEMA_VERSION: u16 = 2;
+pub const NETWORK_DISCOVERY_SCHEMA_VERSION: u16 = 3;
 pub const NETWORK_DISCOVERY_VALIDITY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 pub const NETWORK_PROFILE_MAX_TAGS: usize = 12;
 pub const NETWORK_PROFILE_MAX_TAG_CHARS: usize = 32;
@@ -418,6 +453,10 @@ pub fn default_network_language() -> String {
 
 pub fn default_network_region() -> String {
     DEFAULT_NETWORK_REGION.into()
+}
+
+fn default_policy_revision() -> u64 {
+    1
 }
 
 fn validate_network_name(name: &str) -> DomainResult<()> {
@@ -990,7 +1029,22 @@ pub struct NetworkDiscoveryDocument {
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
     pub owner: NodeId,
+    /// Public governance roles disclosed before joining. Full member IDs,
+    /// endpoints beyond the signed public hints, topology and activity remain
+    /// outside this document.
+    #[serde(default)]
+    pub administrators: Vec<NodeId>,
     pub revision: u64,
+    pub policy_revision: u64,
+    pub privacy_policy_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_limit: Option<u32>,
+    #[serde(default)]
+    pub member_count: u32,
+    #[serde(default)]
+    pub exit_contribution: ExitContributionObligation,
+    #[serde(default)]
+    pub privacy_changes: Vec<String>,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
     /// Canonical capability declaration summary. This is discoverability
@@ -1039,9 +1093,32 @@ impl NetworkDiscoveryDocument {
                 "discovery tags must use canonical order",
             ));
         }
-        if self.revision == 0 {
+        if self.revision == 0 || self.policy_revision == 0 || self.privacy_policy_revision == 0 {
             return Err(DomainError::invalid_value(
-                "discovery revision must be positive",
+                "discovery revisions must be positive",
+            ));
+        }
+        if self.member_limit == Some(0) || self.member_count == 0 {
+            return Err(DomainError::invalid_value(
+                "discovery member counts are invalid",
+            ));
+        }
+        if self
+            .member_limit
+            .is_some_and(|limit| self.member_count > limit)
+        {
+            return Err(DomainError::invariant(
+                "discovery member count exceeds the configured limit",
+            ));
+        }
+        if self.privacy_changes.len() > 32
+            || self
+                .privacy_changes
+                .iter()
+                .any(|change| change.is_empty() || change.chars().count() > 256)
+        {
+            return Err(DomainError::invalid_value(
+                "discovery privacy changes are invalid",
             ));
         }
         if self.issued_at_unix_ms >= self.expires_at_unix_ms {
@@ -1094,6 +1171,24 @@ impl NetworkDiscoveryDocument {
         expires_at_unix_ms: u64,
         revoked_at_unix_ms: Option<u64>,
     ) -> DomainResult<Self> {
+        Self::from_record_with_endpoints(
+            record,
+            revision,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            revoked_at_unix_ms,
+            Vec::new(),
+        )
+    }
+
+    pub fn from_record_with_endpoints(
+        record: &NetworkRecord,
+        revision: u64,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        revoked_at_unix_ms: Option<u64>,
+        endpoints: Vec<NetworkEndpoint>,
+    ) -> DomainResult<Self> {
         record.validate()?;
         let signed_profile = record.signed_profile.as_ref().ok_or_else(|| {
             DomainError::new(
@@ -1121,11 +1216,18 @@ impl NetworkDiscoveryDocument {
             visibility: record.visibility,
             join_mode: record.join_mode,
             owner: record.owner.clone(),
+            administrators: record.administrators.clone(),
             revision,
+            policy_revision: record.policy_revision,
+            privacy_policy_revision: record.privacy_policy_revision,
+            member_limit: record.member_limit,
+            member_count: u32::try_from(record.members.len()).unwrap_or(u32::MAX),
+            exit_contribution: record.exit_contribution,
+            privacy_changes: record.privacy_changes.clone(),
             issued_at_unix_ms,
             expires_at_unix_ms,
             capability_summary: record.capability_declarations.clone(),
-            endpoints: Vec::new(),
+            endpoints,
             revoked_at_unix_ms,
         };
         document.validate_at(issued_at_unix_ms)?;
@@ -1240,7 +1342,14 @@ mod tests {
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::ApprovalRequired,
             owner,
+            administrators: Vec::new(),
             revision,
+            policy_revision: 1,
+            privacy_policy_revision: 1,
+            member_limit: None,
+            member_count: 1,
+            exit_contribution: ExitContributionObligation::NotRequired,
+            privacy_changes: Vec::new(),
             issued_at_unix_ms: now.saturating_sub(1),
             expires_at_unix_ms: now + 60_000,
             capability_summary: vec![CapabilityKind::Relay],
@@ -1452,6 +1561,10 @@ mod tests {
             members: vec![owner, admin],
             revision: 1,
             policy_revision: 1,
+            privacy_policy_revision: 1,
+            member_limit: None,
+            exit_contribution: ExitContributionObligation::NotRequired,
+            privacy_changes: Vec::new(),
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
             signed_profile: None,

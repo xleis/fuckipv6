@@ -369,10 +369,15 @@
       ],
       "type": "object"
     },
+    "ContentHash": {
+      "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
+      "type": "string"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
         "tcp",
+        "websocket",
         "local"
       ],
       "type": "string"
@@ -384,6 +389,14 @@
         "windows_desktop",
         "macos_desktop",
         "headless"
+      ],
+      "type": "string"
+    },
+    "ExitContributionObligation": {
+      "description": "Exit contribution is an explicit network admission obligation, not a\ncapability silently enabled by joining.",
+      "enum": [
+        "required",
+        "not_required"
       ],
       "type": "string"
     },
@@ -463,6 +476,25 @@
       ],
       "type": "string"
     },
+    "MembershipState": {
+      "description": "The durable state of one node's relationship with one network.",
+      "enum": [
+        "discovered",
+        "applying",
+        "pending_approval",
+        "accepted",
+        "key_ready",
+        "connecting",
+        "active",
+        "degraded",
+        "leaving",
+        "left",
+        "rejected",
+        "suspended",
+        "cancelled"
+      ],
+      "type": "string"
+    },
     "NetworkAdminProfileProjection": {
       "properties": {
         "administrator_count": {
@@ -501,6 +533,14 @@
     "NetworkDiscoveryDocument": {
       "description": "Signed discovery data. Endpoints may change between revisions; the stable\nnetwork ID remains bound to the immutable network public key.",
       "properties": {
+        "administrators": {
+          "default": [],
+          "description": "Public governance roles disclosed before joining. Full member IDs,\nendpoints beyond the signed public hints, topology and activity remain\noutside this document.",
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
         "capability_summary": {
           "description": "Canonical capability declaration summary. This is discoverability\nmetadata, not proof that a capability is currently operational.",
           "items": {
@@ -514,6 +554,10 @@
             "$ref": "#/$defs/NetworkEndpoint"
           },
           "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
         },
         "expires_at_unix_ms": {
           "format": "uint64",
@@ -533,6 +577,20 @@
           "description": "Public discovery facets. Schema v2 includes these fields in the signed\npayload. Defaults keep older local JSON readable while validation still\nrejects records created under a different document schema.",
           "type": "string"
         },
+        "member_count": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "member_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -541,6 +599,23 @@
         },
         "owner": {
           "$ref": "#/$defs/NodeId"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "privacy_changes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "public_key": {
           "$ref": "#/$defs/PublicKey"
@@ -598,6 +673,8 @@
         "join_mode",
         "owner",
         "revision",
+        "policy_revision",
+        "privacy_policy_revision",
         "issued_at_unix_ms",
         "expires_at_unix_ms",
         "capability_summary"
@@ -1341,6 +1418,54 @@
             },
             "status": {
               "const": "network_profile_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeNetworkJoinPreview"
+            },
+            "status": {
+              "const": "network_join_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeNetworkJoinResult"
+            },
+            "status": {
+              "const": "network_joined",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeNetworkLeaveResult"
+            },
+            "status": {
+              "const": "network_left",
               "type": "string"
             }
           },
@@ -2348,8 +2473,297 @@
       ],
       "type": "string"
     },
-    "NodeNetworkProfileSnapshot": {
+    "NodeNetworkJoinPreview": {
+      "description": "Complete, signed disclosure shown before a direct local join. It contains\npublic governance metadata only: no member addresses, topology, activity,\ninvitation credentials or private keys cross this boundary.",
+      "properties": {
+        "administrators": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "already_member": {
+          "type": "boolean"
+        },
+        "blocked_reason_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "can_join": {
+          "type": "boolean"
+        },
+        "capability_summary": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "contribution_policy_key": {
+          "type": "string"
+        },
+        "discovery_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/NetworkEndpoint"
+          },
+          "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "locally_contributed_capabilities": {
+          "description": "Capabilities remain locally controlled. The only admission obligation\nis disclosed separately as Exit contribution.",
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "member_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "member_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "network_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "preview_digest": {
+          "description": "The digest also binds discovery revision, policy disclosures, endpoints,\ncapability declarations and expiry.",
+          "type": "string"
+        },
+        "privacy_changes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "terms_hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "Current join terms are hashed exactly as acknowledged by the owner."
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility"
+        }
+      },
+      "required": [
+        "network_id",
+        "network_name",
+        "public_key",
+        "owner",
+        "administrators",
+        "discovery_revision",
+        "network_policy_revision",
+        "privacy_policy_revision",
+        "join_mode",
+        "visibility",
+        "capability_summary",
+        "endpoints",
+        "member_count",
+        "exit_contribution",
+        "privacy_changes",
+        "already_member",
+        "can_join",
+        "terms_hash",
+        "preview_digest",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "locally_contributed_capabilities",
+        "contribution_policy_key"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkJoinResult": {
+      "properties": {
+        "config_saved": {
+          "type": "boolean"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "membership": {
+          "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/NodeSnapshot"
+        },
+        "started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "membership",
+        "snapshot",
+        "idempotent",
+        "config_saved",
+        "started"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkLeaveResult": {
+      "properties": {
+        "left": {
+          "type": "boolean"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/NodeSnapshot"
+        }
+      },
+      "required": [
+        "network_name",
+        "left",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkMembershipSnapshot": {
       "description": "Public, owner-editable network metadata rendered by every UI adapter.\n\nThis is deliberately a separate projection from `NetworkRecord`: secrets,\nmembers, addresses, topology, activity and invitations are not fields and\ntherefore cannot be serialized by accident.",
+      "properties": {
+        "acknowledged_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_contribution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionObligation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "member_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "network_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "state": {
+          "$ref": "#/$defs/MembershipState"
+        },
+        "suspension_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terms_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_name",
+        "network_id",
+        "node_id",
+        "state",
+        "role",
+        "local_policy_revision",
+        "created_at_unix_ms",
+        "updated_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkProfileSnapshot": {
       "properties": {
         "capability_declarations": {
           "items": {
@@ -3179,6 +3593,14 @@
           },
           "type": "array"
         },
+        "memberships": {
+          "default": [],
+          "description": "Durable local membership acknowledgements, one per stable network ID.\nThis projection contains no private keys, peer addresses or topology.",
+          "items": {
+            "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
+          },
+          "type": "array"
+        },
         "network_profiles": {
           "default": [],
           "description": "Owner-authored public network-profile projections. This field is an\nallowlisted public snapshot: it never contains member identities,\naddresses, topology, activity, invitation tickets or secret material.",
@@ -3350,7 +3772,9 @@
             "unpublish_network_discovery",
             "refresh_discovery_index",
             "retry_discovery_index",
+            "preview_join_network",
             "join_network",
+            "leave_network",
             "update_routing",
             "set_network_role",
             "set_node_display_name",

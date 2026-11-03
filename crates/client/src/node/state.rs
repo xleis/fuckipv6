@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
-    ActivityEntry, CapabilityKind, CapabilityState, NetworkJoinMode, NetworkVisibility,
-    OperationRecovery,
+    ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation, MembershipRole,
+    MembershipState, NetworkJoinMode, NetworkVisibility, OperationRecovery,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -68,6 +68,10 @@ pub struct NodeSnapshot {
     /// addresses, topology, activity, invitation tickets or secret material.
     #[serde(default)]
     pub network_profiles: Vec<NodeNetworkProfileSnapshot>,
+    /// Durable local membership acknowledgements, one per stable network ID.
+    /// This projection contains no private keys, peer addresses or topology.
+    #[serde(default)]
+    pub memberships: Vec<NodeNetworkMembershipSnapshot>,
     /// Signed public discovery-index projection. This control-plane state is
     /// isolated from joined network lifecycle and forwarding data planes.
     #[serde(default)]
@@ -163,6 +167,13 @@ impl NodeSnapshot {
                 .iter()
                 .map(|service| service.network_name.as_str()),
             "duplicate_embedded_service",
+            &mut violations,
+        );
+        collect_duplicate_values(
+            self.memberships
+                .iter()
+                .map(|membership| membership.network_id.as_str()),
+            "duplicate_membership",
             &mut violations,
         );
         collect_duplicate_values(
@@ -763,6 +774,25 @@ pub struct NodeIdentitySnapshot {
 /// This is deliberately a separate projection from `NetworkRecord`: secrets,
 /// members, addresses, topology, activity and invitations are not fields and
 /// therefore cannot be serialized by accident.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkMembershipSnapshot {
+    pub network_name: String,
+    pub network_id: String,
+    pub node_id: String,
+    pub state: MembershipState,
+    pub role: MembershipRole,
+    pub local_policy_revision: u64,
+    pub network_policy_revision: Option<u64>,
+    pub privacy_policy_revision: Option<u64>,
+    pub member_limit: Option<u32>,
+    pub exit_contribution: Option<ExitContributionObligation>,
+    pub terms_hash: Option<String>,
+    pub acknowledged_at_unix_ms: Option<u64>,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub suspension_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeNetworkProfileSnapshot {
     pub network_id: String,

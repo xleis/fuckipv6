@@ -6,10 +6,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
-    default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind,
-    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkJoinMode,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
-    NETWORK_PROFILE_MAX_TAG_CHARS,
+    default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
+    ExitContributionObligation, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
+    NetworkEndpoint, NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview,
+    NetworkProfileUpdate, NetworkVisibility, NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -77,7 +77,9 @@ pub enum NodeCommandKind {
     UnpublishNetworkDiscovery,
     RefreshDiscoveryIndex,
     RetryDiscoveryIndex,
+    PreviewJoinNetwork,
     JoinNetwork,
+    LeaveNetwork,
     UpdateRouting,
     SetNetworkRole,
     SetNodeDisplayName,
@@ -102,7 +104,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 38] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -118,7 +120,9 @@ impl NodeCommandKind {
         Self::UnpublishNetworkDiscovery,
         Self::RefreshDiscoveryIndex,
         Self::RetryDiscoveryIndex,
+        Self::PreviewJoinNetwork,
         Self::JoinNetwork,
+        Self::LeaveNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::SetNodeDisplayName,
@@ -143,7 +147,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 35] = [
+    pub const ACTIONS: [Self; 37] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -158,7 +162,9 @@ impl NodeCommandKind {
         Self::UnpublishNetworkDiscovery,
         Self::RefreshDiscoveryIndex,
         Self::RetryDiscoveryIndex,
+        Self::PreviewJoinNetwork,
         Self::JoinNetwork,
+        Self::LeaveNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::SetNodeDisplayName,
@@ -216,7 +222,9 @@ impl NodeCommandKind {
             Self::UnpublishNetworkDiscovery => "unpublish_network_discovery",
             Self::RefreshDiscoveryIndex => "refresh_discovery_index",
             Self::RetryDiscoveryIndex => "retry_discovery_index",
+            Self::PreviewJoinNetwork => "preview_join_network",
             Self::JoinNetwork => "join_network",
+            Self::LeaveNetwork => "leave_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
             Self::SetNodeDisplayName => "set_node_display_name",
@@ -259,6 +267,7 @@ impl NodeCommandKind {
                 | Self::RefreshDiscoveryIndex
                 | Self::RetryDiscoveryIndex
                 | Self::JoinNetwork
+                | Self::LeaveNetwork
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
                 | Self::SetNodeDisplayName
@@ -330,9 +339,13 @@ pub enum NodeCommand {
     },
     /// Retry the last configured discovery index after an outage.
     RetryDiscoveryIndex,
-    /// Join using signed discovery material that is revalidated against the
-    /// persisted revision/revocation watermark before any network mutation.
-    JoinNetwork(NodeJoinNetworkCommand),
+    /// Read-only disclosure preview for a signed open-network discovery record.
+    PreviewJoinNetwork(NodePreviewJoinNetworkCommand),
+    /// Confirm and directly join a network using signed discovery material that
+    /// is revalidated against the persisted revision/revocation watermark.
+    JoinNetwork(Box<NodeJoinNetworkCommand>),
+    /// Remove only this network's local configuration and membership.
+    LeaveNetwork(NodeLeaveNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
     SetNodeDisplayName(NodeSetNodeDisplayNameCommand),
@@ -394,7 +407,9 @@ impl NodeCommand {
             Self::UnpublishNetworkDiscovery(_) => NodeCommandKind::UnpublishNetworkDiscovery,
             Self::RefreshDiscoveryIndex { .. } => NodeCommandKind::RefreshDiscoveryIndex,
             Self::RetryDiscoveryIndex => NodeCommandKind::RetryDiscoveryIndex,
+            Self::PreviewJoinNetwork(_) => NodeCommandKind::PreviewJoinNetwork,
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
+            Self::LeaveNetwork(_) => NodeCommandKind::LeaveNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
             Self::SetNodeDisplayName(_) => NodeCommandKind::SetNodeDisplayName,
@@ -492,7 +507,9 @@ impl NodeCommand {
                 Ok(())
             }
             Self::RetryDiscoveryIndex => Ok(()),
+            Self::PreviewJoinNetwork(command) => command.validate(),
             Self::JoinNetwork(command) => command.validate(),
+            Self::LeaveNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
             Self::SetNodeDisplayName(command) => command.validate(),
@@ -846,20 +863,52 @@ impl NodeNetworkDiscoveryCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewJoinNetworkCommand {
+    pub network_id: String,
+}
+
+impl crate::node::NodePreviewJoinNetworkCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        if self.network_id.trim().is_empty() {
+            return Err(invalid("预览加入时必须选择网络 ID"));
+        }
+        if fuckipv6_common::domain::NetworkId::parse(self.network_id.clone()).is_err() {
+            return Err(invalid("网络 ID 格式无效"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeJoinNetworkCommand {
     pub target: String,
     pub network_name: Option<String>,
     pub start: bool,
     /// Public signed discovery material selected by the user. It is never
-    /// trusted as cached authority: the handler revalidates it immediately.
+    /// trusted as cached authority: the handler replaces or revalidates it from
+    /// the persisted discovery snapshot immediately before mutation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_record: Option<NetworkDiscoveryRecord>,
+    /// Stable network selected from a discovery preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
+    /// Exact discovery digest shown in the preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policy_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms_hash: Option<ContentHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at_unix_ms: Option<u64>,
 }
 
 impl NodeJoinNetworkCommand {
     fn validate(&self) -> Result<(), NodeProblem> {
-        if self.target.trim().is_empty() {
-            return Err(invalid("加入网络的目标地址或票据不能为空"));
+        if self.target.trim().is_empty() && self.network_id.is_none() {
+            return Err(invalid("加入网络的目标地址、票据或网络 ID 不能为空"));
         }
         if let Some(name) = self.network_name.as_deref() {
             validate_network_name(name)?;
@@ -873,8 +922,80 @@ impl NodeJoinNetworkCommand {
                 );
             }
         }
+        if let Some(network_id) = self.network_id.as_deref() {
+            fuckipv6_common::domain::NetworkId::parse(network_id.to_owned())
+                .map_err(|_| invalid("网络 ID 格式无效"))?;
+            if self.preview_digest.as_deref().is_none_or(str::is_empty)
+                || self.network_policy_revision.unwrap_or(0) == 0
+                || self.privacy_policy_revision.unwrap_or(0) == 0
+                || self.terms_hash.is_none()
+                || self.acknowledged_at_unix_ms.unwrap_or(0) == 0
+            {
+                return Err(invalid("加入网络前必须确认完整的预览条款"));
+            }
+            if let Some(record) = self.discovery_record.as_ref() {
+                if record.document.network_id.as_str() != network_id {
+                    return Err(invalid("网络 ID 与签名发现记录不一致"));
+                }
+            }
+        } else if self.preview_digest.is_some()
+            || self.network_policy_revision.is_some()
+            || self.privacy_policy_revision.is_some()
+            || self.terms_hash.is_some()
+            || self.acknowledged_at_unix_ms.is_some()
+        {
+            return Err(invalid("确认字段必须和 network_id 一起提交"));
+        }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeLeaveNetworkCommand {
+    pub network_name: String,
+}
+
+impl crate::node::NodeLeaveNetworkCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)
+    }
+}
+
+/// Complete, signed disclosure shown before a direct local join. It contains
+/// public governance metadata only: no member addresses, topology, activity,
+/// invitation credentials or private keys cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkJoinPreview {
+    pub network_id: String,
+    pub network_name: String,
+    pub public_key: String,
+    pub owner: String,
+    pub administrators: Vec<String>,
+    pub discovery_revision: u64,
+    pub network_policy_revision: u64,
+    pub privacy_policy_revision: u64,
+    pub join_mode: NetworkJoinMode,
+    pub visibility: NetworkVisibility,
+    pub capability_summary: Vec<CapabilityKind>,
+    pub endpoints: Vec<NetworkEndpoint>,
+    pub member_count: u32,
+    pub member_limit: Option<u32>,
+    pub exit_contribution: ExitContributionObligation,
+    pub privacy_changes: Vec<String>,
+    pub already_member: bool,
+    pub can_join: bool,
+    pub blocked_reason_key: Option<String>,
+    /// Current join terms are hashed exactly as acknowledged by the owner.
+    pub terms_hash: ContentHash,
+    /// The digest also binds discovery revision, policy disclosures, endpoints,
+    /// capability declarations and expiry.
+    pub preview_digest: String,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    /// Capabilities remain locally controlled. The only admission obligation
+    /// is disclosed separately as Exit contribution.
+    pub locally_contributed_capabilities: Vec<CapabilityKind>,
+    pub contribution_policy_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -1428,6 +1549,22 @@ pub struct NodeIdentityRotationSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkJoinResult {
+    pub membership: crate::node::NodeNetworkMembershipSnapshot,
+    pub snapshot: NodeSnapshot,
+    pub idempotent: bool,
+    pub config_saved: bool,
+    pub started: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkLeaveResult {
+    pub network_name: String,
+    pub left: bool,
+    pub snapshot: NodeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
     Snapshot(Box<NodeSnapshot>),
@@ -1440,6 +1577,9 @@ pub enum NodeCommandOutcome {
     NetworkCreated(NodeCreatedNetwork),
     NetworkProfilePreview(Box<NetworkProfilePreview>),
     NetworkProfileUpdated(Box<NetworkProfileApplyResult>),
+    NetworkJoinPreview(Box<NodeNetworkJoinPreview>),
+    NetworkJoined(Box<NodeNetworkJoinResult>),
+    NetworkLeft(Box<NodeNetworkLeaveResult>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
     ConfigurationPreview(Box<ConfigurationPreview>),
@@ -1502,6 +1642,12 @@ impl CommandAuditTrail {
         outcome: AuditOutcome,
         reason: &str,
     ) {
+        // A preview is a read-only disclosure. Keep it out of the durable
+        // command audit and activity feed; the subsequent confirmed join is the
+        // auditable mutation.
+        if request.command.kind() == NodeCommandKind::PreviewJoinNetwork {
+            return;
+        }
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let audit_id = fuckipv6_common::domain::AuditId::from_public_key(
             format!(
@@ -1885,11 +2031,24 @@ mod tests {
                 index_url: Some("https://discovery.example.com".into()),
             },
             NodeCommand::RetryDiscoveryIndex,
-            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+            NodeCommand::PreviewJoinNetwork(crate::node::NodePreviewJoinNetworkCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(b"preview-network")
+                    .to_string(),
+            }),
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "fk://invite".into(),
                 network_name: Some("office".into()),
                 start: true,
                 discovery_record: None,
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+            })),
+            NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
+                network_name: "office".into(),
             }),
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),
@@ -2295,18 +2454,30 @@ mod tests {
                 external_host: Some("  ".into()),
                 auto_connect: true,
             }),
-            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "  ".into(),
                 network_name: None,
                 start: false,
                 discovery_record: None,
-            }),
-            NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+            })),
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "ws://127.0.0.1:6666".into(),
                 network_name: Some("../office".into()),
                 start: false,
                 discovery_record: None,
-            }),
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+            })),
             NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
                 network_name: "home/office".into(),
                 role: NodeNetworkRole::Relay,
@@ -2383,6 +2554,7 @@ mod tests {
             NodeCommandKind::ProbePeer,
             NodeCommandKind::GetConfiguration,
             NodeCommandKind::PreviewNetworkProfile,
+            NodeCommandKind::PreviewJoinNetwork,
             NodeCommandKind::PreviewConfiguration,
             NodeCommandKind::GetConfigurationHistory,
         ] {
@@ -2399,6 +2571,7 @@ mod tests {
                     | NodeCommandKind::ProbePeer
                     | NodeCommandKind::GetConfiguration
                     | NodeCommandKind::PreviewNetworkProfile
+                    | NodeCommandKind::PreviewJoinNetwork
                     | NodeCommandKind::PreviewConfiguration
                     | NodeCommandKind::GetConfigurationHistory
             ) {
@@ -2658,12 +2831,18 @@ mod tests {
                 NodeCommandContext::local_owner(actor(), "local-ipc:owner"),
                 NodeCommandRequest::new(
                     52,
-                    NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
+                    NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                         target: invitation.into(),
                         network_name: Some("home".into()),
                         start: false,
                         discovery_record: None,
-                    }),
+                        network_id: None,
+                        preview_digest: None,
+                        network_policy_revision: None,
+                        privacy_policy_revision: None,
+                        terms_hash: None,
+                        acknowledged_at_unix_ms: None,
+                    })),
                 ),
             )
             .await

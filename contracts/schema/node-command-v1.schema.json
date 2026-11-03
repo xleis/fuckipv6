@@ -10,17 +10,38 @@
       ],
       "type": "string"
     },
+    "ContentHash": {
+      "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
+      "type": "string"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
         "tcp",
+        "websocket",
         "local"
+      ],
+      "type": "string"
+    },
+    "ExitContributionObligation": {
+      "description": "Exit contribution is an explicit network admission obligation, not a\ncapability silently enabled by joining.",
+      "enum": [
+        "required",
+        "not_required"
       ],
       "type": "string"
     },
     "NetworkDiscoveryDocument": {
       "description": "Signed discovery data. Endpoints may change between revisions; the stable\nnetwork ID remains bound to the immutable network public key.",
       "properties": {
+        "administrators": {
+          "default": [],
+          "description": "Public governance roles disclosed before joining. Full member IDs,\nendpoints beyond the signed public hints, topology and activity remain\noutside this document.",
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
         "capability_summary": {
           "description": "Canonical capability declaration summary. This is discoverability\nmetadata, not proof that a capability is currently operational.",
           "items": {
@@ -34,6 +55,10 @@
             "$ref": "#/$defs/NetworkEndpoint"
           },
           "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
         },
         "expires_at_unix_ms": {
           "format": "uint64",
@@ -53,6 +78,20 @@
           "description": "Public discovery facets. Schema v2 includes these fields in the signed\npayload. Defaults keep older local JSON readable while validation still\nrejects records created under a different document schema.",
           "type": "string"
         },
+        "member_count": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "member_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -61,6 +100,23 @@
         },
         "owner": {
           "$ref": "#/$defs/NodeId"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "privacy_changes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "public_key": {
           "$ref": "#/$defs/PublicKey"
@@ -118,6 +174,8 @@
         "join_mode",
         "owner",
         "revision",
+        "policy_revision",
+        "privacy_policy_revision",
         "issued_at_unix_ms",
         "expires_at_unix_ms",
         "capability_summary"
@@ -371,6 +429,14 @@
     },
     "NodeJoinNetworkCommand": {
       "properties": {
+        "acknowledged_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "discovery_record": {
           "anyOf": [
             {
@@ -380,11 +446,41 @@
               "type": "null"
             }
           ],
-          "description": "Public signed discovery material selected by the user. It is never\ntrusted as cached authority: the handler revalidates it immediately."
+          "description": "Public signed discovery material selected by the user. It is never\ntrusted as cached authority: the handler replaces or revalidates it from\nthe persisted discovery snapshot immediately before mutation."
+        },
+        "network_id": {
+          "description": "Stable network selected from a discovery preview.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "network_name": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "network_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "preview_digest": {
+          "description": "Exact discovery digest shown in the preview.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -393,11 +489,32 @@
         },
         "target": {
           "type": "string"
+        },
+        "terms_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentHash"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "target",
         "start"
+      ],
+      "type": "object"
+    },
+    "NodeLeaveNetworkCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name"
       ],
       "type": "object"
     },
@@ -515,6 +632,17 @@
       "required": [
         "expected_revision",
         "networks"
+      ],
+      "type": "object"
+    },
+    "NodePreviewJoinNetworkCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id"
       ],
       "type": "object"
     },
@@ -950,7 +1078,24 @@
       "type": "object"
     },
     {
-      "description": "Join using signed discovery material that is revalidated against the\npersisted revision/revocation watermark before any network mutation.",
+      "description": "Read-only disclosure preview for a signed open-network discovery record.",
+      "properties": {
+        "command": {
+          "const": "preview_join_network",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodePreviewJoinNetworkCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Confirm and directly join a network using signed discovery material that\nis revalidated against the persisted revision/revocation watermark.",
       "properties": {
         "command": {
           "const": "join_network",
@@ -958,6 +1103,23 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeJoinNetworkCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Remove only this network's local configuration and membership.",
+      "properties": {
+        "command": {
+          "const": "leave_network",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeLeaveNetworkCommand"
         }
       },
       "required": [

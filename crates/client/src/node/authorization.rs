@@ -433,6 +433,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::GetConfigurationHistory => NodePermission::ViewState,
@@ -450,6 +451,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::UpdateNetworkDiscovery
         | NodeCommandKind::UnpublishNetworkDiscovery
         | NodeCommandKind::JoinNetwork
+        | NodeCommandKind::LeaveNetwork
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
         | NodeCommandKind::UpdateNetworkAllocation
@@ -478,7 +480,9 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::UnpublishNetworkDiscovery
             | NodeCommandKind::RefreshDiscoveryIndex
             | NodeCommandKind::RetryDiscoveryIndex
+            | NodeCommandKind::PreviewJoinNetwork
             | NodeCommandKind::JoinNetwork
+            | NodeCommandKind::LeaveNetwork
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
             | NodeCommandKind::StartNode
@@ -502,6 +506,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::GetBlacklist
         | NodeCommandKind::GetNetworkAllocation
         | NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
@@ -525,6 +530,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
             (PolicyAction::Create, ResourceKind::Network)
         }
         NodeCommandKind::JoinNetwork => (PolicyAction::Create, ResourceKind::Membership),
+        NodeCommandKind::LeaveNetwork => (PolicyAction::Remove, ResourceKind::Membership),
         NodeCommandKind::UpdateRouting => (PolicyAction::Update, ResourceKind::TrafficPolicy),
         NodeCommandKind::SetNetworkRole => (PolicyAction::Update, ResourceKind::Capability),
         NodeCommandKind::BanClient | NodeCommandKind::UnbanClient => {
@@ -551,6 +557,7 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::GetUiManifest
         | NodeCommand::GetDiagnostics
         | NodeCommand::CreateNetwork(_)
+        | NodeCommand::PreviewJoinNetwork(_)
         | NodeCommand::JoinNetwork(_)
         | NodeCommand::SetNodeDisplayName(_)
         | NodeCommand::RotateNodeIdentity(_)
@@ -582,6 +589,9 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::RebuildTun { network_name } => {
             NetworkTargets::Named(vec![network_name.clone()])
+        }
+        NodeCommand::LeaveNetwork(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
         }
         NodeCommand::UpdateRouting(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])

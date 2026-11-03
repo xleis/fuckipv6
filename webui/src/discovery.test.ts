@@ -21,10 +21,17 @@ function document(
   overrides: Partial<NetworkDiscoveryDocument> = {},
 ): NetworkDiscoveryDocument {
   return {
-    schema_version: 2,
+    schema_version: 3,
     network_id: `net_${name}`,
     public_key: `${name}-public-key`,
     publisher: "publisher-node",
+    administrators: [],
+    policy_revision: 1,
+    privacy_policy_revision: 1,
+    member_limit: null,
+    member_count: 1,
+    exit_contribution: "not_required",
+    privacy_changes: [],
     name,
     purpose: `${name} purpose`,
     language: "en",

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{JoinRequest, JoinRequestId, MembershipRole, NetworkId};
 use fuckipv6_common::{
-    ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NetworkTicket,
+    ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NatType, NetworkTicket,
 };
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -33,7 +33,9 @@ use crate::config_manager::{ConfigManager, NetworkConfig, NetworkCreationError};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
-use crate::signaling::client::{JoinRequestControlError, SignalingClient};
+use crate::signaling::client::{
+    JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
+};
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
     EmbeddedServiceStartRequest,
@@ -203,42 +205,31 @@ pub(crate) fn network_setup_problem_code(stage: NetworkSetupStage) -> NodeProble
 }
 
 fn map_join_request_error(error: JoinRequestControlError) -> RuntimeControlError {
-    let (code, message_key) = match error {
-        JoinRequestControlError::Disconnected | JoinRequestControlError::Unavailable => (
-            NodeProblemCode::Unavailable,
-            "join_request.error.unavailable",
-        ),
-        JoinRequestControlError::TimedOut => {
-            (NodeProblemCode::TimedOut, "join_request.error.timeout")
+    let code = match error {
+        JoinRequestControlError::Disconnected
+        | JoinRequestControlError::Unavailable
+        | JoinRequestControlError::Rejected(429)
+        | JoinRequestControlError::Rejected(503) => NodeProblemCode::Unavailable,
+        JoinRequestControlError::TimedOut => NodeProblemCode::TimedOut,
+        JoinRequestControlError::Rejected(401) => NodeProblemCode::AuthenticationRequired,
+        JoinRequestControlError::Rejected(403) => NodeProblemCode::PermissionDenied,
+        JoinRequestControlError::Rejected(404) => NodeProblemCode::NotFound,
+        JoinRequestControlError::Rejected(_) | JoinRequestControlError::InvalidResponse => {
+            NodeProblemCode::InvalidRequest
         }
-        JoinRequestControlError::Rejected(401) => (
-            NodeProblemCode::AuthenticationRequired,
-            "join_request.error.unauthorized",
-        ),
-        JoinRequestControlError::Rejected(403) => (
-            NodeProblemCode::PermissionDenied,
-            "join_request.error.forbidden",
-        ),
-        JoinRequestControlError::Rejected(404) => {
-            (NodeProblemCode::NotFound, "join_request.error.not_found")
-        }
-        JoinRequestControlError::Rejected(429) => (
-            NodeProblemCode::Unavailable,
-            "join_request.error.rate_limited",
-        ),
-        JoinRequestControlError::Rejected(503) => (
-            NodeProblemCode::Unavailable,
-            "join_request.error.overloaded",
-        ),
-        JoinRequestControlError::Rejected(_) | JoinRequestControlError::InvalidResponse => (
-            NodeProblemCode::InvalidRequest,
-            "join_request.error.unavailable",
-        ),
     };
     RuntimeControlError::JoinRequest {
         code,
-        message_key,
+        message_key: error.message_key(),
         message: error.to_string(),
+    }
+}
+
+fn join_request_unavailable(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::JoinRequest {
+        code: NodeProblemCode::Unavailable,
+        message_key: "join_request.error.unavailable",
+        message: message.into(),
     }
 }
 
@@ -1415,6 +1406,10 @@ enum RuntimeControlCommand {
         command: NodeSetNetworkRoleCommand,
         reply: oneshot::Sender<Result<RoleUpdateResult, RuntimeControlError>>,
     },
+    JoinRequest {
+        command: JoinRequestRuntimeCommand,
+        reply: oneshot::Sender<Result<JoinRequestExecutionResult, RuntimeControlError>>,
+    },
     Stop {
         networks: Vec<String>,
         all: bool,
@@ -1454,6 +1449,39 @@ enum RuntimeControlCommand {
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<StopSummary, RuntimeControlError>>,
     },
+}
+
+enum JoinRequestRuntimeCommand {
+    Submit {
+        request: Box<JoinRequest>,
+        coordinator_url: Option<String>,
+    },
+    List {
+        network_id: NetworkId,
+        coordinator_url: Option<String>,
+    },
+    Review {
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestBatchReviewItem>,
+    },
+    Withdraw {
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        coordinator_url: Option<String>,
+    },
+    Resubmit {
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        expected_revision: u64,
+        reason: String,
+        coordinator_url: Option<String>,
+    },
+}
+
+enum JoinRequestExecutionResult {
+    Status(JoinRequestStatusSnapshot),
+    List(Vec<JoinRequest>),
+    Review(Vec<JoinRequestReviewResult>),
 }
 
 fn routing_summary_timestamp() -> u64 {
@@ -1792,6 +1820,131 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn submit_join_request(
+        &self,
+        request: JoinRequest,
+        coordinator_url: Option<String>,
+    ) -> Result<JoinRequestStatusSnapshot, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::Submit {
+                request: Box::new(request),
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::Status(status) => Ok(status),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的提交响应".into(),
+            }),
+        }
+    }
+
+    pub async fn list_join_requests(
+        &self,
+        network_id: NetworkId,
+        coordinator_url: Option<String>,
+    ) -> Result<Vec<JoinRequest>, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::List {
+                network_id,
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::List(requests) => Ok(requests),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的列表响应".into(),
+            }),
+        }
+    }
+
+    pub async fn review_join_requests(
+        &self,
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestBatchReviewItem>,
+    ) -> Result<Vec<JoinRequestReviewResult>, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::Review {
+                network_id,
+                reviews,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::Review(reviews) => Ok(reviews),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的审批响应".into(),
+            }),
+        }
+    }
+
+    pub async fn withdraw_join_request(
+        &self,
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        coordinator_url: Option<String>,
+    ) -> Result<JoinRequestStatusSnapshot, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::Withdraw {
+                network_id,
+                request_id,
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::Status(status) => Ok(status),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的撤回响应".into(),
+            }),
+        }
+    }
+
+    pub async fn resubmit_join_request(
+        &self,
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        expected_revision: u64,
+        reason: String,
+        coordinator_url: Option<String>,
+    ) -> Result<JoinRequestStatusSnapshot, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::Resubmit {
+                network_id,
+                request_id,
+                expected_revision,
+                reason,
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::Status(status) => Ok(status),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的重申响应".into(),
+            }),
+        }
+    }
+
+    async fn execute_join_request(
+        &self,
+        command: JoinRequestRuntimeCommand,
+    ) -> Result<JoinRequestExecutionResult, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::JoinRequest { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn stop(
         &self,
         networks: Vec<String>,
@@ -2021,6 +2174,10 @@ async fn run_actor(
                 let result = actor.set_network_role(command).await;
                 let _ = reply.send(result);
             }
+            RuntimeControlCommand::JoinRequest { command, reply } => {
+                let result = actor.execute_join_request_command(command).await;
+                let _ = reply.send(result);
+            }
             RuntimeControlCommand::Stop {
                 networks,
                 all,
@@ -2101,6 +2258,146 @@ impl NetworkRuntimeActor {
             .iter()
             .map(|(network_name, session)| (network_name.clone(), session.tun_name.clone()))
             .collect())
+    }
+
+    async fn execute_join_request_command(
+        &mut self,
+        command: JoinRequestRuntimeCommand,
+    ) -> Result<JoinRequestExecutionResult, RuntimeControlError> {
+        match command {
+            JoinRequestRuntimeCommand::Submit {
+                request,
+                coordinator_url,
+            } => {
+                let network_id = request.network_id.clone();
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling.submit_join_request(*request).await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::Status)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::List {
+                network_id,
+                coordinator_url,
+            } => {
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling.list_join_requests(network_id).await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::List)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::Review {
+                network_id,
+                reviews,
+            } => {
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, None, false)
+                    .await?;
+                debug_assert!(!ephemeral);
+                signaling
+                    .review_join_requests(network_id, reviews)
+                    .await
+                    .map(JoinRequestExecutionResult::Review)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::Withdraw {
+                network_id,
+                request_id,
+                coordinator_url,
+            } => {
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling
+                    .withdraw_join_request(network_id, request_id)
+                    .await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::Status)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::Resubmit {
+                network_id,
+                request_id,
+                expected_revision,
+                reason,
+                coordinator_url,
+            } => {
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling
+                    .resubmit_join_request(network_id, request_id, expected_revision, reason)
+                    .await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::Status)
+                    .map_err(map_join_request_error)
+            }
+        }
+    }
+
+    /// Review operations must use the established data-plane registration.
+    /// Applicant-only operations may open one short-lived signaling connection
+    /// when the target network has not been joined yet. Reusing the active
+    /// session is mandatory when present so the Coordinator never sees two
+    /// registrations for the same node on the same network.
+    async fn join_request_signaling(
+        &mut self,
+        network_id: &NetworkId,
+        coordinator_url: Option<&str>,
+        allow_ephemeral: bool,
+    ) -> Result<(Arc<SignalingClient>, bool), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        if let Some(signaling) = self
+            .sessions
+            .values()
+            .find(|session| session.network_id.as_deref() == Some(network_id.as_str()))
+            .and_then(|session| session.signaling.clone())
+        {
+            return Ok((signaling, false));
+        }
+        if !allow_ephemeral {
+            return Err(join_request_unavailable(
+                "审批操作需要目标网络使用中的权威数据面连接",
+            ));
+        }
+        let Some(coordinator_url) = coordinator_url.filter(|url| !url.trim().is_empty()) else {
+            return Err(join_request_unavailable(
+                "目标网络当前未运行，且没有可用的签名协调端点",
+            ));
+        };
+        let identity = self.configs.load_node_identity().map_err(|error| {
+            join_request_unavailable(format!("加载审批连接所需节点身份失败: {error:#}"))
+        })?;
+        let signaling = SignalingClient::connect(coordinator_url, identity, 0, NatType::Unknown)
+            .await
+            .map_err(|error| {
+                join_request_unavailable(format!("建立审批控制连接失败: {error:#}"))
+            })?;
+        Ok((Arc::new(signaling), true))
+    }
+
+    async fn close_ephemeral_join_request_signaling(
+        &self,
+        signaling: &Arc<SignalingClient>,
+        ephemeral: bool,
+    ) {
+        if ephemeral {
+            if let Err(error) = signaling.close().await {
+                tracing::warn!(%error, "关闭一次性审批控制连接失败");
+            }
+        }
     }
 
     async fn start_node(&mut self) -> Result<StartSummary, RuntimeControlError> {
@@ -5910,6 +6207,109 @@ mod tests {
                 .expect("restored role config")
                 .exit_node_enabled
         );
+
+        harness.shutdown().await;
+    }
+
+    #[test]
+    fn join_request_control_errors_map_to_stable_problem_contract() {
+        let cases = [
+            (
+                JoinRequestControlError::Disconnected,
+                NodeProblemCode::Unavailable,
+                "join_request.error.unavailable",
+                true,
+            ),
+            (
+                JoinRequestControlError::Unavailable,
+                NodeProblemCode::Unavailable,
+                "join_request.error.unavailable",
+                true,
+            ),
+            (
+                JoinRequestControlError::TimedOut,
+                NodeProblemCode::TimedOut,
+                "join_request.error.timeout",
+                true,
+            ),
+            (
+                JoinRequestControlError::Rejected(401),
+                NodeProblemCode::AuthenticationRequired,
+                "join_request.error.unauthorized",
+                false,
+            ),
+            (
+                JoinRequestControlError::Rejected(403),
+                NodeProblemCode::PermissionDenied,
+                "join_request.error.forbidden",
+                false,
+            ),
+            (
+                JoinRequestControlError::Rejected(404),
+                NodeProblemCode::NotFound,
+                "join_request.error.not_found",
+                false,
+            ),
+            (
+                JoinRequestControlError::Rejected(429),
+                NodeProblemCode::Unavailable,
+                "join_request.error.rate_limited",
+                true,
+            ),
+            (
+                JoinRequestControlError::Rejected(503),
+                NodeProblemCode::Unavailable,
+                "join_request.error.overloaded",
+                true,
+            ),
+            (
+                JoinRequestControlError::InvalidResponse,
+                NodeProblemCode::InvalidRequest,
+                "join_request.error.unavailable",
+                false,
+            ),
+        ];
+
+        for (control_error, code, message_key, retryable) in cases {
+            let error = map_join_request_error(control_error);
+            assert_eq!(error.problem_code(), code);
+            assert_eq!(error.message_key(), message_key);
+            assert_eq!(error.retryable(), retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn review_join_requests_fails_closed_without_an_active_data_plane_session() {
+        use fuckipv6_common::domain::JoinRequestReviewAction;
+
+        let harness = TestHarness::new("join-review-no-session").await;
+        let network_id = NetworkId::from_public_key(b"join-review-no-session");
+        let error = harness
+            .runtime
+            .review_join_requests(
+                network_id,
+                vec![JoinRequestBatchReviewItem {
+                    request_id: JoinRequestId::from_public_key(b"missing-request"),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+            )
+            .await
+            .expect_err("review must not create a second data-plane registration");
+
+        match error {
+            RuntimeControlError::JoinRequest {
+                code,
+                message_key,
+                message,
+            } => {
+                assert_eq!(code, NodeProblemCode::Unavailable);
+                assert_eq!(message_key, "join_request.error.unavailable");
+                assert!(message.contains("权威数据面连接"));
+            }
+            error => panic!("unexpected review error: {error}"),
+        }
 
         harness.shutdown().await;
     }

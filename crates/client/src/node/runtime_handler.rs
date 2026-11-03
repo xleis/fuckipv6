@@ -4,10 +4,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
 
 use fuckipv6_common::domain::{
-    CapabilityKind, JoinTermsAck, MembershipRole, MembershipTerms, NetworkDiscoveryRecord,
+    CapabilityKind, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId,
+    JoinTermsAck, MembershipRole, MembershipTerms, NetworkDiscoveryRecord, NetworkId,
     NetworkMembership, NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId,
-    OperationId,
+    OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
+use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
 
 use super::runtime_control::{network_setup_problem_code, RestartSummary};
 use super::state::{NodeNetworkProfileSnapshot, NodeSignedNetworkProfileSnapshot};
@@ -25,7 +27,10 @@ use crate::discovery_index::{
 };
 use crate::ipc::MultiNetworkRegistry;
 use crate::network_setup::NetworkSetupStage;
-use crate::node::command::NodeNetworkProfileCommand;
+use crate::node::command::{
+    NodeJoinRequestListResult, NodeJoinRequestReviewAck, NodeJoinRequestReviewOutcome,
+    NodeNetworkProfileCommand, NodeResubmitJoinRequestCommand, NodeSubmitJoinRequestCommand,
+};
 use crate::symmetric::EmbeddedServiceManager;
 
 #[derive(Clone)]
@@ -426,14 +431,71 @@ impl NodeRuntimeHandler {
                     }
                     (None, _) => unavailable(request_id, "加入网络尚未接入内嵌网络服务 actor"),
                 },
-                super::NodeCommand::SubmitJoinRequest(_)
-                | super::NodeCommand::ListJoinRequests(_)
-                | super::NodeCommand::ReviewJoinRequest(_)
-                | super::NodeCommand::BatchReviewJoinRequests(_)
-                | super::NodeCommand::WithdrawJoinRequest(_)
-                | super::NodeCommand::ResubmitJoinRequest(_) => {
-                    unavailable(request_id, "审批加入运行时尚未初始化")
+                super::NodeCommand::SubmitJoinRequest(command) => {
+                    match (runtime, discovery, configs) {
+                        (Some(runtime), Some(discovery), Some(configs)) => {
+                            submit_join_request(&runtime, &discovery, &configs, request_id, command)
+                                .await
+                        }
+                        _ => unavailable(request_id, "提交加入申请需要节点配置、发现索引和运行时"),
+                    }
                 }
+                super::NodeCommand::ListJoinRequests(command) => match runtime {
+                    Some(runtime) => {
+                        list_join_requests(
+                            &runtime,
+                            discovery.as_ref(),
+                            request_id,
+                            command.network_id,
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "列出加入申请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::ReviewJoinRequest(command) => match runtime {
+                    Some(runtime) => {
+                        review_join_requests(
+                            &runtime,
+                            request_id,
+                            command.network_id,
+                            vec![command.review],
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "审批加入申请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::BatchReviewJoinRequests(command) => match runtime {
+                    Some(runtime) => {
+                        review_join_requests(
+                            &runtime,
+                            request_id,
+                            command.network_id,
+                            command.reviews,
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "批量审批加入申请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::WithdrawJoinRequest(command) => match runtime {
+                    Some(runtime) => {
+                        withdraw_join_request(
+                            &runtime,
+                            discovery.as_ref(),
+                            request_id,
+                            command.network_id,
+                            command.request_id,
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "撤回加入申请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::ResubmitJoinRequest(command) => match runtime {
+                    Some(runtime) => {
+                        resubmit_join_request(&runtime, discovery.as_ref(), request_id, command)
+                            .await
+                    }
+                    None => unavailable(request_id, "重申加入申请需要运行中的节点控制面"),
+                },
                 super::NodeCommand::UpdateRouting(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
                     if command.is_exit_node && !capabilities.supported {
@@ -1378,6 +1440,393 @@ fn join_target_from_record(
         })
 }
 
+fn join_request_rejection(
+    request_id: u64,
+    message_key: &'static str,
+    message: impl Into<String>,
+) -> NodeCommandResult {
+    NodeCommandResult::rejected(
+        request_id,
+        NodeProblem::new(NodeProblemCode::InvalidRequest, message).with_message_key(message_key),
+    )
+}
+
+async fn approval_coordinator_url(
+    discovery: Option<&DiscoveryIndexManager>,
+    network_id: &NetworkId,
+) -> Option<String> {
+    let record = discovery?
+        .approval_join_record(network_id.as_str())
+        .await
+        .ok()?;
+    join_target_from_record(&record)
+}
+
+fn approval_join_request_from_record(
+    record: &NetworkDiscoveryRecord,
+    identity: &Identity,
+    display_name: Option<String>,
+    reason: String,
+    now_unix_ms: u64,
+) -> Result<JoinRequest, String> {
+    let document = &record.document;
+    let applicant_node_id = NodeId::from_public_key(&identity.public_key_bytes());
+    let applicant = JoinApplicantProfile {
+        node_id: applicant_node_id.clone(),
+        display_name,
+        public_key_fingerprint: Identity::public_key_fingerprint(&identity.public_key_bytes()),
+    };
+    let terms = MembershipTerms {
+        network_policy_revision: document.policy_revision,
+        privacy_policy_revision: document.privacy_policy_revision,
+        exit_contribution: document.exit_contribution,
+        member_limit: document.member_limit,
+    };
+    let grant_preview = JoinRequestGrantPreview {
+        role: MembershipRole::Member,
+        capabilities: document.capability_summary.clone(),
+        exit_contribution: document.exit_contribution,
+        file_access: document.capability_summary.contains(&CapabilityKind::File),
+        grants_data_plane_access: true,
+    };
+    let submission_nonce = format!(
+        "{}:{}",
+        document.revision,
+        blake3::hash(reason.as_bytes()).to_hex()
+    );
+    let request_id =
+        JoinRequest::derived_id(&document.network_id, &applicant_node_id, &submission_nonce);
+    let expires_at_unix_ms = now_unix_ms
+        .saturating_add(JOIN_REQUEST_DEFAULT_EXPIRY_MS)
+        .min(document.expires_at_unix_ms);
+    JoinRequest::new(
+        request_id,
+        document.network_id.clone(),
+        applicant,
+        reason,
+        terms,
+        grant_preview,
+        now_unix_ms,
+        expires_at_unix_ms,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn apply_join_request_status(
+    request: &mut JoinRequest,
+    status: crate::signaling::client::JoinRequestStatusSnapshot,
+    reason: Option<String>,
+    now_unix_ms: u64,
+) {
+    request.state = status.state;
+    request.revision = status.revision;
+    request.updated_at_unix_ms = now_unix_ms;
+    request.information_request = status.information_request;
+    if let Some(reason) = reason {
+        request.reason = Some(reason);
+    }
+    if request.state.is_terminal() {
+        request.decided_at_unix_ms.get_or_insert(now_unix_ms);
+        request.reason_retention_until_unix_ms.get_or_insert(
+            now_unix_ms.saturating_add(fuckipv6_common::domain::JOIN_REQUEST_REASON_RETENTION_MS),
+        );
+    }
+}
+
+async fn submit_join_request(
+    runtime: &NetworkRuntimeManager,
+    discovery: &DiscoveryIndexManager,
+    configs: &ConfigManager,
+    request_id: u64,
+    command: NodeSubmitJoinRequestCommand,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(command.network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_network_id",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let record = match discovery.approval_join_record(network_id.as_str()).await {
+        Ok(record) => record,
+        Err(error) => return NodeCommandResult::rejected(request_id, discovery_problem(error)),
+    };
+    let Some(coordinator_url) = join_target_from_record(&record) else {
+        return unavailable(request_id, "签名发现记录没有可用的 Websocket 审批端点");
+    };
+    let identity = match configs.load_node_identity() {
+        Ok(identity) => identity,
+        Err(error) => return unavailable(request_id, format!("加载节点身份失败: {error:#}")),
+    };
+    let display_name = match configs.node_display_name() {
+        Ok(display_name) => display_name,
+        Err(error) => return unavailable(request_id, format!("加载节点显示名称失败: {error:#}")),
+    };
+    let now = unix_time_ms();
+    let mut request = match approval_join_request_from_record(
+        &record,
+        &identity,
+        display_name,
+        command.reason,
+        now,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_request",
+                format!("构造加入申请失败: {error}"),
+            )
+        }
+    };
+    match runtime
+        .submit_join_request(request.clone(), Some(coordinator_url.clone()))
+        .await
+    {
+        Ok(status) => {
+            apply_join_request_status(&mut request, status, None, unix_time_ms());
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::JoinRequestSubmitted(Box::new(request)),
+            )
+        }
+        Err(error) => {
+            runtime_rejection_for_network(request_id, error, request.network_id.to_string())
+        }
+    }
+}
+
+async fn list_join_requests(
+    runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    request_id: u64,
+    network_id: String,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_network_id",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let coordinator_url = approval_coordinator_url(discovery, &network_id).await;
+    match runtime
+        .list_join_requests(network_id.clone(), coordinator_url)
+        .await
+    {
+        Ok(requests) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::JoinRequests(Box::new(NodeJoinRequestListResult {
+                network_id: network_id.to_string(),
+                requests,
+            })),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+fn domain_join_request_reviews(
+    reviews: Vec<crate::node::command::NodeJoinRequestReviewItem>,
+) -> Result<Vec<JoinRequestBatchReviewItem>, NodeProblem> {
+    reviews
+        .into_iter()
+        .map(|review| {
+            let request_id = JoinRequestId::parse(review.request_id).map_err(|_| {
+                NodeProblem::new(NodeProblemCode::InvalidRequest, "加入申请 ID 格式无效")
+                    .with_message_key("join_request.error.invalid_request_id")
+            })?;
+            Ok(JoinRequestBatchReviewItem {
+                request_id,
+                expected_revision: review.expected_revision,
+                action: review.action,
+                note: review.note,
+            })
+        })
+        .collect()
+}
+
+async fn review_join_requests(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    network_id: String,
+    reviews: Vec<crate::node::command::NodeJoinRequestReviewItem>,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_network_id",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let reviews = match domain_join_request_reviews(reviews) {
+        Ok(reviews) => reviews,
+        Err(problem) => return NodeCommandResult::rejected(request_id, problem),
+    };
+    match runtime
+        .review_join_requests(network_id.clone(), reviews)
+        .await
+    {
+        Ok(reviews) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::JoinRequestsReviewed(Box::new(NodeJoinRequestReviewAck {
+                network_id: network_id.to_string(),
+                reviews: reviews
+                    .into_iter()
+                    .map(|review| NodeJoinRequestReviewOutcome {
+                        request_id: review.request_id.to_string(),
+                        state: review.state,
+                        revision: review.revision,
+                    })
+                    .collect(),
+            })),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn withdraw_join_request(
+    runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    request_id: u64,
+    network_id: String,
+    join_request_id: String,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_network_id",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let join_request_id = match JoinRequestId::parse(join_request_id) {
+        Ok(request_id) => request_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_request_id",
+                "加入申请 ID 格式无效",
+            )
+        }
+    };
+    let coordinator_url = approval_coordinator_url(discovery, &network_id).await;
+    let mut request = match runtime
+        .list_join_requests(network_id.clone(), coordinator_url.clone())
+        .await
+    {
+        Ok(requests) => match requests
+            .into_iter()
+            .find(|request| request.request_id == join_request_id)
+        {
+            Some(request) => request,
+            None => {
+                return runtime_rejection_for_network(
+                    request_id,
+                    RuntimeControlError::NotFound("加入申请不存在或已被清理".into()),
+                    network_id.to_string(),
+                )
+            }
+        },
+        Err(error) => {
+            return runtime_rejection_for_network(request_id, error, network_id.to_string())
+        }
+    };
+    match runtime
+        .withdraw_join_request(network_id.clone(), join_request_id, coordinator_url)
+        .await
+    {
+        Ok(status) => {
+            apply_join_request_status(&mut request, status, None, unix_time_ms());
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::JoinRequestUpdated(Box::new(request)),
+            )
+        }
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn resubmit_join_request(
+    runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    request_id: u64,
+    command: NodeResubmitJoinRequestCommand,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(command.network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_network_id",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let join_request_id = match JoinRequestId::parse(command.request_id) {
+        Ok(request_id) => request_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_request_id",
+                "加入申请 ID 格式无效",
+            )
+        }
+    };
+    let coordinator_url = approval_coordinator_url(discovery, &network_id).await;
+    let mut request = match runtime
+        .list_join_requests(network_id.clone(), coordinator_url.clone())
+        .await
+    {
+        Ok(requests) => match requests
+            .into_iter()
+            .find(|request| request.request_id == join_request_id)
+        {
+            Some(request) => request,
+            None => {
+                return runtime_rejection_for_network(
+                    request_id,
+                    RuntimeControlError::NotFound("加入申请不存在或已被清理".into()),
+                    network_id.to_string(),
+                )
+            }
+        },
+        Err(error) => {
+            return runtime_rejection_for_network(request_id, error, network_id.to_string())
+        }
+    };
+    let reason = command.reason;
+    match runtime
+        .resubmit_join_request(
+            network_id.clone(),
+            join_request_id,
+            command.expected_revision,
+            reason.clone(),
+            coordinator_url,
+        )
+        .await
+    {
+        Ok(status) => {
+            apply_join_request_status(&mut request, status, Some(reason), unix_time_ms());
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::JoinRequestUpdated(Box::new(request)),
+            )
+        }
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
 async fn join_runtime_network(
     runtime: &NetworkRuntimeManager,
     discovery: Option<&DiscoveryIndexManager>,
@@ -2116,6 +2565,130 @@ mod tests {
         assert_eq!(problem.code, code);
         assert_eq!(problem.retryable, retryable);
         assert!(!problem.message.is_empty());
+    }
+
+    fn approval_discovery_record(identity: &Identity, now_unix_ms: u64) -> NetworkDiscoveryRecord {
+        use fuckipv6_common::domain::{
+            DiscoveryTransport, ExitContributionObligation, NetworkDiscoveryDocument,
+            NetworkEndpoint, NetworkJoinMode, NetworkVisibility, PublicKey,
+            NETWORK_DISCOVERY_SCHEMA_VERSION,
+        };
+
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let node_id = NodeId::from_public_key(&identity.public_key_bytes());
+        let document = NetworkDiscoveryDocument {
+            schema_version: NETWORK_DISCOVERY_SCHEMA_VERSION,
+            network_id: NetworkId::from_public_key(public_key.as_str().as_bytes()),
+            public_key,
+            publisher: node_id.clone(),
+            name: "approval-network".into(),
+            purpose: "Test approval joins".into(),
+            language: "zh-CN".into(),
+            region: "CN".into(),
+            tags: vec!["approval".into()],
+            visibility: NetworkVisibility::Private,
+            join_mode: NetworkJoinMode::ApprovalRequired,
+            owner: node_id,
+            administrators: Vec::new(),
+            revision: 9,
+            policy_revision: 7,
+            privacy_policy_revision: 3,
+            member_limit: Some(16),
+            member_count: 4,
+            exit_contribution: ExitContributionObligation::Required,
+            privacy_changes: vec!["仅公开审批所需的资料".into()],
+            issued_at_unix_ms: now_unix_ms.saturating_sub(1_000),
+            expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+            capability_summary: vec![CapabilityKind::Exit, CapabilityKind::File],
+            endpoints: vec![NetworkEndpoint {
+                transport: DiscoveryTransport::Websocket,
+                host: "coordinator.example.test".into(),
+                port: 443,
+            }],
+            revoked_at_unix_ms: None,
+        };
+        NetworkDiscoveryRecord::sign(document, identity).expect("sign approval discovery record")
+    }
+
+    #[test]
+    fn approval_request_uses_signed_network_terms_and_redacted_public_profile() {
+        let identity = Identity::generate().expect("generate identity");
+        let now = 1_800_000_000_000;
+        let record = approval_discovery_record(&identity, now);
+        let request = approval_join_request_from_record(
+            &record,
+            &identity,
+            Some("申请人".into()),
+            "希望加入测试网络".into(),
+            now,
+        )
+        .expect("construct approval request");
+
+        assert_eq!(request.network_id, record.document.network_id);
+        assert_eq!(
+            request.applicant.node_id,
+            NodeId::from_public_key(&identity.public_key_bytes())
+        );
+        assert_eq!(request.applicant.display_name.as_deref(), Some("申请人"));
+        assert_eq!(
+            request.applicant.public_key_fingerprint,
+            Identity::public_key_fingerprint(&identity.public_key_bytes())
+        );
+        assert_eq!(request.reason.as_deref(), Some("希望加入测试网络"));
+        assert_eq!(request.terms.network_policy_revision, 7);
+        assert_eq!(request.terms.privacy_policy_revision, 3);
+        assert_eq!(request.terms.member_limit, Some(16));
+        assert_eq!(
+            request.terms.exit_contribution,
+            fuckipv6_common::domain::ExitContributionObligation::Required
+        );
+        assert_eq!(request.grant_preview.role, MembershipRole::Member);
+        assert_eq!(
+            request.grant_preview.capabilities,
+            vec![CapabilityKind::Exit, CapabilityKind::File]
+        );
+        assert!(request.grant_preview.file_access);
+        assert!(request.grant_preview.grants_data_plane_access);
+        assert_eq!(
+            request.expires_at_unix_ms,
+            record.document.expires_at_unix_ms
+        );
+        assert!(request.request_id.as_str().starts_with("join_"));
+    }
+
+    #[test]
+    fn terminal_join_request_status_sets_decision_and_retention_metadata() {
+        let identity = Identity::generate().expect("generate identity");
+        let now = 1_800_000_000_000;
+        let record = approval_discovery_record(&identity, now);
+        let mut request =
+            approval_join_request_from_record(&record, &identity, None, "请审批".into(), now)
+                .expect("construct approval request");
+        let decided_at = now + 5_000;
+        let request_id = request.request_id.clone();
+        apply_join_request_status(
+            &mut request,
+            crate::signaling::client::JoinRequestStatusSnapshot {
+                request_id,
+                state: fuckipv6_common::domain::JoinRequestState::Rejected,
+                revision: 2,
+                information_request: None,
+            },
+            None,
+            decided_at,
+        );
+
+        assert_eq!(
+            request.state,
+            fuckipv6_common::domain::JoinRequestState::Rejected
+        );
+        assert_eq!(request.revision, 2);
+        assert_eq!(request.updated_at_unix_ms, decided_at);
+        assert_eq!(request.decided_at_unix_ms, Some(decided_at));
+        assert_eq!(
+            request.reason_retention_until_unix_ms,
+            Some(decided_at + fuckipv6_common::domain::JOIN_REQUEST_REASON_RETENTION_MS)
+        );
     }
 
     #[tokio::test]

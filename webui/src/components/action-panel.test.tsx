@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
+  JoinRequest,
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeCommandOutcome,
@@ -41,6 +42,9 @@ const joinNetwork = manifest.pages
 const leaveNetwork = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "leave_network") as NodeUiAction;
+const listJoinRequests = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "list_join_requests") as NodeUiAction;
 const currentFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const nextFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
@@ -187,6 +191,46 @@ const joinedOutcome = {
     },
     snapshot,
     started: true,
+  },
+};
+
+const joinRequest: JoinRequest = {
+  schema_version: 1,
+  request_id: `join_${"A".repeat(43)}`,
+  network_id: "net_stable_home",
+  applicant: {
+    node_id: `node_${"B".repeat(43)}`,
+    display_name: "Branch office router",
+    public_key_fingerprint: "SHA256:branch-office-public-key",
+  },
+  reason: "Connect the branch office devices to the family network.",
+  reason_visibility: "owners_and_administrators",
+  state: "pending",
+  revision: 3,
+  terms: {
+    network_policy_revision: 4,
+    privacy_policy_revision: 2,
+    exit_contribution: "required",
+    member_limit: 16,
+  },
+  grant_preview: {
+    role: "member",
+    capabilities: ["relay", "file"],
+    exit_contribution: "required",
+    file_access: true,
+    grants_data_plane_access: true,
+  },
+  created_at_unix_ms: 1_700_000_000_000,
+  updated_at_unix_ms: 1_700_000_100_000,
+  expires_at_unix_ms: 1_700_600_000_000,
+  reason_retention_until_unix_ms: 1_703_000_000_000,
+};
+
+const joinRequestsOutcome = {
+  status: "join_requests" as const,
+  data: {
+    network_id: "net_stable_home",
+    requests: [joinRequest],
   },
 };
 
@@ -868,5 +912,122 @@ describe("action panel operation status", () => {
     expect(result).toHaveTextContent("purpose");
     expect(result).toHaveTextContent("tags");
     expect(result).toHaveTextContent("translated:profile.revision");
+  });
+});
+
+describe("action panel join request review list", () => {
+  it("shows applicant details, reason visibility and approval risks", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: joinRequestsOutcome as NodeCommandOutcome,
+    }));
+    const view = render(
+      <ActionPanel
+        actions={[listJoinRequests]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_join_requests",
+      }),
+    );
+    const network = screen.getByLabelText("translated:field.network_id");
+    await user.clear(network);
+    await user.type(network, "net_stable_home");
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    const list = await screen.findByTestId("join-request-list");
+    expect(list).toHaveTextContent("Branch office router");
+    expect(list).toHaveTextContent(joinRequest.reason!);
+    expect(list).toHaveTextContent("translated:join_requests.node_id");
+    expect(list).toHaveTextContent(joinRequest.applicant.node_id);
+    expect(list).toHaveTextContent(joinRequest.applicant.public_key_fingerprint);
+    expect(list).toHaveTextContent(
+      "translated:join_requests.reason_visibility.owners_and_administrators",
+    );
+    expect(within(list).getByTestId("join-request-risk")).toHaveTextContent(
+      "translated:join_requests.exit.required",
+    );
+    expect(within(list).getByTestId("join-request-risk")).toHaveTextContent(
+      "translated:join_requests.file_access.granted",
+    );
+    expect(within(list).getByTestId("join-request-risk")).toHaveTextContent(
+      "translated:join_requests.data_plane.granted",
+    );
+    expect(within(list).getByTestId("join-request-risk")).toHaveTextContent(
+      "translated:join_requests.expiring_soon",
+    );
+
+    view.rerender(
+      <ActionPanel
+        actions={[listJoinRequests]}
+        snapshot={snapshot}
+        selectedNetwork="studio"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.queryByTestId("join-request-list")).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders an explicit empty review list", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={[listJoinRequests]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: {
+            status: "join_requests",
+            data: { network_id: "net_stable_home", requests: [] },
+          } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_join_requests",
+      }),
+    );
+    const network = screen.getByLabelText("translated:field.network_id");
+    await user.clear(network);
+    await user.type(network, "net_stable_home");
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    expect(await screen.findByTestId("join-request-empty")).toHaveTextContent(
+      "translated:join_requests.empty",
+    );
   });
 });

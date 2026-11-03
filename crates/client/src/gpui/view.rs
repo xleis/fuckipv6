@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, IdempotencyKey, NetworkJoinMode,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
+    CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinRequestState, MembershipRole,
+    NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
     NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
     OperationState,
 };
@@ -52,9 +52,9 @@ use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
-    NodeNetworkCreationNextStep, NodeNetworkJoinPreview, NodeNetworkStatus, NodeOperationSnapshot,
-    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProblem,
-    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
+    NodeJoinRequestListResult, NodeNetworkCreationNextStep, NodeNetworkJoinPreview,
+    NodeNetworkStatus, NodeOperationSnapshot, NodePreviewConfigurationCommand, NodePrimaryStatus,
+    NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
     NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError,
 };
@@ -248,6 +248,7 @@ struct GpuiShell {
     recent_network_profile_preview: Option<NetworkProfilePreview>,
     recent_network_profile_updated: Option<NetworkProfileApplyResult>,
     recent_network_join_preview: Option<NodeNetworkJoinPreview>,
+    recent_join_requests: Option<NodeJoinRequestListResult>,
     network_join_terms_confirmed: bool,
     error: Option<String>,
     notice: Option<String>,
@@ -312,6 +313,7 @@ impl GpuiShell {
             recent_network_profile_preview: None,
             recent_network_profile_updated: None,
             recent_network_join_preview: None,
+            recent_join_requests: None,
             network_join_terms_confirmed: false,
             error: None,
             notice: None,
@@ -1207,11 +1209,13 @@ impl GpuiShell {
                 ));
             }
             NodeCommandOutcome::JoinRequests(result) => {
+                let result = *result;
                 self.notice = Some(tr(
                     self.locale,
                     "gpui.join_requests_loaded",
                     &[("count", &result.requests.len().to_string())],
                 ));
+                self.recent_join_requests = Some(result);
             }
             NodeCommandOutcome::JoinRequestsReviewed(result) => {
                 self.notice = Some(tr(
@@ -2444,6 +2448,7 @@ impl GpuiShell {
 
     fn select_network_context(&mut self, network_name: String, cx: &mut Context<Self>) {
         self.selected_network = Some(network_name.clone());
+        self.recent_join_requests = None;
         if let Some(manifest) = &self.manifest {
             let network_fields = manifest
                 .pages
@@ -5812,6 +5817,10 @@ impl GpuiShell {
             .then_some(self.recent_network_join_preview.as_ref())
             .flatten()
             .map(|preview| self.join_preview_card(preview, cx));
+        let join_requests_card = (action.id == "list_join_requests")
+            .then_some(self.recent_join_requests.as_ref())
+            .flatten()
+            .map(|result| self.join_requests_card(result));
         let status = match action.backend_status {
             NodeUiBackendStatus::Implemented => t(self.locale, "status.backend.implemented"),
             NodeUiBackendStatus::Unavailable => t(self.locale, "status.backend.unavailable"),
@@ -5878,6 +5887,9 @@ impl GpuiShell {
                     .text_color(rgba(COLOR_MUTED))
                     .child(format!("{} · {}", action.id, status)),
             );
+            if let Some(requests_card) = join_requests_card {
+                body = body.child(requests_card);
+            }
             if let Some(preview_card) = join_preview_card {
                 // A discovery-backed join must always pass through the
                 // signed preview and explicit terms acknowledgement. Hide the
@@ -6075,6 +6087,321 @@ impl GpuiShell {
                 .into_any_element()
             }))
             .into_any_element()
+    }
+
+    fn join_requests_card(&self, result: &NodeJoinRequestListResult) -> gpui::AnyElement {
+        let count = tr(
+            self.locale,
+            "join_requests.count",
+            &[("count", &result.requests.len().to_string())],
+        );
+        let requests = result
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let applicant = request
+                    .applicant
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| request.applicant.node_id.as_str().to_string());
+                let state = t(self.locale, join_request_state_key(request.state)).to_string();
+                let reason = request
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| t(self.locale, "join_requests.reason_redacted").to_string());
+                let visibility = t(
+                    self.locale,
+                    "join_requests.reason_visibility.owners_and_administrators",
+                )
+                .to_string();
+                let capabilities = if request.grant_preview.capabilities.is_empty() {
+                    t(self.locale, "common.none").to_string()
+                } else {
+                    request
+                        .grant_preview
+                        .capabilities
+                        .iter()
+                        .map(|capability| {
+                            t(self.locale, profile_capability_key(*capability)).to_string()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                };
+                let role = t(
+                    self.locale,
+                    join_request_role_key(request.grant_preview.role),
+                )
+                .to_string();
+                let exit = t(
+                    self.locale,
+                    if request.grant_preview.exit_contribution
+                        == ExitContributionObligation::Required
+                    {
+                        "join_requests.exit.required"
+                    } else {
+                        "join_requests.exit.not_required"
+                    },
+                )
+                .to_string();
+                let file_access = t(
+                    self.locale,
+                    if request.grant_preview.file_access {
+                        "join_requests.file_access.granted"
+                    } else {
+                        "join_requests.file_access.not_granted"
+                    },
+                )
+                .to_string();
+                let data_plane = t(
+                    self.locale,
+                    if request.grant_preview.grants_data_plane_access {
+                        "join_requests.data_plane.granted"
+                    } else {
+                        "join_requests.data_plane.not_granted"
+                    },
+                )
+                .to_string();
+                let expires = format_diagnostic_timestamp(self.locale, request.expires_at_unix_ms);
+                let expiring = request.expires_at_unix_ms
+                    <= unix_time_ms().saturating_add(24 * 60 * 60 * 1000);
+                let information_request = request.information_request.clone();
+
+                div()
+                    .id(SharedString::from(format!(
+                        "join-request-{}",
+                        request.request_id
+                    )))
+                    .when(index == 0, |item| {
+                        item.debug_selector(|| "visual-join-request-first".into())
+                    })
+                    .role(Role::Article)
+                    .aria_label(applicant.clone())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div().flex().flex_col().gap_1().child(
+                                    div()
+                                        .debug_selector(|| "visual-join-request-applicant".into())
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(rgba(COLOR_MUTED))
+                                                .child(
+                                                    t(self.locale, "join_requests.applicant")
+                                                        .to_string(),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight(600.0))
+                                                .text_color(rgba(COLOR_TEXT))
+                                                .child(applicant),
+                                        ),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .justify_end()
+                                    .gap_1()
+                                    .child(profile_status_chip(state))
+                                    .child(profile_status_chip(format!(
+                                        "{}: {}",
+                                        t(self.locale, "join_requests.revision"),
+                                        format_integer(self.locale, request.revision as i64)
+                                    ))),
+                            ),
+                    )
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join_requests.node_id"),
+                        request.applicant.node_id.as_str().to_string(),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join_requests.fingerprint"),
+                        request.applicant.public_key_fingerprint.clone(),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "join_requests.request_id"),
+                        request.request_id.as_str().to_string(),
+                    ))
+                    .child(
+                        div()
+                            .debug_selector(|| "visual-join-request-reason".into())
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_2()
+                            .rounded_sm()
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .border_l_2()
+                            .border_color(rgba(COLOR_ACCENT))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(t(self.locale, "join_requests.reason").to_string()),
+                            )
+                            .child(div().text_sm().text_color(rgba(COLOR_TEXT)).child(reason))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(visibility),
+                            ),
+                    )
+                    .when(information_request.is_some(), |item| {
+                        item.child(
+                            div()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(rgba(COLOR_PANEL_RAISED))
+                                .text_xs()
+                                .text_color(rgba(COLOR_WARNING))
+                                .child(format!(
+                                    "{}: {}",
+                                    t(self.locale, "join_requests.information_request"),
+                                    information_request.unwrap_or_default()
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .debug_selector(|| "visual-join-request-risk".into())
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_2()
+                            .rounded_sm()
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .border_1()
+                            .border_color(rgba(COLOR_WARNING))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_WARNING))
+                                    .child("!")
+                                    .child(t(self.locale, "join_requests.risk").to_string()),
+                            )
+                            .child(diagnostic_metadata_row(
+                                t(self.locale, "join_requests.role"),
+                                role,
+                            ))
+                            .child(diagnostic_metadata_row(
+                                t(self.locale, "join_requests.capabilities"),
+                                capabilities,
+                            ))
+                            .child(diagnostic_metadata_row(
+                                t(self.locale, "join_requests.exit"),
+                                exit,
+                            ))
+                            .child(diagnostic_metadata_row(
+                                t(self.locale, "join_requests.file_access"),
+                                file_access,
+                            ))
+                            .child(diagnostic_metadata_row(
+                                t(self.locale, "join_requests.data_plane"),
+                                data_plane,
+                            ))
+                            .child(diagnostic_metadata_row(
+                                t(self.locale, "join_requests.expires_at"),
+                                expires,
+                            ))
+                            .when(expiring, |risk| {
+                                risk.child(div().text_xs().text_color(rgba(COLOR_WARNING)).child(
+                                    t(self.locale, "join_requests.expiring_soon").to_string(),
+                                ))
+                            }),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        let mut card = div()
+            .id("join-requests-list")
+            .debug_selector(|| "visual-join-requests-list".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "join_requests.title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(t(self.locale, "join_requests.title").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(count),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgba(COLOR_FAINT))
+                            .child(result.network_id.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .p_2()
+                    .rounded_sm()
+                    .bg(rgba(COLOR_PANEL))
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "join_requests.privacy_boundary").to_string()),
+            );
+
+        if requests.is_empty() {
+            card = card.child(
+                empty_state(t(self.locale, "join_requests.empty"))
+                    .debug_selector(|| "visual-join-requests-empty".into()),
+            );
+        } else {
+            card = card.child(div().flex().flex_col().gap_3().children(requests));
+        }
+
+        card.into_any_element()
     }
 
     fn join_preview_card(
@@ -7501,6 +7828,25 @@ fn profile_capability_key(capability: CapabilityKind) -> &'static str {
     }
 }
 
+fn join_request_state_key(state: JoinRequestState) -> &'static str {
+    match state {
+        JoinRequestState::Pending => "join_request.state.pending",
+        JoinRequestState::NeedsInformation => "join_request.state.needs_information",
+        JoinRequestState::Approved => "join_request.state.approved",
+        JoinRequestState::Rejected => "join_request.state.rejected",
+        JoinRequestState::Withdrawn => "join_request.state.withdrawn",
+        JoinRequestState::Expired => "join_request.state.expired",
+    }
+}
+
+fn join_request_role_key(role: MembershipRole) -> &'static str {
+    match role {
+        MembershipRole::Owner => "join_request.role.owner",
+        MembershipRole::Administrator => "join_request.role.administrator",
+        MembershipRole::Member => "join_request.role.member",
+    }
+}
+
 fn discovery_transport_name(
     transport: fuckipv6_common::domain::DiscoveryTransport,
 ) -> &'static str {
@@ -7712,6 +8058,12 @@ fn action_label(locale: Locale, id: &str) -> String {
         "retry_discovery_index" => "action.retry_discovery_index",
         "preview_join_network" => "action.preview_join_network",
         "join_network" => "action.join_network",
+        "submit_join_request" => "action.submit_join_request",
+        "list_join_requests" => "action.list_join_requests",
+        "review_join_request" => "action.review_join_request",
+        "batch_review_join_requests" => "action.batch_review_join_requests",
+        "resubmit_join_request" => "action.resubmit_join_request",
+        "withdraw_join_request" => "action.withdraw_join_request",
         "leave_network" => "action.leave_network",
         "start_networks" => "action.start_networks",
         "stop_networks" => "action.stop_networks",
@@ -7964,8 +8316,9 @@ mod tests {
     use crate::tun::TunCapabilityReason;
     use fuckipv6_common::crypto::Identity;
     use fuckipv6_common::domain::{
-        DiscoveryTransport, NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkEndpoint,
-        NetworkId, Signature,
+        DiscoveryTransport, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview,
+        JoinRequestId, MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord,
+        NetworkEndpoint, NetworkId, NodeId, Signature,
     };
     use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
@@ -8121,6 +8474,42 @@ mod tests {
             tags: &[],
             capabilities: Vec::new(),
             accepted_at_unix_ms,
+        }
+    }
+
+    fn join_requests_fixture(empty: bool) -> NodeJoinRequestListResult {
+        let now = unix_time_ms();
+        let network_id = NetworkId::from_public_key(b"gpui-join-requests-network");
+        let applicant = NodeId::from_public_key(b"gpui-join-request-applicant");
+        let request = JoinRequest::new(
+            JoinRequestId::from_public_key(b"gpui-join-request"),
+            network_id.clone(),
+            JoinApplicantProfile {
+                node_id: applicant,
+                display_name: Some("Branch office router".into()),
+                public_key_fingerprint: "SHA256:gpui-branch-office".into(),
+            },
+            "Connect the branch office devices to the family network.",
+            MembershipTerms {
+                network_policy_revision: 4,
+                privacy_policy_revision: 2,
+                exit_contribution: ExitContributionObligation::Required,
+                member_limit: Some(16),
+            },
+            JoinRequestGrantPreview {
+                role: MembershipRole::Member,
+                capabilities: vec![CapabilityKind::File],
+                exit_contribution: ExitContributionObligation::Required,
+                file_access: true,
+                grants_data_plane_access: true,
+            },
+            now.saturating_sub(60_000),
+            now.saturating_add(3_600_000),
+        )
+        .expect("join request fixture");
+        NodeJoinRequestListResult {
+            network_id: network_id.to_string(),
+            requests: if empty { Vec::new() } else { vec![request] },
         }
     }
 
@@ -8464,6 +8853,61 @@ mod tests {
                 "missing profile preview element {selector}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn join_request_review_list_renders_applicant_reason_and_risk_details(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell
+                    .expanded_actions
+                    .insert("list_join_requests".into(), true);
+                shell.recent_join_requests = Some(join_requests_fixture(false));
+                cx.notify();
+            })
+            .expect("install join request list fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-join-requests-list",
+            "visual-join-request-first",
+            "visual-join-request-applicant",
+            "visual-join-request-reason",
+            "visual-join-request-risk",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing join request review element {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn join_request_review_list_renders_an_explicit_empty_state(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell
+                    .expanded_actions
+                    .insert("list_join_requests".into(), true);
+                shell.recent_join_requests = Some(join_requests_fixture(true));
+                cx.notify();
+            })
+            .expect("install empty join request list fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-join-requests-list").is_some());
+        assert!(visible.debug_bounds("visual-join-requests-empty").is_some());
+        assert!(visible.debug_bounds("visual-join-request-first").is_none());
     }
 
     #[gpui::test]

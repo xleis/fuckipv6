@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type {
+  JoinRequest,
   NetworkProfileApplyResult,
   NetworkProfilePreview,
   NetworkProfileProjections,
@@ -19,6 +20,7 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiField,
+  NodeJoinRequestListResult,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   blockReasonText,
@@ -987,6 +989,203 @@ function OperationStatusCard({
   );
 }
 
+const joinRequestSoonToExpireMs = 24 * 60 * 60 * 1000;
+
+function JoinRequestRisk({
+  request,
+  locale,
+  loadedAtUnixMs,
+}: {
+  request: JoinRequest;
+  locale: Locale;
+  loadedAtUnixMs: number;
+}) {
+  const grant = request.grant_preview;
+  const capabilities =
+    grant.capabilities && grant.capabilities.length > 0
+      ? grant.capabilities
+          .map((capability) => label(locale, `capability.${capability}`))
+          .join(" · ")
+      : label(locale, "common.none");
+  return (
+    <section className="join-request-risk" data-testid="join-request-risk">
+      <div className="join-request-risk-heading">
+        <ShieldAlert size={15} />
+        <strong>{label(locale, "join_requests.risk")}</strong>
+      </div>
+      <dl className="join-request-risk-list">
+        <div>
+          <dt>{label(locale, "join_requests.role")}</dt>
+          <dd>{label(locale, `join_request.role.${grant.role}`)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join_requests.capabilities")}</dt>
+          <dd>{capabilities}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join_requests.exit")}</dt>
+          <dd>
+            {label(
+              locale,
+              grant.exit_contribution === "required"
+                ? "join_requests.exit.required"
+                : "join_requests.exit.not_required",
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join_requests.file_access")}</dt>
+          <dd>
+            {label(
+              locale,
+              grant.file_access
+                ? "join_requests.file_access.granted"
+                : "join_requests.file_access.not_granted",
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join_requests.data_plane")}</dt>
+          <dd>
+            {label(
+              locale,
+              grant.grants_data_plane_access
+                ? "join_requests.data_plane.granted"
+                : "join_requests.data_plane.not_granted",
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join_requests.expires_at")}</dt>
+          <dd>
+            {i18n().formatTimestamp(locale, request.expires_at_unix_ms)}
+          </dd>
+        </div>
+      </dl>
+      {request.expires_at_unix_ms <=
+      loadedAtUnixMs + joinRequestSoonToExpireMs ? (
+        <p className="join-request-expiry-warning">
+          <AlertTriangle size={14} />
+          <span>{label(locale, "join_requests.expiring_soon")}</span>
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function JoinRequestListCard({
+  result,
+  locale,
+  loadedAtUnixMs,
+}: {
+  result: NodeJoinRequestListResult;
+  locale: Locale;
+  loadedAtUnixMs: number;
+}) {
+  return (
+    <section
+      className="join-request-list"
+      data-testid="join-request-list"
+      aria-label={label(locale, "join_requests.title")}
+    >
+      <div className="join-request-list-heading">
+        <div>
+          <span>{label(locale, "join_requests.title")}</span>
+          <strong>
+            {tr(locale, "join_requests.count", {
+              count: String(result.requests.length),
+            })}
+          </strong>
+        </div>
+        <code>{result.network_id}</code>
+      </div>
+      <p className="join-request-privacy">
+        {label(locale, "join_requests.privacy_boundary")}
+      </p>
+      {result.requests.length === 0 ? (
+        <p className="join-request-empty" data-testid="join-request-empty">
+          {label(locale, "join_requests.empty")}
+        </p>
+      ) : (
+        <div className="join-request-items">
+          {result.requests.map((request) => {
+            const visibility =
+              request.reason_visibility ?? "owners_and_administrators";
+            return (
+              <article
+                className="join-request-item"
+                data-testid="join-request-item"
+                key={request.request_id}
+              >
+                <header className="join-request-item-heading">
+                  <div>
+                    <span>{label(locale, "join_requests.applicant")}</span>
+                    <strong>
+                      {request.applicant.display_name ??
+                        request.applicant.node_id}
+                    </strong>
+                  </div>
+                  <div className="join-request-status-chips">
+                    <span>
+                      {label(locale, `join_request.state.${request.state}`)}
+                    </span>
+                    <span>
+                      {label(locale, "join_requests.revision")}:{" "}
+                      {request.revision}
+                    </span>
+                  </div>
+                </header>
+                <dl className="join-request-applicant">
+                  <div>
+                    <dt>{label(locale, "join_requests.node_id")}</dt>
+                    <dd>
+                      <code>{request.applicant.node_id}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "join_requests.fingerprint")}</dt>
+                    <dd>
+                      <code>{request.applicant.public_key_fingerprint}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "join_requests.request_id")}</dt>
+                    <dd>
+                      <code>{request.request_id}</code>
+                    </dd>
+                  </div>
+                </dl>
+                <section className="join-request-reason">
+                  <h4>{label(locale, "join_requests.reason")}</h4>
+                  <blockquote>
+                    {request.reason ?? label(locale, "join_requests.reason_redacted")}
+                  </blockquote>
+                  <p>
+                    {label(locale, `join_requests.reason_visibility.${visibility}`)}
+                  </p>
+                </section>
+                {request.information_request ? (
+                  <p className="join-request-information">
+                    <strong>
+                      {label(locale, "join_requests.information_request")}
+                    </strong>{" "}
+                    {request.information_request}
+                  </p>
+                ) : null}
+                <JoinRequestRisk
+                  request={request}
+                  locale={locale}
+                  loadedAtUnixMs={loadedAtUnixMs}
+                />
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ActionCard({
   action,
   snapshot,
@@ -1030,6 +1229,10 @@ function ActionCard({
     useState<NetworkProfileOutcome | null>(null);
   const [joinPreview, setJoinPreview] =
     useState<NodeNetworkJoinPreview | null>(null);
+  const [joinRequests, setJoinRequests] = useState<{
+    result: NodeJoinRequestListResult;
+    loadedAtUnixMs: number;
+  } | null>(null);
   const [joinConfirmed, setJoinConfirmed] = useState(false);
   const [failure, setFailure] = useState("");
   const editedFields = useRef(new Set<string>());
@@ -1071,6 +1274,7 @@ function ActionCard({
     setFailure("");
     setProfileOutcome(null);
     setJoinPreview(null);
+    setJoinRequests(null);
     setJoinConfirmed(false);
   }, [action, selectedNetwork, snapshot]);
 
@@ -1088,6 +1292,7 @@ function ActionCard({
       setResult("");
       setProfileOutcome(null);
       setJoinPreview(null);
+      setJoinRequests(null);
       setJoinConfirmed(false);
     }
   }
@@ -1137,6 +1342,12 @@ function ActionCard({
           setJoinConfirmed(false);
           setOpen(true);
         } else {
+          if (submission.outcome.status === "join_requests") {
+            setJoinRequests({
+              result: submission.outcome.data,
+              loadedAtUnixMs: Date.now(),
+            });
+          }
           if (
             submission.outcome.status === "network_joined" ||
             submission.outcome.status === "network_left"
@@ -1205,7 +1416,10 @@ function ActionCard({
         type="button"
         className="action-card-head"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          if (!open) setJoinRequests(null);
+          setOpen((current) => !current);
+        }}
       >
         <span>{label(locale, action.label_key)}</span>
         <ChevronRight
@@ -1230,6 +1444,13 @@ function ActionCard({
           blockedReason={joinBlockedReason}
           onCheckedChange={setJoinConfirmed}
           onConfirm={() => void confirmJoin()}
+        />
+      ) : null}
+      {joinRequests ? (
+        <JoinRequestListCard
+          result={joinRequests.result}
+          locale={locale}
+          loadedAtUnixMs={joinRequests.loadedAtUnixMs}
         />
       ) : null}
       {open ? (

@@ -2190,6 +2190,177 @@ button:disabled {
   align-items: flex-start;
   padding-block: var(--space-1);
 }
+.join-request-list {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  margin: 0 var(--space-3) var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-raised) 92%, var(--accent-soft));
+}
+.join-request-list-heading,
+.join-request-item-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.join-request-list-heading > div,
+.join-request-item-heading > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.join-request-list-heading span,
+.join-request-item-heading span,
+.join-request-applicant dt,
+.join-request-risk-list dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+}
+.join-request-list-heading strong,
+.join-request-item-heading strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+}
+.join-request-list-heading code {
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  user-select: all;
+}
+.join-request-privacy,
+.join-request-empty,
+.join-request-reason p,
+.join-request-information {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+.join-request-privacy {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.join-request-empty {
+  padding: var(--space-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+.join-request-items {
+  display: grid;
+  gap: var(--space-3);
+}
+.join-request-item {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.join-request-status-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+.join-request-status-chips span {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+.join-request-applicant,
+.join-request-risk-list {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+  margin: 0;
+}
+.join-request-applicant > div,
+.join-request-risk-list > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(84px, 0.38fr) minmax(0, 1fr);
+  gap: var(--space-2);
+}
+.join-request-applicant dd,
+.join-request-risk-list dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.join-request-applicant code {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  user-select: all;
+}
+.join-request-reason {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border-left: 2px solid var(--accent);
+  background: var(--surface-raised);
+}
+.join-request-reason h4 {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.join-request-reason blockquote {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.join-request-information {
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.join-request-risk {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+}
+.join-request-risk-heading,
+.join-request-expiry-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--warning);
+  font-size: var(--font-size-xs);
+}
+.join-request-risk-heading > svg,
+.join-request-expiry-warning > svg {
+  flex: 0 0 auto;
+}
+.join-request-expiry-warning {
+  margin: 0;
+  align-items: flex-start;
+}
 .profile-chip-list {
   display: flex;
   flex-wrap: wrap;

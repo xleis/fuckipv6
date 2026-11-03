@@ -1130,7 +1130,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 ### W8-06 审批加入 `[~]`
 
 - [ ] 提供申请理由字段、可见范围说明和长度限制；
-- [ ] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
+- [x] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
 - [ ] 支持批准、拒绝、要求补充信息和批量审批；
 - [ ] 审批前显示将授予的成员权限和 Exit/File 影响；
 - [ ] 并发审批只能产生一个最终成员状态；
@@ -1151,14 +1151,21 @@ GPUI 的 44 项动作绑定与类型化命令构造覆盖六个动作，WebUI �
 要求补充信息必须附说明。验证通过：
 `cargo test -p fuckipv6-client --all-features --lib node::ui_manifest`（17 passed）、
 `cargo test -p fuckipv6-client --all-features --lib gpui::view_model`（34 passed）、
-`cargo test -p fuckipv6-common i18n`（9 passed）、WebUI 9 个测试文件 108/108、
+`cargo test -p fuckipv6-common i18n`（9 passed）、WebUI 9 个测试文件 110/110、
 `npm run typecheck`、`npm run lint`、`./scripts/check-contracts.sh`、
 `cargo fmt --all -- --check` 和 `git diff --check`。
 
-尚未完成完整审批产品表面：待审批列表仍未展示申请人公开资料、理由与风险提示；审批前尚未
-展示成员权限和 Exit/File 影响预览；WebUI 批量审批仍使用 JSON 输入而非选择式工作流；
-并发冲突的原地恢复、申请理由可见范围/保留策略指示以及统一活动/通知视图仍需实现。因此本项
-保持进行中，不能因命令已可达而标记完成。
+本轮同时完成待审批列表面：WebUI 与 GPUI 都保存 `list_join_requests` 的完整结果，并在切换
+网络或重新打开动作时清除旧列表。列表展示申请人 display name、Node ID、公钥指纹、request ID、
+revision、状态与过期时间，并明确说明理由仅对网络所有者和管理员可见；申请理由、补充信息要求、
+授予角色、capabilities、Exit/File 影响与数据面访问风险均有独立提示，空列表也有明确状态。
+WebUI 新增 `shows applicant details, reason visibility and approval risks` 与
+`renders an explicit empty review list` 测试，GPUI 新增两条 visual-selector 回归测试；
+同时修复 GPUI 六个加入申请动作的中文标签映射。
+
+尚未完成完整审批产品表面：审批前对话框尚未复用该风险摘要；WebUI 批量审批仍使用 JSON
+输入而非选择式工作流；并发冲突的原地恢复、申请理由保留策略专属 UI 以及统一活动/通知视图
+仍需实现。因此本项保持进行中，不能因列表与命令已可达而标记完成。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

@@ -1082,16 +1082,18 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：所有者能准确知道公网将看到什么；字段级隐私测试证明无越界泄漏。
 
-### W8-03 签名发现索引 `[ ]`
+### W8-03 签名发现索引 `[x]`
 
-- [ ] 定义可签名的 DiscoveryRecord，包含 Network ID、版本、发布者、过期时间和能力摘要；
-- [ ] 客户端在展示和加入前验证签名、版本、过期时间与吊销状态；
-- [ ] 索引记录单调更新，拒绝回放旧版本覆盖新版本；
-- [ ] 支持索引发布、更新、下线、重试和失败状态；
-- [ ] 索引服务器不可用时不阻塞本地网络启动和数据面；
-- [ ] 记录索引请求结果，但不记录不必要的用户搜索隐私；
-- [ ] 提供索引故障的降级状态和手动刷新；
-- [ ] 加入流程重新验证资料，而不是信任搜索结果缓存。
+- [x] 定义可签名的 DiscoveryRecord，包含 Network ID、版本、发布者、过期时间和能力摘要；
+- [x] 客户端在展示和加入前验证签名、版本、过期时间与吊销状态；
+- [x] 索引记录单调更新，拒绝回放旧版本覆盖新版本；
+- [x] 支持索引发布、更新、下线、重试和失败状态；
+- [x] 索引服务器不可用时不阻塞本地网络启动和数据面；
+- [x] 记录索引请求结果，但不记录不必要的用户搜索隐私；
+- [x] 提供索引故障的降级状态和手动刷新；
+- [x] 加入流程重新验证资料，而不是信任搜索结果缓存。
+
+**证据（2026-11-03）**：`NetworkDiscoveryDocument` 使用独立 schema version，绑定 Network ID、网络公钥、所有者/发布者、单调 revision、签发/过期时间、规范化能力摘要和可选吊销时间；`NetworkDiscoveryRecord` 由网络身份签名，读取、刷新、展示和加入前均验证签名、版本、有效期、发布者绑定与吊销状态。索引状态覆盖 `idle/pending/ready/degraded/failed/unsupported`，持久化只包含公开签名记录、摘要、revision watermark 和稳定错误分类，不接收或记录搜索文本、邀请凭据和 ticket。相同 revision 仅接受字节摘要一致的幂等重试，旧 revision 和冲突 revision 被拒绝；已接受吊销 tombstone 后，任何非同一 tombstone 的后续记录均被拒绝。发布、更新、下线、刷新和重试均通过统一命令、本地所有者授权、操作审计和快照投影暴露；索引请求超时、离线、服务端错误、非法响应和存储错误不会停止或重建已加入网络，`data_plane_affected=false`。加入流程在 `runtime.join` 前重新验证调用方提供的签名 DiscoveryRecord，搜索缓存不能绕过验证。验证通过：`cargo test -p fuckipv6-common --all-features`（182 passed）、`cargo test -p fuckipv6-client --all-features`（库 749 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed）、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 8 个测试文件 92/92、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`（含 Rust、TypeScript、Android DTO 测试）、`cargo fmt --all -- --check` 和 `git diff --check`。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 **验收**：伪造、过期、重放记录无法作为有效网络展示或加入；索引故障与已加入网络故障隔离。
 

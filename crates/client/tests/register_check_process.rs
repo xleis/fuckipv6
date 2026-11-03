@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use fuckipv6_client::symmetric::EmbeddedCoordinator;
+use fuckipv6_client::{config_manager::ConfigManager, symmetric::EmbeddedCoordinator};
+use fuckipv6_common::domain::NetworkCreateProfile;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,6 +12,24 @@ async fn register_check_command_registers_with_embedded_host() -> Result<()> {
     let node_bin = workspace_bin("fuckipv6")?;
     let signaling_addr = free_loopback_addr().await?;
     let config_dir = unique_temp_dir("coordinator");
+    let configs = ConfigManager::new_for_dir(config_dir.clone())?;
+    configs
+        .create_owned_network(
+            NetworkCreateProfile {
+                name: "register-check-test".into(),
+                purpose: "Registration compatibility test".into(),
+                icon: "network".into(),
+                language: "en".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
+                visibility: Default::default(),
+                join_mode: Default::default(),
+            },
+            "ws://127.0.0.1:1",
+            false,
+        )
+        .context("create approved network roster")?;
     let mut coordinator = EmbeddedCoordinator::start_with_config_dir(
         "register-check-test",
         signaling_addr.port(),
@@ -25,7 +44,7 @@ async fn register_check_command_registers_with_embedded_host() -> Result<()> {
 
     wait_for_tcp(signaling_addr).await?;
 
-    let key_path = unique_temp_key_path();
+    let key_path = config_dir.join("node_identity.pem");
     let output = tokio::time::timeout(
         Duration::from_secs(10),
         Command::new(&node_bin)
@@ -105,10 +124,6 @@ fn workspace_bin(name: &str) -> Result<PathBuf> {
     } else {
         anyhow::bail!("binary `{}` was not built at {:?}", name, path)
     }
-}
-
-fn unique_temp_key_path() -> PathBuf {
-    unique_temp_dir("register-check").with_extension("key")
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

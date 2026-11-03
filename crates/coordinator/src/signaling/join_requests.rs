@@ -275,6 +275,9 @@ impl JoinRequestStore {
                     if request.network_id != *network_id {
                         bail!("join request belongs to another network");
                     }
+                    if request.applicant.node_id == *reviewer {
+                        bail!("join_request.error.self_review_forbidden");
+                    }
                     request.review(
                         review.expected_revision,
                         review.action,
@@ -987,6 +990,57 @@ mod tests {
             1_003,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reviewer_cannot_approve_their_own_request() {
+        let dir = test_dir("self-review");
+        let applicant_seed = "self-reviewer";
+        let applicant_id = applicant(applicant_seed);
+        let record_path = write_network_record(&dir, &network_record(owner(), vec![]));
+        let store = JoinRequestStore::new(
+            dir.join("join_requests.json"),
+            Some(record_path.clone()),
+            None,
+            vec![],
+        )
+        .unwrap();
+        let request = request(applicant_seed, "self-review", 1_000);
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                request.clone(),
+                1_001,
+            )
+            .unwrap();
+
+        // Simulate the applicant gaining reviewer authority after submitting.
+        // The explicit self-review check must still reject the decision.
+        write_network_record(&dir, &network_record(owner(), vec![applicant_id.clone()]));
+
+        let error = store
+            .review(
+                &network_id(),
+                &applicant_id,
+                vec![JoinRequestBatchReviewItem {
+                    request_id: request.request_id.clone(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+                1_002,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "join_request.error.self_review_forbidden"
+        );
+        let listed = store.list(&network_id(), &owner(), 1_003).unwrap();
+        assert_eq!(listed[0].state, JoinRequestState::Pending);
+        assert_eq!(listed[0].revision, 1);
     }
 
     #[test]

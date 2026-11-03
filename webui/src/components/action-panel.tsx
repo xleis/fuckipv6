@@ -7,7 +7,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type {
   NodeCommandOutcome,
   NodeOperationSnapshot,
@@ -151,6 +151,11 @@ function FieldControl({
         }
         value={String(value)}
         required={field.required}
+        placeholder={
+          field.input === "fingerprint"
+            ? label(locale, "placeholder.fingerprint")
+            : undefined
+        }
         min={
           field.input === "port"
             ? 1
@@ -298,6 +303,9 @@ function ActionCard({
   const [errors, setErrors] = useState<string[]>([]);
   const [result, setResult] = useState("");
   const [failure, setFailure] = useState("");
+  const editedFields = useRef(new Set<string>());
+  const fingerprint = snapshot.identity?.public_key_fingerprint ?? "";
+  const previousFingerprint = useRef(fingerprint);
   const pageBlocked = interactionBlocked
     ? pageStateDefinition(interactionBlocked)
     : null;
@@ -325,6 +333,20 @@ function ActionCard({
     if (!requested) return;
     onRequestedActionOpened();
   }, [requested, onRequestedActionOpened]);
+
+  useEffect(() => {
+    if (fingerprint === previousFingerprint.current) return;
+    previousFingerprint.current = fingerprint;
+    if (
+      action.fields.some((field) => field.id === "expected_fingerprint") &&
+      !editedFields.current.has("expected_fingerprint")
+    ) {
+      setValues((current) => ({
+        ...current,
+        expected_fingerprint: fingerprint,
+      }));
+    }
+  }, [action.fields, fingerprint]);
 
   async function submit(): Promise<void> {
     const validation = validateActionValues(action, values, locale);
@@ -376,6 +398,11 @@ function ActionCard({
           size={16}
         />
       </button>
+      {result ? (
+        <p className="form-success" role="status">
+          {result}
+        </p>
+      ) : null}
       {open ? (
         <form className="action-form" onSubmit={handleSubmit}>
           {pageBlocked || executionBlocked ? (
@@ -395,9 +422,10 @@ function ActionCard({
               locale={locale}
               snapshot={snapshot}
               value={values[field.id] ?? ""}
-              onChange={(value) =>
-                setValues((current) => ({ ...current, [field.id]: value }))
-              }
+              onChange={(value) => {
+                editedFields.current.add(field.id);
+                setValues((current) => ({ ...current, [field.id]: value }));
+              }}
             />
           ))}
           {errors.length > 0 ? (
@@ -410,11 +438,6 @@ function ActionCard({
           {failure ? (
             <p className="form-error" role="alert">
               {failure}
-            </p>
-          ) : null}
-          {result ? (
-            <p className="form-success" role="status">
-              {result}
             </p>
           ) : null}
           {pending ? (

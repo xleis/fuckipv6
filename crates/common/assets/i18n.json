@@ -1052,7 +1052,22 @@
       "gpui.configuration_loaded": "完整配置已加载",
       "gpui.configuration_previewed": "配置预览完成：{diffs} 项差异，{errors} 个校验问题",
       "gpui.configuration_applied": "配置已应用：revision {previous} → {revision}（no_op={no_op}）",
-      "gpui.configuration_history_loaded": "配置历史已加载：{count} 条"
+      "gpui.configuration_history_loaded": "配置历史已加载：{count} 条",
+      "action.rotate_node_identity": "轮换节点密钥",
+      "field.expected_fingerprint": "当前公钥指纹",
+      "confirm.rotate_node_identity.title": "确认轮换节点密钥",
+      "confirm.rotate_node_identity.consequence": "将生成新的 Node ID 和公钥，所有 Web 所有者会话会立即失效。开始前必须停止全部运行中的网络。",
+      "placeholder.fingerprint": "粘贴当前 43 字符 Base64URL 指纹",
+      "validation.fingerprint_invalid": "公钥指纹必须是 43 字符的无填充 Base64URL，并解码为 32 字节。",
+      "gpui.identity_rotated": "节点身份已轮换：{old_node_id} → {new_node_id} · 指纹 {old_fingerprint} → {new_fingerprint} · 受影响配置网络 {networks} · 所有者会话 {sessions}",
+      "outcome.identity_rotated": "节点身份已轮换：{old_node_id} → {new_node_id} · 指纹 {old_fingerprint} → {new_fingerprint} · 受影响配置网络 {networks} · Web 所有者会话 {sessions}",
+      "identity.rotation.title": "密钥轮换影响",
+      "identity.rotation.impact": "轮换前必须停止所有运行中的网络。网络配置会保留，但成员身份、邀请、已建立会话以及依赖旧公钥的信任关系可能需要重建；全部 Web 所有者会话会失效。Passkey 和本地恢复材料会保留；如无法登录，请在节点主机运行 fuckipv6 recover-owner，系统不提供公网恢复接口。",
+      "identity.rotation.sessions_invalidated": "已全部失效",
+      "identity.rotation.sessions_preserved": "未失效",
+      "identity.security.title": "Passkey 与本地恢复",
+      "identity.security.detail": "在设置中管理 Passkey、本地恢复和所有者访问。此页只显示可公开核验的节点身份。",
+      "identity.security.settings_button": "前往安全设置"
     },
     "en": {
       "nav.overview": "Overview",
@@ -2104,7 +2119,22 @@
       "gpui.configuration_loaded": "Complete configuration loaded",
       "gpui.configuration_previewed": "Configuration preview complete: {diffs} changes, {errors} validation issues",
       "gpui.configuration_applied": "Configuration applied: revision {previous} → {revision} (no_op={no_op})",
-      "gpui.configuration_history_loaded": "Configuration history loaded: {count} entries"
+      "gpui.configuration_history_loaded": "Configuration history loaded: {count} entries",
+      "action.rotate_node_identity": "Rotate node key",
+      "field.expected_fingerprint": "Current public-key fingerprint",
+      "confirm.rotate_node_identity.title": "Confirm node key rotation",
+      "confirm.rotate_node_identity.consequence": "A new Node ID and public key will be generated, and every Web owner session will be invalidated immediately. Stop all running networks first.",
+      "placeholder.fingerprint": "Paste the current 43-character Base64URL fingerprint",
+      "validation.fingerprint_invalid": "The public-key fingerprint must be a 43-character unpadded Base64URL value that decodes to 32 bytes.",
+      "gpui.identity_rotated": "Node identity rotated: {old_node_id} → {new_node_id} · fingerprint {old_fingerprint} → {new_fingerprint} · affected configured networks {networks} · owner sessions {sessions}",
+      "outcome.identity_rotated": "Node identity rotated: {old_node_id} → {new_node_id} · fingerprint {old_fingerprint} → {new_fingerprint} · affected configured networks {networks} · Web owner sessions {sessions}",
+      "identity.rotation.title": "Key rotation impact",
+      "identity.rotation.impact": "Stop every running network before rotating. Network configuration is retained, but membership identities, invitations, established sessions, and trust based on the old public key may need to be rebuilt; every Web owner session is invalidated. Passkeys and local recovery material are retained. If sign-in is unavailable, run fuckipv6 recover-owner on the node host; there is no public recovery endpoint.",
+      "identity.rotation.sessions_invalidated": "All invalidated",
+      "identity.rotation.sessions_preserved": "Not invalidated",
+      "identity.security.title": "Passkeys and local recovery",
+      "identity.security.detail": "Manage passkeys, local recovery, and owner access in Settings. This page shows only publicly verifiable node identity.",
+      "identity.security.settings_button": "Open security settings"
     }
   }
 }

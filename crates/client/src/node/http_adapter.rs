@@ -63,6 +63,11 @@ pub const NODE_HTTP_MAX_COMMAND_BODY_BYTES: usize = 256 * 1024;
 /// unbounded wait queue.
 pub const NODE_HTTP_MAX_CONCURRENT_COMMANDS: usize = 32;
 
+/// Identity rotation invalidates the WebUI owner session before its operation
+/// can be polled. Keep the authenticated POST open long enough to return the
+/// terminal result, but never claim success when the operation is still active.
+const NODE_HTTP_IDENTITY_ROTATION_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Metadata carried by every v1 success and error response.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeApiResponseMeta {
@@ -665,6 +670,7 @@ pub struct NodeHttpAdapter {
     operations: Arc<Mutex<OperationRegistry>>,
     command_slots: Arc<Semaphore>,
     command_concurrency_limit: usize,
+    identity_rotation_wait_timeout: Duration,
 }
 
 impl NodeHttpAdapter {
@@ -677,6 +683,7 @@ impl NodeHttpAdapter {
             operations: Arc::new(Mutex::new(OperationRegistry::default())),
             command_slots: Arc::new(Semaphore::new(NODE_HTTP_MAX_CONCURRENT_COMMANDS)),
             command_concurrency_limit: NODE_HTTP_MAX_CONCURRENT_COMMANDS,
+            identity_rotation_wait_timeout: NODE_HTTP_IDENTITY_ROTATION_WAIT_TIMEOUT,
         }
     }
 
@@ -684,6 +691,12 @@ impl NodeHttpAdapter {
     fn with_command_concurrency_limit(mut self, limit: usize) -> Self {
         self.command_concurrency_limit = limit.max(1);
         self.command_slots = Arc::new(Semaphore::new(self.command_concurrency_limit));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_identity_rotation_wait_timeout(mut self, timeout: Duration) -> Self {
+        self.identity_rotation_wait_timeout = timeout;
         self
     }
 
@@ -703,6 +716,26 @@ impl NodeHttpAdapter {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             })
+    }
+
+    async fn wait_for_operation_terminal(
+        &self,
+        id: &OperationId,
+        wait_timeout: Duration,
+    ) -> Option<NodeOperationSnapshot> {
+        let deadline = tokio::time::Instant::now() + wait_timeout;
+        loop {
+            if let Some(operation) = self.operation(id.as_str()) {
+                if operation.operation.state.is_terminal() {
+                    return Some(operation);
+                }
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return self.operation(id.as_str());
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(20))).await;
+        }
     }
 
     /// Register and launch one mutating command. Registration and idempotency
@@ -1163,6 +1196,7 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::NetworkAllocation(_)
         | NodeCommandOutcome::Probe(_)
         | NodeCommandOutcome::NetworkCreated(_)
+        | NodeCommandOutcome::IdentityRotated(_)
         | NodeCommandOutcome::Configuration(_)
         | NodeCommandOutcome::ConfigurationPreview(_)
         | NodeCommandOutcome::ConfigurationApplied(_)
@@ -1230,7 +1264,9 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
-        NodeCommand::SetNodeDisplayName(_) => OperationKind::IdentityUpdate,
+        NodeCommand::SetNodeDisplayName(_) | NodeCommand::RotateNodeIdentity(_) => {
+            OperationKind::IdentityUpdate
+        }
         NodeCommand::BanClient(_) | NodeCommand::UnbanClient(_) => {
             OperationKind::ClientBlacklistUpdate
         }
@@ -1294,6 +1330,7 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::RollbackConfiguration(_)
         | NodeCommand::GetConfigurationHistory
         | NodeCommand::SetNodeDisplayName(_)
+        | NodeCommand::RotateNodeIdentity(_)
         | NodeCommand::Shutdown => node_target(),
     }
 }
@@ -1495,19 +1532,48 @@ async fn handle_v1_command(
             )
             .into_response();
         };
+        let rotates_identity =
+            matches!(&payload.request.command, NodeCommand::RotateNodeIdentity(_));
         return match adapter
             .submit_operation(context, payload.request, idempotency_key)
             .await
         {
-            Ok((operation, _created)) => (
-                StatusCode::ACCEPTED,
-                Json(NodeApiCommandResponse {
-                    meta: NodeApiResponseMeta::new(request_id),
-                    result: None,
-                    operation: Some(operation),
-                }),
-            )
-                .into_response(),
+            Ok((operation, _created)) => {
+                let operation = if rotates_identity {
+                    adapter
+                        .wait_for_operation_terminal(
+                            &operation.operation.operation_id,
+                            adapter.identity_rotation_wait_timeout,
+                        )
+                        .await
+                        .unwrap_or(operation)
+                } else {
+                    operation
+                };
+                if rotates_identity && operation.operation.state.is_terminal() {
+                    if let Some(result) = operation.result.clone() {
+                        let status = status_for_command_result(&result);
+                        return (
+                            status,
+                            Json(NodeApiCommandResponse {
+                                meta: NodeApiResponseMeta::new(request_id),
+                                result: Some(result),
+                                operation: Some(operation),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+                (
+                    StatusCode::ACCEPTED,
+                    Json(NodeApiCommandResponse {
+                        meta: NodeApiResponseMeta::new(request_id),
+                        result: None,
+                        operation: Some(operation),
+                    }),
+                )
+                    .into_response()
+            }
             Err(OperationSubmitError::Invalid(problem)) => {
                 let mut error = HttpApiError::invalid_request(request_id, problem.message.clone());
                 error.body.problem = Some(problem);
@@ -2468,13 +2534,14 @@ mod tests {
     use super::*;
     use crate::node::{
         node_ui_manifest, NodeCommandFuture, NodeCommandHandler, NodeCommandResult,
-        NodeJoinNetworkCommand, NodeNetworkSnapshot, NodeNetworkStatus, NodeProblemCode,
-        NodeTrafficSnapshot,
+        NodeIdentityRotationSnapshot, NodeJoinNetworkCommand, NodeNetworkSnapshot,
+        NodeNetworkStatus, NodeProblemCode, NodeTrafficSnapshot,
     };
 
     #[derive(Clone)]
     enum StubWriteBehavior {
         Completed,
+        IdentityRotated(NodeIdentityRotationSnapshot),
         Rejected(NodeProblem),
     }
 
@@ -2515,6 +2582,12 @@ mod tests {
                                     message: "stub write completed".into(),
                                 },
                             ),
+                            StubWriteBehavior::IdentityRotated(rotation) => {
+                                NodeCommandResult::completed(
+                                    request_id,
+                                    NodeCommandOutcome::IdentityRotated(rotation),
+                                )
+                            }
                             StubWriteBehavior::Rejected(problem) => {
                                 NodeCommandResult::rejected(request_id, problem)
                             }
@@ -2997,6 +3070,129 @@ mod tests {
         assert!(matches!(
             result.outcome,
             NodeCommandOutcome::Completed { .. }
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_rotation_returns_its_terminal_result_in_one_authenticated_post() {
+        let rotation = NodeIdentityRotationSnapshot {
+            old_node_id: "node-old".into(),
+            old_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            new_node_id: "node-new".into(),
+            new_fingerprint: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(),
+            created_at_unix_ms: 1_800_000_000_000,
+            owner_initialized: true,
+            owner_sessions_invalidated: true,
+            affected_configured_network_count: 2,
+        };
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::IdentityRotated(rotation.clone()),
+            Duration::ZERO,
+        );
+        let key = IdempotencyKey::from_public_key(b"identity-rotation-once");
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(
+                78,
+                NodeCommand::RotateNodeIdentity(crate::node::NodeRotateNodeIdentityCommand {
+                    expected_fingerprint: rotation.old_fingerprint.clone(),
+                }),
+            ),
+            idempotency_key: Some(key.clone()),
+        };
+
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: NodeApiCommandResponse = json_body(response).await;
+        let result = body.result.expect("rotation returns a synchronous result");
+        assert!(matches!(
+            result.outcome,
+            NodeCommandOutcome::IdentityRotated(ref completed)
+                if completed.new_node_id == rotation.new_node_id
+        ));
+        let operation = body.operation.expect("rotation keeps the operation record");
+        assert_eq!(operation.operation.state, OperationState::Succeeded);
+        assert_eq!(operation.operation.stage, "succeeded");
+
+        let retry = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(
+                79,
+                NodeCommand::RotateNodeIdentity(crate::node::NodeRotateNodeIdentityCommand {
+                    expected_fingerprint: rotation.old_fingerprint,
+                }),
+            ),
+            idempotency_key: Some(key),
+        };
+        let retry_response = post_v1_command(adapter, &retry).await;
+        assert_eq!(retry_response.status(), StatusCode::OK);
+        let retry_body: NodeApiCommandResponse = json_body(retry_response).await;
+        assert_eq!(
+            retry_body
+                .operation
+                .expect("retry returns the existing operation")
+                .operation
+                .operation_id,
+            operation.operation.operation_id
+        );
+        assert!(retry_body.result.is_some());
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_rotation_timeout_returns_the_real_background_operation() {
+        let rotation = NodeIdentityRotationSnapshot {
+            old_node_id: "node-old".into(),
+            old_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            new_node_id: "node-new".into(),
+            new_fingerprint: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(),
+            created_at_unix_ms: 1_800_000_000_000,
+            owner_initialized: false,
+            owner_sessions_invalidated: false,
+            affected_configured_network_count: 0,
+        };
+        let (adapter, _state, _events, writes) = adapter_fixture_with_write(
+            node_ui_manifest(),
+            StubWriteBehavior::IdentityRotated(rotation.clone()),
+            Duration::from_millis(100),
+        );
+        let adapter = adapter.with_identity_rotation_wait_timeout(Duration::from_millis(10));
+        let payload = NodeCommandHttpRequest {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            request: NodeCommandRequest::new(
+                80,
+                NodeCommand::RotateNodeIdentity(crate::node::NodeRotateNodeIdentityCommand {
+                    expected_fingerprint: rotation.old_fingerprint,
+                }),
+            ),
+            idempotency_key: Some(IdempotencyKey::from_public_key(
+                b"identity-rotation-timeout",
+            )),
+        };
+
+        let response = post_v1_command(adapter.clone(), &payload).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: NodeApiCommandResponse = json_body(response).await;
+        assert!(body.result.is_none());
+        let submitted = body.operation.expect("timeout returns the real operation");
+        assert!(!submitted.operation.state.is_terminal());
+
+        let completed =
+            wait_for_terminal_operation(&adapter, submitted.operation.operation_id.as_str()).await;
+        assert_eq!(
+            completed.operation.operation.state,
+            OperationState::Succeeded
+        );
+        let result = completed
+            .operation
+            .result
+            .expect("background rotation eventually exposes its result");
+        assert!(matches!(
+            result.outcome,
+            NodeCommandOutcome::IdentityRotated(ref completed)
+                if completed.new_fingerprint == rotation.new_fingerprint
         ));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
     }

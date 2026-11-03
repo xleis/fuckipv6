@@ -230,6 +230,18 @@
       ],
       "type": "object"
     },
+    "NodeRotateNodeIdentityCommand": {
+      "properties": {
+        "expected_fingerprint": {
+          "description": "The current public-key fingerprint shown to the owner. Requiring it\nprevents a stale UI from rotating a newer identity that it has not seen.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_fingerprint"
+      ],
+      "type": "object"
+    },
     "NodeRoutingMode": {
       "enum": [
         "mesh_only",
@@ -534,6 +546,22 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeSetNodeDisplayNameCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "command": {
+          "const": "rotate_node_identity",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeRotateNodeIdentityCommand"
         }
       },
       "required": [

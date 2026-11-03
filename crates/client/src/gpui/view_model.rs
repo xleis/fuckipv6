@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -11,10 +13,10 @@ use crate::node::{
     NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
     NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
     NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeRollbackConfigurationCommand, NodeRoutingDefaultAction, NodeRoutingMode,
-    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetNetworkRoleCommand,
-    NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction, NodeUiAvailability,
-    NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
+    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
+    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction,
+    NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
     NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 use crate::tun::{TunCapabilityReason, TunPlatform};
@@ -114,6 +116,7 @@ pub enum ActionBinding {
     SetExitNodeRole,
     SetRelayRole,
     SetNodeDisplayName,
+    RotateNodeIdentity,
     StartNode,
     StopNode,
     RestartNode,
@@ -127,7 +130,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -146,6 +149,7 @@ impl ActionBinding {
         Self::SetExitNodeRole,
         Self::SetRelayRole,
         Self::SetNodeDisplayName,
+        Self::RotateNodeIdentity,
         Self::StartNode,
         Self::StopNode,
         Self::RestartNode,
@@ -178,6 +182,7 @@ impl ActionBinding {
             Self::SetExitNodeRole => "set_exit_node_role",
             Self::SetRelayRole => "set_relay_role",
             Self::SetNodeDisplayName => "set_node_display_name",
+            Self::RotateNodeIdentity => "rotate_node_identity",
             Self::StartNode => "start_node",
             Self::StopNode => "stop_node",
             Self::RestartNode => "restart_node",
@@ -732,6 +737,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::SetNodeDisplayName,
             NodeCommandKind::SetNodeDisplayName,
         ),
+        "rotate_node_identity" => (
+            ActionBinding::RotateNodeIdentity,
+            NodeCommandKind::RotateNodeIdentity,
+        ),
         "start_node" => (ActionBinding::StartNode, NodeCommandKind::StartNode),
         "stop_node" => (ActionBinding::StopNode, NodeCommandKind::StopNode),
         "restart_node" => (ActionBinding::RestartNode, NodeCommandKind::RestartNode),
@@ -979,6 +988,15 @@ pub fn build_command(
                 display_name: optional_non_empty(field("display_name")),
             },
         )),
+        Ok(ActionBinding::RotateNodeIdentity) => Ok(NodeCommand::RotateNodeIdentity(
+            NodeRotateNodeIdentityCommand {
+                expected_fingerprint: parse_fingerprint(
+                    action,
+                    "expected_fingerprint",
+                    &required("expected_fingerprint")?,
+                )?,
+            },
+        )),
         Ok(ActionBinding::StartNode) => Ok(NodeCommand::StartNode),
         Ok(ActionBinding::StopNode) => Ok(NodeCommand::StopNode),
         Ok(ActionBinding::RestartNode) => Ok(NodeCommand::RestartNode),
@@ -1063,6 +1081,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             HashSet::from(["network_name", "role", "enabled"])
         }
         "set_node_display_name" => HashSet::from(["display_name"]),
+        "rotate_node_identity" => HashSet::from(["expected_fingerprint"]),
         "get_configuration" | "get_configuration_history" => HashSet::from([]),
         "preview_configuration" | "apply_configuration" => {
             HashSet::from(["expected_revision", "networks"])
@@ -1123,6 +1142,26 @@ fn parse_configuration_networks(
             Ok((name.clone(), config.clone()))
         })
         .collect()
+}
+
+fn parse_fingerprint(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<String, CommandBuildError> {
+    let invalid = || CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    };
+    if value.trim() != value {
+        return Err(invalid());
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(value).map_err(|_| invalid())?;
+    if decoded.len() != 32 {
+        return Err(invalid());
+    }
+    Ok(value.to_owned())
 }
 
 fn parse_number<T>(
@@ -1348,6 +1387,23 @@ fn row_with_navigation(
         navigation: Some(RowNavigation {
             page_id: page_id.into(),
             network_name: Some(network_name.into()),
+            label: label.into(),
+        }),
+    }
+}
+
+fn row_with_page_navigation(
+    title: impl Into<String>,
+    detail: impl Into<String>,
+    page_id: impl Into<String>,
+    label: impl Into<String>,
+) -> RowModel {
+    RowModel {
+        title: title.into(),
+        detail: detail.into(),
+        navigation: Some(RowNavigation {
+            page_id: page_id.into(),
+            network_name: None,
             label: label.into(),
         }),
     }
@@ -2564,6 +2620,16 @@ fn project_identity(
                 t(locale, "gpui.empty.identity_config"),
                 config_rows,
             ),
+            section(
+                t(locale, "identity.security.title"),
+                t(locale, "identity.security.detail"),
+                vec![row_with_page_navigation(
+                    t(locale, "identity.security.title"),
+                    t(locale, "identity.security.detail"),
+                    "settings",
+                    t(locale, "identity.security.settings_button"),
+                )],
+            ),
         ],
     )
 }
@@ -3313,7 +3379,7 @@ mod tests {
         snapshot.identity = Some(NodeIdentitySnapshot {
             node_id: "node-1".into(),
             display_name: Some("desktop".into()),
-            public_key_fingerprint: "aa:bb".into(),
+            public_key_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
             created_at_unix_ms: Some(1_700_000_000_000),
         });
         snapshot
@@ -4005,7 +4071,21 @@ mod tests {
             .expect("identity page");
         let model = build_page_model_for_page(page, &populated_snapshot(), Locale::ZhCn)
             .expect("identity model");
-        assert_eq!(model.sections.len(), 2);
+        assert_eq!(model.sections.len(), 3);
+        let security_row = model.sections[2]
+            .rows
+            .first()
+            .expect("identity security navigation row");
+        let navigation = security_row
+            .navigation
+            .as_ref()
+            .expect("identity security navigation");
+        assert_eq!(navigation.page_id, "settings");
+        assert_eq!(navigation.network_name, None);
+        assert_eq!(
+            navigation.label,
+            t(Locale::ZhCn, "identity.security.settings_button")
+        );
         let rendered = model
             .sections
             .iter()
@@ -4136,6 +4216,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
+        assert_eq!(ActionBinding::ALL.len(), 29);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -4181,12 +4262,74 @@ mod tests {
         let manifest = node_ui_manifest();
         for page in &manifest.pages {
             for action in &page.actions {
-                let values = default_form_values(action, Some("home"));
+                let mut values = default_form_values(action, Some("home"));
+                if action.id == "rotate_node_identity" {
+                    values.insert(
+                        "expected_fingerprint".into(),
+                        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+                    );
+                }
                 let command = build_command(action, &values).expect("typed command");
                 assert_ne!(action.id, "");
                 assert!(!format!("{command:?}").is_empty());
             }
         }
+    }
+
+    #[test]
+    fn identity_rotation_requires_current_fingerprint_and_manage_permission() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "identity")
+            .expect("identity page");
+        let action = page
+            .actions
+            .iter()
+            .find(|action| action.id == "rotate_node_identity")
+            .expect("rotate identity action");
+        let valid = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+        let command = build_command(
+            action,
+            &HashMap::from([("expected_fingerprint".into(), valid.into())]),
+        )
+        .expect("valid fingerprint command");
+        assert!(matches!(
+            command,
+            NodeCommand::RotateNodeIdentity(ref command)
+                if command.expected_fingerprint == valid
+        ));
+
+        for invalid in [
+            "",
+            "aa:bb",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ] {
+            let error = build_command(
+                action,
+                &HashMap::from([("expected_fingerprint".into(), invalid.into())]),
+            )
+            .expect_err("invalid fingerprint");
+            assert!(matches!(
+                error,
+                CommandBuildError::InvalidField {
+                    ref action_id,
+                    ref field_id,
+                    ..
+                } if action_id == "rotate_node_identity" && field_id == "expected_fingerprint"
+            ));
+        }
+
+        let mut denied = populated_snapshot();
+        denied.permissions.permissions.clear();
+        assert_eq!(
+            action_block_reason(action, &denied, Some("home")),
+            Some(ActionBlockReason::PermissionDenied)
+        );
     }
 
     #[test]

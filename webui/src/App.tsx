@@ -886,7 +886,22 @@ function AppShell({
         setActiveOperation(submission.operation);
         onOperation(submission.operation);
       }
-      if (submission.outcome?.status === "snapshot") {
+      if (submission.outcome?.status === "identity_rotated") {
+        const rotation = submission.outcome.data;
+        const current =
+          queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY) ?? snapshot;
+        if (current.identity) {
+          queryClient.setQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY, {
+            ...current,
+            identity: {
+              ...current.identity,
+              node_id: rotation.new_node_id,
+              public_key_fingerprint: rotation.new_fingerprint,
+              created_at_unix_ms: rotation.created_at_unix_ms,
+            },
+          });
+        }
+      } else if (submission.outcome?.status === "snapshot") {
         queryClient.setQueryData(SNAPSHOT_QUERY_KEY, submission.outcome.data);
       } else {
         await Promise.all([

@@ -447,6 +447,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::UnbanClient
         | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::SetNodeDisplayName
+        | NodeCommandKind::RotateNodeIdentity
         | NodeCommandKind::StartNode
         | NodeCommandKind::RestartNode
         | NodeCommandKind::CleanupResiduals
@@ -468,6 +469,7 @@ fn requires_recent_reauthentication(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::RestartNode
             | NodeCommandKind::RebuildTun
             | NodeCommandKind::SetNodeDisplayName
+            | NodeCommandKind::RotateNodeIdentity
             | NodeCommandKind::CleanupResiduals
     )
 }
@@ -482,6 +484,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::CreateNetwork
             | NodeCommandKind::JoinNetwork
             | NodeCommandKind::SetNodeDisplayName
+            | NodeCommandKind::RotateNodeIdentity
             | NodeCommandKind::StartNode
             | NodeCommandKind::StopNode
             | NodeCommandKind::RestartNode
@@ -505,9 +508,9 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
-        NodeCommandKind::ApplyConfiguration | NodeCommandKind::SetNodeDisplayName => {
-            (PolicyAction::Update, ResourceKind::Keys)
-        }
+        NodeCommandKind::ApplyConfiguration
+        | NodeCommandKind::SetNodeDisplayName
+        | NodeCommandKind::RotateNodeIdentity => (PolicyAction::Update, ResourceKind::Keys),
         NodeCommandKind::RollbackConfiguration => (PolicyAction::Recover, ResourceKind::Keys),
         NodeCommandKind::StartNetworks => (PolicyAction::Enable, ResourceKind::Network),
         NodeCommandKind::StopNetworks => (PolicyAction::Disable, ResourceKind::Network),
@@ -547,6 +550,7 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::CreateNetwork(_)
         | NodeCommand::JoinNetwork(_)
         | NodeCommand::SetNodeDisplayName(_)
+        | NodeCommand::RotateNodeIdentity(_)
         | NodeCommand::StartNode
         | NodeCommand::StopNode
         | NodeCommand::RestartNode
@@ -970,6 +974,41 @@ mod tests {
             &command,
         )
         .expect("local owner can rename the node identity");
+    }
+
+    #[test]
+    fn node_identity_rotation_is_owner_only_and_requires_reauthentication() {
+        let command = NodeCommand::RotateNodeIdentity(crate::node::NodeRotateNodeIdentityCommand {
+            expected_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        });
+        let (local_policy, network_policy) = start_policies();
+        assert_denied(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            command.clone(),
+            "permission.local_owner_required",
+        );
+
+        authorize_command(&NodeCommandContext::local_owner(actor(), "gpui"), &command)
+            .expect("desktop local owner may rotate the node identity");
+
+        let stale_owner = NodeCommandContext::owner_session(actor(), "webui", false);
+        assert_denied(
+            &stale_owner,
+            command.clone(),
+            "permission.recent_authentication_required",
+        );
+        authorize_command(
+            &NodeCommandContext::owner_session(actor(), "webui", true),
+            &command,
+        )
+        .expect("recently reauthenticated WebUI owner may rotate the identity");
     }
 
     #[test]

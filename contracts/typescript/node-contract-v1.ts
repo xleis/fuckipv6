@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "preview_configuration", "probe_peer", "rebuild_tun", "restart_networks", "restart_node", "rollback_configuration", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_routing"] as const;
+export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "preview_configuration", "probe_peer", "rebuild_tun", "restart_networks", "restart_node", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_routing"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "preview_configuration", "probe_peer", "rebuild_tun", "restart_networks", "restart_node", "rollback_configuration", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_routing"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["apply_configuration", "ban_client", "cleanup_node_residuals", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "preview_configuration", "probe_peer", "rebuild_tun", "restart_networks", "restart_node", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "unban_client", "update_network_allocation", "update_routing"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -311,6 +311,9 @@ export type NodeCommand = {
   "command": "set_node_display_name";
   "payload": NodeSetNodeDisplayNameCommand;
 } | {
+  "command": "rotate_node_identity";
+  "payload": NodeRotateNodeIdentityCommand;
+} | {
   "command": "get_blacklist";
   "payload": {
   "network_name": string;
@@ -396,6 +399,9 @@ export type NodeCommandOutcome = {
 } | {
   "data": NodeCreatedNetwork;
   "status": "network_created";
+} | {
+  "data": NodeIdentityRotationSnapshot;
+  "status": "identity_rotated";
 } | {
   "data": ConfigurationDocument;
   "status": "configuration";
@@ -573,6 +579,17 @@ export type NodeHttpErrorResponse = {
 };
 
 export type NodeId = string;
+
+export type NodeIdentityRotationSnapshot = {
+  "affected_configured_network_count": number;
+  "created_at_unix_ms": number;
+  "new_fingerprint": string;
+  "new_node_id": string;
+  "old_fingerprint": string;
+  "old_node_id": string;
+  "owner_initialized": boolean;
+  "owner_sessions_invalidated": boolean;
+};
 
 export type NodeIdentitySnapshot = {
   "created_at_unix_ms"?: number | null;
@@ -784,6 +801,10 @@ export type NodeRollbackConfigurationCommand = {
   "target_revision": number;
 };
 
+export type NodeRotateNodeIdentityCommand = {
+  "expected_fingerprint": string;
+};
+
 export type NodeRoutingDefaultAction = {
   "kind": "direct";
 } | {
@@ -882,7 +903,7 @@ export type NodeUiAction = {
   "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
   "backend_status": NodeUiBackendStatus;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "set_node_display_name" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "join_network" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
   "fields": Array<NodeUiField>;
   "id": string;
@@ -915,7 +936,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
 
 export type NodeUiManifest = {
   "pages": Array<NodeUiPage>;
@@ -929,7 +950,7 @@ export type NodeUiPage = {
   "title_key": string;
 };
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name" | "fingerprint";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;

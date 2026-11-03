@@ -28,9 +28,10 @@ pub use command::{
     NodeCleanupStepStatus, NodeClientBlacklistCommand, NodeCommand, NodeCommandBus,
     NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
     NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeCreateNetworkCommand,
-    NodeCreatedNetwork, NodeDiagnosticsSnapshot, NodeJoinNetworkCommand, NodeNetworkAllocation,
-    NodeNetworkAllocationSnapshot, NodePeerProbeSnapshot, NodePreviewConfigurationCommand,
-    NodeProbePeerCommand, NodeResidualCleanupResult, NodeRollbackConfigurationCommand,
+    NodeCreatedNetwork, NodeDiagnosticsSnapshot, NodeIdentityRotationSnapshot,
+    NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkAllocationSnapshot,
+    NodePeerProbeSnapshot, NodePreviewConfigurationCommand, NodeProbePeerCommand,
+    NodeResidualCleanupResult, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
     NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
     NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };

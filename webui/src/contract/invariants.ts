@@ -60,6 +60,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   set_exit_node_role: "set_network_role",
   set_relay_role: "set_network_role",
   set_node_display_name: "set_node_display_name",
+  rotate_node_identity: "rotate_node_identity",
   get_network_allocation: "get_network_allocation",
   update_network_allocation: "update_network_allocation",
   get_configuration: "get_configuration",
@@ -117,6 +118,7 @@ const INPUT_KINDS = new Set([
   "revision",
   "configuration_json",
   "display_name",
+  "fingerprint",
 ]);
 const VALIDATIONS = new Set([
   "none",
@@ -132,6 +134,7 @@ const VALIDATIONS = new Set([
   "revision",
   "configuration_json",
   "display_name",
+  "fingerprint",
 ]);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
@@ -146,6 +149,7 @@ const OUTCOME_STATUSES = new Set([
   "configuration_preview",
   "configuration_applied",
   "configuration_history",
+  "identity_rotated",
   "accepted",
   "completed",
   "rejected",
@@ -588,6 +592,8 @@ export function defaultFieldValue(
     return action.id === "set_relay_role" ? "relay" : "exit_node";
   if (field.id === "display_name")
     return snapshot.identity?.display_name ?? "";
+  if (field.id === "expected_fingerprint")
+    return snapshot.identity?.public_key_fingerprint ?? "";
   return "";
 }
 
@@ -870,6 +876,22 @@ export function validateActionValues(
       if ([...displayName].length > 80) {
         errors.push(label(locale, "validation.display_name_too_long"));
       }
+    } else if (field.validation === "fingerprint") {
+      const fingerprint = String(value);
+      if (!/^[A-Za-z0-9_-]{43}$/.test(fingerprint)) {
+        errors.push(label(locale, "validation.fingerprint_invalid"));
+      } else {
+        try {
+          const decoded = atob(
+            fingerprint.replace(/-/g, "+").replace(/_/g, "/") + "=",
+          );
+          if (decoded.length !== 32) {
+            errors.push(label(locale, "validation.fingerprint_invalid"));
+          }
+        } catch {
+          errors.push(label(locale, "validation.fingerprint_invalid"));
+        }
+      }
     }
   }
   if (
@@ -1051,6 +1073,13 @@ export function buildCommand(
           display_name: optional(values, "display_name"),
         },
       };
+    case "rotate_node_identity":
+      return {
+        command: "rotate_node_identity",
+        payload: {
+          expected_fingerprint: requiredString("expected_fingerprint"),
+        },
+      };
     case "get_configuration":
       return { command: "get_configuration" };
     case "preview_configuration":
@@ -1149,6 +1178,29 @@ function validatedOutcome(value: unknown): NodeCommandOutcome {
     configurationApplied(outcome.data);
   if (outcome.status === "configuration_history")
     configurationHistory(outcome.data);
+  if (outcome.status === "identity_rotated") {
+    if (!record(outcome.data)) fail("identity rotation result invalid");
+    stringValue(outcome.data.old_node_id, "old node id invalid", true);
+    stringValue(outcome.data.new_node_id, "new node id invalid", true);
+    stringValue(outcome.data.old_fingerprint, "old fingerprint invalid", true);
+    stringValue(outcome.data.new_fingerprint, "new fingerprint invalid", true);
+    nonNegativeInteger(
+      outcome.data.created_at_unix_ms,
+      "identity creation time invalid",
+    );
+    nonNegativeInteger(
+      outcome.data.affected_configured_network_count,
+      "affected network count invalid",
+    );
+    booleanValueRaw(
+      outcome.data.owner_initialized,
+      "owner initialized flag invalid",
+    );
+    booleanValueRaw(
+      outcome.data.owner_sessions_invalidated,
+      "owner session invalidation flag invalid",
+    );
+  }
   if (outcome.status === "rejected" && !record(outcome.data))
     fail("rejected outcome is missing problem");
   if (outcome.status === "accepted" && !record(outcome.data))
@@ -1282,6 +1334,24 @@ export function outcomeSummary(
       change: label(
         locale,
         outcome.data.changed ? "outcome.changed" : "outcome.unchanged",
+      ),
+    });
+  }
+  if (outcome.status === "identity_rotated") {
+    return i18n().tr(locale, "outcome.identity_rotated", {
+      old_node_id: outcome.data.old_node_id,
+      new_node_id: outcome.data.new_node_id,
+      old_fingerprint: outcome.data.old_fingerprint,
+      new_fingerprint: outcome.data.new_fingerprint,
+      networks: i18n().formatInteger(
+        locale,
+        outcome.data.affected_configured_network_count,
+      ),
+      sessions: label(
+        locale,
+        outcome.data.owner_sessions_invalidated
+          ? "identity.rotation.sessions_invalidated"
+          : "identity.rotation.sessions_preserved",
       ),
     });
   }

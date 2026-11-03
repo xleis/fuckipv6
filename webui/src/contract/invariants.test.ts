@@ -11,7 +11,10 @@ import {
   commandEnvelope,
   executionBlockReason,
   operationStateIsTerminal,
+  outcomeSummary,
   validateAcceptedCommandResponse,
+  validateActionValues,
+  validateCommandResponse,
   validateManifestResponse,
   validateOperationResponse,
   validateSnapshot,
@@ -158,6 +161,110 @@ describe("node UI contract invariants", () => {
         auto_connect: true,
       },
     });
+  });
+
+  it("validates and builds a typed node identity rotation command", () => {
+    const rotate = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "rotate_node_identity");
+    expect(rotate).toBeDefined();
+    const fingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    expect(
+      validateActionValues(
+        rotate!,
+        { expected_fingerprint: fingerprint },
+        "zh-CN",
+      ),
+    ).toEqual([]);
+    expect(
+      commandEnvelope(
+        43,
+        rotate!,
+        { expected_fingerprint: fingerprint },
+        "zh-CN",
+        "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
+      ).request.command,
+    ).toEqual({
+      command: "rotate_node_identity",
+      payload: { expected_fingerprint: fingerprint },
+    });
+  });
+
+  it("rejects padded, malformed, or wrong-length identity fingerprints", () => {
+    const rotate = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "rotate_node_identity")!;
+    for (const fingerprint of [
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!",
+      "short",
+    ]) {
+      const errors = validateActionValues(
+        rotate,
+        { expected_fingerprint: fingerprint },
+        "zh-CN",
+      );
+      expect(errors).toEqual(["translated:validation.fingerprint_invalid"]);
+      expect(() =>
+        commandEnvelope(
+          44,
+          rotate,
+          { expected_fingerprint: fingerprint },
+          "zh-CN",
+          "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
+        ),
+      ).toThrow("translated:validation.fingerprint_invalid");
+    }
+  });
+
+  it("validates and summarizes an identity rotation outcome", () => {
+    const outcome = {
+      status: "identity_rotated" as const,
+      data: {
+        old_node_id: "node-old",
+        new_node_id: "node-new",
+        old_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        new_fingerprint: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        created_at_unix_ms: 1_700_000_000_000,
+        affected_configured_network_count: 2,
+        owner_initialized: true,
+        owner_sessions_invalidated: true,
+      },
+    };
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 45,
+          server_time: "2026-11-01T00:00:00Z",
+          result: { request_id: 45, outcome },
+        },
+        45,
+      ),
+    ).toEqual(outcome);
+    expect(outcomeSummary(outcome, "zh-CN")).toBe(
+      "translated:outcome.identity_rotated",
+    );
+
+    const invalid = structuredClone(outcome) as unknown as {
+      data: Record<string, unknown>;
+    };
+    invalid.data.owner_sessions_invalidated = "yes";
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 46,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 46,
+            outcome: invalid as unknown as typeof outcome,
+          },
+        },
+        46,
+      ),
+    ).toThrow("owner session invalidation flag invalid");
   });
 
   it("fails closed when a rebuild action has no TUN capability data", () => {

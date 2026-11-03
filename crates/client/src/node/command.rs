@@ -2,6 +2,8 @@ use crate::config_transaction::{
     ConfigurationApplyResult, ConfigurationDocument, ConfigurationHistoryEntry,
     ConfigurationPreview,
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use fuckipv6_common::domain::{ActivityEntry, AuditEntry, AuditOutcome};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
@@ -64,6 +66,7 @@ pub enum NodeCommandKind {
     UpdateRouting,
     SetNetworkRole,
     SetNodeDisplayName,
+    RotateNodeIdentity,
     GetBlacklist,
     BanClient,
     UnbanClient,
@@ -84,7 +87,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -97,6 +100,7 @@ impl NodeCommandKind {
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::SetNodeDisplayName,
+        Self::RotateNodeIdentity,
         Self::GetBlacklist,
         Self::BanClient,
         Self::UnbanClient,
@@ -117,7 +121,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 27] = [
+    pub const ACTIONS: [Self; 28] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -129,6 +133,7 @@ impl NodeCommandKind {
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::SetNodeDisplayName,
+        Self::RotateNodeIdentity,
         Self::GetBlacklist,
         Self::BanClient,
         Self::UnbanClient,
@@ -161,6 +166,7 @@ impl NodeCommandKind {
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
             Self::SetNodeDisplayName => "set_node_display_name",
+            Self::RotateNodeIdentity => "rotate_node_identity",
             Self::GetBlacklist => "get_blacklist",
             Self::BanClient => "ban_client",
             Self::UnbanClient => "unban_client",
@@ -195,6 +201,7 @@ impl NodeCommandKind {
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
                 | Self::SetNodeDisplayName
+                | Self::RotateNodeIdentity
                 | Self::BanClient
                 | Self::UnbanClient
                 | Self::UpdateNetworkAllocation
@@ -242,6 +249,7 @@ pub enum NodeCommand {
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
     SetNodeDisplayName(NodeSetNodeDisplayNameCommand),
+    RotateNodeIdentity(NodeRotateNodeIdentityCommand),
     GetBlacklist {
         network_name: String,
     },
@@ -296,6 +304,7 @@ impl NodeCommand {
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
             Self::SetNodeDisplayName(_) => NodeCommandKind::SetNodeDisplayName,
+            Self::RotateNodeIdentity(_) => NodeCommandKind::RotateNodeIdentity,
             Self::GetBlacklist { .. } => NodeCommandKind::GetBlacklist,
             Self::BanClient(_) => NodeCommandKind::BanClient,
             Self::UnbanClient(_) => NodeCommandKind::UnbanClient,
@@ -375,6 +384,7 @@ impl NodeCommand {
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
             Self::SetNodeDisplayName(command) => command.validate(),
+            Self::RotateNodeIdentity(command) => command.validate(),
             Self::GetBlacklist { network_name } | Self::GetNetworkAllocation { network_name } => {
                 validate_network_name(network_name)
             }
@@ -545,6 +555,28 @@ impl NodeSetNodeDisplayNameCommand {
         }
         if display_name.chars().count() > 80 {
             return Err(invalid("节点显示名不能超过 80 个字符"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRotateNodeIdentityCommand {
+    /// The current public-key fingerprint shown to the owner. Requiring it
+    /// prevents a stale UI from rotating a newer identity that it has not seen.
+    pub expected_fingerprint: String,
+}
+
+impl NodeRotateNodeIdentityCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        if self.expected_fingerprint.trim() != self.expected_fingerprint {
+            return Err(invalid("公钥指纹首尾不能包含空白字符"));
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(&self.expected_fingerprint)
+            .map_err(|_| invalid("公钥指纹格式无效"))?;
+        if decoded.len() != 32 {
+            return Err(invalid("公钥指纹必须解码为 32 字节"));
         }
         Ok(())
     }
@@ -884,6 +916,21 @@ pub struct NodeResidualCleanupResult {
     pub residue: NodeRuntimeResidueSnapshot,
 }
 
+/// Public result of a completed node key rotation. The DTO deliberately
+/// contains fingerprints and identifiers only; private keys and owner tokens
+/// never cross the command boundary.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeIdentityRotationSnapshot {
+    pub old_node_id: String,
+    pub old_fingerprint: String,
+    pub new_node_id: String,
+    pub new_fingerprint: String,
+    pub created_at_unix_ms: u64,
+    pub owner_initialized: bool,
+    pub owner_sessions_invalidated: bool,
+    pub affected_configured_network_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
@@ -895,6 +942,7 @@ pub enum NodeCommandOutcome {
     NetworkAllocation(NodeNetworkAllocationSnapshot),
     Probe(NodePeerProbeSnapshot),
     NetworkCreated(NodeCreatedNetwork),
+    IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
     ConfigurationPreview(Box<ConfigurationPreview>),
     ConfigurationApplied(Box<ConfigurationApplyResult>),
@@ -1274,6 +1322,9 @@ mod tests {
             NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
                 display_name: Some("edge-gateway".into()),
             }),
+            NodeCommand::RotateNodeIdentity(NodeRotateNodeIdentityCommand {
+                expected_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            }),
             NodeCommand::GetBlacklist {
                 network_name: "home".into(),
             },
@@ -1548,6 +1599,9 @@ mod tests {
             }),
             NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
                 display_name: Some("界".repeat(81)),
+            }),
+            NodeCommand::RotateNodeIdentity(NodeRotateNodeIdentityCommand {
+                expected_fingerprint: "not-a-fingerprint".into(),
             }),
             NodeCommand::ProbePeer(NodeProbePeerCommand {
                 network_name: "home".into(),

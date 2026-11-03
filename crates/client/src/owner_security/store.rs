@@ -388,6 +388,19 @@ pub(crate) enum CommitOutcome {
     AlreadyInitialized,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerNodeMigration {
+    Uninitialized,
+    Migrated,
+    AlreadyMigrated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnerRotationPreflight {
+    pub(crate) owner_initialized: bool,
+    pub(crate) had_owner_sessions: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OwnerPersistence {
     config_dir: PathBuf,
@@ -557,6 +570,86 @@ impl OwnerPersistence {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error).context("无法释放所有者更新锁"),
+        }
+    }
+
+    /// Verify that an initialized owner belongs to the identity about to be
+    /// replaced. Rotation is allowed before owner initialization, but never
+    /// over an owner record for an unrelated node.
+    pub(crate) fn validate_node_for_rotation(
+        &self,
+        expected_old: &NodeId,
+    ) -> Result<OwnerRotationPreflight> {
+        match self.load()? {
+            OwnerLoad::Uninitialized => Ok(OwnerRotationPreflight {
+                owner_initialized: false,
+                had_owner_sessions: false,
+            }),
+            OwnerLoad::Complete(store) if store.owner.node_id == *expected_old => {
+                Ok(OwnerRotationPreflight {
+                    owner_initialized: true,
+                    had_owner_sessions: !store.sessions.is_empty(),
+                })
+            }
+            OwnerLoad::Complete(_) => anyhow::bail!("所有者记录属于其他节点，拒绝轮换身份"),
+            OwnerLoad::Corrupt(reason) => {
+                anyhow::bail!("所有者安全状态损坏，拒绝轮换身份: {reason}")
+            }
+        }
+    }
+
+    /// Migrate the initialized owner record to a replacement node identity.
+    /// Passkey credentials and the recovery verifier remain authoritative, but
+    /// every owner session is invalidated because the node trust boundary has
+    /// changed. The operation is idempotent so journal recovery can safely rerun
+    /// it after a process crash.
+    pub(crate) fn migrate_owner_node(
+        &self,
+        expected_old: &NodeId,
+        replacement: &NodeId,
+    ) -> Result<OwnerNodeMigration> {
+        if expected_old == replacement {
+            anyhow::bail!("新旧节点身份不能相同");
+        }
+
+        let lock_path = self.config_dir.join(INIT_LOCK_FILE);
+        let lock = open_private_file(&lock_path, true, true)?;
+        FileExt::lock_exclusive(&lock).context("无法锁定所有者身份迁移事务")?;
+        let result = (|| -> Result<OwnerNodeMigration> {
+            let mut store = match self.load()? {
+                OwnerLoad::Complete(store) => store,
+                OwnerLoad::Uninitialized => return Ok(OwnerNodeMigration::Uninitialized),
+                OwnerLoad::Corrupt(reason) => anyhow::bail!("所有者状态损坏: {reason}"),
+            };
+
+            if store.owner.node_id != *expected_old && store.owner.node_id != *replacement {
+                anyhow::bail!("所有者记录与待轮换的节点身份不匹配");
+            }
+
+            let changed = store.owner.node_id != *replacement || !store.sessions.is_empty();
+            if changed {
+                store.owner.node_id = replacement.clone();
+                store.sessions.clear();
+                store.owner.sessions.clear();
+                store.validate()?;
+                let owner_json =
+                    serde_json::to_vec_pretty(&store).context("无法序列化所有者记录")?;
+                let owner_dir = self.config_dir.join(OWNER_DIR);
+                write_private_file_atomic(&owner_dir.join(OWNER_FILE), &owner_json)?;
+                sync_directory(&owner_dir)?;
+            }
+
+            Ok(if changed {
+                OwnerNodeMigration::Migrated
+            } else {
+                OwnerNodeMigration::AlreadyMigrated
+            })
+        })();
+        let unlock = FileExt::unlock(&lock);
+        match (result, unlock) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error).context("无法释放所有者身份迁移锁"),
         }
     }
 
@@ -962,6 +1055,63 @@ mod tests {
         };
         assert_eq!(store.passkeys.len(), 3);
         store.validate()?;
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn owner_node_migration_preserves_credentials_and_invalidates_sessions() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-owner-node-migration-{}-{}",
+            std::process::id(),
+            random_suffix()
+        ));
+        let persistence = OwnerPersistence::new(dir.clone())?;
+        let mut store = fixture_store();
+        let credential_id = store.owner.passkeys[0].credential_id.clone();
+        store.insert_session(StoredSession {
+            reference: SessionRef::new([4u8; 32]),
+            credential_id: credential_id.clone(),
+            channel: SessionChannel::Local,
+            rp_id: "localhost".to_string(),
+            origin: "http://localhost:8080".to_string(),
+            created_at_unix_ms: 1_700_000_000_400,
+            expires_at_unix_ms: 1_700_000_000_900,
+            last_authenticated_at_unix_ms: 1_700_000_000_400,
+        })?;
+        persistence.commit(&store, &[7u8; 32])?;
+
+        let replacement = NodeId::from_public_key(b"owner-store-replacement");
+        assert_eq!(
+            persistence.migrate_owner_node(&node_id(), &replacement)?,
+            OwnerNodeMigration::Migrated
+        );
+        let OwnerLoad::Complete(migrated) = persistence.load()? else {
+            panic!("owner must remain complete");
+        };
+        assert_eq!(migrated.owner.node_id, replacement);
+        assert_eq!(migrated.owner.passkeys[0].credential_id, credential_id);
+        assert!(migrated.sessions.is_empty());
+        assert!(migrated.owner.sessions.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(OWNER_DIR).join(RECOVERY_VERIFIER_FILE))?,
+            URL_SAFE_NO_PAD.encode([7u8; 32])
+        );
+        assert_eq!(
+            persistence.migrate_owner_node(&node_id(), &replacement)?,
+            OwnerNodeMigration::AlreadyMigrated
+        );
+        let unrelated_replacement = NodeId::from_public_key(b"owner-store-unrelated");
+        assert!(persistence
+            .migrate_owner_node(
+                &NodeId::from_public_key(b"unrelated"),
+                &unrelated_replacement
+            )
+            .is_err());
+        let OwnerLoad::Complete(unchanged) = persistence.load()? else {
+            panic!("owner must remain complete");
+        };
+        assert_eq!(unchanged.owner.node_id, replacement);
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

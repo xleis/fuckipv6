@@ -1309,6 +1309,13 @@ button:disabled {
 .identity-copy h2 {
   margin: 2px 0 var(--space-3);
 }
+.identity-guidance-card {
+  display: grid;
+  gap: var(--space-3);
+}
+.identity-guidance-card .secondary-button {
+  justify-self: start;
+}
 .route-card {
   display: grid;
   gap: var(--space-3);

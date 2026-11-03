@@ -19,6 +19,21 @@ const snapshot = productFixture.snapshot as NodeSnapshot;
 const restart = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "restart_node") as NodeUiAction;
+const rotate = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "rotate_node_identity") as NodeUiAction;
+const currentFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const nextFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+const identitySnapshot: NodeSnapshot = {
+  ...snapshot,
+  identity: {
+    node_id: "node-current",
+    display_name: "Current node",
+    public_key_fingerprint: currentFingerprint,
+    created_at_unix_ms: 1_700_000_000_000,
+  },
+};
 
 function renderPanel(
   interactionBlocked: PageStateKind | null,
@@ -89,6 +104,82 @@ describe("action panel interaction gate", () => {
     expect(within(dialog).getByRole("status")).toHaveTextContent(
       "translated:state.stale.title",
     );
+  });
+});
+
+describe("action panel field synchronization", () => {
+  it("adopts a refreshed fingerprint until the owner edits the field", async () => {
+    const user = userEvent.setup();
+    const view = render(
+      <ActionPanel
+        actions={[rotate]}
+        snapshot={identitySnapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.rotate_node_identity",
+      }),
+    );
+    const input = screen.getByRole("textbox", {
+      name: "translated:field.expected_fingerprint",
+    });
+    expect(input).toHaveValue(currentFingerprint);
+
+    view.rerender(
+      <ActionPanel
+        actions={[rotate]}
+        snapshot={{
+          ...identitySnapshot,
+          identity: {
+            ...identitySnapshot.identity!,
+            public_key_fingerprint: nextFingerprint,
+          },
+        }}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+    expect(input).toHaveValue(nextFingerprint);
+
+    await user.clear(input);
+    await user.type(input, editedFingerprint);
+    view.rerender(
+      <ActionPanel
+        actions={[rotate]}
+        snapshot={identitySnapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+    expect(input).toHaveValue(editedFingerprint);
   });
 });
 

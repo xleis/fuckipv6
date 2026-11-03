@@ -722,6 +722,22 @@
         {
           "properties": {
             "data": {
+              "$ref": "#/$defs/NodeIdentityRotationSnapshot"
+            },
+            "status": {
+              "const": "identity_rotated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
               "$ref": "#/$defs/ConfigurationDocument"
             },
             "status": {
@@ -983,6 +999,50 @@
     },
     "NodeId": {
       "type": "string"
+    },
+    "NodeIdentityRotationSnapshot": {
+      "description": "Public result of a completed node key rotation. The DTO deliberately\ncontains fingerprints and identifiers only; private keys and owner tokens\nnever cross the command boundary.",
+      "properties": {
+        "affected_configured_network_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new_fingerprint": {
+          "type": "string"
+        },
+        "new_node_id": {
+          "type": "string"
+        },
+        "old_fingerprint": {
+          "type": "string"
+        },
+        "old_node_id": {
+          "type": "string"
+        },
+        "owner_initialized": {
+          "type": "boolean"
+        },
+        "owner_sessions_invalidated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "old_node_id",
+        "old_fingerprint",
+        "new_node_id",
+        "new_fingerprint",
+        "created_at_unix_ms",
+        "owner_initialized",
+        "owner_sessions_invalidated",
+        "affected_configured_network_count"
+      ],
+      "type": "object"
     },
     "NodeIdentitySnapshot": {
       "description": "Public node identity metadata. Secret key material must never enter this DTO.",
@@ -2242,6 +2302,7 @@
             "update_routing",
             "set_network_role",
             "set_node_display_name",
+            "rotate_node_identity",
             "get_blacklist",
             "ban_client",
             "unban_client",
@@ -2400,6 +2461,7 @@
         "configuration_json",
         "display_name",
         "external_host",
+        "fingerprint",
         "network_mode",
         "network_name",
         "network_selection",
@@ -2475,7 +2537,8 @@
         "positive_timeout",
         "revision",
         "configuration_json",
-        "display_name"
+        "display_name",
+        "fingerprint"
       ],
       "type": "string"
     },

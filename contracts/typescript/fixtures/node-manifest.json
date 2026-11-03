@@ -643,6 +643,32 @@
             }
           ],
           "confirmation": null
+        },
+        {
+          "id": "rotate_node_identity",
+          "label_key": "action.rotate_node_identity",
+          "command": "rotate_node_identity",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.identity.rotate"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_fingerprint",
+              "label_key": "field.expected_fingerprint",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.rotate_node_identity.title",
+            "consequence_key": "confirm.rotate_node_identity.consequence",
+            "destructive": true
+          }
         }
       ]
     },

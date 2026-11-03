@@ -38,6 +38,7 @@
             "update_routing",
             "set_network_role",
             "set_node_display_name",
+            "rotate_node_identity",
             "get_blacklist",
             "ban_client",
             "unban_client",
@@ -196,6 +197,7 @@
         "configuration_json",
         "display_name",
         "external_host",
+        "fingerprint",
         "network_mode",
         "network_name",
         "network_selection",
@@ -249,7 +251,8 @@
         "positive_timeout",
         "revision",
         "configuration_json",
-        "display_name"
+        "display_name",
+        "fingerprint"
       ],
       "type": "string"
     }

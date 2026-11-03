@@ -44,7 +44,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 86,
+                NodeContractV1.DTO_CLASS_NAMES.length == 88,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -151,6 +151,24 @@ public final class NodeContractV1Test {
                 OperationKind.TUN_REBUILD,
                 OperationKind.fromWireName("tun_rebuild"),
                 "TUN rebuild operation kind");
+        assertSame(
+                NodeCommandKind.ROTATE_NODE_IDENTITY,
+                NodeCommandKind.fromWireName("rotate_node_identity"),
+                "node identity rotation command");
+        NodeContractV1.NodeRotateNodeIdentityCommand.class.getDeclaredField(
+                "expected_fingerprint");
+        for (String field : new String[] {
+            "affected_configured_network_count",
+            "created_at_unix_ms",
+            "new_fingerprint",
+            "new_node_id",
+            "old_fingerprint",
+            "old_node_id",
+            "owner_initialized",
+            "owner_sessions_invalidated"
+        }) {
+            NodeContractV1.NodeIdentityRotationSnapshot.class.getDeclaredField(field);
+        }
         expectIllegalArgument(
                 () -> NodeCommandKind.fromWireName("not_a_command"),
                 "unknown command");
@@ -216,6 +234,9 @@ public final class NodeContractV1Test {
         assertTrue(
                 NodeContractV1.isManifestAction(NodeCommandKind.REBUILD_TUN),
                 "rebuild_tun must be a visible action");
+        assertTrue(
+                NodeContractV1.isManifestAction(NodeCommandKind.ROTATE_NODE_IDENTITY),
+                "rotate_node_identity must be a visible action");
         assertTrue(
                 NodeContractV1.isManifestAction(NodeCommandKind.GET_NODE_DIAGNOSTICS),
                 "get_node_diagnostics must be a visible action");
@@ -290,6 +311,18 @@ public final class NodeContractV1Test {
                 createCommand.command,
                 "create_network command DTO");
         assertSame(createNetwork, createCommand.payload, "create_network payload identity");
+        NodeContractV1.NodeRotateNodeIdentityCommand rotateIdentity =
+                new NodeContractV1.NodeRotateNodeIdentityCommand("fingerprint");
+        NodeContractV1.NodeCommand.RotateNodeIdentity rotateCommand =
+                new NodeContractV1.NodeCommand.RotateNodeIdentity(rotateIdentity);
+        assertSame(
+                NodeCommandKind.ROTATE_NODE_IDENTITY,
+                rotateCommand.command,
+                "rotate_node_identity command DTO");
+        assertSame(
+                rotateIdentity,
+                rotateCommand.payload,
+                "rotate_node_identity payload identity");
 
         NodeContractV1.NodeCommandOutcome.Completed completed =
                 new NodeContractV1.NodeCommandOutcome.Completed(
@@ -306,6 +339,9 @@ public final class NodeContractV1Test {
         new NodeContractV1.NodeCommandOutcome.ConfigurationPreview(null);
         new NodeContractV1.NodeCommandOutcome.ConfigurationApplied(null);
         new NodeContractV1.NodeCommandOutcome.ConfigurationHistory(null);
+        new NodeContractV1.NodeCommandOutcome.IdentityRotated(
+                new NodeContractV1.NodeIdentityRotationSnapshot(
+                        0L, 0L, "new", "new-node", "old", "old-node", false, false));
         new NodeContractV1.NodeCommandOutcome.Accepted(null);
         new NodeContractV1.NodeCommandOutcome.Rejected(null);
 

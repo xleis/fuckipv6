@@ -164,7 +164,7 @@ impl ConfigManager {
 
     /// Load or create the node-wide signing identity.
     pub(crate) fn load_node_identity(&self) -> Result<Identity> {
-        Identity::load_or_generate(self.node_identity_path()).context("无法加载节点身份")
+        crate::owner_security::rotation::load_reconciled_identity(self)
     }
 
     fn load_node_metadata(&self) -> Result<NodeMetadata> {
@@ -224,6 +224,14 @@ impl ConfigManager {
         metadata.identity_created_at_unix_ms = Some(created_at);
         self.save_node_metadata(&metadata)?;
         Ok(created_at)
+    }
+
+    /// Record the creation time of a newly generated identity while preserving
+    /// unrelated node-wide metadata such as display name and language.
+    pub(crate) fn set_node_identity_created_at_unix_ms(&self, created_at: u64) -> Result<()> {
+        let mut metadata = self.load_node_metadata()?;
+        metadata.identity_created_at_unix_ms = Some(created_at);
+        self.save_node_metadata(&metadata)
     }
 
     /// Persist a node-wide display name. Empty or whitespace-only values clear it.

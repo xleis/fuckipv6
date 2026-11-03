@@ -118,6 +118,12 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "修改节点显示名需要节点配置管理器"),
                 },
+                super::NodeCommand::RotateNodeIdentity(command) => match configs {
+                    Some(configs) => {
+                        rotate_node_identity(&state, &configs, request_id, command).await
+                    }
+                    None => unavailable(request_id, "轮换节点身份需要节点配置管理器"),
+                },
                 super::NodeCommand::GetConfiguration => match configs {
                     Some(configs) => configuration_document(&configs, request_id).await,
                     None => unavailable(request_id, "读取配置需要节点配置管理器"),
@@ -414,6 +420,104 @@ async fn set_node_display_name(
         })
         .await;
     NodeCommandResult::snapshot(request_id, snapshot)
+}
+
+async fn rotate_node_identity(
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+    request_id: u64,
+    command: super::NodeRotateNodeIdentityCommand,
+) -> NodeCommandResult {
+    let snapshot = state.snapshot().await;
+    let Some(identity) = snapshot.identity.as_ref() else {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::NotFound, "节点身份尚未初始化"),
+        );
+    };
+    if identity.public_key_fingerprint != command.expected_fingerprint {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(
+                NodeProblemCode::Conflict,
+                "节点身份已变化，请刷新后重新确认轮换",
+            ),
+        );
+    }
+    if snapshot.lifecycle.active_networks > 0 {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(
+                NodeProblemCode::Conflict,
+                "请先停止所有活动网络再轮换节点身份",
+            )
+            .with_param(
+                "active_networks",
+                snapshot.lifecycle.active_networks.to_string(),
+            ),
+        );
+    }
+
+    let configs = configs.clone();
+    let expected_fingerprint = command.expected_fingerprint;
+    let rotation = tokio::task::spawn_blocking(move || {
+        crate::owner_security::rotation::rotate_node_identity(&configs, &expected_fingerprint)
+    })
+    .await;
+    let rotation = match rotation {
+        Ok(Ok(rotation)) => rotation,
+        Ok(Err(error)) => {
+            let text = format!("{error:#}");
+            if text.contains("身份已变化") || text.contains("所有者") {
+                return NodeCommandResult::rejected(
+                    request_id,
+                    NodeProblem::new(
+                        NodeProblemCode::Conflict,
+                        "节点身份状态已变化，请刷新后再试",
+                    ),
+                );
+            }
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Internal,
+                    "节点身份轮换失败；旧身份保持不变，若新密钥已写入将在下次加载时恢复事务",
+                ),
+            );
+        }
+        Err(_) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(NodeProblemCode::Internal, "节点身份轮换任务异常终止"),
+            );
+        }
+    };
+
+    state
+        .update(|snapshot| {
+            let identity = snapshot
+                .identity
+                .as_mut()
+                .expect("rotation preflight requires an identity snapshot");
+            identity.node_id = rotation.new_node_id.clone();
+            identity.public_key_fingerprint = rotation.new_fingerprint.clone();
+            identity.created_at_unix_ms = Some(rotation.new_created_at_unix_ms);
+        })
+        .await;
+
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::IdentityRotated(super::NodeIdentityRotationSnapshot {
+            old_node_id: rotation.old_node_id,
+            old_fingerprint: rotation.old_fingerprint,
+            new_node_id: rotation.new_node_id,
+            new_fingerprint: rotation.new_fingerprint,
+            created_at_unix_ms: rotation.new_created_at_unix_ms,
+            owner_initialized: rotation.owner_initialized,
+            owner_sessions_invalidated: rotation.owner_sessions_invalidated,
+            affected_configured_network_count: rotation.affected_network_count,
+        }),
+    )
 }
 
 async fn configuration_document(configs: &ConfigManager, request_id: u64) -> NodeCommandResult {

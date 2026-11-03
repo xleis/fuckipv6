@@ -6,6 +6,7 @@
 
 pub(crate) mod audit;
 pub(crate) mod recovery;
+pub(crate) mod rotation;
 pub(crate) mod service;
 pub(crate) mod store;
 pub(crate) mod webauthn;

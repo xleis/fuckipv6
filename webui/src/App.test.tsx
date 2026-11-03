@@ -31,6 +31,7 @@ import {
   HttpError,
   ReauthenticationRequiredError,
   loadManifest,
+  loadOperation,
   loadSnapshot,
   sendCommand,
 } from "./api/client";
@@ -46,6 +47,7 @@ vi.mock("./api/client", async (importOriginal) => {
   return {
     ...original,
     loadManifest: vi.fn(),
+    loadOperation: vi.fn(),
     loadSnapshot: vi.fn(),
     sendCommand: vi.fn(),
   };
@@ -284,6 +286,147 @@ describe("React WebUI shell", () => {
     ]);
     await expectModuleTabs("activity", ["traffic", "logs"]);
     await expectModuleTabs("settings", ["settings"]);
+  });
+
+  it("shows verifiable identity details with rotation impact and a recovery entry", async () => {
+    authenticate({
+      ...snapshot,
+      identity: {
+        node_id: "node-current",
+        display_name: "Home node",
+        public_key_fingerprint:
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        created_at_unix_ms: 1_700_000_000_000,
+      },
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.identity" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.identity" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Home node")).toBeInTheDocument();
+    expect(screen.getByText("node-current")).toBeInTheDocument();
+    expect(
+      screen.getByText("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("translated:identity.rotation.title"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("translated:identity.rotation.impact"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("translated:identity.security.detail"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:identity.security.settings_button",
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.settings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("applies a one-POST identity rotation without polling or a stale refresh", async () => {
+    const oldFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const newFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    authenticate({
+      ...snapshot,
+      identity: {
+        node_id: "node-current",
+        display_name: "Home node",
+        public_key_fingerprint: oldFingerprint,
+        created_at_unix_ms: 1_700_000_000_000,
+      },
+    });
+    const outcome: NodeCommandOutcome = {
+      status: "identity_rotated",
+      data: {
+        old_node_id: "node-current",
+        new_node_id: "node-rotated",
+        old_fingerprint: oldFingerprint,
+        new_fingerprint: newFingerprint,
+        created_at_unix_ms: 1_700_000_100_000,
+        affected_configured_network_count: 0,
+        owner_initialized: true,
+        owner_sessions_invalidated: true,
+      },
+    };
+    vi.mocked(sendCommand).mockImplementation(
+      async (request): Promise<NodeApiCommandResponse> => ({
+        schema_version: 1,
+        request_id: request.request.request_id,
+        server_time: "2026-11-02T00:00:00Z",
+        result: { request_id: request.request.request_id, outcome },
+        operation: {
+          operation_id: "op-identity-rotation",
+          state: "succeeded",
+          stage: "complete",
+          attempt: 1,
+          max_attempts: 1,
+          cancellable: false,
+          cancel_blocked_reason: "operation.cancel.not_supported",
+          result: { request_id: request.request.request_id, outcome },
+        } as NodeOperationSnapshot,
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.identity" }),
+    );
+    const panel = await screen.findByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    await user.click(
+      within(panel).getByRole("button", {
+        name: "translated:action.rotate_node_identity",
+      }),
+    );
+    expect(
+      within(panel).getByRole("textbox", {
+        name: "translated:field.expected_fingerprint",
+      }),
+    ).toHaveValue(oldFingerprint);
+    await user.click(
+      within(panel).getByRole("button", { name: "translated:common.execute" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    expect(
+      await within(panel).findByText("translated:outcome.identity_rotated"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("node-rotated")).toBeInTheDocument();
+    expect(screen.getByText(newFingerprint)).toBeInTheDocument();
+    expect(screen.queryByText("node-current")).not.toBeInTheDocument();
+    expect(sendCommand).toHaveBeenCalledTimes(1);
+    expect(loadOperation).not.toHaveBeenCalled();
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendCommand).mock.calls[0][0].request.command).toEqual({
+      command: "rotate_node_identity",
+      payload: { expected_fingerprint: oldFingerprint },
+    });
   });
 
   it("renders authoritative interfaces and diagnostics on node runtime", async () => {

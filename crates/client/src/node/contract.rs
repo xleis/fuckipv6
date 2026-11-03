@@ -219,7 +219,7 @@ mod tests {
         NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateNetworkCommand,
         NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection,
         NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
-        NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+        NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use fuckipv6_common::NetworkMode;
@@ -269,6 +269,9 @@ mod tests {
             }),
             NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
                 display_name: Some("edge-gateway".into()),
+            }),
+            NodeCommand::RotateNodeIdentity(NodeRotateNodeIdentityCommand {
+                expected_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
             }),
             NodeCommand::GetBlacklist {
                 network_name: "home".into(),

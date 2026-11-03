@@ -219,6 +219,7 @@ struct GpuiShell {
     operation_idempotency_key: Option<IdempotencyKey>,
     error: Option<String>,
     notice: Option<String>,
+    pending_notice_after_snapshot: Option<String>,
     language_menu_open: bool,
     network_menu_open: bool,
 }
@@ -268,6 +269,7 @@ impl GpuiShell {
             operation_idempotency_key: None,
             error: None,
             notice: None,
+            pending_notice_after_snapshot: None,
             language_menu_open: false,
             network_menu_open: false,
         };
@@ -961,7 +963,10 @@ impl GpuiShell {
         match result.outcome {
             NodeCommandOutcome::Snapshot(snapshot) => {
                 self.apply_snapshot(*snapshot, cx);
-                self.notice = Some(t(self.locale, "gpui.snapshot_refreshed").to_string());
+                self.notice = self
+                    .pending_notice_after_snapshot
+                    .take()
+                    .or_else(|| Some(t(self.locale, "gpui.snapshot_refreshed").to_string()));
             }
             NodeCommandOutcome::UiManifest(manifest) => {
                 let manifest = *manifest;
@@ -1114,6 +1119,50 @@ impl GpuiShell {
                     ],
                 ));
             }
+            NodeCommandOutcome::IdentityRotated(rotation) => {
+                if let Some(identity) = self.snapshot.identity.as_mut() {
+                    identity.node_id = rotation.new_node_id.clone();
+                    identity.public_key_fingerprint = rotation.new_fingerprint.clone();
+                    identity.created_at_unix_ms = Some(rotation.created_at_unix_ms);
+                }
+                self.set_field_value(
+                    "rotate_node_identity",
+                    "expected_fingerprint",
+                    rotation.new_fingerprint.clone(),
+                );
+                if let Some(input) = self
+                    .text_inputs
+                    .get(&self.field_key("rotate_node_identity", "expected_fingerprint"))
+                    .cloned()
+                {
+                    input.update(cx, |input, cx| {
+                        input.set_value(rotation.new_fingerprint.clone(), cx)
+                    });
+                }
+                self.pending_notice_after_snapshot = Some(tr(
+                    self.locale,
+                    "gpui.identity_rotated",
+                    &[
+                        ("old_node_id", &rotation.old_node_id),
+                        ("new_node_id", &rotation.new_node_id),
+                        ("old_fingerprint", &rotation.old_fingerprint),
+                        ("new_fingerprint", &rotation.new_fingerprint),
+                        (
+                            "networks",
+                            &rotation.affected_configured_network_count.to_string(),
+                        ),
+                        (
+                            "sessions",
+                            if rotation.owner_sessions_invalidated {
+                                t(self.locale, "identity.rotation.sessions_invalidated")
+                            } else {
+                                t(self.locale, "identity.rotation.sessions_preserved")
+                            },
+                        ),
+                    ],
+                ));
+                self.submit_raw(NodeCommand::GetSnapshot, cx);
+            }
             NodeCommandOutcome::Configuration(document) => {
                 self.configuration.receive_document(document, true);
                 self.configuration
@@ -1217,6 +1266,14 @@ impl GpuiShell {
         }
         for (key, value) in defaults {
             self.form_values.entry(key).or_insert(value);
+        }
+        if let Some(fingerprint) = self
+            .snapshot
+            .identity
+            .as_ref()
+            .map(|identity| identity.public_key_fingerprint.clone())
+        {
+            self.set_field_value("rotate_node_identity", "expected_fingerprint", fingerprint);
         }
         self.fill_empty_network_fields();
 
@@ -4780,6 +4837,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "set_exit_node_role" => "action.set_exit_node_role",
         "set_relay_role" => "action.set_relay_role",
         "set_node_display_name" => "action.set_node_display_name",
+        "rotate_node_identity" => "action.rotate_node_identity",
         "start_node" => "action.start_node",
         "stop_node" => "action.stop_node",
         "restart_node" => "action.restart_node",
@@ -4818,6 +4876,7 @@ fn placeholder_for(
         NodeUiInputKind::TimeoutMs => "1500".into(),
         NodeUiInputKind::Revision => t(locale, "placeholder.revision").into(),
         NodeUiInputKind::ConfigurationJson => t(locale, "placeholder.configuration_json").into(),
+        NodeUiInputKind::Fingerprint => t(locale, "placeholder.fingerprint").into(),
         _ if matches!(
             action_id,
             "stop_networks" | "restart_networks" | "cleanup_node_residuals"

@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -393,6 +393,7 @@ public final class NodeContractV1 {
         RESTART_NETWORKS("restart_networks"),
         RESTART_NODE("restart_node"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
+        ROTATE_NODE_IDENTITY("rotate_node_identity"),
         SET_NETWORK_ROLE("set_network_role"),
         SET_NODE_DISPLAY_NAME("set_node_display_name"),
         SHUTDOWN("shutdown"),
@@ -948,6 +949,7 @@ public final class NodeContractV1 {
         CONFIGURATION_JSON("configuration_json"),
         DISPLAY_NAME("display_name"),
         EXTERNAL_HOST("external_host"),
+        FINGERPRINT("fingerprint"),
         NETWORK_MODE("network_mode"),
         NETWORK_NAME("network_name"),
         NETWORK_SELECTION("network_selection"),
@@ -992,7 +994,8 @@ public final class NodeContractV1 {
         POSITIVE_TIMEOUT("positive_timeout"),
         REVISION("revision"),
         CONFIGURATION_JSON("configuration_json"),
-        DISPLAY_NAME("display_name");
+        DISPLAY_NAME("display_name"),
+        FINGERPRINT("fingerprint");
 
         private final String wireName;
 
@@ -1846,6 +1849,29 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeIdentityRotationSnapshot. */
+    public static final class NodeIdentityRotationSnapshot {
+        public final Long affected_configured_network_count;
+        public final Long created_at_unix_ms;
+        public final String new_fingerprint;
+        public final String new_node_id;
+        public final String old_fingerprint;
+        public final String old_node_id;
+        public final Boolean owner_initialized;
+        public final Boolean owner_sessions_invalidated;
+
+        public NodeIdentityRotationSnapshot(Long affected_configured_network_count, Long created_at_unix_ms, String new_fingerprint, String new_node_id, String old_fingerprint, String old_node_id, Boolean owner_initialized, Boolean owner_sessions_invalidated) {
+            this.affected_configured_network_count = affected_configured_network_count;
+            this.created_at_unix_ms = created_at_unix_ms;
+            this.new_fingerprint = new_fingerprint;
+            this.new_node_id = new_node_id;
+            this.old_fingerprint = old_fingerprint;
+            this.old_node_id = old_node_id;
+            this.owner_initialized = owner_initialized;
+            this.owner_sessions_invalidated = owner_sessions_invalidated;
+        }
+    }
+
     /** DTO for NodeIdentitySnapshot. */
     public static final class NodeIdentitySnapshot {
         public final Long created_at_unix_ms;
@@ -2240,6 +2266,15 @@ public final class NodeContractV1 {
         public NodeRollbackConfigurationCommand(Long expected_revision, Long target_revision) {
             this.expected_revision = expected_revision;
             this.target_revision = target_revision;
+        }
+    }
+
+    /** DTO for NodeRotateNodeIdentityCommand. */
+    public static final class NodeRotateNodeIdentityCommand {
+        public final String expected_fingerprint;
+
+        public NodeRotateNodeIdentityCommand(String expected_fingerprint) {
+            this.expected_fingerprint = expected_fingerprint;
         }
     }
 
@@ -2854,6 +2889,15 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class RotateNodeIdentity extends NodeCommand {
+            public final NodeRotateNodeIdentityCommand payload;
+
+            public RotateNodeIdentity(NodeRotateNodeIdentityCommand payload) {
+                super(NodeCommandKind.ROTATE_NODE_IDENTITY);
+                this.payload = payload;
+            }
+        }
+
         public static final class GetBlacklist extends NodeCommand {
             public final GetBlacklistPayload payload;
 
@@ -3083,6 +3127,15 @@ public final class NodeContractV1 {
 
             public NetworkCreated(NodeCreatedNetwork data) {
                 super("network_created");
+                this.data = data;
+            }
+        }
+
+        public static final class IdentityRotated extends NodeCommandOutcome {
+            public final NodeIdentityRotationSnapshot data;
+
+            public IdentityRotated(NodeIdentityRotationSnapshot data) {
+                super("identity_rotated");
                 this.data = data;
             }
         }
@@ -3551,6 +3604,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.RESTART_NODE ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
+            command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SET_NODE_DISPLAY_NAME ||
             command == NodeCommandKind.SHUTDOWN ||

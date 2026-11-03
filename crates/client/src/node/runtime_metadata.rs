@@ -1,3 +1,4 @@
+use fuckipv6_common::domain::NodeId;
 use fuckipv6_common::{AggregatedLogEntry, ClientConfig, Identity, RoutingMode};
 
 use super::{
@@ -18,7 +19,7 @@ pub(crate) fn identity_snapshot(
     created_at_unix_ms: Option<u64>,
 ) -> NodeIdentitySnapshot {
     NodeIdentitySnapshot {
-        node_id: identity.client_id().to_string(),
+        node_id: NodeId::from_public_key(&identity.public_key_bytes()).to_string(),
         display_name,
         public_key_fingerprint: Identity::public_key_fingerprint(&identity.public_key_bytes()),
         created_at_unix_ms,
@@ -128,7 +129,11 @@ mod tests {
             Some(1_700_000_000_000),
         );
 
-        assert_eq!(snapshot.node_id, identity.client_id());
+        assert_eq!(
+            snapshot.node_id,
+            NodeId::from_public_key(&identity.public_key_bytes()).to_string()
+        );
+        assert_ne!(snapshot.node_id, identity.client_id());
         assert_eq!(snapshot.display_name.as_deref(), Some("edge-gateway"));
         assert_eq!(
             snapshot.public_key_fingerprint,

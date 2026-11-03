@@ -1342,44 +1342,73 @@ function Logs({
 function Identity({
   snapshot,
   locale,
+  onNavigate,
 }: Omit<
   PageContentProps,
   "page" | "selectedNetwork" | "onSelectNetwork" | "onNavigate"
->) {
+> & { onNavigate(pageId: string): void }) {
   const identity = snapshot.identity;
-  if (!identity) return empty(label(locale, "common.no_data"));
   return (
-    <section className="surface-card identity-card">
-      <div className="identity-avatar">
-        <KeyRound size={28} />
-      </div>
-      <div className="identity-copy">
-        <span>{label(locale, "nav.identity")}</span>
-        <h2>{identity.display_name || label(locale, "common.unknown")}</h2>
-        <dl className="detail-list">
-          <div>
-            <dt>{label(locale, "identity.row.node_id")}</dt>
-            <dd>
-              <code>{identity.node_id}</code>
-            </dd>
+    <div className="page-content-stack">
+      {identity ? (
+        <section className="surface-card identity-card">
+          <div className="identity-avatar">
+            <KeyRound size={28} />
           </div>
-          <div>
-            <dt>{label(locale, "identity.row.fingerprint")}</dt>
-            <dd>
-              <code>{identity.public_key_fingerprint}</code>
-            </dd>
+          <div className="identity-copy">
+            <span>{label(locale, "nav.identity")}</span>
+            <h2>{identity.display_name || label(locale, "common.unknown")}</h2>
+            <dl className="detail-list">
+              <div>
+                <dt>{label(locale, "identity.row.node_id")}</dt>
+                <dd>
+                  <code>{identity.node_id}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>{label(locale, "identity.row.fingerprint")}</dt>
+                <dd>
+                  <code>{identity.public_key_fingerprint}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>{label(locale, "identity.row.created_at")}</dt>
+                <dd>
+                  {identity.created_at_unix_ms != null
+                    ? formatTimestamp(locale, identity.created_at_unix_ms)
+                    : label(locale, "common.not_available")}
+                </dd>
+              </div>
+            </dl>
           </div>
-          <div>
-            <dt>{label(locale, "identity.row.created_at")}</dt>
-            <dd>
-              {identity.created_at_unix_ms != null
-                ? formatTimestamp(locale, identity.created_at_unix_ms)
-                : label(locale, "common.not_available")}
-            </dd>
-          </div>
-        </dl>
-      </div>
-    </section>
+        </section>
+      ) : (
+        empty(label(locale, "common.no_data"))
+      )}
+      <section className="surface-card identity-guidance-card">
+        <div className="card-heading">
+          <h3>{label(locale, "identity.rotation.title")}</h3>
+          <AlertTriangle size={17} />
+        </div>
+        <p className="muted-copy">
+          {label(locale, "identity.rotation.impact")}
+        </p>
+      </section>
+      <section className="surface-card identity-guidance-card">
+        <div className="card-heading">
+          <h3>{label(locale, "identity.security.title")}</h3>
+          <ShieldCheck size={17} />
+        </div>
+        <p className="muted-copy">{label(locale, "identity.security.detail")}</p>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => onNavigate("settings")}
+        >
+          {label(locale, "identity.security.settings_button")}
+        </button>
+      </section>
+    </div>
   );
 }
 

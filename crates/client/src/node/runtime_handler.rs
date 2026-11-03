@@ -1,10 +1,12 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
 
 use fuckipv6_common::domain::{
-    CapabilityKind, NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, OperationId,
+    CapabilityKind, JoinTermsAck, MembershipRole, MembershipTerms, NetworkDiscoveryRecord,
+    NetworkMembership, NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId,
+    OperationId,
 };
 
 use super::runtime_control::{network_setup_problem_code, RestartSummary};
@@ -45,6 +47,7 @@ pub struct NodeRuntimeHandler {
     runtime: Option<NetworkRuntimeManager>,
     configs: Option<ConfigManager>,
     discovery: Option<DiscoveryIndexManager>,
+    join_gate: Arc<Mutex<()>>,
 }
 
 impl NodeRuntimeHandler {
@@ -64,6 +67,7 @@ impl NodeRuntimeHandler {
             runtime: None,
             configs: None,
             discovery: None,
+            join_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -82,6 +86,7 @@ impl NodeRuntimeHandler {
             runtime: Some(runtime),
             configs: Some(configs),
             discovery: Some(discovery),
+            join_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -97,6 +102,7 @@ impl NodeRuntimeHandler {
         let runtime = self.runtime.clone();
         let configs = self.configs.clone();
         let discovery = self.discovery.clone();
+        let join_gate = self.join_gate.clone();
 
         Box::pin(async move {
             let request_id = request.request_id;
@@ -111,6 +117,9 @@ impl NodeRuntimeHandler {
                     }
                     if let Some(configs) = configs.as_ref() {
                         refresh_network_profiles(&state, configs).await;
+                        if let Err(error) = refresh_network_memberships(&state, configs).await {
+                            tracing::warn!(%error, "刷新本地网络成员关系失败，保留上一份快照");
+                        }
                     }
                     let (live_tun_names, runtime_problem) = match runtime.as_ref() {
                         Some(runtime) => match runtime.live_tun_names().await {
@@ -393,9 +402,15 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "加入预览需要持久化签名发现记录"),
                 },
-                super::NodeCommand::LeaveNetwork(_) => {
-                    unavailable(request_id, "退出网络需要节点配置和运行时可回滚清理")
-                }
+                super::NodeCommand::LeaveNetwork(command) => match (runtime, configs) {
+                    (Some(runtime), Some(configs)) => {
+                        leave_runtime_network(
+                            &runtime, &state, &configs, &join_gate, request_id, command,
+                        )
+                        .await
+                    }
+                    _ => unavailable(request_id, "退出网络需要节点配置和运行时清理能力"),
+                },
                 super::NodeCommand::JoinNetwork(command) => match (runtime, discovery) {
                     (Some(runtime), discovery) => {
                         join_runtime_network(
@@ -403,6 +418,7 @@ impl NodeRuntimeHandler {
                             discovery.as_ref(),
                             &state,
                             configs.as_ref(),
+                            &join_gate,
                             request_id,
                             command,
                         )
@@ -577,6 +593,70 @@ async fn refresh_network_profiles(state: &NodeStateStore, configs: &ConfigManage
     .await;
     if let Ok(profiles) = profiles {
         state.replace_network_profiles(profiles).await;
+    }
+}
+
+async fn refresh_network_memberships(
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+) -> Result<(), String> {
+    let configs = configs.clone();
+    let memberships = tokio::task::spawn_blocking(move || {
+        let mut memberships = configs
+            .list_joined_memberships()
+            .map_err(|error| error.to_string())?;
+        memberships.sort_by(|left, right| left.network_name.cmp(&right.network_name));
+        Ok::<_, String>(
+            memberships
+                .iter()
+                .map(network_membership_snapshot)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .map_err(|error| format!("成员关系刷新任务失败: {error}"))??;
+    state.replace_memberships(memberships).await;
+    Ok(())
+}
+
+fn network_membership_snapshot(
+    joined: &crate::config_manager::JoinedNetworkMembership,
+) -> super::NodeNetworkMembershipSnapshot {
+    let membership = &joined.membership;
+    super::NodeNetworkMembershipSnapshot {
+        network_name: joined.network_name.clone(),
+        network_id: membership.network_id.to_string(),
+        node_id: membership.node_id.to_string(),
+        state: membership.state,
+        role: membership.role,
+        local_policy_revision: membership.local_policy_revision,
+        network_policy_revision: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.network_policy_revision),
+        privacy_policy_revision: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.privacy_policy_revision),
+        member_limit: membership
+            .terms
+            .as_ref()
+            .and_then(|terms| terms.member_limit),
+        exit_contribution: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.exit_contribution),
+        terms_hash: membership
+            .terms_ack
+            .as_ref()
+            .map(|ack| ack.terms_hash.as_str().to_owned()),
+        acknowledged_at_unix_ms: membership
+            .terms_ack
+            .as_ref()
+            .map(|ack| ack.acknowledged_at_unix_ms),
+        created_at_unix_ms: membership.created_at_unix_ms,
+        updated_at_unix_ms: membership.updated_at_unix_ms,
+        suspension_reason: membership.suspension_reason.clone(),
     }
 }
 
@@ -1244,6 +1324,22 @@ async fn join_membership_exists(
     {
         return true;
     }
+    if let Some(configs) = configs {
+        let configs = configs.clone();
+        let network_id = network_id.to_owned();
+        if tokio::task::spawn_blocking(move || {
+            configs
+                .joined_membership(&network_id)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .await
+        .unwrap_or(false)
+        {
+            return true;
+        }
+    }
     configs.is_some_and(|configs| {
         configs.list_networks().is_ok_and(|networks| {
             networks
@@ -1279,9 +1375,17 @@ async fn join_runtime_network(
     discovery: Option<&DiscoveryIndexManager>,
     state: &NodeStateStore,
     configs: Option<&ConfigManager>,
+    join_gate: &Arc<Mutex<()>>,
     request_id: u64,
     mut command: Box<super::NodeJoinNetworkCommand>,
 ) -> NodeCommandResult {
+    // A complete join owns discovery confirmation, membership persistence,
+    // configuration mutation and runtime start. Serializing the whole sequence
+    // prevents two UI submissions from racing the member-limit check.
+    let _join_guard = join_gate.lock().await;
+    let mut confirmed_record = None;
+    let mut terms_ack = None;
+
     if let Some(network_id) = command.network_id.as_deref() {
         let Some(discovery) = discovery else {
             return unavailable(request_id, "加入网络前无法验证持久化签名发现记录");
@@ -1334,7 +1438,17 @@ async fn join_runtime_network(
         };
         command.network_name = Some(record.document.name.clone());
         command.target = target;
-        command.discovery_record = None;
+        terms_ack = Some(JoinTermsAck {
+            terms_hash: command
+                .terms_hash
+                .clone()
+                .expect("validated join command has terms hash"),
+            acknowledged_at_unix_ms: command
+                .acknowledged_at_unix_ms
+                .expect("validated join command has acknowledgement time"),
+        });
+        command.discovery_record = Some(record.clone());
+        confirmed_record = Some(record);
     } else if let Some(record) = command.discovery_record.take() {
         let Some(discovery) = discovery else {
             return unavailable(request_id, "加入网络前无法验证签名发现记录");
@@ -1342,30 +1456,270 @@ async fn join_runtime_network(
         if let Err(error) = discovery.validate_join_record(&record) {
             return NodeCommandResult::rejected(request_id, discovery_problem(error));
         }
+        confirmed_record = Some(record);
     }
+
+    // Persist acceptance before creating configuration or starting a data
+    // plane. On any later failure only the record inserted by this operation is
+    // rolled back; memberships for other networks are never touched.
+    let persisted = match (confirmed_record.as_ref(), terms_ack) {
+        (Some(record), Some(ack)) => {
+            let Some(configs) = configs else {
+                return unavailable(request_id, "加入网络需要节点配置管理器");
+            };
+            match persist_joined_membership(configs, record, ack).await {
+                Ok(membership) => Some(membership),
+                Err(error) => {
+                    return NodeCommandResult::rejected(
+                        request_id,
+                        NodeProblem::new(
+                            NodeProblemCode::Unavailable,
+                            format!("保存本地成员关系失败: {error}"),
+                        )
+                        .with_param("error_kind", "storage")
+                        .retryable(true)
+                        .for_network(record.document.name.clone()),
+                    );
+                }
+            }
+        }
+        _ => None,
+    };
+
     match runtime.join(*command).await {
-        Ok(result) => NodeCommandResult::completed(
-            request_id,
-            NodeCommandOutcome::Completed {
-                message: format!(
-                    "网络 [{}] 配置{}；{}；协调端点: {}",
-                    result.network_name,
-                    if result.config_saved {
-                        "已保存"
-                    } else {
-                        "已存在"
+        Ok(result) => {
+            if let Some(configs) = configs {
+                if let Err(error) = refresh_network_memberships(state, configs).await {
+                    tracing::warn!(%error, "加入成功后刷新本地网络成员关系失败");
+                }
+            }
+            let snapshot = state.snapshot().await;
+            let Some((joined, inserted)) = persisted else {
+                return NodeCommandResult::completed(
+                    request_id,
+                    NodeCommandOutcome::Completed {
+                        message: format!(
+                            "网络 [{}] 配置{}；{}；协调端点: {}",
+                            result.network_name,
+                            if result.config_saved {
+                                "已保存"
+                            } else {
+                                "已存在"
+                            },
+                            if result.started {
+                                "运行时已启动"
+                            } else {
+                                "按请求未自动启动"
+                            },
+                            result.coordinator_url
+                        ),
                     },
-                    if result.started {
-                        "运行时已启动"
-                    } else {
-                        "按请求未自动启动"
-                    },
-                    result.coordinator_url
-                ),
-            },
-        ),
-        Err(error) => runtime_rejection(request_id, error),
+                );
+            };
+            let membership = snapshot
+                .memberships
+                .iter()
+                .find(|membership| membership.network_id == joined.membership.network_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| network_membership_snapshot(&joined));
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::NetworkJoined(Box::new(super::NodeNetworkJoinResult {
+                    membership,
+                    snapshot,
+                    idempotent: !inserted,
+                    config_saved: result.config_saved,
+                    started: result.started,
+                })),
+            )
+        }
+        Err(error) => {
+            if let Some((joined, true)) = persisted {
+                if let Some(configs) = configs {
+                    if let Err(rollback) = remove_joined_membership(
+                        configs,
+                        joined.membership.network_id.as_str().to_owned(),
+                    )
+                    .await
+                    {
+                        return NodeCommandResult::rejected(
+                            request_id,
+                            NodeProblem::new(
+                                NodeProblemCode::Unavailable,
+                                format!("加入失败: {error}；回滚本地成员关系失败: {rollback}"),
+                            )
+                            .with_param("error_kind", "storage")
+                            .retryable(true)
+                            .for_network(joined.network_name.clone()),
+                        );
+                    }
+                    if let Err(refresh) = refresh_network_memberships(state, configs).await {
+                        tracing::warn!(
+                            %refresh,
+                            network = %joined.network_name,
+                            "加入失败回滚后刷新成员关系失败，直接更新本地投影"
+                        );
+                        let mut memberships = state.snapshot().await.memberships;
+                        memberships.retain(|membership| {
+                            membership.network_id != joined.membership.network_id.as_str()
+                        });
+                        state.replace_memberships(memberships).await;
+                    }
+                }
+            }
+            runtime_rejection(request_id, error)
+        }
     }
+}
+
+async fn persist_joined_membership(
+    configs: &ConfigManager,
+    record: &NetworkDiscoveryRecord,
+    ack: JoinTermsAck,
+) -> Result<(crate::config_manager::JoinedNetworkMembership, bool), String> {
+    let configs = configs.clone();
+    let record = record.clone();
+    tokio::task::spawn_blocking(move || {
+        let now = unix_time_ms().max(ack.acknowledged_at_unix_ms);
+        let terms = MembershipTerms {
+            network_policy_revision: record.document.policy_revision,
+            privacy_policy_revision: record.document.privacy_policy_revision,
+            exit_contribution: record.document.exit_contribution,
+            member_limit: record.document.member_limit,
+        };
+        let identity = configs
+            .load_node_identity()
+            .map_err(|error| error.to_string())?;
+        let node_id = NodeId::from_public_key(&identity.public_key_bytes());
+        let mut membership = NetworkMembership::new(
+            record.document.network_id.clone(),
+            node_id,
+            MembershipRole::Member,
+            ack.acknowledged_at_unix_ms,
+        );
+        let acknowledged_at_unix_ms = ack.acknowledged_at_unix_ms;
+        membership
+            .begin_apply(terms, ack, acknowledged_at_unix_ms)
+            .map_err(|error| error.to_string())?;
+        membership.accept(now).map_err(|error| error.to_string())?;
+        configs
+            .upsert_joined_membership(&record.document.name, membership)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("成员关系写入任务失败: {error}"))?
+}
+
+async fn remove_joined_membership(
+    configs: &ConfigManager,
+    network_id: String,
+) -> Result<(), String> {
+    let configs = configs.clone();
+    tokio::task::spawn_blocking(move || {
+        configs
+            .remove_joined_membership(&network_id)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("成员关系回滚任务失败: {error}"))?
+}
+
+async fn leave_runtime_network(
+    runtime: &NetworkRuntimeManager,
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+    join_gate: &Arc<Mutex<()>>,
+    request_id: u64,
+    command: super::NodeLeaveNetworkCommand,
+) -> NodeCommandResult {
+    let _join_guard = join_gate.lock().await;
+    let network_name = command.network_name;
+    let configs_for_lookup = configs.clone();
+    let network_name_for_lookup = network_name.clone();
+    let joined = match tokio::task::spawn_blocking(move || {
+        configs_for_lookup.joined_membership_for_network_name(&network_name_for_lookup)
+    })
+    .await
+    {
+        Ok(Ok(joined)) => joined,
+        Ok(Err(error)) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!("读取网络 [{network_name}] 的本地成员关系失败: {error}"),
+                )
+                .with_param("error_kind", "storage")
+                .retryable(true)
+                .for_network(network_name),
+            );
+        }
+        Err(error) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Internal,
+                    format!("读取网络 [{network_name}] 的本地成员关系任务失败: {error}"),
+                )
+                .retryable(true)
+                .for_network(network_name),
+            );
+        }
+    };
+
+    if let Err(error) = runtime.leave(network_name.clone()).await {
+        return runtime_rejection_for_network(request_id, error, network_name);
+    }
+
+    if let Some(joined) = joined.as_ref() {
+        if let Err(error) =
+            remove_joined_membership(configs, joined.membership.network_id.as_str().to_owned())
+                .await
+        {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!(
+                        "网络 [{network_name}] 的运行时和配置已退出，但删除本地成员关系失败: {error}"
+                    ),
+                )
+                .with_param("error_kind", "storage")
+                .retryable(true)
+                .for_network(network_name),
+            );
+        }
+    }
+
+    if let Err(error) = refresh_network_memberships(state, configs).await {
+        tracing::warn!(%error, network = %network_name, "退出后刷新成员关系失败，更新本地投影");
+        let mut memberships = state.snapshot().await.memberships;
+        if let Some(joined) = joined.as_ref() {
+            memberships.retain(|membership| {
+                membership.network_id != joined.membership.network_id.as_str()
+            });
+        }
+        state.replace_memberships(memberships).await;
+    }
+
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::NetworkLeft(Box::new(super::NodeNetworkLeaveResult {
+            network_name,
+            left: true,
+            snapshot: state.snapshot().await,
+        })),
+    )
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 async fn stop_runtime_networks(

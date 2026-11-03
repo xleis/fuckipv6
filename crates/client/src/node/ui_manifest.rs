@@ -928,7 +928,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "preview_join_network",
                         "action.preview_join_network",
                         NodeCommandKind::PreviewJoinNetwork,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ViewState,
                         NodeUiAvailability::NodeRunning,
                         vec![field(
@@ -976,7 +976,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "leave_network",
                         "action.leave_network",
                         NodeCommandKind::LeaveNetwork,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NetworkSelected,
                         vec![field(
@@ -2062,6 +2062,8 @@ mod tests {
             NodeCommandKind::RebuildTun,
             NodeCommandKind::CreateNetwork,
             NodeCommandKind::JoinNetwork,
+            NodeCommandKind::PreviewJoinNetwork,
+            NodeCommandKind::LeaveNetwork,
             NodeCommandKind::StartNode,
             NodeCommandKind::StopNode,
             NodeCommandKind::RestartNode,

@@ -1332,6 +1332,31 @@ impl NodeStateStore {
         published
     }
 
+    /// Replace durable local membership acknowledgements without assigning a
+    /// data-plane state. Acceptance means the signed join terms were applied,
+    /// not that keys are ready or the network is connected.
+    pub(crate) async fn replace_memberships(
+        &self,
+        memberships: Vec<NodeNetworkMembershipSnapshot>,
+    ) -> NodeSnapshot {
+        let mut snapshot = self.snapshot.write().await;
+        if snapshot.memberships == memberships {
+            return snapshot.clone();
+        }
+        snapshot.memberships = memberships;
+        snapshot.refresh_capability_states();
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        let published = snapshot.clone();
+        self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.advance_snapshot_revision(published.revision);
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
+        published
+    }
+
     /// Update local control-plane reachability without changing the
     /// authoritative node revision or emitting a node state-change event.
     pub async fn set_control_health(&self, health: NodeControlHealth) {

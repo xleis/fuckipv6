@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
     preview_network_profile, AuditEntry, AuditId, AuditLog, AuditOutcome, NetworkCreateProfile,
-    NetworkProfileApplyResult, NetworkProfileDiffEntry, NetworkProfilePreview,
-    NetworkProfileUpdate, NetworkRecord, NodeId as DomainNodeId, OperationId, PublicKey,
-    NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
+    NetworkId, NetworkMembership, NetworkProfileApplyResult, NetworkProfileDiffEntry,
+    NetworkProfilePreview, NetworkProfileUpdate, NetworkRecord, NodeId as DomainNodeId,
+    OperationId, PublicKey, NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
 };
 use fuckipv6_common::i18n::LanguagePreference;
 use fuckipv6_common::{ClientConfig, Identity};
@@ -25,6 +25,8 @@ const NODE_METADATA_FILE: &str = "node_identity.json";
 const NETWORK_IDENTITY_FILE: &str = "network_identity.pem";
 const NETWORK_RECORD_FILE: &str = "network.json";
 const NETWORK_GOVERNANCE_FILE: &str = "governance.json";
+const JOINED_MEMBERSHIPS_FILE: &str = "memberships.json";
+const JOINED_MEMBERSHIPS_SCHEMA_VERSION: u16 = 1;
 
 /// 网络配置信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,37 @@ pub struct NetworkConfig {
 pub struct NetworkList {
     pub networks: HashMap<String, NetworkConfig>,
     pub default_network: Option<String>,
+}
+
+/// Durable local relationship between a configured network directory and the
+/// stable network membership it represents. Membership state is deliberately
+/// separate from connection/runtime state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct JoinedNetworkMembership {
+    pub network_name: String,
+    pub membership: NetworkMembership,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JoinedMembershipFile {
+    #[serde(default = "joined_membership_schema_version")]
+    schema_version: u16,
+    #[serde(default)]
+    memberships: BTreeMap<String, JoinedNetworkMembership>,
+}
+
+impl Default for JoinedMembershipFile {
+    fn default() -> Self {
+        Self {
+            schema_version: JOINED_MEMBERSHIPS_SCHEMA_VERSION,
+            memberships: BTreeMap::new(),
+        }
+    }
+}
+
+fn joined_membership_schema_version() -> u16 {
+    JOINED_MEMBERSHIPS_SCHEMA_VERSION
 }
 
 /// A successfully persisted owner-created network.
@@ -203,6 +236,157 @@ impl ConfigManager {
     /// 获取网络列表文件路径
     fn get_networks_file(&self) -> PathBuf {
         self.config_dir.join("networks.json")
+    }
+
+    fn joined_memberships_path(&self) -> PathBuf {
+        self.config_dir.join(JOINED_MEMBERSHIPS_FILE)
+    }
+
+    fn joined_memberships_lock_path(&self) -> PathBuf {
+        self.config_dir.join(".memberships.lock")
+    }
+
+    fn lock_joined_memberships(&self) -> Result<std::fs::File> {
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.joined_memberships_lock_path())
+            .context("无法打开本地成员关系锁")?;
+        lock_file.lock_exclusive().context("无法锁定本地成员关系")?;
+        Ok(lock_file)
+    }
+
+    fn load_joined_membership_file(&self) -> Result<JoinedMembershipFile> {
+        let path = self.joined_memberships_path();
+        if !path.exists() {
+            return Ok(JoinedMembershipFile::default());
+        }
+        let content = std::fs::read(&path)
+            .with_context(|| format!("无法读取本地成员关系: {}", path.display()))?;
+        let file: JoinedMembershipFile = serde_json::from_slice(&content)
+            .with_context(|| format!("无法解析本地成员关系: {}", path.display()))?;
+        if file.schema_version != JOINED_MEMBERSHIPS_SCHEMA_VERSION {
+            anyhow::bail!("不支持的本地成员关系版本: {}", file.schema_version);
+        }
+        Ok(file)
+    }
+
+    fn persist_joined_membership_file(&self, file: &JoinedMembershipFile) -> Result<()> {
+        let path = self.joined_memberships_path();
+        let previous = if path.is_file() {
+            Some(
+                std::fs::read(&path)
+                    .with_context(|| format!("无法备份本地成员关系: {}", path.display()))?,
+            )
+        } else {
+            None
+        };
+        if let Err(error) = write_json_atomic(&path, file) {
+            let rollback = match previous {
+                Some(previous) => write_bytes_atomic(&path, &previous),
+                None if path.is_file() => std::fs::remove_file(&path)
+                    .with_context(|| format!("无法回滚本地成员关系: {}", path.display())),
+                None => Ok(()),
+            };
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(error).context(format!(
+                    "本地成员关系写入失败且回滚失败: {rollback_error:#}"
+                )),
+            };
+        }
+        Ok(())
+    }
+
+    /// Read the durable membership projections without consulting runtime or
+    /// discovery state. The file is replaced atomically, so readers never see a
+    /// partial JSON document.
+    pub(crate) fn list_joined_memberships(&self) -> Result<Vec<JoinedNetworkMembership>> {
+        let _lock = self.lock_joined_memberships()?;
+        Ok(self
+            .load_joined_membership_file()?
+            .memberships
+            .into_values()
+            .collect())
+    }
+
+    pub(crate) fn joined_membership(
+        &self,
+        network_id: &str,
+    ) -> Result<Option<JoinedNetworkMembership>> {
+        let network_id = NetworkId::parse(network_id.to_owned())
+            .map_err(|error| anyhow::anyhow!("网络 ID 格式无效: {error}"))?;
+        let _lock = self.lock_joined_memberships()?;
+        Ok(self
+            .load_joined_membership_file()?
+            .memberships
+            .get(network_id.as_str())
+            .cloned())
+    }
+
+    pub(crate) fn joined_membership_for_network_name(
+        &self,
+        network_name: &str,
+    ) -> Result<Option<JoinedNetworkMembership>> {
+        Self::validate_network_name(network_name)?;
+        let _lock = self.lock_joined_memberships()?;
+        Ok(self
+            .load_joined_membership_file()?
+            .memberships
+            .into_values()
+            .find(|joined| joined.network_name == network_name))
+    }
+
+    /// Persist one accepted local membership. Repeating the same join returns
+    /// the existing non-terminal record without changing the file. Terminal
+    /// records may be replaced by a new explicit join.
+    pub(crate) fn upsert_joined_membership(
+        &self,
+        network_name: &str,
+        membership: NetworkMembership,
+    ) -> Result<(JoinedNetworkMembership, bool)> {
+        Self::validate_network_name(network_name)?;
+        membership.validate().context("本地成员关系无效")?;
+        if membership.state != fuckipv6_common::domain::MembershipState::Accepted {
+            anyhow::bail!("只能持久化已接受的本地成员关系");
+        }
+        let network_id = membership.network_id.as_str().to_owned();
+        let _lock = self.lock_joined_memberships()?;
+        let mut file = self.load_joined_membership_file()?;
+        if let Some(existing) = file.memberships.get(&network_id) {
+            if existing.membership.node_id != membership.node_id {
+                anyhow::bail!("网络 [{network_id}] 的本地成员关系属于其他节点身份");
+            }
+            if !existing.membership.state.is_terminal() {
+                return Ok((existing.clone(), false));
+            }
+        }
+        let stored = JoinedNetworkMembership {
+            network_name: network_name.to_owned(),
+            membership,
+        };
+        file.memberships.insert(network_id, stored.clone());
+        self.persist_joined_membership_file(&file)?;
+        Ok((stored, true))
+    }
+
+    /// Remove only one stable network membership. Other network relationships
+    /// remain byte-for-byte equivalent in the persisted file.
+    pub(crate) fn remove_joined_membership(
+        &self,
+        network_id: &str,
+    ) -> Result<Option<JoinedNetworkMembership>> {
+        let network_id = NetworkId::parse(network_id.to_owned())
+            .map_err(|error| anyhow::anyhow!("网络 ID 格式无效: {error}"))?;
+        let _lock = self.lock_joined_memberships()?;
+        let mut file = self.load_joined_membership_file()?;
+        let removed = file.memberships.remove(network_id.as_str());
+        if removed.is_some() {
+            self.persist_joined_membership_file(&file)?;
+        }
+        Ok(removed)
     }
 
     /// Stable node identity shared by every network hosted by this node.
@@ -1076,6 +1260,40 @@ impl ConfigManager {
         }
     }
 
+    /// Attach the signed discovery identity to an existing local network.
+    /// Repeating the same metadata is idempotent; a conflicting stable identity
+    /// must never overwrite another network's configuration.
+    pub(crate) fn set_network_identity_metadata(
+        &self,
+        network_name: &str,
+        network_id: &str,
+        public_key: &str,
+    ) -> Result<()> {
+        Self::validate_network_name(network_name)?;
+        let network_id = NetworkId::parse(network_id.to_owned())
+            .map_err(|error| anyhow::anyhow!("网络 ID 格式无效: {error}"))?;
+        let mut list = self.load_network_list()?;
+        let network = list
+            .networks
+            .get_mut(network_name)
+            .with_context(|| format!("无法设置身份元数据：网络 [{network_name}] 不存在"))?;
+        if let Some(existing) = network.network_id.as_deref() {
+            if existing != network_id.as_str() {
+                anyhow::bail!(
+                    "网络 [{network_name}] 已绑定稳定网络 ID [{existing}]，不能覆盖为 [{network_id}]"
+                );
+            }
+        }
+        if let Some(existing) = network.public_key.as_deref() {
+            if existing != public_key {
+                anyhow::bail!("网络 [{network_name}] 的公钥元数据与签名发现记录不一致");
+            }
+        }
+        network.network_id = Some(network_id.to_string());
+        network.public_key = Some(public_key.to_owned());
+        self.save_network_list(&list)
+    }
+
     fn configuration_store(&self) -> ConfigurationTransactionStore {
         ConfigurationTransactionStore::new(self.config_dir.clone())
     }
@@ -1305,7 +1523,10 @@ fn url_to_network_slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use fuckipv6_common::domain::{CapabilityKind, NetworkJoinMode, NetworkVisibility};
+    use fuckipv6_common::domain::{
+        CapabilityKind, ExitContributionObligation, JoinTermsAck, MembershipRole, MembershipState,
+        MembershipTerms, NetworkJoinMode, NetworkVisibility,
+    };
 
     use super::*;
 
@@ -1326,6 +1547,32 @@ mod tests {
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
         }
+    }
+
+    fn accepted_membership(seed: &str) -> NetworkMembership {
+        let network_id = NetworkId::from_public_key(seed.as_bytes());
+        let node_id = DomainNodeId::from_public_key(b"local-node");
+        let terms = MembershipTerms {
+            network_policy_revision: 7,
+            privacy_policy_revision: 3,
+            exit_contribution: ExitContributionObligation::Required,
+            member_limit: Some(25),
+        };
+        let now = 1_000;
+        let mut membership =
+            NetworkMembership::new(network_id, node_id, MembershipRole::Member, now);
+        membership
+            .begin_apply(
+                terms.clone(),
+                JoinTermsAck {
+                    terms_hash: terms.content_hash().expect("terms hash"),
+                    acknowledged_at_unix_ms: now,
+                },
+                now,
+            )
+            .expect("begin membership application");
+        membership.accept(now + 1).expect("accept membership");
+        membership
     }
 
     #[test]
@@ -1923,6 +2170,122 @@ mod tests {
         let reopened = ConfigManager::new_for_dir(dir.clone())?;
         assert_eq!(reopened.node_identity_created_at_unix_ms()?, first);
         assert_eq!(reopened.node_display_name()?, Some("legacy-node".into()));
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_memberships_are_idempotent_and_removed_by_stable_id() -> anyhow::Result<()> {
+        let dir = temp_config_dir("memberships");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let alpha = accepted_membership("membership-alpha");
+        let beta = accepted_membership("membership-beta");
+
+        let (stored, inserted) = manager.upsert_joined_membership("alpha", alpha.clone())?;
+        assert!(inserted);
+        assert_eq!(stored.membership, alpha);
+        let (replayed, inserted) = manager.upsert_joined_membership("alpha", alpha.clone())?;
+        assert!(!inserted);
+        assert_eq!(replayed, stored);
+        manager.upsert_joined_membership("beta", beta.clone())?;
+
+        assert_eq!(manager.list_joined_memberships()?.len(), 2);
+        assert_eq!(
+            manager
+                .joined_membership(alpha.network_id.as_str())?
+                .expect("alpha membership")
+                .network_name,
+            "alpha"
+        );
+
+        let removed = manager
+            .remove_joined_membership(alpha.network_id.as_str())?
+            .expect("removed alpha membership");
+        assert_eq!(removed.network_name, "alpha");
+        assert!(manager
+            .joined_membership(alpha.network_id.as_str())?
+            .is_none());
+        assert_eq!(
+            manager
+                .joined_membership_for_network_name("beta")?
+                .expect("beta membership remains")
+                .membership,
+            beta
+        );
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        let memberships = reopened.list_joined_memberships()?;
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].network_name, "beta");
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn membership_file_rejects_non_accepted_or_inconsistent_records() -> anyhow::Result<()> {
+        let dir = temp_config_dir("membership-validation");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let accepted = accepted_membership("membership-valid");
+        manager.upsert_joined_membership("valid", accepted.clone())?;
+
+        let mut applying = accepted;
+        applying.state = MembershipState::Applying;
+        assert!(manager.upsert_joined_membership("valid", applying).is_err());
+
+        let mut other_node = accepted_membership("membership-valid");
+        other_node.node_id = DomainNodeId::from_public_key(b"other-node");
+        assert!(manager
+            .upsert_joined_membership("valid", other_node)
+            .is_err());
+
+        assert_eq!(manager.list_joined_memberships()?.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_membership_updates_do_not_overwrite_each_other() -> anyhow::Result<()> {
+        let dir = temp_config_dir("membership-concurrency");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let seed = format!("membership-concurrent-{index}");
+                barrier.wait();
+                manager
+                    .upsert_joined_membership(
+                        &format!("network-{index}"),
+                        accepted_membership(&seed),
+                    )
+                    .map(|(_, inserted)| inserted)
+            }));
+        }
+        for worker in workers {
+            assert!(worker.join().expect("membership worker")?);
+        }
+
+        let memberships = manager.list_joined_memberships()?;
+        assert_eq!(memberships.len(), 8);
+        assert_eq!(
+            memberships
+                .iter()
+                .map(|membership| membership.network_name.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            (0..8)
+                .map(|index| format!("network-{index}"))
+                .collect::<std::collections::BTreeSet<_>>()
+                .iter()
+                .map(String::as_str)
+                .collect()
+        );
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

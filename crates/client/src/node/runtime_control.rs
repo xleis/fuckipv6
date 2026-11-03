@@ -549,6 +549,12 @@ pub(crate) struct JoinResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeaveResult {
+    pub network_name: String,
+    pub config_removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoleUpdateResult {
     pub network_name: String,
     pub role: NodeNetworkRole,
@@ -1326,6 +1332,11 @@ enum RuntimeControlCommand {
         _operation: OperationGuard,
         reply: oneshot::Sender<Result<JoinResult, RuntimeControlError>>,
     },
+    Leave {
+        network_name: String,
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<LeaveResult, RuntimeControlError>>,
+    },
     UpdateRouting {
         command: NodeUpdateRoutingCommand,
         reply: oneshot::Sender<Result<ipc::RoutingUpdateResult, RuntimeControlError>>,
@@ -1673,6 +1684,20 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn leave(&self, network_name: String) -> Result<LeaveResult, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::Leave {
+            network_name,
+            _operation: operation,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn update_routing(
         &self,
         command: NodeUpdateRoutingCommand,
@@ -1908,6 +1933,14 @@ async fn run_actor(
                 reply,
             } => {
                 let result = actor.join(command).await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::Leave {
+                network_name,
+                _operation,
+                reply,
+            } => {
+                let result = actor.leave(network_name).await;
                 let _ = reply.send(result);
             }
             RuntimeControlCommand::UpdateRouting { command, reply } => {
@@ -2666,13 +2699,17 @@ impl NetworkRuntimeActor {
         command: Box<NodeJoinNetworkCommand>,
     ) -> Result<JoinResult, RuntimeControlError> {
         let (coordinator_url, default_name) = parse_join_target(&command.target)?;
-        let network_name = command.network_name.unwrap_or(default_name);
+        let network_name = command.network_name.clone().unwrap_or(default_name);
 
         if self.configs.network_exists(&network_name) {
+            self.verify_existing_join_identity(&network_name, &coordinator_url, command.as_ref())?;
             if !command.start {
-                return Err(RuntimeControlError::Conflict(format!(
-                    "网络配置已存在: {network_name}"
-                )));
+                return Ok(JoinResult {
+                    network_name,
+                    coordinator_url,
+                    config_saved: false,
+                    started: false,
+                });
             }
             let summary = self
                 .start_selection(NodeNetworkSelection::Named(vec![network_name.clone()]))
@@ -2697,22 +2734,43 @@ impl NetworkRuntimeActor {
                 ))
             })?;
 
+        if let Some(record) = command.discovery_record.as_ref() {
+            if let Err(error) = self.configs.set_network_identity_metadata(
+                &network_name,
+                record.document.network_id.as_str(),
+                &record.document.public_key.to_string(),
+            ) {
+                let rollback = self.rollback_failed_join(&network_name).await;
+                return Err(join_rollback_error(
+                    format!("网络 [{network_name}] 已保存，但写入稳定身份失败: {error:#}"),
+                    rollback.err(),
+                ));
+            }
+        }
+
         let mut started = false;
         if command.start {
-            let config = ClientConfig::from_file(&config_file).map_err(|error| {
-                RuntimeControlError::Persistence(format!(
-                    "网络 [{network_name}] 已保存，但读取配置失败: {error:#}"
-                ))
-            })?;
+            let config = match ClientConfig::from_file(&config_file) {
+                Ok(config) => config,
+                Err(error) => {
+                    let rollback = self.rollback_failed_join(&network_name).await;
+                    return Err(join_rollback_error(
+                        format!("网络 [{network_name}] 已保存，但读取配置失败: {error:#}"),
+                        rollback.err(),
+                    ));
+                }
+            };
             let spec = super::NodeNetworkSpec {
                 name: network_name.clone(),
                 config_path: config_file,
                 config,
             };
             if let Err(error) = self.start_spec(spec).await {
-                return Err(RuntimeControlError::Launch(format!(
-                    "网络 [{network_name}] 配置已保存，但启动失败: {error}"
-                )));
+                let rollback = self.rollback_failed_join(&network_name).await;
+                return Err(join_rollback_error(
+                    format!("网络 [{network_name}] 配置已保存，但启动失败: {error}"),
+                    rollback.err(),
+                ));
             }
             started = true;
         }
@@ -2723,6 +2781,129 @@ impl NetworkRuntimeActor {
             coordinator_url,
             config_saved: true,
             started,
+        })
+    }
+
+    fn verify_existing_join_identity(
+        &self,
+        network_name: &str,
+        coordinator_url: &str,
+        command: &NodeJoinNetworkCommand,
+    ) -> Result<(), RuntimeControlError> {
+        let networks = self.configs.list_networks().map_err(|error| {
+            RuntimeControlError::Persistence(format!(
+                "网络 [{network_name}] 已存在，但读取本地身份元数据失败: {error:#}"
+            ))
+        })?;
+        let existing = networks
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .ok_or_else(|| {
+                RuntimeControlError::Conflict(format!("网络配置已存在: {network_name}"))
+            })?;
+
+        if existing.coordinator_url != coordinator_url {
+            return Err(RuntimeControlError::Conflict(format!(
+                "网络 [{network_name}] 已绑定其他协调端点，不能覆盖为 [{coordinator_url}]"
+            )));
+        }
+
+        let Some(expected_id) = command.network_id.as_deref() else {
+            return Ok(());
+        };
+        match existing.network_id.as_deref() {
+            Some(existing_id) if existing_id == expected_id => Ok(()),
+            Some(existing_id) => Err(RuntimeControlError::Conflict(format!(
+                "网络 [{network_name}] 已绑定稳定网络 ID [{existing_id}]，与加入记录 [{expected_id}] 不一致"
+            ))),
+            None => {
+                let Some(record) = command.discovery_record.as_ref() else {
+                    return Err(RuntimeControlError::Conflict(format!(
+                        "网络 [{network_name}] 缺少稳定身份元数据，不能确认重复加入"
+                    )));
+                };
+                self.configs
+                    .set_network_identity_metadata(
+                        network_name,
+                        expected_id,
+                        &record.document.public_key.to_string(),
+                    )
+                    .map_err(|error| {
+                        RuntimeControlError::Persistence(format!(
+                            "网络 [{network_name}] 的稳定身份元数据写入失败: {error:#}"
+                        ))
+                    })
+            }
+        }
+    }
+
+    async fn leave(&mut self, network_name: String) -> Result<LeaveResult, RuntimeControlError> {
+        let config_removed = self.configs.network_exists(&network_name);
+        let deadline = Instant::now() + self.timeouts.stop;
+        match self
+            .stop_until(vec![network_name.clone()], false, true, deadline)
+            .await
+        {
+            Ok(summary) if summary.is_success() => {}
+            Ok(summary) => {
+                return Err(RuntimeControlError::Launch(format!(
+                    "退出网络 [{network_name}] 前停止运行时失败: {}",
+                    summary.message()
+                )));
+            }
+            Err(RuntimeControlError::NotFound(_)) => {
+                // An offline configured network has no actor/service to stop.
+            }
+            Err(error) => return Err(error),
+        }
+
+        if config_removed {
+            self.configs
+                .delete_network(&network_name)
+                .map_err(|error| {
+                    RuntimeControlError::Persistence(format!(
+                        "退出网络 [{network_name}] 时删除本地配置失败: {error:#}"
+                    ))
+                })?;
+        }
+        self.forget_network(&network_name).await;
+        self.publish_dynamic_lifecycle().await;
+
+        Ok(LeaveResult {
+            network_name,
+            config_removed,
+        })
+    }
+
+    async fn rollback_failed_join(&self, network_name: &str) -> Result<(), RuntimeControlError> {
+        self.state
+            .update(|snapshot| {
+                snapshot
+                    .configuration
+                    .networks
+                    .retain(|network| network.network_name != network_name);
+                snapshot
+                    .networks
+                    .retain(|network| network.name != network_name);
+                snapshot
+                    .peers
+                    .retain(|peer| peer.network_name != network_name);
+                snapshot
+                    .routing_summaries
+                    .retain(|summary| summary.network_name != network_name);
+                if snapshot
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|problem| problem.network_name.as_deref() == Some(network_name))
+                {
+                    snapshot.last_error = None;
+                }
+            })
+            .await;
+        self.configs.delete_network(network_name).map_err(|error| {
+            RuntimeControlError::Persistence(format!(
+                "回滚网络 [{network_name}] 的未完成配置失败: {error:#}"
+            ))
         })
     }
 
@@ -4429,6 +4610,18 @@ fn parse_join_target(target: &str) -> Result<(String, String), RuntimeControlErr
         coordinator_url.clone(),
         ConfigManager::extract_network_name(&coordinator_url),
     ))
+}
+
+fn join_rollback_error(
+    message: String,
+    rollback_error: Option<RuntimeControlError>,
+) -> RuntimeControlError {
+    match rollback_error {
+        Some(rollback_error) => RuntimeControlError::Persistence(format!(
+            "{message}；且回滚未完成配置失败: {rollback_error}"
+        )),
+        None => RuntimeControlError::Launch(message),
+    }
 }
 
 fn cleanup_block_message(report: &RuntimeCleanupReport, network_name: &str) -> String {

@@ -464,7 +464,7 @@
           "id": "preview_join_network",
           "label_key": "action.preview_join_network",
           "command": "preview_join_network",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "view_state",
           "audit": {
             "policy": "none",
@@ -522,7 +522,7 @@
           "id": "leave_network",
           "label_key": "action.leave_network",
           "command": "leave_network",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "manage_networks",
           "audit": {
             "policy": "record_outcome",

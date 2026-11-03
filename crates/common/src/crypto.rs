@@ -7,7 +7,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha512};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 /// 客户端身份
 #[derive(Clone)]
@@ -62,14 +64,37 @@ impl Identity {
         })
     }
 
-    /// 保存身份到文件
+    /// 保存身份到文件。
+    ///
+    /// The complete key material is written to a private file in the target
+    /// directory and atomically renamed into place. A failed write therefore
+    /// leaves either the previous identity or the new identity intact, never a
+    /// truncated key file.
     pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
-        let mut bytes = Vec::with_capacity(64);
+        static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+        let path = path.as_ref();
+        let mut bytes = Zeroizing::new(Vec::with_capacity(64));
         bytes.extend_from_slice(&self.signing_key.to_bytes());
         bytes.extend_from_slice(self.verifying_key.as_bytes());
 
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let file_name = path
+            .file_name()
+            .with_context(|| format!("Key file path has no file name: {:?}", path))?;
+        let mut temporary_name = file_name.to_os_string();
+        temporary_name.push(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary_path = parent.join(temporary_name);
+
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
 
         #[cfg(unix)]
         {
@@ -77,26 +102,24 @@ impl Identity {
             options.mode(0o600);
         }
 
-        let mut file = options
-            .open(path.as_ref())
-            .with_context(|| format!("Failed to write key file: {:?}", path.as_ref()))?;
+        let write_result = (|| -> Result<()> {
+            let mut file = options.open(&temporary_path).with_context(|| {
+                format!("Failed to create temporary key file: {:?}", temporary_path)
+            })?;
+            file.write_all(&bytes)
+                .with_context(|| format!("Failed to write key file: {:?}", path))?;
+            file.sync_all()
+                .with_context(|| format!("Failed to sync key file: {:?}", path))?;
+            std::fs::rename(&temporary_path, path)
+                .with_context(|| format!("Failed to atomically replace key file: {:?}", path))?;
+            sync_parent_directory(parent)?;
+            Ok(())
+        })();
 
-        // `mode` only applies when the file is created. Tighten an existing
-        // identity before replacing its contents so it is never rewritten
-        // while remaining readable by other local users.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .with_context(|| {
-                    format!("Failed to secure key file permissions: {:?}", path.as_ref())
-                })?;
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
         }
-
-        file.write_all(&bytes)
-            .with_context(|| format!("Failed to write key file: {:?}", path.as_ref()))?;
-
-        Ok(())
+        write_result
     }
 
     /// 如果文件不存在则生成并保存，否则加载
@@ -254,6 +277,18 @@ pub fn decrypt_payload(key: &[u8; 32], payload: &[u8]) -> Result<Vec<u8>> {
     Ok(plaintext)
 }
 
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("Failed to sync key file directory: {:?}", parent))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Base64编码 (URL安全，无填充)
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
@@ -305,14 +340,25 @@ mod tests {
     }
 
     #[test]
-    fn test_identity_save_load() -> anyhow::Result<()> {
-        let temp_file = std::env::temp_dir().join("test_key.pem");
+    fn test_identity_save_load_replaces_the_complete_file() -> anyhow::Result<()> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temp_file = std::env::temp_dir().join(format!(
+            "fuckipv6_identity_replace_{}_{}.pem",
+            std::process::id(),
+            unique
+        ));
 
         let identity1 = Identity::generate()?;
         identity1.save_to_file(&temp_file)?;
+        let identity2 = Identity::generate()?;
+        identity2.save_to_file(&temp_file)?;
 
-        let identity2 = Identity::load_from_file(&temp_file)?;
-        assert_eq!(identity1.client_id(), identity2.client_id());
+        let loaded = Identity::load_from_file(&temp_file)?;
+        assert_eq!(identity2.client_id(), loaded.client_id());
+        assert_ne!(identity1.client_id(), loaded.client_id());
+        assert_eq!(std::fs::metadata(&temp_file)?.len(), 64);
 
         std::fs::remove_file(temp_file).ok();
         Ok(())

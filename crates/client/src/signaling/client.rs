@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{JoinRequest, JoinRequestId, JoinRequestState, NetworkId};
 use fuckipv6_common::{
-    codec, validate_signaling_message_len, Identity, JoinRequestReviewResult, NatType, PeerInfo,
-    RelayEndpoint, SignalingMessage, VirtualIps, MAX_SIGNALING_MESSAGE_SIZE,
+    codec, validate_signaling_message_len, Identity, JoinRequestBatchReviewItem,
+    JoinRequestReviewResult, NatType, PeerInfo, RelayEndpoint, SignalingMessage, VirtualIps,
+    MAX_SIGNALING_MESSAGE_SIZE,
 };
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
@@ -19,6 +20,7 @@ use tokio_tungstenite::{
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const JOIN_REQUEST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SignalingCloseError {
@@ -51,6 +53,199 @@ pub struct SignalingClient {
     known_peers_rx: watch::Receiver<Vec<PeerInfo>>,
     shutdown_tx: watch::Sender<bool>,
     task: StdMutex<Option<JoinHandle<()>>>,
+    join_requests: Arc<JoinRequestResponseHub>,
+    join_request_gate: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JoinRequestStatusSnapshot {
+    pub request_id: JoinRequestId,
+    pub state: JoinRequestState,
+    pub revision: u64,
+    pub information_request: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JoinRequestResponse {
+    Status(JoinRequestStatusSnapshot),
+    List(Vec<JoinRequest>),
+    Review {
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestReviewResult>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum JoinRequestControlError {
+    #[error("审批控制连接已断开")]
+    Disconnected,
+    #[error("审批控制请求超时")]
+    TimedOut,
+    #[error("审批控制请求被拒绝")]
+    Rejected(u16),
+    #[error("审批控制响应无效")]
+    InvalidResponse,
+    #[error("审批控制连接尚未就绪")]
+    Unavailable,
+}
+
+impl JoinRequestControlError {
+    pub(crate) fn message_key(self) -> &'static str {
+        match self {
+            Self::Disconnected | Self::Unavailable => "join_request.error.unavailable",
+            Self::TimedOut => "join_request.error.timeout",
+            Self::Rejected(401) => "join_request.error.unauthorized",
+            Self::Rejected(403) => "join_request.error.forbidden",
+            Self::Rejected(404) => "join_request.error.not_found",
+            Self::Rejected(429) => "join_request.error.rate_limited",
+            Self::Rejected(503) => "join_request.error.overloaded",
+            Self::Rejected(_) | Self::InvalidResponse => "join_request.error.unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingJoinRequest {
+    Status(JoinRequestId),
+    List(NetworkId),
+    Review {
+        network_id: NetworkId,
+        request_ids: Vec<JoinRequestId>,
+    },
+}
+
+struct PendingJoinRequestResponse {
+    expected: PendingJoinRequest,
+    sender: oneshot::Sender<std::result::Result<JoinRequestResponse, JoinRequestControlError>>,
+}
+
+#[derive(Default)]
+struct JoinRequestResponseHub {
+    pending: StdMutex<Option<PendingJoinRequestResponse>>,
+}
+
+impl JoinRequestResponseHub {
+    fn register(
+        &self,
+        expected: PendingJoinRequest,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<JoinRequestResponse, JoinRequestControlError>>,
+        JoinRequestControlError,
+    > {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.is_some() {
+            return Err(JoinRequestControlError::Unavailable);
+        }
+        *pending = Some(PendingJoinRequestResponse { expected, sender });
+        Ok(receiver)
+    }
+
+    /// Route an approval response only when it belongs to the active request.
+    /// Unknown approval responses are dropped rather than published through the
+    /// general event stream, which may contain applicant prose.
+    fn route(&self, message: &SignalingMessage) -> bool {
+        let matches = match message {
+            SignalingMessage::Error { .. } => self.has_pending(),
+            SignalingMessage::JoinRequestStatus { request_id, .. } => self.matches(
+                |expected| matches!(expected, PendingJoinRequest::Status(id) if id == request_id),
+            ),
+            SignalingMessage::JoinRequestListResponse { .. } => {
+                self.matches(|expected| matches!(expected, PendingJoinRequest::List(_)))
+            }
+            SignalingMessage::JoinRequestReviewAck {
+                network_id,
+                reviews,
+            } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingJoinRequest::Review {
+                        network_id: expected_network,
+                        request_ids,
+                    } if expected_network == network_id
+                        && reviews.len() == request_ids.len()
+                        && reviews.iter().all(|review| request_ids.contains(&review.request_id))
+                )
+            }),
+            _ => return false,
+        };
+
+        let is_approval_response = matches!(
+            message,
+            SignalingMessage::JoinRequestStatus { .. }
+                | SignalingMessage::JoinRequestListResponse { .. }
+                | SignalingMessage::JoinRequestReviewAck { .. }
+        );
+        if !matches {
+            return is_approval_response;
+        }
+
+        let response = match message {
+            SignalingMessage::JoinRequestStatus {
+                request_id,
+                state,
+                revision,
+                information_request,
+            } => JoinRequestResponse::Status(JoinRequestStatusSnapshot {
+                request_id: request_id.clone(),
+                state: *state,
+                revision: *revision,
+                information_request: information_request.clone(),
+            }),
+            SignalingMessage::JoinRequestListResponse { requests } => {
+                JoinRequestResponse::List(requests.clone())
+            }
+            SignalingMessage::JoinRequestReviewAck {
+                network_id,
+                reviews,
+            } => JoinRequestResponse::Review {
+                network_id: network_id.clone(),
+                reviews: reviews.clone(),
+            },
+            SignalingMessage::Error { code, .. } => {
+                return self.finish(Err(JoinRequestControlError::Rejected(*code)));
+            }
+            _ => unreachable!("approval response match was checked above"),
+        };
+        self.finish(Ok(response))
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    fn matches(&self, predicate: impl FnOnce(&PendingJoinRequest) -> bool) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|pending| predicate(&pending.expected))
+    }
+
+    fn finish(
+        &self,
+        result: std::result::Result<JoinRequestResponse, JoinRequestControlError>,
+    ) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.sender.send(result);
+        }
+        true
+    }
+
+    fn fail_pending(&self, error: JoinRequestControlError) {
+        let _ = self.finish(Err(error));
+    }
 }
 
 #[derive(Clone)]
@@ -85,6 +280,7 @@ struct ConnectionChannels<'a> {
     relay_endpoint_tx: &'a watch::Sender<Option<RelayEndpoint>>,
     relay_endpoints_tx: &'a watch::Sender<Vec<RelayEndpoint>>,
     known_peers_tx: &'a watch::Sender<Vec<PeerInfo>>,
+    join_requests: &'a JoinRequestResponseHub,
 }
 
 struct ConnectionState {
@@ -131,6 +327,7 @@ impl SignalingClient {
         let (relay_endpoints_tx, relay_endpoints_rx) = watch::channel(Vec::new());
         let (known_peers_tx, known_peers_rx) = watch::channel(Vec::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let join_requests = Arc::new(JoinRequestResponseHub::default());
 
         let registration = RegistrationIdentity {
             client_id: identity.client_id().to_string(),
@@ -157,6 +354,7 @@ impl SignalingClient {
             relay_endpoint_tx,
             relay_endpoints_tx,
             known_peers_tx,
+            join_requests.clone(),
             shutdown_rx,
         ));
 
@@ -170,6 +368,8 @@ impl SignalingClient {
             known_peers_rx,
             shutdown_tx,
             task: StdMutex::new(Some(task)),
+            join_requests,
+            join_request_gate: Arc::new(Mutex::new(())),
         };
 
         client.wait_for_initial_registration().await?;
@@ -208,6 +408,152 @@ impl SignalingClient {
     /// 发送心跳
     pub fn send_heartbeat(&self) -> Result<()> {
         self.send(SignalingMessage::heartbeat())
+    }
+
+    pub(crate) async fn submit_join_request(
+        &self,
+        request: JoinRequest,
+    ) -> std::result::Result<JoinRequestStatusSnapshot, JoinRequestControlError> {
+        let request_id = request.request_id.clone();
+        match self
+            .send_join_request_operation(
+                SignalingMessage::JoinRequestSubmit {
+                    request: Box::new(request),
+                },
+                PendingJoinRequest::Status(request_id),
+            )
+            .await?
+        {
+            JoinRequestResponse::Status(status) => Ok(status),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn list_join_requests(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<Vec<JoinRequest>, JoinRequestControlError> {
+        match self
+            .send_join_request_operation(
+                SignalingMessage::JoinRequestList {
+                    network_id: network_id.clone(),
+                },
+                PendingJoinRequest::List(network_id),
+            )
+            .await?
+        {
+            JoinRequestResponse::List(requests) => Ok(requests),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn review_join_requests(
+        &self,
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestBatchReviewItem>,
+    ) -> std::result::Result<Vec<JoinRequestReviewResult>, JoinRequestControlError> {
+        let request_ids = reviews
+            .iter()
+            .map(|review| review.request_id.clone())
+            .collect::<Vec<_>>();
+        let (message, expected) = if reviews.len() == 1 {
+            let review = reviews.into_iter().next().expect("one review");
+            (
+                SignalingMessage::JoinRequestReview {
+                    network_id: network_id.clone(),
+                    request_id: review.request_id,
+                    expected_revision: review.expected_revision,
+                    action: review.action,
+                    note: review.note,
+                },
+                PendingJoinRequest::Review {
+                    network_id,
+                    request_ids,
+                },
+            )
+        } else {
+            (
+                SignalingMessage::JoinRequestBatchReview {
+                    network_id: network_id.clone(),
+                    reviews,
+                },
+                PendingJoinRequest::Review {
+                    network_id,
+                    request_ids,
+                },
+            )
+        };
+        match self.send_join_request_operation(message, expected).await? {
+            JoinRequestResponse::Review { reviews, .. } => Ok(reviews),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn withdraw_join_request(
+        &self,
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+    ) -> std::result::Result<JoinRequestStatusSnapshot, JoinRequestControlError> {
+        match self
+            .send_join_request_operation(
+                SignalingMessage::JoinRequestWithdraw {
+                    network_id,
+                    request_id: request_id.clone(),
+                },
+                PendingJoinRequest::Status(request_id),
+            )
+            .await?
+        {
+            JoinRequestResponse::Status(status) => Ok(status),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn resubmit_join_request(
+        &self,
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        expected_revision: u64,
+        reason: String,
+    ) -> std::result::Result<JoinRequestStatusSnapshot, JoinRequestControlError> {
+        match self
+            .send_join_request_operation(
+                SignalingMessage::JoinRequestResubmit {
+                    network_id,
+                    request_id: request_id.clone(),
+                    expected_revision,
+                    reason,
+                },
+                PendingJoinRequest::Status(request_id),
+            )
+            .await?
+        {
+            JoinRequestResponse::Status(status) => Ok(status),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    async fn send_join_request_operation(
+        &self,
+        message: SignalingMessage,
+        expected: PendingJoinRequest,
+    ) -> std::result::Result<JoinRequestResponse, JoinRequestControlError> {
+        let _gate = self.join_request_gate.lock().await;
+        let receiver = self.join_requests.register(expected)?;
+        if self.send(message).is_err() {
+            self.join_requests
+                .fail_pending(JoinRequestControlError::Disconnected);
+            return Err(JoinRequestControlError::Unavailable);
+        }
+        match tokio::time::timeout(JOIN_REQUEST_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(JoinRequestControlError::Disconnected),
+            Err(_) => {
+                self.join_requests
+                    .fail_pending(JoinRequestControlError::TimedOut);
+                Err(JoinRequestControlError::TimedOut)
+            }
+        }
     }
 
     /// 关闭信令连接，并等待连接任务退出。
@@ -294,6 +640,7 @@ async fn connection_manager(
     relay_endpoint_tx: watch::Sender<Option<RelayEndpoint>>,
     relay_endpoints_tx: watch::Sender<Vec<RelayEndpoint>>,
     known_peers_tx: watch::Sender<Vec<PeerInfo>>,
+    join_requests: Arc<JoinRequestResponseHub>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let channels = ConnectionChannels {
@@ -303,6 +650,7 @@ async fn connection_manager(
         relay_endpoint_tx: &relay_endpoint_tx,
         relay_endpoints_tx: &relay_endpoints_tx,
         known_peers_tx: &known_peers_tx,
+        join_requests: &join_requests,
     };
     let mut pending_outbound = Vec::new();
     let mut state = ConnectionState {
@@ -397,6 +745,9 @@ async fn handle_connected_signaling<S>(
 }
 
 fn notify_disconnected(channels: ConnectionChannels<'_>, reason: String) {
+    channels
+        .join_requests
+        .fail_pending(JoinRequestControlError::Disconnected);
     let _ = channels.assigned_ip_tx.send(None);
     let _ = channels.relay_endpoint_tx.send(None);
     let _ = channels
@@ -573,6 +924,10 @@ fn handle_incoming_message(
         // `wait_for_initial_registration`; publish every other registration
         // field first so callers observe one coherent RegisterAck snapshot.
         let _ = channels.assigned_ip_tx.send(Some(assigned_ip));
+    }
+
+    if channels.join_requests.route(&msg) {
+        return Ok(());
     }
 
     if let Some(event) = signaling_message_to_event(msg) {
@@ -872,6 +1227,8 @@ mod tests {
             known_peers_rx,
             shutdown_tx,
             task: StdMutex::new(Some(task)),
+            join_requests: Arc::new(JoinRequestResponseHub::default()),
+            join_request_gate: Arc::new(Mutex::new(())),
         };
 
         let error = client
@@ -951,6 +1308,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_request_responses_are_correlated_and_removed_from_general_events() {
+        let hub = JoinRequestResponseHub::default();
+        let request_id = JoinRequestId::from_public_key(b"correlated-request");
+        let receiver = hub
+            .register(PendingJoinRequest::Status(request_id.clone()))
+            .expect("register pending approval request");
+
+        assert!(hub.route(&SignalingMessage::JoinRequestStatus {
+            request_id: request_id.clone(),
+            state: JoinRequestState::Pending,
+            revision: 3,
+            information_request: Some("private note".into()),
+        }));
+        let response = receiver.await.expect("response sender").expect("status");
+        assert_eq!(
+            response,
+            JoinRequestResponse::Status(JoinRequestStatusSnapshot {
+                request_id,
+                state: JoinRequestState::Pending,
+                revision: 3,
+                information_request: Some("private note".into()),
+            })
+        );
+        assert!(
+            hub.route(&SignalingMessage::JoinRequestListResponse {
+                requests: Vec::new()
+            }),
+            "an unmatched list response must be swallowed, not published as a general event"
+        );
+        assert!(
+            !hub.route(&SignalingMessage::protocol_error(
+                fuckipv6_common::ErrorCode::Internal,
+                "not part of an approval operation",
+            )),
+            "unrelated signaling errors must remain available to the data plane"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_fails_the_pending_join_request() {
+        let hub = JoinRequestResponseHub::default();
+        let network_id = NetworkId::from_public_key(b"disconnect-network");
+        let receiver = hub
+            .register(PendingJoinRequest::List(network_id))
+            .expect("register pending list request");
+        hub.fail_pending(JoinRequestControlError::Disconnected);
+        assert_eq!(
+            receiver
+                .await
+                .expect("disconnect must not drop the response channel"),
+            Err(JoinRequestControlError::Disconnected)
+        );
+    }
+
+    #[tokio::test]
     async fn connection_manager_reregisters_after_reconnect_and_preserves_ip() -> Result<()> {
         let identity = Identity::generate()?;
         let registration = RegistrationIdentity {
@@ -1006,6 +1418,7 @@ mod tests {
             relay_endpoint_tx,
             relay_endpoints_tx,
             known_peers_tx,
+            Arc::new(JoinRequestResponseHub::default()),
             shutdown_rx,
         ));
 

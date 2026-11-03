@@ -1068,15 +1068,17 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`；
   `./scripts/check-contracts.sh`；WebUI 87 passed，typecheck、lint、build 均通过。
 
-### W8-02 公开资料与隐私预览 `[ ]`
+### W8-02 公开资料与隐私预览 `[x]`
 
-- [ ] 区分公开发现卡片、成员可见资料、管理员可见资料和本地秘密；
-- [ ] 创建/编辑时提供实际公开预览；
-- [ ] 公开字段不包含成员地址、私钥、内部拓扑和活动记录；
-- [ ] 支持语言、地区、标签、简介和能力声明；
-- [ ] 资料显式使用 schema version 和签名；
-- [ ] 变更采用差异预览、原子应用和审计；
-- [ ] 对误导性能力声明和过期资料显示警告。
+- [x] 区分公开发现卡片、成员可见资料、管理员可见资料和本地秘密；
+- [x] 创建/编辑时提供实际公开预览；
+- [x] 公开字段不包含成员地址、私钥、内部拓扑和活动记录；
+- [x] 支持语言、地区、标签、简介和能力声明；
+- [x] 资料显式使用 schema version 和签名；
+- [x] 变更采用差异预览、原子应用和审计；
+- [x] 对误导性能力声明和过期资料显示警告。
+
+**证据（2026-11-03）**：`NetworkPublicProfileDocument` 使用显式公开字段 allowlist、固定 `schema_version`，覆盖名称、简介、图标、语言、地区、标签、能力声明、可见性和加入模式；`NetworkPublicProfileRecord` 由网络独立身份签名，并在读取、预览和应用前校验网络 ID/公钥绑定、schema、revision、签名及有效期。预览统一生成公开发现卡片、成员视图、管理员视图和本地秘密四层投影：公开卡只携带可发现字段和 withheld 类别名，成员/管理员视图仅增加人数、revision 与策略版本，本地秘密仅报告身份是否存在、公钥指纹、存储类别以及 `secret_material_included=false`，不返回成员地址、私钥、内部拓扑、活动记录或邀请凭据。WebUI 与 GPUI 的创建/编辑资料动作均消费预览、差异、版本冲突和 `can_apply`；更新命令在排他文件锁内重新读取并复核 revision，重新签名后原子写入网络记录和治理审计，审计写入失败会恢复旧记录。运行时将能力声明与当前 CapabilityRegistry 对比，对未观测声明、未声明但已观测能力和旧版未签名资料给出警告，并对过期资料提示重新签发。字段级隐私测试枚举并拒绝成员、地址、端点、拓扑、活动、审计、私钥、签名密钥、身份和邀请字段；另有签名篡改/schema/revision 拒绝、四层预览、过期与冲突、原子保存和审计回滚测试。验证通过：`cargo test -p fuckipv6-common --all-features`（178 passed）、`cargo test -p fuckipv6-client --all-features`（库 743 passed、3 ignored；进程集成测试 12 passed；特权生命周期测试 1 ignored）、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI 8 个测试文件 92/92、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`（含 Rust、TypeScript、Android DTO 测试）、`cargo fmt --all -- --check` 和 `git diff --check`。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 **验收**：所有者能准确知道公网将看到什么；字段级隐私测试证明无越界泄漏。
 

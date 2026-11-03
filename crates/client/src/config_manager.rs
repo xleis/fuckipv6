@@ -3,9 +3,12 @@ use crate::config_transaction::{
     ConfigurationPreview, ConfigurationTransactionError, ConfigurationTransactionStore,
 };
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use fuckipv6_common::domain::{
-    AuditEntry, AuditId, AuditLog, AuditOutcome, NetworkCreateProfile, NetworkRecord,
-    NodeId as DomainNodeId, PublicKey,
+    preview_network_profile, AuditEntry, AuditId, AuditLog, AuditOutcome, NetworkCreateProfile,
+    NetworkProfileApplyResult, NetworkProfileDiffEntry, NetworkProfilePreview,
+    NetworkProfileUpdate, NetworkRecord, NodeId as DomainNodeId, OperationId, PublicKey,
+    NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
 };
 use fuckipv6_common::i18n::LanguagePreference;
 use fuckipv6_common::{ClientConfig, Identity};
@@ -79,6 +82,19 @@ pub enum NetworkCreationError {
     #[error("无权创建网络: {0}")]
     PermissionDenied(String),
     #[error("网络持久化失败: {0}")]
+    Storage(String),
+}
+
+/// Stable, adapter-mappable profile preview/update failures.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkProfileError {
+    #[error("网络资料无效: {0}")]
+    Invalid(String),
+    #[error("网络资料版本冲突: 期望 {expected}，当前 {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
+    #[error("网络资料不存在: {0}")]
+    NotFound(String),
+    #[error("网络资料持久化失败: {0}")]
     Storage(String),
 }
 
@@ -360,6 +376,231 @@ impl ConfigManager {
         Ok(record)
     }
 
+    /// Preview an owner-editable public profile against the exact persisted
+    /// record. Preview is read-only and does not create an audit entry.
+    pub fn preview_network_profile(
+        &self,
+        network_name: &str,
+        expected_revision: u64,
+        update: NetworkProfileUpdate,
+    ) -> std::result::Result<NetworkProfilePreview, NetworkProfileError> {
+        let record = self
+            .load_network_record(network_name)
+            .map_err(map_network_profile_load_error)?;
+        preview_network_profile(
+            network_name,
+            &record,
+            expected_revision,
+            &update,
+            unix_time_ms().max(1),
+        )
+        .map_err(|error| NetworkProfileError::Invalid(error.to_string()))
+    }
+
+    /// Apply a previously previewed profile update under an exclusive
+    /// filesystem lock. The record is re-read inside the lock, re-signed with
+    /// the independent network identity, written atomically, and followed by a
+    /// governance audit entry. If the audit write fails, the previous record is
+    /// restored atomically.
+    pub fn update_network_profile(
+        &self,
+        network_name: &str,
+        expected_revision: u64,
+        update: NetworkProfileUpdate,
+        actor: &str,
+        source: &str,
+        operation_id: Option<OperationId>,
+    ) -> std::result::Result<NetworkProfileApplyResult, NetworkProfileError> {
+        let record_path = self
+            .network_record_path(network_name)
+            .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+        let identity_path = self
+            .network_identity_path(network_name)
+            .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+        let governance_path = self
+            .network_governance_path(network_name)
+            .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+        if !record_path.exists() {
+            return Err(NetworkProfileError::NotFound(network_name.into()));
+        }
+        let lock_path = record_path.with_file_name(".profile.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| NetworkProfileError::Storage(format!("无法打开资料锁: {error}")))?;
+        lock_file
+            .lock_exclusive()
+            .map_err(|error| NetworkProfileError::Storage(format!("无法锁定网络资料: {error}")))?;
+
+        let result = (|| {
+            let old_bytes = std::fs::read(&record_path).map_err(|error| {
+                NetworkProfileError::Storage(format!("无法读取当前网络资料: {error}"))
+            })?;
+            let record = self
+                .load_network_record(network_name)
+                .map_err(map_network_profile_load_error)?;
+            let now_unix_ms = unix_time_ms().max(1);
+            let mut preview = preview_network_profile(
+                network_name,
+                &record,
+                expected_revision,
+                &update,
+                now_unix_ms,
+            )
+            .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+            if preview.conflict {
+                return Err(NetworkProfileError::RevisionConflict {
+                    expected: expected_revision,
+                    actual: record.revision,
+                });
+            }
+
+            let identity = Identity::load_from_file(&identity_path).map_err(|error| {
+                NetworkProfileError::Storage(format!("无法加载网络签名身份: {error:#}"))
+            })?;
+            let identity_public_key = PublicKey::from_bytes(identity.public_key_bytes());
+            if identity_public_key != record.public_key {
+                return Err(NetworkProfileError::Invalid(
+                    "网络签名身份与网络公钥不匹配".into(),
+                ));
+            }
+
+            let changed_paths = preview
+                .diff
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>();
+            let needs_signature = record.signed_profile.is_none()
+                || record
+                    .signed_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.document.is_expired_at(now_unix_ms));
+            let needs_write = !changed_paths.is_empty() || needs_signature;
+            let previous_revision = record.revision;
+            let mut updated = record.clone();
+            if !changed_paths.is_empty() {
+                updated
+                    .apply_profile_update(&update, expected_revision, now_unix_ms)
+                    .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+            }
+            if needs_write {
+                updated
+                    .sign_public_profile(
+                        &identity,
+                        now_unix_ms,
+                        now_unix_ms.saturating_add(NETWORK_PUBLIC_PROFILE_VALIDITY_MS),
+                    )
+                    .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+                // Recompute the preview against the newly prepared record so
+                // the public candidate, revision and warnings are the exact
+                // values that will be persisted.
+                let post_update = NetworkProfileUpdate::from_record(&updated);
+                preview = preview_network_profile(
+                    network_name,
+                    &updated,
+                    updated.revision,
+                    &post_update,
+                    now_unix_ms,
+                )
+                .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+                preview.diff = changed_paths
+                    .iter()
+                    .map(|path| NetworkProfileDiffEntry {
+                        path: path.clone(),
+                        before: preview
+                            .diff
+                            .iter()
+                            .find(|entry| entry.path == *path)
+                            .and_then(|entry| entry.before.clone()),
+                        after: preview
+                            .diff
+                            .iter()
+                            .find(|entry| entry.path == *path)
+                            .and_then(|entry| entry.after.clone()),
+                    })
+                    .collect();
+            }
+
+            if needs_write {
+                let mut governance = if governance_path.exists() {
+                    let bytes = std::fs::read(&governance_path).map_err(|error| {
+                        NetworkProfileError::Storage(format!("无法读取治理日志: {error}"))
+                    })?;
+                    serde_json::from_slice::<AuditLog>(&bytes).map_err(|error| {
+                        NetworkProfileError::Storage(format!("无法解析治理日志: {error}"))
+                    })?
+                } else {
+                    AuditLog::default()
+                };
+                let actor_id = DomainNodeId::parse(actor)
+                    .map_err(|error| NetworkProfileError::Invalid(error.to_string()))?;
+                let audit_id = AuditId::from_public_key(
+                    format!(
+                        "{}:network.profile.update:{}:{}",
+                        updated.network_id, updated.revision, now_unix_ms
+                    )
+                    .as_bytes(),
+                );
+                let mut details = BTreeMap::new();
+                details.insert("old_revision".into(), previous_revision.to_string());
+                details.insert("new_revision".into(), updated.revision.to_string());
+                details.insert("changed_paths".into(), changed_paths.join(","));
+                details.insert("source".into(), source.to_string());
+                details.insert("actor".into(), actor.to_string());
+                governance
+                    .append(AuditEntry {
+                        audit_id,
+                        operation_id,
+                        actor: actor_id,
+                        network_id: Some(updated.network_id.clone()),
+                        action: "network.profile.update".into(),
+                        resource: format!("network/{}", updated.network_id),
+                        outcome: AuditOutcome::Succeeded,
+                        occurred_at_unix_ms: now_unix_ms,
+                        summary: format!("Network [{}] public profile updated", updated.name),
+                        details,
+                        sensitive_keys: Default::default(),
+                    })
+                    .map_err(|error| {
+                        NetworkProfileError::Storage(format!("无法写入资料审计: {error}"))
+                    })?;
+
+                write_network_profile_record_and_audit(
+                    &record_path,
+                    &old_bytes,
+                    &updated,
+                    &governance_path,
+                    &governance,
+                )?;
+            }
+
+            let signed_profile = updated
+                .signed_profile
+                .clone()
+                .ok_or_else(|| NetworkProfileError::Invalid("网络资料没有可返回的签名".into()))?;
+            Ok(NetworkProfileApplyResult {
+                network_name: network_name.into(),
+                revision: updated.revision,
+                previous_revision,
+                applied_at_unix_ms: now_unix_ms,
+                changed_paths,
+                signed_profile,
+                projections: preview.projections,
+                warnings: preview.warnings,
+                audit_action: if needs_write {
+                    "network.profile.update".into()
+                } else {
+                    "network.profile.unchanged".into()
+                },
+            })
+        })();
+        let _ = lock_file.unlock();
+        result
+    }
+
     /// Create an owner-scoped network and its independent signing identity.
     ///
     /// The network identity is intentionally distinct from the node identity:
@@ -390,8 +631,8 @@ impl ConfigManager {
         set_default: bool,
         network_identity: Identity,
     ) -> std::result::Result<CreatedOwnedNetwork, NetworkCreationError> {
-        profile
-            .validate()
+        let profile = profile
+            .normalized()
             .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
         let network_name = profile.name.clone();
         let network_dir = self.get_network_dir(&network_name);
@@ -422,7 +663,15 @@ impl ConfigManager {
         let public_key = PublicKey::from_bytes(network_identity.public_key_bytes());
         let owner = DomainNodeId::from_public_key(&node_identity.public_key_bytes());
         let now_unix_ms = unix_time_ms().max(1);
-        let record = NetworkRecord::create_owned(profile, public_key, owner.clone(), now_unix_ms)
+        let mut record =
+            NetworkRecord::create_owned(profile, public_key, owner.clone(), now_unix_ms)
+                .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        record
+            .sign_public_profile(
+                &network_identity,
+                now_unix_ms,
+                now_unix_ms.saturating_add(NETWORK_PUBLIC_PROFILE_VALIDITY_MS),
+            )
             .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
 
         self.ensure_network_id_unique(&list, &record)?;
@@ -926,6 +1175,40 @@ impl ConfigManager {
     }
 }
 
+fn write_network_profile_record_and_audit(
+    record_path: &Path,
+    old_record_bytes: &[u8],
+    record: &NetworkRecord,
+    governance_path: &Path,
+    governance: &AuditLog,
+) -> std::result::Result<(), NetworkProfileError> {
+    write_json_atomic(record_path, record)
+        .map_err(|error| NetworkProfileError::Storage(format!("无法保存网络资料: {error:#}")))?;
+    if let Err(error) = write_json_atomic(governance_path, governance) {
+        let _ = write_bytes_atomic(record_path, old_record_bytes);
+        return Err(NetworkProfileError::Storage(format!(
+            "治理审计保存失败，网络资料已回滚: {error:#}"
+        )));
+    }
+    Ok(())
+}
+
+fn map_network_profile_load_error(error: NetworkCreationError) -> NetworkProfileError {
+    match error {
+        NetworkCreationError::Invalid(message) => NetworkProfileError::Invalid(message),
+        NetworkCreationError::DuplicateName(name)
+        | NetworkCreationError::DuplicateId(name)
+        | NetworkCreationError::PermissionDenied(name) => NetworkProfileError::Invalid(name),
+        NetworkCreationError::Storage(message) => {
+            if message.contains("No such file") || message.contains("os error 2") {
+                NetworkProfileError::NotFound(message)
+            } else {
+                NetworkProfileError::Storage(message)
+            }
+        }
+    }
+}
+
 fn sorted_network_names(list: &NetworkList) -> Vec<String> {
     let mut names = list.networks.keys().cloned().collect::<Vec<_>>();
     names.sort();
@@ -942,6 +1225,11 @@ fn unix_time_ms() -> u64 {
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    let content = serde_json::to_vec_pretty(value).context("无法序列化 JSON")?;
+    write_bytes_atomic(path, &content)
+}
+
+fn write_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
@@ -956,14 +1244,13 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
         TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let temporary_path = parent.join(temporary_name);
-    let content = serde_json::to_vec_pretty(value).context("无法序列化 JSON")?;
     let write_result = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary_path)
             .with_context(|| format!("无法创建临时文件: {}", temporary_path.display()))?;
-        file.write_all(&content)
+        file.write_all(content)
             .with_context(|| format!("无法写入临时文件: {}", temporary_path.display()))?;
         file.sync_all()
             .with_context(|| format!("无法同步临时文件: {}", temporary_path.display()))?;
@@ -1018,7 +1305,7 @@ fn url_to_network_slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use fuckipv6_common::domain::{NetworkJoinMode, NetworkVisibility};
+    use fuckipv6_common::domain::{CapabilityKind, NetworkJoinMode, NetworkVisibility};
 
     use super::*;
 
@@ -1033,6 +1320,9 @@ mod tests {
             purpose: "A private family mesh".into(),
             icon: "home".into(),
             language: "zh-CN".into(),
+            region: "CN".into(),
+            tags: vec!["family".into()],
+            capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
         }
@@ -1109,6 +1399,211 @@ mod tests {
             reopened.load_network_record("home")?.network_id,
             created.record.network_id
         );
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_preview_is_read_only_and_revision_conflict_does_not_write() -> anyhow::Result<()> {
+        let dir = temp_config_dir("profile-preview");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let created = manager
+            .create_owned_network(owned_profile("home"), "ws://127.0.0.1:6666", true)
+            .expect("create owned network");
+        let record_path = manager.network_record_path("home")?;
+        let governance_path = manager.network_governance_path("home")?;
+        let record_before = std::fs::read(&record_path)?;
+        let governance_before = std::fs::read(&governance_path)?;
+        let update = NetworkProfileUpdate {
+            purpose: "Preview only".into(),
+            region: "JP".into(),
+            tags: vec!["Tokyo".into(), "Asia".into()],
+            capability_declarations: vec![CapabilityKind::Relay],
+            ..NetworkProfileUpdate::from_record(&created.record)
+        };
+
+        let preview = manager
+            .preview_network_profile("home", created.record.revision, update.clone())
+            .expect("preview profile");
+        assert_eq!(preview.candidate_revision, created.record.revision + 1);
+        assert_eq!(
+            preview.projections.administrator_view.revision,
+            preview.candidate_revision
+        );
+        assert!(preview.diff.iter().any(|entry| entry.path == "purpose"));
+        assert_eq!(std::fs::read(&record_path)?, record_before);
+        assert_eq!(std::fs::read(&governance_path)?, governance_before);
+        assert!(!manager
+            .get_network_dir("home")
+            .join(".profile.lock")
+            .exists());
+
+        assert!(matches!(
+            manager.update_network_profile(
+                "home",
+                0,
+                update,
+                &DomainNodeId::from_public_key(&manager.load_node_identity()?.public_key_bytes(),)
+                    .to_string(),
+                "profile-test",
+                None,
+            ),
+            Err(NetworkProfileError::RevisionConflict {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        assert_eq!(std::fs::read(&record_path)?, record_before);
+        assert_eq!(std::fs::read(&governance_path)?, governance_before);
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_update_resigns_persists_and_audits_operation_id() -> anyhow::Result<()> {
+        let dir = temp_config_dir("profile-update");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let created = manager
+            .create_owned_network(owned_profile("home"), "ws://127.0.0.1:6666", true)
+            .expect("create owned network");
+        let actor =
+            DomainNodeId::from_public_key(&manager.load_node_identity()?.public_key_bytes())
+                .to_string();
+        let operation_id = OperationId::from_public_key(b"profile-operation");
+        let update = NetworkProfileUpdate {
+            purpose: "Updated public purpose".into(),
+            icon: "mesh".into(),
+            language: "ja".into(),
+            region: "JP".into(),
+            tags: vec!["Tokyo".into(), "Asia".into()],
+            capability_declarations: vec![CapabilityKind::Exit, CapabilityKind::Relay],
+            visibility: NetworkVisibility::Public,
+            join_mode: NetworkJoinMode::ApprovalRequired,
+        };
+
+        let result = manager
+            .update_network_profile(
+                "home",
+                created.record.revision,
+                update,
+                &actor,
+                "webui",
+                Some(operation_id.clone()),
+            )
+            .expect("update profile");
+        assert_eq!(result.previous_revision, 1);
+        assert_eq!(result.revision, 2);
+        assert_eq!(result.audit_action, "network.profile.update");
+        assert!(result
+            .changed_paths
+            .iter()
+            .any(|path| path == "capability_declarations"));
+        result.signed_profile.validate()?;
+        assert_eq!(result.signed_profile.document.revision, 2);
+        assert_eq!(result.signed_profile.document.region, "JP");
+        assert_eq!(
+            result.signed_profile.document.tags,
+            vec!["asia".to_string(), "tokyo".to_string()]
+        );
+        assert!(
+            result.signed_profile.document.expires_at_unix_ms
+                > result.signed_profile.document.issued_at_unix_ms
+        );
+
+        let persisted = manager.load_network_record("home")?;
+        assert_eq!(persisted.revision, 2);
+        assert_eq!(persisted.purpose, "Updated public purpose");
+        persisted
+            .signed_profile
+            .as_ref()
+            .expect("signed")
+            .validate()?;
+
+        let governance: AuditLog =
+            serde_json::from_slice(&std::fs::read(manager.network_governance_path("home")?)?)?;
+        assert_eq!(governance.entries().len(), 2);
+        let audit = governance.entries().last().expect("profile audit");
+        assert_eq!(audit.action, "network.profile.update");
+        assert_eq!(audit.operation_id.as_ref(), Some(&operation_id));
+        assert_eq!(audit.actor.as_str(), actor);
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_expired_profile_is_resigned_without_revision_bump() -> anyhow::Result<()> {
+        let dir = temp_config_dir("profile-resign");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let created = manager
+            .create_owned_network(owned_profile("home"), "ws://127.0.0.1:6666", true)
+            .expect("create owned network");
+        let identity = Identity::load_from_file(&manager.network_identity_path("home")?)?;
+        let mut expired = created.record.clone();
+        expired.sign_public_profile(&identity, 1, 2)?;
+        write_json_atomic(&manager.network_record_path("home")?, &expired)?;
+
+        let result = manager
+            .update_network_profile(
+                "home",
+                expired.revision,
+                NetworkProfileUpdate::from_record(&expired),
+                &DomainNodeId::from_public_key(&manager.load_node_identity()?.public_key_bytes())
+                    .to_string(),
+                "profile-test",
+                None,
+            )
+            .expect("resign profile");
+        assert_eq!(result.previous_revision, 1);
+        assert_eq!(result.revision, 1);
+        assert!(result.changed_paths.is_empty());
+        assert!(result.signed_profile.document.expires_at_unix_ms > 2);
+        assert!(!result.warnings.iter().any(|warning| {
+            warning.code == fuckipv6_common::domain::NetworkProfileWarningCode::ProfileExpired
+        }));
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_record_is_rolled_back_when_audit_write_fails() -> anyhow::Result<()> {
+        let dir = temp_config_dir("profile-audit-rollback");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let created = manager
+            .create_owned_network(owned_profile("home"), "ws://127.0.0.1:6666", true)
+            .expect("create owned network");
+        let record_path = manager.network_record_path("home")?;
+        let governance_path = manager.network_governance_path("home")?;
+        let old_bytes = std::fs::read(&record_path)?;
+        let identity = Identity::load_from_file(&manager.network_identity_path("home")?)?;
+        let mut updated = created.record.clone();
+        updated.purpose = "Must roll back".into();
+        updated.revision += 1;
+        updated.sign_public_profile(&identity, unix_time_ms().max(1), u64::MAX)?;
+        let governance: AuditLog = serde_json::from_slice(&std::fs::read(&governance_path)?)?;
+
+        std::fs::remove_file(&governance_path)?;
+        std::fs::create_dir(&governance_path)?;
+        let error = write_network_profile_record_and_audit(
+            &record_path,
+            &old_bytes,
+            &updated,
+            &governance_path,
+            &governance,
+        )
+        .expect_err("audit directory should reject atomic file replacement");
+        assert!(
+            matches!(error, NetworkProfileError::Storage(message) if message.contains("已回滚"))
+        );
+        assert_eq!(std::fs::read(&record_path)?, old_bytes);
+        assert!(governance_path.is_dir());
+
         let _ = std::fs::remove_dir_all(dir);
         Ok(())
     }

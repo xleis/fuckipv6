@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productVisualFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
+  NetworkProfileProjections,
+  NetworkPublicProfileDocument,
   NodeApiManifestResponse,
   NodeOperationSnapshot,
   NodeSnapshot,
@@ -10,6 +12,7 @@ import type {
 import {
   commandEnvelope,
   executionBlockReason,
+  initialActionValues,
   operationStateIsTerminal,
   outcomeSummary,
   validateAcceptedCommandResponse,
@@ -64,6 +67,98 @@ function emptySnapshot(): NodeSnapshot {
     capabilities: { capabilities: [] },
   };
 }
+
+const publicProfile: NetworkPublicProfileDocument = {
+  schema_version: 1,
+  network_id: "net_stable_home",
+  public_key: "network-public-key",
+  owner: "node-owner",
+  name: "home",
+  purpose: "Family devices across two homes",
+  icon: "home.router_2",
+  language: "zh-CN",
+  region: "CN",
+  tags: ["family", "smart-home"],
+  capability_declarations: ["relay"],
+  visibility: "unlisted",
+  join_mode: "invite_only",
+  revision: 4,
+  issued_at_unix_ms: 1_700_000_000_000,
+  expires_at_unix_ms: 1_700_086_400_000,
+};
+
+const profileProjections: NetworkProfileProjections = {
+  public_card: {
+    candidate: publicProfile,
+    currently_published: {
+      document: { ...publicProfile, revision: 3 },
+      signature: "signature",
+    },
+    withheld_categories: [
+      "member_identity",
+      "address",
+      "topology",
+      "activity",
+      "invitation",
+      "private_key",
+    ],
+  },
+  member_view: {
+    profile: publicProfile,
+    member_count: 3,
+    administrator_count: 1,
+  },
+  administrator_view: {
+    profile: publicProfile,
+    member_count: 3,
+    administrator_count: 1,
+    revision: 4,
+    policy_revision: 2,
+  },
+  local_secret: {
+    identity_present: true,
+    secret_material_included: false,
+    public_key_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    storage: "identity-keychain",
+  },
+};
+
+const profilePreview = {
+  network_name: "home",
+  expected_revision: 3,
+  current_revision: 4,
+  candidate_revision: 5,
+  conflict: true,
+  can_apply: false,
+  projections: profileProjections,
+  diff: [
+    { path: "purpose", before: "Old purpose", after: publicProfile.purpose },
+    { path: "tags", before: null, after: "family,smart-home" },
+  ],
+  warnings: [
+    {
+      code: "capability_not_observed" as const,
+      field: "capability_declarations",
+      capability: "relay" as const,
+      message: "Relay capability has not been observed",
+    },
+  ],
+};
+
+const profileUpdate = {
+  network_name: "home",
+  revision: 5,
+  previous_revision: 4,
+  applied_at_unix_ms: 1_700_000_100_000,
+  changed_paths: ["purpose", "tags"],
+  signed_profile: {
+    document: { ...publicProfile, revision: 5 },
+    signature: "signature",
+  },
+  projections: profileProjections,
+  warnings: profilePreview.warnings,
+  audit_action: "network.profile.update",
+};
 
 beforeEach(() => {
   installTestI18nRuntime();
@@ -170,6 +265,9 @@ describe("node UI contract invariants", () => {
         purpose: "Family devices across two homes",
         icon: "home",
         language: "zh-CN",
+        region: "ZZ",
+        tags: "",
+        capability_declarations: "",
         visibility: "unlisted",
         join_mode: "invite_only",
         signaling_port: "6666",
@@ -191,6 +289,9 @@ describe("node UI contract invariants", () => {
         purpose: "Family devices across two homes",
         icon: "home",
         language: "zh-CN",
+        region: "ZZ",
+        tags: [],
+        capability_declarations: [],
         visibility: "unlisted",
         join_mode: "invite_only",
         signaling_port: 6666,
@@ -199,6 +300,236 @@ describe("node UI contract invariants", () => {
         auto_connect: true,
       },
     });
+  });
+
+  it("builds typed profile preview and update commands from snapshot defaults", () => {
+    const profileSnapshot = structuredClone(
+      productVisualFixture.snapshot as NodeSnapshot,
+    );
+    profileSnapshot.network_profiles = [
+      {
+        name: "home",
+        network_id: "net_stable_home",
+        purpose: publicProfile.purpose,
+        icon: publicProfile.icon,
+        language: publicProfile.language,
+        region: publicProfile.region,
+        tags: publicProfile.tags,
+        capability_declarations: publicProfile.capability_declarations,
+        visibility: publicProfile.visibility,
+        join_mode: publicProfile.join_mode,
+        revision: publicProfile.revision,
+        policy_revision: 2,
+        signed_profile: {
+          schema_version: 1,
+          issued_at_unix_ms: publicProfile.issued_at_unix_ms,
+          expires_at_unix_ms: publicProfile.expires_at_unix_ms,
+        },
+      },
+    ];
+    const preview = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "preview_network_profile")!;
+    const update = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "update_network_profile")!;
+    const values = initialActionValues(preview, profileSnapshot, "home");
+    expect(values).toMatchObject({
+      network_name: "home",
+      expected_revision: "4",
+      purpose: publicProfile.purpose,
+      icon: publicProfile.icon,
+      language: "zh-CN",
+      region: "CN",
+      tags: "family,smart-home",
+      capability_declarations: "relay",
+      visibility: "unlisted",
+      join_mode: "invite_only",
+    });
+    expect(validateActionValues(preview, values, "zh-CN")).toEqual([]);
+
+    const edited = {
+      ...values,
+      purpose: "Updated family network",
+      tags: "family, smart-home",
+      capability_declarations: "relay,exit",
+    };
+    const payload = {
+      network_name: "home",
+      expected_revision: 4,
+      update: {
+        purpose: "Updated family network",
+        icon: "home.router_2",
+        language: "zh-CN",
+        region: "CN",
+        tags: ["family", "smart-home"],
+        capability_declarations: ["relay", "exit"],
+        visibility: "unlisted",
+        join_mode: "invite_only",
+      },
+    };
+    expect(
+      commandEnvelope(
+        43,
+        preview,
+        edited,
+        "zh-CN",
+        "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
+      ).request.command,
+    ).toEqual({ command: "preview_network_profile", payload });
+    expect(
+      commandEnvelope(
+        44,
+        update,
+        edited,
+        "zh-CN",
+        "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
+      ).request.command,
+    ).toEqual({ command: "update_network_profile", payload });
+  });
+
+  it("validates region, tag and capability profile constraints", () => {
+    const createNetwork = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "create_network")!;
+    const valid = {
+      name: "home",
+      purpose: "Family devices across two homes",
+      icon: "home.router_2",
+      language: "zh-CN",
+      region: "ZZ",
+      tags: "",
+      capability_declarations: "",
+      visibility: "unlisted",
+      join_mode: "invite_only",
+      signaling_port: "6666",
+      relay_port: "6667",
+      external_host: "",
+      auto_connect: true,
+    };
+
+    expect(
+      validateActionValues(createNetwork, { ...valid, region: "cn" }, "zh-CN"),
+    ).toEqual(["translated:validation.network_region_invalid"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, tags: Array.from({ length: 13 }, (_, i) => `tag${i}`).join(",") },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_tags_too_many"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, tags: "home,bad tag" },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_tag_invalid"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, tags: "home,HOME" },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_tag_duplicate"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, capability_declarations: "relay,storage" },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_capability_invalid"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, capability_declarations: "relay,relay" },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_capability_duplicate"]);
+  });
+
+  it("validates signed profile preview and applied-result contracts", () => {
+    const previewOutcome = {
+      status: "network_profile_preview" as const,
+      data: profilePreview,
+    };
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 45,
+          server_time: "2026-11-01T00:00:00Z",
+          result: { request_id: 45, outcome: previewOutcome },
+        },
+        45,
+      ),
+    ).toEqual(previewOutcome);
+    expect(outcomeSummary(previewOutcome, "zh-CN")).toBe(
+      "translated:outcome.network_profile_previewed",
+    );
+
+    const updateOutcome = {
+      status: "network_profile_updated" as const,
+      data: profileUpdate,
+    };
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 46,
+          server_time: "2026-11-01T00:00:01Z",
+          result: { request_id: 46, outcome: updateOutcome },
+        },
+        46,
+      ),
+    ).toEqual(updateOutcome);
+    expect(outcomeSummary(updateOutcome, "zh-CN")).toBe(
+      "translated:outcome.network_profile_updated",
+    );
+
+    const invalidPreview = structuredClone(profilePreview) as unknown as {
+      projections: Record<string, unknown>;
+    };
+    delete invalidPreview.projections.administrator_view;
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 47,
+          server_time: "2026-11-01T00:00:02Z",
+          result: {
+            request_id: 47,
+            outcome: {
+              status: "network_profile_preview",
+              data: invalidPreview,
+            } as unknown as typeof previewOutcome,
+          },
+        },
+        47,
+      ),
+    ).toThrow("network administrator projection invalid");
+
+    const invalidUpdate = structuredClone(profileUpdate) as unknown as {
+      changed_paths: unknown;
+    };
+    invalidUpdate.changed_paths = "purpose";
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 48,
+          server_time: "2026-11-01T00:00:03Z",
+          result: {
+            request_id: 48,
+            outcome: {
+              status: "network_profile_updated",
+              data: invalidUpdate,
+            } as unknown as typeof updateOutcome,
+          },
+        },
+        48,
+      ),
+    ).toThrow("network profile changed paths invalid");
   });
 
   it("validates network profile fields and summarizes the created identity", () => {
@@ -210,6 +541,9 @@ describe("node UI contract invariants", () => {
       purpose: "Family devices across two homes",
       icon: "home.router_2",
       language: "zh-CN",
+      region: "ZZ",
+      tags: "",
+      capability_declarations: "",
       visibility: "unlisted",
       join_mode: "invite_only",
       signaling_port: "6666",

@@ -432,6 +432,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::GetNetworkAllocation
         | NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
+        | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::GetConfigurationHistory => NodePermission::ViewState,
         NodeCommandKind::UpdateRouting => NodePermission::ChangeRouting,
         NodeCommandKind::SetNetworkRole => NodePermission::ManageRoles,
@@ -442,6 +443,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::RestartNetworks
         | NodeCommandKind::RebuildTun
         | NodeCommandKind::CreateNetwork
+        | NodeCommandKind::UpdateNetworkProfile
         | NodeCommandKind::JoinNetwork
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
@@ -464,6 +466,8 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::GetDiagnostics
             | NodeCommandKind::RebuildTun
             | NodeCommandKind::CreateNetwork
+            | NodeCommandKind::PreviewNetworkProfile
+            | NodeCommandKind::UpdateNetworkProfile
             | NodeCommandKind::JoinNetwork
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
@@ -486,7 +490,8 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::GetUiManifest
         | NodeCommandKind::GetDiagnostics
         | NodeCommandKind::GetBlacklist
-        | NodeCommandKind::GetNetworkAllocation => (PolicyAction::Read, ResourceKind::Network),
+        | NodeCommandKind::GetNetworkAllocation
+        | NodeCommandKind::PreviewNetworkProfile => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
@@ -499,6 +504,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::RestartNetworks
         | NodeCommandKind::RebuildTun
         | NodeCommandKind::UpdateNetworkAllocation
+        | NodeCommandKind::UpdateNetworkProfile
         | NodeCommandKind::RestartNode => (PolicyAction::Update, ResourceKind::Network),
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
             (PolicyAction::Create, ResourceKind::Network)
@@ -569,6 +575,10 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         NodeCommand::GetBlacklist { network_name }
         | NodeCommand::GetNetworkAllocation { network_name } => {
             NetworkTargets::Named(vec![network_name.clone()])
+        }
+        NodeCommand::PreviewNetworkProfile(command)
+        | NodeCommand::UpdateNetworkProfile(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
         }
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
@@ -718,6 +728,9 @@ mod tests {
             purpose: "A second home network".into(),
             icon: "home".into(),
             language: "en".into(),
+            region: "ZZ".into(),
+            tags: Vec::new(),
+            capability_declarations: Vec::new(),
             visibility: fuckipv6_common::domain::NetworkVisibility::Unlisted,
             join_mode: fuckipv6_common::domain::NetworkJoinMode::InviteOnly,
             signaling_port: 6666,

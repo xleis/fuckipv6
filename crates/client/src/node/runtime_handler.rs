@@ -3,18 +3,31 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
+use fuckipv6_common::domain::{
+    CapabilityKind, NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, OperationId,
+};
+
 use super::runtime_control::{network_setup_problem_code, RestartSummary};
+use super::state::{NodeNetworkProfileSnapshot, NodeSignedNetworkProfileSnapshot};
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
     NodeCommandContext, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome,
     NodeCommandRequest, NodeCommandResult, NodePeerProbeSnapshot, NodeProblem, NodeProblemCode,
     NodeStateStore, NodeValidationIssue,
 };
-use crate::config_manager::ConfigManager;
+use crate::config_manager::{ConfigManager, NetworkProfileError};
 use crate::config_transaction::{ConfigurationTransactionError, ConfigurationValidationCode};
 use crate::ipc::MultiNetworkRegistry;
 use crate::network_setup::NetworkSetupStage;
+use crate::node::command::NodeNetworkProfileCommand;
 use crate::symmetric::EmbeddedServiceManager;
+
+#[derive(Clone)]
+struct NodeCommandAuditContext {
+    actor: String,
+    source: String,
+    operation_id: Option<OperationId>,
+}
 
 /// Production handler for operations backed by the live node runtime.
 ///
@@ -66,7 +79,7 @@ impl NodeRuntimeHandler {
 
     fn execute(
         &self,
-        actor: Option<(String, String)>,
+        context: Option<NodeCommandAuditContext>,
         request: NodeCommandRequest,
         cancel: Option<watch::Receiver<bool>>,
     ) -> NodeCommandFuture {
@@ -84,6 +97,9 @@ impl NodeRuntimeHandler {
 
             match request.command {
                 super::NodeCommand::GetSnapshot => {
+                    if let Some(configs) = configs.as_ref() {
+                        refresh_network_profiles(&state, configs).await;
+                    }
                     let (live_tun_names, runtime_problem) = match runtime.as_ref() {
                         Some(runtime) => match runtime.live_tun_names().await {
                             Ok(names) => (Some(names), None),
@@ -143,30 +159,30 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "配置预览需要节点配置管理器"),
                 },
-                super::NodeCommand::ApplyConfiguration(command) => match (configs, actor) {
-                    (Some(configs), Some((actor, source))) => {
+                super::NodeCommand::ApplyConfiguration(command) => match (configs, context) {
+                    (Some(configs), Some(context)) => {
                         apply_configuration(
                             &configs,
                             request_id,
                             command.expected_revision,
                             command.networks,
-                            actor,
-                            source,
+                            context.actor,
+                            context.source,
                         )
                         .await
                     }
                     (None, _) => unavailable(request_id, "配置应用需要节点配置管理器"),
                     (_, None) => unavailable(request_id, "配置应用缺少受信任的认证上下文"),
                 },
-                super::NodeCommand::RollbackConfiguration(command) => match (configs, actor) {
-                    (Some(configs), Some((actor, source))) => {
+                super::NodeCommand::RollbackConfiguration(command) => match (configs, context) {
+                    (Some(configs), Some(context)) => {
                         rollback_configuration(
                             &configs,
                             request_id,
                             command.expected_revision,
                             command.target_revision,
-                            actor,
-                            source,
+                            context.actor,
+                            context.source,
                         )
                         .await
                     }
@@ -254,6 +270,28 @@ impl NodeRuntimeHandler {
                 super::NodeCommand::CreateNetwork(command) => match runtime {
                     Some(runtime) => create_runtime_network(&runtime, request_id, command).await,
                     None => unavailable(request_id, "创建网络尚未接入内嵌网络服务 actor"),
+                },
+                super::NodeCommand::PreviewNetworkProfile(command) => match configs {
+                    Some(configs) => {
+                        preview_network_profile(&state, &configs, request_id, command).await
+                    }
+                    None => unavailable(request_id, "网络资料预览需要节点配置管理器"),
+                },
+                super::NodeCommand::UpdateNetworkProfile(command) => match (configs, context) {
+                    (Some(configs), Some(context)) => {
+                        update_network_profile(
+                            &state,
+                            &configs,
+                            request_id,
+                            command,
+                            context.actor,
+                            context.source,
+                            context.operation_id,
+                        )
+                        .await
+                    }
+                    (None, _) => unavailable(request_id, "更新网络资料需要节点配置管理器"),
+                    (_, None) => unavailable(request_id, "更新网络资料缺少受信任的认证上下文"),
                 },
                 super::NodeCommand::JoinNetwork(command) => match runtime {
                     Some(runtime) => join_runtime_network(&runtime, request_id, command).await,
@@ -381,10 +419,11 @@ impl NodeCommandHandler for NodeRuntimeHandler {
         request: NodeCommandRequest,
     ) -> NodeCommandFuture {
         self.execute(
-            Some((
-                context.actor().as_str().to_owned(),
-                context.source().to_owned(),
-            )),
+            Some(NodeCommandAuditContext {
+                actor: context.actor().as_str().to_owned(),
+                source: context.source().to_owned(),
+                operation_id: context.audit_operation_id().cloned(),
+            }),
             request,
             None,
         )
@@ -397,13 +436,195 @@ impl NodeCommandHandler for NodeRuntimeHandler {
         cancel: watch::Receiver<bool>,
     ) -> NodeCommandFuture {
         self.execute(
-            Some((
-                context.actor().as_str().to_owned(),
-                context.source().to_owned(),
-            )),
+            Some(NodeCommandAuditContext {
+                actor: context.actor().as_str().to_owned(),
+                source: context.source().to_owned(),
+                operation_id: context.audit_operation_id().cloned(),
+            }),
             request,
             Some(cancel),
         )
+    }
+}
+
+async fn refresh_network_profiles(state: &NodeStateStore, configs: &ConfigManager) {
+    let configs = configs.clone();
+    let profiles = tokio::task::spawn_blocking(move || {
+        let Ok(list) = configs.list_networks() else {
+            return Vec::new();
+        };
+        let mut profiles = list
+            .into_iter()
+            .filter_map(|network| configs.load_network_record(&network.name).ok())
+            .map(network_profile_snapshot)
+            .collect::<Vec<_>>();
+        profiles.sort_by(|left, right| left.name.cmp(&right.name));
+        profiles
+    })
+    .await;
+    if let Ok(profiles) = profiles {
+        state.replace_network_profiles(profiles).await;
+    }
+}
+
+fn network_profile_snapshot(record: NetworkRecord) -> NodeNetworkProfileSnapshot {
+    NodeNetworkProfileSnapshot {
+        network_id: record.network_id.as_str().to_owned(),
+        name: record.name,
+        purpose: record.purpose,
+        icon: record.icon,
+        language: record.language,
+        region: record.region,
+        tags: record.tags,
+        capability_declarations: record.capability_declarations,
+        visibility: record.visibility,
+        join_mode: record.join_mode,
+        revision: record.revision,
+        policy_revision: record.policy_revision,
+        signed_profile: record
+            .signed_profile
+            .map(|signed| NodeSignedNetworkProfileSnapshot {
+                schema_version: signed.document.schema_version,
+                issued_at_unix_ms: signed.document.issued_at_unix_ms,
+                expires_at_unix_ms: signed.document.expires_at_unix_ms,
+            }),
+    }
+}
+
+async fn preview_network_profile(
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+    request_id: u64,
+    command: NodeNetworkProfileCommand,
+) -> NodeCommandResult {
+    let capabilities = state.snapshot().await.capabilities;
+    let configs = configs.clone();
+    let network_name = command.network_name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        configs.preview_network_profile(&network_name, command.expected_revision, command.update)
+    })
+    .await;
+    match result {
+        Ok(Ok(mut preview)) => {
+            append_capability_warnings(
+                &mut preview.warnings,
+                &preview
+                    .projections
+                    .public_card
+                    .candidate
+                    .capability_declarations,
+                &capabilities,
+            );
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::NetworkProfilePreview(Box::new(preview)),
+            )
+        }
+        Ok(Err(error)) => network_profile_rejection(request_id, error),
+        Err(_) => unavailable(request_id, "网络资料预览任务异常终止"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_network_profile(
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+    request_id: u64,
+    command: NodeNetworkProfileCommand,
+    actor: String,
+    source: String,
+    operation_id: Option<OperationId>,
+) -> NodeCommandResult {
+    let capabilities = state.snapshot().await.capabilities;
+    let configs_for_update = configs.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        configs_for_update.update_network_profile(
+            &command.network_name,
+            command.expected_revision,
+            command.update,
+            &actor,
+            &source,
+            operation_id,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(mut applied)) => {
+            append_capability_warnings(
+                &mut applied.warnings,
+                &applied.signed_profile.document.capability_declarations,
+                &capabilities,
+            );
+            refresh_network_profiles(state, configs).await;
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::NetworkProfileUpdated(Box::new(applied)),
+            )
+        }
+        Ok(Err(error)) => network_profile_rejection(request_id, error),
+        Err(_) => unavailable(request_id, "网络资料更新任务异常终止"),
+    }
+}
+
+fn append_capability_warnings(
+    warnings: &mut Vec<NetworkProfileWarning>,
+    declared: &[CapabilityKind],
+    capabilities: &super::state::NodeCapabilityRegistrySnapshot,
+) {
+    for capability in declared {
+        if !capabilities.state(*capability).is_operational() {
+            warnings.push(NetworkProfileWarning::capability(
+                NetworkProfileWarningCode::CapabilityNotObserved,
+                *capability,
+                format!(
+                    "网络资料声明了 {} 能力，但当前节点运行时未观察到该能力处于可用状态",
+                    capability.wire_name()
+                ),
+            ));
+        }
+    }
+    for capability in CapabilityKind::ALL {
+        if capabilities.state(capability).is_operational() && !declared.contains(&capability) {
+            warnings.push(NetworkProfileWarning::capability(
+                NetworkProfileWarningCode::CapabilityUndeclared,
+                capability,
+                format!(
+                    "当前节点已观察到 {} 能力，但网络公开资料未声明该能力",
+                    capability.wire_name()
+                ),
+            ));
+        }
+    }
+}
+
+fn network_profile_rejection(request_id: u64, error: NetworkProfileError) -> NodeCommandResult {
+    match error {
+        NetworkProfileError::Invalid(message) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::InvalidRequest, message)
+                .with_message_key("error.network_profile_invalid"),
+        ),
+        NetworkProfileError::RevisionConflict { expected, actual } => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(
+                NodeProblemCode::Conflict,
+                format!("网络资料已在别处更新；期望 revision {expected}，当前 revision {actual}"),
+            )
+            .with_message_key("error.network_profile_revision_conflict")
+            .with_revision_conflict(expected, actual),
+        ),
+        NetworkProfileError::NotFound(network_name) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::NotFound, "网络资料不存在")
+                .with_message_key("error.network_profile_not_found")
+                .for_network(network_name),
+        ),
+        NetworkProfileError::Storage(message) => NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Internal, message)
+                .with_message_key("error.network_profile_storage")
+                .retryable(true),
+        ),
     }
 }
 
@@ -1666,6 +1887,9 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: "network".into(),
                 language: "und".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
                 signaling_port: 6666,

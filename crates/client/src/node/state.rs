@@ -5,7 +5,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
-use fuckipv6_common::domain::{ActivityEntry, CapabilityKind, CapabilityState, OperationRecovery};
+use fuckipv6_common::domain::{
+    ActivityEntry, CapabilityKind, CapabilityState, NetworkJoinMode, NetworkVisibility,
+    OperationRecovery,
+};
 use fuckipv6_common::ExitNodeCapabilities;
 
 use super::{NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodePhase};
@@ -59,6 +62,11 @@ pub struct NodeSnapshot {
     /// configuration. Missing data from older peers deserializes as empty.
     #[serde(default)]
     pub routing_summaries: Vec<NodeRoutingSummarySnapshot>,
+    /// Owner-authored public network-profile projections. This field is an
+    /// allowlisted public snapshot: it never contains member identities,
+    /// addresses, topology, activity, invitation tickets or secret material.
+    #[serde(default)]
+    pub network_profiles: Vec<NodeNetworkProfileSnapshot>,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
     /// The five most recent user-meaningful command outcomes. Entries are
@@ -745,6 +753,36 @@ pub struct NodeIdentitySnapshot {
     pub created_at_unix_ms: Option<u64>,
 }
 
+/// Public, owner-editable network metadata rendered by every UI adapter.
+///
+/// This is deliberately a separate projection from `NetworkRecord`: secrets,
+/// members, addresses, topology, activity and invitations are not fields and
+/// therefore cannot be serialized by accident.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkProfileSnapshot {
+    pub network_id: String,
+    pub name: String,
+    pub purpose: String,
+    pub icon: String,
+    pub language: String,
+    pub region: String,
+    pub tags: Vec<String>,
+    pub capability_declarations: Vec<CapabilityKind>,
+    pub visibility: NetworkVisibility,
+    pub join_mode: NetworkJoinMode,
+    pub revision: u64,
+    pub policy_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_profile: Option<NodeSignedNetworkProfileSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeSignedNetworkProfileSnapshot {
+    pub schema_version: u16,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
 /// One local network and the roles this node currently performs in it.
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeNetworkSnapshot {
@@ -1199,6 +1237,30 @@ impl NodeStateStore {
         }
         snapshot.interfaces = capture.interfaces;
         snapshot.interface_problems = capture.problems;
+        snapshot.refresh_capability_states();
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        let published = snapshot.clone();
+        self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.advance_snapshot_revision(published.revision);
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
+        published
+    }
+
+    /// Replace the public network-profile projection without manufacturing a
+    /// new node revision when the persisted metadata is unchanged.
+    pub(crate) async fn replace_network_profiles(
+        &self,
+        profiles: Vec<NodeNetworkProfileSnapshot>,
+    ) -> NodeSnapshot {
+        let mut snapshot = self.snapshot.write().await;
+        if snapshot.network_profiles == profiles {
+            return snapshot.clone();
+        }
+        snapshot.network_profiles = profiles;
         snapshot.refresh_capability_states();
         snapshot.revision = snapshot.revision.saturating_add(1);
         let published = snapshot.clone();

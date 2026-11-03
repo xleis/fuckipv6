@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "NetworkAdminProfileProjection", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeLifecycleSnapshot", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -347,6 +347,33 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NetworkProfileWarningCode {
+        UNSIGNED_LEGACY("unsigned_legacy"),
+        PROFILE_EXPIRED("profile_expired"),
+        REVISION_CONFLICT("revision_conflict"),
+        CAPABILITY_NOT_OBSERVED("capability_not_observed"),
+        CAPABILITY_UNDECLARED("capability_undeclared");
+
+        private final String wireName;
+
+        NetworkProfileWarningCode(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NetworkProfileWarningCode fromWireName(String value) {
+            for (NetworkProfileWarningCode candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NetworkProfileWarningCode wire value: " + value);
+        }
+    }
+
     public enum NetworkVisibility {
         PUBLIC("public"),
         UNLISTED("unlisted"),
@@ -463,6 +490,7 @@ public final class NodeContractV1 {
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
         PREVIEW_CONFIGURATION("preview_configuration"),
+        PREVIEW_NETWORK_PROFILE("preview_network_profile"),
         PROBE_PEER("probe_peer"),
         REBUILD_TUN("rebuild_tun"),
         RESTART_NETWORKS("restart_networks"),
@@ -478,6 +506,7 @@ public final class NodeContractV1 {
         STOP_NODE("stop_node"),
         UNBAN_CLIENT("unban_client"),
         UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
+        UPDATE_NETWORK_PROFILE("update_network_profile"),
         UPDATE_ROUTING("update_routing");
 
         private final String wireName;
@@ -1146,6 +1175,9 @@ public final class NodeContractV1 {
         PURPOSE("purpose"),
         ICON("icon"),
         LANGUAGE("language"),
+        REGION("region"),
+        TAGS("tags"),
+        CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode"),
         PORT("port"),
@@ -1228,6 +1260,9 @@ public final class NodeContractV1 {
         NETWORK_PURPOSE("network_purpose"),
         NETWORK_ICON("network_icon"),
         NETWORK_LANGUAGE("network_language"),
+        REGION("region"),
+        TAGS("tags"),
+        CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode");
 
@@ -1316,6 +1351,7 @@ public final class NodeContractV1 {
         NODE_CLEANUP("node_cleanup"),
         DIAGNOSTICS("diagnostics"),
         NETWORK_CREATE("network_create"),
+        NETWORK_PROFILE_UPDATE("network_profile_update"),
         NETWORK_APPLY("network_apply"),
         TUN_REBUILD("tun_rebuild"),
         NETWORK_LEAVE("network_leave"),
@@ -1680,6 +1716,230 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NetworkAdminProfileProjection. */
+    public static final class NetworkAdminProfileProjection {
+        public final Long administrator_count;
+        public final Long member_count;
+        public final Long policy_revision;
+        public final NetworkPublicProfileDocument profile;
+        public final Long revision;
+
+        public NetworkAdminProfileProjection(Long administrator_count, Long member_count, Long policy_revision, NetworkPublicProfileDocument profile, Long revision) {
+            this.administrator_count = administrator_count;
+            this.member_count = member_count;
+            this.policy_revision = policy_revision;
+            this.profile = profile;
+            this.revision = revision;
+        }
+    }
+
+    /** DTO for NetworkLocalSecretProjection. */
+    public static final class NetworkLocalSecretProjection {
+        public final Boolean identity_present;
+        public final String public_key_fingerprint;
+        public final Boolean secret_material_included;
+        public final String storage;
+
+        public NetworkLocalSecretProjection(Boolean identity_present, String public_key_fingerprint, Boolean secret_material_included, String storage) {
+            this.identity_present = identity_present;
+            this.public_key_fingerprint = public_key_fingerprint;
+            this.secret_material_included = secret_material_included;
+            this.storage = storage;
+        }
+    }
+
+    /** DTO for NetworkMemberProfileProjection. */
+    public static final class NetworkMemberProfileProjection {
+        public final Long administrator_count;
+        public final Long member_count;
+        public final NetworkPublicProfileDocument profile;
+
+        public NetworkMemberProfileProjection(Long administrator_count, Long member_count, NetworkPublicProfileDocument profile) {
+            this.administrator_count = administrator_count;
+            this.member_count = member_count;
+            this.profile = profile;
+        }
+    }
+
+    /** DTO for NetworkProfileApplyResult. */
+    public static final class NetworkProfileApplyResult {
+        public final Long applied_at_unix_ms;
+        public final String audit_action;
+        public final List<String> changed_paths;
+        public final String network_name;
+        public final Long previous_revision;
+        public final NetworkProfileProjections projections;
+        public final Long revision;
+        public final NetworkPublicProfileRecord signed_profile;
+        public final List<NetworkProfileWarning> warnings;
+
+        public NetworkProfileApplyResult(Long applied_at_unix_ms, String audit_action, List<String> changed_paths, String network_name, Long previous_revision, NetworkProfileProjections projections, Long revision, NetworkPublicProfileRecord signed_profile, List<NetworkProfileWarning> warnings) {
+            this.applied_at_unix_ms = applied_at_unix_ms;
+            this.audit_action = audit_action;
+            this.changed_paths = changed_paths;
+            this.network_name = network_name;
+            this.previous_revision = previous_revision;
+            this.projections = projections;
+            this.revision = revision;
+            this.signed_profile = signed_profile;
+            this.warnings = warnings;
+        }
+    }
+
+    /** DTO for NetworkProfileDiffEntry. */
+    public static final class NetworkProfileDiffEntry {
+        public final String after;
+        public final String before;
+        public final String path;
+
+        public NetworkProfileDiffEntry(String after, String before, String path) {
+            this.after = after;
+            this.before = before;
+            this.path = path;
+        }
+    }
+
+    /** DTO for NetworkProfilePreview. */
+    public static final class NetworkProfilePreview {
+        public final Boolean can_apply;
+        public final Long candidate_revision;
+        public final Boolean conflict;
+        public final Long current_revision;
+        public final List<NetworkProfileDiffEntry> diff;
+        public final Long expected_revision;
+        public final String network_name;
+        public final NetworkProfileProjections projections;
+        public final List<NetworkProfileWarning> warnings;
+
+        public NetworkProfilePreview(Boolean can_apply, Long candidate_revision, Boolean conflict, Long current_revision, List<NetworkProfileDiffEntry> diff, Long expected_revision, String network_name, NetworkProfileProjections projections, List<NetworkProfileWarning> warnings) {
+            this.can_apply = can_apply;
+            this.candidate_revision = candidate_revision;
+            this.conflict = conflict;
+            this.current_revision = current_revision;
+            this.diff = diff;
+            this.expected_revision = expected_revision;
+            this.network_name = network_name;
+            this.projections = projections;
+            this.warnings = warnings;
+        }
+    }
+
+    /** DTO for NetworkProfileProjections. */
+    public static final class NetworkProfileProjections {
+        public final NetworkAdminProfileProjection administrator_view;
+        public final NetworkLocalSecretProjection local_secret;
+        public final NetworkMemberProfileProjection member_view;
+        public final NetworkPublicProfileProjection public_card;
+
+        public NetworkProfileProjections(NetworkAdminProfileProjection administrator_view, NetworkLocalSecretProjection local_secret, NetworkMemberProfileProjection member_view, NetworkPublicProfileProjection public_card) {
+            this.administrator_view = administrator_view;
+            this.local_secret = local_secret;
+            this.member_view = member_view;
+            this.public_card = public_card;
+        }
+    }
+
+    /** DTO for NetworkProfileUpdate. */
+    public static final class NetworkProfileUpdate {
+        public final List<CapabilityKind> capability_declarations;
+        public final String icon;
+        public final String join_mode;
+        public final String language;
+        public final String purpose;
+        public final String region;
+        public final List<String> tags;
+        public final NetworkVisibility visibility;
+
+        public NetworkProfileUpdate(List<CapabilityKind> capability_declarations, String icon, String join_mode, String language, String purpose, String region, List<String> tags, NetworkVisibility visibility) {
+            this.capability_declarations = capability_declarations;
+            this.icon = icon;
+            this.join_mode = join_mode;
+            this.language = language;
+            this.purpose = purpose;
+            this.region = region;
+            this.tags = tags;
+            this.visibility = visibility;
+        }
+    }
+
+    /** DTO for NetworkProfileWarning. */
+    public static final class NetworkProfileWarning {
+        public final CapabilityKind capability;
+        public final NetworkProfileWarningCode code;
+        public final String field;
+        public final String message;
+
+        public NetworkProfileWarning(CapabilityKind capability, NetworkProfileWarningCode code, String field, String message) {
+            this.capability = capability;
+            this.code = code;
+            this.field = field;
+            this.message = message;
+        }
+    }
+
+    /** DTO for NetworkPublicProfileDocument. */
+    public static final class NetworkPublicProfileDocument {
+        public final List<CapabilityKind> capability_declarations;
+        public final Long expires_at_unix_ms;
+        public final String icon;
+        public final Long issued_at_unix_ms;
+        public final String join_mode;
+        public final String language;
+        public final String name;
+        public final String network_id;
+        public final String owner;
+        public final String public_key;
+        public final String purpose;
+        public final String region;
+        public final Long revision;
+        public final Integer schema_version;
+        public final List<String> tags;
+        public final NetworkVisibility visibility;
+
+        public NetworkPublicProfileDocument(List<CapabilityKind> capability_declarations, Long expires_at_unix_ms, String icon, Long issued_at_unix_ms, String join_mode, String language, String name, String network_id, String owner, String public_key, String purpose, String region, Long revision, Integer schema_version, List<String> tags, NetworkVisibility visibility) {
+            this.capability_declarations = capability_declarations;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.icon = icon;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.join_mode = join_mode;
+            this.language = language;
+            this.name = name;
+            this.network_id = network_id;
+            this.owner = owner;
+            this.public_key = public_key;
+            this.purpose = purpose;
+            this.region = region;
+            this.revision = revision;
+            this.schema_version = schema_version;
+            this.tags = tags;
+            this.visibility = visibility;
+        }
+    }
+
+    /** DTO for NetworkPublicProfileProjection. */
+    public static final class NetworkPublicProfileProjection {
+        public final NetworkPublicProfileDocument candidate;
+        public final NetworkPublicProfileRecord currently_published;
+        public final List<String> withheld_categories;
+
+        public NetworkPublicProfileProjection(NetworkPublicProfileDocument candidate, NetworkPublicProfileRecord currently_published, List<String> withheld_categories) {
+            this.candidate = candidate;
+            this.currently_published = currently_published;
+            this.withheld_categories = withheld_categories;
+        }
+    }
+
+    /** DTO for NetworkPublicProfileRecord. */
+    public static final class NetworkPublicProfileRecord {
+        public final NetworkPublicProfileDocument document;
+        public final String signature;
+
+        public NetworkPublicProfileRecord(NetworkPublicProfileDocument document, String signature) {
+            this.document = document;
+            this.signature = signature;
+        }
+    }
+
     /** DTO for NodeApiCommandResponse. */
     public static final class NodeApiCommandResponse {
         public final NodeOperationSnapshot operation;
@@ -1937,26 +2197,32 @@ public final class NodeContractV1 {
     /** DTO for NodeCreateNetworkCommand. */
     public static final class NodeCreateNetworkCommand {
         public final Boolean auto_connect;
+        public final List<CapabilityKind> capability_declarations;
         public final String external_host;
         public final String icon;
         public final String join_mode;
         public final String language;
         public final String name;
         public final String purpose;
+        public final String region;
         public final Integer relay_port;
         public final Integer signaling_port;
+        public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NodeCreateNetworkCommand(Boolean auto_connect, String external_host, String icon, String join_mode, String language, String name, String purpose, Integer relay_port, Integer signaling_port, NetworkVisibility visibility) {
+        public NodeCreateNetworkCommand(Boolean auto_connect, List<CapabilityKind> capability_declarations, String external_host, String icon, String join_mode, String language, String name, String purpose, String region, Integer relay_port, Integer signaling_port, List<String> tags, NetworkVisibility visibility) {
             this.auto_connect = auto_connect;
+            this.capability_declarations = capability_declarations;
             this.external_host = external_host;
             this.icon = icon;
             this.join_mode = join_mode;
             this.language = language;
             this.name = name;
             this.purpose = purpose;
+            this.region = region;
             this.relay_port = relay_port;
             this.signaling_port = signaling_port;
+            this.tags = tags;
             this.visibility = visibility;
         }
     }
@@ -2361,6 +2627,52 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeNetworkProfileCommand. */
+    public static final class NodeNetworkProfileCommand {
+        public final Long expected_revision;
+        public final String network_name;
+        public final NetworkProfileUpdate update;
+
+        public NodeNetworkProfileCommand(Long expected_revision, String network_name, NetworkProfileUpdate update) {
+            this.expected_revision = expected_revision;
+            this.network_name = network_name;
+            this.update = update;
+        }
+    }
+
+    /** DTO for NodeNetworkProfileSnapshot. */
+    public static final class NodeNetworkProfileSnapshot {
+        public final List<CapabilityKind> capability_declarations;
+        public final String icon;
+        public final String join_mode;
+        public final String language;
+        public final String name;
+        public final String network_id;
+        public final Long policy_revision;
+        public final String purpose;
+        public final String region;
+        public final Long revision;
+        public final NodeSignedNetworkProfileSnapshot signed_profile;
+        public final List<String> tags;
+        public final NetworkVisibility visibility;
+
+        public NodeNetworkProfileSnapshot(List<CapabilityKind> capability_declarations, String icon, String join_mode, String language, String name, String network_id, Long policy_revision, String purpose, String region, Long revision, NodeSignedNetworkProfileSnapshot signed_profile, List<String> tags, NetworkVisibility visibility) {
+            this.capability_declarations = capability_declarations;
+            this.icon = icon;
+            this.join_mode = join_mode;
+            this.language = language;
+            this.name = name;
+            this.network_id = network_id;
+            this.policy_revision = policy_revision;
+            this.purpose = purpose;
+            this.region = region;
+            this.revision = revision;
+            this.signed_profile = signed_profile;
+            this.tags = tags;
+            this.visibility = visibility;
+        }
+    }
+
     /** DTO for NodeNetworkSnapshot. */
     public static final class NodeNetworkSnapshot {
         public final String assigned_ipv4;
@@ -2647,6 +2959,19 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeSignedNetworkProfileSnapshot. */
+    public static final class NodeSignedNetworkProfileSnapshot {
+        public final Long expires_at_unix_ms;
+        public final Long issued_at_unix_ms;
+        public final Integer schema_version;
+
+        public NodeSignedNetworkProfileSnapshot(Long expires_at_unix_ms, Long issued_at_unix_ms, Integer schema_version) {
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.schema_version = schema_version;
+        }
+    }
+
     /** DTO for NodeSnapshot. */
     public static final class NodeSnapshot {
         public final NodeCapabilityRegistrySnapshot capabilities;
@@ -2660,6 +2985,7 @@ public final class NodeContractV1 {
         public final NodeProblem last_error;
         public final NodeLifecycleSnapshot lifecycle;
         public final List<NodeLogEntry> logs;
+        public final List<NodeNetworkProfileSnapshot> network_profiles;
         public final List<NodeNetworkSnapshot> networks;
         public final List<NodePeerSnapshot> peers;
         public final NodePermissionSnapshot permissions;
@@ -2669,7 +2995,7 @@ public final class NodeContractV1 {
         public final TunCapabilities tun_capabilities;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
             this.configuration = configuration;
             this.control_health = control_health;
@@ -2681,6 +3007,7 @@ public final class NodeContractV1 {
             this.last_error = last_error;
             this.lifecycle = lifecycle;
             this.logs = logs;
+            this.network_profiles = network_profiles;
             this.networks = networks;
             this.peers = peers;
             this.permissions = permissions;
@@ -3160,6 +3487,24 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class PreviewNetworkProfile extends NodeCommand {
+            public final NodeNetworkProfileCommand payload;
+
+            public PreviewNetworkProfile(NodeNetworkProfileCommand payload) {
+                super(NodeCommandKind.PREVIEW_NETWORK_PROFILE);
+                this.payload = payload;
+            }
+        }
+
+        public static final class UpdateNetworkProfile extends NodeCommand {
+            public final NodeNetworkProfileCommand payload;
+
+            public UpdateNetworkProfile(NodeNetworkProfileCommand payload) {
+                super(NodeCommandKind.UPDATE_NETWORK_PROFILE);
+                this.payload = payload;
+            }
+        }
+
         public static final class JoinNetwork extends NodeCommand {
             public final NodeJoinNetworkCommand payload;
 
@@ -3434,6 +3779,24 @@ public final class NodeContractV1 {
 
             public NetworkCreated(NodeCreatedNetwork data) {
                 super("network_created");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkProfilePreview extends NodeCommandOutcome {
+            public final NetworkProfilePreview data;
+
+            public NetworkProfilePreview(NetworkProfilePreview data) {
+                super("network_profile_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkProfileUpdated extends NodeCommandOutcome {
+            public final NetworkProfileApplyResult data;
+
+            public NetworkProfileUpdated(NetworkProfileApplyResult data) {
+                super("network_profile_updated");
                 this.data = data;
             }
         }
@@ -3906,6 +4269,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.PREVIEW_CONFIGURATION ||
+            command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.REBUILD_TUN ||
             command == NodeCommandKind.RESTART_NETWORKS ||
@@ -3921,6 +4285,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.STOP_NODE ||
             command == NodeCommandKind.UNBAN_CLIENT ||
             command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||
+            command == NodeCommandKind.UPDATE_NETWORK_PROFILE ||
             command == NodeCommandKind.UPDATE_ROUTING;
     }
 }

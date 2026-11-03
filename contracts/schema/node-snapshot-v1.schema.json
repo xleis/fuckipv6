@@ -194,6 +194,26 @@
     "NetworkId": {
       "type": "string"
     },
+    "NetworkJoinMode": {
+      "description": "Admission policy selected by the network owner.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "Requests are accepted immediately.",
+          "type": "string"
+        },
+        {
+          "const": "approval_required",
+          "description": "Requests enter `pending_approval`.",
+          "type": "string"
+        },
+        {
+          "const": "invite_only",
+          "description": "The node must first consume a signed, single-use invitation.",
+          "type": "string"
+        }
+      ]
+    },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
       "oneOf": [
@@ -213,6 +233,15 @@
           "type": "string"
         }
       ]
+    },
+    "NetworkVisibility": {
+      "description": "How much of a network's public profile is discoverable without membership.",
+      "enum": [
+        "public",
+        "unlisted",
+        "private"
+      ],
+      "type": "string"
     },
     "NodeAccessModel": {
       "enum": [
@@ -666,6 +695,82 @@
         "log_level",
         "log_file_configured",
         "identity_configured"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkProfileSnapshot": {
+      "description": "Public, owner-editable network metadata rendered by every UI adapter.\n\nThis is deliberately a separate projection from `NetworkRecord`: secrets,\nmembers, addresses, topology, activity and invitations are not fields and\ntherefore cannot be serialized by accident.",
+      "properties": {
+        "capability_declarations": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "language": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signed_profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeSignedNetworkProfileSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility"
+        }
+      },
+      "required": [
+        "network_id",
+        "name",
+        "purpose",
+        "icon",
+        "language",
+        "region",
+        "tags",
+        "capability_declarations",
+        "visibility",
+        "join_mode",
+        "revision",
+        "policy_revision"
       ],
       "type": "object"
     },
@@ -1159,6 +1264,32 @@
         }
       ]
     },
+    "NodeSignedNetworkProfileSnapshot": {
+      "properties": {
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "NodeTrafficSnapshot": {
       "properties": {
         "error_count": {
@@ -1457,6 +1588,14 @@
     "logs": {
       "items": {
         "$ref": "#/$defs/NodeLogEntry"
+      },
+      "type": "array"
+    },
+    "network_profiles": {
+      "default": [],
+      "description": "Owner-authored public network-profile projections. This field is an\nallowlisted public snapshot: it never contains member identities,\naddresses, topology, activity, invitation tickets or secret material.",
+      "items": {
+        "$ref": "#/$defs/NodeNetworkProfileSnapshot"
       },
       "type": "array"
     },

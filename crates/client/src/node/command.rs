@@ -5,9 +5,10 @@ use crate::config_transaction::{
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::{
-    default_network_icon, default_network_language, default_network_purpose, ActivityEntry,
-    AuditEntry, AuditOutcome, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
-    NetworkVisibility,
+    default_network_icon, default_network_language, default_network_purpose,
+    default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind,
+    MembershipRole, NetworkCreateProfile, NetworkJoinMode, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -68,6 +69,8 @@ pub enum NodeCommandKind {
     RestartNetworks,
     RebuildTun,
     CreateNetwork,
+    PreviewNetworkProfile,
+    UpdateNetworkProfile,
     JoinNetwork,
     UpdateRouting,
     SetNetworkRole,
@@ -93,7 +96,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 31] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -102,6 +105,8 @@ impl NodeCommandKind {
         Self::RestartNetworks,
         Self::RebuildTun,
         Self::CreateNetwork,
+        Self::PreviewNetworkProfile,
+        Self::UpdateNetworkProfile,
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -127,7 +132,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 28] = [
+    pub const ACTIONS: [Self; 30] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -135,6 +140,8 @@ impl NodeCommandKind {
         Self::RestartNetworks,
         Self::RebuildTun,
         Self::CreateNetwork,
+        Self::PreviewNetworkProfile,
+        Self::UpdateNetworkProfile,
         Self::JoinNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -186,6 +193,8 @@ impl NodeCommandKind {
             Self::RestartNetworks => "restart_networks",
             Self::RebuildTun => "rebuild_tun",
             Self::CreateNetwork => "create_network",
+            Self::PreviewNetworkProfile => "preview_network_profile",
+            Self::UpdateNetworkProfile => "update_network_profile",
             Self::JoinNetwork => "join_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
@@ -222,6 +231,7 @@ impl NodeCommandKind {
                 | Self::RestartNetworks
                 | Self::RebuildTun
                 | Self::CreateNetwork
+                | Self::UpdateNetworkProfile
                 | Self::JoinNetwork
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
@@ -277,6 +287,10 @@ pub enum NodeCommand {
         network_name: String,
     },
     CreateNetwork(NodeCreateNetworkCommand),
+    /// Build the exact public-card preview and field-level diff without writing.
+    PreviewNetworkProfile(NodeNetworkProfileCommand),
+    /// Atomically apply, re-sign and audit a public profile update.
+    UpdateNetworkProfile(NodeNetworkProfileCommand),
     JoinNetwork(NodeJoinNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
@@ -332,6 +346,8 @@ impl NodeCommand {
             Self::RestartNetworks { .. } => NodeCommandKind::RestartNetworks,
             Self::RebuildTun { .. } => NodeCommandKind::RebuildTun,
             Self::CreateNetwork(_) => NodeCommandKind::CreateNetwork,
+            Self::PreviewNetworkProfile(_) => NodeCommandKind::PreviewNetworkProfile,
+            Self::UpdateNetworkProfile(_) => NodeCommandKind::UpdateNetworkProfile,
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
@@ -412,6 +428,9 @@ impl NodeCommand {
             }
             Self::RebuildTun { network_name } => validate_network_name(network_name),
             Self::CreateNetwork(command) => command.validate(),
+            Self::PreviewNetworkProfile(command) | Self::UpdateNetworkProfile(command) => {
+                command.validate()
+            }
             Self::JoinNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
@@ -478,6 +497,12 @@ pub struct NodeCreateNetworkCommand {
     pub icon: String,
     #[serde(default = "default_network_language")]
     pub language: String,
+    #[serde(default = "default_network_region")]
+    pub region: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub capability_declarations: Vec<CapabilityKind>,
     #[serde(default)]
     pub visibility: NetworkVisibility,
     #[serde(default)]
@@ -534,6 +559,15 @@ impl NodeCreateNetworkCommand {
                 message: "网络语言必须使用类似 zh-CN、en 或 und 的 BCP-47 标签".into(),
             });
         }
+        if !valid_region_code(&self.region) {
+            issues.push(NodeValidationIssue {
+                path: "region".into(),
+                code: "invalid_network_region".into(),
+                message: "网络地区必须使用两位大写 ISO 3166-1 代码；不披露时使用 ZZ".into(),
+            });
+        }
+        validate_profile_tags(&self.tags, &mut issues);
+        validate_profile_capabilities(&self.capability_declarations, &mut issues);
         if self.signaling_port == 0 {
             issues.push(NodeValidationIssue {
                 path: "signaling_port".into(),
@@ -582,8 +616,60 @@ impl NodeCreateNetworkCommand {
             purpose: self.purpose.clone(),
             icon: self.icon.clone(),
             language: self.language.clone(),
+            region: self.region.clone(),
+            tags: self.tags.clone(),
+            capability_declarations: self.capability_declarations.clone(),
             visibility: self.visibility,
             join_mode: self.join_mode,
+        }
+    }
+}
+
+fn valid_region_code(region: &str) -> bool {
+    region.len() == 2
+        && region
+            .chars()
+            .all(|character| character.is_ascii_uppercase())
+}
+
+fn validate_profile_tags(tags: &[String], issues: &mut Vec<NodeValidationIssue>) {
+    let mut seen = HashSet::new();
+    for (index, tag) in tags.iter().enumerate() {
+        let valid = !tag.is_empty()
+            && tag.chars().count() <= NETWORK_PROFILE_MAX_TAG_CHARS
+            && tag.trim() == tag
+            && !tag.chars().any(|character| {
+                character.is_control()
+                    || character.is_whitespace()
+                    || !(character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
+            });
+        if !valid || !seen.insert(tag.to_ascii_lowercase()) {
+            issues.push(NodeValidationIssue {
+                path: format!("tags[{index}]"),
+                code: if valid {
+                    "duplicate_network_tag".into()
+                } else {
+                    "invalid_network_tag".into()
+                },
+                message: "标签必须唯一、不超过 32 个字符，且只能包含字母、数字、'.'、'-' 和 '_'"
+                    .into(),
+            });
+        }
+    }
+}
+
+fn validate_profile_capabilities(
+    capabilities: &[CapabilityKind],
+    issues: &mut Vec<NodeValidationIssue>,
+) {
+    let mut seen = HashSet::new();
+    for (index, capability) in capabilities.iter().enumerate() {
+        if !seen.insert(*capability) {
+            issues.push(NodeValidationIssue {
+                path: format!("capability_declarations[{index}]"),
+                code: "duplicate_capability_declaration".into(),
+                message: "能力声明不能重复；声明仅表示网络意图，不代表当前节点已启用该能力".into(),
+            });
         }
     }
 }
@@ -604,6 +690,82 @@ fn valid_language_tag(language: &str) -> bool {
                     .chars()
                     .all(|character| character.is_ascii_alphanumeric())
         })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkProfileCommand {
+    pub network_name: String,
+    pub expected_revision: u64,
+    pub update: NetworkProfileUpdate,
+}
+
+impl NodeNetworkProfileCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        let mut issues = Vec::new();
+        validate_network_name(&self.network_name)?;
+        if self.expected_revision == 0 {
+            issues.push(NodeValidationIssue {
+                path: "expected_revision".into(),
+                code: "invalid_profile_revision".into(),
+                message: "网络资料 revision 必须为正整数".into(),
+            });
+        }
+        if self.update.purpose.is_empty()
+            || self.update.purpose.chars().count() > 512
+            || self.update.purpose.trim() != self.update.purpose
+            || self.update.purpose.chars().any(char::is_control)
+        {
+            issues.push(NodeValidationIssue {
+                path: "update.purpose".into(),
+                code: "invalid_network_purpose".into(),
+                message: "网络简介不能为空、长度不能超过 512，且首尾不能包含空白或控制字符".into(),
+            });
+        }
+        if self.update.icon.is_empty()
+            || self.update.icon.len() > 64
+            || self.update.icon.trim() != self.update.icon
+            || self.update.icon.chars().any(|character| {
+                !(character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, '-' | '_' | '.'))
+            })
+        {
+            issues.push(NodeValidationIssue {
+                path: "update.icon".into(),
+                code: "invalid_network_icon".into(),
+                message: "网络图标必须是小写 ASCII 标识，只能包含字母、数字、'.'、'-' 和 '_'"
+                    .into(),
+            });
+        }
+        if !valid_language_tag(&self.update.language) {
+            issues.push(NodeValidationIssue {
+                path: "update.language".into(),
+                code: "invalid_network_language".into(),
+                message: "网络语言必须使用类似 zh-CN、en 或 und 的 BCP-47 标签".into(),
+            });
+        }
+        if !valid_region_code(&self.update.region) {
+            issues.push(NodeValidationIssue {
+                path: "update.region".into(),
+                code: "invalid_network_region".into(),
+                message: "网络地区必须使用两位大写 ISO 3166-1 代码；不披露时使用 ZZ".into(),
+            });
+        }
+        if self.update.tags.len() > fuckipv6_common::domain::NETWORK_PROFILE_MAX_TAGS {
+            issues.push(NodeValidationIssue {
+                path: "update.tags".into(),
+                code: "too_many_network_tags".into(),
+                message: "网络标签最多 12 个".into(),
+            });
+        }
+        validate_profile_tags(&self.update.tags, &mut issues);
+        validate_profile_capabilities(&self.update.capability_declarations, &mut issues);
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid("网络公开资料校验失败").with_validation_issues(issues))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -1186,6 +1348,8 @@ pub enum NodeCommandOutcome {
     NetworkAllocation(NodeNetworkAllocationSnapshot),
     Probe(NodePeerProbeSnapshot),
     NetworkCreated(NodeCreatedNetwork),
+    NetworkProfilePreview(Box<NetworkProfilePreview>),
+    NetworkProfileUpdated(Box<NetworkProfileApplyResult>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
     ConfigurationPreview(Box<ConfigurationPreview>),
@@ -1577,12 +1741,43 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: DEFAULT_NETWORK_ICON.into(),
                 language: DEFAULT_NETWORK_LANGUAGE.into(),
+                region: default_network_region(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("vpn.example.com".into()),
                 auto_connect: true,
+            }),
+            NodeCommand::PreviewNetworkProfile(NodeNetworkProfileCommand {
+                network_name: "home".into(),
+                expected_revision: 1,
+                update: NetworkProfileUpdate {
+                    purpose: "A test network".into(),
+                    icon: DEFAULT_NETWORK_ICON.into(),
+                    language: DEFAULT_NETWORK_LANGUAGE.into(),
+                    region: default_network_region(),
+                    tags: Vec::new(),
+                    capability_declarations: Vec::new(),
+                    visibility: NetworkVisibility::Unlisted,
+                    join_mode: NetworkJoinMode::InviteOnly,
+                },
+            }),
+            NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
+                network_name: "home".into(),
+                expected_revision: 1,
+                update: NetworkProfileUpdate {
+                    purpose: "A test network".into(),
+                    icon: DEFAULT_NETWORK_ICON.into(),
+                    language: DEFAULT_NETWORK_LANGUAGE.into(),
+                    region: default_network_region(),
+                    tags: Vec::new(),
+                    capability_declarations: Vec::new(),
+                    visibility: NetworkVisibility::Unlisted,
+                    join_mode: NetworkJoinMode::InviteOnly,
+                },
             }),
             NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
                 target: "fk://invite".into(),
@@ -1728,6 +1923,9 @@ mod tests {
             purpose: "A test network".into(),
             icon: DEFAULT_NETWORK_ICON.into(),
             language: DEFAULT_NETWORK_LANGUAGE.into(),
+            region: default_network_region(),
+            tags: Vec::new(),
+            capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
             signaling_port: 6666,
@@ -1754,6 +1952,9 @@ mod tests {
             purpose: "A test network".into(),
             icon: DEFAULT_NETWORK_ICON.into(),
             language: DEFAULT_NETWORK_LANGUAGE.into(),
+            region: default_network_region(),
+            tags: Vec::new(),
+            capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
             signaling_port: 6666,
@@ -1769,6 +1970,9 @@ mod tests {
             purpose: "Family devices across two homes".into(),
             icon: "home".into(),
             language: "zh-CN".into(),
+            region: "CN".into(),
+            tags: Vec::new(),
+            capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Private,
             join_mode: NetworkJoinMode::InviteOnly,
             signaling_port: 6666,
@@ -1944,6 +2148,9 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: DEFAULT_NETWORK_ICON.into(),
                 language: DEFAULT_NETWORK_LANGUAGE.into(),
+                region: default_network_region(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 0,
@@ -1956,6 +2163,9 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: DEFAULT_NETWORK_ICON.into(),
                 language: DEFAULT_NETWORK_LANGUAGE.into(),
+                region: default_network_region(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 6666,
@@ -1968,6 +2178,9 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: DEFAULT_NETWORK_ICON.into(),
                 language: DEFAULT_NETWORK_LANGUAGE.into(),
+                region: default_network_region(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 6666,
@@ -2060,6 +2273,7 @@ mod tests {
             NodeCommandKind::GetNetworkAllocation,
             NodeCommandKind::ProbePeer,
             NodeCommandKind::GetConfiguration,
+            NodeCommandKind::PreviewNetworkProfile,
             NodeCommandKind::PreviewConfiguration,
             NodeCommandKind::GetConfigurationHistory,
         ] {
@@ -2075,6 +2289,7 @@ mod tests {
                     | NodeCommandKind::GetNetworkAllocation
                     | NodeCommandKind::ProbePeer
                     | NodeCommandKind::GetConfiguration
+                    | NodeCommandKind::PreviewNetworkProfile
                     | NodeCommandKind::PreviewConfiguration
                     | NodeCommandKind::GetConfigurationHistory
             ) {
@@ -2283,6 +2498,9 @@ mod tests {
             purpose: "A network the administrator cannot create".into(),
             icon: "network".into(),
             language: "en".into(),
+            region: "ZZ".into(),
+            tags: Vec::new(),
+            capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Private,
             join_mode: NetworkJoinMode::InviteOnly,
             signaling_port: 6666,

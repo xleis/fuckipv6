@@ -82,6 +82,27 @@
               "validation": "network_language"
             },
             {
+              "id": "region",
+              "label_key": "field.region",
+              "input": "region",
+              "required": true,
+              "validation": "region"
+            },
+            {
+              "id": "tags",
+              "label_key": "field.tags",
+              "input": "tags",
+              "required": false,
+              "validation": "tags"
+            },
+            {
+              "id": "capability_declarations",
+              "label_key": "field.capability_declarations",
+              "input": "capability_declarations",
+              "required": false,
+              "validation": "capability_declarations"
+            },
+            {
               "id": "visibility",
               "label_key": "field.visibility",
               "input": "visibility",
@@ -125,6 +146,181 @@
             }
           ],
           "confirmation": null
+        },
+        {
+          "id": "preview_network_profile",
+          "label_key": "action.preview_network_profile",
+          "command": "preview_network_profile",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "purpose",
+              "label_key": "field.purpose",
+              "input": "purpose",
+              "required": true,
+              "validation": "network_purpose"
+            },
+            {
+              "id": "icon",
+              "label_key": "field.icon",
+              "input": "icon",
+              "required": true,
+              "validation": "network_icon"
+            },
+            {
+              "id": "language",
+              "label_key": "field.language",
+              "input": "language",
+              "required": true,
+              "validation": "network_language"
+            },
+            {
+              "id": "region",
+              "label_key": "field.region",
+              "input": "region",
+              "required": true,
+              "validation": "region"
+            },
+            {
+              "id": "tags",
+              "label_key": "field.tags",
+              "input": "tags",
+              "required": false,
+              "validation": "tags"
+            },
+            {
+              "id": "capability_declarations",
+              "label_key": "field.capability_declarations",
+              "input": "capability_declarations",
+              "required": false,
+              "validation": "capability_declarations"
+            },
+            {
+              "id": "visibility",
+              "label_key": "field.visibility",
+              "input": "visibility",
+              "required": true,
+              "validation": "visibility"
+            },
+            {
+              "id": "join_mode",
+              "label_key": "field.join_mode",
+              "input": "join_mode",
+              "required": true,
+              "validation": "join_mode"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "update_network_profile",
+          "label_key": "action.update_network_profile",
+          "command": "update_network_profile",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.profile.update"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "purpose",
+              "label_key": "field.purpose",
+              "input": "purpose",
+              "required": true,
+              "validation": "network_purpose"
+            },
+            {
+              "id": "icon",
+              "label_key": "field.icon",
+              "input": "icon",
+              "required": true,
+              "validation": "network_icon"
+            },
+            {
+              "id": "language",
+              "label_key": "field.language",
+              "input": "language",
+              "required": true,
+              "validation": "network_language"
+            },
+            {
+              "id": "region",
+              "label_key": "field.region",
+              "input": "region",
+              "required": true,
+              "validation": "region"
+            },
+            {
+              "id": "tags",
+              "label_key": "field.tags",
+              "input": "tags",
+              "required": false,
+              "validation": "tags"
+            },
+            {
+              "id": "capability_declarations",
+              "label_key": "field.capability_declarations",
+              "input": "capability_declarations",
+              "required": false,
+              "validation": "capability_declarations"
+            },
+            {
+              "id": "visibility",
+              "label_key": "field.visibility",
+              "input": "visibility",
+              "required": true,
+              "validation": "visibility"
+            },
+            {
+              "id": "join_mode",
+              "label_key": "field.join_mode",
+              "input": "join_mode",
+              "required": true,
+              "validation": "join_mode"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.update_network_profile.title",
+            "consequence_key": "confirm.update_network_profile.consequence",
+            "destructive": false,
+            "recent_authentication_required": false
+          }
         },
         {
           "id": "join_network",

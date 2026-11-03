@@ -1296,6 +1296,8 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::NetworkAllocation(_)
         | NodeCommandOutcome::Probe(_)
         | NodeCommandOutcome::NetworkCreated(_)
+        | NodeCommandOutcome::NetworkProfilePreview(_)
+        | NodeCommandOutcome::NetworkProfileUpdated(_)
         | NodeCommandOutcome::IdentityRotated(_)
         | NodeCommandOutcome::Configuration(_)
         | NodeCommandOutcome::ConfigurationPreview(_)
@@ -1361,6 +1363,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::RebuildTun { .. } => OperationKind::TunRebuild,
         NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
         NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
+        NodeCommand::UpdateNetworkProfile(_) => OperationKind::NetworkProfileUpdate,
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -1384,6 +1387,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ProbePeer(_)
         | NodeCommand::GetConfiguration
         | NodeCommand::PreviewConfiguration(_)
+        | NodeCommand::PreviewNetworkProfile(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
@@ -1399,6 +1403,8 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
     };
     match command {
         NodeCommand::CreateNetwork(command) => network_target(&command.name),
+        NodeCommand::PreviewNetworkProfile(command)
+        | NodeCommand::UpdateNetworkProfile(command) => network_target(&command.network_name),
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()

@@ -68,6 +68,7 @@ pub enum OperationKind {
     NodeCleanup,
     Diagnostics,
     NetworkCreate,
+    NetworkProfileUpdate,
     NetworkApply,
     TunRebuild,
     NetworkLeave,

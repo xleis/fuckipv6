@@ -1,5 +1,15 @@
 {
   "$defs": {
+    "CapabilityKind": {
+      "description": "The fixed first-version capability set. Unknown wire values fail closed at\ndeserialization and are never inferred from a free-form label.",
+      "enum": [
+        "coordinator",
+        "relay",
+        "exit",
+        "file"
+      ],
+      "type": "string"
+    },
     "NetworkJoinMode": {
       "description": "Admission policy selected by the network owner.",
       "oneOf": [
@@ -39,6 +49,52 @@
           "type": "string"
         }
       ]
+    },
+    "NetworkProfileUpdate": {
+      "description": "Owner-editable public fields for an existing network. The network name and\nstable identity deliberately cannot be changed through this command.",
+      "properties": {
+        "capability_declarations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "language": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility"
+        }
+      },
+      "required": [
+        "purpose",
+        "icon",
+        "language",
+        "region",
+        "visibility",
+        "join_mode"
+      ],
+      "type": "object"
     },
     "NetworkVisibility": {
       "description": "How much of a network's public profile is discoverable without membership.",
@@ -242,6 +298,40 @@
             },
             "payload": {
               "$ref": "#/$defs/NodeCreateNetworkCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Build the exact public-card preview and field-level diff without writing.",
+          "properties": {
+            "command": {
+              "const": "preview_network_profile",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkProfileCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Atomically apply, re-sign and audit a public profile update.",
+          "properties": {
+            "command": {
+              "const": "update_network_profile",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkProfileCommand"
             }
           },
           "required": [
@@ -609,6 +699,13 @@
         "auto_connect": {
           "type": "boolean"
         },
+        "capability_declarations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
         "external_host": {
           "type": [
             "string",
@@ -634,6 +731,10 @@
           "default": "Owner-created network",
           "type": "string"
         },
+        "region": {
+          "default": "ZZ",
+          "type": "string"
+        },
         "relay_port": {
           "format": "uint16",
           "maximum": 65535,
@@ -645,6 +746,13 @@
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "visibility": {
           "$ref": "#/$defs/NetworkVisibility",
@@ -697,6 +805,27 @@
         "mode",
         "ipv4_pool",
         "ipv6_pool"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkProfileCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "update": {
+          "$ref": "#/$defs/NetworkProfileUpdate"
+        }
+      },
+      "required": [
+        "network_name",
+        "expected_revision",
+        "update"
       ],
       "type": "object"
     },

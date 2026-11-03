@@ -680,6 +680,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::RebuildTun { .. } => OperationKind::TunRebuild,
         NodeCommand::CleanupResiduals { .. } => OperationKind::NodeCleanup,
         NodeCommand::CreateNetwork(_) => OperationKind::NetworkCreate,
+        NodeCommand::UpdateNetworkProfile(_) => OperationKind::NetworkProfileUpdate,
         NodeCommand::JoinNetwork(_) => OperationKind::NetworkApply,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -699,6 +700,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ProbePeer(_)
         | NodeCommand::GetConfiguration
         | NodeCommand::PreviewConfiguration(_)
+        | NodeCommand::PreviewNetworkProfile(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
@@ -714,6 +716,8 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
     };
     match command {
         NodeCommand::CreateNetwork(command) => network_target(&command.name),
+        NodeCommand::PreviewNetworkProfile(command)
+        | NodeCommand::UpdateNetworkProfile(command) => network_target(&command.network_name),
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()
@@ -1139,6 +1143,9 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: "network".into(),
                 language: "und".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
                 signaling_port: 6666,

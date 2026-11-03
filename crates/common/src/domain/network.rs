@@ -1,9 +1,12 @@
 use std::collections::BTreeSet;
 
+use crate::crypto::Identity;
+
 use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::capability::CapabilityKind;
 use super::ids::{NetworkId, NodeId, PublicKey, Signature};
 use super::{DomainError, DomainResult};
 
@@ -70,6 +73,18 @@ pub struct NetworkRecord {
     /// BCP-47-like language tag for the network's public profile.
     #[serde(default = "default_network_language")]
     pub language: String,
+    /// ISO 3166-1 alpha-2 region, or `ZZ` when the owner does not disclose one.
+    #[serde(default = "default_network_region")]
+    pub region: String,
+    /// Stable discovery tags. The domain validates uniqueness after canonical
+    /// normalization; adapters should submit normalized or raw values and rely
+    /// on the shared preview/apply path.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Owner-declared capabilities. A declaration is discoverability metadata,
+    /// not proof that the capability is operational on any particular node.
+    #[serde(default)]
+    pub capability_declarations: Vec<CapabilityKind>,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
     pub owner: NodeId,
@@ -81,6 +96,11 @@ pub struct NetworkRecord {
     pub policy_revision: u64,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
+    /// Signed public profile. Legacy owner records may omit this field; UI
+    /// previews must surface an `UnsignedLegacy` warning instead of treating
+    /// the mutable record itself as a verified public document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_profile: Option<NetworkPublicProfileRecord>,
 }
 
 impl NetworkRecord {
@@ -95,6 +115,9 @@ impl NetworkRecord {
         validate_network_purpose(&self.purpose)?;
         validate_network_icon(&self.icon)?;
         validate_network_language(&self.language)?;
+        validate_network_region(&self.region)?;
+        validate_network_tags(&self.tags)?;
+        validate_capability_declarations(&self.capability_declarations)?;
         if self.revision == 0 || self.policy_revision == 0 {
             return Err(DomainError::invalid_value(
                 "network and policy revisions must be positive",
@@ -132,7 +155,101 @@ impl NetworkRecord {
                 "network owner and administrators must be members",
             ));
         }
+        if let Some(profile) = &self.signed_profile {
+            profile.validate()?;
+            profile.validate_against_record(self)?;
+        }
         Ok(())
+    }
+
+    /// Build the exact fields that are allowed to cross the public profile
+    /// boundary. Member IDs, addresses, endpoints, topology, activity and
+    /// secrets are intentionally absent from this type.
+    pub fn public_profile_document(
+        &self,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> DomainResult<NetworkPublicProfileDocument> {
+        let document = NetworkPublicProfileDocument {
+            schema_version: NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION,
+            network_id: self.network_id.clone(),
+            public_key: self.public_key.clone(),
+            owner: self.owner.clone(),
+            name: self.name.clone(),
+            purpose: self.purpose.clone(),
+            icon: self.icon.clone(),
+            language: self.language.clone(),
+            region: self.region.clone(),
+            tags: self.tags.clone(),
+            capability_declarations: self.capability_declarations.clone(),
+            visibility: self.visibility,
+            join_mode: self.join_mode,
+            revision: self.revision,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    /// Issue a fresh signed profile using the network's independent signing
+    /// identity. The identity's public key must match the record.
+    pub fn sign_public_profile(
+        &mut self,
+        identity: &Identity,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> DomainResult<()> {
+        let identity_public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        if identity_public_key != self.public_key {
+            return Err(DomainError::invariant(
+                "network signing identity does not match the network record",
+            ));
+        }
+        let document = self.public_profile_document(issued_at_unix_ms, expires_at_unix_ms)?;
+        self.signed_profile = Some(NetworkPublicProfileRecord::sign(document, identity));
+        self.validate()
+    }
+
+    /// Apply only public-profile fields. Governance membership and policy
+    /// revisions require separate audited operations.
+    pub fn apply_profile_update(
+        &mut self,
+        update: &NetworkProfileUpdate,
+        expected_revision: u64,
+        now_unix_ms: u64,
+    ) -> DomainResult<Vec<NetworkProfileDiffEntry>> {
+        update.validate()?;
+        if self.revision != expected_revision {
+            return Err(DomainError::new(
+                "domain.network_profile_revision_conflict",
+                "network profile revision no longer matches the preview",
+            ));
+        }
+        let diff = network_profile_diff(self, update);
+        if diff.is_empty() {
+            return Ok(diff);
+        }
+        if now_unix_ms < self.created_at_unix_ms {
+            return Err(DomainError::invariant(
+                "network update time predates creation",
+            ));
+        }
+        self.purpose = update.purpose.clone();
+        self.icon = update.icon.clone();
+        self.language = update.language.clone();
+        self.region = update.region.clone();
+        self.tags = canonical_tags(&update.tags)?;
+        self.capability_declarations = canonical_capabilities(&update.capability_declarations)?;
+        self.visibility = update.visibility;
+        self.join_mode = update.join_mode;
+        self.revision = self.revision.saturating_add(1);
+        self.updated_at_unix_ms = self.updated_at_unix_ms.max(now_unix_ms);
+        // The old signature no longer covers the mutated fields. The caller
+        // must issue a new signature before persisting the record.
+        self.signed_profile = None;
+        self.validate()?;
+        Ok(diff)
     }
 
     /// Create the first revision owned by the identity that created the
@@ -152,6 +269,9 @@ impl NetworkRecord {
             purpose: profile.purpose,
             icon: profile.icon,
             language: profile.language,
+            region: profile.region,
+            tags: profile.tags,
+            capability_declarations: profile.capability_declarations,
             visibility: profile.visibility,
             join_mode: profile.join_mode,
             owner: owner.clone(),
@@ -161,7 +281,11 @@ impl NetworkRecord {
             policy_revision: 1,
             created_at_unix_ms: now_unix_ms,
             updated_at_unix_ms: now_unix_ms,
+            signed_profile: None,
         };
+        let mut record = record;
+        record.tags = canonical_tags(&record.tags)?;
+        record.capability_declarations = canonical_capabilities(&record.capability_declarations)?;
         record.validate()?;
         Ok(record)
     }
@@ -193,6 +317,12 @@ pub struct NetworkCreateProfile {
     pub purpose: String,
     pub icon: String,
     pub language: String,
+    #[serde(default = "default_network_region")]
+    pub region: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub capability_declarations: Vec<CapabilityKind>,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
 }
@@ -202,13 +332,75 @@ impl NetworkCreateProfile {
         validate_network_name(&self.name)?;
         validate_network_purpose(&self.purpose)?;
         validate_network_icon(&self.icon)?;
-        validate_network_language(&self.language)
+        validate_network_language(&self.language)?;
+        validate_network_region(&self.region)?;
+        validate_network_tags(&self.tags)?;
+        validate_capability_declarations(&self.capability_declarations)
+    }
+
+    pub fn normalized(mut self) -> DomainResult<Self> {
+        self.tags = canonical_tags(&self.tags)?;
+        self.capability_declarations = canonical_capabilities(&self.capability_declarations)?;
+        self.validate()?;
+        Ok(self)
+    }
+}
+
+/// Owner-editable public fields for an existing network. The network name and
+/// stable identity deliberately cannot be changed through this command.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkProfileUpdate {
+    pub purpose: String,
+    pub icon: String,
+    pub language: String,
+    pub region: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub capability_declarations: Vec<CapabilityKind>,
+    pub visibility: NetworkVisibility,
+    pub join_mode: NetworkJoinMode,
+}
+
+impl NetworkProfileUpdate {
+    pub fn from_record(record: &NetworkRecord) -> Self {
+        Self {
+            purpose: record.purpose.clone(),
+            icon: record.icon.clone(),
+            language: record.language.clone(),
+            region: record.region.clone(),
+            tags: record.tags.clone(),
+            capability_declarations: record.capability_declarations.clone(),
+            visibility: record.visibility,
+            join_mode: record.join_mode,
+        }
+    }
+
+    pub fn validate(&self) -> DomainResult<()> {
+        validate_network_purpose(&self.purpose)?;
+        validate_network_icon(&self.icon)?;
+        validate_network_language(&self.language)?;
+        validate_network_region(&self.region)?;
+        validate_network_tags(&self.tags)?;
+        validate_capability_declarations(&self.capability_declarations)
+    }
+
+    pub fn normalized(mut self) -> DomainResult<Self> {
+        self.tags = canonical_tags(&self.tags)?;
+        self.capability_declarations = canonical_capabilities(&self.capability_declarations)?;
+        self.validate()?;
+        Ok(self)
     }
 }
 
 pub const DEFAULT_NETWORK_PURPOSE: &str = "Owner-created network";
 pub const DEFAULT_NETWORK_ICON: &str = "network";
 pub const DEFAULT_NETWORK_LANGUAGE: &str = "und";
+pub const DEFAULT_NETWORK_REGION: &str = "ZZ";
+pub const NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION: u16 = 1;
+pub const NETWORK_PUBLIC_PROFILE_VALIDITY_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+pub const NETWORK_PROFILE_MAX_TAGS: usize = 12;
+pub const NETWORK_PROFILE_MAX_TAG_CHARS: usize = 32;
 
 pub fn default_network_purpose() -> String {
     DEFAULT_NETWORK_PURPOSE.into()
@@ -220,6 +412,10 @@ pub fn default_network_icon() -> String {
 
 pub fn default_network_language() -> String {
     DEFAULT_NETWORK_LANGUAGE.into()
+}
+
+pub fn default_network_region() -> String {
+    DEFAULT_NETWORK_REGION.into()
 }
 
 fn validate_network_name(name: &str) -> DomainResult<()> {
@@ -260,6 +456,76 @@ fn validate_network_icon(icon: &str) -> DomainResult<()> {
     Ok(())
 }
 
+fn validate_network_region(region: &str) -> DomainResult<()> {
+    if region.len() != 2
+        || !region
+            .chars()
+            .all(|character| character.is_ascii_uppercase())
+    {
+        return Err(DomainError::invalid_value("network region is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_network_tags(tags: &[String]) -> DomainResult<()> {
+    if tags.len() > NETWORK_PROFILE_MAX_TAGS {
+        return Err(DomainError::invalid_value("network has too many tags"));
+    }
+    let mut normalized = BTreeSet::new();
+    for tag in tags {
+        if tag.is_empty()
+            || tag.chars().count() > NETWORK_PROFILE_MAX_TAG_CHARS
+            || tag.trim() != tag
+            || tag.chars().any(|character| {
+                character.is_control()
+                    || character.is_whitespace()
+                    || !(character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
+            })
+        {
+            return Err(DomainError::invalid_value("network tag is invalid"));
+        }
+        if !normalized.insert(tag.to_ascii_lowercase()) {
+            return Err(DomainError::invalid_value("network tags must be unique"));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_tags(tags: &[String]) -> DomainResult<Vec<String>> {
+    validate_network_tags(tags)?;
+    let mut normalized = tags
+        .iter()
+        .map(|tag| tag.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn validate_capability_declarations(capabilities: &[CapabilityKind]) -> DomainResult<()> {
+    if capabilities.len() > CapabilityKind::ALL.len() {
+        return Err(DomainError::invalid_value(
+            "network has too many capability declarations",
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    for capability in capabilities {
+        if !unique.insert(*capability) {
+            return Err(DomainError::invalid_value(
+                "network capability declarations must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_capabilities(capabilities: &[CapabilityKind]) -> DomainResult<Vec<CapabilityKind>> {
+    validate_capability_declarations(capabilities)?;
+    let mut normalized = capabilities.to_vec();
+    normalized.sort();
+    Ok(normalized)
+}
+
 fn validate_network_language(language: &str) -> DomainResult<()> {
     let mut segments = language.split('-');
     let Some(primary) = segments.next() else {
@@ -280,6 +546,422 @@ fn validate_network_language(language: &str) -> DomainResult<()> {
         return Err(DomainError::invalid_value("network language is invalid"));
     }
     Ok(())
+}
+
+/// Public profile data that is safe to show before membership. This type is
+/// an allowlist: it has no member identities, assigned addresses, endpoints,
+/// topology, activity history or secret references.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkPublicProfileDocument {
+    pub schema_version: u16,
+    pub network_id: NetworkId,
+    pub public_key: PublicKey,
+    pub owner: NodeId,
+    pub name: String,
+    pub purpose: String,
+    pub icon: String,
+    pub language: String,
+    pub region: String,
+    pub tags: Vec<String>,
+    pub capability_declarations: Vec<CapabilityKind>,
+    pub visibility: NetworkVisibility,
+    pub join_mode: NetworkJoinMode,
+    pub revision: u64,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+impl NetworkPublicProfileDocument {
+    pub fn validate(&self) -> DomainResult<()> {
+        if self.schema_version != NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION {
+            return Err(DomainError::invalid_value(
+                "network public profile schema version is unsupported",
+            ));
+        }
+        let expected = NetworkId::from_public_key(self.public_key.as_str().as_bytes());
+        if self.network_id != expected {
+            return Err(DomainError::invariant(
+                "network public profile id does not match its public key",
+            ));
+        }
+        validate_network_name(&self.name)?;
+        validate_network_purpose(&self.purpose)?;
+        validate_network_icon(&self.icon)?;
+        validate_network_language(&self.language)?;
+        validate_network_region(&self.region)?;
+        validate_network_tags(&self.tags)?;
+        validate_capability_declarations(&self.capability_declarations)?;
+        if self.revision == 0 {
+            return Err(DomainError::invalid_value(
+                "network public profile revision must be positive",
+            ));
+        }
+        if self.issued_at_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::invariant(
+                "network public profile validity interval is empty",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_expired_at(&self, now_unix_ms: u64) -> bool {
+        now_unix_ms >= self.expires_at_unix_ms
+    }
+
+    pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
+        serde_json::to_vec(self)
+            .map_err(|_| DomainError::invalid_value("network public profile cannot be encoded"))
+    }
+
+    fn validate_against_record(&self, record: &NetworkRecord) -> DomainResult<()> {
+        self.validate()?;
+        if self.schema_version != NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION
+            || self.network_id != record.network_id
+            || self.public_key != record.public_key
+            || self.owner != record.owner
+            || self.name != record.name
+            || self.purpose != record.purpose
+            || self.icon != record.icon
+            || self.language != record.language
+            || self.region != record.region
+            || self.tags != record.tags
+            || self.capability_declarations != record.capability_declarations
+            || self.visibility != record.visibility
+            || self.join_mode != record.join_mode
+            || self.revision != record.revision
+        {
+            return Err(DomainError::invariant(
+                "network public profile does not match the signed record",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkPublicProfileRecord {
+    pub document: NetworkPublicProfileDocument,
+    pub signature: Signature,
+}
+
+impl NetworkPublicProfileRecord {
+    pub fn sign(document: NetworkPublicProfileDocument, identity: &Identity) -> Self {
+        let signature = identity.sign(&document.signing_payload().unwrap_or_default());
+        Self {
+            document,
+            signature: Signature::from_bytes(signature.to_bytes()),
+        }
+    }
+
+    pub fn validate(&self) -> DomainResult<()> {
+        self.document.validate()?;
+        let key = VerifyingKey::from_bytes(&self.document.public_key.to_bytes()?)
+            .map_err(|_| DomainError::invalid_value("network public key is invalid"))?;
+        let signature = DalekSignature::from_bytes(&self.signature.to_bytes()?);
+        key.verify(&self.document.signing_payload()?, &signature)
+            .map_err(|_| {
+                DomainError::new(
+                    "domain.invalid_signature",
+                    "network public profile signature is invalid",
+                )
+            })
+    }
+
+    fn validate_against_record(&self, record: &NetworkRecord) -> DomainResult<()> {
+        self.validate()?;
+        self.document.validate_against_record(record)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProfileWarningCode {
+    UnsignedLegacy,
+    ProfileExpired,
+    RevisionConflict,
+    CapabilityNotObserved,
+    CapabilityUndeclared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkProfileWarning {
+    pub code: NetworkProfileWarningCode,
+    pub field: Option<String>,
+    pub capability: Option<CapabilityKind>,
+    pub message: String,
+}
+
+impl NetworkProfileWarning {
+    pub fn new(code: NetworkProfileWarningCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            field: None,
+            capability: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn capability(
+        code: NetworkProfileWarningCode,
+        capability: CapabilityKind,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code,
+            field: Some("capability_declarations".into()),
+            capability: Some(capability),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkProfileDiffEntry {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// Exact public-card projection plus the categories that are withheld. The
+/// withheld values themselves never cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkPublicProfileProjection {
+    pub candidate: NetworkPublicProfileDocument,
+    pub currently_published: Option<NetworkPublicProfileRecord>,
+    pub withheld_categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkMemberProfileProjection {
+    pub profile: NetworkPublicProfileDocument,
+    pub member_count: usize,
+    pub administrator_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkAdminProfileProjection {
+    pub profile: NetworkPublicProfileDocument,
+    pub member_count: usize,
+    pub administrator_count: usize,
+    pub revision: u64,
+    pub policy_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkLocalSecretProjection {
+    pub identity_present: bool,
+    pub public_key_fingerprint: String,
+    pub storage: String,
+    pub secret_material_included: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkProfileProjections {
+    pub public_card: NetworkPublicProfileProjection,
+    pub member_view: NetworkMemberProfileProjection,
+    pub administrator_view: NetworkAdminProfileProjection,
+    pub local_secret: NetworkLocalSecretProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkProfilePreview {
+    pub network_name: String,
+    pub expected_revision: u64,
+    pub current_revision: u64,
+    pub candidate_revision: u64,
+    pub conflict: bool,
+    pub can_apply: bool,
+    pub projections: NetworkProfileProjections,
+    pub diff: Vec<NetworkProfileDiffEntry>,
+    pub warnings: Vec<NetworkProfileWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkProfileApplyResult {
+    pub network_name: String,
+    pub revision: u64,
+    pub previous_revision: u64,
+    pub applied_at_unix_ms: u64,
+    pub changed_paths: Vec<String>,
+    pub signed_profile: NetworkPublicProfileRecord,
+    pub projections: NetworkProfileProjections,
+    pub warnings: Vec<NetworkProfileWarning>,
+    pub audit_action: String,
+}
+
+fn network_profile_diff(
+    record: &NetworkRecord,
+    update: &NetworkProfileUpdate,
+) -> Vec<NetworkProfileDiffEntry> {
+    let current = NetworkProfileUpdate::from_record(record);
+    let mut entries = Vec::new();
+    let mut compare = |path: &str, before: String, after: String| {
+        if before != after {
+            entries.push(NetworkProfileDiffEntry {
+                path: path.into(),
+                before: Some(before),
+                after: Some(after),
+            });
+        }
+    };
+    compare("purpose", current.purpose, update.purpose.clone());
+    compare("icon", current.icon, update.icon.clone());
+    compare("language", current.language, update.language.clone());
+    compare("region", current.region, update.region.clone());
+    compare(
+        "tags",
+        current.tags.join(","),
+        canonical_tags(&update.tags)
+            .unwrap_or_else(|_| update.tags.clone())
+            .join(","),
+    );
+    compare(
+        "capability_declarations",
+        current
+            .capability_declarations
+            .iter()
+            .map(|capability| capability.wire_name())
+            .collect::<Vec<_>>()
+            .join(","),
+        canonical_capabilities(&update.capability_declarations)
+            .unwrap_or_else(|_| update.capability_declarations.clone())
+            .iter()
+            .map(|capability| capability.wire_name())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    compare(
+        "visibility",
+        format!("{:?}", current.visibility).to_ascii_lowercase(),
+        format!("{:?}", update.visibility).to_ascii_lowercase(),
+    );
+    compare(
+        "join_mode",
+        format!("{:?}", current.join_mode).to_ascii_lowercase(),
+        format!("{:?}", update.join_mode).to_ascii_lowercase(),
+    );
+    entries
+}
+
+/// Build the truthful four-layer preview used by creation and editing. The
+/// caller may append capability warnings after comparing declarations with the
+/// live `NodeCapabilityRegistrySnapshot`.
+pub fn preview_network_profile(
+    network_name: &str,
+    record: &NetworkRecord,
+    expected_revision: u64,
+    update: &NetworkProfileUpdate,
+    now_unix_ms: u64,
+) -> DomainResult<NetworkProfilePreview> {
+    update.validate()?;
+    let conflict = record.revision != expected_revision;
+    let diff = network_profile_diff(record, update);
+    let candidate_revision = if diff.is_empty() {
+        record.revision
+    } else {
+        record.revision.saturating_add(1)
+    };
+    let candidate_document = NetworkPublicProfileDocument {
+        schema_version: NETWORK_PUBLIC_PROFILE_SCHEMA_VERSION,
+        network_id: record.network_id.clone(),
+        public_key: record.public_key.clone(),
+        owner: record.owner.clone(),
+        name: record.name.clone(),
+        purpose: update.purpose.clone(),
+        icon: update.icon.clone(),
+        language: update.language.clone(),
+        region: update.region.clone(),
+        tags: canonical_tags(&update.tags)?,
+        capability_declarations: canonical_capabilities(&update.capability_declarations)?,
+        visibility: update.visibility,
+        join_mode: update.join_mode,
+        revision: candidate_revision,
+        issued_at_unix_ms: now_unix_ms,
+        expires_at_unix_ms: now_unix_ms.saturating_add(NETWORK_PUBLIC_PROFILE_VALIDITY_MS),
+    };
+    candidate_document.validate()?;
+
+    let mut warnings = Vec::new();
+    if record.signed_profile.is_none() {
+        warnings.push(NetworkProfileWarning::new(
+            NetworkProfileWarningCode::UnsignedLegacy,
+            "该网络资料来自旧版记录，尚无可验证签名；应用变更后会签发新资料",
+        ));
+    }
+    if record
+        .signed_profile
+        .as_ref()
+        .is_some_and(|profile| profile.document.is_expired_at(now_unix_ms))
+    {
+        warnings.push(NetworkProfileWarning::new(
+            NetworkProfileWarningCode::ProfileExpired,
+            "当前公网资料已超过有效期，请重新签发",
+        ));
+    }
+    if conflict {
+        warnings.push(NetworkProfileWarning::new(
+            NetworkProfileWarningCode::RevisionConflict,
+            "网络资料已在别处更新；请重新加载后再预览",
+        ));
+    }
+
+    let projections =
+        network_profile_projections(record, candidate_document, record.signed_profile.clone());
+    Ok(NetworkProfilePreview {
+        network_name: network_name.into(),
+        expected_revision,
+        current_revision: record.revision,
+        candidate_revision,
+        conflict,
+        can_apply: !conflict,
+        projections,
+        diff,
+        warnings,
+    })
+}
+
+pub fn network_profile_projections(
+    record: &NetworkRecord,
+    candidate: NetworkPublicProfileDocument,
+    currently_published: Option<NetworkPublicProfileRecord>,
+) -> NetworkProfileProjections {
+    let public_profile = candidate.clone();
+    let candidate_revision = candidate.revision;
+    let fingerprint = blake3::hash(record.public_key.as_str().as_bytes())
+        .to_hex()
+        .to_string();
+    NetworkProfileProjections {
+        public_card: NetworkPublicProfileProjection {
+            candidate,
+            currently_published,
+            withheld_categories: vec![
+                "member_identity".into(),
+                "network_addresses".into(),
+                "internal_topology".into(),
+                "activity_history".into(),
+                "secret_material".into(),
+                "invitation_tickets".into(),
+            ],
+        },
+        member_view: NetworkMemberProfileProjection {
+            profile: public_profile.clone(),
+            member_count: record.members.len(),
+            administrator_count: record.administrators.len(),
+        },
+        administrator_view: NetworkAdminProfileProjection {
+            profile: public_profile,
+            member_count: record.members.len(),
+            administrator_count: record.administrators.len(),
+            revision: candidate_revision,
+            policy_revision: record.policy_revision,
+        },
+        local_secret: NetworkLocalSecretProjection {
+            identity_present: true,
+            public_key_fingerprint: fingerprint,
+            storage: "network_identity_file".into(),
+            secret_material_included: false,
+        },
+    }
 }
 
 /// Signed discovery data. Endpoints may change between revisions; the stable
@@ -490,6 +1172,9 @@ mod tests {
             purpose: "test".into(),
             icon: "network".into(),
             language: "en".into(),
+            region: "US".into(),
+            tags: vec!["home".into()],
+            capability_declarations: vec![CapabilityKind::Relay],
             visibility: NetworkVisibility::Private,
             join_mode: NetworkJoinMode::InviteOnly,
             owner: owner.clone(),
@@ -499,6 +1184,7 @@ mod tests {
             policy_revision: 1,
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
+            signed_profile: None,
         };
         network.validate().unwrap();
         network.members.pop();
@@ -511,6 +1197,9 @@ mod tests {
             purpose: "Family devices across two homes".into(),
             icon: "home".into(),
             language: "zh-CN".into(),
+            region: "CN".into(),
+            tags: vec!["Family".into(), "home".into()],
+            capability_declarations: vec![CapabilityKind::Relay, CapabilityKind::Coordinator],
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
         }
@@ -534,6 +1223,12 @@ mod tests {
         assert_eq!(network.policy_revision, 1);
         assert_eq!(network.icon, "home");
         assert_eq!(network.language, "zh-CN");
+        assert_eq!(network.region, "CN");
+        assert_eq!(network.tags, vec!["family", "home"]);
+        assert_eq!(
+            network.capability_declarations,
+            vec![CapabilityKind::Coordinator, CapabilityKind::Relay]
+        );
     }
 
     #[test]
@@ -583,6 +1278,160 @@ mod tests {
     }
 
     #[test]
+    fn signed_public_profile_is_exact_and_private_fields_are_absent() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        network
+            .sign_public_profile(&identity, 100, 100 + NETWORK_PUBLIC_PROFILE_VALIDITY_MS)
+            .unwrap();
+        let profile = network.signed_profile.as_ref().unwrap();
+        profile.validate().unwrap();
+        let value = serde_json::to_value(&profile.document).unwrap();
+        let object = value.as_object().unwrap();
+        let allowed = BTreeSet::from([
+            "schema_version",
+            "network_id",
+            "public_key",
+            "owner",
+            "name",
+            "purpose",
+            "icon",
+            "language",
+            "region",
+            "tags",
+            "capability_declarations",
+            "visibility",
+            "join_mode",
+            "revision",
+            "issued_at_unix_ms",
+            "expires_at_unix_ms",
+        ]);
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            allowed
+        );
+        for forbidden in [
+            "members",
+            "administrators",
+            "assigned_ipv4",
+            "assigned_ipv6",
+            "p2p_listen_addr",
+            "endpoints",
+            "tunnel",
+            "topology",
+            "activity",
+            "audit",
+            "private_key",
+            "signing_key",
+            "identity",
+            "ticket",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "public profile leaked {forbidden}"
+            );
+            assert!(!value.to_string().contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn signed_public_profile_rejects_tampering_schema_and_revision_mismatch() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        network.sign_public_profile(&identity, 100, 200).unwrap();
+
+        let mut tampered = network.clone();
+        tampered.signed_profile.as_mut().unwrap().document.purpose = "tampered".into();
+        assert_eq!(
+            tampered.validate().unwrap_err().code(),
+            "domain.invalid_signature"
+        );
+
+        let mut unsupported = network.clone();
+        unsupported
+            .signed_profile
+            .as_mut()
+            .unwrap()
+            .document
+            .schema_version = 99;
+        assert!(unsupported.validate().is_err());
+
+        let mut revision = network;
+        revision.signed_profile.as_mut().unwrap().document.revision = 2;
+        assert!(revision.validate().is_err());
+    }
+
+    #[test]
+    fn profile_preview_is_four_layered_and_reports_expiry_conflict_and_diff() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        network.sign_public_profile(&identity, 100, 200).unwrap();
+        let update = NetworkProfileUpdate {
+            purpose: "Updated purpose".into(),
+            region: "JP".into(),
+            tags: vec!["Tokyo".into(), "asia".into()],
+            capability_declarations: vec![CapabilityKind::Exit],
+            ..NetworkProfileUpdate::from_record(&network)
+        };
+
+        let preview = preview_network_profile("home-mesh", &network, 1, &update, 300).unwrap();
+        assert_eq!(preview.current_revision, 1);
+        assert_eq!(preview.candidate_revision, 2);
+        assert!(!preview.conflict);
+        assert_eq!(preview.projections.public_card.candidate.region, "JP");
+        assert_eq!(preview.projections.member_view.member_count, 1);
+        assert_eq!(
+            preview.projections.administrator_view.revision,
+            preview.candidate_revision
+        );
+        assert_eq!(preview.projections.administrator_view.policy_revision, 1);
+        assert!(!preview.projections.local_secret.secret_material_included);
+        assert!(preview.diff.iter().any(|entry| entry.path == "purpose"));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.code == NetworkProfileWarningCode::ProfileExpired));
+
+        let conflict = preview_network_profile("home-mesh", &network, 0, &update, 300).unwrap();
+        assert!(conflict.conflict);
+        assert!(!conflict.can_apply);
+        assert!(conflict
+            .warnings
+            .iter()
+            .any(|warning| warning.code == NetworkProfileWarningCode::RevisionConflict));
+    }
+
+    #[test]
+    fn profile_update_applies_atomically_in_memory_and_requires_resigning() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        network.sign_public_profile(&identity, 100, 1_000).unwrap();
+        let update = NetworkProfileUpdate {
+            purpose: "Changed".into(),
+            ..NetworkProfileUpdate::from_record(&network)
+        };
+        let diff = network.apply_profile_update(&update, 1, 200).unwrap();
+        assert_eq!(diff.len(), 1);
+        assert_eq!(network.revision, 2);
+        assert!(network.signed_profile.is_none());
+        network.sign_public_profile(&identity, 200, 300).unwrap();
+        network.validate().unwrap();
+        assert!(network.apply_profile_update(&update, 1, 300).is_err());
+    }
+
+    #[test]
     fn legacy_network_record_uses_default_public_profile_fields() {
         let value = serde_json::json!({
             "network_id": NetworkId::from_public_key(PublicKey::from_bytes([11; 32]).as_str().as_bytes()),
@@ -602,6 +1451,10 @@ mod tests {
         let record: NetworkRecord = serde_json::from_value(value).unwrap();
         assert_eq!(record.icon, DEFAULT_NETWORK_ICON);
         assert_eq!(record.language, DEFAULT_NETWORK_LANGUAGE);
+        assert_eq!(record.region, DEFAULT_NETWORK_REGION);
+        assert!(record.tags.is_empty());
+        assert!(record.capability_declarations.is_empty());
+        assert!(record.signed_profile.is_none());
         record.validate().unwrap();
     }
 }

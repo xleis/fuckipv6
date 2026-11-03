@@ -469,6 +469,8 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::RebuildTun
         | NodeCommandKind::CleanupResiduals
         | NodeCommandKind::CreateNetwork
+        | NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::UpdateNetworkProfile
         | NodeCommandKind::JoinNetwork
         | NodeCommandKind::StartNode
         | NodeCommandKind::StopNode

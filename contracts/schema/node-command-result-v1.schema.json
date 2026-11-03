@@ -455,8 +455,109 @@
       ],
       "type": "string"
     },
+    "NetworkAdminProfileProjection": {
+      "properties": {
+        "administrator_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "member_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "profile": {
+          "$ref": "#/$defs/NetworkPublicProfileDocument"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profile",
+        "member_count",
+        "administrator_count",
+        "revision",
+        "policy_revision"
+      ],
+      "type": "object"
+    },
     "NetworkId": {
       "type": "string"
+    },
+    "NetworkJoinMode": {
+      "description": "Admission policy selected by the network owner.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "Requests are accepted immediately.",
+          "type": "string"
+        },
+        {
+          "const": "approval_required",
+          "description": "Requests enter `pending_approval`.",
+          "type": "string"
+        },
+        {
+          "const": "invite_only",
+          "description": "The node must first consume a signed, single-use invitation.",
+          "type": "string"
+        }
+      ]
+    },
+    "NetworkLocalSecretProjection": {
+      "properties": {
+        "identity_present": {
+          "type": "boolean"
+        },
+        "public_key_fingerprint": {
+          "type": "string"
+        },
+        "secret_material_included": {
+          "type": "boolean"
+        },
+        "storage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity_present",
+        "public_key_fingerprint",
+        "storage",
+        "secret_material_included"
+      ],
+      "type": "object"
+    },
+    "NetworkMemberProfileProjection": {
+      "properties": {
+        "administrator_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "member_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "profile": {
+          "$ref": "#/$defs/NetworkPublicProfileDocument"
+        }
+      },
+      "required": [
+        "profile",
+        "member_count",
+        "administrator_count"
+      ],
+      "type": "object"
     },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
@@ -477,6 +578,343 @@
           "type": "string"
         }
       ]
+    },
+    "NetworkProfileApplyResult": {
+      "properties": {
+        "applied_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "audit_action": {
+          "type": "string"
+        },
+        "changed_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "projections": {
+          "$ref": "#/$defs/NetworkProfileProjections"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signed_profile": {
+          "$ref": "#/$defs/NetworkPublicProfileRecord"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/NetworkProfileWarning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_name",
+        "revision",
+        "previous_revision",
+        "applied_at_unix_ms",
+        "changed_paths",
+        "signed_profile",
+        "projections",
+        "warnings",
+        "audit_action"
+      ],
+      "type": "object"
+    },
+    "NetworkProfileDiffEntry": {
+      "properties": {
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "before": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "NetworkProfilePreview": {
+      "properties": {
+        "can_apply": {
+          "type": "boolean"
+        },
+        "candidate_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conflict": {
+          "type": "boolean"
+        },
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diff": {
+          "items": {
+            "$ref": "#/$defs/NetworkProfileDiffEntry"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "projections": {
+          "$ref": "#/$defs/NetworkProfileProjections"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/NetworkProfileWarning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_name",
+        "expected_revision",
+        "current_revision",
+        "candidate_revision",
+        "conflict",
+        "can_apply",
+        "projections",
+        "diff",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "NetworkProfileProjections": {
+      "properties": {
+        "administrator_view": {
+          "$ref": "#/$defs/NetworkAdminProfileProjection"
+        },
+        "local_secret": {
+          "$ref": "#/$defs/NetworkLocalSecretProjection"
+        },
+        "member_view": {
+          "$ref": "#/$defs/NetworkMemberProfileProjection"
+        },
+        "public_card": {
+          "$ref": "#/$defs/NetworkPublicProfileProjection"
+        }
+      },
+      "required": [
+        "public_card",
+        "member_view",
+        "administrator_view",
+        "local_secret"
+      ],
+      "type": "object"
+    },
+    "NetworkProfileWarning": {
+      "properties": {
+        "capability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/NetworkProfileWarningCode"
+        },
+        "field": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "NetworkProfileWarningCode": {
+      "enum": [
+        "unsigned_legacy",
+        "profile_expired",
+        "revision_conflict",
+        "capability_not_observed",
+        "capability_undeclared"
+      ],
+      "type": "string"
+    },
+    "NetworkPublicProfileDocument": {
+      "description": "Public profile data that is safe to show before membership. This type is\nan allowlist: it has no member identities, assigned addresses, endpoints,\ntopology, activity history or secret references.",
+      "properties": {
+        "capability_declarations": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "language": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "owner": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "public_key": {
+          "$ref": "#/$defs/PublicKey"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility"
+        }
+      },
+      "required": [
+        "schema_version",
+        "network_id",
+        "public_key",
+        "owner",
+        "name",
+        "purpose",
+        "icon",
+        "language",
+        "region",
+        "tags",
+        "capability_declarations",
+        "visibility",
+        "join_mode",
+        "revision",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "NetworkPublicProfileProjection": {
+      "description": "Exact public-card projection plus the categories that are withheld. The\nwithheld values themselves never cross this boundary.",
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/NetworkPublicProfileDocument"
+        },
+        "currently_published": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkPublicProfileRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "withheld_categories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate",
+        "withheld_categories"
+      ],
+      "type": "object"
+    },
+    "NetworkPublicProfileRecord": {
+      "properties": {
+        "document": {
+          "$ref": "#/$defs/NetworkPublicProfileDocument"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        }
+      },
+      "required": [
+        "document",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "NetworkVisibility": {
+      "description": "How much of a network's public profile is discoverable without membership.",
+      "enum": [
+        "public",
+        "unlisted",
+        "private"
+      ],
+      "type": "string"
     },
     "NodeAccessModel": {
       "enum": [
@@ -719,6 +1157,38 @@
             },
             "status": {
               "const": "network_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NetworkProfilePreview"
+            },
+            "status": {
+              "const": "network_profile_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NetworkProfileApplyResult"
+            },
+            "status": {
+              "const": "network_profile_updated",
               "type": "string"
             }
           },
@@ -1587,6 +2057,82 @@
       ],
       "type": "string"
     },
+    "NodeNetworkProfileSnapshot": {
+      "description": "Public, owner-editable network metadata rendered by every UI adapter.\n\nThis is deliberately a separate projection from `NetworkRecord`: secrets,\nmembers, addresses, topology, activity and invitations are not fields and\ntherefore cannot be serialized by accident.",
+      "properties": {
+        "capability_declarations": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "language": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signed_profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeSignedNetworkProfileSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility"
+        }
+      },
+      "required": [
+        "network_id",
+        "name",
+        "purpose",
+        "icon",
+        "language",
+        "region",
+        "tags",
+        "capability_declarations",
+        "visibility",
+        "join_mode",
+        "revision",
+        "policy_revision"
+      ],
+      "type": "object"
+    },
     "NodeNetworkRole": {
       "description": "Network roles are capabilities within a network, never product identities.",
       "enum": [
@@ -2198,6 +2744,32 @@
       ],
       "type": "object"
     },
+    "NodeSignedNetworkProfileSnapshot": {
+      "properties": {
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "NodeSnapshot": {
       "description": "Stable, transport-neutral state rendered by every node UI adapter.",
       "properties": {
@@ -2302,6 +2874,14 @@
         "logs": {
           "items": {
             "$ref": "#/$defs/NodeLogEntry"
+          },
+          "type": "array"
+        },
+        "network_profiles": {
+          "default": [],
+          "description": "Owner-authored public network-profile projections. This field is an\nallowlisted public snapshot: it never contains member identities,\naddresses, topology, activity, invitation tickets or secret material.",
+          "items": {
+            "$ref": "#/$defs/NodeNetworkProfileSnapshot"
           },
           "type": "array"
         },
@@ -2461,6 +3041,8 @@
             "restart_networks",
             "rebuild_tun",
             "create_network",
+            "preview_network_profile",
+            "update_network_profile",
             "join_network",
             "update_routing",
             "set_network_role",
@@ -2655,6 +3237,9 @@
         "purpose",
         "icon",
         "language",
+        "region",
+        "tags",
+        "capability_declarations",
         "visibility",
         "join_mode",
         "port",
@@ -2766,6 +3351,9 @@
         "network_purpose",
         "network_icon",
         "network_language",
+        "region",
+        "tags",
+        "capability_declarations",
         "visibility",
         "join_mode"
       ],
@@ -2808,6 +3396,14 @@
         "hint_key"
       ],
       "type": "object"
+    },
+    "PublicKey": {
+      "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
+      "type": "string"
+    },
+    "Signature": {
+      "description": "Signature bytes encoded as URL-safe base64 without padding.",
+      "type": "string"
     },
     "TunCapabilities": {
       "description": "Redacted TUN readiness for the current node process. This is deliberately\nderived from capability metadata rather than a real TUN creation probe.",

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::{
-    CapabilityKind, CapabilityState, NetworkJoinMode, NetworkVisibility,
+    CapabilityKind, CapabilityState, NetworkJoinMode, NetworkProfileUpdate, NetworkVisibility,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -13,10 +13,10 @@ use crate::node::{
     NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
     NodeControlHealth, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeInterfaceKind,
     NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeNetworkAllocation,
-    NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
-    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
-    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePrimaryStatus,
+    NodeProbePeerCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction,
     NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
     NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
@@ -103,6 +103,8 @@ pub enum ActionBinding {
     RefreshSnapshot,
     GetDiagnostics,
     CreateNetwork,
+    PreviewNetworkProfile,
+    UpdateNetworkProfile,
     JoinNetwork,
     StartNetworks,
     StopNetworks,
@@ -132,10 +134,12 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 31] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
+        Self::PreviewNetworkProfile,
+        Self::UpdateNetworkProfile,
         Self::JoinNetwork,
         Self::StartNetworks,
         Self::StopNetworks,
@@ -169,6 +173,8 @@ impl ActionBinding {
             Self::RefreshSnapshot => "refresh_snapshot",
             Self::GetDiagnostics => "get_node_diagnostics",
             Self::CreateNetwork => "create_network",
+            Self::PreviewNetworkProfile => "preview_network_profile",
+            Self::UpdateNetworkProfile => "update_network_profile",
             Self::JoinNetwork => "join_network",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
@@ -721,6 +727,14 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::GetDiagnostics,
         ),
         "create_network" => (ActionBinding::CreateNetwork, NodeCommandKind::CreateNetwork),
+        "preview_network_profile" => (
+            ActionBinding::PreviewNetworkProfile,
+            NodeCommandKind::PreviewNetworkProfile,
+        ),
+        "update_network_profile" => (
+            ActionBinding::UpdateNetworkProfile,
+            NodeCommandKind::UpdateNetworkProfile,
+        ),
         "join_network" => (ActionBinding::JoinNetwork, NodeCommandKind::JoinNetwork),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
         "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
@@ -854,8 +868,15 @@ pub fn action_block_reason(
 
 pub fn default_form_values(
     action: &NodeUiAction,
+    snapshot: &NodeSnapshot,
     selected_network: Option<&str>,
 ) -> HashMap<String, String> {
+    let profile = selected_network.and_then(|selected| {
+        snapshot
+            .network_profiles
+            .iter()
+            .find(|profile| profile.name == selected)
+    });
     action
         .fields
         .iter()
@@ -868,9 +889,49 @@ pub fn default_form_values(
                 ("create_network", "purpose") => "Owner-created network".into(),
                 ("create_network", "icon") => "network".into(),
                 ("create_network", "language") => "und".into(),
+                ("create_network", "region") => "ZZ".into(),
                 ("create_network", "visibility") => "unlisted".into(),
                 ("create_network", "join_mode") => "invite_only".into(),
                 ("create_network", "auto_connect") => "true".into(),
+                ("preview_network_profile" | "update_network_profile", "purpose") => profile
+                    .map(|profile| profile.purpose.clone())
+                    .unwrap_or_else(|| "Owner-created network".into()),
+                ("preview_network_profile" | "update_network_profile", "icon") => profile
+                    .map(|profile| profile.icon.clone())
+                    .unwrap_or_else(|| "network".into()),
+                ("preview_network_profile" | "update_network_profile", "language") => profile
+                    .map(|profile| profile.language.clone())
+                    .unwrap_or_else(|| "und".into()),
+                ("preview_network_profile" | "update_network_profile", "region") => profile
+                    .map(|profile| profile.region.clone())
+                    .unwrap_or_else(|| "ZZ".into()),
+                ("preview_network_profile" | "update_network_profile", "tags") => profile
+                    .map(|profile| profile.tags.join(","))
+                    .unwrap_or_default(),
+                (
+                    "preview_network_profile" | "update_network_profile",
+                    "capability_declarations",
+                ) => profile
+                    .map(|profile| {
+                        profile
+                            .capability_declarations
+                            .iter()
+                            .map(|capability| capability.wire_name())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default(),
+                ("preview_network_profile" | "update_network_profile", "visibility") => profile
+                    .map(|profile| format!("{:?}", profile.visibility).to_ascii_lowercase())
+                    .unwrap_or_else(|| "unlisted".into()),
+                ("preview_network_profile" | "update_network_profile", "join_mode") => profile
+                    .map(|profile| format!("{:?}", profile.join_mode).to_ascii_lowercase())
+                    .unwrap_or_else(|| "invite_only".into()),
+                ("preview_network_profile" | "update_network_profile", "expected_revision") => {
+                    profile
+                        .map(|profile| profile.revision.to_string())
+                        .unwrap_or_else(|| "0".into())
+                }
                 ("start_networks", "selection") => "default".into(),
                 ("stop_networks", "networks") => selected_network.unwrap_or_default().into(),
                 ("stop_networks", "all") => "false".into(),
@@ -930,6 +991,11 @@ pub fn build_command(
                 purpose: field("purpose"),
                 icon: field("icon"),
                 language: field("language"),
+                region: field("region"),
+                tags: split_names(&field("tags")),
+                capability_declarations: parse_capability_declarations(&field(
+                    "capability_declarations",
+                ))?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
                 signaling_port: parse_number(
@@ -941,6 +1007,34 @@ pub fn build_command(
                 external_host: optional_non_empty(field("external_host")),
                 auto_connect: parse_bool(action, "auto_connect", &required("auto_connect")?)?,
             }))
+        }
+        Ok(ActionBinding::PreviewNetworkProfile | ActionBinding::UpdateNetworkProfile) => {
+            let update = NetworkProfileUpdate {
+                purpose: field("purpose"),
+                icon: field("icon"),
+                language: field("language"),
+                region: field("region"),
+                tags: split_names(&field("tags")),
+                capability_declarations: parse_capability_declarations(&field(
+                    "capability_declarations",
+                ))?,
+                visibility: parse_visibility(field("visibility"))?,
+                join_mode: parse_join_mode(field("join_mode"))?,
+            };
+            let command = NodeNetworkProfileCommand {
+                network_name: field("network_name"),
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                update,
+            };
+            if action.id == "preview_network_profile" {
+                Ok(NodeCommand::PreviewNetworkProfile(command))
+            } else {
+                Ok(NodeCommand::UpdateNetworkProfile(command))
+            }
         }
         Ok(ActionBinding::JoinNetwork) => Ok(NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
             target: field("target"),
@@ -1085,12 +1179,27 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "purpose",
             "icon",
             "language",
+            "region",
+            "tags",
+            "capability_declarations",
             "visibility",
             "join_mode",
             "signaling_port",
             "relay_port",
             "external_host",
             "auto_connect",
+        ]),
+        "preview_network_profile" | "update_network_profile" => HashSet::from([
+            "network_name",
+            "expected_revision",
+            "purpose",
+            "icon",
+            "language",
+            "region",
+            "tags",
+            "capability_declarations",
+            "visibility",
+            "join_mode",
         ]),
         "join_network" => HashSet::from(["target", "network_name", "start"]),
         "start_networks" => HashSet::from(["selection"]),
@@ -1340,6 +1449,23 @@ fn split_names(value: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
+        .collect()
+}
+
+fn parse_capability_declarations(value: &str) -> Result<Vec<CapabilityKind>, CommandBuildError> {
+    split_names(value)
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "coordinator" => Ok(CapabilityKind::Coordinator),
+            "relay" => Ok(CapabilityKind::Relay),
+            "exit" | "exit_node" | "exit-node" => Ok(CapabilityKind::Exit),
+            "file" => Ok(CapabilityKind::File),
+            _ => Err(CommandBuildError::InvalidField {
+                action_id: "create_network".into(),
+                field_id: "capability_declarations".into(),
+                value,
+            }),
+        })
         .collect()
 }
 
@@ -4271,7 +4397,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 29);
+        assert_eq!(ActionBinding::ALL.len(), 31);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -4315,9 +4441,10 @@ mod tests {
     #[test]
     fn action_builders_use_typed_node_commands() {
         let manifest = node_ui_manifest();
+        let snapshot = populated_snapshot();
         for page in &manifest.pages {
             for action in &page.actions {
-                let mut values = default_form_values(action, Some("home"));
+                let mut values = default_form_values(action, &snapshot, Some("home"));
                 if action.id == "rotate_node_identity" {
                     values.insert(
                         "expected_fingerprint".into(),
@@ -4665,7 +4792,8 @@ mod tests {
             .expect("peers page")
             .actions[0]
             .clone();
-        let mut values = default_form_values(&action, Some("home"));
+        let snapshot = populated_snapshot();
+        let mut values = default_form_values(&action, &snapshot, Some("home"));
         values.insert("timeout_ms".into(), "not-a-number".into());
         assert!(matches!(
             build_command(&action, &values),

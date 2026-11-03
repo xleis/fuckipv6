@@ -3,7 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
-use fuckipv6_common::domain::{IdempotencyKey, OperationError, OperationState};
+use fuckipv6_common::domain::{
+    CapabilityKind, IdempotencyKey, NetworkJoinMode, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
+    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
+};
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
     tr, LanguagePreference, Locale,
@@ -181,6 +185,12 @@ fn app_region_id(region: AppRegion) -> SharedString {
     SharedString::from(format!("gpui-region-{}", region.name()))
 }
 
+struct NetworkProfileResultSections<'a> {
+    status: gpui::AnyElement,
+    details: Div,
+    warnings: &'a [fuckipv6_common::domain::NetworkProfileWarning],
+}
+
 fn visible_overview_primary_page<'a>(
     overview: &'a OverviewModel,
     manifest: Option<&NodeUiManifest>,
@@ -224,6 +234,8 @@ struct GpuiShell {
     operation_cancel_error: Option<String>,
     recent_diagnostics: Option<NodeDiagnosticsSnapshot>,
     diagnostic_copy_notice: Option<String>,
+    recent_network_profile_preview: Option<NetworkProfilePreview>,
+    recent_network_profile_updated: Option<NetworkProfileApplyResult>,
     error: Option<String>,
     notice: Option<String>,
     pending_notice_after_snapshot: Option<String>,
@@ -278,6 +290,8 @@ impl GpuiShell {
             operation_cancel_error: None,
             recent_diagnostics: None,
             diagnostic_copy_notice: None,
+            recent_network_profile_preview: None,
+            recent_network_profile_updated: None,
             error: None,
             notice: None,
             pending_notice_after_snapshot: None,
@@ -1098,6 +1112,35 @@ impl GpuiShell {
                     ],
                 ));
             }
+            NodeCommandOutcome::NetworkProfilePreview(preview) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.network_profile_previewed",
+                    &[
+                        ("network", &preview.network_name),
+                        ("revision", &preview.candidate_revision.to_string()),
+                        ("diffs", &preview.diff.len().to_string()),
+                        ("warnings", &preview.warnings.len().to_string()),
+                    ],
+                ));
+                self.recent_network_profile_preview = Some(*preview);
+                self.recent_network_profile_updated = None;
+            }
+            NodeCommandOutcome::NetworkProfileUpdated(result) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.network_profile_updated",
+                    &[
+                        ("network", &result.network_name),
+                        ("previous", &result.previous_revision.to_string()),
+                        ("revision", &result.revision.to_string()),
+                        ("warnings", &result.warnings.len().to_string()),
+                    ],
+                ));
+                self.recent_network_profile_preview = None;
+                self.recent_network_profile_updated = Some(*result);
+                self.submit_raw(NodeCommand::GetSnapshot, cx);
+            }
             NodeCommandOutcome::NetworkCreated(created) => {
                 let key = if created.started {
                     "gpui.network_created_started"
@@ -1338,7 +1381,9 @@ impl GpuiShell {
             if is_configuration_action(&action.id) {
                 continue;
             }
-            for (field, value) in default_form_values(action, self.selected_network.as_deref()) {
+            for (field, value) in
+                default_form_values(action, &self.snapshot, self.selected_network.as_deref())
+            {
                 defaults.insert(self.field_key(&action.id, &field), value);
             }
             for field in &action.fields {
@@ -1430,7 +1475,7 @@ impl GpuiShell {
             .iter()
             .flat_map(|page| &page.actions)
             .flat_map(|action| {
-                default_form_values(action, Some(&selected))
+                default_form_values(action, &self.snapshot, Some(&selected))
                     .into_iter()
                     .map(|(field_id, value)| (self.field_key(&action.id, &field_id), value))
                     .collect::<Vec<_>>()
@@ -5021,6 +5066,580 @@ impl GpuiShell {
             .into_any_element()
     }
 
+    fn network_profile_result_card(&self) -> Option<gpui::AnyElement> {
+        if let Some(preview) = &self.recent_network_profile_preview {
+            return Some(self.network_profile_preview_card(preview));
+        }
+        self.recent_network_profile_updated
+            .as_ref()
+            .map(|result| self.network_profile_updated_card(result))
+    }
+
+    fn network_profile_preview_card(&self, preview: &NetworkProfilePreview) -> gpui::AnyElement {
+        let signature_valid = preview
+            .projections
+            .public_card
+            .currently_published
+            .as_ref()
+            .is_some_and(|profile| profile.validate().is_ok());
+        let status = div()
+            .debug_selector(|| "visual-network-profile-preview".into())
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.revision",
+                &[(
+                    "revision",
+                    &format_integer(self.locale, preview.current_revision as i64),
+                )],
+            )))
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.revision",
+                &[(
+                    "revision",
+                    &format_integer(self.locale, preview.candidate_revision as i64),
+                )],
+            )))
+            .child(profile_status_chip(
+                t(
+                    self.locale,
+                    if preview.can_apply {
+                        "profile.can_apply"
+                    } else {
+                        "profile.cannot_apply"
+                    },
+                )
+                .to_string(),
+            ))
+            .when(preview.conflict, |status| {
+                status.child(
+                    div()
+                        .debug_selector(|| "visual-network-profile-conflict".into())
+                        .w_full()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_WARNING))
+                        .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                        .p_3()
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(rgba(COLOR_WARNING))
+                        .child(tr(
+                            self.locale,
+                            "profile.conflict",
+                            &[
+                                (
+                                    "current",
+                                    &format_integer(self.locale, preview.current_revision as i64),
+                                ),
+                                (
+                                    "expected",
+                                    &format_integer(self.locale, preview.expected_revision as i64),
+                                ),
+                            ],
+                        )),
+                )
+            })
+            .into_any_element();
+
+        let diff = if preview.diff.is_empty() {
+            div()
+                .debug_selector(|| "visual-network-profile-no-changes".into())
+                .text_xs()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "profile.no_changes").to_string())
+                .into_any_element()
+        } else {
+            div()
+                .debug_selector(|| "visual-network-profile-diff".into())
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(preview.diff.iter().map(|entry| {
+                    let before = entry
+                        .before
+                        .clone()
+                        .unwrap_or_else(|| t(self.locale, "common.none").to_string());
+                    let after = entry
+                        .after
+                        .clone()
+                        .unwrap_or_else(|| t(self.locale, "common.none").to_string());
+                    div()
+                        .id(SharedString::from(format!(
+                            "network-profile-diff-{}",
+                            entry.path
+                        )))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_md()
+                        .bg(rgba(COLOR_BG))
+                        .p_2()
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_xs()
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(entry.path.clone()),
+                        )
+                        .child(diagnostic_metadata_row(
+                            t(self.locale, "configuration.before"),
+                            before,
+                        ))
+                        .child(diagnostic_metadata_row(
+                            t(self.locale, "configuration.after"),
+                            after,
+                        ))
+                        .into_any_element()
+                }))
+                .into_any_element()
+        };
+
+        self.network_profile_result_layout(
+            "profile.preview_title",
+            &preview.network_name,
+            &preview.projections,
+            signature_valid,
+            NetworkProfileResultSections {
+                status,
+                details: profile_result_section(t(self.locale, "profile.diff"), diff),
+                warnings: &preview.warnings,
+            },
+        )
+    }
+
+    fn network_profile_updated_card(&self, result: &NetworkProfileApplyResult) -> gpui::AnyElement {
+        let signature_valid = result.signed_profile.validate().is_ok();
+        let status = div()
+            .debug_selector(|| "visual-network-profile-updated".into())
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.revision",
+                &[(
+                    "revision",
+                    &format_integer(self.locale, result.previous_revision as i64),
+                )],
+            )))
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.revision",
+                &[(
+                    "revision",
+                    &format_integer(self.locale, result.revision as i64),
+                )],
+            )))
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.audit",
+                &[("action", &result.audit_action)],
+            )))
+            .into_any_element();
+
+        let changed_paths = if result.changed_paths.is_empty() {
+            div()
+                .debug_selector(|| "visual-network-profile-no-changes".into())
+                .text_xs()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "profile.no_changes").to_string())
+                .into_any_element()
+        } else {
+            div()
+                .debug_selector(|| "visual-network-profile-changed-paths".into())
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(result.changed_paths.iter().map(|path| {
+                    div()
+                        .font_family("monospace")
+                        .rounded_sm()
+                        .bg(rgba(COLOR_BG))
+                        .p_2()
+                        .text_xs()
+                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                        .child(path.clone())
+                        .into_any_element()
+                }))
+                .into_any_element()
+        };
+
+        self.network_profile_result_layout(
+            "profile.updated_title",
+            &result.network_name,
+            &result.projections,
+            signature_valid,
+            NetworkProfileResultSections {
+                status,
+                details: profile_result_section(
+                    t(self.locale, "configuration.history.changed_paths"),
+                    changed_paths,
+                ),
+                warnings: &result.warnings,
+            },
+        )
+    }
+
+    fn network_profile_result_layout(
+        &self,
+        title_key: &str,
+        network_name: &str,
+        projections: &NetworkProfileProjections,
+        signature_valid: bool,
+        sections: NetworkProfileResultSections<'_>,
+    ) -> gpui::AnyElement {
+        let NetworkProfileResultSections {
+            status,
+            details,
+            warnings,
+        } = sections;
+        let title = t(self.locale, title_key).to_string();
+        let projection_grid = self.network_profile_projection_grid(projections, signature_valid);
+        let withheld = div()
+            .debug_selector(|| "visual-network-profile-withheld".into())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_WARNING))
+            .p_3()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_WARNING))
+                    .child(t(self.locale, "profile.withheld").to_string()),
+            )
+            .child(
+                div()
+                    .font_family("monospace")
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(projections.public_card.withheld_categories.join(", ")),
+            );
+        let warning_section = self.network_profile_warnings(warnings);
+
+        div()
+            .id("network-profile-result")
+            .debug_selector(|| "visual-network-profile-result".into())
+            .role(Role::Article)
+            .aria_label(title.clone())
+            .mt_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(title.to_uppercase()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(network_name.to_string()),
+                    ),
+            )
+            .child(status)
+            .child(projection_grid)
+            .child(withheld)
+            .child(details)
+            .child(warning_section)
+            .into_any_element()
+    }
+
+    fn network_profile_projection_grid(
+        &self,
+        projections: &NetworkProfileProjections,
+        signature_valid: bool,
+    ) -> Div {
+        let public_card = self.network_profile_document_card(
+            "profile.public_card",
+            &projections.public_card.candidate,
+            signature_valid,
+            None,
+            None,
+        );
+        let member_view = self.network_profile_document_card(
+            "profile.member_view",
+            &projections.member_view.profile,
+            signature_valid,
+            Some(projections.member_view.member_count),
+            Some(projections.member_view.administrator_count),
+        );
+        let admin_view = self.network_profile_document_card(
+            "profile.admin_view",
+            &projections.administrator_view.profile,
+            signature_valid,
+            Some(projections.administrator_view.member_count),
+            Some(projections.administrator_view.administrator_count),
+        );
+        let secret = &projections.local_secret;
+        let secret_card = div()
+            .debug_selector(|| "visual-network-profile-local-secret".into())
+            .flex_1()
+            .min_w(px(220.0))
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .bg(rgba(COLOR_BG))
+            .p_3()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(t(self.locale, "profile.local_secret").to_string()),
+            )
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.storage"),
+                secret.storage.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "profile.identity"),
+                t(
+                    self.locale,
+                    if secret.identity_present {
+                        "profile.identity_present"
+                    } else {
+                        "profile.identity_absent"
+                    },
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "profile.secret"),
+                t(
+                    self.locale,
+                    if secret.secret_material_included {
+                        "profile.secret_included"
+                    } else {
+                        "profile.secret_not_included"
+                    },
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "identity.public_key_fingerprint"),
+                secret.public_key_fingerprint.clone(),
+            ));
+
+        div()
+            .debug_selector(|| "visual-network-profile-projections".into())
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(public_card)
+            .child(member_view)
+            .child(admin_view)
+            .child(secret_card)
+    }
+
+    fn network_profile_document_card(
+        &self,
+        title_key: &str,
+        document: &NetworkPublicProfileDocument,
+        signature_valid: bool,
+        member_count: Option<usize>,
+        administrator_count: Option<usize>,
+    ) -> Div {
+        let capabilities = if document.capability_declarations.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            document
+                .capability_declarations
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let tags = if document.tags.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            document.tags.join(", ")
+        };
+        let mut metadata = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .pt_2()
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.revision",
+                &[(
+                    "revision",
+                    &format_integer(self.locale, document.revision as i64),
+                )],
+            )))
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.schema_version",
+                &[(
+                    "version",
+                    &format_integer(self.locale, document.schema_version as i64),
+                )],
+            )))
+            .child(profile_status_chip(tr(
+                self.locale,
+                "profile.expires_at",
+                &[(
+                    "time",
+                    &format_diagnostic_timestamp(self.locale, document.expires_at_unix_ms),
+                )],
+            )));
+        if signature_valid {
+            metadata = metadata.child(profile_status_chip(
+                t(self.locale, "profile.signature_valid").to_string(),
+            ));
+        }
+        if let Some(count) = member_count {
+            metadata = metadata.child(profile_status_chip(tr(
+                self.locale,
+                "profile.member_count",
+                &[("count", &format_integer(self.locale, count as i64))],
+            )));
+        }
+        if let Some(count) = administrator_count {
+            metadata = metadata.child(profile_status_chip(tr(
+                self.locale,
+                "profile.admin_count",
+                &[("count", &format_integer(self.locale, count as i64))],
+            )));
+        }
+
+        div()
+            .debug_selector(move || profile_document_selector(title_key).to_string())
+            .flex_1()
+            .min_w(px(220.0))
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .bg(rgba(COLOR_BG))
+            .p_3()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(t(self.locale, title_key).to_string()),
+            )
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.purpose"),
+                document.purpose.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.icon"),
+                document.icon.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.language"),
+                document.language.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.region"),
+                document.region.clone(),
+            ))
+            .child(diagnostic_metadata_row(t(self.locale, "field.tags"), tags))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.capability_declarations"),
+                capabilities,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.visibility"),
+                t(self.locale, profile_visibility_key(document.visibility)).to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.join_mode"),
+                t(self.locale, profile_join_mode_key(document.join_mode)).to_string(),
+            ))
+            .child(metadata)
+    }
+
+    fn network_profile_warnings(
+        &self,
+        warnings: &[fuckipv6_common::domain::NetworkProfileWarning],
+    ) -> Div {
+        let body = if warnings.is_empty() {
+            div()
+                .debug_selector(|| "visual-network-profile-no-warnings".into())
+                .text_xs()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "profile.no_warnings").to_string())
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(warnings.iter().enumerate().map(|(index, warning)| {
+                    let code = profile_warning_key(warning.code).to_string();
+                    let capability = warning
+                        .capability
+                        .map(|capability| t(self.locale, profile_capability_key(capability)))
+                        .unwrap_or_default();
+                    div()
+                        .id(SharedString::from(format!(
+                            "network-profile-warning-{index}"
+                        )))
+                        .debug_selector(move || format!("visual-network-profile-warning-{code}"))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_WARNING))
+                        .p_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(COLOR_WARNING))
+                                .child(
+                                    t(self.locale, profile_warning_key(warning.code)).to_string(),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                .child(warning.message.clone()),
+                        )
+                        .when(!capability.is_empty(), |warning| {
+                            warning.child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(capability),
+                            )
+                        })
+                        .into_any_element()
+                }))
+                .into_any_element()
+        };
+        profile_result_section(t(self.locale, "profile.warnings"), body)
+    }
+
     fn action_panel(&self, layout: LayoutClass, cx: &mut Context<Self>) -> impl IntoElement {
         let presentation = ActionPanelPresentation::for_layout(layout);
         let actions = self
@@ -5035,23 +5654,25 @@ impl GpuiShell {
             .into_iter()
             .map(|action| self.action_card(action, cx))
             .collect::<Vec<_>>();
-        let body = if action_cards.is_empty() {
-            div()
-                .id("no-shared-actions")
-                .p_4()
-                .text_sm()
-                .text_color(rgba(COLOR_MUTED))
-                .child(t(self.locale, "common.page_actions_empty").to_string())
-                .into_any_element()
-        } else {
-            div()
-                .id("action-panel-body")
-                .flex()
-                .flex_col()
-                .overflow_y_scroll()
-                .children(action_cards)
-                .into_any_element()
-        };
+        let body = div()
+            .id("action-panel-body")
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .when(action_cards.is_empty(), |body| {
+                body.child(
+                    div()
+                        .id("no-shared-actions")
+                        .p_4()
+                        .text_sm()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "common.page_actions_empty").to_string()),
+                )
+            })
+            .children(action_cards)
+            .when_some(self.network_profile_result_card(), |body, result| {
+                body.child(div().px_3().pb_3().child(result))
+            });
 
         let mut panel = div()
             .id(app_region_id(AppRegion::ActionPanel))
@@ -5539,6 +6160,87 @@ fn diagnostic_metadata_row(label: impl Into<SharedString>, value: impl Into<Shar
         )
 }
 
+fn profile_result_section(title: impl Into<SharedString>, body: gpui::AnyElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgba(COLOR_BORDER))
+        .p_3()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight(600.0))
+                .text_color(rgba(COLOR_TEXT))
+                .child(title.into()),
+        )
+        .child(body)
+}
+
+fn profile_status_chip(label: impl Into<SharedString>) -> Div {
+    div()
+        .rounded_full()
+        .border_1()
+        .border_color(rgba(COLOR_BORDER))
+        .bg(rgba(COLOR_PANEL))
+        .px_2()
+        .py_1()
+        .text_xs()
+        .line_height(px(16.0))
+        .text_color(rgba(COLOR_TEXT_SECONDARY))
+        .child(label.into())
+}
+
+fn profile_capability_key(capability: CapabilityKind) -> &'static str {
+    match capability {
+        CapabilityKind::Coordinator => "capability.coordinator",
+        CapabilityKind::Relay => "capability.relay",
+        CapabilityKind::Exit => "capability.exit",
+        CapabilityKind::File => "capability.file",
+    }
+}
+
+fn profile_document_selector(title_key: &str) -> &'static str {
+    match title_key {
+        "profile.public_card" => "visual-network-profile-public-card",
+        "profile.member_view" => "visual-network-profile-member-view",
+        "profile.admin_view" => "visual-network-profile-admin-view",
+        _ => "visual-network-profile-document",
+    }
+}
+
+fn profile_warning_key(code: NetworkProfileWarningCode) -> &'static str {
+    match code {
+        NetworkProfileWarningCode::UnsignedLegacy => "warning.network_profile.unsigned_legacy",
+        NetworkProfileWarningCode::ProfileExpired => "warning.network_profile.profile_expired",
+        NetworkProfileWarningCode::RevisionConflict => "warning.network_profile.revision_conflict",
+        NetworkProfileWarningCode::CapabilityNotObserved => {
+            "warning.network_profile.capability_not_observed"
+        }
+        NetworkProfileWarningCode::CapabilityUndeclared => {
+            "warning.network_profile.capability_undeclared"
+        }
+    }
+}
+
+fn profile_visibility_key(visibility: NetworkVisibility) -> &'static str {
+    match visibility {
+        NetworkVisibility::Public => "choice.visibility.public",
+        NetworkVisibility::Unlisted => "choice.visibility.unlisted",
+        NetworkVisibility::Private => "choice.visibility.private",
+    }
+}
+
+fn profile_join_mode_key(join_mode: NetworkJoinMode) -> &'static str {
+    match join_mode {
+        NetworkJoinMode::Open => "choice.join_mode.open",
+        NetworkJoinMode::ApprovalRequired => "choice.join_mode.approval_required",
+        NetworkJoinMode::InviteOnly => "choice.join_mode.invite_only",
+    }
+}
+
 fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
     match status {
         NodePrimaryStatus::Running => SemanticState::Success,
@@ -5634,6 +6336,8 @@ fn action_label(locale: Locale, id: &str) -> String {
         "refresh_snapshot" => "action.refresh_snapshot",
         "get_node_diagnostics" => "action.get_node_diagnostics",
         "create_network" => "action.create_network",
+        "preview_network_profile" => "action.preview_network_profile",
+        "update_network_profile" => "action.update_network_profile",
         "join_network" => "action.join_network",
         "start_networks" => "action.start_networks",
         "stop_networks" => "action.stop_networks",
@@ -5995,6 +6699,92 @@ mod tests {
         }
     }
 
+    fn network_profile_fixtures() -> (
+        NetworkProfilePreview,
+        NetworkProfilePreview,
+        NetworkProfileApplyResult,
+    ) {
+        use fuckipv6_common::crypto::Identity;
+        use fuckipv6_common::domain::{
+            preview_network_profile, NetworkCreateProfile, NetworkProfileUpdate, NetworkRecord,
+            NodeId, PublicKey,
+        };
+
+        let identity = Identity::generate().expect("generate profile identity");
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"gpui-profile-owner");
+        let mut network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "home-mesh".into(),
+                purpose: "Family devices across two homes".into(),
+                icon: "home".into(),
+                language: "zh-CN".into(),
+                region: "CN".into(),
+                tags: vec!["family".into(), "home".into()],
+                capability_declarations: vec![CapabilityKind::Relay],
+                visibility: NetworkVisibility::Unlisted,
+                join_mode: NetworkJoinMode::InviteOnly,
+            },
+            public_key,
+            owner,
+            100,
+        )
+        .expect("create profile fixture");
+        network
+            .sign_public_profile(&identity, 100, 10_000)
+            .expect("sign profile fixture");
+
+        let unchanged = NetworkProfileUpdate::from_record(&network);
+        let empty_preview =
+            preview_network_profile("home-mesh", &network, 1, &unchanged, 200).unwrap();
+        let update = NetworkProfileUpdate {
+            purpose: "Family devices and shared files".into(),
+            region: "JP".into(),
+            tags: vec!["family".into(), "tokyo".into()],
+            capability_declarations: vec![CapabilityKind::Relay, CapabilityKind::File],
+            ..NetworkProfileUpdate::from_record(&network)
+        };
+        let mut preview = preview_network_profile("home-mesh", &network, 1, &update, 200).unwrap();
+        preview
+            .warnings
+            .push(fuckipv6_common::domain::NetworkProfileWarning::capability(
+                NetworkProfileWarningCode::CapabilityNotObserved,
+                CapabilityKind::File,
+                "File capability is declared but not currently observed",
+            ));
+
+        let changed_paths = network
+            .apply_profile_update(&update, 1, 200)
+            .expect("apply profile fixture")
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>();
+        network
+            .sign_public_profile(&identity, 200, 10_100)
+            .expect("re-sign profile fixture");
+        let signed_profile = network
+            .signed_profile
+            .clone()
+            .expect("signed updated profile");
+        let projections = fuckipv6_common::domain::network_profile_projections(
+            &network,
+            signed_profile.document.clone(),
+            Some(signed_profile.clone()),
+        );
+        let updated = NetworkProfileApplyResult {
+            network_name: "home-mesh".into(),
+            revision: network.revision,
+            previous_revision: 1,
+            applied_at_unix_ms: 200,
+            changed_paths,
+            signed_profile,
+            projections,
+            warnings: Vec::new(),
+            audit_action: "network.profile.update".into(),
+        };
+        (empty_preview, preview, updated)
+    }
+
     fn operation_fixture(state: OperationState, cancellable: bool) -> NodeOperationSnapshot {
         use fuckipv6_common::domain::{
             DomainActorRef, DomainObjectRef, IdempotencyKey as DomainIdempotencyKey, NodeId,
@@ -6108,6 +6898,109 @@ mod tests {
                 "missing fixed diagnostic layer {selector}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn network_profile_preview_renders_privacy_layers_diff_and_warnings(cx: &mut TestAppContext) {
+        let (_, mut preview, _) = network_profile_fixtures();
+        preview.conflict = true;
+        preview.can_apply = false;
+        preview.expected_revision = 0;
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.recent_network_profile_preview = Some(preview);
+                cx.notify();
+            })
+            .expect("install profile preview fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-network-profile-result",
+            "visual-network-profile-preview",
+            "visual-network-profile-conflict",
+            "visual-network-profile-projections",
+            "visual-network-profile-public-card",
+            "visual-network-profile-member-view",
+            "visual-network-profile-admin-view",
+            "visual-network-profile-local-secret",
+            "visual-network-profile-withheld",
+            "visual-network-profile-diff",
+            "visual-network-profile-warning-warning.network_profile.capability_not_observed",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing profile preview element {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn network_profile_result_renders_empty_diff_and_warning_states(cx: &mut TestAppContext) {
+        let (empty_preview, _, _) = network_profile_fixtures();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.recent_network_profile_preview = Some(empty_preview);
+                cx.notify();
+            })
+            .expect("install empty profile preview fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-network-profile-no-changes")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-network-profile-no-warnings")
+            .is_some());
+        assert!(visible
+            .debug_bounds(
+                "visual-network-profile-warning-warning.network_profile.capability_not_observed"
+            )
+            .is_none());
+    }
+
+    #[gpui::test]
+    fn network_profile_updated_renders_signed_audit_result(cx: &mut TestAppContext) {
+        let (_, _, updated) = network_profile_fixtures();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.recent_network_profile_updated = Some(updated);
+                cx.notify();
+            })
+            .expect("install applied profile fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-network-profile-result",
+            "visual-network-profile-updated",
+            "visual-network-profile-projections",
+            "visual-network-profile-admin-view",
+            "visual-network-profile-withheld",
+            "visual-network-profile-changed-paths",
+            "visual-network-profile-no-warnings",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing applied profile element {selector}"
+            );
+        }
+        assert!(visible
+            .debug_bounds("visual-network-profile-preview")
+            .is_none());
     }
 
     #[gpui::test]

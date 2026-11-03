@@ -1,7 +1,7 @@
 use anyhow::Result;
 use fuckipv6_common::domain::{
-    default_network_icon, default_network_language, default_network_purpose, NetworkJoinMode,
-    NetworkVisibility,
+    default_network_icon, default_network_language, default_network_purpose,
+    default_network_region, CapabilityKind, NetworkJoinMode, NetworkVisibility,
 };
 use fuckipv6_common::NetworkTicket;
 use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
@@ -186,6 +186,12 @@ pub struct HostRequest {
     pub icon: String,
     #[serde(default = "default_network_language")]
     pub language: String,
+    #[serde(default = "default_network_region")]
+    pub region: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub capability_declarations: Vec<CapabilityKind>,
     #[serde(default)]
     pub visibility: NetworkVisibility,
     #[serde(default)]
@@ -662,6 +668,9 @@ impl AppController {
             purpose,
             icon,
             language,
+            region,
+            tags,
+            capability_declarations,
             visibility,
             join_mode,
             port,
@@ -679,6 +688,9 @@ impl AppController {
                 purpose,
                 icon,
                 language,
+                region,
+                tags,
+                capability_declarations,
                 visibility,
                 join_mode,
                 signaling_port: port,

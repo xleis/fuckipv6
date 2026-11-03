@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
+  NetworkProfileProjections,
+  NetworkPublicProfileDocument,
   NodeCommandOutcome,
   NodeOperationSnapshot,
   NodeSnapshot,
@@ -22,6 +24,12 @@ const restart = manifest.pages
 const rotate = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "rotate_node_identity") as NodeUiAction;
+const previewProfile = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "preview_network_profile") as NodeUiAction;
+const updateProfile = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "update_network_profile") as NodeUiAction;
 const currentFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const nextFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
@@ -32,6 +40,142 @@ const identitySnapshot: NodeSnapshot = {
     display_name: "Current node",
     public_key_fingerprint: currentFingerprint,
     created_at_unix_ms: 1_700_000_000_000,
+  },
+};
+
+const publicProfile: NetworkPublicProfileDocument = {
+  schema_version: 1,
+  network_id: "net_stable_home",
+  public_key: "network-public-key",
+  owner: "node-owner",
+  name: "home",
+  purpose: "Family devices across two homes",
+  icon: "home.router_2",
+  language: "zh-CN",
+  region: "CN",
+  tags: ["family", "smart-home"],
+  capability_declarations: ["relay"],
+  visibility: "unlisted",
+  join_mode: "invite_only",
+  revision: 4,
+  issued_at_unix_ms: 1_700_000_000_000,
+  expires_at_unix_ms: 1_700_086_400_000,
+};
+
+const profileProjections: NetworkProfileProjections = {
+  public_card: {
+    candidate: publicProfile,
+    currently_published: {
+      document: { ...publicProfile, revision: 3 },
+      signature: "signature",
+    },
+    withheld_categories: [
+      "member_identity",
+      "address",
+      "topology",
+      "activity",
+      "invitation",
+      "private_key",
+    ],
+  },
+  member_view: {
+    profile: publicProfile,
+    member_count: 3,
+    administrator_count: 1,
+  },
+  administrator_view: {
+    profile: publicProfile,
+    member_count: 3,
+    administrator_count: 1,
+    revision: 4,
+    policy_revision: 2,
+  },
+  local_secret: {
+    identity_present: true,
+    secret_material_included: false,
+    public_key_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    storage: "identity-keychain",
+  },
+};
+
+const profileSnapshot: NodeSnapshot = {
+  ...snapshot,
+  network_profiles: [
+    {
+      name: "home",
+      network_id: "net_stable_home",
+      purpose: publicProfile.purpose,
+      icon: publicProfile.icon,
+      language: publicProfile.language,
+      region: publicProfile.region,
+      tags: publicProfile.tags,
+      capability_declarations: publicProfile.capability_declarations,
+      visibility: publicProfile.visibility,
+      join_mode: publicProfile.join_mode,
+      revision: publicProfile.revision,
+      policy_revision: 2,
+      signed_profile: {
+        schema_version: 1,
+        issued_at_unix_ms: publicProfile.issued_at_unix_ms,
+        expires_at_unix_ms: publicProfile.expires_at_unix_ms,
+      },
+    },
+  ],
+};
+
+const profileWarnings = [
+  {
+    code: "capability_not_observed" as const,
+    field: "capability_declarations",
+    capability: "relay" as const,
+    message: "Relay capability has not been observed",
+  },
+  {
+    code: "profile_expired" as const,
+    field: "expires_at_unix_ms",
+    message: "The published profile has expired",
+  },
+];
+
+const profilePreviewOutcome = {
+  status: "network_profile_preview" as const,
+  data: {
+    network_name: "home",
+    expected_revision: 3,
+    current_revision: 4,
+    candidate_revision: 5,
+    conflict: true,
+    can_apply: false,
+    projections: profileProjections,
+    diff: [
+      { path: "purpose", before: "Old purpose", after: publicProfile.purpose },
+      { path: "tags", before: null, after: "family,smart-home" },
+    ],
+    warnings: profileWarnings,
+  },
+};
+
+const profileUpdateOutcome = {
+  status: "network_profile_updated" as const,
+  data: {
+    network_name: "home",
+    revision: 5,
+    previous_revision: 4,
+    applied_at_unix_ms: 1_700_000_100_000,
+    changed_paths: ["purpose", "tags"],
+    signed_profile: {
+      document: { ...publicProfile, revision: 5 },
+      signature: "signature",
+    },
+    projections: {
+      ...profileProjections,
+      public_card: {
+        ...profileProjections.public_card,
+        candidate: { ...publicProfile, revision: 5 },
+      },
+    },
+    warnings: profileWarnings,
+    audit_action: "network.profile.update",
   },
 };
 
@@ -362,5 +506,101 @@ describe("action panel operation status", () => {
       );
     });
     expect(status).toHaveTextContent("translated:diagnostic.state.failed");
+  });
+
+  it("renders the four profile projections, diff, warnings and conflict", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={[previewProfile]}
+        snapshot={profileSnapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: profilePreviewOutcome as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.preview_network_profile",
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    const result = await screen.findByTestId("network-profile-result");
+    expect(result).toHaveTextContent("translated:profile.preview_title");
+    for (const projection of [
+      "public_card",
+      "member_view",
+      "admin_view",
+      "local_secret",
+    ]) {
+      expect(result).toHaveTextContent(`translated:profile.${projection}`);
+    }
+    expect(result).toHaveTextContent("translated:profile.withheld");
+    expect(result).toHaveTextContent("member_identity");
+    expect(result).toHaveTextContent("translated:profile.conflict");
+    expect(result).toHaveTextContent("translated:profile.cannot_apply");
+    expect(result).toHaveTextContent("purpose");
+    expect(result).toHaveTextContent("Old purpose");
+    expect(result).toHaveTextContent(publicProfile.purpose);
+    expect(result).toHaveTextContent("Relay capability has not been observed");
+    expect(result).toHaveTextContent("The published profile has expired");
+    expect(result).toHaveTextContent("translated:profile.signature_valid");
+  });
+
+  it("renders applied profile audit data and changed paths", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      async (): Promise<ActionSubmission> => ({
+        outcome: profileUpdateOutcome as NodeCommandOutcome,
+      }),
+    );
+    render(
+      <ActionPanel
+        actions={[updateProfile]}
+        snapshot={profileSnapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedActionId={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.update_network_profile",
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    const result = await screen.findByTestId("network-profile-result");
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(result).toHaveTextContent("translated:profile.updated_title");
+    expect(result).toHaveTextContent("translated:profile.audit");
+    expect(result).toHaveTextContent("purpose");
+    expect(result).toHaveTextContent("tags");
+    expect(result).toHaveTextContent("translated:profile.revision");
   });
 });

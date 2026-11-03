@@ -1,4 +1,5 @@
 import type {
+  CapabilityKind,
   NodeApiCommandResponse,
   NodeApiManifestResponse,
   NodeApiOperationResponse,
@@ -11,6 +12,8 @@ import type {
   ConfigurationHistoryEntry,
   ConfigurationPreview,
   NodeNetworkSelection,
+  NetworkProfileApplyResult,
+  NetworkProfilePreview,
   NodeOperationSnapshot,
   NodeProblem,
   NodeSnapshot,
@@ -80,6 +83,8 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   restart_node: "restart_node",
   cleanup_node_residuals: "cleanup_node_residuals",
   create_network: "create_network",
+  preview_network_profile: "preview_network_profile",
+  update_network_profile: "update_network_profile",
   join_network: "join_network",
   start_networks: "start_networks",
   stop_networks: "stop_networks",
@@ -146,6 +151,9 @@ const INPUT_KINDS = new Set([
   "purpose",
   "icon",
   "language",
+  "region",
+  "tags",
+  "capability_declarations",
   "visibility",
   "join_mode",
   "port",
@@ -176,6 +184,9 @@ const VALIDATIONS = new Set([
   "network_purpose",
   "network_icon",
   "network_language",
+  "region",
+  "tags",
+  "capability_declarations",
   "visibility",
   "join_mode",
 ]);
@@ -188,6 +199,8 @@ const OUTCOME_STATUSES = new Set([
   "network_allocation",
   "probe",
   "network_created",
+  "network_profile_preview",
+  "network_profile_updated",
   "configuration",
   "configuration_preview",
   "configuration_applied",
@@ -213,6 +226,25 @@ const NETWORK_STATUSES = new Set([
   "failed",
 ]);
 const NETWORK_ROLES = new Set(["member", "discovery", "relay", "exit_node"]);
+const CAPABILITY_KINDS = new Set<CapabilityKind>([
+  "coordinator",
+  "relay",
+  "exit",
+  "file",
+]);
+const NETWORK_PROFILE_WARNING_CODES = new Set([
+  "unsigned_legacy",
+  "profile_expired",
+  "revision_conflict",
+  "capability_not_observed",
+  "capability_undeclared",
+]);
+const NETWORK_VISIBILITIES = new Set(["public", "unlisted", "private"]);
+const NETWORK_JOIN_MODES = new Set([
+  "open",
+  "approval_required",
+  "invite_only",
+]);
 const TUN_PLATFORMS = new Set(["linux", "macos", "windows", "other"]);
 const TUN_CAPABILITY_REASONS = new Set([
   "platform_unsupported",
@@ -491,6 +523,60 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
     if (!record(network.traffic))
       fail(`network traffic invalid: ${network.name}`);
   }
+  if (snapshot.network_profiles !== undefined) {
+    for (const profile of snapshot.network_profiles) {
+      if (!record(profile)) fail("network profile snapshot invalid");
+      stringValue(profile.name, "network profile snapshot name invalid", true);
+      stringValue(
+        profile.network_id,
+        "network profile snapshot id invalid",
+        true,
+      );
+      stringValue(profile.purpose, "network profile snapshot purpose invalid", true);
+      stringValue(profile.icon, "network profile snapshot icon invalid", true);
+      stringValue(
+        profile.language,
+        "network profile snapshot language invalid",
+        true,
+      );
+      if (!/^[A-Z]{2}$/.test(String(profile.region)))
+        fail("network profile snapshot region invalid");
+      stringArray(profile.tags, "network profile snapshot tags invalid");
+      const capabilities = stringArray(
+        profile.capability_declarations,
+        "network profile snapshot capabilities invalid",
+      );
+      for (const capability of capabilities) {
+        if (!CAPABILITY_KINDS.has(capability as CapabilityKind))
+          fail("network profile snapshot capability invalid");
+      }
+      if (!NETWORK_VISIBILITIES.has(String(profile.visibility)))
+        fail("network profile snapshot visibility invalid");
+      if (!NETWORK_JOIN_MODES.has(String(profile.join_mode)))
+        fail("network profile snapshot join mode invalid");
+      nonNegativeInteger(profile.revision, "network profile snapshot revision invalid");
+      nonNegativeInteger(
+        profile.policy_revision,
+        "network profile snapshot policy revision invalid",
+      );
+      if (profile.signed_profile !== undefined && profile.signed_profile !== null) {
+        if (!record(profile.signed_profile))
+          fail("signed network profile snapshot invalid");
+        nonNegativeInteger(
+          profile.signed_profile.schema_version,
+          "signed network profile snapshot schema invalid",
+        );
+        nonNegativeInteger(
+          profile.signed_profile.issued_at_unix_ms,
+          "signed network profile snapshot issue time invalid",
+        );
+        nonNegativeInteger(
+          profile.signed_profile.expires_at_unix_ms,
+          "signed network profile snapshot expiry invalid",
+        );
+      }
+    }
+  }
   for (const peer of snapshot.peers) {
     if (!record(peer)) fail("peer snapshot invalid");
     stringValue(peer.peer_id, "peer id invalid", true);
@@ -625,9 +711,33 @@ export function defaultFieldValue(
   selectedNetwork: string,
 ): string | boolean {
   const network = defaultNetworkName(snapshot, selectedNetwork);
+  const profileAction =
+    action.id === "preview_network_profile" ||
+    action.id === "update_network_profile";
+  const profile = profileAction
+    ? (snapshot.network_profiles ?? []).find(
+        (entry) => entry.name === network,
+      )
+    : undefined;
+  if (profile) {
+    if (field.id === "network_name") return profile.name;
+    if (field.id === "expected_revision") return String(profile.revision);
+    if (field.id === "purpose") return profile.purpose;
+    if (field.id === "icon") return profile.icon;
+    if (field.id === "language") return profile.language;
+    if (field.id === "region") return profile.region;
+    if (field.id === "tags") return profile.tags.join(",");
+    if (field.id === "capability_declarations")
+      return profile.capability_declarations.join(",");
+    if (field.id === "visibility") return profile.visibility;
+    if (field.id === "join_mode") return profile.join_mode;
+  }
   if (field.id === "purpose") return "Owner-created network";
   if (field.id === "icon") return "network";
   if (field.id === "language") return "und";
+  if (field.id === "region") return "ZZ";
+  if (field.id === "tags") return "";
+  if (field.id === "capability_declarations") return "";
   if (field.id === "visibility") return "unlisted";
   if (field.id === "join_mode") return "invite_only";
   if (field.id === "signaling_port") return "6666";
@@ -832,6 +942,179 @@ function configurationHistory(value: unknown): ConfigurationHistoryEntry[] {
   return value as ConfigurationHistoryEntry[];
 }
 
+function stringArray(value: unknown, message: string): string[] {
+  const items = arrayValue(value, message);
+  for (const item of items) stringValue(item, message);
+  return items as string[];
+}
+
+function networkProfileDocument(value: unknown): void {
+  if (!record(value)) fail("network profile document invalid");
+  stringValue(value.network_id, "network profile id invalid", true);
+  stringValue(value.public_key, "network profile public key invalid", true);
+  stringValue(value.owner, "network profile owner invalid", true);
+  stringValue(value.name, "network profile name invalid", true);
+  stringValue(value.purpose, "network profile purpose invalid", true);
+  stringValue(value.icon, "network profile icon invalid", true);
+  stringValue(value.language, "network profile language invalid", true);
+  if (!/^[A-Z]{2}$/.test(stringValue(value.region, "network region invalid")))
+    fail("network profile region invalid");
+  stringArray(value.tags, "network profile tags invalid");
+  const capabilities = stringArray(
+    value.capability_declarations,
+    "network profile capabilities invalid",
+  );
+  for (const capability of capabilities) {
+    if (!CAPABILITY_KINDS.has(capability as CapabilityKind))
+      fail("network profile capability invalid");
+  }
+  if (!NETWORK_VISIBILITIES.has(String(value.visibility)))
+    fail("network profile visibility invalid");
+  if (!NETWORK_JOIN_MODES.has(String(value.join_mode)))
+    fail("network profile join mode invalid");
+  nonNegativeInteger(value.revision, "network profile revision invalid");
+  nonNegativeInteger(value.schema_version, "network profile schema invalid");
+  nonNegativeInteger(value.issued_at_unix_ms, "network profile issue time invalid");
+  nonNegativeInteger(value.expires_at_unix_ms, "network profile expiry invalid");
+}
+
+function networkProfileRecord(value: unknown): void {
+  if (!record(value)) fail("signed network profile invalid");
+  networkProfileDocument(value.document);
+  stringValue(value.signature, "network profile signature invalid", true);
+}
+
+function networkProfileWarnings(value: unknown): void {
+  const warnings = arrayValue(value, "network profile warnings invalid");
+  for (const warning of warnings) {
+    if (
+      !record(warning) ||
+      !NETWORK_PROFILE_WARNING_CODES.has(String(warning.code))
+    ) {
+      fail("network profile warning invalid");
+    }
+    stringValue(warning.message, "network profile warning message invalid");
+    if (warning.capability !== undefined && warning.capability !== null) {
+      if (!CAPABILITY_KINDS.has(warning.capability as CapabilityKind))
+        fail("network profile warning capability invalid");
+    }
+  }
+}
+
+function networkProfileProjections(value: unknown): void {
+  if (!record(value)) fail("network profile projections invalid");
+  if (!record(value.public_card)) fail("network public card invalid");
+  networkProfileDocument(value.public_card.candidate);
+  stringArray(
+    value.public_card.withheld_categories,
+    "network profile withheld categories invalid",
+  );
+  const published = value.public_card.currently_published;
+  if (published !== undefined && published !== null)
+    networkProfileRecord(published);
+
+  if (!record(value.member_view)) fail("network member projection invalid");
+  networkProfileDocument(value.member_view.profile);
+  nonNegativeInteger(
+    value.member_view.member_count,
+    "network member count invalid",
+  );
+  nonNegativeInteger(
+    value.member_view.administrator_count,
+    "network administrator count invalid",
+  );
+
+  if (!record(value.administrator_view))
+    fail("network administrator projection invalid");
+  networkProfileDocument(value.administrator_view.profile);
+  nonNegativeInteger(
+    value.administrator_view.member_count,
+    "network admin member count invalid",
+  );
+  nonNegativeInteger(
+    value.administrator_view.administrator_count,
+    "network admin administrator count invalid",
+  );
+  nonNegativeInteger(
+    value.administrator_view.revision,
+    "network admin profile revision invalid",
+  );
+  nonNegativeInteger(
+    value.administrator_view.policy_revision,
+    "network admin policy revision invalid",
+  );
+
+  if (!record(value.local_secret)) fail("network local secret projection invalid");
+  booleanValueRaw(
+    value.local_secret.identity_present,
+    "network local identity flag invalid",
+  );
+  booleanValueRaw(
+    value.local_secret.secret_material_included,
+    "network local secret flag invalid",
+  );
+  stringValue(
+    value.local_secret.public_key_fingerprint,
+    "network local fingerprint invalid",
+    true,
+  );
+  stringValue(value.local_secret.storage, "network local storage invalid", true);
+}
+
+function networkProfileDiff(value: unknown): void {
+  for (const entry of arrayValue(value, "network profile diff invalid")) {
+    if (!record(entry)) fail("network profile diff entry invalid");
+    stringValue(entry.path, "network profile diff path invalid", true);
+    for (const side of [entry.before, entry.after]) {
+      if (side !== undefined && side !== null && typeof side !== "string")
+        fail("network profile diff value invalid");
+    }
+  }
+}
+
+function networkProfilePreview(value: unknown): NetworkProfilePreview {
+  if (!record(value)) fail("network profile preview invalid");
+  stringValue(value.network_name, "network profile preview network invalid", true);
+  booleanValueRaw(value.can_apply, "network profile can_apply invalid");
+  booleanValueRaw(value.conflict, "network profile conflict invalid");
+  nonNegativeInteger(
+    value.current_revision,
+    "network profile current revision invalid",
+  );
+  nonNegativeInteger(
+    value.expected_revision,
+    "network profile expected revision invalid",
+  );
+  nonNegativeInteger(
+    value.candidate_revision,
+    "network profile candidate revision invalid",
+  );
+  networkProfileDiff(value.diff);
+  networkProfileWarnings(value.warnings);
+  networkProfileProjections(value.projections);
+  return value as NetworkProfilePreview;
+}
+
+function networkProfileApplyResult(value: unknown): NetworkProfileApplyResult {
+  if (!record(value)) fail("network profile apply result invalid");
+  stringValue(value.network_name, "network profile apply network invalid", true);
+  stringValue(value.audit_action, "network profile audit action invalid", true);
+  stringArray(value.changed_paths, "network profile changed paths invalid");
+  nonNegativeInteger(
+    value.applied_at_unix_ms,
+    "network profile applied time invalid",
+  );
+  nonNegativeInteger(
+    value.previous_revision,
+    "network profile previous revision invalid",
+  );
+  nonNegativeInteger(value.revision, "network profile revision invalid");
+  networkProfileRecord(value.signed_profile);
+  networkProfileWarnings(value.warnings);
+  networkProfileProjections(value.projections);
+  return value as NetworkProfileApplyResult;
+}
+
 export function validateActionValues(
   action: NodeUiAction,
   values: ActionValues,
@@ -875,14 +1158,63 @@ export function validateActionValues(
       ) {
         errors.push(label(locale, "validation.network_language_invalid"));
       }
+    } else if (field.validation === "region") {
+      if (!/^[A-Z]{2}$/.test(String(value))) {
+        errors.push(label(locale, "validation.network_region_invalid"));
+      }
+    } else if (field.validation === "tags") {
+      const tags = splitNames(value);
+      if (tags.length > 12) {
+        errors.push(label(locale, "validation.network_tags_too_many"));
+      }
+      const seen = new Set<string>();
+      for (const tag of tags) {
+        if (
+          [...tag].length > 32 ||
+          !/^[\p{L}\p{N}._-]+$/u.test(tag)
+        ) {
+          errors.push(
+            i18n().tr(locale, "validation.network_tag_invalid", { tag }),
+          );
+        }
+        const key = tag.replace(/[A-Z]/g, (character) =>
+          character.toLowerCase(),
+        );
+        if (seen.has(key)) {
+          errors.push(
+            i18n().tr(locale, "validation.network_tag_duplicate", { tag }),
+          );
+        }
+        seen.add(key);
+      }
+    } else if (field.validation === "capability_declarations") {
+      const capabilities = splitNames(value);
+      const seen = new Set<string>();
+      for (const capability of capabilities) {
+        if (!CAPABILITY_KINDS.has(capability as CapabilityKind)) {
+          errors.push(
+            i18n().tr(locale, "validation.network_capability_invalid", {
+              capability,
+            }),
+          );
+        }
+        if (seen.has(capability)) {
+          errors.push(
+            i18n().tr(locale, "validation.network_capability_duplicate", {
+              capability,
+            }),
+          );
+        }
+        seen.add(capability);
+      }
     } else if (
       field.validation === "visibility" &&
-      !["public", "unlisted", "private"].includes(String(value))
+      !NETWORK_VISIBILITIES.has(String(value))
     ) {
       errors.push(label(locale, "validation.network_visibility_invalid"));
     } else if (
       field.validation === "join_mode" &&
-      !["open", "approval_required", "invite_only"].includes(String(value))
+      !NETWORK_JOIN_MODES.has(String(value))
     ) {
       errors.push(label(locale, "validation.network_join_mode_invalid"));
     } else if (field.validation === "network_name") {
@@ -1091,6 +1423,11 @@ export function buildCommand(
           purpose: requiredString("purpose"),
           icon: requiredString("icon"),
           language: requiredString("language"),
+          region: requiredString("region"),
+          tags: splitNames(values.tags),
+          capability_declarations: splitNames(
+            values.capability_declarations,
+          ) as CapabilityKind[],
           visibility: requiredString("visibility") as
             | "public"
             | "unlisted"
@@ -1105,6 +1442,38 @@ export function buildCommand(
           auto_connect: booleanValue(values.auto_connect, locale),
         },
       };
+    case "preview_network_profile":
+    case "update_network_profile": {
+      const command = {
+        network_name: requiredString("network_name"),
+        expected_revision: revisionValue(
+          requireValue("expected_revision"),
+          label(locale, "field.expected_revision"),
+          locale,
+        ),
+        update: {
+          purpose: requiredString("purpose"),
+          icon: requiredString("icon"),
+          language: requiredString("language"),
+          region: requiredString("region"),
+          tags: splitNames(values.tags),
+          capability_declarations: splitNames(
+            values.capability_declarations,
+          ) as CapabilityKind[],
+          visibility: requiredString("visibility") as
+            | "public"
+            | "unlisted"
+            | "private",
+          join_mode: requiredString("join_mode") as
+            | "open"
+            | "approval_required"
+            | "invite_only",
+        },
+      };
+      return action.id === "preview_network_profile"
+        ? { command: "preview_network_profile", payload: command }
+        : { command: "update_network_profile", payload: command };
+    }
     case "join_network":
       return {
         command: "join_network",
@@ -1288,6 +1657,10 @@ function validatedOutcome(value: unknown): NodeCommandOutcome {
     configurationApplied(outcome.data);
   if (outcome.status === "configuration_history")
     configurationHistory(outcome.data);
+  if (outcome.status === "network_profile_preview")
+    networkProfilePreview(outcome.data);
+  if (outcome.status === "network_profile_updated")
+    networkProfileApplyResult(outcome.data);
   if (outcome.status === "identity_rotated") {
     if (!record(outcome.data)) fail("identity rotation result invalid");
     stringValue(outcome.data.old_node_id, "old node id invalid", true);
@@ -1440,6 +1813,19 @@ export function outcomeSummary(
       next_steps: outcome.data.next_steps
         .map((step) => label(locale, `next_step.${step}`))
         .join(label(locale, "common.list_separator")),
+    });
+  }
+  if (outcome.status === "network_profile_preview") {
+    return i18n().tr(locale, "outcome.network_profile_previewed", {
+      changes: i18n().formatInteger(locale, outcome.data.diff.length),
+      warnings: i18n().formatInteger(locale, outcome.data.warnings.length),
+    });
+  }
+  if (outcome.status === "network_profile_updated") {
+    return i18n().tr(locale, "outcome.network_profile_updated", {
+      previous: i18n().formatInteger(locale, outcome.data.previous_revision),
+      revision: i18n().formatInteger(locale, outcome.data.revision),
+      warnings: i18n().formatInteger(locale, outcome.data.warnings.length),
     });
   }
   if (outcome.status === "blacklist") {

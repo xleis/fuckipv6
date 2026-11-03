@@ -31,10 +31,11 @@ pub use command::{
     NodeCreatedNetwork, NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticRecoveryAction,
     NodeDiagnosticState, NodeDiagnosticsSnapshot, NodeIdentityRotationSnapshot,
     NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkAllocationSnapshot,
-    NodeNetworkCreationNextStep, NodePeerProbeSnapshot, NodePreviewConfigurationCommand,
-    NodeProbePeerCommand, NodeResidualCleanupResult, NodeRollbackConfigurationCommand,
-    NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand,
-    NodeSetNodeDisplayNameCommand, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeNetworkCreationNextStep, NodeNetworkProfileCommand, NodePeerProbeSnapshot,
+    NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeResidualCleanupResult,
+    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot,
+    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeUpdateNetworkAllocationCommand,
+    NodeUpdateRoutingCommand,
 };
 pub use event::{
     NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,
@@ -68,8 +69,8 @@ pub use state::{
     NodeNetworkStatus, NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission,
     NodePermissionSnapshot, NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeProblemDetails,
     NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummarySnapshot,
-    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSnapshot, NodeStateStore,
-    NodeTrafficSnapshot, NodeValidationIssue,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSignedNetworkProfileSnapshot,
+    NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
 };
 pub use ui_manifest::{
     audit_for_command, node_ui_manifest, NodeUiAction, NodeUiActionBlockReason, NodeUiAudit,

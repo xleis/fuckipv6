@@ -217,12 +217,13 @@ mod tests {
     use super::*;
     use crate::node::{
         NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateNetworkCommand,
-        NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole, NodeNetworkSelection,
-        NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
-        NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
-        NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+        NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkProfileCommand, NodeNetworkRole,
+        NodeNetworkSelection, NodePreviewConfigurationCommand, NodeProbePeerCommand,
+        NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand,
+        NodeSetNodeDisplayNameCommand, NodeUpdateNetworkAllocationCommand,
+        NodeUpdateRoutingCommand,
     };
-    use fuckipv6_common::NetworkMode;
+    use fuckipv6_common::{domain::NetworkProfileUpdate, NetworkMode};
     use std::path::PathBuf;
 
     fn sample_commands() -> Vec<NodeCommand> {
@@ -249,12 +250,43 @@ mod tests {
                 purpose: "A test network".into(),
                 icon: "network".into(),
                 language: "und".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
                 signaling_port: 41000,
                 relay_port: 42000,
                 external_host: None,
                 auto_connect: false,
+            }),
+            NodeCommand::PreviewNetworkProfile(NodeNetworkProfileCommand {
+                network_name: "home".into(),
+                expected_revision: 1,
+                update: NetworkProfileUpdate {
+                    purpose: "A test network".into(),
+                    icon: "network".into(),
+                    language: "und".into(),
+                    region: "ZZ".into(),
+                    tags: Vec::new(),
+                    capability_declarations: Vec::new(),
+                    visibility: Default::default(),
+                    join_mode: Default::default(),
+                },
+            }),
+            NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
+                network_name: "home".into(),
+                expected_revision: 1,
+                update: NetworkProfileUpdate {
+                    purpose: "A test network".into(),
+                    icon: "network".into(),
+                    language: "und".into(),
+                    region: "ZZ".into(),
+                    tags: Vec::new(),
+                    capability_declarations: Vec::new(),
+                    visibility: Default::default(),
+                    join_mode: Default::default(),
+                },
             }),
             NodeCommand::JoinNetwork(NodeJoinNetworkCommand {
                 target: "ticket".into(),

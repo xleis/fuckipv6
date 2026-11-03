@@ -9,6 +9,10 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type {
+  NetworkProfileApplyResult,
+  NetworkProfilePreview,
+  NetworkProfileProjections,
+  NetworkPublicProfileDocument,
   NodeCommandOutcome,
   NodeOperationSnapshot,
   NodeSnapshot,
@@ -18,6 +22,7 @@ import type {
 import {
   blockReasonText,
   executionBlockReason,
+  i18n,
   initialActionValues,
   label,
   operationStateIsTerminal,
@@ -216,6 +221,393 @@ function operationFailureSummary(
     : message;
 }
 
+type NetworkProfileOutcome = Extract<
+  NodeCommandOutcome,
+  { status: "network_profile_preview" | "network_profile_updated" }
+>;
+
+function profileList(
+  values: string[],
+  locale: Locale,
+  className = "profile-chip-list",
+) {
+  if (values.length === 0)
+    return <span className="profile-empty-value">{label(locale, "common.none")}</span>;
+  return (
+    <span className={className}>
+      {values.map((value) => (
+        <code key={value}>{value}</code>
+      ))}
+    </span>
+  );
+}
+
+function ProfileDocumentCard({
+  title,
+  document,
+  locale,
+  signatureValid,
+  memberCount,
+  administratorCount,
+  policyRevision,
+}: {
+  title: string;
+  document: NetworkPublicProfileDocument;
+  locale: Locale;
+  signatureValid?: boolean;
+  memberCount?: number;
+  administratorCount?: number;
+  policyRevision?: number;
+}) {
+  return (
+    <section className="profile-projection-card">
+      <div className="profile-projection-heading">
+        <span>{title}</span>
+        <strong>{document.name}</strong>
+      </div>
+      <dl className="profile-definition-list">
+        <div>
+          <dt>{label(locale, "field.purpose")}</dt>
+          <dd>{document.purpose}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.icon")}</dt>
+          <dd>
+            <code>{document.icon}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.language")}</dt>
+          <dd>
+            <code>{document.language}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.region")}</dt>
+          <dd>
+            <code>{document.region}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.tags")}</dt>
+          <dd>{profileList(document.tags, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.capability_declarations")}</dt>
+          <dd>{profileList(document.capability_declarations, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.visibility")}</dt>
+          <dd>{label(locale, `choice.visibility.${document.visibility}`)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "field.join_mode")}</dt>
+          <dd>{label(locale, `choice.join_mode.${document.join_mode}`)}</dd>
+        </div>
+      </dl>
+      <div className="profile-signature-meta">
+        <span>
+          {tr(locale, "profile.revision", {
+            revision: i18n().formatInteger(locale, document.revision),
+          })}
+        </span>
+        <span>
+          {tr(locale, "profile.schema_version", {
+            version: i18n().formatInteger(locale, document.schema_version),
+          })}
+        </span>
+        <span>
+          {tr(locale, "profile.expires_at", {
+            time: i18n().formatTimestamp(locale, document.expires_at_unix_ms),
+          })}
+        </span>
+        {signatureValid ? <span>{label(locale, "profile.signature_valid")}</span> : null}
+        {memberCount !== undefined ? (
+          <span>
+            {tr(locale, "profile.member_count", {
+              count: i18n().formatInteger(locale, memberCount),
+            })}
+          </span>
+        ) : null}
+        {administratorCount !== undefined ? (
+          <span>
+            {tr(locale, "profile.admin_count", {
+              count: i18n().formatInteger(locale, administratorCount),
+            })}
+          </span>
+        ) : null}
+        {policyRevision !== undefined ? (
+          <span>
+            {tr(locale, "profile.policy_revision", {
+              revision: i18n().formatInteger(locale, policyRevision),
+            })}
+          </span>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function ProfileProjectionGrid({
+  projections,
+  locale,
+  signedProfile,
+}: {
+  projections: NetworkProfileProjections;
+  locale: Locale;
+  signedProfile: boolean;
+}) {
+  return (
+    <div className="profile-projection-grid">
+      <ProfileDocumentCard
+        title={label(locale, "profile.public_card")}
+        document={projections.public_card.candidate}
+        locale={locale}
+        signatureValid={signedProfile}
+      />
+      <ProfileDocumentCard
+        title={label(locale, "profile.member_view")}
+        document={projections.member_view.profile}
+        locale={locale}
+        signatureValid={signedProfile}
+        memberCount={projections.member_view.member_count}
+        administratorCount={projections.member_view.administrator_count}
+      />
+      <ProfileDocumentCard
+        title={label(locale, "profile.admin_view")}
+        document={projections.administrator_view.profile}
+        locale={locale}
+        signatureValid={signedProfile}
+        memberCount={projections.administrator_view.member_count}
+        administratorCount={projections.administrator_view.administrator_count}
+        policyRevision={projections.administrator_view.policy_revision}
+      />
+      <section className="profile-projection-card">
+        <div className="profile-projection-heading">
+          <span>{label(locale, "profile.local_secret")}</span>
+          <strong>{projections.local_secret.storage}</strong>
+        </div>
+        <div className="profile-secret-flags">
+          <span>
+            {label(
+              locale,
+              projections.local_secret.identity_present
+                ? "profile.identity_present"
+                : "profile.identity_absent",
+            )}
+          </span>
+          <span>
+            {label(
+              locale,
+              projections.local_secret.secret_material_included
+                ? "profile.secret_included"
+                : "profile.secret_not_included",
+            )}
+          </span>
+        </div>
+        <code className="profile-fingerprint">
+          {projections.local_secret.public_key_fingerprint}
+        </code>
+      </section>
+    </div>
+  );
+}
+
+function ProfileWarnings({
+  outcome,
+  locale,
+}: {
+  outcome: NetworkProfileOutcome;
+  locale: Locale;
+}) {
+  const warnings = outcome.data.warnings;
+  return (
+    <section className="profile-result-section">
+      <h4>{label(locale, "profile.warnings")}</h4>
+      {warnings.length === 0 ? (
+        <p className="profile-muted">{label(locale, "profile.no_warnings")}</p>
+      ) : (
+        <ul className="profile-warning-list">
+          {warnings.map((warning, index) => (
+            <li key={`${warning.code}:${warning.capability ?? ""}:${index}`}>
+              <AlertTriangle size={14} />
+              <div>
+                <strong>
+                  {label(locale, `warning.network_profile.${warning.code}`)}
+                </strong>
+                <span>{warning.message}</span>
+                {warning.capability ? <code>{warning.capability}</code> : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function NetworkProfileResultCard({
+  outcome,
+  locale,
+}: {
+  outcome: NetworkProfileOutcome;
+  locale: Locale;
+}) {
+  const previewData: NetworkProfilePreview | null =
+    outcome.status === "network_profile_preview" ? outcome.data : null;
+  const updateData: NetworkProfileApplyResult | null =
+    outcome.status === "network_profile_updated" ? outcome.data : null;
+  const data = previewData ?? updateData;
+  if (!data) return null;
+  return (
+    <section
+      className="network-profile-result"
+      data-testid="network-profile-result"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>
+            {label(
+              locale,
+              previewData ? "profile.preview_title" : "profile.updated_title",
+            )}
+          </span>
+          <strong>{data.network_name}</strong>
+        </div>
+        <Check size={16} />
+      </div>
+
+      {previewData ? (
+        <div className="profile-result-status">
+          <span>
+            {tr(locale, "profile.revision", {
+              revision: i18n().formatInteger(
+                locale,
+                previewData.current_revision,
+              ),
+            })}
+          </span>
+          <span>
+            {tr(locale, "profile.revision", {
+              revision: i18n().formatInteger(
+                locale,
+                previewData.candidate_revision,
+              ),
+            })}
+          </span>
+          <span>
+            {label(
+              locale,
+              previewData.can_apply
+                ? "profile.can_apply"
+                : "profile.cannot_apply",
+            )}
+          </span>
+        </div>
+      ) : updateData ? (
+        <div className="profile-result-status">
+          <span>
+            {tr(locale, "profile.revision", {
+              revision: i18n().formatInteger(
+                locale,
+                updateData.previous_revision,
+              ),
+            })}
+          </span>
+          <span>
+            {tr(locale, "profile.revision", {
+              revision: i18n().formatInteger(locale, updateData.revision),
+            })}
+          </span>
+          <span>
+            {tr(locale, "profile.audit", {
+              action: updateData.audit_action,
+            })}
+          </span>
+        </div>
+      ) : null}
+
+      {previewData?.conflict ? (
+        <div className="inline-notice warning">
+          <ShieldAlert size={15} />
+          <span>
+            {tr(locale, "profile.conflict", {
+              current: i18n().formatInteger(
+                locale,
+                previewData.current_revision,
+              ),
+              expected: i18n().formatInteger(
+                locale,
+                previewData.expected_revision,
+              ),
+            })}
+          </span>
+        </div>
+      ) : null}
+
+      <ProfileProjectionGrid
+        projections={data.projections}
+        locale={locale}
+        signedProfile={
+          updateData !== null ||
+          Boolean(data.projections.public_card.currently_published)
+        }
+      />
+
+      <section className="profile-withheld">
+        <AlertTriangle size={14} />
+        <div>
+          <strong>{label(locale, "profile.withheld")}</strong>
+          {profileList(data.projections.public_card.withheld_categories, locale)}
+        </div>
+      </section>
+
+      {previewData ? (
+        <section className="profile-result-section">
+          <h4>{label(locale, "profile.diff")}</h4>
+          {previewData.diff.length === 0 ? (
+            <p className="profile-muted">{label(locale, "profile.no_changes")}</p>
+          ) : (
+            <ul className="profile-diff-list">
+              {previewData.diff.map((entry) => (
+                <li key={entry.path}>
+                  <code>{entry.path}</code>
+                  <div>
+                    <span>{label(locale, "configuration.before")}</span>
+                    <strong>{entry.before ?? label(locale, "common.none")}</strong>
+                  </div>
+                  <div>
+                    <span>{label(locale, "configuration.after")}</span>
+                    <strong>{entry.after ?? label(locale, "common.none")}</strong>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : updateData ? (
+        <section className="profile-result-section">
+          <h4>{label(locale, "configuration.history.changed_paths")}</h4>
+          {updateData.changed_paths.length === 0 ? (
+            <p className="profile-muted">{label(locale, "profile.no_changes")}</p>
+          ) : (
+            <ul className="profile-path-list">
+              {updateData.changed_paths.map((path) => (
+                <li key={path}>
+                  <code>{path}</code>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+
+      <ProfileWarnings outcome={outcome} locale={locale} />
+    </section>
+  );
+}
+
 function OperationStatusCard({
   operation,
   locale,
@@ -390,6 +782,8 @@ function ActionCard({
   );
   const [errors, setErrors] = useState<string[]>([]);
   const [result, setResult] = useState("");
+  const [profileOutcome, setProfileOutcome] =
+    useState<NetworkProfileOutcome | null>(null);
   const [failure, setFailure] = useState("");
   const editedFields = useRef(new Set<string>());
   const fingerprint = snapshot.identity?.public_key_fingerprint ?? "";
@@ -445,12 +839,19 @@ function ActionCard({
     setErrors([]);
     setFailure("");
     setResult("");
+    setProfileOutcome(null);
     try {
       const submission = await onSubmit(action, values, () => {});
       if (submission.outcome?.status === "rejected") {
         setFailure(outcomeSummary(submission.outcome, locale));
       } else if (submission.outcome) {
         setResult(outcomeSummary(submission.outcome, locale));
+        if (
+          submission.outcome.status === "network_profile_preview" ||
+          submission.outcome.status === "network_profile_updated"
+        ) {
+          setProfileOutcome(submission.outcome);
+        }
         setOpen(false);
       } else if (submission.operation) {
         setFailure(operationFailureSummary(submission.operation, locale));
@@ -490,6 +891,9 @@ function ActionCard({
         <p className="form-success" role="status">
           {result}
         </p>
+      ) : null}
+      {profileOutcome ? (
+        <NetworkProfileResultCard outcome={profileOutcome} locale={locale} />
       ) : null}
       {open ? (
         <form className="action-form" onSubmit={handleSubmit}>

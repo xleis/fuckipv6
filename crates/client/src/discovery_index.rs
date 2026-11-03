@@ -596,6 +596,25 @@ impl DiscoveryIndexManager {
         )
     }
 
+    /// Re-read and verify the signed record used to submit an approval-based
+    /// join request. This path is read-only, accepts only networks that require
+    /// approval, and preserves the same expiry, revocation, capacity and
+    /// transport checks as direct joining.
+    pub async fn approval_join_record(
+        &self,
+        network_id: &str,
+    ) -> Result<NetworkDiscoveryRecord, DiscoveryIndexError> {
+        let persisted = self
+            .persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let accepted = persisted
+            .records
+            .get(network_id)
+            .ok_or_else(|| DiscoveryIndexError::join("join.error.not_found"))?;
+        validate_approval_join_record(&accepted.record, now_unix_ms())
+    }
+
     /// Re-read the exact accepted record and verify every acknowledgement field
     /// before the caller mutates local configuration or starts a runtime.
     pub async fn confirm_join_record(
@@ -1019,6 +1038,34 @@ impl DiscoveryIndexManager {
     }
 }
 
+fn validate_approval_join_record(
+    record: &NetworkDiscoveryRecord,
+    now: u64,
+) -> Result<NetworkDiscoveryRecord, DiscoveryIndexError> {
+    record
+        .validate_at(now)
+        .map_err(DiscoveryIndexError::from_domain)?;
+    if record.document.revoked_at_unix_ms.is_some() {
+        return Err(DiscoveryIndexError::join("join.error.revoked"));
+    }
+    if record.document.join_mode != NetworkJoinMode::ApprovalRequired {
+        return Err(DiscoveryIndexError::join("join.error.unavailable"));
+    }
+    if record
+        .document
+        .member_limit
+        .is_some_and(|limit| record.document.member_count >= limit)
+    {
+        return Err(DiscoveryIndexError::join("join.error.member_limit"));
+    }
+    if !record.document.endpoints.iter().any(|endpoint| {
+        endpoint.transport == fuckipv6_common::domain::DiscoveryTransport::Websocket
+    }) {
+        return Err(DiscoveryIndexError::join("join.error.endpoint_unavailable"));
+    }
+    Ok(record.clone())
+}
+
 fn preview_from_record(
     record: &NetworkDiscoveryRecord,
     discovery_digest: &str,
@@ -1314,6 +1361,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path.join("discovery_index.json")
+    }
+
+    fn seed_persisted_record(manager: &DiscoveryIndexManager, record: NetworkDiscoveryRecord) {
+        let id = record.document.network_id.to_string();
+        let digest = record.digest().unwrap();
+        manager
+            .persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .insert(
+                id,
+                PersistedDiscoveryRecord {
+                    record,
+                    digest,
+                    accepted_at_unix_ms: now_unix_ms(),
+                },
+            );
     }
 
     fn signed_network_profile(identity: &Identity) -> NetworkRecord {
@@ -1653,6 +1718,158 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.reason_key, Some(expected_reason));
         }
+    }
+
+    #[tokio::test]
+    async fn approval_join_record_is_read_only_and_requires_an_approval_network() {
+        let path = temp_path("approval-join-read-only");
+        let manager = DiscoveryIndexManager::new(path.clone(), Arc::new(FakeTransport::default()));
+        let identity = Identity::generate().unwrap();
+        let profile =
+            signed_network_profile_with(&identity, NetworkJoinMode::ApprovalRequired, None, 0);
+        let record = signed_network_revision_from_profile(&identity, &profile, 1);
+        let network_id = record.document.network_id.to_string();
+        manager
+            .accept_record_locked(record.clone(), now_unix_ms(), true)
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert_eq!(
+            manager.approval_join_record(&network_id).await.unwrap(),
+            record
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let open_path = temp_path("approval-join-open-rejected");
+        let open_manager =
+            DiscoveryIndexManager::new(open_path, Arc::new(FakeTransport::default()));
+        let open =
+            signed_network_revision_from_profile(&identity, &signed_network_profile(&identity), 1);
+        open_manager
+            .accept_record_locked(open, now_unix_ms(), true)
+            .unwrap();
+        let error = open_manager
+            .approval_join_record(&network_id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason_key, Some("join.error.unavailable"));
+
+        let full_path = temp_path("approval-join-full-rejected");
+        let full_manager =
+            DiscoveryIndexManager::new(full_path, Arc::new(FakeTransport::default()));
+        let full_profile =
+            signed_network_profile_with(&identity, NetworkJoinMode::ApprovalRequired, Some(1), 0);
+        let full = signed_network_revision_from_profile(&identity, &full_profile, 1);
+        full_manager
+            .accept_record_locked(full, now_unix_ms(), true)
+            .unwrap();
+        let error = full_manager
+            .approval_join_record(&network_id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason_key, Some("join.error.member_limit"));
+
+        let no_endpoint_path = temp_path("approval-join-no-endpoint");
+        let no_endpoint_manager =
+            DiscoveryIndexManager::new(no_endpoint_path, Arc::new(FakeTransport::default()));
+        let now = now_unix_ms();
+        let document = NetworkDiscoveryDocument::from_record_with_endpoints(
+            &profile,
+            1,
+            now.saturating_sub(1),
+            now.saturating_add(NETWORK_DISCOVERY_VALIDITY_MS),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let no_endpoint = NetworkDiscoveryRecord::sign(document, &identity).unwrap();
+        no_endpoint_manager
+            .accept_record_locked(no_endpoint, now, true)
+            .unwrap();
+        let error = no_endpoint_manager
+            .approval_join_record(&network_id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason_key, Some("join.error.endpoint_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn approval_join_record_rejects_tampering_expiry_and_revocation() {
+        let manager = DiscoveryIndexManager::new(
+            temp_path("approval-join-invalid"),
+            Arc::new(FakeTransport::default()),
+        );
+        let identity = Identity::generate().unwrap();
+        let profile =
+            signed_network_profile_with(&identity, NetworkJoinMode::ApprovalRequired, None, 0);
+        let network_id = profile.network_id.to_string();
+        let endpoint = NetworkEndpoint {
+            transport: DiscoveryTransport::Websocket,
+            host: "coordinator.home.example".into(),
+            port: 443,
+        };
+        let now = now_unix_ms();
+
+        let expired_document = NetworkDiscoveryDocument::from_record_with_endpoints(
+            &profile,
+            1,
+            now.saturating_sub(100),
+            now.saturating_sub(1),
+            None,
+            vec![endpoint.clone()],
+        )
+        .unwrap();
+        let expired = NetworkDiscoveryRecord::sign(expired_document, &identity).unwrap();
+        seed_persisted_record(&manager, expired);
+        assert_eq!(
+            manager
+                .approval_join_record(&network_id)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Rejected
+        );
+
+        let revoked_document = NetworkDiscoveryDocument::from_record_with_endpoints(
+            &profile,
+            2,
+            now.saturating_sub(100),
+            now.saturating_add(NETWORK_DISCOVERY_VALIDITY_MS),
+            Some(now.saturating_sub(100)),
+            vec![endpoint.clone()],
+        )
+        .unwrap();
+        let revoked = NetworkDiscoveryRecord::sign(revoked_document, &identity).unwrap();
+        seed_persisted_record(&manager, revoked);
+        assert_eq!(
+            manager
+                .approval_join_record(&network_id)
+                .await
+                .unwrap_err()
+                .reason_key,
+            Some("join.error.revoked")
+        );
+
+        let valid_document = NetworkDiscoveryDocument::from_record_with_endpoints(
+            &profile,
+            3,
+            now.saturating_sub(1),
+            now.saturating_add(NETWORK_DISCOVERY_VALIDITY_MS),
+            None,
+            vec![endpoint],
+        )
+        .unwrap();
+        let mut tampered = NetworkDiscoveryRecord::sign(valid_document, &identity).unwrap();
+        tampered.document.name = "tampered".into();
+        seed_persisted_record(&manager, tampered);
+        assert_eq!(
+            manager
+                .approval_join_record(&network_id)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Rejected
+        );
     }
 
     #[tokio::test]

@@ -915,6 +915,14 @@ function AppShell({
         }
       } else if (submission.outcome?.status === "snapshot") {
         queryClient.setQueryData(SNAPSHOT_QUERY_KEY, submission.outcome.data);
+      } else if (
+        submission.outcome?.status === "network_joined" ||
+        submission.outcome?.status === "network_left"
+      ) {
+        queryClient.setQueryData(
+          SNAPSHOT_QUERY_KEY,
+          submission.outcome.data.snapshot,
+        );
       } else {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY }),

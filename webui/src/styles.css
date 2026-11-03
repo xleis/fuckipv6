@@ -2180,6 +2180,16 @@ button:disabled {
   color: var(--text-secondary);
   font-size: var(--font-size-xs);
 }
+.join-preview-details {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+}
+.join-preview-details > div {
+  grid-template-columns: minmax(76px, 0.42fr) minmax(0, 1fr);
+}
+.join-terms-check {
+  align-items: flex-start;
+  padding-block: var(--space-1);
+}
 .profile-chip-list {
   display: flex;
   flex-wrap: wrap;
@@ -2467,6 +2477,13 @@ button:disabled {
 .dropdown-item[data-highlighted] {
   background: var(--surface-hover);
   color: var(--text);
+}
+.context-item.danger {
+  color: var(--danger);
+}
+.context-item.danger[data-highlighted] {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 .dropdown-label {
   padding: var(--space-2) var(--space-3) var(--space-1);

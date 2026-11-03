@@ -1134,9 +1134,15 @@ export function validateActionValues(
   locale: Locale,
 ): string[] {
   const errors: string[] = [];
+  const previewJoin =
+    action.id === "join_network" && !blank(values.network_id);
   for (const field of action.fields) {
     const value = values[field.id];
-    if (field.required && blank(value)) {
+    if (
+      field.required &&
+      !(previewJoin && field.id === "target") &&
+      blank(value)
+    ) {
       errors.push(
         i18n().tr(locale, "validation.required", {
           field: label(locale, field.label_key),
@@ -1338,6 +1344,27 @@ export function validateActionValues(
       }
     }
   }
+  if (previewJoin) {
+    const digest = String(values.preview_digest ?? "").trim();
+    const termsHash = String(values.terms_hash ?? "").trim();
+    const policyRevision = Number(values.network_policy_revision);
+    const privacyRevision = Number(values.privacy_policy_revision);
+    const acknowledgedAt = Number(values.acknowledged_at_unix_ms);
+    if (!digest || !termsHash) {
+      errors.push(label(locale, "validation.join_confirmation_incomplete"));
+    }
+    if (
+      !Number.isSafeInteger(policyRevision) ||
+      policyRevision <= 0 ||
+      !Number.isSafeInteger(privacyRevision) ||
+      privacyRevision <= 0
+    ) {
+      errors.push(label(locale, "validation.join_policy_revision_invalid"));
+    }
+    if (!Number.isSafeInteger(acknowledgedAt) || acknowledgedAt <= 0) {
+      errors.push(label(locale, "validation.join_acknowledgement_invalid"));
+    }
+  }
   if (
     action.id === "create_network" &&
     Number(values.signaling_port) === Number(values.relay_port)
@@ -1512,15 +1539,35 @@ export function buildCommand(
         command: "preview_join_network",
         payload: { network_id: requiredString("network_id") },
       };
-    case "join_network":
+    case "join_network": {
+      const networkId = optional(values, "network_id");
+      const payload = {
+        target: optional(values, "target") ?? "",
+        network_name: optional(values, "network_name"),
+        start: booleanValue(values.start, locale),
+      };
+      if (!networkId) {
+        return { command: "join_network", payload };
+      }
       return {
         command: "join_network",
         payload: {
-          target: requiredString("target"),
-          network_name: optional(values, "network_name"),
-          start: booleanValue(values.start, locale),
+          ...payload,
+          network_id: networkId,
+          preview_digest: requiredString("preview_digest"),
+          network_policy_revision: Number(
+            requireValue("network_policy_revision"),
+          ),
+          privacy_policy_revision: Number(
+            requireValue("privacy_policy_revision"),
+          ),
+          terms_hash: requiredString("terms_hash"),
+          acknowledged_at_unix_ms: Number(
+            requireValue("acknowledged_at_unix_ms"),
+          ),
         },
       };
+    }
     case "leave_network":
       return {
         command: "leave_network",
@@ -1869,6 +1916,28 @@ export function outcomeSummary(
       previous: i18n().formatInteger(locale, outcome.data.previous_revision),
       revision: i18n().formatInteger(locale, outcome.data.revision),
       warnings: i18n().formatInteger(locale, outcome.data.warnings.length),
+    });
+  }
+  if (outcome.status === "network_join_preview") {
+    return i18n().tr(locale, "outcome.network_join_previewed", {
+      network: outcome.data.network_name,
+      members: i18n().formatInteger(locale, outcome.data.member_count),
+    });
+  }
+  if (outcome.status === "network_joined") {
+    return i18n().tr(locale, "outcome.network_joined", {
+      network: outcome.data.membership.network_name,
+      state: label(
+        locale,
+        outcome.data.idempotent
+          ? "outcome.membership_unchanged"
+          : "outcome.membership_created",
+      ),
+    });
+  }
+  if (outcome.status === "network_left") {
+    return i18n().tr(locale, "outcome.network_left", {
+      network: outcome.data.network_name,
     });
   }
   if (outcome.status === "blacklist") {

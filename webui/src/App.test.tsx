@@ -2012,7 +2012,7 @@ describe("React WebUI shell", () => {
     expect(sendCommand).not.toHaveBeenCalled();
   });
 
-  it("opens network details and pre-fills only the join network name", async () => {
+  it("opens the signed join preview with the stable discovery network id", async () => {
     authenticate(discoverySnapshot([discoveryRecord("family")]));
     const user = userEvent.setup();
     renderApp();
@@ -2038,11 +2038,116 @@ describe("React WebUI shell", () => {
       name: "translated:common.shared_actions",
     });
     expect(
-      within(panel).getByLabelText("translated:field.network_name"),
-    ).toHaveValue("family");
+      within(panel).getByRole("button", {
+        name: "translated:action.preview_join_network",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
     expect(
-      within(panel).getByLabelText("translated:field.ticket_or_url"),
-    ).toHaveValue("");
+      within(panel).getByLabelText("translated:field.network_id"),
+    ).toHaveValue("network-family");
+    expect(
+      within(panel).queryByLabelText("translated:field.ticket_or_url"),
+    ).not.toBeInTheDocument();
+    expect(sendCommand).not.toHaveBeenCalled();
+  });
+
+  it("leaves the selected network without touching other memberships", async () => {
+    authenticate(populatedSnapshot);
+    const remainingNetwork = populatedSnapshot.networks.find(
+      (network) => network.name === "studio",
+    )!;
+    const leftSnapshot: NodeSnapshot = {
+      ...populatedSnapshot,
+      revision: populatedSnapshot.revision + 1,
+      networks: [remainingNetwork],
+      lifecycle: {
+        ...populatedSnapshot.lifecycle,
+        active_networks: 1,
+        configured_networks: 1,
+      },
+    };
+    vi.mocked(sendCommand).mockImplementation(
+      async (request): Promise<NodeApiCommandResponse> => ({
+        schema_version: 1,
+        request_id: request.request.request_id,
+        server_time: "2026-11-04T00:00:00Z",
+        result: {
+          request_id: request.request.request_id,
+          outcome: {
+            status: "network_left",
+            data: {
+              left: true,
+              network_name: "home",
+              snapshot: leftSnapshot,
+            },
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      }),
+    );
+    const joined = await screen.findByTestId("joined-networks-section");
+    const homeCard = within(joined).getByText("home").closest("article");
+    expect(homeCard).not.toBeNull();
+    fireEvent.contextMenu(homeCard!);
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "translated:action.leave_network",
+      }),
+    );
+
+    const panel = screen.getByRole("complementary", {
+      name: "translated:common.shared_actions",
+    });
+    const leaveAction = within(panel)
+      .getByRole("button", {
+        name: "translated:action.leave_network",
+      })
+      .closest("article");
+    expect(leaveAction).not.toBeNull();
+    expect(
+      within(leaveAction!).getByRole("button", {
+        name: "translated:action.leave_network",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(leaveAction!).getByLabelText("translated:field.network_name"),
+    ).toHaveValue("home");
+
+    await user.click(
+      within(leaveAction!).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    expect(
+      await within(panel).findByText("translated:outcome.network_left"),
+    ).toBeInTheDocument();
+    expect(sendCommand).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendCommand).mock.calls[0][0].request.command).toEqual({
+      command: "leave_network",
+      payload: { network_name: "home" },
+    });
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("joined-networks-section")).queryByText("home"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      within(screen.getByTestId("joined-networks-section")).getByText("studio"),
+    ).toBeInTheDocument();
   });
 
   it("shows degraded partial and stale discovery without calling it empty", async () => {

@@ -7,11 +7,13 @@ import type {
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeCommandOutcome,
+  NodeNetworkJoinPreview,
   NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiAction,
   NodeUiManifest,
 } from "../../../contracts/typescript/node-contract-v1";
+import type { ActionValues } from "../contract/invariants";
 import type { PageStateKind } from "../state-matrix";
 import { installTestI18nRuntime } from "../test/runtime";
 import { ActionPanel, type ActionSubmission } from "./action-panel";
@@ -30,6 +32,15 @@ const previewProfile = manifest.pages
 const updateProfile = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "update_network_profile") as NodeUiAction;
+const previewJoin = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "preview_join_network") as NodeUiAction;
+const joinNetwork = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "join_network") as NodeUiAction;
+const leaveNetwork = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "leave_network") as NodeUiAction;
 const currentFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const nextFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
@@ -123,6 +134,62 @@ const profileSnapshot: NodeSnapshot = {
   ],
 };
 
+const joinPreview: NodeNetworkJoinPreview = {
+  network_id: "network-family",
+  network_name: "family",
+  public_key: "network-public-key",
+  owner: "owner-family",
+  administrators: ["admin-one", "admin-two"],
+  discovery_revision: 7,
+  network_policy_revision: 4,
+  privacy_policy_revision: 3,
+  join_mode: "open",
+  visibility: "public",
+  capability_summary: ["relay"],
+  endpoints: [
+    { host: "relay.example.test", port: 443, transport: "websocket" },
+  ],
+  member_count: 8,
+  member_limit: 16,
+  exit_contribution: "required",
+  privacy_changes: ["Operators can observe connection metadata"],
+  already_member: false,
+  can_join: true,
+  blocked_reason_key: null,
+  terms_hash: "terms-hash-family",
+  preview_digest: "preview-digest-family",
+  issued_at_unix_ms: 1_700_000_000_000,
+  expires_at_unix_ms: 1_700_086_400_000,
+  locally_contributed_capabilities: [],
+  contribution_policy_key: "join.contribution.local_control",
+};
+
+const joinPreviewOutcome = {
+  status: "network_join_preview" as const,
+  data: joinPreview,
+};
+
+const joinedOutcome = {
+  status: "network_joined" as const,
+  data: {
+    config_saved: true,
+    idempotent: false,
+    membership: {
+      network_id: "network-family",
+      network_name: "family",
+      node_id: "node-current",
+      role: "member",
+      state: "accepted",
+      local_policy_revision: 1,
+      acknowledged_at_unix_ms: 1_700_000_000_123,
+      created_at_unix_ms: 1_700_000_000_000,
+      updated_at_unix_ms: 1_700_000_000_123,
+    },
+    snapshot,
+    started: true,
+  },
+};
+
 const profileWarnings = [
   {
     code: "capability_not_observed" as const,
@@ -182,7 +249,7 @@ const profileUpdateOutcome = {
 function renderPanel(
   interactionBlocked: PageStateKind | null,
   onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
-    outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+    outcome: { status: "completed", data: {} } as unknown as NodeCommandOutcome,
   })),
 ) {
   return render(
@@ -331,6 +398,55 @@ describe("action panel field synchronization", () => {
       />,
     );
     expect(input).toHaveValue(editedFingerprint);
+  });
+});
+
+describe("action panel selected network synchronization", () => {
+  it("updates network defaults without remounting the action card", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+    }));
+    const view = render(
+      <ActionPanel
+        actions={[leaveNetwork]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:action.leave_network" }),
+    );
+    const input = screen.getByLabelText("translated:field.network_name");
+    expect(input).toHaveValue("home");
+
+    view.rerender(
+      <ActionPanel
+        actions={[leaveNetwork]}
+        snapshot={snapshot}
+        selectedNetwork="studio"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await waitFor(() => expect(input).toHaveValue("studio"));
+    expect(screen.getByLabelText("translated:field.network_name")).toBe(input);
   });
 });
 
@@ -557,6 +673,156 @@ describe("action panel operation status", () => {
     expect(result).toHaveTextContent("Relay capability has not been observed");
     expect(result).toHaveTextContent("The published profile has expired");
     expect(result).toHaveTextContent("translated:profile.signature_valid");
+  });
+
+  it("renders a signed join preview and submits confirmed terms at click time", async () => {
+    const user = userEvent.setup();
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_123);
+    const onSubmit = vi
+      .fn<
+        (
+          action: NodeUiAction,
+          values: ActionValues,
+          onOperation: (operation: NodeOperationSnapshot) => void,
+        ) => Promise<ActionSubmission>
+      >()
+      .mockResolvedValueOnce({
+        outcome: joinPreviewOutcome as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: joinedOutcome as NodeCommandOutcome,
+      });
+    render(
+      <ActionPanel
+        actions={[previewJoin, joinNetwork]}
+        snapshot={snapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "preview_join_network",
+          values: { network_id: "network-family" },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const preview = await screen.findByTestId("network-join-preview");
+    expect(preview).toHaveTextContent("translated:join.preview_title");
+    expect(preview).toHaveTextContent("network-family");
+    expect(preview).toHaveTextContent("owner-family");
+    expect(preview).toHaveTextContent("admin-one");
+    expect(preview).toHaveTextContent("Operators can observe connection metadata");
+    expect(preview).toHaveTextContent("translated:join.local_capabilities_none");
+    expect(preview).toHaveTextContent(
+      "translated:join.contribution.local_control",
+    );
+
+    const confirm = within(preview).getByRole("button", {
+      name: "translated:join.confirm",
+    });
+    expect(confirm).toBeDisabled();
+    await user.click(
+      within(preview).getByRole("checkbox", {
+        name: "translated:join.terms_checkbox",
+      }),
+    );
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1]?.[0]).toBe(joinNetwork);
+    expect(onSubmit.mock.calls[1]?.[1]).toMatchObject({
+      network_id: "network-family",
+      network_name: "family",
+      preview_digest: "preview-digest-family",
+      network_policy_revision: "4",
+      privacy_policy_revision: "3",
+      terms_hash: "terms-hash-family",
+      acknowledged_at_unix_ms: "1700000000123",
+      start: true,
+    });
+    expect(
+      await screen.findByText("translated:outcome.network_joined"),
+    ).toBeInTheDocument();
+    now.mockRestore();
+  });
+
+  it("keeps an unconfirmed preview available when the final join is rejected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi
+      .fn<() => Promise<ActionSubmission>>()
+      .mockResolvedValueOnce({
+        outcome: joinPreviewOutcome as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "rejected",
+          data: {
+            category: "validation",
+            code: "conflict",
+            message: "Preview changed",
+            message_key: "join.error.preview_changed",
+            retryable: true,
+            network_name: "family",
+          },
+        } as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: joinedOutcome as NodeCommandOutcome,
+      });
+    render(
+      <ActionPanel
+        actions={[previewJoin, joinNetwork]}
+        snapshot={snapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "preview_join_network",
+          values: { network_id: "network-family" },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const preview = await screen.findByTestId("network-join-preview");
+    const checkbox = within(preview).getByRole("checkbox", {
+      name: "translated:join.terms_checkbox",
+    });
+    await user.click(checkbox);
+    await user.click(
+      within(preview).getByRole("button", {
+        name: "translated:join.confirm",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "translated:join.error.preview_changed",
+    );
+    expect(screen.getByTestId("network-join-preview")).toBeInTheDocument();
+    expect(checkbox).toBeChecked();
+
+    await user.click(
+      within(screen.getByTestId("network-join-preview")).getByRole("button", {
+        name: "translated:join.confirm",
+      }),
+    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(3));
   });
 
   it("renders applied profile audit data and changed paths", async () => {

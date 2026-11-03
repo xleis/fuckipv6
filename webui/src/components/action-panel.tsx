@@ -14,6 +14,7 @@ import type {
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeCommandOutcome,
+  NodeNetworkJoinPreview,
   NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiAction,
@@ -612,6 +613,231 @@ function NetworkProfileResultCard({
   );
 }
 
+function joinPreviewValues(preview: NodeNetworkJoinPreview): ActionValues {
+  return {
+    target: "",
+    network_id: preview.network_id,
+    network_name: preview.network_name,
+    preview_digest: preview.preview_digest,
+    network_policy_revision: String(preview.network_policy_revision),
+    privacy_policy_revision: String(preview.privacy_policy_revision),
+    terms_hash: preview.terms_hash,
+    start: true,
+  };
+}
+
+function joinList(
+  values: string[],
+  locale: Locale,
+  emptyKey = "common.none",
+): string {
+  return values.length > 0
+    ? values.join(label(locale, "common.list_separator"))
+    : label(locale, emptyKey);
+}
+
+function JoinPreviewCard({
+  preview,
+  locale,
+  checked,
+  pending,
+  blockedReason,
+  onCheckedChange,
+  onConfirm,
+}: {
+  preview: NodeNetworkJoinPreview;
+  locale: Locale;
+  checked: boolean;
+  pending: boolean;
+  blockedReason: string;
+  onCheckedChange(checked: boolean): void;
+  onConfirm(): void;
+}) {
+  const canConfirm = preview.can_join && checked && !pending && !blockedReason;
+  return (
+    <section
+      className="network-profile-result join-preview-result"
+      data-testid="network-join-preview"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>{label(locale, "join.preview_title")}</span>
+          <strong>{preview.network_name}</strong>
+        </div>
+        {preview.can_join ? <Check size={16} /> : <ShieldAlert size={16} />}
+      </div>
+      <div className="profile-result-status">
+        <span>
+          {label(
+            locale,
+            preview.can_join ? "join.can_join" : "join.cannot_join",
+          )}
+        </span>
+        {preview.already_member ? (
+          <span>{label(locale, "join.already_member")}</span>
+        ) : null}
+        <span>
+          {label(locale, `choice.join_mode.${preview.join_mode}`)}
+        </span>
+        <span>
+          {label(locale, `choice.visibility.${preview.visibility}`)}
+        </span>
+      </div>
+      {!preview.can_join ? (
+        <div className="inline-notice danger">
+          <ShieldAlert size={15} />
+          <span>
+            {label(
+              locale,
+              preview.blocked_reason_key || "join.error.unavailable",
+            )}
+          </span>
+        </div>
+      ) : null}
+      {blockedReason ? (
+        <div className="inline-notice warning">
+          <ShieldAlert size={15} />
+          <span>{blockedReason}</span>
+        </div>
+      ) : null}
+      <dl className="profile-definition-list join-preview-details">
+        <div>
+          <dt>{label(locale, "join.network_id")}</dt>
+          <dd>
+            <code>{preview.network_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.owner")}</dt>
+          <dd>
+            <code>{preview.owner}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.administrators")}</dt>
+          <dd>{joinList(preview.administrators, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.discovery_revision")}</dt>
+          <dd>{i18n().formatInteger(locale, preview.discovery_revision)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.network_policy_revision")}</dt>
+          <dd>
+            {i18n().formatInteger(locale, preview.network_policy_revision)}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.privacy_policy_revision")}</dt>
+          <dd>
+            {i18n().formatInteger(locale, preview.privacy_policy_revision)}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.members")}</dt>
+          <dd>
+            {tr(locale, "join.member_count", {
+              count: i18n().formatInteger(locale, preview.member_count),
+              limit:
+                preview.member_limit == null
+                  ? label(locale, "common.unlimited")
+                  : i18n().formatInteger(locale, preview.member_limit),
+            })}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.exit_contribution")}</dt>
+          <dd>{label(locale, `join.exit.${preview.exit_contribution}`)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.privacy_changes")}</dt>
+          <dd>{joinList(preview.privacy_changes, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.capabilities")}</dt>
+          <dd>
+            {joinList(
+              preview.capability_summary.map((capability) =>
+                label(locale, `capability.${capability}`),
+              ),
+              locale,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.local_capabilities")}</dt>
+          <dd>
+            {joinList(
+              preview.locally_contributed_capabilities.map((capability) =>
+                label(locale, `capability.${capability}`),
+              ),
+              locale,
+              "join.local_capabilities_none",
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.contribution_policy")}</dt>
+          <dd>{label(locale, preview.contribution_policy_key)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.endpoints")}</dt>
+          <dd>
+            {joinList(
+              preview.endpoints.map(
+                (endpoint) =>
+                  `${endpoint.transport}://${endpoint.host}:${endpoint.port}`,
+              ),
+              locale,
+            )}
+          </dd>
+        </div>
+      </dl>
+      <div className="profile-signature-meta">
+        <span>
+          {tr(locale, "join.issued_at", {
+            time: i18n().formatTimestamp(locale, preview.issued_at_unix_ms),
+          })}
+        </span>
+        <span>
+          {tr(locale, "join.expires_at", {
+            time: i18n().formatTimestamp(locale, preview.expires_at_unix_ms),
+          })}
+        </span>
+        <span>
+          {tr(locale, "join.preview_digest", {
+            digest: preview.preview_digest,
+          })}
+        </span>
+      </div>
+      <div className="inline-notice">
+        <ShieldAlert size={15} />
+        <span>{label(locale, "join.local_revocable")}</span>
+      </div>
+      <label className="check-field join-terms-check">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={pending || !preview.can_join}
+          onChange={(event) => onCheckedChange(event.target.checked)}
+        />
+        <span>{label(locale, "join.terms_checkbox")}</span>
+      </label>
+      <button
+        className="primary-button"
+        type="button"
+        disabled={!canConfirm}
+        onClick={onConfirm}
+      >
+        {pending
+          ? label(locale, "common.operation_in_progress")
+          : label(locale, "join.confirm")}
+      </button>
+    </section>
+  );
+}
+
 function OperationStatusCard({
   operation,
   locale,
@@ -763,6 +989,8 @@ function ActionCard({
   interactionBlocked,
   requested,
   requestedValues,
+  joinAction,
+  joinPending,
   onRequestedActionOpened,
   onSubmit,
 }: {
@@ -774,6 +1002,8 @@ function ActionCard({
   interactionBlocked: PageStateKind | null;
   requested: boolean;
   requestedValues?: ActionValues;
+  joinAction?: NodeUiAction;
+  joinPending: boolean;
   onRequestedActionOpened(): void;
   onSubmit(
     action: NodeUiAction,
@@ -791,6 +1021,9 @@ function ActionCard({
   const [result, setResult] = useState("");
   const [profileOutcome, setProfileOutcome] =
     useState<NetworkProfileOutcome | null>(null);
+  const [joinPreview, setJoinPreview] =
+    useState<NodeNetworkJoinPreview | null>(null);
+  const [joinConfirmed, setJoinConfirmed] = useState(false);
   const [failure, setFailure] = useState("");
   const editedFields = useRef(new Set<string>());
   const fingerprint = snapshot.identity?.public_key_fingerprint ?? "";
@@ -811,7 +1044,28 @@ function ActionCard({
       : executionBlocked
         ? blockReasonText(executionBlocked, locale)
         : "";
+  const joinBlockedReason = !joinAction
+    ? label(locale, "join.action_unavailable")
+    : executionBlockReason(joinAction, snapshot, selectedNetwork)
+      ? blockReasonText(
+          executionBlockReason(joinAction, snapshot, selectedNetwork),
+          locale,
+        )
+      : "";
   const [previousRequested, setPreviousRequested] = useState(requested);
+  const previousSelectedNetwork = useRef(selectedNetwork);
+
+  useEffect(() => {
+    if (previousSelectedNetwork.current === selectedNetwork) return;
+    previousSelectedNetwork.current = selectedNetwork;
+    setConfirming(false);
+    setValues(initialActionValues(action, snapshot, selectedNetwork));
+    setErrors([]);
+    setFailure("");
+    setProfileOutcome(null);
+    setJoinPreview(null);
+    setJoinConfirmed(false);
+  }, [action, selectedNetwork, snapshot]);
 
   if (requested !== previousRequested) {
     setPreviousRequested(requested);
@@ -826,6 +1080,8 @@ function ActionCard({
       setFailure("");
       setResult("");
       setProfileOutcome(null);
+      setJoinPreview(null);
+      setJoinConfirmed(false);
     }
   }
 
@@ -869,7 +1125,53 @@ function ActionCard({
         ) {
           setProfileOutcome(submission.outcome);
         }
-        setOpen(false);
+        if (submission.outcome.status === "network_join_preview") {
+          setJoinPreview(submission.outcome.data);
+          setJoinConfirmed(false);
+          setOpen(true);
+        } else {
+          if (
+            submission.outcome.status === "network_joined" ||
+            submission.outcome.status === "network_left"
+          ) {
+            setJoinPreview(null);
+            setJoinConfirmed(false);
+          }
+          setOpen(false);
+        }
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function confirmJoin(): Promise<void> {
+    if (!joinPreview || !joinAction || !joinConfirmed) return;
+    setErrors([]);
+    setFailure("");
+    setResult("");
+    try {
+      const submission = await onSubmit(
+        joinAction,
+        {
+          ...joinPreviewValues(joinPreview),
+          acknowledged_at_unix_ms: String(Date.now()),
+        },
+        () => {},
+      );
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome) {
+        setResult(outcomeSummary(submission.outcome, locale));
+        if (submission.outcome.status === "network_joined") {
+          setJoinPreview(null);
+          setJoinConfirmed(false);
+          setOpen(false);
+        }
       } else if (submission.operation) {
         setFailure(operationFailureSummary(submission.operation, locale));
       } else {
@@ -911,6 +1213,17 @@ function ActionCard({
       ) : null}
       {profileOutcome ? (
         <NetworkProfileResultCard outcome={profileOutcome} locale={locale} />
+      ) : null}
+      {joinPreview ? (
+        <JoinPreviewCard
+          preview={joinPreview}
+          locale={locale}
+          checked={joinConfirmed}
+          pending={joinPending}
+          blockedReason={joinBlockedReason}
+          onCheckedChange={setJoinConfirmed}
+          onConfirm={() => void confirmJoin()}
+        />
       ) : null}
       {open ? (
         <form className="action-form" onSubmit={handleSubmit}>
@@ -1081,7 +1394,7 @@ export function ActionPanel(props: ActionPanelProps) {
       <div className="action-list">
         {actions.map((action) => (
           <ActionCard
-            key={`${action.id}:${props.selectedNetwork}`}
+            key={action.id}
             action={action}
             snapshot={props.snapshot}
             selectedNetwork={props.selectedNetwork}
@@ -1094,6 +1407,10 @@ export function ActionPanel(props: ActionPanelProps) {
                 ? props.requestedAction.values
                 : undefined
             }
+            joinAction={actions.find(
+              (candidate) => candidate.id === "join_network",
+            )}
+            joinPending={pendingAction === "join_network"}
             onRequestedActionOpened={props.onRequestedActionOpened}
             onSubmit={onSubmit}
           />

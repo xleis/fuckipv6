@@ -141,11 +141,13 @@ function NetworkContextMenu({
   locale,
   onSelectNetwork,
   onNavigate,
+  onRequestAction,
 }: {
   network: NodeNetworkSnapshot;
   locale: Locale;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
+  onRequestAction(actionId: string, initialValues?: ActionValues): void;
 }) {
   return (
     <ContextMenu.Root>
@@ -208,6 +210,17 @@ function NetworkContextMenu({
           >
             {label(locale, "nav.traffic")}
           </ContextMenu.Item>
+          <ContextMenu.Item
+            className="context-item danger"
+            onSelect={() => {
+              onSelectNetwork(network.name);
+              onRequestAction("leave_network", {
+                network_name: network.name,
+              });
+            }}
+          >
+            {label(locale, "action.leave_network")}
+          </ContextMenu.Item>
         </ContextMenu.Content>
       </ContextMenu.Portal>
     </ContextMenu.Root>
@@ -217,6 +230,7 @@ function NetworkContextMenu({
 const OVERVIEW_ACTIVITY_ACTIONS = new Set([
   "network.create",
   "network.join",
+  "network.leave",
   "network.start",
   "network.stop",
   "network.restart",
@@ -1367,7 +1381,9 @@ function DiscoveryResultCard({
           className="primary-button"
           type="button"
           onClick={() =>
-            onRequestAction("join_network", { network_name: result.title })
+            onRequestAction("preview_join_network", {
+              network_id: result.networkId,
+            })
           }
         >
           {discoveryJoinLabel(locale, result.joinMode)}
@@ -1436,6 +1452,7 @@ function Networks({
                 locale={locale}
                 onSelectNetwork={onSelectNetwork}
                 onNavigate={onNavigate}
+                onRequestAction={onRequestAction}
               />
             ))}
           </div>

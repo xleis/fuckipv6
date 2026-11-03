@@ -5,6 +5,7 @@ import type {
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeApiManifestResponse,
+  NodeCommandOutcome,
   NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiManifest,
@@ -300,6 +301,100 @@ describe("node UI contract invariants", () => {
         auto_connect: true,
       },
     });
+  });
+
+  it("requires and builds the complete signed network join confirmation", () => {
+    const join = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "join_network")!;
+    const confirmed = {
+      target: "",
+      network_name: "family",
+      start: true,
+      network_id: "network-family",
+      preview_digest: "preview-digest-family",
+      network_policy_revision: "4",
+      privacy_policy_revision: "3",
+      terms_hash: "terms-hash-family",
+      acknowledged_at_unix_ms: "1700000000123",
+    };
+
+    expect(validateActionValues(join, confirmed, "zh-CN")).toEqual([]);
+    expect(
+      commandEnvelope(
+        41,
+        join,
+        confirmed,
+        "zh-CN",
+        "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
+      ).request.command,
+    ).toEqual({
+      command: "join_network",
+      payload: {
+        target: "",
+        network_name: "family",
+        start: true,
+        network_id: "network-family",
+        preview_digest: "preview-digest-family",
+        network_policy_revision: 4,
+        privacy_policy_revision: 3,
+        terms_hash: "terms-hash-family",
+        acknowledged_at_unix_ms: 1_700_000_000_123,
+      },
+    });
+
+    for (const [values, error] of [
+      [
+        { ...confirmed, preview_digest: "" },
+        "translated:validation.join_confirmation_incomplete",
+      ],
+      [
+        { ...confirmed, terms_hash: " " },
+        "translated:validation.join_confirmation_incomplete",
+      ],
+      [
+        { ...confirmed, network_policy_revision: "0" },
+        "translated:validation.join_policy_revision_invalid",
+      ],
+      [
+        { ...confirmed, privacy_policy_revision: "-1" },
+        "translated:validation.join_policy_revision_invalid",
+      ],
+      [
+        { ...confirmed, acknowledged_at_unix_ms: "0" },
+        "translated:validation.join_acknowledgement_invalid",
+      ],
+    ] as const) {
+      expect(validateActionValues(join, values, "zh-CN")).toEqual([error]);
+      expect(() => commandEnvelope(42, join, values, "zh-CN", "idempotency")).toThrow(
+        error,
+      );
+    }
+  });
+
+  it("summarizes join preview, joined, and leave outcomes", () => {
+    const preview = {
+      status: "network_join_preview",
+      data: { network_name: "family", member_count: 8 },
+    } as unknown as NodeCommandOutcome;
+    const joined = {
+      status: "network_joined",
+      data: { membership: { network_name: "family" }, idempotent: false },
+    } as unknown as NodeCommandOutcome;
+    const left = {
+      status: "network_left",
+      data: { network_name: "family" },
+    } as unknown as NodeCommandOutcome;
+
+    expect(outcomeSummary(preview, "zh-CN")).toBe(
+      "translated:outcome.network_join_previewed",
+    );
+    expect(outcomeSummary(joined, "zh-CN")).toBe(
+      "translated:outcome.network_joined",
+    );
+    expect(outcomeSummary(left, "zh-CN")).toBe(
+      "translated:outcome.network_left",
+    );
   });
 
   it("builds typed profile preview and update commands from snapshot defaults", () => {

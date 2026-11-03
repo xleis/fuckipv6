@@ -152,6 +152,24 @@ impl NodeCommandKind {
         Self::Shutdown,
     ];
 
+    /// Commands whose blast radius or trust-boundary changes require a recent
+    /// WebUI Passkey ceremony. Authorization and the UI manifest both consume
+    /// this policy so server enforcement cannot drift from the warning shown to
+    /// the owner.
+    pub const fn requires_recent_reauthentication(self) -> bool {
+        matches!(
+            self,
+            Self::Shutdown
+                | Self::ApplyConfiguration
+                | Self::RollbackConfiguration
+                | Self::RestartNode
+                | Self::RebuildTun
+                | Self::SetNodeDisplayName
+                | Self::RotateNodeIdentity
+                | Self::CleanupResiduals
+        )
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GetSnapshot => "get_snapshot",

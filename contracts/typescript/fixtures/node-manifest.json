@@ -1,5 +1,34 @@
 {
   "schema_version": 1,
+  "page_states": [
+    "initial_loading",
+    "error",
+    "maintenance",
+    "permission_denied",
+    "unsupported",
+    "offline",
+    "control_unavailable",
+    "node_failed",
+    "degraded",
+    "stale",
+    "refreshing",
+    "empty",
+    "ready"
+  ],
+  "action_block_reasons": [
+    "node_not_running",
+    "no_online_network",
+    "no_network_selected",
+    "permission_denied",
+    "platform_unsupported",
+    "exit_node_unsupported",
+    "tun_platform_unsupported",
+    "tun_permission_denied",
+    "tun_device_unavailable",
+    "tun_tool_unavailable",
+    "tun_unavailable",
+    "backend_unavailable"
+  ],
   "pages": [
     {
       "id": "overview",
@@ -150,7 +179,8 @@
           "confirmation": {
             "title_key": "confirm.stop_networks.title",
             "consequence_key": "confirm.stop_networks.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         },
         {
@@ -183,7 +213,8 @@
           "confirmation": {
             "title_key": "confirm.restart_networks.title",
             "consequence_key": "confirm.restart_networks.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         },
         {
@@ -209,7 +240,8 @@
           "confirmation": {
             "title_key": "confirm.rebuild_tun.title",
             "consequence_key": "confirm.rebuild_tun.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": true
           }
         }
       ]
@@ -307,7 +339,8 @@
           "confirmation": {
             "title_key": "confirm.ban_client.title",
             "consequence_key": "confirm.ban_client.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         },
         {
@@ -417,7 +450,8 @@
           "confirmation": {
             "title_key": "confirm.restart_node.title",
             "consequence_key": "confirm.restart_node.consequence",
-            "destructive": true
+            "destructive": true,
+            "recent_authentication_required": true
           }
         },
         {
@@ -447,7 +481,12 @@
               "validation": "none"
             }
           ],
-          "confirmation": null
+          "confirmation": {
+            "title_key": "confirm.cleanup_node_residuals.title",
+            "consequence_key": "confirm.cleanup_node_residuals.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
         }
       ]
     },
@@ -512,7 +551,8 @@
           "confirmation": {
             "title_key": "confirm.update_routing.title",
             "consequence_key": "confirm.update_routing.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         }
       ]
@@ -559,7 +599,8 @@
           "confirmation": {
             "title_key": "confirm.set_exit_node_role.title",
             "consequence_key": "confirm.set_exit_node_role.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         }
       ]
@@ -606,7 +647,8 @@
           "confirmation": {
             "title_key": "confirm.set_relay_role.title",
             "consequence_key": "confirm.set_relay_role.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         }
       ]
@@ -642,7 +684,12 @@
               "validation": "display_name"
             }
           ],
-          "confirmation": null
+          "confirmation": {
+            "title_key": "confirm.set_node_display_name.title",
+            "consequence_key": "confirm.set_node_display_name.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
         },
         {
           "id": "rotate_node_identity",
@@ -667,7 +714,8 @@
           "confirmation": {
             "title_key": "confirm.rotate_node_identity.title",
             "consequence_key": "confirm.rotate_node_identity.consequence",
-            "destructive": true
+            "destructive": true,
+            "recent_authentication_required": true
           }
         }
       ]
@@ -743,7 +791,8 @@
           "confirmation": {
             "title_key": "confirm.update_network_allocation.title",
             "consequence_key": "confirm.update_network_allocation.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": false
           }
         },
         {
@@ -819,7 +868,8 @@
           "confirmation": {
             "title_key": "confirm.apply_configuration.title",
             "consequence_key": "confirm.apply_configuration.consequence",
-            "destructive": false
+            "destructive": false,
+            "recent_authentication_required": true
           }
         },
         {
@@ -852,7 +902,8 @@
           "confirmation": {
             "title_key": "confirm.rollback_configuration.title",
             "consequence_key": "confirm.rollback_configuration.consequence",
-            "destructive": true
+            "destructive": true,
+            "recent_authentication_required": true
           }
         },
         {
@@ -884,7 +935,8 @@
           "confirmation": {
             "title_key": "confirm.shutdown_node.title",
             "consequence_key": "confirm.shutdown_node.consequence",
-            "destructive": true
+            "destructive": true,
+            "recent_authentication_required": true
           }
         }
       ]

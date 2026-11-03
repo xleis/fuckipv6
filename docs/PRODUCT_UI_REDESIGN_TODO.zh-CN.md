@@ -53,7 +53,7 @@
 | W4 控制 API | `[x]` | P0 | W1,W2 | W4-01 至 W4-07 已完成；版本化 API、operation/SSE、稳定错误、服务端授权、生成客户端、限额与自动化攻击面门禁均有测试证据。未进行真实公网环境实机压测 |
 | W5 设计系统 | `[~]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[~]` | P1 | W4,W5 | 五导航与单一主状态已落地；概览、设置和状态矩阵待完成 |
-| W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥与 W7-05 诊断恢复已完成；W7-02 接口/TUN 进行中，W7-06 状态权限矩阵待完成 |
+| W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥、W7-05 诊断恢复与 W7-06 状态权限矩阵已完成；W7-02 接口/TUN 的实机平台验收进行中 |
 | W8 网络创建与发现 | `[ ]` | P1 | W3,W4,W5 | 创建、发现、申请、审批 |
 | W9 成员、组与拓扑 | `[ ]` | P1 | W8 | 拓扑、列表、邀请、批量操作 |
 | W10 安全与隐私 | `[ ]` | P1 | W9 | ACL、字段权限、测试器、审计 |
@@ -1014,15 +1014,17 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：用户能定位是节点、网络还是出口故障；诊断有硬超时、可取消、可脱敏导出且无残留。
 
-### W7-06 节点页状态与权限矩阵 `[ ]`
+### W7-06 节点页状态与权限矩阵 `[x]`
 
-- [ ] 加载、刷新、空、错误、陈旧、无权限、不支持、维护状态全部实现；
-- [ ] 禁用控件均显示本地或网络权限原因；
-- [ ] GPUI、WebUI 和适用时的 Android 使用同一状态/错误契约；
-- [ ] 窄屏采用纵向摘要和折叠详情；
-- [ ] 危险操作具备二次确认、影响说明和近期重认证；
-- [ ] 完成键盘、屏幕阅读器、焦点和对比度测试；
-- [ ] 页面不出现静态成功文案、假指标或不可执行按钮。
+- [x] 加载、刷新、空、错误、陈旧、无权限、不支持、维护状态全部实现；
+- [x] 禁用控件均显示本地或网络权限原因；
+- [x] GPUI、WebUI 和适用时的 Android 使用同一状态/错误契约；
+- [x] 窄屏采用纵向摘要和折叠详情；
+- [x] 危险操作具备二次确认、影响说明和近期重认证；
+- [x] 完成键盘、屏幕阅读器、焦点和对比度测试；
+- [x] 页面不出现静态成功文案、假指标或不可执行按钮。
+
+**证据（2026-11-03）**：节点 UI manifest 现在显式发布 13 个固定顺序页面状态和 12 个固定顺序动作禁用原因；Rust 校验、WebUI 运行时校验、TypeScript 生成类型和 Android fail-closed 枚举共同拒绝集合或顺序漂移。GPUI 的本地动作阻断原因统一投影到 manifest 的 `NodeUiActionBlockReason` 后再取文案，WebUI 直接使用生成的 `NodeUiPageState`/`NodeUiActionBlockReason` 闭集，并将 Exit 角色不支持统一映射为 `exit_node_unsupported`。危险命令的近期重认证策略收敛到 `NodeCommandKind::requires_recent_reauthentication()`，服务端授权与 manifest 确认声明共用该策略；WebUI 和 GPUI 在二次确认中展示操作影响及 WebUI Passkey 重认证要求，并为先前缺失的改名、残留清理加上可翻译确认文案。既有唯一主状态、动作/配置/操作禁用原因、窄屏纵向布局与折叠详情继续由 W5-03、W5-05、W6-07 的共享契约和测试覆盖；本轮重新执行无网络 Chromium 无障碍夹具，焦点陷阱、焦点恢复、菜单键/右键等价、Tabs ARIA 和能力文本状态均通过。验证通过：`cargo test -p fuckipv6-client --all-features`（lib 726 passed、3 ignored；`register_check_process` 1 passed；`w2_runtime_process` 11 passed；`lifecycle_cleanup_linux` 1 ignored）、`cargo test -p fuckipv6-common i18n` 9/9、WebUI 8 个测试文件 86/86、`npm run typecheck`、`npm run lint`、`npm run build`、`node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check`。构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。Android 当前仅完成生成契约和 fail-closed 解码验证，原生 Compose 页面行为仍由 W16 验收。
 
 **验收**：节点页在成功、失败、降级和权限受限场景均有完整且一致的产品行为。
 

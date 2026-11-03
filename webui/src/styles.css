@@ -2016,6 +2016,12 @@ button:disabled {
   display: grid;
   gap: var(--space-2);
 }
+.dialog-secondary-copy {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

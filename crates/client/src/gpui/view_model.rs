@@ -16,8 +16,8 @@ use crate::node::{
     NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
     NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction,
-    NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
-    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
+    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
 };
 use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
@@ -208,23 +208,35 @@ pub enum ActionBlockReason {
 }
 
 impl ActionBlockReason {
+    /// Project the adapter-local failure detail onto the canonical manifest
+    /// vocabulary before looking up presentation copy.
+    pub const fn contract_reason(self) -> NodeUiActionBlockReason {
+        match self {
+            Self::NodeNotRunning => NodeUiActionBlockReason::NodeNotRunning,
+            Self::NoOnlineNetwork => NodeUiActionBlockReason::NoOnlineNetwork,
+            Self::NoNetworkSelected => NodeUiActionBlockReason::NoNetworkSelected,
+            Self::PermissionDenied => NodeUiActionBlockReason::PermissionDenied,
+            Self::ExitNodeUnsupported => NodeUiActionBlockReason::ExitNodeUnsupported,
+            Self::TunUnavailable(reason) => match reason {
+                TunCapabilityReason::PlatformUnsupported => {
+                    NodeUiActionBlockReason::TunPlatformUnsupported
+                }
+                TunCapabilityReason::PermissionDenied => {
+                    NodeUiActionBlockReason::TunPermissionDenied
+                }
+                TunCapabilityReason::DeviceUnavailable => {
+                    NodeUiActionBlockReason::TunDeviceUnavailable
+                }
+                TunCapabilityReason::ToolUnavailable => NodeUiActionBlockReason::TunToolUnavailable,
+                TunCapabilityReason::Unknown => NodeUiActionBlockReason::TunUnavailable,
+            },
+        }
+    }
+
     /// Stable catalog key. Adapters must translate this at the presentation
     /// boundary instead of treating UI copy as a business identifier.
     pub const fn message_key(self) -> &'static str {
-        match self {
-            Self::NodeNotRunning => "blocked.node_not_running",
-            Self::NoOnlineNetwork => "blocked.no_online_network",
-            Self::NoNetworkSelected => "blocked.no_network_selected",
-            Self::PermissionDenied => "blocked.permission_denied",
-            Self::ExitNodeUnsupported => "blocked.exit_node_unsupported",
-            Self::TunUnavailable(reason) => match reason {
-                TunCapabilityReason::PlatformUnsupported => "blocked.tun_platform_unsupported",
-                TunCapabilityReason::PermissionDenied => "blocked.tun_permission_denied",
-                TunCapabilityReason::DeviceUnavailable => "blocked.tun_device_unavailable",
-                TunCapabilityReason::ToolUnavailable => "blocked.tun_tool_unavailable",
-                TunCapabilityReason::Unknown => "blocked.tun_unavailable",
-            },
-        }
+        self.contract_reason().message_key()
     }
 }
 

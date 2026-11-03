@@ -542,6 +542,11 @@ function ActionCard({
                       "common.ready_to_submit",
                   )}
                 </Dialog.Description>
+                {action.confirmation?.recent_authentication_required ? (
+                  <p className="dialog-secondary-copy">
+                    {label(locale, "confirm.reauthentication_required")}
+                  </p>
+                ) : null}
               </div>
             </div>
             {confirmBlockedReason ? (

@@ -94,6 +94,34 @@ describe("node UI contract invariants", () => {
     expect(() => validateManifestResponse(manifestResponse(invalid))).toThrow("page set/order mismatch");
   });
 
+  it("rejects manifest page-state or block-reason vocabulary drift", () => {
+    const invalidPageStates = structuredClone(manifest);
+    invalidPageStates.page_states.reverse();
+    expect(() =>
+      validateManifestResponse(manifestResponse(invalidPageStates)),
+    ).toThrow("page state vocabulary mismatch");
+
+    const invalidReasons = structuredClone(manifest);
+    invalidReasons.action_block_reasons = invalidReasons.action_block_reasons.filter(
+      (reason) => reason !== "exit_node_unsupported",
+    );
+    expect(() =>
+      validateManifestResponse(manifestResponse(invalidReasons)),
+    ).toThrow("action block reason vocabulary mismatch");
+  });
+
+  it("rejects a confirmation without an explicit reauthentication declaration", () => {
+    const invalid = structuredClone(manifest);
+    const shutdown = invalid.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "shutdown_node")!;
+    delete (shutdown.confirmation as unknown as Record<string, unknown>)
+      .recent_authentication_required;
+    expect(() => validateManifestResponse(manifestResponse(invalid))).toThrow(
+      "confirmation reauthentication flag invalid for shutdown_node",
+    );
+  });
+
   it("accepts the shared deterministic product visual fixture verbatim", () => {
     const fixture = productVisualFixture as {
       schema_version: number;
@@ -265,6 +293,24 @@ describe("node UI contract invariants", () => {
         46,
       ),
     ).toThrow("owner session invalidation flag invalid");
+  });
+
+  it("uses the shared canonical reason for unsupported exit-node actions", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "set_exit_node_role")!;
+    const snapshot = emptySnapshot();
+    snapshot.permissions = {
+      access_model: "trusted_control_plane",
+      permissions: ["view_state", "manage_networks", "manage_roles"],
+    };
+    snapshot.capabilities = {
+      capabilities: [{ kind: "exit", state: "unsupported" }],
+    };
+
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "exit_node_unsupported",
+    );
   });
 
   it("fails closed when a rebuild action has no TUN capability data", () => {

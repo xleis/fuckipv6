@@ -938,6 +938,8 @@ export type NodeUiAction = {
   "permission": NodePermission;
 };
 
+export type NodeUiActionBlockReason = "node_not_running" | "no_online_network" | "no_network_selected" | "permission_denied" | "platform_unsupported" | "exit_node_unsupported" | "tun_platform_unsupported" | "tun_permission_denied" | "tun_device_unavailable" | "tun_tool_unavailable" | "tun_unavailable" | "backend_unavailable";
+
 export type NodeUiAudit = {
   "action"?: string | null;
   "policy": NodeUiAuditPolicy;
@@ -952,6 +954,7 @@ export type NodeUiBackendStatus = "implemented" | "unavailable";
 export type NodeUiConfirmation = {
   "consequence_key": string;
   "destructive": boolean;
+  "recent_authentication_required": boolean;
   "title_key": string;
 };
 
@@ -966,6 +969,8 @@ export type NodeUiField = {
 export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
 
 export type NodeUiManifest = {
+  "action_block_reasons": Array<NodeUiActionBlockReason>;
+  "page_states": Array<NodeUiPageState>;
   "pages": Array<NodeUiPage>;
   "schema_version": number;
 };
@@ -976,6 +981,8 @@ export type NodeUiPage = {
   "nav_label_key": string;
   "title_key": string;
 };
+
+export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
 export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name" | "fingerprint";
 

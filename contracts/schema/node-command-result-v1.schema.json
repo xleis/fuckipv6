@@ -2487,6 +2487,24 @@
       ],
       "type": "object"
     },
+    "NodeUiActionBlockReason": {
+      "description": "Canonical reasons that can disable a manifest action. The enum is flat so\nWebUI, GPUI, generated bindings and Android consume the same fail-closed\nvocabulary even when their local capability snapshots have richer details.",
+      "enum": [
+        "node_not_running",
+        "no_online_network",
+        "no_network_selected",
+        "permission_denied",
+        "platform_unsupported",
+        "exit_node_unsupported",
+        "tun_platform_unsupported",
+        "tun_permission_denied",
+        "tun_device_unavailable",
+        "tun_tool_unavailable",
+        "tun_unavailable",
+        "backend_unavailable"
+      ],
+      "type": "string"
+    },
     "NodeUiAudit": {
       "properties": {
         "action": {
@@ -2538,9 +2556,13 @@
     "NodeUiConfirmation": {
       "properties": {
         "consequence_key": {
+          "description": "Human-readable scope and impact shown before submission.",
           "type": "string"
         },
         "destructive": {
+          "type": "boolean"
+        },
+        "recent_authentication_required": {
           "type": "boolean"
         },
         "title_key": {
@@ -2550,7 +2572,8 @@
       "required": [
         "title_key",
         "consequence_key",
-        "destructive"
+        "destructive",
+        "recent_authentication_required"
       ],
       "type": "object"
     },
@@ -2605,6 +2628,18 @@
     "NodeUiManifest": {
       "description": "Declarative contract shared by WebUI and the future native GPUI surface.\n\nAdapters may choose different widgets and rendering, but page availability,\ncommands, fields, validation, confirmations, permission classes and backend\nmaturity come from this manifest rather than duplicated UI business logic.",
       "properties": {
+        "action_block_reasons": {
+          "items": {
+            "$ref": "#/$defs/NodeUiActionBlockReason"
+          },
+          "type": "array"
+        },
+        "page_states": {
+          "items": {
+            "$ref": "#/$defs/NodeUiPageState"
+          },
+          "type": "array"
+        },
         "pages": {
           "items": {
             "$ref": "#/$defs/NodeUiPage"
@@ -2620,6 +2655,8 @@
       },
       "required": [
         "schema_version",
+        "page_states",
+        "action_block_reasons",
         "pages"
       ],
       "type": "object"
@@ -2649,6 +2686,25 @@
         "actions"
       ],
       "type": "object"
+    },
+    "NodeUiPageState": {
+      "description": "Canonical node-page states shared by every UI adapter.",
+      "enum": [
+        "initial_loading",
+        "error",
+        "maintenance",
+        "permission_denied",
+        "unsupported",
+        "offline",
+        "control_unavailable",
+        "node_failed",
+        "degraded",
+        "stale",
+        "refreshing",
+        "empty",
+        "ready"
+      ],
+      "type": "string"
     },
     "NodeUiValidation": {
       "enum": [

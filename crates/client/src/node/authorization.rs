@@ -280,7 +280,7 @@ pub(crate) fn authorize_command(
     }
 
     if context.local_owner {
-        if requires_recent_reauthentication(kind) && !context.recent_reauthentication {
+        if kind.requires_recent_reauthentication() && !context.recent_reauthentication {
             return Err(CommandDenial::new(
                 "permission.recent_authentication_required",
                 "recent owner reauthentication is required",
@@ -454,24 +454,6 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::ApplyConfiguration
         | NodeCommandKind::RollbackConfiguration => NodePermission::ManageNetworks,
     }
-}
-
-/// Operations whose blast radius or ability to alter the trust boundary
-/// requires a WebUI owner to have completed a Passkey ceremony recently.
-/// Desktop local-owner contexts are always fresh because the OS user session
-/// is their authentication boundary.
-fn requires_recent_reauthentication(kind: NodeCommandKind) -> bool {
-    matches!(
-        kind,
-        NodeCommandKind::Shutdown
-            | NodeCommandKind::ApplyConfiguration
-            | NodeCommandKind::RollbackConfiguration
-            | NodeCommandKind::RestartNode
-            | NodeCommandKind::RebuildTun
-            | NodeCommandKind::SetNodeDisplayName
-            | NodeCommandKind::RotateNodeIdentity
-            | NodeCommandKind::CleanupResiduals
-    )
 }
 
 fn is_local_owner_only(kind: NodeCommandKind) -> bool {

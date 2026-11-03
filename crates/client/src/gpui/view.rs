@@ -673,14 +673,19 @@ impl GpuiShell {
         if let Some(confirmation) = &action.confirmation {
             if self.pending_confirmation.as_deref() != Some(action.id.as_str()) {
                 self.pending_confirmation = Some(action.id.clone());
-                self.notice = Some(tr(
+                let mut notice = tr(
                     self.locale,
                     "gpui.confirm_action",
                     &[
                         ("title", t(self.locale, &confirmation.title_key)),
                         ("consequence", t(self.locale, &confirmation.consequence_key)),
                     ],
-                ));
+                );
+                if confirmation.recent_authentication_required {
+                    notice.push(' ');
+                    notice.push_str(t(self.locale, "confirm.reauthentication_required"));
+                }
+                self.notice = Some(notice);
                 cx.notify();
                 return;
             }

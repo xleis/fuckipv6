@@ -8,6 +8,95 @@ use super::state::NodePermission;
 
 pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
 
+/// Canonical node-page states shared by every UI adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiPageState {
+    InitialLoading,
+    Error,
+    Maintenance,
+    PermissionDenied,
+    Unsupported,
+    Offline,
+    ControlUnavailable,
+    NodeFailed,
+    Degraded,
+    Stale,
+    Refreshing,
+    Empty,
+    Ready,
+}
+
+pub const NODE_UI_PAGE_STATES: [NodeUiPageState; 13] = [
+    NodeUiPageState::InitialLoading,
+    NodeUiPageState::Error,
+    NodeUiPageState::Maintenance,
+    NodeUiPageState::PermissionDenied,
+    NodeUiPageState::Unsupported,
+    NodeUiPageState::Offline,
+    NodeUiPageState::ControlUnavailable,
+    NodeUiPageState::NodeFailed,
+    NodeUiPageState::Degraded,
+    NodeUiPageState::Stale,
+    NodeUiPageState::Refreshing,
+    NodeUiPageState::Empty,
+    NodeUiPageState::Ready,
+];
+
+/// Canonical reasons that can disable a manifest action. The enum is flat so
+/// WebUI, GPUI, generated bindings and Android consume the same fail-closed
+/// vocabulary even when their local capability snapshots have richer details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiActionBlockReason {
+    NodeNotRunning,
+    NoOnlineNetwork,
+    NoNetworkSelected,
+    PermissionDenied,
+    PlatformUnsupported,
+    ExitNodeUnsupported,
+    TunPlatformUnsupported,
+    TunPermissionDenied,
+    TunDeviceUnavailable,
+    TunToolUnavailable,
+    TunUnavailable,
+    BackendUnavailable,
+}
+
+pub const NODE_UI_ACTION_BLOCK_REASONS: [NodeUiActionBlockReason; 12] = [
+    NodeUiActionBlockReason::NodeNotRunning,
+    NodeUiActionBlockReason::NoOnlineNetwork,
+    NodeUiActionBlockReason::NoNetworkSelected,
+    NodeUiActionBlockReason::PermissionDenied,
+    NodeUiActionBlockReason::PlatformUnsupported,
+    NodeUiActionBlockReason::ExitNodeUnsupported,
+    NodeUiActionBlockReason::TunPlatformUnsupported,
+    NodeUiActionBlockReason::TunPermissionDenied,
+    NodeUiActionBlockReason::TunDeviceUnavailable,
+    NodeUiActionBlockReason::TunToolUnavailable,
+    NodeUiActionBlockReason::TunUnavailable,
+    NodeUiActionBlockReason::BackendUnavailable,
+];
+
+impl NodeUiActionBlockReason {
+    pub const fn message_key(self) -> &'static str {
+        match self {
+            Self::NodeNotRunning => "blocked.node_not_running",
+            Self::NoOnlineNetwork => "blocked.no_online_network",
+            Self::NoNetworkSelected => "blocked.no_network_selected",
+            Self::PermissionDenied => "blocked.permission_denied",
+            Self::PlatformUnsupported => "blocked.platform_unsupported",
+            Self::ExitNodeUnsupported => "blocked.exit_node_unsupported",
+            Self::TunPlatformUnsupported => "blocked.tun_platform_unsupported",
+            Self::TunPermissionDenied => "blocked.tun_permission_denied",
+            Self::TunDeviceUnavailable => "blocked.tun_device_unavailable",
+            Self::TunToolUnavailable => "blocked.tun_tool_unavailable",
+            Self::TunUnavailable => "blocked.tun_unavailable",
+            Self::BackendUnavailable => "blocked.backend_unavailable",
+        }
+    }
+}
+
 /// Declarative contract shared by WebUI and the future native GPUI surface.
 ///
 /// Adapters may choose different widgets and rendering, but page availability,
@@ -16,6 +105,8 @@ pub const NODE_UI_MANIFEST_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiManifest {
     pub schema_version: u16,
+    pub page_states: Vec<NodeUiPageState>,
+    pub action_block_reasons: Vec<NodeUiActionBlockReason>,
     pub pages: Vec<NodeUiPage>,
 }
 
@@ -46,6 +137,19 @@ impl NodeUiManifest {
             violations.push(format!(
                 "schema_version_mismatch:expected={NODE_UI_MANIFEST_SCHEMA_VERSION}:actual={}",
                 self.schema_version
+            ));
+        }
+
+        if self.page_states != NODE_UI_PAGE_STATES {
+            violations.push(format!(
+                "page_state_set_or_order_mismatch:expected={NODE_UI_PAGE_STATES:?}:actual={:?}",
+                self.page_states
+            ));
+        }
+        if self.action_block_reasons != NODE_UI_ACTION_BLOCK_REASONS {
+            violations.push(format!(
+                "action_block_reason_set_or_order_mismatch:expected={NODE_UI_ACTION_BLOCK_REASONS:?}:actual={:?}",
+                self.action_block_reasons
             ));
         }
 
@@ -146,6 +250,26 @@ impl NodeUiManifest {
                         violations.push(format!("confirmation_has_empty_key:{context}"));
                     }
                 }
+                let requires_recent_auth = action.command.requires_recent_reauthentication();
+                if requires_recent_auth
+                    && !action
+                        .confirmation
+                        .as_ref()
+                        .is_some_and(|confirmation| confirmation.recent_authentication_required)
+                {
+                    violations.push(format!(
+                        "sensitive_command_requires_reauthentication_confirmation:{context}:{}",
+                        action.command.as_str()
+                    ));
+                }
+                if let Some(confirmation) = &action.confirmation {
+                    if confirmation.recent_authentication_required != requires_recent_auth {
+                        violations.push(format!(
+                            "confirmation_reauthentication_mismatch:{context}:{}",
+                            action.command.as_str()
+                        ));
+                    }
+                }
                 if action.command == NodeCommandKind::Shutdown
                     && !action
                         .confirmation
@@ -239,8 +363,10 @@ pub struct NodeUiField {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiConfirmation {
     pub title_key: String,
+    /// Human-readable scope and impact shown before submission.
     pub consequence_key: String,
     pub destructive: bool,
+    pub recent_authentication_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -373,6 +499,8 @@ pub enum NodeUiValidation {
 pub fn node_ui_manifest() -> NodeUiManifest {
     NodeUiManifest {
         schema_version: NODE_UI_MANIFEST_SCHEMA_VERSION,
+        page_states: NODE_UI_PAGE_STATES.to_vec(),
+        action_block_reasons: NODE_UI_ACTION_BLOCK_REASONS.to_vec(),
         pages: vec![
             page("overview", "nav.overview", "page.overview", vec![]),
             page(
@@ -498,6 +626,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         Some(confirmation(
+                            NodeCommandKind::StopNetworks,
                             "confirm.stop_networks.title",
                             "confirm.stop_networks.consequence",
                             false,
@@ -527,6 +656,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         Some(confirmation(
+                            NodeCommandKind::RestartNetworks,
                             "confirm.restart_networks.title",
                             "confirm.restart_networks.consequence",
                             false,
@@ -547,6 +677,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             NodeUiValidation::NetworkName,
                         )],
                         Some(confirmation(
+                            NodeCommandKind::RebuildTun,
                             "confirm.rebuild_tun.title",
                             "confirm.rebuild_tun.consequence",
                             false,
@@ -631,6 +762,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         Some(confirmation(
+                            NodeCommandKind::BanClient,
                             "confirm.ban_client.title",
                             "confirm.ban_client.consequence",
                             false,
@@ -717,6 +849,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         NodeUiAvailability::NodeRunning,
                         vec![],
                         Some(confirmation(
+                            NodeCommandKind::RestartNode,
                             "confirm.restart_node.title",
                             "confirm.restart_node.consequence",
                             true,
@@ -745,7 +878,12 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                                 NodeUiValidation::None,
                             ),
                         ],
-                        None,
+                        Some(confirmation(
+                            NodeCommandKind::CleanupResiduals,
+                            "confirm.cleanup_node_residuals.title",
+                            "confirm.cleanup_node_residuals.consequence",
+                            false,
+                        )),
                     ),
                 ],
             ),
@@ -793,6 +931,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         ),
                     ],
                     Some(confirmation(
+                        NodeCommandKind::UpdateRouting,
                         "confirm.update_routing.title",
                         "confirm.update_routing.consequence",
                         false,
@@ -834,6 +973,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         ),
                     ],
                     Some(confirmation(
+                        NodeCommandKind::SetNetworkRole,
                         "confirm.set_exit_node_role.title",
                         "confirm.set_exit_node_role.consequence",
                         false,
@@ -875,6 +1015,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         ),
                     ],
                     Some(confirmation(
+                        NodeCommandKind::SetNetworkRole,
                         "confirm.set_relay_role.title",
                         "confirm.set_relay_role.consequence",
                         false,
@@ -901,7 +1042,12 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             false,
                             NodeUiValidation::DisplayName,
                         )],
-                        None,
+                        Some(confirmation(
+                            NodeCommandKind::SetNodeDisplayName,
+                            "confirm.set_node_display_name.title",
+                            "confirm.set_node_display_name.consequence",
+                            false,
+                        )),
                     ),
                     action(
                         "rotate_node_identity",
@@ -918,6 +1064,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             NodeUiValidation::Fingerprint,
                         )],
                         Some(confirmation(
+                            NodeCommandKind::RotateNodeIdentity,
                             "confirm.rotate_node_identity.title",
                             "confirm.rotate_node_identity.consequence",
                             true,
@@ -984,6 +1131,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         Some(confirmation(
+                            NodeCommandKind::UpdateNetworkAllocation,
                             "confirm.update_network_allocation.title",
                             "confirm.update_network_allocation.consequence",
                             false,
@@ -1048,6 +1196,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         Some(confirmation(
+                            NodeCommandKind::ApplyConfiguration,
                             "confirm.apply_configuration.title",
                             "confirm.apply_configuration.consequence",
                             false,
@@ -1077,6 +1226,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         Some(confirmation(
+                            NodeCommandKind::RollbackConfiguration,
                             "confirm.rollback_configuration.title",
                             "confirm.rollback_configuration.consequence",
                             true,
@@ -1101,6 +1251,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         NodeUiAvailability::NodeRunning,
                         vec![],
                         Some(confirmation(
+                            NodeCommandKind::Shutdown,
                             "confirm.shutdown_node.title",
                             "confirm.shutdown_node.consequence",
                             true,
@@ -1161,11 +1312,17 @@ fn field(
     }
 }
 
-fn confirmation(title_key: &str, consequence_key: &str, destructive: bool) -> NodeUiConfirmation {
+fn confirmation(
+    command: NodeCommandKind,
+    title_key: &str,
+    consequence_key: &str,
+    destructive: bool,
+) -> NodeUiConfirmation {
     NodeUiConfirmation {
         title_key: title_key.into(),
         consequence_key: consequence_key.into(),
         destructive,
+        recent_authentication_required: command.requires_recent_reauthentication(),
     }
 }
 
@@ -1179,6 +1336,117 @@ mod tests {
         node_ui_manifest()
             .validate()
             .expect("canonical manifest must be valid");
+    }
+
+    #[test]
+    fn manifest_publishes_the_canonical_ui_state_vocabularies() {
+        let manifest = node_ui_manifest();
+        assert_eq!(manifest.page_states, NODE_UI_PAGE_STATES);
+        assert_eq!(manifest.action_block_reasons, NODE_UI_ACTION_BLOCK_REASONS);
+        assert_eq!(
+            manifest
+                .action_block_reasons
+                .iter()
+                .map(|reason| reason.message_key())
+                .collect::<Vec<_>>(),
+            vec![
+                "blocked.node_not_running",
+                "blocked.no_online_network",
+                "blocked.no_network_selected",
+                "blocked.permission_denied",
+                "blocked.platform_unsupported",
+                "blocked.exit_node_unsupported",
+                "blocked.tun_platform_unsupported",
+                "blocked.tun_permission_denied",
+                "blocked.tun_device_unavailable",
+                "blocked.tun_tool_unavailable",
+                "blocked.tun_unavailable",
+                "blocked.backend_unavailable",
+            ]
+        );
+    }
+
+    #[test]
+    fn validation_rejects_ui_state_vocabulary_drift() {
+        let mut manifest = node_ui_manifest();
+        manifest.page_states.reverse();
+        let violations = manifest.validate().expect_err("reordered states must fail");
+        assert!(violations
+            .iter()
+            .any(|violation| violation.starts_with("page_state_set_or_order_mismatch:")));
+
+        let mut manifest = node_ui_manifest();
+        manifest.action_block_reasons.pop();
+        let violations = manifest
+            .validate()
+            .expect_err("missing block reason must fail");
+        assert!(violations.iter().any(|violation| {
+            violation.starts_with("action_block_reason_set_or_order_mismatch:")
+        }));
+    }
+
+    #[test]
+    fn recent_authentication_policy_drives_server_and_manifest_confirmation() {
+        let manifest = node_ui_manifest();
+        for action in manifest.pages.iter().flat_map(|page| &page.actions) {
+            let expected = action.command.requires_recent_reauthentication();
+            assert_eq!(
+                action
+                    .confirmation
+                    .as_ref()
+                    .is_some_and(|confirmation| confirmation.recent_authentication_required),
+                expected,
+                "confirmation declaration drifted for {}",
+                action.command.as_str()
+            );
+        }
+
+        let rename = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeCommandKind::SetNodeDisplayName)
+            .expect("rename action");
+        assert!(rename
+            .confirmation
+            .as_ref()
+            .is_some_and(|confirmation| { confirmation.recent_authentication_required }));
+    }
+
+    #[test]
+    fn validation_rejects_missing_or_mismatched_reauthentication_warning() {
+        let mut manifest = node_ui_manifest();
+        let restart = manifest
+            .pages
+            .iter_mut()
+            .flat_map(|page| &mut page.actions)
+            .find(|action| action.command == NodeCommandKind::RestartNode)
+            .expect("restart action")
+            .confirmation
+            .as_mut()
+            .expect("restart confirmation");
+        restart.recent_authentication_required = false;
+        let violations = manifest
+            .validate()
+            .expect_err("missing reauthentication warning must fail");
+        assert!(violations
+            .iter()
+            .any(|violation| { violation.starts_with("confirmation_reauthentication_mismatch:") }));
+
+        let mut manifest = node_ui_manifest();
+        let shutdown = manifest
+            .pages
+            .iter_mut()
+            .flat_map(|page| &mut page.actions)
+            .find(|action| action.command == NodeCommandKind::Shutdown)
+            .expect("shutdown action");
+        shutdown.confirmation = None;
+        let violations = manifest
+            .validate()
+            .expect_err("sensitive command without confirmation must fail");
+        assert!(violations.iter().any(|violation| {
+            violation.starts_with("sensitive_command_requires_reauthentication_confirmation:")
+        }));
     }
 
     #[test]

@@ -83,6 +83,8 @@ describe("action panel interaction gate", () => {
       name: "translated:common.execute",
     });
     expect(confirm).toBeEnabled();
+    expect(within(dialog).getByText("translated:confirm.reauthentication_required"))
+      .toBeInTheDocument();
 
     view.rerender(
       <ActionPanel

@@ -1,19 +1,9 @@
-import type { NodeSnapshot } from "../../contracts/typescript/node-contract-v1";
+import type {
+  NodeSnapshot,
+  NodeUiPageState,
+} from "../../contracts/typescript/node-contract-v1";
 
-export type PageStateKind =
-  | "initial_loading"
-  | "error"
-  | "maintenance"
-  | "permission_denied"
-  | "unsupported"
-  | "offline"
-  | "control_unavailable"
-  | "node_failed"
-  | "degraded"
-  | "stale"
-  | "refreshing"
-  | "empty"
-  | "ready";
+export type PageStateKind = NodeUiPageState;
 
 export type PageStateTone = "neutral" | "info" | "warn" | "danger" | "success";
 

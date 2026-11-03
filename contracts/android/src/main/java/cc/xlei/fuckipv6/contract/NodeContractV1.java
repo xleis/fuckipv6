@@ -924,6 +924,40 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NodeUiActionBlockReason {
+        NODE_NOT_RUNNING("node_not_running"),
+        NO_ONLINE_NETWORK("no_online_network"),
+        NO_NETWORK_SELECTED("no_network_selected"),
+        PERMISSION_DENIED("permission_denied"),
+        PLATFORM_UNSUPPORTED("platform_unsupported"),
+        EXIT_NODE_UNSUPPORTED("exit_node_unsupported"),
+        TUN_PLATFORM_UNSUPPORTED("tun_platform_unsupported"),
+        TUN_PERMISSION_DENIED("tun_permission_denied"),
+        TUN_DEVICE_UNAVAILABLE("tun_device_unavailable"),
+        TUN_TOOL_UNAVAILABLE("tun_tool_unavailable"),
+        TUN_UNAVAILABLE("tun_unavailable"),
+        BACKEND_UNAVAILABLE("backend_unavailable");
+
+        private final String wireName;
+
+        NodeUiActionBlockReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeUiActionBlockReason fromWireName(String value) {
+            for (NodeUiActionBlockReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeUiActionBlockReason wire value: " + value);
+        }
+    }
+
     public enum NodeUiAuditPolicy {
         NONE("none"),
         RECORD_OUTCOME("record_outcome");
@@ -1033,6 +1067,41 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeUiInputKind wire value: " + value);
+        }
+    }
+
+    public enum NodeUiPageState {
+        INITIAL_LOADING("initial_loading"),
+        ERROR("error"),
+        MAINTENANCE("maintenance"),
+        PERMISSION_DENIED("permission_denied"),
+        UNSUPPORTED("unsupported"),
+        OFFLINE("offline"),
+        CONTROL_UNAVAILABLE("control_unavailable"),
+        NODE_FAILED("node_failed"),
+        DEGRADED("degraded"),
+        STALE("stale"),
+        REFRESHING("refreshing"),
+        EMPTY("empty"),
+        READY("ready");
+
+        private final String wireName;
+
+        NodeUiPageState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeUiPageState fromWireName(String value) {
+            for (NodeUiPageState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeUiPageState wire value: " + value);
         }
     }
 
@@ -2571,11 +2640,13 @@ public final class NodeContractV1 {
     public static final class NodeUiConfirmation {
         public final String consequence_key;
         public final Boolean destructive;
+        public final Boolean recent_authentication_required;
         public final String title_key;
 
-        public NodeUiConfirmation(String consequence_key, Boolean destructive, String title_key) {
+        public NodeUiConfirmation(String consequence_key, Boolean destructive, Boolean recent_authentication_required, String title_key) {
             this.consequence_key = consequence_key;
             this.destructive = destructive;
+            this.recent_authentication_required = recent_authentication_required;
             this.title_key = title_key;
         }
     }
@@ -2599,10 +2670,14 @@ public final class NodeContractV1 {
 
     /** DTO for NodeUiManifest. */
     public static final class NodeUiManifest {
+        public final List<NodeUiActionBlockReason> action_block_reasons;
+        public final List<NodeUiPageState> page_states;
         public final List<NodeUiPage> pages;
         public final Integer schema_version;
 
-        public NodeUiManifest(List<NodeUiPage> pages, Integer schema_version) {
+        public NodeUiManifest(List<NodeUiActionBlockReason> action_block_reasons, List<NodeUiPageState> page_states, List<NodeUiPage> pages, Integer schema_version) {
+            this.action_block_reasons = action_block_reasons;
+            this.page_states = page_states;
             this.pages = pages;
             this.schema_version = schema_version;
         }

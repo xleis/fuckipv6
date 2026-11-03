@@ -15,14 +15,47 @@ import type {
   NodeProblem,
   NodeSnapshot,
   NodeUiAction,
+  NodeUiActionBlockReason,
   NodeUiField,
   NodeUiManifest,
+  NodeUiPageState,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
 import { ContractError } from "../api/client";
 
 export const HTTP_SCHEMA_VERSION = 1;
 export const MANIFEST_SCHEMA_VERSION = 1;
+
+const PAGE_STATES = [
+  "initial_loading",
+  "error",
+  "maintenance",
+  "permission_denied",
+  "unsupported",
+  "offline",
+  "control_unavailable",
+  "node_failed",
+  "degraded",
+  "stale",
+  "refreshing",
+  "empty",
+  "ready",
+] as const satisfies readonly NodeUiPageState[];
+
+const ACTION_BLOCK_REASONS = [
+  "node_not_running",
+  "no_online_network",
+  "no_network_selected",
+  "permission_denied",
+  "platform_unsupported",
+  "exit_node_unsupported",
+  "tun_platform_unsupported",
+  "tun_permission_denied",
+  "tun_device_unavailable",
+  "tun_tool_unavailable",
+  "tun_unavailable",
+  "backend_unavailable",
+] as const satisfies readonly NodeUiActionBlockReason[];
 
 export const REQUIRED_PAGES = [
   "overview",
@@ -180,18 +213,7 @@ const TUN_CAPABILITY_REASONS = new Set([
 ]);
 
 export type ActionValues = Record<string, string | boolean>;
-export type BlockReason =
-  | "permission_denied"
-  | "node_not_running"
-  | "no_online_network"
-  | "no_network_selected"
-  | "platform_unsupported"
-  | "tun_platform_unsupported"
-  | "tun_permission_denied"
-  | "tun_device_unavailable"
-  | "tun_tool_unavailable"
-  | "tun_unavailable"
-  | "backend_unavailable";
+export type BlockReason = NodeUiActionBlockReason;
 
 function tunBlockReason(
   capabilities: NodeSnapshot["tun_capabilities"] | undefined,
@@ -274,6 +296,13 @@ export function validateManifestResponse(
   const manifest = response.manifest as unknown as NodeUiManifest;
   if (manifest.schema_version !== MANIFEST_SCHEMA_VERSION)
     fail("manifest schema mismatch");
+  if (JSON.stringify(manifest.page_states) !== JSON.stringify(PAGE_STATES))
+    fail("page state vocabulary mismatch");
+  if (
+    JSON.stringify(manifest.action_block_reasons) !==
+    JSON.stringify(ACTION_BLOCK_REASONS)
+  )
+    fail("action block reason vocabulary mismatch");
   if (!Array.isArray(manifest.pages)) fail("manifest pages must be an array");
   const pageIds = manifest.pages.map((page) => page.id);
   unique(pageIds, "page id");
@@ -333,6 +362,25 @@ function validateAction(action: NodeUiAction, seen: Set<string>): void {
     fail(`unknown availability for ${action.id}`);
   if (!BACKEND_STATUSES.has(action.backend_status))
     fail(`unknown backend status for ${action.id}`);
+  if (action.confirmation !== undefined && action.confirmation !== null) {
+    if (!record(action.confirmation)) fail(`confirmation invalid for ${action.id}`);
+    stringValue(
+      action.confirmation.title_key,
+      `confirmation title missing for ${action.id}`,
+      true,
+    );
+    stringValue(
+      action.confirmation.consequence_key,
+      `confirmation consequence missing for ${action.id}`,
+      true,
+    );
+    if (typeof action.confirmation.destructive !== "boolean")
+      fail(`confirmation destructive flag invalid for ${action.id}`);
+    if (
+      typeof action.confirmation.recent_authentication_required !== "boolean"
+    )
+      fail(`confirmation reauthentication flag invalid for ${action.id}`);
+  }
   if (!Array.isArray(action.fields)) fail(`fields missing for ${action.id}`);
   unique(
     action.fields.map((field) => field.id),
@@ -526,7 +574,7 @@ export function executionBlockReason(
       (exitCapability?.state === "unknown" &&
         snapshot.exit_node_capabilities?.supported === false)
     ) {
-      return "platform_unsupported";
+      return "exit_node_unsupported";
     }
   }
   if (action.id === "rebuild_tun" && !snapshot.tun_capabilities?.can_rebuild) {

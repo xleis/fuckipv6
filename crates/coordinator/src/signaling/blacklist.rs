@@ -498,6 +498,9 @@ mod tests {
             blacklist: BlacklistConfig::default(),
             authorization_revocations: Vec::new(),
             relay_endpoints: Vec::new(),
+            network_record_path: None,
+            owner_node_id: None,
+            administrator_node_ids: Vec::new(),
         }
     }
 

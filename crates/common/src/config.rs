@@ -340,6 +340,21 @@ pub struct CoordinatorConfig {
     /// 分布式 QUIC 中继网格节点列表 (可选)
     #[serde(default)]
     pub relay_endpoints: Vec<crate::protocol::RelayEndpoint>,
+
+    /// Owner-authored network record used as the live, fail-closed roster for
+    /// approval review. Embedded coordinators point this at `network.json`;
+    /// standalone deployments may omit it and use the explicit roster below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_record_path: Option<PathBuf>,
+
+    /// Explicit fallback owner for deployments without a local network record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_node_id: Option<String>,
+
+    /// Explicit fallback administrator roster for deployments without a local
+    /// network record. Client-supplied roles are never trusted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub administrator_node_ids: Vec<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -357,6 +372,9 @@ impl Default for CoordinatorConfig {
             blacklist: crate::acl::BlacklistConfig::default(),
             authorization_revocations: Vec::new(),
             relay_endpoints: Vec::new(),
+            network_record_path: None,
+            owner_node_id: None,
+            administrator_node_ids: Vec::new(),
         }
     }
 }
@@ -398,6 +416,26 @@ impl CoordinatorConfig {
 
         for revocation in &self.authorization_revocations {
             revocation.validate()?;
+        }
+
+        if let Some(path) = &self.network_record_path {
+            if path.as_os_str().is_empty() {
+                anyhow::bail!("network_record_path 不能为空");
+            }
+        }
+        if self
+            .owner_node_id
+            .as_ref()
+            .is_some_and(|owner| owner.trim().is_empty())
+        {
+            anyhow::bail!("owner_node_id 不能为空");
+        }
+        if self
+            .administrator_node_ids
+            .iter()
+            .any(|administrator| administrator.trim().is_empty())
+        {
+            anyhow::bail!("administrator_node_ids 不能包含空值");
         }
 
         if let Some(tls) = &self.tls {
@@ -1120,6 +1158,9 @@ mod tests {
             blacklist: Default::default(),
             authorization_revocations: Default::default(),
             relay_endpoints: Default::default(),
+            network_record_path: None,
+            owner_node_id: None,
+            administrator_node_ids: Vec::new(),
         };
 
         config.validate()?;

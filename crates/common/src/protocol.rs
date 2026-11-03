@@ -2,6 +2,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+use crate::domain::{
+    JoinRequest, JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId,
+};
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,19 +102,29 @@ pub enum SignalingMessage {
     },
 
     /// 请求与某个节点建立连接
-    ConnectRequest { target_id: ClientId },
+    ConnectRequest {
+        target_id: ClientId,
+    },
 
     /// 服务器返回目标节点信息
-    ConnectInfo { peer: PeerInfo },
+    ConnectInfo {
+        peer: PeerInfo,
+    },
 
     /// 节点连接准备通知 (发送给目标节点)
-    ConnectNotify { peer: PeerInfo },
+    ConnectNotify {
+        peer: PeerInfo,
+    },
 
     /// 节点上线通知 (广播给所有在线节点)
-    PeerOnline { peer: PeerInfo },
+    PeerOnline {
+        peer: PeerInfo,
+    },
 
     /// 节点下线通知
-    PeerOffline { client_id: ClientId },
+    PeerOffline {
+        client_id: ClientId,
+    },
 
     /// 通过协调服务器中继的数据包 (支持 IPv4 / IPv6)
     RelayPacket {
@@ -122,13 +135,89 @@ pub enum SignalingMessage {
     },
 
     /// 心跳
-    Heartbeat { timestamp: u64 },
+    Heartbeat {
+        timestamp: u64,
+    },
 
     /// 心跳响应
-    HeartbeatAck { timestamp: u64 },
+    HeartbeatAck {
+        timestamp: u64,
+    },
 
     /// 错误响应
-    Error { code: u16, message: String },
+    Error {
+        code: u16,
+        message: String,
+    },
+
+    // Approval-based joining. These variants are appended so existing postcard
+    // variant numbers remain stable. Request prose is only carried in messages
+    // to the applicant and the network's authenticated owner/administrators.
+    JoinRequestSubmit {
+        request: Box<JoinRequest>,
+    },
+    JoinRequestStatus {
+        request_id: JoinRequestId,
+        state: JoinRequestState,
+        revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        information_request: Option<String>,
+    },
+    JoinRequestList {
+        network_id: NetworkId,
+    },
+    JoinRequestListResponse {
+        requests: Vec<JoinRequest>,
+    },
+    JoinRequestReview {
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        expected_revision: u64,
+        action: JoinRequestReviewAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    JoinRequestBatchReview {
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestBatchReviewItem>,
+    },
+    JoinRequestReviewAck {
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestReviewResult>,
+    },
+    JoinRequestWithdraw {
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+    },
+    JoinRequestChanged {
+        request_id: JoinRequestId,
+        state: JoinRequestState,
+        revision: u64,
+    },
+    JoinRequestResubmit {
+        network_id: NetworkId,
+        request_id: JoinRequestId,
+        expected_revision: u64,
+        reason: String,
+    },
+}
+
+/// One CAS-protected item in an atomic batch approval transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinRequestBatchReviewItem {
+    pub request_id: JoinRequestId,
+    pub expected_revision: u64,
+    pub action: JoinRequestReviewAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Public acknowledgement; it never contains the request prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinRequestReviewResult {
+    pub request_id: JoinRequestId,
+    pub state: JoinRequestState,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

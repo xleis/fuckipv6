@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use fuckipv6_common::domain::{JoinRequest, JoinRequestId, JoinRequestState, NetworkId, NodeId};
 use fuckipv6_common::{
-    codec, validate_signaling_message_len, validate_signaling_relay_payload_len, ErrorCode,
-    Identity, RelayEndpoint, SignalingMessage, MAX_SIGNALING_MESSAGE_SIZE,
+    codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
+    ErrorCode, Identity, JoinRequestBatchReviewItem, RelayEndpoint, SignalingMessage,
+    MAX_SIGNALING_MESSAGE_SIZE,
 };
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -15,6 +17,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 
+use super::join_requests::JoinRequestStore;
 use super::session::SessionManager;
 
 fn verify_registration(
@@ -46,6 +49,7 @@ pub struct SignalingServer {
     session_manager: Arc<SessionManager>,
     relay_endpoint: Option<RelayEndpoint>,
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
+    join_request_store: Option<Arc<JoinRequestStore>>,
     listener: Option<TcpListener>,
 }
 
@@ -59,6 +63,7 @@ impl SignalingServer {
             session_manager,
             relay_endpoint: None,
             relay_endpoints: Arc::new(Vec::new()),
+            join_request_store: None,
             listener: None,
         })
     }
@@ -69,6 +74,7 @@ impl SignalingServer {
             session_manager,
             relay_endpoint: None,
             relay_endpoints: Arc::new(Vec::new()),
+            join_request_store: None,
             listener: None,
         }
     }
@@ -102,6 +108,30 @@ impl SignalingServer {
         self
     }
 
+    /// Attach the durable approval store. Without one, approval messages fail
+    /// closed while registration and data-plane signaling remain available.
+    pub fn with_join_request_store(mut self, store: Arc<JoinRequestStore>) -> Self {
+        self.join_request_store = Some(store);
+        self
+    }
+
+    /// Build the approval store from the same persisted coordinator config used
+    /// for allocation and revocation.
+    pub fn with_join_request_store_from_config(
+        mut self,
+        state_dir: impl AsRef<std::path::Path>,
+        config: &CoordinatorConfig,
+    ) -> Result<Self> {
+        let store = JoinRequestStore::new(
+            state_dir.as_ref().join("join_requests.json"),
+            config.network_record_path.clone(),
+            config.owner_node_id.clone(),
+            config.administrator_node_ids.clone(),
+        )?;
+        self.join_request_store = Some(Arc::new(store));
+        Ok(self)
+    }
+
     pub fn session_manager(&self) -> Arc<SessionManager> {
         self.session_manager.clone()
     }
@@ -124,6 +154,7 @@ impl SignalingServer {
                     let session_manager = self.session_manager.clone();
                     let relay_endpoint = self.relay_endpoint.clone();
                     let relay_endpoints = self.relay_endpoints.clone();
+                    let join_request_store = self.join_request_store.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -132,6 +163,7 @@ impl SignalingServer {
                             session_manager,
                             relay_endpoint,
                             relay_endpoints,
+                            join_request_store,
                         )
                         .await
                         {
@@ -177,6 +209,7 @@ async fn handle_connection(
     session_manager: Arc<SessionManager>,
     relay_endpoint: Option<RelayEndpoint>,
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
+    join_request_store: Option<Arc<JoinRequestStore>>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
     let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
@@ -199,6 +232,7 @@ async fn handle_connection(
             local_addr,
             relay_endpoint.as_ref(),
             &relay_endpoints,
+            join_request_store.as_deref(),
         )
         .await
         {
@@ -238,6 +272,7 @@ async fn handle_connection_message(
     local_addr: Option<SocketAddr>,
     relay_endpoint: Option<&RelayEndpoint>,
     relay_endpoints: &[RelayEndpoint],
+    join_request_store: Option<&JoinRequestStore>,
 ) -> bool {
     match msg {
         Ok(Message::Binary(data)) => {
@@ -250,6 +285,7 @@ async fn handle_connection_message(
                 local_addr,
                 relay_endpoint,
                 relay_endpoints,
+                join_request_store,
             )
             .await;
             true
@@ -277,6 +313,7 @@ async fn handle_binary_message(
     local_addr: Option<SocketAddr>,
     relay_endpoint: Option<&RelayEndpoint>,
     relay_endpoints: &[RelayEndpoint],
+    join_request_store: Option<&JoinRequestStore>,
 ) {
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
     tracing::trace!("数据前32字节: {:?}", &data[..data.len().min(32)]);
@@ -298,6 +335,7 @@ async fn handle_binary_message(
                 local_addr,
                 relay_endpoint,
                 relay_endpoints,
+                join_request_store,
             )
             .await
             {
@@ -358,6 +396,7 @@ async fn handle_signaling_message(
     local_addr: Option<SocketAddr>,
     relay_endpoint: Option<&RelayEndpoint>,
     relay_endpoints: &[RelayEndpoint],
+    join_request_store: Option<&JoinRequestStore>,
 ) -> Result<()> {
     match msg {
         SignalingMessage::Register { .. } => {
@@ -386,13 +425,407 @@ async fn handle_signaling_message(
         } => {
             handle_relay_packet(src_ip, dst_ip, payload, session_manager, tx, client_id).await?;
         }
-
+        SignalingMessage::JoinRequestSubmit { request } => {
+            handle_join_request_submit(
+                *request,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+            )
+            .await?;
+        }
+        SignalingMessage::JoinRequestList { network_id } => {
+            handle_join_request_list(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+            )
+            .await?;
+        }
+        SignalingMessage::JoinRequestReview {
+            network_id,
+            request_id,
+            expected_revision,
+            action,
+            note,
+        } => {
+            handle_join_request_review(
+                network_id,
+                vec![JoinRequestBatchReviewItem {
+                    request_id,
+                    expected_revision,
+                    action,
+                    note,
+                }],
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+            )
+            .await?;
+        }
+        SignalingMessage::JoinRequestBatchReview {
+            network_id,
+            reviews,
+        } => {
+            handle_join_request_review(
+                network_id,
+                reviews,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+            )
+            .await?;
+        }
+        SignalingMessage::JoinRequestWithdraw {
+            network_id,
+            request_id,
+        } => {
+            handle_join_request_withdraw(
+                network_id,
+                request_id,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+            )
+            .await?;
+        }
+        SignalingMessage::JoinRequestResubmit {
+            network_id,
+            request_id,
+            expected_revision,
+            reason,
+        } => {
+            handle_join_request_resubmit(
+                network_id,
+                request_id,
+                expected_revision,
+                reason,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+            )
+            .await?;
+        }
+        // These variants are server-to-client events. Accepting one from a
+        // client would let it manufacture approval state in another view.
+        SignalingMessage::JoinRequestStatus { .. }
+        | SignalingMessage::JoinRequestListResponse { .. }
+        | SignalingMessage::JoinRequestReviewAck { .. }
+        | SignalingMessage::JoinRequestChanged { .. } => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::protocol_error(
+                    ErrorCode::BadRequest,
+                    "Approval response messages are server-originated",
+                ),
+            )?;
+        }
         _ => {
             tracing::warn!("收到未预期的信令消息类型: {:?}", msg);
         }
     }
 
     Ok(())
+}
+
+async fn authenticated_join_actor(
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+) -> Result<Option<(NodeId, Vec<u8>)>> {
+    let Some(client_id) = client_id.as_deref() else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Client must register before using approval-based joining",
+            ),
+        )?;
+        return Ok(None);
+    };
+    let Some(public_key) = session_manager.online_client_public_key(client_id).await else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Client registration is no longer active",
+            ),
+        )?;
+        return Ok(None);
+    };
+    Ok(Some((NodeId::from_public_key(&public_key), public_key)))
+}
+
+fn require_join_request_store<'a>(
+    store: Option<&'a JoinRequestStore>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a JoinRequestStore>> {
+    if let Some(store) = store {
+        return Ok(Some(store));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Approval-based joining is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+async fn broadcast_join_request_changed(
+    store: &JoinRequestStore,
+    session_manager: &SessionManager,
+    network_id: &NetworkId,
+    applicant: &NodeId,
+    request_id: &JoinRequestId,
+    state: JoinRequestState,
+    revision: u64,
+) -> Result<()> {
+    let recipients = store.notification_recipients(network_id, applicant)?;
+    let message = SignalingMessage::JoinRequestChanged {
+        request_id: request_id.clone(),
+        state,
+        revision,
+    };
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if recipients.contains(&node_id) {
+            session_manager
+                .send_to_client(&peer.client_id, message.clone())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn send_join_request_status(
+    store: &JoinRequestStore,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    network_id: &NetworkId,
+    actor: &NodeId,
+    request_id: &JoinRequestId,
+) -> Result<()> {
+    let request = store
+        .status(network_id, actor, request_id, unix_time_ms())?
+        .context("join request status disappeared after a successful transaction")?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::JoinRequestStatus {
+            request_id: request.request_id,
+            state: request.state,
+            revision: request.revision,
+            information_request: request.information_request,
+        },
+    )
+}
+
+async fn handle_join_request_submit(
+    request: JoinRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&JoinRequestStore>,
+) -> Result<()> {
+    let Some((actor, public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_join_request_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let network_id = request.network_id.clone();
+    let result = store.submit(&network_id, &actor, &public_key, request, unix_time_ms())?;
+    send_join_request_status(
+        store,
+        session_manager,
+        tx,
+        &network_id,
+        &actor,
+        &result.request_id,
+    )
+    .await?;
+    broadcast_join_request_changed(
+        store,
+        session_manager,
+        &network_id,
+        &actor,
+        &result.request_id,
+        result.state,
+        result.revision,
+    )
+    .await
+}
+
+async fn handle_join_request_list(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&JoinRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_join_request_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let requests = store.list(&network_id, &actor, unix_time_ms())?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::JoinRequestListResponse { requests },
+    )
+}
+
+async fn handle_join_request_review(
+    network_id: NetworkId,
+    reviews: Vec<JoinRequestBatchReviewItem>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&JoinRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_join_request_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+
+    // Resolve applicants before the atomic decision so online notifications can
+    // be delivered without another authorization-dependent read afterwards.
+    let mut applicants = Vec::with_capacity(reviews.len());
+    for review in &reviews {
+        let request = store
+            .status(&network_id, &actor, &review.request_id, unix_time_ms())?
+            .with_context(|| format!("join request not found: {}", review.request_id))?;
+        applicants.push((review.request_id.clone(), request.applicant.node_id));
+    }
+
+    let results = store.review(&network_id, &actor, reviews, unix_time_ms())?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::JoinRequestReviewAck {
+            network_id: network_id.clone(),
+            reviews: results.clone(),
+        },
+    )?;
+    for result in results {
+        let applicant = applicants
+            .iter()
+            .find_map(|(request_id, applicant)| {
+                (request_id == &result.request_id).then_some(applicant)
+            })
+            .context("review result has no notification target")?;
+        broadcast_join_request_changed(
+            store,
+            session_manager,
+            &network_id,
+            applicant,
+            &result.request_id,
+            result.state,
+            result.revision,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn handle_join_request_resubmit(
+    network_id: NetworkId,
+    request_id: JoinRequestId,
+    expected_revision: u64,
+    reason: String,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&JoinRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_join_request_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let result = store.resubmit(
+        &network_id,
+        &actor,
+        &request_id,
+        expected_revision,
+        reason,
+        unix_time_ms(),
+    )?;
+    send_join_request_status(store, session_manager, tx, &network_id, &actor, &request_id).await?;
+    broadcast_join_request_changed(
+        store,
+        session_manager,
+        &network_id,
+        &actor,
+        &result.request_id,
+        result.state,
+        result.revision,
+    )
+    .await
+}
+
+async fn handle_join_request_withdraw(
+    network_id: NetworkId,
+    request_id: JoinRequestId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&JoinRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_join_request_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let result = store.withdraw(&network_id, &actor, &request_id, unix_time_ms())?;
+    send_join_request_status(store, session_manager, tx, &network_id, &actor, &request_id).await?;
+    broadcast_join_request_changed(
+        store,
+        session_manager,
+        &network_id,
+        &actor,
+        &result.request_id,
+        result.state,
+        result.revision,
+    )
+    .await
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -488,7 +921,7 @@ async fn handle_register_message(
         .await
         .with_context(|| format!("注册客户端失败: {id}"))?;
 
-    let peers = session_manager.get_all_peers().await;
+    let peers = session_manager.get_data_plane_peers().await;
     let peers: Vec<_> = peers
         .into_iter()
         .filter(|peer| peer.client_id != id)
@@ -498,6 +931,12 @@ async fn handle_register_message(
 
     let ipv4_prefix = session_manager.ipv4_prefix().await;
     let ipv6_prefix = session_manager.ipv6_prefix().await;
+    let is_data_plane_member = session_manager
+        .get_peer_info(&id)
+        .await
+        .map(|peer| session_manager.is_data_plane_member(&peer.public_key))
+        .transpose()?
+        .unwrap_or(false);
 
     let response = SignalingMessage::RegisterAck {
         assigned_ip: virtual_ips.primary_ipv6(),
@@ -505,14 +944,22 @@ async fn handle_register_message(
         network_prefix: ipv6_prefix,
         ipv4_prefix: Some(ipv4_prefix),
         peers,
-        relay_endpoint: relay_endpoint
-            .cloned()
-            .map(|endpoint| endpoint.for_signaling_connection(local_addr)),
-        relay_endpoints: relay_endpoints
-            .iter()
-            .cloned()
-            .map(|endpoint| endpoint.for_signaling_connection(local_addr))
-            .collect(),
+        relay_endpoint: is_data_plane_member
+            .then(|| {
+                relay_endpoint
+                    .cloned()
+                    .map(|endpoint| endpoint.for_signaling_connection(local_addr))
+            })
+            .flatten(),
+        relay_endpoints: if is_data_plane_member {
+            relay_endpoints
+                .iter()
+                .cloned()
+                .map(|endpoint| endpoint.for_signaling_connection(local_addr))
+                .collect()
+        } else {
+            Vec::new()
+        },
     };
 
     send_binary(tx, session_manager, response)?;
@@ -522,17 +969,67 @@ async fn handle_register_message(
     Ok(())
 }
 
+async fn require_data_plane_session(
+    client_id: &Option<String>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<fuckipv6_common::PeerInfo>> {
+    let Some(client_id) = client_id.as_deref() else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Client must register before using the data plane",
+            ),
+        )?;
+        return Ok(None);
+    };
+    let Some(peer) = session_manager.get_peer_info(&client_id.to_string()).await else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Client registration is no longer active",
+            ),
+        )?;
+        return Ok(None);
+    };
+    if !session_manager.is_data_plane_member(&peer.public_key)? {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Node is not a current data-plane member",
+            ),
+        )?;
+        return Ok(None);
+    }
+    Ok(Some(peer))
+}
+
 async fn handle_connect_request(
     target_id: String,
     session_manager: &Arc<SessionManager>,
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
 ) -> Result<()> {
+    let Some(requester_peer) = require_data_plane_session(client_id, session_manager, tx).await?
+    else {
+        return Ok(());
+    };
     let Some(peer) = session_manager.get_peer_info(&target_id).await else {
         let error = SignalingMessage::protocol_error(ErrorCode::NotFound, "Peer not found");
         send_binary(tx, session_manager, error)?;
         return Ok(());
     };
+    if !session_manager.is_data_plane_member(&peer.public_key)? {
+        let error = SignalingMessage::protocol_error(ErrorCode::NotFound, "Peer not found");
+        send_binary(tx, session_manager, error)?;
+        return Ok(());
+    }
 
     send_binary(
         tx,
@@ -540,19 +1037,15 @@ async fn handle_connect_request(
         SignalingMessage::ConnectInfo { peer: peer.clone() },
     )?;
 
-    if let Some(requester_id) = client_id {
-        if let Some(requester_peer) = session_manager.get_peer_info(requester_id).await {
-            session_manager
-                .send_to_client(
-                    &target_id,
-                    SignalingMessage::ConnectNotify {
-                        peer: requester_peer,
-                    },
-                )
-                .await
-                .with_context(|| format!("通知目标节点连接请求失败: {target_id}"))?;
-        }
-    }
+    session_manager
+        .send_to_client(
+            &target_id,
+            SignalingMessage::ConnectNotify {
+                peer: requester_peer,
+            },
+        )
+        .await
+        .with_context(|| format!("通知目标节点连接请求失败: {target_id}"))?;
 
     Ok(())
 }
@@ -612,6 +1105,15 @@ async fn handle_relay_packet(
         let error = SignalingMessage::protocol_error(
             ErrorCode::Unauthorized,
             "Relay source IP is not assigned to this client",
+        );
+        send_binary(tx, session_manager, error)?;
+        return Ok(());
+    }
+    if !session_manager.is_data_plane_member(&session.public_key)? {
+        session_manager.record_relay_error();
+        let error = SignalingMessage::protocol_error(
+            ErrorCode::Forbidden,
+            "Relay source is not a current data-plane member",
         );
         send_binary(tx, session_manager, error)?;
         return Ok(());

@@ -398,6 +398,14 @@ impl RelayServer {
             anyhow::bail!("客户端身份已撤销，拒绝 QUIC 中继注册: {client_id}");
         }
 
+        if !self
+            .session_manager
+            .is_data_plane_member(public_key)
+            .context("数据面成员名册查询失败，拒绝 QUIC 中继注册")?
+        {
+            anyhow::bail!("节点不是当前数据面成员，拒绝 QUIC 中继注册: {client_id}");
+        }
+
         let peer = self
             .session_manager
             .get_peer_info(client_id)
@@ -520,18 +528,37 @@ impl RelayServer {
             .is_registration_revoked(client_id, public_key)
             .await
         {
-            Ok(false) => Ok(()),
-            Ok(true) => Err(Box::new(RelayMessage::error(
-                ErrorCode::Forbidden,
-                format!("{direction} client authorization has been revoked"),
-            ))),
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(Box::new(RelayMessage::error(
+                    ErrorCode::Forbidden,
+                    format!("{direction} client authorization has been revoked"),
+                )));
+            }
             Err(error) => {
                 tracing::error!(
                     "QUIC 中继授权撤销目录查询失败，拒绝{direction}发包 {client_id}: {error:#}"
                 );
-                Err(Box::new(RelayMessage::error(
+                return Err(Box::new(RelayMessage::error(
                     ErrorCode::Internal,
                     "authorization revocation check failed",
+                )));
+            }
+        }
+
+        match self.session_manager.is_data_plane_member(public_key) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Box::new(RelayMessage::error(
+                ErrorCode::Forbidden,
+                format!("{direction} client is not a current data-plane member"),
+            ))),
+            Err(error) => {
+                tracing::error!(
+                    "数据面成员名册查询失败，拒绝{direction}发包 {client_id}: {error:#}"
+                );
+                Err(Box::new(RelayMessage::error(
+                    ErrorCode::Internal,
+                    "data-plane membership check failed",
                 )))
             }
         }

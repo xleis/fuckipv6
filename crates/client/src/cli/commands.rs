@@ -2721,6 +2721,41 @@ async fn handle_signaling_event(
             return SignalingAction::RelayedPacket { src_ip, payload };
         }
 
+        SignalingEvent::JoinRequestStatus {
+            request_id,
+            state,
+            revision,
+            ..
+        } => {
+            tracing::debug!(
+                "审批请求状态更新: request={}, state={:?}, revision={}",
+                request_id,
+                state,
+                revision
+            );
+        }
+
+        SignalingEvent::JoinRequestListResponse { requests } => {
+            tracing::debug!("收到 {} 条审批请求", requests.len());
+        }
+
+        SignalingEvent::JoinRequestReviewAck { reviews, .. } => {
+            tracing::debug!("审批请求确认 {} 条", reviews.len());
+        }
+
+        SignalingEvent::JoinRequestChanged {
+            request_id,
+            state,
+            revision,
+        } => {
+            tracing::debug!(
+                "审批请求变更通知: request={}, state={:?}, revision={}",
+                request_id,
+                state,
+                revision
+            );
+        }
+
         SignalingEvent::Error { code, message } => {
             tracing::error!("信令错误 {}: {}", code, message);
         }

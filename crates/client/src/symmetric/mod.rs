@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
+use fuckipv6_common::domain::{NetworkRecord, NodeId};
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
 };
 use fuckipv6_coordinator::{
     relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
-    signaling::server::SignalingServer, signaling::session::SessionManager,
+    signaling::join_requests::JoinRequestStore, signaling::server::SignalingServer,
+    signaling::session::SessionManager,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -95,9 +97,45 @@ impl EmbeddedCoordinator {
         let blacklist_path = config_manager
             .coordinator_config_path(network_name)
             .context("无法确定协调端持久化路径")?;
-        let mut default_coordinator_config = CoordinatorConfig::default();
-        default_coordinator_config.network.ipv6_pool = pool.to_string();
-        default_coordinator_config.network.ip_pool = Some(pool.to_string());
+        let network_record_path = config_manager
+            .network_record_path(network_name)
+            .context("无法确定审批授权网络资料路径")?;
+        // Validate the owner-authored roster before any coordinator defaults are
+        // created. A later review re-reads this file for every authorization,
+        // but startup should still surface malformed authority immediately.
+        if network_record_path.exists() {
+            let record: NetworkRecord = serde_json::from_slice(
+                &std::fs::read(&network_record_path).with_context(|| {
+                    format!(
+                        "无法读取审批授权网络资料: {}",
+                        network_record_path.display()
+                    )
+                })?,
+            )
+            .with_context(|| {
+                format!(
+                    "无法解析审批授权网络资料: {}",
+                    network_record_path.display()
+                )
+            })?;
+            record
+                .validate()
+                .context("审批授权网络资料校验失败，拒绝启动内嵌协调器")?;
+        }
+        let node_identity = config_manager
+            .load_node_identity()
+            .context("无法加载内嵌协调器 owner 身份")?;
+        let owner_node_id = NodeId::from_public_key(&node_identity.public_key()).to_string();
+        let mut default_coordinator_config = if blacklist_path.exists() {
+            CoordinatorConfig::from_file(&blacklist_path).context("无法加载内嵌协调端持久配置")?
+        } else {
+            let mut config = CoordinatorConfig::default();
+            config.network.ipv6_pool = pool.to_string();
+            config.network.ip_pool = Some(pool.to_string());
+            config
+        };
+        default_coordinator_config.network_record_path = Some(network_record_path.clone());
+        default_coordinator_config.owner_node_id = Some(owner_node_id.clone());
         let blacklist_store = CoordinatorConfigBlacklistStore::with_default_config(
             blacklist_path.clone(),
             default_coordinator_config.clone(),
@@ -114,14 +152,30 @@ impl EmbeddedCoordinator {
             default_coordinator_config
                 .save_to_file(&blacklist_path)
                 .context("无法初始化内嵌协调端持久配置")?;
+        } else {
+            default_coordinator_config
+                .save_to_file(&blacklist_path)
+                .context("无法更新内嵌协调端审批授权配置")?;
         }
         let persisted_allocation = blacklist_store
             .load_network_allocation()
             .context("无法加载持久化协调端地址分配")?;
+        let join_request_store = Arc::new(
+            JoinRequestStore::new(
+                blacklist_path.with_file_name("join_requests.json"),
+                Some(network_record_path.clone()),
+                Some(owner_node_id),
+                Vec::new(),
+            )
+            .context("无法初始化审批请求存储")?,
+        );
         let session_manager = Arc::new(
             SessionManager::new_with_allocation(&persisted_allocation)
                 .context("无法初始化内嵌协调器地址池")?,
         );
+        session_manager
+            .attach_data_plane_membership(network_record_path.clone())
+            .context("无法加载数据面成员名册")?;
         let blacklist_store = Arc::new(blacklist_store);
         session_manager
             .attach_blacklist_store(blacklist_store.clone())
@@ -131,6 +185,7 @@ impl EmbeddedCoordinator {
         let signaling_bind = format!("0.0.0.0:{signaling_port}");
         let signaling_server =
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
+                .with_join_request_store(join_request_store)
                 .bind()
                 .await
                 .context("无法绑定内嵌信令服务")?;

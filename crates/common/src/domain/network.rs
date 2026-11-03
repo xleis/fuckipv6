@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use super::capability::CapabilityKind;
 use super::ids::{NetworkId, NodeId, PublicKey, Signature};
-use super::membership::ExitContributionObligation;
+use super::membership::{
+    ExitContributionObligation, JoinRequestGrantPreview, MembershipRole, MembershipTerms,
+};
 use super::{DomainError, DomainResult};
 
 /// How much of a network's public profile is discoverable without membership.
@@ -323,6 +325,57 @@ impl NetworkRecord {
         record.capability_declarations = canonical_capabilities(&record.capability_declarations)?;
         record.validate()?;
         Ok(record)
+    }
+
+    /// Terms an approval applicant must acknowledge for this exact record.
+    /// Keeping this derivation in the domain prevents the Coordinator and both
+    /// UIs from inventing separate admission-policy views.
+    pub fn membership_terms(&self) -> MembershipTerms {
+        MembershipTerms {
+            network_policy_revision: self.policy_revision,
+            privacy_policy_revision: self.privacy_policy_revision,
+            exit_contribution: self.exit_contribution,
+            member_limit: self.member_limit,
+        }
+    }
+
+    /// Authority disclosed before an approval decision. Approval starts from
+    /// the ordinary member role; network capability declarations determine the
+    /// data-plane capability grant shown to reviewers. Local Exit enablement
+    /// remains a separate local-owner decision even when contribution is
+    /// required by the network.
+    pub fn approval_grant_preview(&self) -> JoinRequestGrantPreview {
+        let capabilities = self.capability_declarations.clone();
+        JoinRequestGrantPreview {
+            role: MembershipRole::Member,
+            file_access: capabilities.contains(&CapabilityKind::File),
+            capabilities,
+            exit_contribution: self.exit_contribution,
+            grants_data_plane_access: true,
+        }
+    }
+
+    /// Add one approved member without changing the signed public profile
+    /// revision. Membership IDs are private roster data, so only the roster
+    /// mutation clock advances. Duplicate admission is idempotent and a hard
+    /// member limit is enforced before mutation.
+    pub fn admit_member(&mut self, member: NodeId, now_unix_ms: u64) -> DomainResult<bool> {
+        if self.members.contains(&member) {
+            return Ok(false);
+        }
+        if self
+            .member_limit
+            .is_some_and(|limit| self.members.len() >= limit as usize)
+        {
+            return Err(DomainError::new(
+                "domain.network_member_limit",
+                "network member limit has been reached",
+            ));
+        }
+        self.members.push(member);
+        self.updated_at_unix_ms = self.updated_at_unix_ms.max(now_unix_ms);
+        self.validate()?;
+        Ok(true)
     }
 
     /// Rename mutable profile metadata without changing the identifier derived

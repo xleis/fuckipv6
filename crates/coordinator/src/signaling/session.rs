@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use fuckipv6_common::domain::{NetworkRecord, NodeId};
 use fuckipv6_common::{
     codec, BlacklistConfig, ClientId, NatType, NetworkAllocation, NetworkMode, PeerInfo,
     QuicClientCertificateAuthorizer, SignalingMessage, VirtualIps,
@@ -7,6 +8,7 @@ use serde::Serialize;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
@@ -36,23 +38,72 @@ pub struct SessionManager {
     authorization_directory: StdRwLock<Option<Arc<NetworkAuthorizationDirectory>>>,
     registration_authorization_gate: Arc<RwLock<()>>,
     certificate_allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
+    data_plane_membership: Arc<StdRwLock<Option<Arc<DataPlaneMembershipAuthority>>>>,
+}
+
+/// Data-plane authorization always re-reads the authoritative roster. A
+/// metadata cache (mtime plus length) can retain a revoked member when a file
+/// is atomically replaced within the filesystem timestamp resolution, so this
+/// path deliberately favors fail-closed correctness over a small read cost.
+#[derive(Debug)]
+struct DataPlaneMembershipAuthority {
+    path: PathBuf,
+}
+
+impl DataPlaneMembershipAuthority {
+    fn new(path: PathBuf) -> Result<Self> {
+        let authority = Self { path };
+        authority.load_members()?;
+        Ok(authority)
+    }
+
+    fn is_member(&self, public_key: &[u8]) -> Result<bool> {
+        let node_id = NodeId::from_public_key(public_key);
+        Ok(self.load_members()?.contains(&node_id))
+    }
+
+    fn load_members(&self) -> Result<std::collections::BTreeSet<NodeId>> {
+        let content = std::fs::read(&self.path)
+            .with_context(|| format!("无法读取数据面成员名册: {}", self.path.display()))?;
+        let record: NetworkRecord = serde_json::from_slice(&content)
+            .with_context(|| format!("无法解析数据面成员名册: {}", self.path.display()))?;
+        record.validate().context("数据面成员名册校验失败")?;
+        Ok(record.members.into_iter().collect())
+    }
 }
 
 #[derive(Debug, Clone)]
 struct SessionClientCertificateAuthorizer {
     allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
+    data_plane_membership: Arc<StdRwLock<Option<Arc<DataPlaneMembershipAuthority>>>>,
 }
 
 impl QuicClientCertificateAuthorizer for SessionClientCertificateAuthorizer {
     fn is_authorized(&self, public_key: &[u8; 32]) -> bool {
-        self.allowlist
+        let allowlisted = self
+            .allowlist
             .read()
             .map(|allowlist| {
                 allowlist
                     .values()
                     .any(|authorized| authorized == public_key)
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !allowlisted {
+            return false;
+        }
+        let membership = self
+            .data_plane_membership
+            .read()
+            .ok()
+            .and_then(|membership| membership.clone());
+        match membership {
+            Some(membership) => membership.is_member(public_key).unwrap_or_else(|error| {
+                tracing::error!("数据面成员名册查询失败，拒绝 QUIC 证书: {error:#}");
+                false
+            }),
+            None => true,
+        }
     }
 }
 
@@ -314,6 +365,7 @@ impl SessionManager {
             authorization_directory: StdRwLock::new(initial_authorization_directory()?),
             registration_authorization_gate: Arc::new(RwLock::new(())),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
+            data_plane_membership: Arc::new(StdRwLock::new(None)),
         })
     }
 
@@ -340,6 +392,7 @@ impl SessionManager {
             authorization_directory: StdRwLock::new(initial_authorization_directory()?),
             registration_authorization_gate: Arc::new(RwLock::new(())),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
+            data_plane_membership: Arc::new(StdRwLock::new(None)),
         })
     }
 
@@ -350,7 +403,47 @@ impl SessionManager {
     pub fn client_certificate_authorizer(&self) -> Arc<dyn QuicClientCertificateAuthorizer> {
         Arc::new(SessionClientCertificateAuthorizer {
             allowlist: self.certificate_allowlist.clone(),
+            data_plane_membership: self.data_plane_membership.clone(),
         })
+    }
+
+    /// Attach the Coordinator-owned network record that is authoritative for
+    /// data-plane membership. Signalling registration stays available to
+    /// pending applicants, but QUIC certificates, relay packets and topology
+    /// broadcasts are gated on a live member lookup.
+    pub fn attach_data_plane_membership(&self, path: impl Into<PathBuf>) -> Result<()> {
+        let authority = Arc::new(DataPlaneMembershipAuthority::new(path.into())?);
+        *self
+            .data_plane_membership
+            .write()
+            .map_err(|_| anyhow!("数据面成员名册锁已损坏"))? = Some(authority);
+        Ok(())
+    }
+
+    /// Check a node's current data-plane membership from its authenticated
+    /// public key. Before a roster is attached, legacy standalone Coordinators
+    /// retain their registration-only authorization behavior.
+    pub fn is_data_plane_member(&self, public_key: &[u8]) -> Result<bool> {
+        let membership = self
+            .data_plane_membership
+            .read()
+            .map_err(|_| anyhow!("数据面成员名册锁已损坏"))?
+            .clone();
+        match membership {
+            Some(membership) => membership.is_member(public_key),
+            None => Ok(true),
+        }
+    }
+
+    fn session_is_data_plane_member(&self, session: &ClientSession) -> bool {
+        self.is_data_plane_member(&session.peer_info.public_key)
+            .unwrap_or_else(|error| {
+                tracing::error!(
+                    "数据面成员名册查询失败，按非成员处理 {}: {error:#}",
+                    session.peer_info.client_id
+                );
+                false
+            })
     }
 
     fn set_client_certificate_authorization(&self, client_id: &ClientId, public_key: &[u8]) {
@@ -888,6 +981,7 @@ impl SessionManager {
         tracing::debug!("sessions write 锁已释放");
 
         if let Some(session) = session_opt {
+            let was_data_plane_member = self.session_is_data_plane_member(&session);
             self.revoke_client_certificate_authorization(client_id);
             // 释放IP
             tracing::debug!("获取 ip_allocator write 锁...");
@@ -899,12 +993,15 @@ impl SessionManager {
 
             tracing::info!("客户端已注销: {}", client_id);
 
-            // 通知所有其他客户端节点下线
-            tracing::debug!("准备广播节点下线通知...");
-            if let Err(err) = self.broadcast_peer_offline(client_id.clone()).await {
-                tracing::warn!("广播节点下线通知失败: {err:#}");
+            // Pending applicants are not part of the member topology, so their
+            // disconnect must not leak an offline event to members.
+            if was_data_plane_member {
+                tracing::debug!("准备广播节点下线通知...");
+                if let Err(err) = self.broadcast_peer_offline(client_id.clone()).await {
+                    tracing::warn!("广播节点下线通知失败: {err:#}");
+                }
+                tracing::debug!("广播下线通知完成");
             }
-            tracing::debug!("广播下线通知完成");
         }
 
         tracing::debug!("unregister_client 函数退出");
@@ -939,6 +1036,20 @@ impl SessionManager {
             .await
             .values()
             .map(|s| s.peer_info.clone())
+            .collect()
+    }
+
+    /// Return only peers that are currently on the authoritative data-plane
+    /// roster. Pending, rejected, withdrawn and expired applicants may keep a
+    /// signalling session for approval messages but must never receive the
+    /// member topology.
+    pub async fn get_data_plane_peers(&self) -> Vec<PeerInfo> {
+        self.sessions
+            .read()
+            .await
+            .values()
+            .filter(|session| self.session_is_data_plane_member(session))
+            .map(|session| session.peer_info.clone())
             .collect()
     }
 
@@ -1051,17 +1162,16 @@ impl SessionManager {
         Ok(())
     }
 
-    /// 向指定虚拟 IP 的客户端发送消息 (支持 IPv4 / IPv6)
+    /// 向指定虚拟 IP 的数据面成员发送消息 (支持 IPv4 / IPv6)
     pub async fn send_to_virtual_ip(
         &self,
         virtual_ip: IpAddr,
         msg: SignalingMessage,
     ) -> Result<()> {
         let sessions = self.sessions.read().await;
-        if let Some(session) = sessions
-            .values()
-            .find(|session| session.peer_info.matches_ip(virtual_ip))
-        {
+        if let Some(session) = sessions.values().find(|session| {
+            session.peer_info.matches_ip(virtual_ip) && self.session_is_data_plane_member(session)
+        }) {
             let data = codec::encode(&msg).context("序列化虚拟 IP 信令消息失败")?;
             fuckipv6_common::validate_signaling_message_len(data.len())
                 .context("虚拟 IP 信令消息超过大小上限")?;
@@ -1095,6 +1205,7 @@ impl SessionManager {
 
         for (id, session) in sessions.iter() {
             if id != exclude
+                && self.session_is_data_plane_member(session)
                 && session
                     .tx
                     .send(Message::Binary(data.clone().into()))
@@ -1112,8 +1223,12 @@ impl SessionManager {
         Ok(())
     } // read 锁在这里自动释放
 
-    /// 广播节点上线消息
+    /// 广播节点上线消息。Pending applicants are deliberately omitted from
+    /// member topology until an approval changes the authoritative roster.
     async fn broadcast_peer_online(&self, peer: PeerInfo) -> Result<()> {
+        if !self.is_data_plane_member(&peer.public_key)? {
+            return Ok(());
+        }
         let excluded_id = peer.client_id.clone();
         let msg = SignalingMessage::PeerOnline { peer };
         self.broadcast_except(&excluded_id, msg).await
@@ -1541,8 +1656,16 @@ fn non_colliding_lift_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{
+        CapabilityKind, NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, PublicKey,
+    };
+    use fuckipv6_common::Identity;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::RwLock as TestRwLock;
+
+    fn write_membership_record(path: &PathBuf, record: &NetworkRecord) {
+        std::fs::write(path, serde_json::to_vec_pretty(record).unwrap()).unwrap();
+    }
 
     #[derive(Default)]
     struct MemoryBlacklistStore {
@@ -2541,6 +2664,121 @@ mod tests {
         assert!(!manager
             .client_certificate_authorizer()
             .is_authorized(&public_key_bytes));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn pending_applicant_has_signalling_but_no_data_plane_membership_until_approved(
+    ) -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-session-membership-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let record_path = dir.join("network.json");
+
+        let owner_identity = Identity::generate()?;
+        let applicant_identity = Identity::generate()?;
+        let owner_id = NodeId::from_public_key(&owner_identity.public_key());
+        let applicant_id = NodeId::from_public_key(&applicant_identity.public_key());
+        let mut record = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "Approval".into(),
+                purpose: "Approval network".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: vec![CapabilityKind::File],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::ApprovalRequired,
+            },
+            PublicKey::from_bytes([42; 32]),
+            owner_id.clone(),
+            1_000,
+        )?;
+        write_membership_record(&record_path, &record);
+
+        let manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        manager.attach_data_plane_membership(&record_path)?;
+        let (applicant_tx, mut applicant_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                applicant_identity.client_id().to_string(),
+                applicant_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                applicant_tx,
+            )
+            .await?;
+        let (owner_tx, _owner_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                owner_identity.client_id().to_string(),
+                owner_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41001),
+                51821,
+                NatType::Open,
+                owner_tx,
+            )
+            .await?;
+
+        assert!(manager
+            .get_peer_info(&applicant_identity.client_id().to_string())
+            .await
+            .is_some());
+        assert!(!manager.is_data_plane_member(&applicant_identity.public_key())?);
+        assert_eq!(manager.get_data_plane_peers().await.len(), 1);
+        assert!(
+            applicant_rx.try_recv().is_err(),
+            "pending applicant must not receive member topology"
+        );
+        let applicant_key: [u8; 32] = applicant_identity
+            .public_key()
+            .try_into()
+            .map_err(|_| anyhow!("invalid test public key"))?;
+        assert!(!manager
+            .client_certificate_authorizer()
+            .is_authorized(&applicant_key));
+        let owner_key: [u8; 32] = owner_identity
+            .public_key()
+            .try_into()
+            .map_err(|_| anyhow!("invalid test public key"))?;
+        assert!(manager
+            .client_certificate_authorizer()
+            .is_authorized(&owner_key));
+
+        assert!(record.admit_member(applicant_id.clone(), 2_000)?);
+        write_membership_record(&record_path, &record);
+        assert!(manager.is_data_plane_member(&applicant_identity.public_key())?);
+        assert_eq!(manager.get_data_plane_peers().await.len(), 2);
+        assert!(
+            manager
+                .client_certificate_authorizer()
+                .is_authorized(&applicant_key),
+            "an online pending applicant must gain relay access immediately after approval"
+        );
+
+        record.members.retain(|member| member != &applicant_id);
+        record.updated_at_unix_ms = 3_000;
+        record.validate()?;
+        write_membership_record(&record_path, &record);
+        assert!(!manager.is_data_plane_member(&applicant_identity.public_key())?);
+        assert!(
+            !manager
+                .client_certificate_authorizer()
+                .is_authorized(&applicant_key),
+            "roster removal must immediately revoke relay certificate authorization"
+        );
+
+        manager
+            .unregister_client(&applicant_identity.client_id().to_string())
+            .await;
+        manager
+            .unregister_client(&owner_identity.client_id().to_string())
+            .await;
+        let _ = std::fs::remove_dir_all(dir);
         Ok(())
     }
 }

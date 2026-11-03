@@ -105,6 +105,12 @@ prefixed_id!(
 );
 prefixed_id!(EventId, "event_", "^event_[A-Za-z0-9_-]{43}$", "event id");
 prefixed_id!(AuditId, "audit_", "^audit_[A-Za-z0-9_-]{43}$", "audit id");
+prefixed_id!(
+    JoinRequestId,
+    "join_",
+    "^join_[A-Za-z0-9_-]{43}$",
+    "join request id"
+);
 prefixed_id!(GroupId, "group_", "^group_[A-Za-z0-9_-]{43}$", "group id");
 prefixed_id!(
     TrafficRuleId,

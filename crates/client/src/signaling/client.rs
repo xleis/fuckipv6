@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use fuckipv6_common::domain::{JoinRequest, JoinRequestId, JoinRequestState, NetworkId};
 use fuckipv6_common::{
-    codec, validate_signaling_message_len, Identity, NatType, PeerInfo, RelayEndpoint,
-    SignalingMessage, VirtualIps, MAX_SIGNALING_MESSAGE_SIZE,
+    codec, validate_signaling_message_len, Identity, JoinRequestReviewResult, NatType, PeerInfo,
+    RelayEndpoint, SignalingMessage, VirtualIps, MAX_SIGNALING_MESSAGE_SIZE,
 };
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -719,6 +720,47 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
 
         SignalingMessage::Error { code, message } => Some(SignalingEvent::Error { code, message }),
 
+        SignalingMessage::JoinRequestStatus {
+            request_id,
+            state,
+            revision,
+            information_request,
+        } => Some(SignalingEvent::JoinRequestStatus {
+            request_id,
+            state,
+            revision,
+            information_request,
+        }),
+
+        SignalingMessage::JoinRequestListResponse { requests } => {
+            Some(SignalingEvent::JoinRequestListResponse { requests })
+        }
+
+        SignalingMessage::JoinRequestReviewAck {
+            network_id,
+            reviews,
+        } => Some(SignalingEvent::JoinRequestReviewAck {
+            network_id,
+            reviews,
+        }),
+
+        SignalingMessage::JoinRequestChanged {
+            request_id,
+            state,
+            revision,
+        } => Some(SignalingEvent::JoinRequestChanged {
+            request_id,
+            state,
+            revision,
+        }),
+
+        SignalingMessage::JoinRequestSubmit { .. }
+        | SignalingMessage::JoinRequestList { .. }
+        | SignalingMessage::JoinRequestReview { .. }
+        | SignalingMessage::JoinRequestBatchReview { .. }
+        | SignalingMessage::JoinRequestWithdraw { .. }
+        | SignalingMessage::JoinRequestResubmit { .. } => None,
+
         _ => None,
     }
 }
@@ -764,6 +806,31 @@ pub enum SignalingEvent {
 
     /// 信令连接已重新建立并已重新发送注册消息
     Reconnected,
+
+    /// Current state of a submitted or withdrawn approval request.
+    JoinRequestStatus {
+        request_id: JoinRequestId,
+        state: JoinRequestState,
+        revision: u64,
+        information_request: Option<String>,
+    },
+
+    /// Authorized approval list. It contains request prose only for the
+    /// applicant and current owner/administrators.
+    JoinRequestListResponse { requests: Vec<JoinRequest> },
+
+    /// Acknowledgement for one atomic single or batch review.
+    JoinRequestReviewAck {
+        network_id: NetworkId,
+        reviews: Vec<JoinRequestReviewResult>,
+    },
+
+    /// Redacted notification suitable for refreshing all related views.
+    JoinRequestChanged {
+        request_id: JoinRequestId,
+        state: JoinRequestState,
+        revision: u64,
+    },
 
     /// 错误
     Error { code: u16, message: String },

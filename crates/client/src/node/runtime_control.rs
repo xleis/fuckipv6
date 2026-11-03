@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuckipv6_common::domain::MembershipRole;
-use fuckipv6_common::{ClientConfig, NetworkTicket};
+use fuckipv6_common::domain::{JoinRequest, JoinRequestId, MembershipRole, NetworkId};
+use fuckipv6_common::{
+    ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NetworkTicket,
+};
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -31,6 +33,7 @@ use crate::config_manager::{ConfigManager, NetworkConfig, NetworkCreationError};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
+use crate::signaling::client::{JoinRequestControlError, SignalingClient};
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
     EmbeddedServiceStartRequest,
@@ -107,6 +110,12 @@ pub(crate) enum RuntimeControlError {
     },
     #[error("{0}")]
     Timeout(String),
+    #[error("{message}")]
+    JoinRequest {
+        code: NodeProblemCode,
+        message_key: &'static str,
+        message: String,
+    },
 }
 
 impl RuntimeControlError {
@@ -124,6 +133,7 @@ impl RuntimeControlError {
             | Self::Storage(_)
             | Self::Launch(_) => NodeProblemCode::Unavailable,
             Self::Timeout(_) => NodeProblemCode::TimedOut,
+            Self::JoinRequest { code, .. } => *code,
         }
     }
 
@@ -132,6 +142,7 @@ impl RuntimeControlError {
             Self::NetworkSetup { stage, .. } => stage.message_key(),
             Self::CreationConflict { .. } => "error.conflict",
             Self::PermissionDenied(_) => "error.permission_denied",
+            Self::JoinRequest { message_key, .. } => message_key,
             _ => self.problem_code().message_key(),
         }
     }
@@ -148,6 +159,17 @@ impl RuntimeControlError {
                 | Self::NetworkSetup {
                     stage: NetworkSetupStage::PermissionDenied
                         | NetworkSetupStage::PlatformUnsupported,
+                    ..
+                }
+                | Self::JoinRequest {
+                    code: NodeProblemCode::AuthenticationRequired
+                        | NodeProblemCode::InvalidRequest
+                        | NodeProblemCode::NotFound
+                        | NodeProblemCode::Conflict
+                        | NodeProblemCode::PermissionDenied
+                        | NodeProblemCode::Cancelled
+                        | NodeProblemCode::Unsupported
+                        | NodeProblemCode::Internal,
                     ..
                 }
         )
@@ -177,6 +199,46 @@ pub(crate) fn network_setup_problem_code(stage: NetworkSetupStage) -> NodeProble
         NetworkSetupStage::PermissionDenied => NodeProblemCode::PermissionDenied,
         NetworkSetupStage::PlatformUnsupported => NodeProblemCode::Unsupported,
         _ => NodeProblemCode::Unavailable,
+    }
+}
+
+fn map_join_request_error(error: JoinRequestControlError) -> RuntimeControlError {
+    let (code, message_key) = match error {
+        JoinRequestControlError::Disconnected | JoinRequestControlError::Unavailable => (
+            NodeProblemCode::Unavailable,
+            "join_request.error.unavailable",
+        ),
+        JoinRequestControlError::TimedOut => {
+            (NodeProblemCode::TimedOut, "join_request.error.timeout")
+        }
+        JoinRequestControlError::Rejected(401) => (
+            NodeProblemCode::AuthenticationRequired,
+            "join_request.error.unauthorized",
+        ),
+        JoinRequestControlError::Rejected(403) => (
+            NodeProblemCode::PermissionDenied,
+            "join_request.error.forbidden",
+        ),
+        JoinRequestControlError::Rejected(404) => {
+            (NodeProblemCode::NotFound, "join_request.error.not_found")
+        }
+        JoinRequestControlError::Rejected(429) => (
+            NodeProblemCode::Unavailable,
+            "join_request.error.rate_limited",
+        ),
+        JoinRequestControlError::Rejected(503) => (
+            NodeProblemCode::Unavailable,
+            "join_request.error.overloaded",
+        ),
+        JoinRequestControlError::Rejected(_) | JoinRequestControlError::InvalidResponse => (
+            NodeProblemCode::InvalidRequest,
+            "join_request.error.unavailable",
+        ),
+    };
+    RuntimeControlError::JoinRequest {
+        code,
+        message_key,
+        message: error.to_string(),
     }
 }
 
@@ -565,11 +627,14 @@ pub(crate) struct RoleUpdateResult {
 #[derive(Debug, Clone)]
 struct NetworkLaunchRequest {
     network_name: String,
+    network_id: Option<String>,
     config_path: String,
     config: ClientConfig,
 }
 
 struct StartedNetworkRuntime {
+    network_id: Option<String>,
+    signaling: Option<Arc<SignalingClient>>,
     tun_name: String,
     assigned_ipv6: std::net::Ipv6Addr,
     assigned_ipv4: Option<std::net::Ipv4Addr>,
@@ -661,6 +726,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let assigned_ipv4 = runtime.assigned_ips.ipv4;
             let p2p_listen_addr = runtime.p2p.local_addr();
             let identity = runtime_metadata::identity_snapshot(&runtime.identity, None, None);
+            let signaling = Some(runtime.signaling.clone());
             let p2p = runtime.p2p.clone();
             let stats = runtime.stats.clone();
 
@@ -801,6 +867,8 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             });
 
             Ok(StartedNetworkRuntime {
+                network_id: request.network_id,
+                signaling,
                 tun_name,
                 assigned_ipv6,
                 assigned_ipv4,
@@ -815,6 +883,8 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
 }
 
 struct NetworkRuntimeSession {
+    network_id: Option<String>,
+    signaling: Option<Arc<SignalingClient>>,
     tun_name: String,
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
@@ -2480,8 +2550,10 @@ impl NetworkRuntimeActor {
         .await;
 
         let network_name = spec.name.clone();
+        let network_id = spec.network_id.clone();
         let launch = self.launcher.launch(NetworkLaunchRequest {
             network_name: network_name.clone(),
+            network_id,
             config_path: spec.config_path.to_string_lossy().into_owned(),
             config: spec.config,
         });
@@ -2541,6 +2613,8 @@ impl NetworkRuntimeActor {
         self.sessions.insert(
             network_name,
             NetworkRuntimeSession {
+                network_id: started.network_id,
+                signaling: started.signaling,
                 tun_name: started.tun_name,
                 routing_control: started.routing_control,
                 shutdown: started.shutdown,
@@ -2648,6 +2722,7 @@ impl NetworkRuntimeActor {
         if command.auto_connect {
             let spec = super::NodeNetworkSpec {
                 name: command.name.clone(),
+                network_id: Some(created.record.network_id.to_string()),
                 config_path: config_file,
                 config,
             };
@@ -2762,6 +2837,10 @@ impl NetworkRuntimeActor {
             };
             let spec = super::NodeNetworkSpec {
                 name: network_name.clone(),
+                network_id: command
+                    .discovery_record
+                    .as_ref()
+                    .map(|record| record.document.network_id.to_string()),
                 config_path: config_file,
                 config,
             };
@@ -4471,6 +4550,8 @@ async fn wait_for_session_shutdown(
     deadline: Instant,
 ) -> SessionShutdownResult {
     let NetworkRuntimeSession {
+        network_id,
+        signaling,
         tun_name,
         routing_control,
         shutdown,
@@ -4485,6 +4566,8 @@ async fn wait_for_session_shutdown(
                     "stop/timeout: 网络 [{network_name}] 的关闭通道已断开且任务未退出；清理结果未知"
                 ))),
                 retry_session: Some(NetworkRuntimeSession {
+                    network_id: network_id.clone(),
+                    signaling: signaling.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -4511,6 +4594,8 @@ async fn wait_for_session_shutdown(
                     "stop/timeout: 网络 [{network_name}] 的关闭通道已断开且任务未退出；清理结果未知"
                 ))),
                 retry_session: Some(NetworkRuntimeSession {
+                    network_id: network_id.clone(),
+                    signaling: signaling.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -4528,6 +4613,8 @@ async fn wait_for_session_shutdown(
                 "stop/timeout: 网络 [{network_name}] 未在期限内退出；清理结果未知，任务继续执行清理"
             ))),
             retry_session: Some(NetworkRuntimeSession {
+                network_id: network_id.clone(),
+                signaling: signaling.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -4555,6 +4642,8 @@ async fn wait_for_session_shutdown(
                 "stop/timeout: 网络 [{network_name}] 未在期限内退出；清理结果未知，任务继续执行清理"
             ))),
             retry_session: Some(NetworkRuntimeSession {
+                network_id: network_id.clone(),
+                signaling: signaling.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -5266,6 +5355,8 @@ mod tests {
                 });
 
                 Ok(StartedNetworkRuntime {
+                    network_id: request.network_id.clone(),
+                    signaling: None,
                     tun_name,
                     assigned_ipv6: Ipv6Addr::LOCALHOST,
                     assigned_ipv4: Some(Ipv4Addr::LOCALHOST),

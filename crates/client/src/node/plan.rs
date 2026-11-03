@@ -22,6 +22,9 @@ pub enum NodeNetworkSelection {
 #[derive(Debug, Clone)]
 pub struct NodeNetworkSpec {
     pub name: String,
+    /// Stable network identity from persisted metadata. Legacy configurations
+    /// may not have this value until a signed membership is recorded.
+    pub network_id: Option<String>,
     pub config_path: PathBuf,
     pub config: ClientConfig,
 }
@@ -34,6 +37,7 @@ pub struct NodeRuntimePlan {
 
 impl NodeRuntimePlan {
     pub fn load(manager: &ConfigManager, selection: NodeNetworkSelection) -> Result<Self> {
+        let persisted = manager.list_networks()?;
         let names = match selection {
             NodeNetworkSelection::None => Vec::new(),
             NodeNetworkSelection::Default => vec![manager
@@ -67,8 +71,13 @@ impl NodeRuntimePlan {
                 .with_context(|| format!("加载网络 [{name}] 配置文件失败"))?;
             // Identity belongs to the node, not to an individual network.
             config.private_key_path = manager.node_identity_path();
+            let network_id = persisted
+                .iter()
+                .find(|network| network.name == name)
+                .and_then(|network| network.network_id.clone());
             networks.push(NodeNetworkSpec {
                 name,
+                network_id,
                 config_path,
                 config,
             });
@@ -131,6 +140,7 @@ mod tests {
         let plan = NodeRuntimePlan::load(&manager, NodeNetworkSelection::Default)?;
         assert_eq!(plan.len(), 1);
         assert_eq!(plan.networks()[0].name, "home");
+        assert_eq!(plan.networks()[0].network_id, None);
         assert_eq!(
             plan.networks()[0].config.coordinator_url,
             "ws://home.example:6666"
@@ -138,6 +148,37 @@ mod tests {
         assert_eq!(
             plan.networks()[0].config.private_key_path,
             manager.node_identity_path()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn plan_associates_each_network_with_its_persisted_stable_id() -> Result<()> {
+        let (manager, dir) = manager("stable-id");
+        manager.create_network("home", "ws://home.example:6666", false)?;
+        manager.create_network("office", "ws://office.example:6666", false)?;
+        let home_id = fuckipv6_common::domain::NetworkId::from_public_key(b"home-network");
+        manager.set_network_identity_metadata("home", home_id.as_str(), "home-public-key")?;
+
+        let plan = NodeRuntimePlan::load(
+            &manager,
+            NodeNetworkSelection::Named(vec!["home".into(), "office".into()]),
+        )?;
+        assert_eq!(
+            plan.networks()
+                .iter()
+                .find(|network| network.name == "home")
+                .and_then(|network| network.network_id.as_deref()),
+            Some(home_id.as_str())
+        );
+        assert_eq!(
+            plan.networks()
+                .iter()
+                .find(|network| network.name == "office")
+                .and_then(|network| network.network_id.as_deref()),
+            None
         );
 
         let _ = std::fs::remove_dir_all(dir);

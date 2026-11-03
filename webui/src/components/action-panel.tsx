@@ -68,6 +68,7 @@ const selectInputs = new Set([
   "routing_mode",
   "visibility",
   "join_mode",
+  "join_request_review_action",
 ]);
 
 function selectOptions(
@@ -85,6 +86,12 @@ function selectOptions(
     return ["open", "approval_required", "invite_only"].map((value) => ({
       value,
       text: label(locale, `choice.join_mode.${value}`),
+    }));
+  }
+  if (field.input === "join_request_review_action") {
+    return ["approve", "reject", "request_information"].map((value) => ({
+      value,
+      text: label(locale, `choice.join_request_review.${value}`),
     }));
   }
   if (field.input === "network_mode") {

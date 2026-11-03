@@ -20,6 +20,7 @@ import type {
   NodeUiAction,
   NodeUiActionBlockReason,
   NodeUiField,
+  NodeJoinRequestReviewItem,
   NodeUiManifest,
   NodeUiPageState,
   NodeUiPage,
@@ -92,6 +93,12 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   retry_discovery_index: "retry_discovery_index",
   preview_join_network: "preview_join_network",
   join_network: "join_network",
+  submit_join_request: "submit_join_request",
+  list_join_requests: "list_join_requests",
+  review_join_request: "review_join_request",
+  batch_review_join_requests: "batch_review_join_requests",
+  withdraw_join_request: "withdraw_join_request",
+  resubmit_join_request: "resubmit_join_request",
   leave_network: "leave_network",
   start_networks: "start_networks",
   stop_networks: "stop_networks",
@@ -163,6 +170,11 @@ const INPUT_KINDS = new Set([
   "capability_declarations",
   "visibility",
   "join_mode",
+  "join_request_id",
+  "join_request_note",
+  "join_request_reason",
+  "join_request_review_action",
+  "join_request_reviews",
   "port",
   "role",
   "routing_mode",
@@ -197,6 +209,11 @@ const VALIDATIONS = new Set([
   "capability_declarations",
   "visibility",
   "join_mode",
+  "join_request_id",
+  "join_request_note",
+  "join_request_reason",
+  "join_request_review_action",
+  "join_request_reviews",
 ]);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
@@ -802,6 +819,103 @@ function blank(value: string | boolean | undefined): boolean {
   );
 }
 
+function validJoinRequestId(value: string): boolean {
+  if (!/^join_[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    const decoded = atob(
+      value.slice("join_".length).replace(/-/g, "+").replace(/_/g, "/") + "=",
+    );
+    return decoded.length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function validJoinRequestText(value: string, maxLength: number): boolean {
+  return (
+    value.trim() !== "" &&
+    value.trim() === value &&
+    !/\p{Cc}/u.test(value) &&
+    [...value].length <= maxLength
+  );
+}
+
+function parseJoinRequestReviews(
+  value: string | boolean | undefined,
+  locale: Locale,
+): NodeJoinRequestReviewItem[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(value ?? ""));
+  } catch {
+    throw new Error(label(locale, "join_request.error.invalid_request"));
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(label(locale, "join_request.error.invalid_request"));
+  }
+  if (parsed.length === 0) {
+    throw new Error(label(locale, "join_request.error.batch_empty"));
+  }
+  if (parsed.length > 100) {
+    throw new Error(label(locale, "join_request.error.batch_too_large"));
+  }
+
+  const seen = new Set<string>();
+  const reviews: NodeJoinRequestReviewItem[] = [];
+  for (const item of parsed) {
+    if (!record(item)) {
+      throw new Error(label(locale, "join_request.error.invalid_request"));
+    }
+    const requestId = typeof item.request_id === "string" ? item.request_id : "";
+    if (!validJoinRequestId(requestId)) {
+      throw new Error(label(locale, "join_request.error.invalid_request_id"));
+    }
+    if (seen.has(requestId)) {
+      throw new Error(label(locale, "join_request.error.batch_duplicate"));
+    }
+    seen.add(requestId);
+    if (
+      !Number.isSafeInteger(item.expected_revision) ||
+      Number(item.expected_revision) <= 0
+    ) {
+      throw new Error(label(locale, "join_request.error.invalid_revision"));
+    }
+    if (
+      item.action !== "approve" &&
+      item.action !== "reject" &&
+      item.action !== "request_information"
+    ) {
+      throw new Error(label(locale, "join_request.error.invalid_request"));
+    }
+    const note = item.note;
+    if (note !== undefined && note !== null && typeof note !== "string") {
+      throw new Error(label(locale, "join_request.error.invalid_action_note"));
+    }
+    if (item.action === "approve" && note !== undefined && note !== null) {
+      throw new Error(label(locale, "join_request.error.invalid_action_note"));
+    }
+    if (
+      item.action === "request_information" &&
+      (note === undefined || note === null)
+    ) {
+      throw new Error(label(locale, "join_request.error.information_required"));
+    }
+    if (
+      typeof note === "string" &&
+      !validJoinRequestText(note, 500)
+    ) {
+      throw new Error(label(locale, "join_request.error.invalid_action_note"));
+    }
+    reviews.push({
+      request_id: requestId,
+      expected_revision: Number(item.expected_revision),
+      action: item.action,
+      ...(typeof note === "string" ? { note } : {}),
+    });
+  }
+  return reviews;
+}
+
 function splitNames(value: string | boolean | undefined): string[] {
   return String(value ?? "")
     .split(",")
@@ -1236,6 +1350,32 @@ export function validateActionValues(
       !NETWORK_JOIN_MODES.has(String(value))
     ) {
       errors.push(label(locale, "validation.network_join_mode_invalid"));
+    } else if (
+      field.validation === "join_request_id" &&
+      !validJoinRequestId(String(value))
+    ) {
+      errors.push(label(locale, "join_request.error.invalid_request_id"));
+    } else if (
+      field.validation === "join_request_reason" &&
+      !validJoinRequestText(String(value), 1000)
+    ) {
+      errors.push(label(locale, "join_request.error.invalid_reason"));
+    } else if (
+      field.validation === "join_request_note" &&
+      !validJoinRequestText(String(value), 500)
+    ) {
+      errors.push(label(locale, "join_request.error.invalid_action_note"));
+    } else if (
+      field.validation === "join_request_review_action" &&
+      !["approve", "reject", "request_information"].includes(String(value))
+    ) {
+      errors.push(label(locale, "join_request.error.invalid_request"));
+    } else if (field.validation === "join_request_reviews") {
+      try {
+        parseJoinRequestReviews(value, locale);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
     } else if (field.validation === "network_name") {
       const name = String(value).trim();
       if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") {
@@ -1370,6 +1510,16 @@ export function validateActionValues(
     Number(values.signaling_port) === Number(values.relay_port)
   ) {
     errors.push(label(locale, "validation.port_distinct"));
+  }
+  if (action.id === "review_join_request") {
+    const reviewAction = String(values.action ?? "");
+    const noteError = label(locale, "join_request.error.invalid_action_note");
+    if (reviewAction === "approve" && !blank(values.note)) {
+      if (!errors.includes(noteError)) errors.push(noteError);
+    }
+    if (reviewAction === "request_information" && blank(values.note)) {
+      errors.push(label(locale, "join_request.error.information_required"));
+    }
   }
   if (action.id === "update_network_allocation") {
     const mode = String(values.mode ?? "");
@@ -1568,6 +1718,71 @@ export function buildCommand(
         },
       };
     }
+    case "submit_join_request":
+      return {
+        command: "submit_join_request",
+        payload: {
+          network_id: requiredString("network_id"),
+          reason: requiredString("reason"),
+        },
+      };
+    case "list_join_requests":
+      return {
+        command: "list_join_requests",
+        payload: { network_id: requiredString("network_id") },
+      };
+    case "review_join_request": {
+      const note = optional(values, "note");
+      return {
+        command: "review_join_request",
+        payload: {
+          network_id: requiredString("network_id"),
+          review: {
+            request_id: requiredString("request_id"),
+            expected_revision: revisionValue(
+              requireValue("expected_revision"),
+              label(locale, "field.expected_revision"),
+              locale,
+            ),
+            action: requiredString("action") as
+              | "approve"
+              | "reject"
+              | "request_information",
+            ...(note ? { note } : {}),
+          },
+        },
+      };
+    }
+    case "batch_review_join_requests":
+      return {
+        command: "batch_review_join_requests",
+        payload: {
+          network_id: requiredString("network_id"),
+          reviews: parseJoinRequestReviews(values.reviews, locale),
+        },
+      };
+    case "withdraw_join_request":
+      return {
+        command: "withdraw_join_request",
+        payload: {
+          network_id: requiredString("network_id"),
+          request_id: requiredString("request_id"),
+        },
+      };
+    case "resubmit_join_request":
+      return {
+        command: "resubmit_join_request",
+        payload: {
+          network_id: requiredString("network_id"),
+          request_id: requiredString("request_id"),
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+          reason: requiredString("reason"),
+        },
+      };
     case "leave_network":
       return {
         command: "leave_network",

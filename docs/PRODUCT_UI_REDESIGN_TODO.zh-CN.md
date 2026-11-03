@@ -54,7 +54,7 @@
 | W5 设计系统 | `[~]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[~]` | P1 | W4,W5 | 五导航与单一主状态已落地；概览、设置和状态矩阵待完成 |
 | W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥、W7-05 诊断恢复与 W7-06 状态权限矩阵已完成；W7-02 接口/TUN 的实机平台验收进行中 |
-| W8 网络创建与发现 | `[ ]` | P1 | W3,W4,W5 | 创建、发现、申请、审批 |
+| W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、申请已落地；审批契约已暴露，完整审批工作流待完成 |
 | W9 成员、组与拓扑 | `[ ]` | P1 | W8 | 拓扑、列表、邀请、批量操作 |
 | W10 安全与隐私 | `[ ]` | P1 | W9 | ACL、字段权限、测试器、审计 |
 | W11 流量路由 | `[ ]` | P1 | W7,W10 | 规则、测试、原子应用、失败关闭 |
@@ -1127,7 +1127,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：用户清楚知道加入后发生什么；加入操作幂等，跨网络状态互不污染。
 
-### W8-06 审批加入 `[ ]`
+### W8-06 审批加入 `[~]`
 
 - [ ] 提供申请理由字段、可见范围说明和长度限制；
 - [ ] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
@@ -1137,6 +1137,28 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [ ] 申请过期、撤回、管理员撤权时有一致状态；
 - [ ] 申请理由只对获授权角色可见，并纳入保留策略；
 - [ ] 所有审批动作有审计、活动投影和通知。
+
+**证据（2026-11-04，审批命令与 UI 契约切片）**：加入申请状态机、服务端权限、幂等、
+revision 冲突、审计和活动/通知后端语义已由前序提交落地；本轮把
+`submit_join_request`、`list_join_requests`、`review_join_request`、
+`batch_review_join_requests`、`withdraw_join_request` 和 `resubmit_join_request`
+全部加入 `NodeCommandKind::ACTIONS`、UI manifest、生成的 Rust/TypeScript/Android/schema
+契约与测试夹具。manifest 为每个动作声明了字段、权限、availability、确认和审计策略；
+GPUI 的 44 项动作绑定与类型化命令构造覆盖六个动作，WebUI 的契约校验和命令构造也已覆盖
+申请理由、审批动作、revision、说明、批量 JSON 与撤回/重申，并提供批准/拒绝/要求补充信息
+的下拉选择及中英文标签。WebUI 校验与后端一致：申请 ID 为 `join_` 加 43 位 Base64URL，
+理由最多 1000 字符，说明最多 500 字符，批量上限 100 条且禁止重复申请，批准不得附说明，
+要求补充信息必须附说明。验证通过：
+`cargo test -p fuckipv6-client --all-features --lib node::ui_manifest`（17 passed）、
+`cargo test -p fuckipv6-client --all-features --lib gpui::view_model`（34 passed）、
+`cargo test -p fuckipv6-common i18n`（9 passed）、WebUI 9 个测试文件 108/108、
+`npm run typecheck`、`npm run lint`、`./scripts/check-contracts.sh`、
+`cargo fmt --all -- --check` 和 `git diff --check`。
+
+尚未完成完整审批产品表面：待审批列表仍未展示申请人公开资料、理由与风险提示；审批前尚未
+展示成员权限和 Exit/File 影响预览；WebUI 批量审批仍使用 JSON 输入而非选择式工作流；
+并发冲突的原地恢复、申请理由可见范围/保留策略指示以及统一活动/通知视图仍需实现。因此本项
+保持进行中，不能因命令已可达而标记完成。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

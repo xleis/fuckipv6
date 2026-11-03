@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     CapabilityKind, CapabilityState, NetworkJoinMode, NetworkProfileUpdate, NetworkVisibility,
 };
@@ -10,17 +11,20 @@ use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
-    NodeControlHealth, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeInterfaceKind,
-    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeLeaveNetworkCommand,
-    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
-    NodePreviewConfigurationCommand, NodePreviewJoinNetworkCommand, NodePrimaryStatus,
-    NodeProbePeerCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodeApplyConfigurationCommand, NodeBatchReviewJoinRequestsCommand, NodeClientBlacklistCommand,
+    NodeCommand, NodeCommandKind, NodeControlHealth, NodeCreateNetworkCommand,
+    NodeEmbeddedServiceStatus, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
+    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
+    NodeListJoinRequestsCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
+    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewJoinNetworkCommand,
+    NodePrimaryStatus, NodeProbePeerCommand, NodeResubmitJoinRequestCommand,
+    NodeReviewJoinRequestCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
     NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
-    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot, NodeUiAction,
-    NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
-    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
+    NodeSubmitJoinRequestCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
+    NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
+    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };
 use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
@@ -113,6 +117,12 @@ pub enum ActionBinding {
     RetryDiscoveryIndex,
     PreviewJoinNetwork,
     JoinNetwork,
+    SubmitJoinRequest,
+    ListJoinRequests,
+    ReviewJoinRequest,
+    BatchReviewJoinRequests,
+    WithdrawJoinRequest,
+    ResubmitJoinRequest,
     LeaveNetwork,
     StartNetworks,
     StopNetworks,
@@ -142,7 +152,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 44] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -155,6 +165,12 @@ impl ActionBinding {
         Self::RetryDiscoveryIndex,
         Self::PreviewJoinNetwork,
         Self::JoinNetwork,
+        Self::SubmitJoinRequest,
+        Self::ListJoinRequests,
+        Self::ReviewJoinRequest,
+        Self::BatchReviewJoinRequests,
+        Self::WithdrawJoinRequest,
+        Self::ResubmitJoinRequest,
         Self::LeaveNetwork,
         Self::StartNetworks,
         Self::StopNetworks,
@@ -197,6 +213,12 @@ impl ActionBinding {
             Self::RetryDiscoveryIndex => "retry_discovery_index",
             Self::PreviewJoinNetwork => "preview_join_network",
             Self::JoinNetwork => "join_network",
+            Self::SubmitJoinRequest => "submit_join_request",
+            Self::ListJoinRequests => "list_join_requests",
+            Self::ReviewJoinRequest => "review_join_request",
+            Self::BatchReviewJoinRequests => "batch_review_join_requests",
+            Self::WithdrawJoinRequest => "withdraw_join_request",
+            Self::ResubmitJoinRequest => "resubmit_join_request",
             Self::LeaveNetwork => "leave_network",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
@@ -782,6 +804,30 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::PreviewJoinNetwork,
         ),
         "join_network" => (ActionBinding::JoinNetwork, NodeCommandKind::JoinNetwork),
+        "submit_join_request" => (
+            ActionBinding::SubmitJoinRequest,
+            NodeCommandKind::SubmitJoinRequest,
+        ),
+        "list_join_requests" => (
+            ActionBinding::ListJoinRequests,
+            NodeCommandKind::ListJoinRequests,
+        ),
+        "review_join_request" => (
+            ActionBinding::ReviewJoinRequest,
+            NodeCommandKind::ReviewJoinRequest,
+        ),
+        "batch_review_join_requests" => (
+            ActionBinding::BatchReviewJoinRequests,
+            NodeCommandKind::BatchReviewJoinRequests,
+        ),
+        "withdraw_join_request" => (
+            ActionBinding::WithdrawJoinRequest,
+            NodeCommandKind::WithdrawJoinRequest,
+        ),
+        "resubmit_join_request" => (
+            ActionBinding::ResubmitJoinRequest,
+            NodeCommandKind::ResubmitJoinRequest,
+        ),
         "leave_network" => (ActionBinding::LeaveNetwork, NodeCommandKind::LeaveNetwork),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
         "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
@@ -1000,6 +1046,33 @@ pub fn default_form_values(
                 ("rollback_configuration", "expected_revision" | "target_revision") => "0".into(),
                 ("set_exit_node_role", "role") => "exit_node".into(),
                 ("set_relay_role", "role") => "relay".into(),
+                (
+                    "review_join_request"
+                    | "batch_review_join_requests"
+                    | "resubmit_join_request",
+                    "expected_revision",
+                ) => "1".into(),
+                (_, "network_id") => snapshot
+                    .network_profiles
+                    .iter()
+                    .find(|profile| profile.name == selected_network.unwrap_or_default())
+                    .map(|profile| profile.network_id.clone())
+                    .unwrap_or_default(),
+                (_, "request_id") => {
+                    fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"default-join-request",
+                    )
+                    .to_string()
+                }
+                (_, "reason") => "Join request".into(),
+                (_, "reviews") => {
+                    let request_id = fuckipv6_common::domain::JoinRequestId::from_public_key(
+                        b"default-join-request",
+                    )
+                    .to_string();
+                    format!(r#"[{{"request_id":"{request_id}","expected_revision":1,"action":"approve"}}]"#)
+                }
+                (_, "action") => "approve".into(),
                 (_, "enabled") => "true".into(),
                 (_, "index_url") => snapshot
                     .discovery_index
@@ -1191,6 +1264,78 @@ pub fn build_command(
                 acknowledged_at_unix_ms,
             })))
         }
+        Ok(ActionBinding::SubmitJoinRequest) => Ok(NodeCommand::SubmitJoinRequest(
+            NodeSubmitJoinRequestCommand {
+                network_id: field("network_id"),
+                reason: field("reason"),
+            },
+        )),
+        Ok(ActionBinding::ListJoinRequests) => {
+            Ok(NodeCommand::ListJoinRequests(NodeListJoinRequestsCommand {
+                network_id: field("network_id"),
+            }))
+        }
+        Ok(ActionBinding::ReviewJoinRequest) => {
+            let review_action = match field("action").as_str() {
+                "approve" => JoinRequestReviewAction::Approve,
+                "reject" => JoinRequestReviewAction::Reject,
+                "request_information" => JoinRequestReviewAction::RequestInformation,
+                _ => {
+                    return Err(CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "action".into(),
+                        value: "[invalid review action]".into(),
+                    });
+                }
+            };
+            Ok(NodeCommand::ReviewJoinRequest(
+                NodeReviewJoinRequestCommand {
+                    network_id: field("network_id"),
+                    review: NodeJoinRequestReviewItem {
+                        request_id: field("request_id"),
+                        expected_revision: parse_number::<u64>(
+                            action,
+                            "expected_revision",
+                            &required("expected_revision")?,
+                        )?,
+                        action: review_action,
+                        note: optional_non_empty(field("note")),
+                    },
+                },
+            ))
+        }
+        Ok(ActionBinding::BatchReviewJoinRequests) => {
+            let reviews = serde_json::from_str::<Vec<NodeJoinRequestReviewItem>>(&field("reviews"))
+                .map_err(|_| CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "reviews".into(),
+                    value: "[invalid review batch]".into(),
+                })?;
+            Ok(NodeCommand::BatchReviewJoinRequests(
+                NodeBatchReviewJoinRequestsCommand {
+                    network_id: field("network_id"),
+                    reviews,
+                },
+            ))
+        }
+        Ok(ActionBinding::WithdrawJoinRequest) => Ok(NodeCommand::WithdrawJoinRequest(
+            NodeWithdrawJoinRequestCommand {
+                network_id: field("network_id"),
+                request_id: field("request_id"),
+            },
+        )),
+        Ok(ActionBinding::ResubmitJoinRequest) => Ok(NodeCommand::ResubmitJoinRequest(
+            NodeResubmitJoinRequestCommand {
+                network_id: field("network_id"),
+                request_id: field("request_id"),
+                expected_revision: parse_number::<u64>(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                reason: field("reason"),
+            },
+        )),
         Ok(ActionBinding::LeaveNetwork) => Ok(NodeCommand::LeaveNetwork(NodeLeaveNetworkCommand {
             network_name: field("network_name"),
         })),
@@ -1363,6 +1508,20 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         // The signed preview confirmation fields are populated internally by
         // the GPUI workflow rather than declared as ordinary manifest inputs.
         "join_network" => HashSet::from(["target", "network_name", "start"]),
+        "submit_join_request" => HashSet::from(["network_id", "reason"]),
+        "list_join_requests" => HashSet::from(["network_id"]),
+        "review_join_request" => HashSet::from([
+            "network_id",
+            "request_id",
+            "expected_revision",
+            "action",
+            "note",
+        ]),
+        "batch_review_join_requests" => HashSet::from(["network_id", "reviews"]),
+        "withdraw_join_request" => HashSet::from(["network_id", "request_id"]),
+        "resubmit_join_request" => {
+            HashSet::from(["network_id", "request_id", "expected_revision", "reason"])
+        }
         "leave_network" => HashSet::from(["network_name"]),
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
@@ -4569,7 +4728,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 38);
+        assert_eq!(ActionBinding::ALL.len(), 44);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages

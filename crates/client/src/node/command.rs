@@ -161,7 +161,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 37] = [
+    pub const ACTIONS: [Self; 43] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -178,6 +178,12 @@ impl NodeCommandKind {
         Self::RetryDiscoveryIndex,
         Self::PreviewJoinNetwork,
         Self::JoinNetwork,
+        Self::SubmitJoinRequest,
+        Self::ListJoinRequests,
+        Self::ReviewJoinRequest,
+        Self::BatchReviewJoinRequests,
+        Self::WithdrawJoinRequest,
+        Self::ResubmitJoinRequest,
         Self::LeaveNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,

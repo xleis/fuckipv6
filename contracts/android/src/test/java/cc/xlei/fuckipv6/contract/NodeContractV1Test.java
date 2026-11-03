@@ -321,13 +321,7 @@ public final class NodeContractV1Test {
                 "unknown envelope command");
 
         for (NodeCommandKind command : NodeCommandKind.values()) {
-            boolean expected = command != NodeCommandKind.GET_UI_MANIFEST
-                    && command != NodeCommandKind.SUBMIT_JOIN_REQUEST
-                    && command != NodeCommandKind.LIST_JOIN_REQUESTS
-                    && command != NodeCommandKind.REVIEW_JOIN_REQUEST
-                    && command != NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS
-                    && command != NodeCommandKind.WITHDRAW_JOIN_REQUEST
-                    && command != NodeCommandKind.RESUBMIT_JOIN_REQUEST;
+            boolean expected = command != NodeCommandKind.GET_UI_MANIFEST;
             assertTrue(
                     NodeContractV1.isManifestAction(command) == expected,
                     "unexpected manifest action classification for " + command.wireName());

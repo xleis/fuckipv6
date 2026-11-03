@@ -519,6 +519,223 @@
           "confirmation": null
         },
         {
+          "id": "submit_join_request",
+          "label_key": "action.submit_join_request",
+          "command": "submit_join_request",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.join_request.submit"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "reason",
+              "label_key": "field.join_request_reason",
+              "input": "join_request_reason",
+              "required": true,
+              "validation": "join_request_reason"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "list_join_requests",
+          "label_key": "action.list_join_requests",
+          "command": "list_join_requests",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "review_join_request",
+          "label_key": "action.review_join_request",
+          "command": "review_join_request",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.join_request.review"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "request_id",
+              "label_key": "field.join_request_id",
+              "input": "join_request_id",
+              "required": true,
+              "validation": "join_request_id"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "action",
+              "label_key": "field.join_request_review_action",
+              "input": "join_request_review_action",
+              "required": true,
+              "validation": "join_request_review_action"
+            },
+            {
+              "id": "note",
+              "label_key": "field.join_request_note",
+              "input": "join_request_note",
+              "required": false,
+              "validation": "join_request_note"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.review_join_request.title",
+            "consequence_key": "confirm.review_join_request.consequence",
+            "destructive": true,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "batch_review_join_requests",
+          "label_key": "action.batch_review_join_requests",
+          "command": "batch_review_join_requests",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.join_request.batch_review"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "reviews",
+              "label_key": "field.join_request_reviews",
+              "input": "join_request_reviews",
+              "required": true,
+              "validation": "join_request_reviews"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.batch_review_join_requests.title",
+            "consequence_key": "confirm.batch_review_join_requests.consequence",
+            "destructive": true,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "withdraw_join_request",
+          "label_key": "action.withdraw_join_request",
+          "command": "withdraw_join_request",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.join_request.withdraw"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "request_id",
+              "label_key": "field.join_request_id",
+              "input": "join_request_id",
+              "required": true,
+              "validation": "join_request_id"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.withdraw_join_request.title",
+            "consequence_key": "confirm.withdraw_join_request.consequence",
+            "destructive": true,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "resubmit_join_request",
+          "label_key": "action.resubmit_join_request",
+          "command": "resubmit_join_request",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.join_request.resubmit"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "request_id",
+              "label_key": "field.join_request_id",
+              "input": "join_request_id",
+              "required": true,
+              "validation": "join_request_id"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "reason",
+              "label_key": "field.join_request_reason",
+              "input": "join_request_reason",
+              "required": true,
+              "validation": "join_request_reason"
+            }
+          ],
+          "confirmation": null
+        },
+        {
           "id": "leave_network",
           "label_key": "action.leave_network",
           "command": "leave_network",

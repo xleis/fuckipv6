@@ -1411,6 +1411,11 @@ public final class NodeContractV1 {
         CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode"),
+        JOIN_REQUEST_ID("join_request_id"),
+        JOIN_REQUEST_NOTE("join_request_note"),
+        JOIN_REQUEST_REASON("join_request_reason"),
+        JOIN_REQUEST_REVIEW_ACTION("join_request_review_action"),
+        JOIN_REQUEST_REVIEWS("join_request_reviews"),
         PORT("port"),
         REVISION("revision"),
         ROLE("role"),
@@ -1496,7 +1501,12 @@ public final class NodeContractV1 {
         TAGS("tags"),
         CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
-        JOIN_MODE("join_mode");
+        JOIN_MODE("join_mode"),
+        JOIN_REQUEST_ID("join_request_id"),
+        JOIN_REQUEST_NOTE("join_request_note"),
+        JOIN_REQUEST_REASON("join_request_reason"),
+        JOIN_REQUEST_REVIEW_ACTION("join_request_review_action"),
+        JOIN_REQUEST_REVIEWS("join_request_reviews");
 
         private final String wireName;
 
@@ -5186,6 +5196,7 @@ public final class NodeContractV1 {
     public static boolean isManifestAction(NodeCommandKind command) {
         return             command == NodeCommandKind.APPLY_CONFIGURATION ||
             command == NodeCommandKind.BAN_CLIENT ||
+            command == NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS ||
             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
             command == NodeCommandKind.CREATE_NETWORK ||
             command == NodeCommandKind.GET_BLACKLIST ||
@@ -5196,6 +5207,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.LEAVE_NETWORK ||
+            command == NodeCommandKind.LIST_JOIN_REQUESTS ||
             command == NodeCommandKind.PREVIEW_CONFIGURATION ||
             command == NodeCommandKind.PREVIEW_JOIN_NETWORK ||
             command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
@@ -5205,7 +5217,9 @@ public final class NodeContractV1 {
             command == NodeCommandKind.REFRESH_DISCOVERY_INDEX ||
             command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.RESTART_NODE ||
+            command == NodeCommandKind.RESUBMIT_JOIN_REQUEST ||
             command == NodeCommandKind.RETRY_DISCOVERY_INDEX ||
+            command == NodeCommandKind.REVIEW_JOIN_REQUEST ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
             command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
@@ -5215,11 +5229,13 @@ public final class NodeContractV1 {
             command == NodeCommandKind.START_NODE ||
             command == NodeCommandKind.STOP_NETWORKS ||
             command == NodeCommandKind.STOP_NODE ||
+            command == NodeCommandKind.SUBMIT_JOIN_REQUEST ||
             command == NodeCommandKind.UNBAN_CLIENT ||
             command == NodeCommandKind.UNPUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||
             command == NodeCommandKind.UPDATE_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_PROFILE ||
-            command == NodeCommandKind.UPDATE_ROUTING;
+            command == NodeCommandKind.UPDATE_ROUTING ||
+            command == NodeCommandKind.WITHDRAW_JOIN_REQUEST;
     }
 }

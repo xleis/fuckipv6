@@ -1507,6 +1507,7 @@ impl GpuiShell {
                         | NodeUiInputKind::NetworkSelection
                         | NodeUiInputKind::Visibility
                         | NodeUiInputKind::JoinMode
+                        | NodeUiInputKind::JoinRequestReviewAction
                 ) {
                     let key = self.field_key(&action.id, &field.id);
                     text_fields.push((
@@ -5992,6 +5993,20 @@ impl GpuiShell {
                 ],
                 cx,
             ),
+            NodeUiInputKind::JoinRequestReviewAction => self.choice_field(
+                action,
+                field,
+                &value,
+                &[
+                    ("approve", "choice.join_request_review.approve"),
+                    ("reject", "choice.join_request_review.reject"),
+                    (
+                        "request_information",
+                        "choice.join_request_review.request_information",
+                    ),
+                ],
+                cx,
+            ),
             _ => self.text_field(action, field, &value, cx),
         };
 
@@ -7757,6 +7772,10 @@ fn placeholder_for(
         NodeUiInputKind::Purpose => t(locale, "placeholder.network_purpose").into(),
         NodeUiInputKind::Icon => "network".into(),
         NodeUiInputKind::Language => "zh-CN".into(),
+        NodeUiInputKind::JoinRequestId => t(locale, "placeholder.join_request_id").into(),
+        NodeUiInputKind::JoinRequestReason => t(locale, "placeholder.join_request_reason").into(),
+        NodeUiInputKind::JoinRequestNote => t(locale, "placeholder.join_request_note").into(),
+        NodeUiInputKind::JoinRequestReviews => t(locale, "placeholder.join_request_reviews").into(),
         _ if matches!(
             action_id,
             "stop_networks" | "restart_networks" | "cleanup_node_residuals"
@@ -9166,7 +9185,8 @@ mod tests {
                         NodeUiInputKind::Boolean
                         | NodeUiInputKind::Role
                         | NodeUiInputKind::RoutingMode
-                        | NodeUiInputKind::NetworkSelection => {}
+                        | NodeUiInputKind::NetworkSelection
+                        | NodeUiInputKind::JoinRequestReviewAction => {}
                         _ => assert_ne!(
                             placeholder_for(Locale::ZhCn, &field.input, &action.id, &field.id),
                             ""

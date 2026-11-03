@@ -11,6 +11,7 @@ import type {
   NodeUiManifest,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
+  buildCommand,
   commandEnvelope,
   executionBlockReason,
   initialActionValues,
@@ -928,5 +929,140 @@ describe("node UI contract invariants", () => {
         42,
       ),
     ).toThrow("command request id mismatch");
+  });
+
+  it("builds typed join request commands and validates review batches", () => {
+    const actions = new Map(
+      manifest.pages
+        .flatMap((page) => page.actions)
+        .map((action) => [action.id, action]),
+    );
+    const requestId = `join_${"A".repeat(43)}`;
+    const networkId = "net_stable_home";
+
+    expect(
+      buildCommand(
+        actions.get("submit_join_request")!,
+        { network_id: networkId, reason: "Need access from the branch office." },
+        "en",
+      ),
+    ).toEqual({
+      command: "submit_join_request",
+      payload: {
+        network_id: networkId,
+        reason: "Need access from the branch office.",
+      },
+    });
+    expect(
+      buildCommand(
+        actions.get("list_join_requests")!,
+        { network_id: networkId },
+        "en",
+      ),
+    ).toEqual({
+      command: "list_join_requests",
+      payload: { network_id: networkId },
+    });
+    expect(
+      buildCommand(
+        actions.get("review_join_request")!,
+        {
+          network_id: networkId,
+          request_id: requestId,
+          expected_revision: "2",
+          action: "request_information",
+          note: "Please describe the devices that need access.",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "review_join_request",
+      payload: {
+        network_id: networkId,
+        review: {
+          request_id: requestId,
+          expected_revision: 2,
+          action: "request_information",
+          note: "Please describe the devices that need access.",
+        },
+      },
+    });
+
+    const batch = actions.get("batch_review_join_requests")!;
+    expect(
+      buildCommand(
+        batch,
+        {
+          network_id: networkId,
+          reviews: JSON.stringify([
+            {
+              request_id: requestId,
+              expected_revision: 2,
+              action: "approve",
+            },
+          ]),
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "batch_review_join_requests",
+      payload: {
+        network_id: networkId,
+        reviews: [
+          {
+            request_id: requestId,
+            expected_revision: 2,
+            action: "approve",
+          },
+        ],
+      },
+    });
+    expect(
+      validateActionValues(
+        batch,
+        {
+          network_id: networkId,
+          reviews: JSON.stringify([
+            {
+              request_id: requestId,
+              expected_revision: 2,
+              action: "request_information",
+            },
+          ]),
+        },
+        "en",
+      ),
+    ).toContain("translated:join_request.error.information_required");
+
+    expect(
+      buildCommand(
+        actions.get("withdraw_join_request")!,
+        { network_id: networkId, request_id: requestId },
+        "en",
+      ),
+    ).toEqual({
+      command: "withdraw_join_request",
+      payload: { network_id: networkId, request_id: requestId },
+    });
+    expect(
+      buildCommand(
+        actions.get("resubmit_join_request")!,
+        {
+          network_id: networkId,
+          request_id: requestId,
+          expected_revision: "3",
+          reason: "Added the requested device details.",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "resubmit_join_request",
+      payload: {
+        network_id: networkId,
+        request_id: requestId,
+        expected_revision: 3,
+        reason: "Added the requested device details.",
+      },
+    });
   });
 });

@@ -43,8 +43,9 @@ use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
-    NodeNetworkStatus, NodeOperationSnapshot, NodePreviewConfigurationCommand, NodePrimaryStatus,
-    NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
+    NodeNetworkCreationNextStep, NodeNetworkStatus, NodeOperationSnapshot,
+    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProblem,
+    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
     NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError,
 };
@@ -1103,11 +1104,48 @@ impl GpuiShell {
                 } else {
                     "gpui.network_created_not_started"
                 };
+                let next_steps = created
+                    .next_steps
+                    .iter()
+                    .map(|step| {
+                        let key = match step {
+                            NodeNetworkCreationNextStep::InviteMembers => {
+                                "next_step.invite_members"
+                            }
+                            NodeNetworkCreationNextStep::ConfigurePolicy => {
+                                "next_step.configure_policy"
+                            }
+                            NodeNetworkCreationNextStep::ContributeCapabilities => {
+                                "next_step.contribute_capabilities"
+                            }
+                        };
+                        t(self.locale, key)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(t(self.locale, "common.list_separator"));
                 self.notice = Some(tr(
                     self.locale,
                     key,
                     &[
                         ("network", &created.network_name),
+                        ("network_id", &created.network_id),
+                        (
+                            "persistence",
+                            if created.config_saved {
+                                t(self.locale, "outcome.persisted")
+                            } else {
+                                t(self.locale, "outcome.not_persisted")
+                            },
+                        ),
+                        (
+                            "startup",
+                            if created.started {
+                                t(self.locale, "outcome.started")
+                            } else {
+                                t(self.locale, "outcome.not_started")
+                            },
+                        ),
+                        ("next_steps", &next_steps),
                         ("ticket", &created.invitation_ticket),
                     ],
                 ));
@@ -1310,6 +1348,8 @@ impl GpuiShell {
                         | NodeUiInputKind::Role
                         | NodeUiInputKind::RoutingMode
                         | NodeUiInputKind::NetworkSelection
+                        | NodeUiInputKind::Visibility
+                        | NodeUiInputKind::JoinMode
                 ) {
                     let key = self.field_key(&action.id, &field.id);
                     text_fields.push((
@@ -4889,6 +4929,28 @@ impl GpuiShell {
                 ],
                 cx,
             ),
+            NodeUiInputKind::Visibility => self.choice_field(
+                action,
+                field,
+                &value,
+                &[
+                    ("public", "choice.visibility.public"),
+                    ("unlisted", "choice.visibility.unlisted"),
+                    ("private", "choice.visibility.private"),
+                ],
+                cx,
+            ),
+            NodeUiInputKind::JoinMode => self.choice_field(
+                action,
+                field,
+                &value,
+                &[
+                    ("open", "choice.join_mode.open"),
+                    ("approval_required", "choice.join_mode.approval_required"),
+                    ("invite_only", "choice.join_mode.invite_only"),
+                ],
+                cx,
+            ),
             _ => self.text_field(action, field, &value, cx),
         };
 
@@ -5628,6 +5690,9 @@ fn placeholder_for(
         NodeUiInputKind::Revision => t(locale, "placeholder.revision").into(),
         NodeUiInputKind::ConfigurationJson => t(locale, "placeholder.configuration_json").into(),
         NodeUiInputKind::Fingerprint => t(locale, "placeholder.fingerprint").into(),
+        NodeUiInputKind::Purpose => t(locale, "placeholder.network_purpose").into(),
+        NodeUiInputKind::Icon => "network".into(),
+        NodeUiInputKind::Language => "zh-CN".into(),
         _ if matches!(
             action_id,
             "stop_networks" | "restart_networks" | "cleanup_node_residuals"

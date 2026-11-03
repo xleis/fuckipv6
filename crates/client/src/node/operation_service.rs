@@ -976,8 +976,9 @@ mod tests {
     use super::*;
     use crate::node::{
         NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult,
-        NodeCreateNetworkCommand, NodeCreatedNetwork,
+        NodeCreateNetworkCommand, NodeCreatedNetwork, NodeNetworkCreationNextStep,
     };
+    use fuckipv6_common::domain::MembershipRole;
 
     #[derive(Clone)]
     struct TestHandler {
@@ -1036,8 +1037,16 @@ mod tests {
                         request_id,
                         NodeCommandOutcome::NetworkCreated(NodeCreatedNetwork {
                             network_name: command.name,
+                            network_id: "net_test_stable_id".into(),
+                            public_key: "test-network-public-key".into(),
+                            owner_role: MembershipRole::Owner,
                             config_saved: true,
                             started: true,
+                            next_steps: vec![
+                                NodeNetworkCreationNextStep::InviteMembers,
+                                NodeNetworkCreationNextStep::ConfigurePolicy,
+                                NodeNetworkCreationNextStep::ContributeCapabilities,
+                            ],
                             invitation_ticket,
                         }),
                     ),
@@ -1127,6 +1136,11 @@ mod tests {
             request_id,
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: name.into(),
+                purpose: "A test network".into(),
+                icon: "network".into(),
+                language: "und".into(),
+                visibility: Default::default(),
+                join_mode: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: None,

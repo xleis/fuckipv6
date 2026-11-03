@@ -1032,17 +1032,41 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 目标：建立可验证身份、稳定网络 ID、签名公开资料和加入治理。发现索引不可用不得影响已加入网络的数据面。
 
-### W8-01 创建网络与稳定 ID `[ ]`
+### W8-01 创建网络与稳定 ID `[x]`
 
-- [ ] 定义 Network 领域模型、创建命令和 schema；
-- [ ] 网络具有稳定、不可伪造且可长期引用的 Network ID；
-- [ ] 名称、描述、图标、语言和公开资料字段完成校验；
-- [ ] 创建者成为首个 Owner/Administrator，并记录治理事件；
-- [ ] 创建过程幂等，网络创建成功后刷新本地网络列表；
-- [ ] 空名称、重复 ID、存储失败、权限失败有结构化错误；
-- [ ] 提供创建后继续邀请、配置策略和贡献能力的下一步。
+- [x] 定义 Network 领域模型、创建命令和 schema；
+- [x] 网络具有稳定、不可伪造且可长期引用的 Network ID；
+- [x] 名称、描述、图标、语言和公开资料字段完成校验；
+- [x] 创建者成为首个 Owner/Administrator，并记录治理事件；
+- [x] 创建过程幂等，网络创建成功后刷新本地网络列表；
+- [x] 空名称、重复 ID、存储失败、权限失败有结构化错误；
+- [x] 提供创建后继续邀请、配置策略和贡献能力的下一步。
 
 **验收**：重复提交不会创建多个网络；网络 ID 在重启、改名和同步后保持稳定。
+
+**证据（2026-11-03）**
+
+- `NetworkRecord` 与 `NetworkCreateProfile` 已覆盖 owner、administrator、member、可见性、
+  加入模式和公开资料；网络使用独立的 `network_identity.pem`，Network ID 从网络公钥派生，
+  与节点身份分离。`rename_and_json_reload_preserve_network_id` 验证改名和 JSON 重载后 ID
+  不变，`creates_owner_network_with_independent_identity_and_governance` 验证关闭并重新打开
+  `ConfigManager` 后 ID 不变。
+- 创建者写入为首个 Owner 和 Member，并生成带 `network.create` 动作的治理审计事件；
+  网络记录、签名身份、治理日志和网络列表均持久化。重复名称、重复 ID、存储失败和回滚均有
+  自动化测试，其中 Unix 身份文件权限为 `0600`。
+- `first_submission_is_persisted_and_idempotent_reuse_dispatches_once` 验证同一幂等键只分派一次；
+  `duplicate_network_name_is_a_structured_conflict_and_creates_nothing` 验证不同请求重复创建
+  同名网络返回 `CreationConflict { reason: "duplicate_name" }` 且不产生第二条配置或服务。
+- 创建成功后运行快照与 configuration snapshot 立即出现新网络；`auto_connect=false` 时状态为
+  `Offline` 且 peer 数为 0。命令返回 `network_id`、`public_key`、`owner_role` 和
+  `next_steps`（邀请成员、配置策略、贡献能力），WebUI 成功摘要会翻译并展示这些下一步。
+- 空名称和非法的 purpose/icon/language/visibility/join_mode 返回字段级
+  `validation_issues`；网络管理员调用创建命令在 handler 前被拒绝并记录拒绝审计。
+  生成的 Rust/TypeScript/Android/schema 契约已同步，旧版创建载荷使用安全公开资料默认值。
+- 验证：`cargo test -p fuckipv6-common`（174 passed）；`cargo test -p fuckipv6-client
+  --all-features`（库 736 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed）；
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`；
+  `./scripts/check-contracts.sh`；WebUI 87 passed，typecheck、lint、build 均通过。
 
 ### W8-02 公开资料与隐私预览 `[ ]`
 

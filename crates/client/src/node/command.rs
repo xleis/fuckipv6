@@ -4,7 +4,13 @@ use crate::config_transaction::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use fuckipv6_common::domain::{ActivityEntry, AuditEntry, AuditOutcome};
+use fuckipv6_common::domain::{
+    default_network_icon, default_network_language, default_network_purpose, ActivityEntry,
+    AuditEntry, AuditOutcome, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
+    NetworkVisibility,
+};
+#[cfg(test)]
+use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,7 +27,7 @@ use super::ui_manifest::audit_for_command;
 use super::{
     NodeCommandContext, NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole,
     NodeNetworkSelection, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
-    NodeStateStore, NodeUiManifest,
+    NodeStateStore, NodeUiManifest, NodeValidationIssue,
 };
 
 #[cfg(test)]
@@ -466,6 +472,16 @@ impl NodeRollbackConfigurationCommand {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCreateNetworkCommand {
     pub name: String,
+    #[serde(default = "default_network_purpose")]
+    pub purpose: String,
+    #[serde(default = "default_network_icon")]
+    pub icon: String,
+    #[serde(default = "default_network_language")]
+    pub language: String,
+    #[serde(default)]
+    pub visibility: NetworkVisibility,
+    #[serde(default)]
+    pub join_mode: NetworkJoinMode,
     pub signaling_port: u16,
     pub relay_port: u16,
     pub external_host: Option<String>,
@@ -474,25 +490,120 @@ pub struct NodeCreateNetworkCommand {
 
 impl NodeCreateNetworkCommand {
     fn validate(&self) -> Result<(), NodeProblem> {
-        validate_network_name(&self.name)?;
+        let mut issues = Vec::new();
+        if let Err(problem) = validate_network_name(&self.name) {
+            issues.push(NodeValidationIssue {
+                path: "name".into(),
+                code: "invalid_network_name".into(),
+                message: problem.message,
+            });
+        }
+        if self.purpose.is_empty()
+            || self.purpose.chars().count() > 512
+            || self.purpose.trim() != self.purpose
+            || self.purpose.chars().any(char::is_control)
+        {
+            issues.push(NodeValidationIssue {
+                path: "purpose".into(),
+                code: "invalid_network_purpose".into(),
+                message: "网络简介不能为空、首尾不能有空白、不能包含控制字符且不能超过 512 个字符"
+                    .into(),
+            });
+        }
+        if self.icon.is_empty()
+            || self.icon.len() > 64
+            || self.icon.trim() != self.icon
+            || self.icon.chars().any(|character| {
+                !(character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, '-' | '_' | '.'))
+            })
+        {
+            issues.push(NodeValidationIssue {
+                path: "icon".into(),
+                code: "invalid_network_icon".into(),
+                message:
+                    "网络图标只能包含小写 ASCII 字母、数字、'.'、'-' 和 '_'，且不能超过 64 个字符"
+                        .into(),
+            });
+        }
+        if !valid_language_tag(&self.language) {
+            issues.push(NodeValidationIssue {
+                path: "language".into(),
+                code: "invalid_network_language".into(),
+                message: "网络语言必须使用类似 zh-CN、en 或 und 的 BCP-47 标签".into(),
+            });
+        }
         if self.signaling_port == 0 {
-            return Err(invalid("信令端口不能为 0"));
+            issues.push(NodeValidationIssue {
+                path: "signaling_port".into(),
+                code: "invalid_port".into(),
+                message: "信令端口不能为 0".into(),
+            });
         }
         if self.relay_port == 0 {
-            return Err(invalid("中继端口不能为 0"));
+            issues.push(NodeValidationIssue {
+                path: "relay_port".into(),
+                code: "invalid_port".into(),
+                message: "中继端口不能为 0".into(),
+            });
         }
         if self.signaling_port == self.relay_port {
-            return Err(invalid("信令端口和中继端口不能相同"));
+            issues.push(NodeValidationIssue {
+                path: "relay_port".into(),
+                code: "ports_must_differ".into(),
+                message: "信令端口和中继端口不能相同".into(),
+            });
         }
-        if self
-            .external_host
-            .as_deref()
-            .is_some_and(|host| host.trim().is_empty())
-        {
-            return Err(invalid("外部主机名不能是空字符串"));
+        if self.external_host.as_deref().is_some_and(|host| {
+            host.trim().is_empty()
+                || host.trim() != host
+                || host.len() > 253
+                || host
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace())
+        }) {
+            issues.push(NodeValidationIssue {
+                path: "external_host".into(),
+                code: "invalid_external_host".into(),
+                message: "外部主机名不能为空、不能包含空白或控制字符，且不能超过 253 个字符".into(),
+            });
         }
-        Ok(())
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid("网络创建参数校验失败").with_validation_issues(issues))
+        }
     }
+
+    pub(crate) fn create_profile(&self) -> NetworkCreateProfile {
+        NetworkCreateProfile {
+            name: self.name.clone(),
+            purpose: self.purpose.clone(),
+            icon: self.icon.clone(),
+            language: self.language.clone(),
+            visibility: self.visibility,
+            join_mode: self.join_mode,
+        }
+    }
+}
+
+fn valid_language_tag(language: &str) -> bool {
+    let mut segments = language.split('-');
+    let Some(primary) = segments.next() else {
+        return false;
+    };
+    language.len() <= 35
+        && (2..=8).contains(&primary.len())
+        && primary
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+        && segments.all(|segment| {
+            (1..=8).contains(&segment.len())
+                && segment
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -825,17 +936,30 @@ pub struct NodePeerProbeSnapshot {
 #[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCreatedNetwork {
     pub network_name: String,
+    pub network_id: String,
+    pub public_key: String,
+    pub owner_role: MembershipRole,
     pub config_saved: bool,
     pub started: bool,
+    pub next_steps: Vec<NodeNetworkCreationNextStep>,
     pub invitation_ticket: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeNetworkCreationNextStep {
+    InviteMembers,
+    ConfigurePolicy,
+    ContributeCapabilities,
 }
 
 impl NodeCreatedNetwork {
     /// Human-readable result for an owner-facing CLI or local UI.
     pub fn owner_message(&self) -> String {
         format!(
-            "网络 [{}] 已创建并保存；{}；邀请票据: {}",
+            "网络 [{}] 已创建并保存；Network ID: {}；{}；邀请票据: {}",
             self.network_name,
+            self.network_id,
             if self.started {
                 "本地运行时已启动"
             } else {
@@ -851,8 +975,12 @@ impl std::fmt::Debug for NodeCreatedNetwork {
         formatter
             .debug_struct("NodeCreatedNetwork")
             .field("network_name", &self.network_name)
+            .field("network_id", &self.network_id)
+            .field("public_key", &self.public_key)
+            .field("owner_role", &self.owner_role)
             .field("config_saved", &self.config_saved)
             .field("started", &self.started)
+            .field("next_steps", &self.next_steps)
             .field("invitation_ticket", &"<redacted>")
             .finish()
     }
@@ -1422,6 +1550,7 @@ pub enum NodeCommandBusError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::NodePermission;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn valid_commands() -> Vec<NodeCommand> {
@@ -1445,6 +1574,11 @@ mod tests {
             },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
+                purpose: "A test network".into(),
+                icon: DEFAULT_NETWORK_ICON.into(),
+                language: DEFAULT_NETWORK_LANGUAGE.into(),
+                visibility: NetworkVisibility::Unlisted,
+                join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("vpn.example.com".into()),
@@ -1568,8 +1702,16 @@ mod tests {
     fn created_network_debug_redacts_the_invitation_ticket() {
         let created = NodeCreatedNetwork {
             network_name: "home".into(),
+            network_id: "net_home".into(),
+            public_key: "public-key".into(),
+            owner_role: MembershipRole::Owner,
             config_saved: true,
             started: true,
+            next_steps: vec![
+                NodeNetworkCreationNextStep::InviteMembers,
+                NodeNetworkCreationNextStep::ConfigurePolicy,
+                NodeNetworkCreationNextStep::ContributeCapabilities,
+            ],
             invitation_ticket: "fk://sensitive-owner-secret@vpn.example:6666".into(),
         };
 
@@ -1583,6 +1725,11 @@ mod tests {
     fn rejects_product_identity_and_unsafe_network_names() {
         let command = NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
             name: "../server".into(),
+            purpose: "A test network".into(),
+            icon: DEFAULT_NETWORK_ICON.into(),
+            language: DEFAULT_NETWORK_LANGUAGE.into(),
+            visibility: NetworkVisibility::Unlisted,
+            join_mode: NetworkJoinMode::InviteOnly,
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -1604,11 +1751,98 @@ mod tests {
 
         assert_invalid(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
             name: "局域网".into(),
+            purpose: "A test network".into(),
+            icon: DEFAULT_NETWORK_ICON.into(),
+            language: DEFAULT_NETWORK_LANGUAGE.into(),
+            visibility: NetworkVisibility::Unlisted,
+            join_mode: NetworkJoinMode::InviteOnly,
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
             auto_connect: true,
         }));
+    }
+
+    fn valid_create_network_command() -> NodeCreateNetworkCommand {
+        NodeCreateNetworkCommand {
+            name: "home".into(),
+            purpose: "Family devices across two homes".into(),
+            icon: "home".into(),
+            language: "zh-CN".into(),
+            visibility: NetworkVisibility::Private,
+            join_mode: NetworkJoinMode::InviteOnly,
+            signaling_port: 6666,
+            relay_port: 6667,
+            external_host: Some("vpn.example.com".into()),
+            auto_connect: false,
+        }
+    }
+
+    #[test]
+    fn network_create_profile_round_trips_new_public_fields() {
+        let command = NodeCommand::CreateNetwork(valid_create_network_command());
+        let encoded = serde_json::to_value(&command).expect("serialize create command");
+        let decoded: NodeCommand =
+            serde_json::from_value(encoded.clone()).expect("deserialize create command");
+
+        assert_eq!(decoded, command);
+        assert_eq!(
+            encoded["payload"]["purpose"],
+            "Family devices across two homes"
+        );
+        assert_eq!(encoded["payload"]["icon"], "home");
+        assert_eq!(encoded["payload"]["language"], "zh-CN");
+        assert_eq!(encoded["payload"]["visibility"], "private");
+        assert_eq!(encoded["payload"]["join_mode"], "invite_only");
+    }
+
+    #[test]
+    fn legacy_network_create_payload_uses_safe_public_defaults() {
+        let command: NodeCommand = serde_json::from_value(serde_json::json!({
+            "command": "create_network",
+            "payload": {
+                "name": "legacy",
+                "signaling_port": 6666,
+                "relay_port": 6667,
+                "external_host": null,
+                "auto_connect": false
+            }
+        }))
+        .expect("legacy create payload decodes");
+
+        let NodeCommand::CreateNetwork(command) = &command else {
+            panic!("expected create command");
+        };
+        assert_eq!(command.purpose, "Owner-created network");
+        assert_eq!(command.icon, DEFAULT_NETWORK_ICON);
+        assert_eq!(command.language, DEFAULT_NETWORK_LANGUAGE);
+        assert_eq!(command.visibility, NetworkVisibility::Unlisted);
+        assert_eq!(command.join_mode, NetworkJoinMode::InviteOnly);
+        command.validate().expect("legacy payload remains valid");
+    }
+
+    #[test]
+    fn malformed_public_profile_fields_return_structured_field_issues() {
+        let mut create = valid_create_network_command();
+        create.purpose = "  ".into();
+        create.icon = "Home Icon".into();
+        create.language = "zh_CN".into();
+
+        let problem = NodeCommand::CreateNetwork(create)
+            .validate()
+            .expect_err("malformed profile must fail");
+        assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+        let issues = problem
+            .details
+            .as_ref()
+            .expect("validation details")
+            .validation_issues
+            .iter()
+            .map(|issue| (issue.path.as_str(), issue.code.as_str()))
+            .collect::<Vec<_>>();
+        assert!(issues.contains(&("purpose", "invalid_network_purpose")));
+        assert!(issues.contains(&("icon", "invalid_network_icon")));
+        assert!(issues.contains(&("language", "invalid_network_language")));
     }
 
     #[test]
@@ -1707,6 +1941,11 @@ mod tests {
             }),
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
+                purpose: "A test network".into(),
+                icon: DEFAULT_NETWORK_ICON.into(),
+                language: DEFAULT_NETWORK_LANGUAGE.into(),
+                visibility: NetworkVisibility::Unlisted,
+                join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 0,
                 relay_port: 6667,
                 external_host: None,
@@ -1714,6 +1953,11 @@ mod tests {
             }),
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
+                purpose: "A test network".into(),
+                icon: DEFAULT_NETWORK_ICON.into(),
+                language: DEFAULT_NETWORK_LANGUAGE.into(),
+                visibility: NetworkVisibility::Unlisted,
+                join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 6666,
                 relay_port: 6666,
                 external_host: None,
@@ -1721,6 +1965,11 @@ mod tests {
             }),
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
+                purpose: "A test network".into(),
+                icon: DEFAULT_NETWORK_ICON.into(),
+                language: DEFAULT_NETWORK_LANGUAGE.into(),
+                visibility: NetworkVisibility::Unlisted,
+                join_mode: NetworkJoinMode::InviteOnly,
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("  ".into()),
@@ -2001,6 +2250,66 @@ mod tests {
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].outcome, AuditOutcome::Denied);
         assert_eq!(activity[0].details["command"], "start_networks");
+    }
+
+    #[tokio::test]
+    async fn create_network_permission_denial_precedes_handler_and_is_audited() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let network_id = fuckipv6_common::domain::NetworkId::from_public_key(b"create-denied-home");
+        let context = NodeCommandContext::network_session(
+            NodeId::from_public_key(b"create-denied-admin"),
+            "control-api:admin-session",
+            [NodePermission::ManageNetworks],
+            [(
+                "home".into(),
+                crate::node::NetworkCommandScope::new(
+                    network_id,
+                    fuckipv6_common::domain::NetworkRole::Administrator,
+                    fuckipv6_common::domain::MembershipState::Active,
+                    Vec::new(),
+                ),
+            )],
+            true,
+        );
+        let bus = NodeCommandBus::spawn(
+            Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        let command = NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
+            name: "new-network".into(),
+            purpose: "A network the administrator cannot create".into(),
+            icon: "network".into(),
+            language: "en".into(),
+            visibility: NetworkVisibility::Private,
+            join_mode: NetworkJoinMode::InviteOnly,
+            signaling_port: 6666,
+            relay_port: 6667,
+            external_host: None,
+            auto_connect: false,
+        });
+
+        let result = bus
+            .execute(context, NodeCommandRequest::new(58, command))
+            .await
+            .expect("authorization denial is a command result");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected authorization rejection");
+        };
+        assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some("permission.local_owner_required")
+        );
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].outcome, AuditOutcome::Denied);
+        assert_eq!(audit[0].action, "network.create");
+        assert!(audit[0].details["authorization_reason"].contains("local node owner"));
     }
 
     #[tokio::test]

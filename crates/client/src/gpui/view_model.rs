@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use fuckipv6_common::domain::{CapabilityKind, CapabilityState};
+use fuckipv6_common::domain::{
+    CapabilityKind, CapabilityState, NetworkJoinMode, NetworkVisibility,
+};
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
@@ -863,6 +865,11 @@ pub fn default_form_values(
                 (_, "relay_port") => "6667".into(),
                 (_, "timeout_ms") => "1500".into(),
                 ("join_network", "start") => "true".into(),
+                ("create_network", "purpose") => "Owner-created network".into(),
+                ("create_network", "icon") => "network".into(),
+                ("create_network", "language") => "und".into(),
+                ("create_network", "visibility") => "unlisted".into(),
+                ("create_network", "join_mode") => "invite_only".into(),
                 ("create_network", "auto_connect") => "true".into(),
                 ("start_networks", "selection") => "default".into(),
                 ("stop_networks", "networks") => selected_network.unwrap_or_default().into(),
@@ -920,6 +927,11 @@ pub fn build_command(
         Ok(ActionBinding::CreateNetwork) => {
             Ok(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: field("name"),
+                purpose: field("purpose"),
+                icon: field("icon"),
+                language: field("language"),
+                visibility: parse_visibility(field("visibility"))?,
+                join_mode: parse_join_mode(field("join_mode"))?,
                 signaling_port: parse_number(
                     action,
                     "signaling_port",
@@ -1070,6 +1082,11 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "get_node_diagnostics" => HashSet::from([]),
         "create_network" => HashSet::from([
             "name",
+            "purpose",
+            "icon",
+            "language",
+            "visibility",
+            "join_mode",
             "signaling_port",
             "relay_port",
             "external_host",
@@ -1174,6 +1191,32 @@ fn parse_fingerprint(
         return Err(invalid());
     }
     Ok(value.to_owned())
+}
+
+fn parse_visibility(value: String) -> Result<NetworkVisibility, CommandBuildError> {
+    match value.as_str() {
+        "public" => Ok(NetworkVisibility::Public),
+        "unlisted" => Ok(NetworkVisibility::Unlisted),
+        "private" => Ok(NetworkVisibility::Private),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: "create_network".into(),
+            field_id: "visibility".into(),
+            value,
+        }),
+    }
+}
+
+fn parse_join_mode(value: String) -> Result<NetworkJoinMode, CommandBuildError> {
+    match value.as_str() {
+        "open" => Ok(NetworkJoinMode::Open),
+        "approval_required" => Ok(NetworkJoinMode::ApprovalRequired),
+        "invite_only" => Ok(NetworkJoinMode::InviteOnly),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: "create_network".into(),
+            field_id: "join_mode".into(),
+            value,
+        }),
+    }
 }
 
 fn parse_number<T>(

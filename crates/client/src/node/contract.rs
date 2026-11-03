@@ -246,6 +246,11 @@ mod tests {
             },
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
+                purpose: "A test network".into(),
+                icon: "network".into(),
+                language: "und".into(),
+                visibility: Default::default(),
+                join_mode: Default::default(),
                 signaling_port: 41000,
                 relay_port: 42000,
                 external_host: None,

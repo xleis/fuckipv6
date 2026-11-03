@@ -143,6 +143,11 @@ const INPUT_KINDS = new Set([
   "network_name",
   "network_selection",
   "peer_target",
+  "purpose",
+  "icon",
+  "language",
+  "visibility",
+  "join_mode",
   "port",
   "role",
   "routing_mode",
@@ -168,6 +173,11 @@ const VALIDATIONS = new Set([
   "configuration_json",
   "display_name",
   "fingerprint",
+  "network_purpose",
+  "network_icon",
+  "network_language",
+  "visibility",
+  "join_mode",
 ]);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
@@ -615,6 +625,11 @@ export function defaultFieldValue(
   selectedNetwork: string,
 ): string | boolean {
   const network = defaultNetworkName(snapshot, selectedNetwork);
+  if (field.id === "purpose") return "Owner-created network";
+  if (field.id === "icon") return "network";
+  if (field.id === "language") return "und";
+  if (field.id === "visibility") return "unlisted";
+  if (field.id === "join_mode") return "invite_only";
   if (field.id === "signaling_port") return "6666";
   if (field.id === "relay_port") return "6667";
   if (field.id === "timeout_ms") return "1500";
@@ -834,7 +849,43 @@ export function validateActionValues(
       continue;
     }
     if (blank(value)) continue;
-    if (field.validation === "network_name") {
+    if (field.validation === "network_purpose") {
+      const purpose = String(value);
+      if (
+        !purpose.trim() ||
+        [...purpose].length > 512 ||
+        purpose.trim() !== purpose ||
+        /\p{Cc}/u.test(purpose)
+      ) {
+        errors.push(label(locale, "validation.network_purpose_invalid"));
+      }
+    } else if (field.validation === "network_icon") {
+      const icon = String(value);
+      if (
+        !/^[a-z0-9._-]{1,64}$/.test(icon) ||
+        icon.trim() !== icon
+      ) {
+        errors.push(label(locale, "validation.network_icon_invalid"));
+      }
+    } else if (field.validation === "network_language") {
+      const language = String(value);
+      if (
+        language.length > 35 ||
+        !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(language)
+      ) {
+        errors.push(label(locale, "validation.network_language_invalid"));
+      }
+    } else if (
+      field.validation === "visibility" &&
+      !["public", "unlisted", "private"].includes(String(value))
+    ) {
+      errors.push(label(locale, "validation.network_visibility_invalid"));
+    } else if (
+      field.validation === "join_mode" &&
+      !["open", "approval_required", "invite_only"].includes(String(value))
+    ) {
+      errors.push(label(locale, "validation.network_join_mode_invalid"));
+    } else if (field.validation === "network_name") {
       const name = String(value).trim();
       if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") {
         errors.push(
@@ -1037,6 +1088,17 @@ export function buildCommand(
         command: "create_network",
         payload: {
           name: requiredString("name"),
+          purpose: requiredString("purpose"),
+          icon: requiredString("icon"),
+          language: requiredString("language"),
+          visibility: requiredString("visibility") as
+            | "public"
+            | "unlisted"
+            | "private",
+          join_mode: requiredString("join_mode") as
+            | "open"
+            | "approval_required"
+            | "invite_only",
           signaling_port: Number(requireValue("signaling_port")),
           relay_port: Number(requireValue("relay_port")),
           external_host: optional(values, "external_host"),
@@ -1364,6 +1426,7 @@ export function outcomeSummary(
   if (outcome.status === "network_created") {
     return i18n().tr(locale, "outcome.network_created", {
       network: outcome.data.network_name,
+      network_id: outcome.data.network_id,
       persistence: label(
         locale,
         outcome.data.config_saved
@@ -1374,6 +1437,9 @@ export function outcomeSummary(
         locale,
         outcome.data.started ? "outcome.started" : "outcome.not_started",
       ),
+      next_steps: outcome.data.next_steps
+        .map((step) => label(locale, `next_step.${step}`))
+        .join(label(locale, "common.list_separator")),
     });
   }
   if (outcome.status === "blacklist") {

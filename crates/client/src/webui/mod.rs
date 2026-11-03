@@ -2167,16 +2167,7 @@ async fn handle_host(
     State(ctrl): State<Arc<AppController>>,
     Json(payload): Json<HostRequest>,
 ) -> ApiResult<AppUiState> {
-    match ctrl
-        .host_network(
-            payload.name,
-            payload.port,
-            payload.relay_port,
-            payload.auto_connect,
-            payload.external_host,
-        )
-        .await
-    {
+    match ctrl.host_network(payload).await {
         Ok(_) => Ok(Json(ctrl.get_state().await)),
         Err(e) => {
             let message = format!("自建网络失败: {e:#}");

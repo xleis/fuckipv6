@@ -8,16 +8,17 @@ use super::ids::{NetworkId, NodeId, PublicKey, Signature};
 use super::{DomainError, DomainResult};
 
 /// How much of a network's public profile is discoverable without membership.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkVisibility {
     Public,
+    #[default]
     Unlisted,
     Private,
 }
 
 /// Admission policy selected by the network owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkJoinMode {
     /// Requests are accepted immediately.
@@ -25,6 +26,7 @@ pub enum NetworkJoinMode {
     /// Requests enter `pending_approval`.
     ApprovalRequired,
     /// The node must first consume a signed, single-use invitation.
+    #[default]
     InviteOnly,
 }
 
@@ -61,6 +63,13 @@ pub struct NetworkRecord {
     pub public_key: PublicKey,
     pub name: String,
     pub purpose: String,
+    /// Stable, machine-readable icon token. It is presentation metadata and is
+    /// not part of the network identifier.
+    #[serde(default = "default_network_icon")]
+    pub icon: String,
+    /// BCP-47-like language tag for the network's public profile.
+    #[serde(default = "default_network_language")]
+    pub language: String,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
     pub owner: NodeId,
@@ -82,12 +91,10 @@ impl NetworkRecord {
                 "network id does not match the network public key",
             ));
         }
-        if self.name.is_empty() || self.name.len() > 80 {
-            return Err(DomainError::invalid_value("network name is invalid"));
-        }
-        if self.purpose.is_empty() || self.purpose.len() > 512 {
-            return Err(DomainError::invalid_value("network purpose is invalid"));
-        }
+        validate_network_name(&self.name)?;
+        validate_network_purpose(&self.purpose)?;
+        validate_network_icon(&self.icon)?;
+        validate_network_language(&self.language)?;
         if self.revision == 0 || self.policy_revision == 0 {
             return Err(DomainError::invalid_value(
                 "network and policy revisions must be positive",
@@ -127,6 +134,152 @@ impl NetworkRecord {
         }
         Ok(())
     }
+
+    /// Create the first revision owned by the identity that created the
+    /// network. The owner is a member with full owner authority; the separate
+    /// administrator list starts empty because the domain forbids duplicating
+    /// the owner there.
+    pub fn create_owned(
+        profile: NetworkCreateProfile,
+        public_key: PublicKey,
+        owner: NodeId,
+        now_unix_ms: u64,
+    ) -> DomainResult<Self> {
+        let record = Self {
+            network_id: NetworkId::from_public_key(public_key.as_str().as_bytes()),
+            public_key,
+            name: profile.name,
+            purpose: profile.purpose,
+            icon: profile.icon,
+            language: profile.language,
+            visibility: profile.visibility,
+            join_mode: profile.join_mode,
+            owner: owner.clone(),
+            administrators: Vec::new(),
+            members: vec![owner],
+            revision: 1,
+            policy_revision: 1,
+            created_at_unix_ms: now_unix_ms,
+            updated_at_unix_ms: now_unix_ms,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// Rename mutable profile metadata without changing the identifier derived
+    /// from the immutable network public key.
+    pub fn rename(&mut self, new_name: impl Into<String>, now_unix_ms: u64) -> DomainResult<()> {
+        let new_name = new_name.into();
+        validate_network_name(&new_name)?;
+        if now_unix_ms < self.created_at_unix_ms {
+            return Err(DomainError::invariant(
+                "network update time predates creation",
+            ));
+        }
+        if self.name != new_name {
+            self.name = new_name;
+            self.revision = self.revision.saturating_add(1);
+            self.updated_at_unix_ms = self.updated_at_unix_ms.max(now_unix_ms);
+        }
+        self.validate()
+    }
+}
+
+/// Owner-supplied public profile used to create a network. Hostnames, ports and
+/// runtime settings deliberately do not participate in this contract.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkCreateProfile {
+    pub name: String,
+    pub purpose: String,
+    pub icon: String,
+    pub language: String,
+    pub visibility: NetworkVisibility,
+    pub join_mode: NetworkJoinMode,
+}
+
+impl NetworkCreateProfile {
+    pub fn validate(&self) -> DomainResult<()> {
+        validate_network_name(&self.name)?;
+        validate_network_purpose(&self.purpose)?;
+        validate_network_icon(&self.icon)?;
+        validate_network_language(&self.language)
+    }
+}
+
+pub const DEFAULT_NETWORK_PURPOSE: &str = "Owner-created network";
+pub const DEFAULT_NETWORK_ICON: &str = "network";
+pub const DEFAULT_NETWORK_LANGUAGE: &str = "und";
+
+pub fn default_network_purpose() -> String {
+    DEFAULT_NETWORK_PURPOSE.into()
+}
+
+pub fn default_network_icon() -> String {
+    DEFAULT_NETWORK_ICON.into()
+}
+
+pub fn default_network_language() -> String {
+    DEFAULT_NETWORK_LANGUAGE.into()
+}
+
+fn validate_network_name(name: &str) -> DomainResult<()> {
+    if name.is_empty() || name.len() > 80 || name.trim() != name || name == "." || name == ".." {
+        return Err(DomainError::invalid_value("network name is invalid"));
+    }
+    if name.chars().any(|character| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    }) {
+        return Err(DomainError::invalid_value("network name is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_network_purpose(purpose: &str) -> DomainResult<()> {
+    if purpose.is_empty()
+        || purpose.chars().count() > 512
+        || purpose.trim() != purpose
+        || purpose.chars().any(char::is_control)
+    {
+        return Err(DomainError::invalid_value("network purpose is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_network_icon(icon: &str) -> DomainResult<()> {
+    if icon.is_empty()
+        || icon.len() > 64
+        || icon.trim() != icon
+        || icon.chars().any(|character| {
+            !(character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_' | '.'))
+        })
+    {
+        return Err(DomainError::invalid_value("network icon is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_network_language(language: &str) -> DomainResult<()> {
+    let mut segments = language.split('-');
+    let Some(primary) = segments.next() else {
+        return Err(DomainError::invalid_value("network language is invalid"));
+    };
+    if language.len() > 35
+        || !(2..=8).contains(&primary.len())
+        || !primary
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+        || segments.any(|segment| {
+            !(1..=8).contains(&segment.len())
+                || !segment
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+    {
+        return Err(DomainError::invalid_value("network language is invalid"));
+    }
+    Ok(())
 }
 
 /// Signed discovery data. Endpoints may change between revisions; the stable
@@ -335,6 +488,8 @@ mod tests {
             public_key,
             name: "mesh".into(),
             purpose: "test".into(),
+            icon: "network".into(),
+            language: "en".into(),
             visibility: NetworkVisibility::Private,
             join_mode: NetworkJoinMode::InviteOnly,
             owner: owner.clone(),
@@ -348,5 +503,105 @@ mod tests {
         network.validate().unwrap();
         network.members.pop();
         assert!(network.validate().is_err());
+    }
+
+    fn create_profile() -> NetworkCreateProfile {
+        NetworkCreateProfile {
+            name: "home-mesh".into(),
+            purpose: "Family devices across two homes".into(),
+            icon: "home".into(),
+            language: "zh-CN".into(),
+            visibility: NetworkVisibility::Unlisted,
+            join_mode: NetworkJoinMode::InviteOnly,
+        }
+    }
+
+    #[test]
+    fn owner_creation_sets_governance_and_derives_stable_id() {
+        let public_key = PublicKey::from_bytes([9; 32]);
+        let owner = NodeId::from_public_key(b"owner");
+        let network = NetworkRecord::create_owned(create_profile(), public_key, owner.clone(), 100)
+            .expect("valid owner-created network");
+
+        assert_eq!(
+            network.network_id,
+            NetworkId::from_public_key(network.public_key.as_str().as_bytes())
+        );
+        assert_eq!(network.owner, owner);
+        assert_eq!(network.members, vec![owner]);
+        assert!(network.administrators.is_empty());
+        assert_eq!(network.revision, 1);
+        assert_eq!(network.policy_revision, 1);
+        assert_eq!(network.icon, "home");
+        assert_eq!(network.language, "zh-CN");
+    }
+
+    #[test]
+    fn rename_and_json_reload_preserve_network_id() {
+        let public_key = PublicKey::from_bytes([10; 32]);
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        let network_id = network.network_id.clone();
+
+        network.rename("renamed-mesh", 200).unwrap();
+        assert_eq!(network.network_id, network_id);
+        assert_eq!(network.revision, 2);
+
+        let encoded = serde_json::to_string(&network).unwrap();
+        let reloaded: NetworkRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reloaded.network_id, network_id);
+        assert_eq!(reloaded.name, "renamed-mesh");
+        reloaded.validate().unwrap();
+    }
+
+    #[test]
+    fn create_profile_rejects_unsafe_or_malformed_public_fields() {
+        let invalid_name = NetworkCreateProfile {
+            name: "home mesh".into(),
+            ..create_profile()
+        };
+        assert!(invalid_name.validate().is_err());
+
+        let empty_purpose = NetworkCreateProfile {
+            purpose: "   ".into(),
+            ..create_profile()
+        };
+        assert!(empty_purpose.validate().is_err());
+
+        let invalid_icon = NetworkCreateProfile {
+            icon: "Home Icon".into(),
+            ..create_profile()
+        };
+        assert!(invalid_icon.validate().is_err());
+
+        let invalid_language = NetworkCreateProfile {
+            language: "zh_CN".into(),
+            ..create_profile()
+        };
+        assert!(invalid_language.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_network_record_uses_default_public_profile_fields() {
+        let value = serde_json::json!({
+            "network_id": NetworkId::from_public_key(PublicKey::from_bytes([11; 32]).as_str().as_bytes()),
+            "public_key": PublicKey::from_bytes([11; 32]),
+            "name": "legacy",
+            "purpose": "Legacy network",
+            "visibility": "private",
+            "join_mode": "invite_only",
+            "owner": NodeId::from_public_key(b"owner"),
+            "administrators": [],
+            "members": [NodeId::from_public_key(b"owner")],
+            "revision": 1,
+            "policy_revision": 1,
+            "created_at_unix_ms": 1,
+            "updated_at_unix_ms": 1
+        });
+        let record: NetworkRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.icon, DEFAULT_NETWORK_ICON);
+        assert_eq!(record.language, DEFAULT_NETWORK_LANGUAGE);
+        record.validate().unwrap();
     }
 }

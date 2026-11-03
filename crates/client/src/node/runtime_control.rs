@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fuckipv6_common::domain::MembershipRole;
 use fuckipv6_common::{ClientConfig, NetworkTicket};
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -17,15 +18,16 @@ use super::{
     NodeDiagnosticRecoveryAction, NodeDiagnosticState, NodeDiagnosticsSnapshot,
     NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus, NodeEventKind,
     NodeIdentitySnapshot, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
-    NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase, NodeProblem,
-    NodeProblemCode, NodeResidualCleanupResult, NodeRoutingDefaultAction, NodeRoutingMode,
-    NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
-    NodeRuntimePlan, NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSnapshot,
-    NodeStateStore, NodeTrafficSnapshot, NodeUpdateRoutingCommand,
+    NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot, NodeNetworkCreationNextStep,
+    NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase,
+    NodeProblem, NodeProblemCode, NodeResidualCleanupResult, NodeRoutingDefaultAction,
+    NodeRoutingMode, NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus,
+    NodeRoutingTargetSnapshot, NodeRuntimePlan, NodeRuntimeResidueSnapshot,
+    NodeSetNetworkRoleCommand, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
+    NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
-use crate::config_manager::{ConfigManager, NetworkConfig};
+use crate::config_manager::{ConfigManager, NetworkConfig, NetworkCreationError};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
@@ -79,6 +81,13 @@ pub(crate) enum RuntimeControlError {
     Invalid(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{message}")]
+    CreationConflict {
+        reason: &'static str,
+        message: String,
+    },
+    #[error("{0}")]
+    PermissionDenied(String),
     #[error("{0}")]
     Cancelled(String),
     #[error("{0}")]
@@ -87,6 +96,8 @@ pub(crate) enum RuntimeControlError {
     Unavailable(String),
     #[error("{0}")]
     Persistence(String),
+    #[error("{0}")]
+    Storage(String),
     #[error("{0}")]
     Launch(String),
     #[error("{message}")]
@@ -102,13 +113,16 @@ impl RuntimeControlError {
     pub(crate) fn problem_code(&self) -> NodeProblemCode {
         match self {
             Self::Invalid(_) => NodeProblemCode::InvalidRequest,
-            Self::Conflict(_) => NodeProblemCode::Conflict,
+            Self::Conflict(_) | Self::CreationConflict { .. } => NodeProblemCode::Conflict,
+            Self::PermissionDenied(_) => NodeProblemCode::PermissionDenied,
             Self::Cancelled(_) => NodeProblemCode::Cancelled,
             Self::NotFound(_) => NodeProblemCode::NotFound,
             Self::NetworkSetup { stage, .. } => network_setup_problem_code(*stage),
-            Self::ActorClosed | Self::Unavailable(_) | Self::Persistence(_) | Self::Launch(_) => {
-                NodeProblemCode::Unavailable
-            }
+            Self::ActorClosed
+            | Self::Unavailable(_)
+            | Self::Persistence(_)
+            | Self::Storage(_)
+            | Self::Launch(_) => NodeProblemCode::Unavailable,
             Self::Timeout(_) => NodeProblemCode::TimedOut,
         }
     }
@@ -116,6 +130,8 @@ impl RuntimeControlError {
     pub(crate) fn message_key(&self) -> &'static str {
         match self {
             Self::NetworkSetup { stage, .. } => stage.message_key(),
+            Self::CreationConflict { .. } => "error.conflict",
+            Self::PermissionDenied(_) => "error.permission_denied",
             _ => self.problem_code().message_key(),
         }
     }
@@ -125,6 +141,8 @@ impl RuntimeControlError {
             self,
             Self::Invalid(_)
                 | Self::Conflict(_)
+                | Self::CreationConflict { .. }
+                | Self::PermissionDenied(_)
                 | Self::Cancelled(_)
                 | Self::NotFound(_)
                 | Self::NetworkSetup {
@@ -140,6 +158,17 @@ impl RuntimeControlError {
             Self::NetworkSetup { stage, .. } => Some(*stage),
             _ => None,
         }
+    }
+
+    pub(crate) fn conflict_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::CreationConflict { reason, .. } => Some(*reason),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_storage_error(&self) -> bool {
+        matches!(self, Self::Storage(_))
     }
 }
 
@@ -502,6 +531,10 @@ impl RestartSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreateResult {
     pub network_name: String,
+    pub network_id: String,
+    pub public_key: String,
+    pub owner_role: MembershipRole,
+    pub next_steps: Vec<NodeNetworkCreationNextStep>,
     pub config_saved: bool,
     pub started: bool,
     pub ticket: String,
@@ -2498,10 +2531,10 @@ impl NetworkRuntimeActor {
                 .iter()
                 .any(|service| service.network_name == command.name)
         {
-            return Err(RuntimeControlError::Conflict(format!(
-                "网络 [{}] 已存在或正在运行",
-                command.name
-            )));
+            return Err(RuntimeControlError::CreationConflict {
+                reason: "duplicate_name",
+                message: format!("网络 [{}] 已存在或正在运行", command.name),
+            });
         }
 
         let host_public_key = self
@@ -2537,20 +2570,19 @@ impl NetworkRuntimeActor {
         self.record_running_embedded_service(&service).await;
         let coordinator_url = format!("ws://127.0.0.1:{}", service.signaling_addr.port());
 
-        let config_file = match self
-            .configs
-            .create_network(&command.name, &coordinator_url, true)
-        {
-            Ok(path) => path,
+        let created = match self.configs.create_owned_network(
+            command.create_profile(),
+            &coordinator_url,
+            true,
+        ) {
+            Ok(created) => created,
             Err(error) => {
                 self.stop_embedded_service(&command.name).await;
                 self.forget_network(&command.name).await;
-                return Err(RuntimeControlError::Persistence(format!(
-                    "保存网络 [{}] 配置失败: {error:#}",
-                    command.name
-                )));
+                return Err(map_network_creation_error(&command.name, error));
             }
         };
+        let config_file = created.config_path;
         if let Err(error) = self.configs.set_embedded_service_metadata(
             &command.name,
             service.signaling_addr.port(),
@@ -2593,11 +2625,36 @@ impl NetworkRuntimeActor {
                     command.name
                 )));
             }
+        } else {
+            self.record_network(NodeNetworkSnapshot {
+                name: command.name.clone(),
+                tun_name: crate::multi_network::derive_tun_name(
+                    Some(&command.name),
+                    &config.tun.name,
+                ),
+                status: NodeNetworkStatus::Offline,
+                assigned_ipv6: None,
+                assigned_ipv4: None,
+                p2p_listen_addr: None,
+                uptime_secs: 0,
+                roles: roles_from_config(&config),
+                peer_count: 0,
+                traffic: NodeTrafficSnapshot::default(),
+            })
+            .await;
         }
 
         self.publish_dynamic_lifecycle().await;
         Ok(CreateResult {
             network_name: command.name,
+            network_id: created.record.network_id.to_string(),
+            public_key: created.record.public_key.to_string(),
+            owner_role: MembershipRole::Owner,
+            next_steps: vec![
+                NodeNetworkCreationNextStep::InviteMembers,
+                NodeNetworkCreationNextStep::ConfigurePolicy,
+                NodeNetworkCreationNextStep::ContributeCapabilities,
+            ],
             config_saved: true,
             started: command.auto_connect,
             ticket: service.ticket,
@@ -4506,6 +4563,31 @@ fn roles_from_config(config: &ClientConfig) -> Vec<NodeNetworkRole> {
     roles
 }
 
+fn map_network_creation_error(
+    network_name: &str,
+    error: NetworkCreationError,
+) -> RuntimeControlError {
+    match error {
+        NetworkCreationError::Invalid(message) => {
+            RuntimeControlError::Invalid(format!("网络 [{network_name}] 创建参数无效: {message}"))
+        }
+        NetworkCreationError::DuplicateName(_) => RuntimeControlError::CreationConflict {
+            reason: "duplicate_name",
+            message: format!("网络 [{network_name}] 已经存在"),
+        },
+        NetworkCreationError::DuplicateId(network_id) => RuntimeControlError::CreationConflict {
+            reason: "duplicate_id",
+            message: format!("网络 [{network_name}] 的稳定 ID [{network_id}] 已存在"),
+        },
+        NetworkCreationError::PermissionDenied(message) => RuntimeControlError::PermissionDenied(
+            format!("创建网络 [{network_name}] 的权限不足: {message}"),
+        ),
+        NetworkCreationError::Storage(message) => {
+            RuntimeControlError::Storage(format!("保存网络 [{network_name}] 失败: {message}"))
+        }
+    }
+}
+
 fn ensure_member_role(
     network_name: &str,
     roles: &[NodeNetworkRole],
@@ -5093,6 +5175,11 @@ mod tests {
     fn create_command(name: &str, auto_connect: bool) -> NodeCreateNetworkCommand {
         NodeCreateNetworkCommand {
             name: name.into(),
+            purpose: "A test network".into(),
+            icon: "network".into(),
+            language: "und".into(),
+            visibility: Default::default(),
+            join_mode: Default::default(),
             signaling_port: 0,
             relay_port: 0,
             external_host: None,
@@ -6754,7 +6841,20 @@ mod tests {
             harness.services.list().await.expect("list services").len(),
             1
         );
-        assert!(harness.state.snapshot().await.networks.is_empty());
+        let snapshot = harness.state.snapshot().await;
+        let network = snapshot
+            .networks
+            .iter()
+            .find(|network| network.name == "detached")
+            .expect("detached network is immediately listed");
+        assert_eq!(network.status, NodeNetworkStatus::Offline);
+        assert_eq!(network.peer_count, 0);
+        assert!(snapshot
+            .configuration
+            .networks
+            .iter()
+            .any(|network| network.network_name == "detached"));
+        assert!(snapshot.invariant_violations().is_empty());
 
         harness
             .runtime
@@ -6768,6 +6868,71 @@ mod tests {
             .expect("list services")
             .is_empty());
         assert!(harness.configs.network_exists("detached"));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_network_name_is_a_structured_conflict_and_creates_nothing() {
+        let harness = TestHarness::new("create-duplicate-name").await;
+        harness
+            .runtime
+            .create(create_command("duplicate", false))
+            .await
+            .expect("create first network");
+        let created_network_id = harness
+            .configs
+            .load_network_record("duplicate")
+            .expect("load created network")
+            .network_id;
+
+        let error = harness
+            .runtime
+            .create(create_command("duplicate", true))
+            .await
+            .expect_err("duplicate name must fail");
+        assert!(matches!(
+            error,
+            RuntimeControlError::CreationConflict {
+                reason: "duplicate_name",
+                ..
+            }
+        ));
+        assert_eq!(
+            harness
+                .configs
+                .load_network_record("duplicate")
+                .expect("load original network")
+                .network_id,
+            created_network_id
+        );
+        let listed = harness
+            .configs
+            .list_networks()
+            .expect("list networks")
+            .into_iter()
+            .filter(|network| network.name == "duplicate")
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].network_id.as_deref(),
+            Some(created_network_id.as_str())
+        );
+        assert_eq!(
+            harness.services.list().await.expect("list services").len(),
+            1
+        );
+
+        let snapshot = harness.state.snapshot().await;
+        assert_eq!(
+            snapshot
+                .networks
+                .iter()
+                .filter(|network| network.name == "duplicate")
+                .count(),
+            1
+        );
+        assert!(snapshot.invariant_violations().is_empty());
 
         harness.shutdown().await;
     }

@@ -57,12 +57,27 @@ const selectInputs = new Set([
   "network_selection",
   "role",
   "routing_mode",
+  "visibility",
+  "join_mode",
 ]);
 
 function selectOptions(
   field: NodeUiField,
   snapshot: NodeSnapshot,
+  locale: Locale,
 ): Array<{ value: string; text: string }> {
+  if (field.input === "visibility") {
+    return ["public", "unlisted", "private"].map((value) => ({
+      value,
+      text: label(locale, `choice.visibility.${value}`),
+    }));
+  }
+  if (field.input === "join_mode") {
+    return ["open", "approval_required", "invite_only"].map((value) => ({
+      value,
+      text: label(locale, `choice.join_mode.${value}`),
+    }));
+  }
   if (field.input === "network_mode") {
     return [
       { value: "dual_stack", text: "dual_stack" },
@@ -130,12 +145,28 @@ function FieldControl({
           value={String(value)}
           onChange={(event) => onChange(event.target.value)}
         >
-          {selectOptions(field, snapshot).map((option) => (
+          {selectOptions(field, snapshot, locale).map((option) => (
             <option key={option.value} value={option.value}>
               {option.text}
             </option>
           ))}
         </select>
+      </label>
+    );
+  }
+  if (field.input === "purpose") {
+    return (
+      <label className="form-field" htmlFor={id}>
+        <span>{fieldLabel}</span>
+        <textarea
+          id={id}
+          value={String(value)}
+          required={field.required}
+          rows={3}
+          maxLength={512}
+          placeholder={label(locale, "placeholder.network_purpose")}
+          onChange={(event) => onChange(event.target.value)}
+        />
       </label>
     );
   }

@@ -119,9 +119,15 @@ export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_requi
 
 export type IdempotencyKey = string;
 
+export type MembershipRole = "owner" | "administrator" | "member";
+
 export type NetworkId = string;
 
+export type NetworkJoinMode = "open" | "approval_required" | "invite_only";
+
 export type NetworkMode = "ipv4_only" | "ipv6_only" | "dual_stack";
+
+export type NetworkVisibility = "public" | "unlisted" | "private";
 
 export type NodeAccessModel = "trusted_control_plane";
 
@@ -448,15 +454,24 @@ export type NodeControlHealth = "unknown" | "available" | "unavailable";
 export type NodeCreateNetworkCommand = {
   "auto_connect": boolean;
   "external_host"?: string | null;
+  "icon"?: string;
+  "join_mode"?: NetworkJoinMode;
+  "language"?: string;
   "name": string;
+  "purpose"?: string;
   "relay_port": number;
   "signaling_port": number;
+  "visibility"?: NetworkVisibility;
 };
 
 export type NodeCreatedNetwork = {
   "config_saved": boolean;
   "invitation_ticket": string;
+  "network_id": string;
   "network_name": string;
+  "next_steps": Array<NodeNetworkCreationNextStep>;
+  "owner_role": MembershipRole;
+  "public_key": string;
   "started": boolean;
 };
 
@@ -715,6 +730,8 @@ export type NodeNetworkConfigSnapshot = {
   "virtual_network"?: string | null;
 };
 
+export type NodeNetworkCreationNextStep = "invite_members" | "configure_policy" | "contribute_capabilities";
+
 export type NodeNetworkRole = "member" | "discovery" | "relay" | "exit_node";
 
 export type NodeNetworkSelection = "default" | "all" | "none" | {
@@ -966,7 +983,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "visibility" | "join_mode" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -984,7 +1001,7 @@ export type NodeUiPage = {
 
 export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name" | "fingerprint";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "visibility" | "join_mode";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;

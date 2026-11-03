@@ -766,13 +766,18 @@ async fn run_default_app(
 
     if host {
         if let Err(e) = controller
-            .host_network(
-                host_name,
-                host_port,
-                host_relay_port,
+            .host_network(crate::webui::HostRequest {
+                name: host_name,
+                purpose: fuckipv6_common::domain::DEFAULT_NETWORK_PURPOSE.into(),
+                icon: fuckipv6_common::domain::DEFAULT_NETWORK_ICON.into(),
+                language: fuckipv6_common::domain::DEFAULT_NETWORK_LANGUAGE.into(),
+                visibility: Default::default(),
+                join_mode: Default::default(),
+                port: host_port,
+                relay_port: host_relay_port,
                 auto_connect,
                 external_host,
-            )
+            })
             .await
         {
             tracing::warn!("启动协调网络服务失败: {e:#}");

@@ -167,6 +167,11 @@ describe("node UI contract invariants", () => {
       createNetwork!,
       {
         name: "home",
+        purpose: "Family devices across two homes",
+        icon: "home",
+        language: "zh-CN",
+        visibility: "unlisted",
+        join_mode: "invite_only",
         signaling_port: "6666",
         relay_port: "6667",
         external_host: "",
@@ -183,12 +188,79 @@ describe("node UI contract invariants", () => {
       command: "create_network",
       payload: {
         name: "home",
+        purpose: "Family devices across two homes",
+        icon: "home",
+        language: "zh-CN",
+        visibility: "unlisted",
+        join_mode: "invite_only",
         signaling_port: 6666,
         relay_port: 6667,
         external_host: null,
         auto_connect: true,
       },
     });
+  });
+
+  it("validates network profile fields and summarizes the created identity", () => {
+    const createNetwork = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "create_network")!;
+    const valid = {
+      name: "home",
+      purpose: "Family devices across two homes",
+      icon: "home.router_2",
+      language: "zh-CN",
+      visibility: "unlisted",
+      join_mode: "invite_only",
+      signaling_port: "6666",
+      relay_port: "6667",
+      external_host: "",
+      auto_connect: true,
+    };
+
+    expect(validateActionValues(createNetwork, valid, "zh-CN")).toEqual([]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, purpose: "   " },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.required"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, icon: "Home Icon" },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_icon_invalid"]);
+    expect(
+      validateActionValues(
+        createNetwork,
+        { ...valid, language: "zh_CN" },
+        "zh-CN",
+      ),
+    ).toEqual(["translated:validation.network_language_invalid"]);
+
+    const outcome = {
+      status: "network_created" as const,
+      data: {
+        network_name: "home",
+        network_id: "net_stable_home",
+        public_key: "network-public-key",
+        owner_role: "owner" as const,
+        config_saved: true,
+        started: false,
+        next_steps: [
+          "invite_members" as const,
+          "configure_policy" as const,
+          "contribute_capabilities" as const,
+        ],
+        invitation_ticket: "fk://owner-secret@127.0.0.1:6666",
+      },
+    };
+    expect(outcomeSummary(outcome, "zh-CN")).toBe(
+      "translated:outcome.network_created",
+    );
   });
 
   it("validates and builds a typed node identity rotation command", () => {

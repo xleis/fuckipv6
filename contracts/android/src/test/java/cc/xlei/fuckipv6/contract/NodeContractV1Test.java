@@ -348,7 +348,17 @@ public final class NodeContractV1Test {
                 cleanup.command,
                 "cleanup_node_residuals command DTO");
         NodeContractV1.NodeCreateNetworkCommand createNetwork =
-                new NodeContractV1.NodeCreateNetworkCommand(true, null, "lab", 41000, 41001);
+                new NodeContractV1.NodeCreateNetworkCommand(
+                        true,
+                        null,
+                        "network",
+                        "invite_only",
+                        "en",
+                        "lab",
+                        "A test network",
+                        41001,
+                        41000,
+                        NodeContractV1.NetworkVisibility.UNLISTED);
         NodeContractV1.NodeCommand.CreateNetwork createCommand =
                 new NodeContractV1.NodeCommand.CreateNetwork(createNetwork);
         assertSame(

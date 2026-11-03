@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "NetworkJoinMode": {
+      "description": "Admission policy selected by the network owner.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "Requests are accepted immediately.",
+          "type": "string"
+        },
+        {
+          "const": "approval_required",
+          "description": "Requests enter `pending_approval`.",
+          "type": "string"
+        },
+        {
+          "const": "invite_only",
+          "description": "The node must first consume a signed, single-use invitation.",
+          "type": "string"
+        }
+      ]
+    },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
       "oneOf": [
@@ -19,6 +39,15 @@
           "type": "string"
         }
       ]
+    },
+    "NetworkVisibility": {
+      "description": "How much of a network's public profile is discoverable without membership.",
+      "enum": [
+        "public",
+        "unlisted",
+        "private"
+      ],
+      "type": "string"
     },
     "NodeApplyConfigurationCommand": {
       "properties": {
@@ -64,7 +93,23 @@
             "null"
           ]
         },
+        "icon": {
+          "default": "network",
+          "type": "string"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode",
+          "default": "invite_only"
+        },
+        "language": {
+          "default": "und",
+          "type": "string"
+        },
         "name": {
+          "type": "string"
+        },
+        "purpose": {
+          "default": "Owner-created network",
           "type": "string"
         },
         "relay_port": {
@@ -78,6 +123,10 @@
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
+        },
+        "visibility": {
+          "$ref": "#/$defs/NetworkVisibility",
+          "default": "unlisted"
         }
       },
       "required": [

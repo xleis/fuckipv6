@@ -815,8 +815,12 @@ async fn create_runtime_network(
             request_id,
             NodeCommandOutcome::NetworkCreated(super::NodeCreatedNetwork {
                 network_name: result.network_name,
+                network_id: result.network_id,
+                public_key: result.public_key,
+                owner_role: result.owner_role,
                 config_saved: result.config_saved,
                 started: result.started,
+                next_steps: result.next_steps,
                 invitation_ticket: result.ticket,
             }),
         ),
@@ -995,6 +999,12 @@ fn runtime_rejection_scoped(
     let mut problem = NodeProblem::new(error.problem_code(), error.to_string())
         .with_message_key(error.message_key())
         .retryable(error.retryable());
+    if let Some(reason) = error.conflict_reason() {
+        problem = problem.with_param("reason", reason);
+    }
+    if error.is_storage_error() {
+        problem = problem.with_param("error_kind", "storage");
+    }
     if let Some(network_name) = network_name {
         problem = problem.for_network(network_name);
     }
@@ -1653,6 +1663,11 @@ mod tests {
         let commands = [
             NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: "home".into(),
+                purpose: "A test network".into(),
+                icon: "network".into(),
+                language: "und".into(),
+                visibility: Default::default(),
+                join_mode: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: None,

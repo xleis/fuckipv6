@@ -24,6 +24,11 @@ pub async fn host(
         &session,
         NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
             name: network_name.to_string(),
+            purpose: format!("Network created from the CLI: {network_name}"),
+            icon: "network".into(),
+            language: "und".into(),
+            visibility: Default::default(),
+            join_mode: Default::default(),
             signaling_port: port,
             relay_port,
             external_host,

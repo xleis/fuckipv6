@@ -712,6 +712,21 @@ mod tests {
         }
     }
 
+    fn create_home() -> NodeCommand {
+        NodeCommand::CreateNetwork(crate::node::NodeCreateNetworkCommand {
+            name: "new-home".into(),
+            purpose: "A second home network".into(),
+            icon: "home".into(),
+            language: "en".into(),
+            visibility: fuckipv6_common::domain::NetworkVisibility::Unlisted,
+            join_mode: fuckipv6_common::domain::NetworkJoinMode::InviteOnly,
+            signaling_port: 6666,
+            relay_port: 6667,
+            external_host: None,
+            auto_connect: false,
+        })
+    }
+
     fn start_policies() -> (Vec<PermissionRule>, Vec<PermissionRule>) {
         (
             vec![allow(
@@ -807,6 +822,29 @@ mod tests {
             NodeCommand::GetDiagnostics,
             "permission.local_owner_required",
         );
+    }
+
+    #[test]
+    fn create_network_is_reserved_for_the_local_node_owner() {
+        let (local_policy, network_policy) = start_policies();
+        assert_denied(
+            &network_context(
+                NetworkRole::Administrator,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            create_home(),
+            "permission.local_owner_required",
+        );
+
+        authorize_command(
+            &NodeCommandContext::local_owner(actor(), "local-owner-create"),
+            &create_home(),
+        )
+        .expect("local node owner can create a network");
     }
 
     #[test]

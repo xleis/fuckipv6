@@ -225,6 +225,11 @@
         "network_name",
         "network_selection",
         "peer_target",
+        "purpose",
+        "icon",
+        "language",
+        "visibility",
+        "join_mode",
         "port",
         "revision",
         "role",
@@ -294,7 +299,12 @@
         "revision",
         "configuration_json",
         "display_name",
-        "fingerprint"
+        "fingerprint",
+        "network_purpose",
+        "network_icon",
+        "network_language",
+        "visibility",
+        "join_mode"
       ],
       "type": "string"
     }

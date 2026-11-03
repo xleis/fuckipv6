@@ -272,6 +272,56 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum MembershipRole {
+        OWNER("owner"),
+        ADMINISTRATOR("administrator"),
+        MEMBER("member");
+
+        private final String wireName;
+
+        MembershipRole(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static MembershipRole fromWireName(String value) {
+            for (MembershipRole candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown MembershipRole wire value: " + value);
+        }
+    }
+
+    public enum NetworkJoinMode {
+        OPEN("open"),
+        APPROVAL_REQUIRED("approval_required"),
+        INVITE_ONLY("invite_only");
+
+        private final String wireName;
+
+        NetworkJoinMode(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NetworkJoinMode fromWireName(String value) {
+            for (NetworkJoinMode candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NetworkJoinMode wire value: " + value);
+        }
+    }
+
     public enum NetworkMode {
         IPV4_ONLY("ipv4_only"),
         IPV6_ONLY("ipv6_only"),
@@ -294,6 +344,31 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NetworkMode wire value: " + value);
+        }
+    }
+
+    public enum NetworkVisibility {
+        PUBLIC("public"),
+        UNLISTED("unlisted"),
+        PRIVATE("private");
+
+        private final String wireName;
+
+        NetworkVisibility(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NetworkVisibility fromWireName(String value) {
+            for (NetworkVisibility candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NetworkVisibility wire value: " + value);
         }
     }
 
@@ -731,6 +806,31 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NodeNetworkCreationNextStep {
+        INVITE_MEMBERS("invite_members"),
+        CONFIGURE_POLICY("configure_policy"),
+        CONTRIBUTE_CAPABILITIES("contribute_capabilities");
+
+        private final String wireName;
+
+        NodeNetworkCreationNextStep(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeNetworkCreationNextStep fromWireName(String value) {
+            for (NodeNetworkCreationNextStep candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeNetworkCreationNextStep wire value: " + value);
+        }
+    }
+
     public enum NodeNetworkRole {
         MEMBER("member"),
         DISCOVERY("discovery"),
@@ -1043,6 +1143,11 @@ public final class NodeContractV1 {
         NETWORK_NAME("network_name"),
         NETWORK_SELECTION("network_selection"),
         PEER_TARGET("peer_target"),
+        PURPOSE("purpose"),
+        ICON("icon"),
+        LANGUAGE("language"),
+        VISIBILITY("visibility"),
+        JOIN_MODE("join_mode"),
         PORT("port"),
         REVISION("revision"),
         ROLE("role"),
@@ -1119,7 +1224,12 @@ public final class NodeContractV1 {
         REVISION("revision"),
         CONFIGURATION_JSON("configuration_json"),
         DISPLAY_NAME("display_name"),
-        FINGERPRINT("fingerprint");
+        FINGERPRINT("fingerprint"),
+        NETWORK_PURPOSE("network_purpose"),
+        NETWORK_ICON("network_icon"),
+        NETWORK_LANGUAGE("network_language"),
+        VISIBILITY("visibility"),
+        JOIN_MODE("join_mode");
 
         private final String wireName;
 
@@ -1828,16 +1938,26 @@ public final class NodeContractV1 {
     public static final class NodeCreateNetworkCommand {
         public final Boolean auto_connect;
         public final String external_host;
+        public final String icon;
+        public final String join_mode;
+        public final String language;
         public final String name;
+        public final String purpose;
         public final Integer relay_port;
         public final Integer signaling_port;
+        public final NetworkVisibility visibility;
 
-        public NodeCreateNetworkCommand(Boolean auto_connect, String external_host, String name, Integer relay_port, Integer signaling_port) {
+        public NodeCreateNetworkCommand(Boolean auto_connect, String external_host, String icon, String join_mode, String language, String name, String purpose, Integer relay_port, Integer signaling_port, NetworkVisibility visibility) {
             this.auto_connect = auto_connect;
             this.external_host = external_host;
+            this.icon = icon;
+            this.join_mode = join_mode;
+            this.language = language;
             this.name = name;
+            this.purpose = purpose;
             this.relay_port = relay_port;
             this.signaling_port = signaling_port;
+            this.visibility = visibility;
         }
     }
 
@@ -1845,13 +1965,21 @@ public final class NodeContractV1 {
     public static final class NodeCreatedNetwork {
         public final Boolean config_saved;
         public final String invitation_ticket;
+        public final String network_id;
         public final String network_name;
+        public final List<NodeNetworkCreationNextStep> next_steps;
+        public final MembershipRole owner_role;
+        public final String public_key;
         public final Boolean started;
 
-        public NodeCreatedNetwork(Boolean config_saved, String invitation_ticket, String network_name, Boolean started) {
+        public NodeCreatedNetwork(Boolean config_saved, String invitation_ticket, String network_id, String network_name, List<NodeNetworkCreationNextStep> next_steps, MembershipRole owner_role, String public_key, Boolean started) {
             this.config_saved = config_saved;
             this.invitation_ticket = invitation_ticket;
+            this.network_id = network_id;
             this.network_name = network_name;
+            this.next_steps = next_steps;
+            this.owner_role = owner_role;
+            this.public_key = public_key;
             this.started = started;
         }
     }

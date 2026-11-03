@@ -61,6 +61,41 @@
               "validation": "network_name"
             },
             {
+              "id": "purpose",
+              "label_key": "field.purpose",
+              "input": "purpose",
+              "required": true,
+              "validation": "network_purpose"
+            },
+            {
+              "id": "icon",
+              "label_key": "field.icon",
+              "input": "icon",
+              "required": true,
+              "validation": "network_icon"
+            },
+            {
+              "id": "language",
+              "label_key": "field.language",
+              "input": "language",
+              "required": true,
+              "validation": "network_language"
+            },
+            {
+              "id": "visibility",
+              "label_key": "field.visibility",
+              "input": "visibility",
+              "required": true,
+              "validation": "visibility"
+            },
+            {
+              "id": "join_mode",
+              "label_key": "field.join_mode",
+              "input": "join_mode",
+              "required": true,
+              "validation": "join_mode"
+            },
+            {
               "id": "signaling_port",
               "label_key": "field.signaling_port",
               "input": "port",

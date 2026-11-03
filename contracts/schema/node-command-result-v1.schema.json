@@ -446,6 +446,15 @@
       ],
       "type": "string"
     },
+    "MembershipRole": {
+      "description": "A member's governance role. Temporary Coordinator authority is intentionally\nrepresented by `CoordinatorTerm`, never by mutating this durable role.",
+      "enum": [
+        "owner",
+        "administrator",
+        "member"
+      ],
+      "type": "string"
+    },
     "NetworkId": {
       "type": "string"
     },
@@ -901,7 +910,22 @@
         "invitation_ticket": {
           "type": "string"
         },
+        "network_id": {
+          "type": "string"
+        },
         "network_name": {
+          "type": "string"
+        },
+        "next_steps": {
+          "items": {
+            "$ref": "#/$defs/NodeNetworkCreationNextStep"
+          },
+          "type": "array"
+        },
+        "owner_role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "public_key": {
           "type": "string"
         },
         "started": {
@@ -910,8 +934,12 @@
       },
       "required": [
         "network_name",
+        "network_id",
+        "public_key",
+        "owner_role",
         "config_saved",
         "started",
+        "next_steps",
         "invitation_ticket"
       ],
       "type": "object"
@@ -1550,6 +1578,14 @@
         "identity_configured"
       ],
       "type": "object"
+    },
+    "NodeNetworkCreationNextStep": {
+      "enum": [
+        "invite_members",
+        "configure_policy",
+        "contribute_capabilities"
+      ],
+      "type": "string"
     },
     "NodeNetworkRole": {
       "description": "Network roles are capabilities within a network, never product identities.",
@@ -2616,6 +2652,11 @@
         "network_name",
         "network_selection",
         "peer_target",
+        "purpose",
+        "icon",
+        "language",
+        "visibility",
+        "join_mode",
         "port",
         "revision",
         "role",
@@ -2721,7 +2762,12 @@
         "revision",
         "configuration_json",
         "display_name",
-        "fingerprint"
+        "fingerprint",
+        "network_purpose",
+        "network_icon",
+        "network_language",
+        "visibility",
+        "join_mode"
       ],
       "type": "string"
     },

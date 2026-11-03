@@ -1,4 +1,8 @@
 use anyhow::Result;
+use fuckipv6_common::domain::{
+    default_network_icon, default_network_language, default_network_purpose, NetworkJoinMode,
+    NetworkVisibility,
+};
 use fuckipv6_common::NetworkTicket;
 use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
 use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
@@ -176,6 +180,16 @@ pub struct ConnectRequest {
 #[derive(Debug, Deserialize)]
 pub struct HostRequest {
     pub name: String,
+    #[serde(default = "default_network_purpose")]
+    pub purpose: String,
+    #[serde(default = "default_network_icon")]
+    pub icon: String,
+    #[serde(default = "default_network_language")]
+    pub language: String,
+    #[serde(default)]
+    pub visibility: NetworkVisibility,
+    #[serde(default)]
+    pub join_mode: NetworkJoinMode,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_relay_port")]
@@ -642,14 +656,19 @@ impl AppController {
     }
 
     /// 一键自建对等网络并生成邀请凭证 (fk://...)
-    pub async fn host_network(
-        &self,
-        name: String,
-        port: u16,
-        relay_port: u16,
-        auto_connect: bool,
-        external_host: Option<String>,
-    ) -> Result<String> {
+    pub async fn host_network(&self, request: HostRequest) -> Result<String> {
+        let HostRequest {
+            name,
+            purpose,
+            icon,
+            language,
+            visibility,
+            join_mode,
+            port,
+            relay_port,
+            auto_connect,
+            external_host,
+        } = request;
         self.log(format!(
             "[启动] 正在通过节点创建网络: {name} (信令={port}, 中继={relay_port})"
         ))
@@ -657,6 +676,11 @@ impl AppController {
         let outcome = self
             .execute_node_command(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name,
+                purpose,
+                icon,
+                language,
+                visibility,
+                join_mode,
                 signaling_port: port,
                 relay_port,
                 external_host,
@@ -1488,6 +1512,27 @@ mod tests {
         assert_eq!(projected.connected_secs, 0);
         assert_eq!(projected.idle_secs, 0);
         assert_eq!(projected.network_name.as_deref(), Some("office"));
+    }
+
+    #[test]
+    fn legacy_host_request_uses_safe_network_profile_defaults() {
+        let request: HostRequest = serde_json::from_value(serde_json::json!({
+            "name": "legacy",
+            "port": 7000,
+            "relay_port": 7001,
+            "auto_connect": false
+        }))
+        .expect("legacy host request decodes");
+
+        assert_eq!(request.purpose, "Owner-created network");
+        assert_eq!(request.icon, "network");
+        assert_eq!(request.language, "und");
+        assert_eq!(request.visibility, NetworkVisibility::Unlisted);
+        assert_eq!(request.join_mode, NetworkJoinMode::InviteOnly);
+        assert_eq!(request.port, 7000);
+        assert_eq!(request.relay_port, 7001);
+        assert!(!request.auto_connect);
+        assert_eq!(request.external_host, None);
     }
 
     #[test]

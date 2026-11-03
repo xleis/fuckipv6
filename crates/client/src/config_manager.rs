@@ -3,15 +3,25 @@ use crate::config_transaction::{
     ConfigurationPreview, ConfigurationTransactionError, ConfigurationTransactionStore,
 };
 use anyhow::{Context, Result};
+use fuckipv6_common::domain::{
+    AuditEntry, AuditId, AuditLog, AuditOutcome, NetworkCreateProfile, NetworkRecord,
+    NodeId as DomainNodeId, PublicKey,
+};
 use fuckipv6_common::i18n::LanguagePreference;
 use fuckipv6_common::{ClientConfig, Identity};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const NODE_IDENTITY_FILE: &str = "node_identity.pem";
 const NODE_METADATA_FILE: &str = "node_identity.json";
+const NETWORK_IDENTITY_FILE: &str = "network_identity.pem";
+const NETWORK_RECORD_FILE: &str = "network.json";
+const NETWORK_GOVERNANCE_FILE: &str = "governance.json";
 
 /// 网络配置信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +30,12 @@ pub struct NetworkConfig {
     pub coordinator_url: String,
     pub created_at: String,
     pub last_used: String,
+    /// Stable network identifier derived from the network public key. Legacy
+    /// joined networks do not have this metadata yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     /// Whether this node owns and must restore the embedded signaling/relay
     /// services for this network.
     #[serde(default)]
@@ -42,6 +58,28 @@ pub struct NetworkConfig {
 pub struct NetworkList {
     pub networks: HashMap<String, NetworkConfig>,
     pub default_network: Option<String>,
+}
+
+/// A successfully persisted owner-created network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedOwnedNetwork {
+    pub config_path: PathBuf,
+    pub record: NetworkRecord,
+}
+
+/// Stable, adapter-mappable reasons for a failed network creation attempt.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkCreationError {
+    #[error("网络资料无效: {0}")]
+    Invalid(String),
+    #[error("网络名称已存在: {0}")]
+    DuplicateName(String),
+    #[error("网络 ID 已存在: {0}")]
+    DuplicateId(String),
+    #[error("无权创建网络: {0}")]
+    PermissionDenied(String),
+    #[error("网络持久化失败: {0}")]
+    Storage(String),
 }
 
 /// Node-wide metadata that is independent from any one joined network.
@@ -283,6 +321,290 @@ impl ConfigManager {
         Ok(())
     }
 
+    pub(crate) fn network_identity_path(&self, network_name: &str) -> Result<PathBuf> {
+        Self::validate_network_name(network_name)?;
+        Ok(self
+            .get_network_dir(network_name)
+            .join(NETWORK_IDENTITY_FILE))
+    }
+
+    pub(crate) fn network_record_path(&self, network_name: &str) -> Result<PathBuf> {
+        Self::validate_network_name(network_name)?;
+        Ok(self.get_network_dir(network_name).join(NETWORK_RECORD_FILE))
+    }
+
+    pub(crate) fn network_governance_path(&self, network_name: &str) -> Result<PathBuf> {
+        Self::validate_network_name(network_name)?;
+        Ok(self
+            .get_network_dir(network_name)
+            .join(NETWORK_GOVERNANCE_FILE))
+    }
+
+    /// Load the durable governance record for an owner-created network.
+    pub fn load_network_record(
+        &self,
+        network_name: &str,
+    ) -> std::result::Result<NetworkRecord, NetworkCreationError> {
+        let path = self
+            .network_record_path(network_name)
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        let content = std::fs::read_to_string(&path).map_err(|error| {
+            NetworkCreationError::Storage(format!("无法读取 {}: {error}", path.display()))
+        })?;
+        let record = serde_json::from_str::<NetworkRecord>(&content).map_err(|error| {
+            NetworkCreationError::Storage(format!("无法解析 {}: {error}", path.display()))
+        })?;
+        record
+            .validate()
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        Ok(record)
+    }
+
+    /// Create an owner-scoped network and its independent signing identity.
+    ///
+    /// The network identity is intentionally distinct from the node identity:
+    /// one node may create several networks, and each must retain its own stable
+    /// network ID. The caller is responsible for service startup, while this
+    /// method owns all durable profile, governance and configuration writes.
+    pub fn create_owned_network(
+        &self,
+        profile: NetworkCreateProfile,
+        coordinator_url: &str,
+        set_default: bool,
+    ) -> std::result::Result<CreatedOwnedNetwork, NetworkCreationError> {
+        let network_identity = Identity::generate().map_err(|error| {
+            NetworkCreationError::Storage(format!("无法生成网络身份: {error:#}"))
+        })?;
+        self.create_owned_network_with_identity(
+            profile,
+            coordinator_url,
+            set_default,
+            network_identity,
+        )
+    }
+
+    fn create_owned_network_with_identity(
+        &self,
+        profile: NetworkCreateProfile,
+        coordinator_url: &str,
+        set_default: bool,
+        network_identity: Identity,
+    ) -> std::result::Result<CreatedOwnedNetwork, NetworkCreationError> {
+        profile
+            .validate()
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        let network_name = profile.name.clone();
+        let network_dir = self.get_network_dir(&network_name);
+        let network_identity_path = self
+            .network_identity_path(&network_name)
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        let network_record_path = self
+            .network_record_path(&network_name)
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        let network_governance_path = self
+            .network_governance_path(&network_name)
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+        let config_file = network_dir.join("config.toml");
+        let mut list = self
+            .load_network_list()
+            .map_err(|error| NetworkCreationError::Storage(format!("{error:#}")))?;
+
+        if list.networks.contains_key(&network_name)
+            || config_file.exists()
+            || network_record_path.exists()
+        {
+            return Err(NetworkCreationError::DuplicateName(network_name));
+        }
+
+        let node_identity = self.load_node_identity().map_err(|error| {
+            NetworkCreationError::Storage(format!("无法加载节点身份: {error:#}"))
+        })?;
+        let public_key = PublicKey::from_bytes(network_identity.public_key_bytes());
+        let owner = DomainNodeId::from_public_key(&node_identity.public_key_bytes());
+        let now_unix_ms = unix_time_ms().max(1);
+        let record = NetworkRecord::create_owned(profile, public_key, owner.clone(), now_unix_ms)
+            .map_err(|error| NetworkCreationError::Invalid(error.to_string()))?;
+
+        self.ensure_network_id_unique(&list, &record)?;
+
+        std::fs::create_dir_all(&network_dir).map_err(|error| {
+            NetworkCreationError::Storage(format!(
+                "无法创建网络目录 {}: {error}",
+                network_dir.display()
+            ))
+        })?;
+
+        let result = (|| -> std::result::Result<PathBuf, NetworkCreationError> {
+            network_identity
+                .save_to_file(&network_identity_path)
+                .map_err(|error| {
+                    NetworkCreationError::Storage(format!("无法保存网络身份: {error:#}"))
+                })?;
+            write_json_atomic(&network_record_path, &record).map_err(|error| {
+                NetworkCreationError::Storage(format!("无法保存网络记录: {error:#}"))
+            })?;
+
+            let mut governance = AuditLog::default();
+            let mut details = BTreeMap::new();
+            details.insert("name".into(), record.name.clone());
+            details.insert("owner".into(), record.owner.to_string());
+            details.insert("revision".into(), record.revision.to_string());
+            details.insert(
+                "visibility".into(),
+                format!("{:?}", record.visibility).to_ascii_lowercase(),
+            );
+            details.insert(
+                "join_mode".into(),
+                format!("{:?}", record.join_mode).to_ascii_lowercase(),
+            );
+            governance
+                .append(AuditEntry {
+                    audit_id: AuditId::from_public_key(
+                        format!("{}:network.create:{now_unix_ms}", record.network_id).as_bytes(),
+                    ),
+                    operation_id: None,
+                    actor: owner,
+                    network_id: Some(record.network_id.clone()),
+                    action: "network.create".into(),
+                    resource: format!("network/{}", record.network_id),
+                    outcome: AuditOutcome::Succeeded,
+                    occurred_at_unix_ms: now_unix_ms,
+                    summary: format!("Network [{}] created", record.name),
+                    details,
+                    sensitive_keys: Default::default(),
+                })
+                .map_err(|error| {
+                    NetworkCreationError::Storage(format!("无法写入创建审计事件: {error}"))
+                })?;
+            write_json_atomic(&network_governance_path, &governance).map_err(|error| {
+                NetworkCreationError::Storage(format!("无法保存治理日志: {error:#}"))
+            })?;
+
+            let config = ClientConfig {
+                client_id: None,
+                coordinator_url: coordinator_url.to_string(),
+                private_key_path: self.node_identity_path(),
+                network: Default::default(),
+                tun: Default::default(),
+                p2p: Default::default(),
+                log: Default::default(),
+                acl: Default::default(),
+                routing: Default::default(),
+                exit_node: Default::default(),
+            };
+            let transaction_store = self.configuration_store();
+            transaction_store
+                .add_network(
+                    &network_name,
+                    &config,
+                    "local-owner",
+                    "network-owner-create",
+                )
+                .map_err(|error| {
+                    NetworkCreationError::Storage(format!("无法保存网络配置: {error:#}"))
+                })?;
+
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            list.networks.insert(
+                network_name.clone(),
+                NetworkConfig {
+                    name: network_name.clone(),
+                    coordinator_url: coordinator_url.to_string(),
+                    created_at: timestamp.clone(),
+                    last_used: timestamp,
+                    network_id: Some(record.network_id.to_string()),
+                    public_key: Some(record.public_key.to_string()),
+                    owns_embedded_services: false,
+                    signaling_port: None,
+                    relay_port: None,
+                    external_host: None,
+                    ip_pool: None,
+                },
+            );
+            if set_default || list.default_network.is_none() {
+                list.default_network = Some(network_name.clone());
+            }
+            if let Err(error) = self.save_network_list(&list) {
+                let rollback = transaction_store.remove_network(
+                    &network_name,
+                    "local-owner",
+                    "network-owner-create-rollback",
+                );
+                if let Err(rollback_error) = rollback {
+                    return Err(NetworkCreationError::Storage(format!(
+                        "网络列表保存失败且配置回滚失败: {error:#}; {rollback_error:#}"
+                    )));
+                }
+                return Err(NetworkCreationError::Storage(format!(
+                    "网络列表保存失败: {error:#}"
+                )));
+            }
+
+            let network_names = sorted_network_names(&list);
+            transaction_store
+                .current_network_path(&network_names, &network_name)
+                .map_err(|error| {
+                    NetworkCreationError::Storage(format!("无法定位网络配置: {error:#}"))
+                })
+        })();
+
+        match result {
+            Ok(config_path) => Ok(CreatedOwnedNetwork {
+                config_path,
+                record,
+            }),
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&network_dir);
+                Err(error)
+            }
+        }
+    }
+
+    fn ensure_network_id_unique(
+        &self,
+        list: &NetworkList,
+        record: &NetworkRecord,
+    ) -> std::result::Result<(), NetworkCreationError> {
+        let target = record.network_id.as_str();
+        for network in list.networks.values() {
+            if network.network_id.as_deref() == Some(target) {
+                return Err(NetworkCreationError::DuplicateId(target.to_string()));
+            }
+        }
+
+        let entries = std::fs::read_dir(&self.config_dir).map_err(|error| {
+            NetworkCreationError::Storage(format!(
+                "无法扫描网络目录 {}: {error}",
+                self.config_dir.display()
+            ))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                NetworkCreationError::Storage(format!("无法读取网络目录项: {error}"))
+            })?;
+            let record_path = entry.path().join(NETWORK_RECORD_FILE);
+            if !record_path.is_file() {
+                continue;
+            }
+            let content = std::fs::read_to_string(&record_path).map_err(|error| {
+                NetworkCreationError::Storage(format!(
+                    "无法读取 {}: {error}",
+                    record_path.display()
+                ))
+            })?;
+            let existing = serde_json::from_str::<NetworkRecord>(&content).map_err(|error| {
+                NetworkCreationError::Storage(format!(
+                    "无法解析 {}: {error}",
+                    record_path.display()
+                ))
+            })?;
+            if existing.network_id.as_str() == target {
+                return Err(NetworkCreationError::DuplicateId(target.to_string()));
+            }
+        }
+        Ok(())
+    }
+
     /// 创建新网络配置
     pub fn create_network(
         &self,
@@ -331,6 +653,8 @@ impl ConfigManager {
                 coordinator_url: coordinator_url.to_string(),
                 created_at: now.clone(),
                 last_used: now,
+                network_id: None,
+                public_key: None,
                 owns_embedded_services: false,
                 signaling_port: None,
                 relay_port: None,
@@ -602,6 +926,60 @@ impl ConfigManager {
     }
 }
 
+fn sorted_network_names(list: &NetworkList) -> Vec<String> {
+    let mut names = list.networks.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("目标文件没有父目录: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("目标文件没有文件名: {}", path.display()))?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temporary_path = parent.join(temporary_name);
+    let content = serde_json::to_vec_pretty(value).context("无法序列化 JSON")?;
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .with_context(|| format!("无法创建临时文件: {}", temporary_path.display()))?;
+        file.write_all(&content)
+            .with_context(|| format!("无法写入临时文件: {}", temporary_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("无法同步临时文件: {}", temporary_path.display()))?;
+        std::fs::rename(&temporary_path, path)
+            .with_context(|| format!("无法替换文件: {}", path.display()))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("无法同步目录: {}", parent.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    write_result
+}
+
 fn normalize_display_name(display_name: Option<String>) -> Result<Option<String>> {
     let Some(display_name) = display_name else {
         return Ok(None);
@@ -640,11 +1018,155 @@ fn url_to_network_slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use fuckipv6_common::domain::{NetworkJoinMode, NetworkVisibility};
+
     use super::*;
 
     fn temp_config_dir(name: &str) -> PathBuf {
         let unique = format!("fuckipv6-config-manager-{}-{}", name, std::process::id());
         std::env::temp_dir().join(unique)
+    }
+
+    fn owned_profile(name: &str) -> NetworkCreateProfile {
+        NetworkCreateProfile {
+            name: name.into(),
+            purpose: "A private family mesh".into(),
+            icon: "home".into(),
+            language: "zh-CN".into(),
+            visibility: NetworkVisibility::Unlisted,
+            join_mode: NetworkJoinMode::InviteOnly,
+        }
+    }
+
+    #[test]
+    fn creates_owner_network_with_independent_identity_and_governance() -> anyhow::Result<()> {
+        let dir = temp_config_dir("owner-create");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let created = manager
+            .create_owned_network(owned_profile("home"), "ws://127.0.0.1:6666", true)
+            .expect("create owned network");
+
+        assert!(created.config_path.is_file());
+        assert!(manager
+            .get_network_dir("home")
+            .join(NETWORK_IDENTITY_FILE)
+            .is_file());
+        assert!(manager
+            .get_network_dir("home")
+            .join(NETWORK_RECORD_FILE)
+            .is_file());
+        assert!(manager
+            .get_network_dir("home")
+            .join(NETWORK_GOVERNANCE_FILE)
+            .is_file());
+        assert_eq!(created.record.owner, created.record.members[0]);
+        assert!(created.record.administrators.is_empty());
+        assert_eq!(created.record.revision, 1);
+        assert_eq!(created.record.policy_revision, 1);
+
+        let persisted = manager.load_network_record("home")?;
+        assert_eq!(persisted.network_id, created.record.network_id);
+        let listed = manager
+            .list_networks()?
+            .into_iter()
+            .find(|network| network.name == "home")
+            .expect("created network in list");
+        assert_eq!(
+            listed.network_id.as_deref(),
+            Some(persisted.network_id.as_str())
+        );
+        assert_eq!(
+            listed.public_key.as_deref(),
+            Some(persisted.public_key.as_str())
+        );
+
+        let governance: AuditLog = serde_json::from_str(&std::fs::read_to_string(
+            manager
+                .get_network_dir("home")
+                .join(NETWORK_GOVERNANCE_FILE),
+        )?)?;
+        assert_eq!(governance.entries().len(), 1);
+        assert_eq!(governance.entries()[0].action, "network.create");
+        assert_eq!(
+            governance.entries()[0].network_id.as_ref(),
+            Some(&created.record.network_id)
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                std::fs::metadata(manager.get_network_dir("home").join(NETWORK_IDENTITY_FILE))?
+                    .permissions()
+                    .mode()
+                    & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        assert_eq!(
+            reopened.load_network_record("home")?.network_id,
+            created.record.network_id
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_duplicate_name_and_duplicate_network_identity() -> anyhow::Result<()> {
+        let dir = temp_config_dir("owner-create-duplicate");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let identity = Identity::generate()?;
+        manager
+            .create_owned_network_with_identity(
+                owned_profile("first"),
+                "ws://127.0.0.1:6666",
+                true,
+                identity.clone(),
+            )
+            .expect("first owner network");
+
+        assert!(matches!(
+            manager.create_owned_network_with_identity(
+                owned_profile("first"),
+                "ws://127.0.0.1:6667",
+                false,
+                Identity::generate()?,
+            ),
+            Err(NetworkCreationError::DuplicateName(name)) if name == "first"
+        ));
+        assert!(matches!(
+            manager.create_owned_network_with_identity(
+                owned_profile("second"),
+                "ws://127.0.0.1:6667",
+                false,
+                identity,
+            ),
+            Err(NetworkCreationError::DuplicateId(id)) if id.starts_with("net_")
+        ));
+        assert!(!manager.network_exists("second"));
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn storage_failure_rolls_back_network_directory_and_list() -> anyhow::Result<()> {
+        let dir = temp_config_dir("owner-create-storage-failure");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        std::fs::write(dir.join(".configuration"), b"not a directory")?;
+
+        assert!(matches!(
+            manager.create_owned_network(owned_profile("failed"), "ws://127.0.0.1:6666", true,),
+            Err(NetworkCreationError::Storage(_))
+        ));
+        assert!(!manager.get_network_dir("failed").exists());
+        assert!(!manager.network_exists("failed"));
+        assert!(manager.list_networks()?.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
     }
 
     #[test]

@@ -993,6 +993,141 @@ mod tests {
     }
 
     #[test]
+    fn expiry_withdrawal_and_admin_revocation_keep_state_and_roster_consistent() {
+        let dir = test_dir("terminal-lifecycle");
+        let store = test_store(&dir);
+        let applicant_seed = "lifecycle-applicant";
+        let applicant_id = applicant(applicant_seed);
+
+        let expiring = request(applicant_seed, "expiring", 1_000);
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                expiring.clone(),
+                1_001,
+            )
+            .unwrap();
+        let listed = store
+            .list(&network_id(), &owner(), expiring.expires_at_unix_ms)
+            .unwrap();
+        assert_eq!(listed[0].state, JoinRequestState::Expired);
+        assert_eq!(listed[0].revision, 2);
+        let late_review = store.review(
+            &network_id(),
+            &owner(),
+            vec![JoinRequestBatchReviewItem {
+                request_id: expiring.request_id.clone(),
+                expected_revision: listed[0].revision,
+                action: JoinRequestReviewAction::Approve,
+                note: None,
+            }],
+            expiring.expires_at_unix_ms,
+        );
+        assert!(late_review.is_err());
+        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        assert!(!roster.members.contains(&applicant_id));
+
+        let withdrawn = request(applicant_seed, "withdrawn", expiring.expires_at_unix_ms + 1);
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                withdrawn.clone(),
+                expiring.expires_at_unix_ms + 2,
+            )
+            .unwrap();
+        let result = store
+            .withdraw(
+                &network_id(),
+                &applicant_id,
+                &withdrawn.request_id,
+                expiring.expires_at_unix_ms + 3,
+            )
+            .unwrap();
+        assert_eq!(result.state, JoinRequestState::Withdrawn);
+        assert_eq!(result.revision, 2);
+        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        assert!(!roster.members.contains(&applicant_id));
+
+        let pending = request(
+            applicant_seed,
+            "revoked-admin",
+            expiring.expires_at_unix_ms + 4,
+        );
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                pending.clone(),
+                expiring.expires_at_unix_ms + 5,
+            )
+            .unwrap();
+        let admin_view = store
+            .list(&network_id(), &admin(), expiring.expires_at_unix_ms + 6)
+            .unwrap();
+        assert!(admin_view
+            .iter()
+            .any(|request| request.request_id == pending.request_id));
+
+        write_network_record(&dir, &network_record(owner(), vec![]));
+        assert!(store
+            .list(&network_id(), &admin(), expiring.expires_at_unix_ms + 7)
+            .unwrap()
+            .is_empty());
+        let recipients = store
+            .notification_recipients(&network_id(), &applicant_id)
+            .unwrap();
+        assert!(!recipients.contains(&admin()));
+        assert!(recipients.contains(&owner()));
+
+        let revoked_review = store.review(
+            &network_id(),
+            &admin(),
+            vec![JoinRequestBatchReviewItem {
+                request_id: pending.request_id.clone(),
+                expected_revision: 1,
+                action: JoinRequestReviewAction::Approve,
+                note: None,
+            }],
+            expiring.expires_at_unix_ms + 8,
+        );
+        assert!(revoked_review.is_err());
+        let listed = store
+            .list(&network_id(), &owner(), expiring.expires_at_unix_ms + 9)
+            .unwrap();
+        assert_eq!(listed[0].state, JoinRequestState::Pending);
+        assert_eq!(listed[0].revision, 1);
+
+        let approved = store
+            .review(
+                &network_id(),
+                &owner(),
+                vec![JoinRequestBatchReviewItem {
+                    request_id: pending.request_id,
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+                expiring.expires_at_unix_ms + 10,
+            )
+            .unwrap();
+        assert_eq!(approved[0].state, JoinRequestState::Approved);
+        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        assert_eq!(
+            roster
+                .members
+                .iter()
+                .filter(|member| **member == applicant_id)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn reviewer_cannot_approve_their_own_request() {
         let dir = test_dir("self-review");
         let applicant_seed = "self-reviewer";

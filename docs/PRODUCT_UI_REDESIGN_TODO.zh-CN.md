@@ -1134,7 +1134,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 支持批准、拒绝、要求补充信息和批量审批；
 - [x] 审批前显示将授予的成员权限和 Exit/File 影响；
 - [x] 并发审批只能产生一个最终成员状态；
-- [ ] 申请过期、撤回、管理员撤权时有一致状态；
+- [x] 申请过期、撤回、管理员撤权时有一致状态；
 - [ ] 申请理由只对获授权角色可见，并纳入保留策略；
 - [ ] 所有审批动作有审计、活动投影和通知。
 
@@ -1214,6 +1214,13 @@ WebUI 回归测试覆盖单条和批量审批的影响预览，GPUI 新增
 一次审批成功且网络名册中该申请人恰好出现一次。验证通过：
 `cargo test -p fuckipv6-coordinator --lib signaling::join_requests::tests::concurrent_approval_produces_one_final_member_state -- --exact`
 （1 passed，83 filtered）。
+
+本轮补齐生命周期一致性回归测试：申请到达过期时间后由列表事务持久化为 Expired，后续批准
+被拒绝且不会写入成员；申请人撤回后状态为 Withdrawn，同样不产生成员关系；管理员被撤权后
+立即从审批列表、审批授权和变更通知收件人中消失，未决申请保持 Pending，Owner 仍可正常审批。
+该测试同时校验过期、撤回、撤权三个阶段及最终批准后的网络名册，确保请求账本和成员投影一致。
+验证通过：`cargo test -p fuckipv6-coordinator --lib signaling::join_requests::tests`
+（9 passed，76 filtered）、`cargo fmt --all -- --check` 和 `git diff --check`。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

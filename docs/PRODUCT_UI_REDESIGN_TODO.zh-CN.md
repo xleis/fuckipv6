@@ -1250,16 +1250,33 @@ revision，并由持久化通知构造函数的序列化回归测试锁定；申
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试；所有审批动作的
 审计、活动投影和通知收件人/载荷均有自动化证据。
 
-### W8-07 私有网络邀请 `[ ]`
+### W8-07 私有网络邀请 `[x]`
 
-- [ ] 生成一次性、可过期、可撤销的邀请；
-- [ ] 邀请绑定网络、角色、能力和使用次数；
-- [ ] 邀请凭据不出现在 URL 查询、日志、活动正文或截图；
-- [ ] 支持复制安全邀请、撤销和状态查看；
-- [ ] 接受邀请前重新认证并展示权限变化；
-- [ ] 接受幂等，重放、过期和已撤销邀请被拒绝；
-- [ ] 邀请被管理员撤权时立即停止后续接受；
-- [ ] 不把邀请等同于永久成员身份。
+- [x] 生成一次性、可过期、可撤销的邀请；
+- [x] 邀请绑定网络、角色、能力和使用次数；
+- [x] 邀请凭据不出现在 URL 查询、日志、活动正文或应用生成的截图内容中；
+- [x] 支持复制安全邀请、撤销和状态查看；
+- [x] 接受邀请前重新认证并展示权限变化；
+- [x] 接受幂等，重放、过期和已撤销邀请被拒绝；
+- [x] 邀请被管理员撤权时立即停止后续接受；
+- [x] 不把邀请等同于永久成员身份。
+
+GPUI 与 WebUI 已接通创建、列表、状态、撤销、预览和兑换六个邀请动作。创建成功后邀请码
+只在一次性签发卡中本地展示供复制，notice、列表、状态刷新、活动、URL 和 Debug 输出均不含
+明文码；创建卡本身可由用户主动截屏，这是复制凭据所必需的显式边界，应用不生成或持久化
+邀请截图。列表和状态操作绑定当前 invitation revision，预览会固定 invitation revision、
+preview digest 与 terms hash；兑换前展示角色、能力、File/数据面权限、Exit 义务、条款和近期
+重新认证要求，并明确这是普通成员关系而非永久身份。expired、revoked、exhausted 和永久成员
+状态均禁止确认。新增并通过 GPUI 测试
+`invitation_creation_shows_the_code_once_and_never_puts_it_in_the_notice`、
+`invitation_status_and_revoke_actions_pin_current_revisions`、
+`invitation_preview_prefills_pinned_redemption_fields_and_requires_terms`、
+`non_accepting_invitation_states_never_submit_redemption`。WebUI 邀请流程 7 个测试通过；
+`npm test -- --run`（121 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
+`node ../scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
+`cargo test -p fuckipv6-client --all-features`（lib 811 passed，3 ignored）、
+`cargo test -p fuckipv6-coordinator --lib signaling::invitations`（7 passed）和
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 均通过。
 
 **验收**：邀请可安全传递、审计和撤销；泄漏单个邀请不能越权加入其他网络。
 

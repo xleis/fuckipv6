@@ -2617,6 +2617,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_acceptance_rejects_forgery_expiry_revocation_replay_and_offline_index() {
+        let path = temp_path("join-security-matrix");
+        let transport = Arc::new(FakeTransport::default());
+        let manager = DiscoveryIndexManager::new(path, transport.clone());
+        let state = NodeStateStore::new();
+        let identity = Identity::generate().unwrap();
+        let profile = signed_network_profile(&identity);
+        let valid = signed_network_revision_from_profile(&identity, &profile, 2);
+        let network_id = valid.document.network_id.to_string();
+        let endpoint = NetworkEndpoint {
+            transport: DiscoveryTransport::Websocket,
+            host: "coordinator.home.example".into(),
+            port: 443,
+        };
+        let now = now_unix_ms();
+
+        let mut forged = valid.clone();
+        forged.document.purpose = "forged public purpose".into();
+        assert_eq!(
+            manager
+                .accept_join_record(&state, forged)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Signature
+        );
+
+        let expired_document = NetworkDiscoveryDocument::from_record_with_endpoints(
+            &profile,
+            3,
+            now.saturating_sub(100),
+            now.saturating_sub(1),
+            None,
+            vec![endpoint.clone()],
+        )
+        .unwrap();
+        let expired = NetworkDiscoveryRecord::sign(expired_document, &identity).unwrap();
+        assert_eq!(
+            manager
+                .accept_join_record(&state, expired)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Rejected
+        );
+
+        let revoked_document = NetworkDiscoveryDocument::from_record_with_endpoints(
+            &profile,
+            4,
+            now.saturating_sub(100),
+            now.saturating_add(NETWORK_DISCOVERY_VALIDITY_MS),
+            Some(now.saturating_sub(100)),
+            vec![endpoint],
+        )
+        .unwrap();
+        let revoked = NetworkDiscoveryRecord::sign(revoked_document, &identity).unwrap();
+        assert_eq!(
+            manager
+                .accept_join_record(&state, revoked)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Rejected
+        );
+
+        manager
+            .accept_join_record(&state, valid)
+            .await
+            .expect("first valid signed record");
+        let replay = signed_network_revision_from_profile(&identity, &profile, 1);
+        assert_eq!(
+            manager
+                .accept_join_record(&state, replay)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Rejected
+        );
+
+        *transport.fail_categories.lock().unwrap() =
+            vec![NodeDiscoveryIndexErrorCategory::Offline; INDEX_MAX_ATTEMPTS];
+        assert_eq!(
+            manager
+                .refresh(&state, Some("https://index.example"))
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Offline
+        );
+        let snapshot = state.snapshot().await;
+        assert_eq!(
+            snapshot.discovery_index.state,
+            NodeDiscoveryIndexState::Degraded
+        );
+        assert!(snapshot.discovery_index.records.iter().any(|record| record
+            .record
+            .document
+            .network_id
+            .to_string()
+            == network_id));
+        assert!(!snapshot.discovery_index.data_plane_affected);
+    }
+
+    #[tokio::test]
     async fn join_confirmation_rejects_revision_race_after_preview() {
         let path = temp_path("join-confirm-revision-race");
         let manager = DiscoveryIndexManager::new(path, Arc::new(FakeTransport::default()));

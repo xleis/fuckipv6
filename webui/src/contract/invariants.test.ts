@@ -10,6 +10,7 @@ import type {
   NodeCommandOutcome,
   NodeOperationSnapshot,
   NodeSnapshot,
+  NetworkMemberDirectory,
   NodeUiManifest,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
@@ -809,6 +810,107 @@ describe("node UI contract invariants", () => {
         46,
       ),
     ).toThrow("owner session invalidation flag invalid");
+  });
+
+  it("builds and strictly validates the authoritative member directory", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "list_network_members")!;
+    const networkId = "net_stable_home";
+    expect(buildCommand(action, { network_id: networkId }, "en")).toEqual({
+      command: "list_network_members",
+      payload: { network_id: networkId },
+    });
+
+    const outcome = {
+      status: "network_members" as const,
+      data: {
+        network_id: networkId,
+        generated_at_unix_ms: 1_700_000_100_000,
+        members: [
+          {
+            node_id: "node-owner",
+            display_name: "Owner",
+            identity_fingerprint:
+              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            role: "owner" as const,
+            groups: ["owner" as const],
+            capabilities: null,
+            status: "approved" as const,
+            presence: {
+              state: "unknown" as const,
+              source: "not_observed" as const,
+              observed_at_unix_ms: null,
+            },
+            joined_at_unix_ms: 1_700_000_000_000,
+          },
+          {
+            node_id: "node-member",
+            role: "member" as const,
+            groups: ["member" as const],
+            capabilities: ["file" as const, "relay" as const],
+            status: "active" as const,
+            presence: {
+              state: "online" as const,
+              source: "live_session" as const,
+              observed_at_unix_ms: 1_700_000_090_000,
+            },
+          },
+        ],
+      },
+    } satisfies NodeCommandOutcome;
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 47,
+          server_time: "2026-11-01T00:00:00Z",
+          result: { request_id: 47, outcome },
+        },
+        47,
+      ),
+    ).toEqual(outcome);
+    expect(outcomeSummary(outcome, "zh-CN")).toBe(
+      "translated:outcome.network_members_loaded",
+    );
+
+    const duplicate = structuredClone(outcome) as unknown as {
+      data: NetworkMemberDirectory;
+    };
+    duplicate.data.members.push({ ...duplicate.data.members[1] });
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 48,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 48,
+            outcome: duplicate as unknown as NodeCommandOutcome,
+          },
+        },
+        48,
+      ),
+    ).toThrow("duplicate member node id: node-member");
+
+    const inconsistent = structuredClone(outcome) as unknown as {
+      data: NetworkMemberDirectory;
+    };
+    inconsistent.data.members[0].presence.state = "offline";
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 49,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 49,
+            outcome: inconsistent as unknown as NodeCommandOutcome,
+          },
+        },
+        49,
+      ),
+    ).toThrow("member 0 offline presence is inconsistent");
   });
 
   it("uses the shared canonical reason for unsupported exit-node actions", () => {

@@ -433,9 +433,123 @@ pub struct JoinRequest {
     pub decided_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub information_request: Option<String>,
+    /// Exact admission time. `decided_at_unix_ms` is shared by rejection,
+    /// withdrawal and expiry and therefore can never be used as join time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at_unix_ms: Option<u64>,
 }
 
 pub const JOIN_REQUEST_SCHEMA_VERSION: u16 = 1;
+
+/// Authoritative, sanitized member status shown by governance surfaces.
+///
+/// This is deliberately distinct from [`MembershipState`], which tracks the
+/// local node's connection workflow. In particular, an approved roster member
+/// is not reported as active until a live data-plane session observes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMemberStatus {
+    Pending,
+    Approved,
+    Active,
+    Degraded,
+    Suspended,
+    Exited,
+    Removed,
+    Expired,
+}
+
+/// Current system groups. Custom and dynamic groups are introduced separately;
+/// role-derived groups here are never inferred from a client-owned label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMemberGroup {
+    Owner,
+    Administrator,
+    Member,
+}
+
+/// Three-state presence. Unknown means the Coordinator has never observed the
+/// member's data-plane session and must never be presented as offline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMemberOnlineState {
+    Online,
+    Offline,
+    Unknown,
+}
+
+/// Why presence has its current value. The timestamp lets both UIs display the
+/// observation's freshness without inventing a client-side observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMemberObservationSource {
+    LiveSession,
+    DisconnectObserved,
+    NotObserved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkMemberPresence {
+    pub state: NetworkMemberOnlineState,
+    pub source: NetworkMemberObservationSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_unix_ms: Option<u64>,
+}
+
+impl NetworkMemberPresence {
+    pub fn unknown() -> Self {
+        Self {
+            state: NetworkMemberOnlineState::Unknown,
+            source: NetworkMemberObservationSource::NotObserved,
+            observed_at_unix_ms: None,
+        }
+    }
+
+    pub fn live(observed_at_unix_ms: u64) -> Self {
+        Self {
+            state: NetworkMemberOnlineState::Online,
+            source: NetworkMemberObservationSource::LiveSession,
+            observed_at_unix_ms: Some(observed_at_unix_ms),
+        }
+    }
+
+    pub fn disconnected(observed_at_unix_ms: u64) -> Self {
+        Self {
+            state: NetworkMemberOnlineState::Offline,
+            source: NetworkMemberObservationSource::DisconnectObserved,
+            observed_at_unix_ms: Some(observed_at_unix_ms),
+        }
+    }
+}
+
+/// One sanitized directory row. Fields that are not authorized or not known are
+/// omitted rather than populated from unrelated network-wide declarations.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkMember {
+    pub node_id: NodeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_fingerprint: Option<String>,
+    pub role: MembershipRole,
+    pub groups: Vec<NetworkMemberGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<CapabilityKind>>,
+    pub status: NetworkMemberStatus,
+    pub presence: NetworkMemberPresence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined_at_unix_ms: Option<u64>,
+}
+
+/// Server-owned snapshot. A directory never carries endpoints, invitation
+/// material, approval prose, public-key bytes or transfer metadata.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkMemberDirectory {
+    pub network_id: NetworkId,
+    pub generated_at_unix_ms: u64,
+    pub members: Vec<NetworkMember>,
+}
 
 impl std::fmt::Debug for JoinRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -461,6 +575,7 @@ impl std::fmt::Debug for JoinRequest {
                 "information_request",
                 &self.information_request.as_ref().map(|_| "[redacted]"),
             )
+            .field("approved_at_unix_ms", &self.approved_at_unix_ms)
             .finish()
     }
 }
@@ -495,6 +610,7 @@ impl JoinRequest {
             reviewer_node_id: None,
             decided_at_unix_ms: None,
             information_request: None,
+            approved_at_unix_ms: None,
         };
         request.validate()?;
         Ok(request)
@@ -562,6 +678,9 @@ impl JoinRequest {
             note.clone()
                 .expect("request-information transition validated a note")
         });
+        if target == JoinRequestState::Approved {
+            self.approved_at_unix_ms = Some(now_unix_ms);
+        }
         if target.is_terminal() {
             self.decided_at_unix_ms = Some(now_unix_ms);
             self.reason_retention_until_unix_ms =
@@ -700,6 +819,19 @@ impl JoinRequest {
             return Err(DomainError::invariant(
                 "terminal join request is missing its decision retention deadline",
             ));
+        }
+        match (self.state, self.approved_at_unix_ms) {
+            (JoinRequestState::Approved, None) => {
+                return Err(DomainError::invariant(
+                    "approved join request is missing its admission time",
+                ));
+            }
+            (state, Some(_)) if state != JoinRequestState::Approved => {
+                return Err(DomainError::invariant(
+                    "non-approved join request cannot carry an admission time",
+                ));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1429,6 +1561,57 @@ mod tests {
         let expires_at = expired.expires_at_unix_ms;
         assert!(expired.expire_if_due(expires_at).unwrap());
         assert_terminal_reason_retention(expired);
+    }
+
+    #[test]
+    fn only_approval_records_the_exact_admission_time() {
+        let mut approved = join_request(100);
+        approved
+            .review(
+                1,
+                JoinRequestReviewAction::Approve,
+                applicant("admin"),
+                None,
+                110,
+            )
+            .unwrap();
+        assert_eq!(approved.approved_at_unix_ms, Some(110));
+        approved.validate().unwrap();
+
+        let mut rejected = join_request(100);
+        rejected
+            .review(
+                1,
+                JoinRequestReviewAction::Reject,
+                applicant("admin"),
+                Some("Does not meet policy".into()),
+                111,
+            )
+            .unwrap();
+        assert!(rejected.approved_at_unix_ms.is_none());
+
+        let mut withdrawn = join_request(100);
+        withdrawn.withdraw(&applicant("applicant"), 112).unwrap();
+        assert!(withdrawn.approved_at_unix_ms.is_none());
+
+        let mut expired = join_request(100);
+        let expires_at = expired.expires_at_unix_ms;
+        assert!(expired.expire_if_due(expires_at).unwrap());
+        assert!(expired.approved_at_unix_ms.is_none());
+
+        let mut missing_admission_time = approved.clone();
+        missing_admission_time.approved_at_unix_ms = None;
+        assert_eq!(
+            missing_admission_time.validate().unwrap_err().code(),
+            "domain.invariant_violation"
+        );
+
+        let mut misplaced_admission_time = rejected;
+        misplaced_admission_time.approved_at_unix_ms = Some(112);
+        assert_eq!(
+            misplaced_admission_time.validate().unwrap_err().code(),
+            "domain.invariant_violation"
+        );
     }
 
     #[test]

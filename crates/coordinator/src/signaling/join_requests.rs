@@ -185,6 +185,45 @@ impl JoinRequestStore {
         })
     }
 
+    /// Internal projection used to assemble the sanitized member directory.
+    /// Ordinary members may see approved metadata for the roster, but pending
+    /// requests remain limited to their own; reviewers see the full network.
+    pub(crate) fn member_directory_requests(
+        &self,
+        network_id: &NetworkId,
+        actor: &NodeId,
+        now_unix_ms: u64,
+    ) -> Result<Vec<JoinRequest>> {
+        self.repair_roster_projection(network_id)?;
+        let record = self.load_network_record_locked(network_id)?;
+        let reviewer = record.owner == *actor || record.administrators.contains(actor);
+        let member = record.members.contains(actor);
+        if !reviewer && !member {
+            bail!("member_directory.error.permission_denied");
+        }
+        self.transaction(|file, _| {
+            file.expire_and_scrub(now_unix_ms)?;
+            let mut requests = file
+                .requests
+                .values()
+                .filter(|request| {
+                    request.network_id == *network_id
+                        && (reviewer
+                            || request.applicant.node_id == *actor
+                            || (member && request.state == JoinRequestState::Approved))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            requests.sort_by(|left, right| {
+                right
+                    .updated_at_unix_ms
+                    .cmp(&left.updated_at_unix_ms)
+                    .then_with(|| left.request_id.cmp(&right.request_id))
+            });
+            Ok(requests)
+        })
+    }
+
     /// Reviewers see every request for the network. Other authenticated nodes
     /// only see their own request; no unfiltered list is ever returned.
     pub fn list(
@@ -459,6 +498,16 @@ impl JoinRequestStore {
         })();
         let _ = FileExt::unlock(&lock);
         result
+    }
+
+    /// Fail closed when no trusted roster is configured. Member directories
+    /// must never synthesize a roster from fallback owner configuration.
+    pub(crate) fn member_directory_network(
+        &self,
+        expected_network_id: &NetworkId,
+    ) -> Result<NetworkRecord> {
+        self.repair_roster_projection(expected_network_id)?;
+        self.load_network_record_locked(expected_network_id)
     }
 
     fn load_network_record_locked(&self, expected_network_id: &NetworkId) -> Result<NetworkRecord> {
@@ -945,6 +994,90 @@ mod tests {
                 .filter(|member| **member == applicant_id)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn member_directory_requests_hide_other_applicants_from_ordinary_members() {
+        let dir = test_dir("member-directory-visibility");
+        let ordinary = applicant("ordinary-member");
+        let mut record = network_record(owner(), vec![admin()]);
+        record.members.push(ordinary.clone());
+        record.validate().unwrap();
+        write_network_record(&dir, &record);
+        let store = JoinRequestStore::new(
+            dir.join("join_requests.json"),
+            Some(dir.join("network.json")),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+
+        let approved_seed = "approved-applicant";
+        let approved_id = applicant(approved_seed);
+        let approved = request(approved_seed, "approved", 1_000);
+        store
+            .submit(
+                &network_id(),
+                &approved_id,
+                approved_seed.as_bytes(),
+                approved.clone(),
+                1_001,
+            )
+            .unwrap();
+        store
+            .review(
+                &network_id(),
+                &admin(),
+                vec![JoinRequestBatchReviewItem {
+                    request_id: approved.request_id.clone(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+                1_002,
+            )
+            .unwrap();
+
+        let pending_seed = "pending-applicant";
+        let pending_id = applicant(pending_seed);
+        let pending = request(pending_seed, "pending", 1_003);
+        store
+            .submit(
+                &network_id(),
+                &pending_id,
+                pending_seed.as_bytes(),
+                pending.clone(),
+                1_004,
+            )
+            .unwrap();
+
+        let member_view = store
+            .member_directory_requests(&network_id(), &ordinary, 1_005)
+            .unwrap();
+        assert!(member_view
+            .iter()
+            .any(|request| request.request_id == approved.request_id));
+        assert!(!member_view
+            .iter()
+            .any(|request| request.request_id == pending.request_id));
+
+        let reviewer_view = store
+            .member_directory_requests(&network_id(), &admin(), 1_005)
+            .unwrap();
+        assert!(reviewer_view
+            .iter()
+            .any(|request| request.request_id == approved.request_id));
+        assert!(reviewer_view
+            .iter()
+            .any(|request| request.request_id == pending.request_id));
+
+        let error = store
+            .member_directory_requests(&network_id(), &applicant("outsider"), 1_005)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "member_directory.error.permission_denied"
         );
     }
 

@@ -510,6 +510,38 @@ impl InvitationStore {
         })
     }
 
+    /// Return only the sanitized redemption projection needed to badge an
+    /// authoritative member directory. Invitation digests, codes and ticket
+    /// material are never exposed outside the private ledger.
+    pub(crate) fn member_directory_redemptions(
+        &self,
+        network_id: &NetworkId,
+        actor: &NodeId,
+    ) -> Result<Vec<InvitationRedemption>> {
+        let record = self.load_network_record(network_id)?;
+        let is_member = record.members.contains(actor);
+        let is_reviewer = record.owner == *actor || record.administrators.contains(actor);
+        if !is_member && !is_reviewer {
+            bail!("invitation.error.permission_denied");
+        }
+        self.with_file_lock(|file| {
+            let mut redemptions = file
+                .redemptions
+                .values()
+                .flat_map(|entries| entries.values())
+                .filter(|redemption| redemption.network_id == *network_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            redemptions.sort_by(|left, right| {
+                right
+                    .joined_at_unix_ms
+                    .cmp(&left.joined_at_unix_ms)
+                    .then_with(|| left.node_id.cmp(&right.node_id))
+            });
+            Ok(redemptions)
+        })
+    }
+
     pub fn notification_recipients(
         &self,
         network_id: &NetworkId,
@@ -994,6 +1026,39 @@ mod tests {
         let listed = store.list(&network_id(), &owner(), NOW + 4).unwrap();
         assert_eq!(listed[0].invitation.used_count, 1);
         assert_eq!(listed[0].remaining_uses, 1);
+    }
+
+    #[test]
+    fn member_directory_redemptions_are_permission_filtered_and_never_expose_ticket_material() {
+        let dir = test_dir("member-directory-redemptions");
+        write_network_record(&dir, &network_record(vec![admin()]));
+        let store = open_store(&dir);
+        let issued = store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        let plaintext = issued.code.as_str().to_owned();
+        let invitee_node = invitee("redemption-member");
+        let preview = store
+            .preview(&network_id(), &invitee_node, &issued.code, NOW + 1)
+            .unwrap();
+        let request = redemption_request(&issued, &preview, NOW + 1);
+        let digest = request.preview_digest.clone();
+        store.redeem(request, &invitee_node, NOW + 2).unwrap();
+
+        let redemptions = store
+            .member_directory_redemptions(&network_id(), &admin())
+            .unwrap();
+        assert_eq!(redemptions.len(), 1);
+        assert_eq!(redemptions[0].node_id, invitee_node);
+        let encoded = serde_json::to_string(&redemptions).unwrap();
+        assert!(!encoded.contains(&plaintext));
+        assert!(!encoded.contains(digest.as_str()));
+        assert!(!encoded.contains("fkinv_"));
+
+        let error = store
+            .member_directory_redemptions(&network_id(), &invitee("outsider"))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "invitation.error.permission_denied");
     }
 
     #[test]

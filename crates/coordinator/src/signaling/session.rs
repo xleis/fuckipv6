@@ -1,12 +1,12 @@
 use anyhow::{anyhow, bail, Context, Result};
-use fuckipv6_common::domain::{NetworkRecord, NodeId};
+use fuckipv6_common::domain::{NetworkMemberPresence, NetworkRecord, NodeId};
 use fuckipv6_common::{
-    codec, BlacklistConfig, ClientId, NatType, NetworkAllocation, NetworkMode, PeerInfo,
+    codec, BlacklistConfig, ClientId, Identity, NatType, NetworkAllocation, NetworkMode, PeerInfo,
     QuicClientCertificateAuthorizer, SignalingMessage, VirtualIps,
 };
 use serde::Serialize;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +39,7 @@ pub struct SessionManager {
     registration_authorization_gate: Arc<RwLock<()>>,
     certificate_allowlist: Arc<StdRwLock<HashMap<ClientId, [u8; 32]>>>,
     data_plane_membership: Arc<StdRwLock<Option<Arc<DataPlaneMembershipAuthority>>>>,
+    member_observations: Arc<StdRwLock<HashMap<NodeId, NetworkMemberPresence>>>,
 }
 
 /// Data-plane authorization always re-reads the authoritative roster. A
@@ -328,6 +329,15 @@ fn refresh_session(session: &mut ClientSession, input: RegistrationInput) {
     session.last_heartbeat = input.now;
 }
 
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn build_client_session(input: &RegistrationInput, virtual_ips: VirtualIps) -> ClientSession {
     let virtual_ip = virtual_ips.primary_ipv6();
     let peer_info = PeerInfo {
@@ -364,6 +374,7 @@ impl SessionManager {
             registration_authorization_gate: Arc::new(RwLock::new(())),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
             data_plane_membership: Arc::new(StdRwLock::new(None)),
+            member_observations: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
 
@@ -391,6 +402,7 @@ impl SessionManager {
             registration_authorization_gate: Arc::new(RwLock::new(())),
             certificate_allowlist: Arc::new(StdRwLock::new(HashMap::new())),
             data_plane_membership: Arc::new(StdRwLock::new(None)),
+            member_observations: Arc::new(StdRwLock::new(HashMap::new())),
         })
     }
 
@@ -885,6 +897,10 @@ impl SessionManager {
             &result.peer_info.client_id,
             &result.peer_info.public_key,
         );
+        let node_id = NodeId::from_public_key(&result.peer_info.public_key);
+        if let Ok(mut observations) = self.member_observations.write() {
+            observations.remove(&node_id);
+        }
 
         if result.is_reconnect {
             tracing::info!(
@@ -980,6 +996,13 @@ impl SessionManager {
 
         if let Some(session) = session_opt {
             let was_data_plane_member = self.session_is_data_plane_member(&session);
+            if was_data_plane_member {
+                let node_id = NodeId::from_public_key(&session.peer_info.public_key);
+                if let Ok(mut observations) = self.member_observations.write() {
+                    observations
+                        .insert(node_id, NetworkMemberPresence::disconnected(unix_time_ms()));
+                }
+            }
             self.revoke_client_certificate_authorization(client_id);
             // 释放IP
             tracing::debug!("获取 ip_allocator write 锁...");
@@ -1037,10 +1060,54 @@ impl SessionManager {
             .collect()
     }
 
-    /// Return only peers that are currently on the authoritative data-plane
-    /// roster. Pending, rejected, withdrawn and expired applicants may keep a
-    /// signalling session for approval messages but must never receive the
-    /// member topology.
+    /// Sanitized fingerprints derived from currently live data-plane
+    /// sessions. Pending, rejected, withdrawn and expired applicants may keep a
+    /// signalling session for approval messages but must never enter this map.
+    /// Public-key bytes never leave this method.
+    pub(crate) async fn member_identity_fingerprints(&self) -> BTreeMap<NodeId, String> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .filter(|session| self.session_is_data_plane_member(session))
+            .map(|session| {
+                (
+                    NodeId::from_public_key(&session.peer_info.public_key),
+                    Identity::public_key_fingerprint(&session.peer_info.public_key),
+                )
+            })
+            .collect()
+    }
+
+    /// Presence observations for the member directory. A disconnect is only
+    /// recorded for a session that belonged to the current authoritative
+    /// roster; approvals alone never create a presence claim.
+    pub(crate) async fn member_presence(
+        &self,
+        now_unix_ms: u64,
+    ) -> BTreeMap<NodeId, NetworkMemberPresence> {
+        let mut observations: BTreeMap<NodeId, NetworkMemberPresence> = self
+            .member_observations
+            .read()
+            .map(|observations| {
+                observations
+                    .iter()
+                    .map(|(node, presence)| (node.clone(), presence.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sessions = self.sessions.read().await;
+        for session in sessions
+            .values()
+            .filter(|session| self.session_is_data_plane_member(session))
+        {
+            observations.insert(
+                NodeId::from_public_key(&session.peer_info.public_key),
+                NetworkMemberPresence::live(now_unix_ms),
+            );
+        }
+        observations
+    }
+
     pub async fn get_data_plane_peers(&self) -> Vec<PeerInfo> {
         self.sessions
             .read()
@@ -2781,6 +2848,134 @@ mod tests {
         manager
             .unregister_client(&applicant_identity.client_id().to_string())
             .await;
+        manager
+            .unregister_client(&owner_identity.client_id().to_string())
+            .await;
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn member_presence_is_observed_only_for_authoritative_roster_sessions() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("fuckipv6-session-presence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let record_path = dir.join("network.json");
+
+        let owner_identity = Identity::generate()?;
+        let applicant_identity = Identity::generate()?;
+        let owner_id = NodeId::from_public_key(&owner_identity.public_key());
+        let record = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "Presence".into(),
+                purpose: "Presence observations".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: vec![CapabilityKind::File],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::ApprovalRequired,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
+            },
+            PublicKey::from_bytes([43; 32]),
+            owner_id.clone(),
+            1_000,
+        )?;
+        write_membership_record(&record_path, &record);
+
+        let manager = SessionManager::new("fd00::1000/120")?;
+        manager.attach_data_plane_membership(&record_path)?;
+        assert!(manager.member_presence(2_000).await.is_empty());
+
+        let (owner_tx, _owner_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                owner_identity.client_id().to_string(),
+                owner_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41100),
+                51820,
+                NatType::Open,
+                owner_tx,
+            )
+            .await?;
+        let (applicant_tx, _applicant_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                applicant_identity.client_id().to_string(),
+                applicant_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41101),
+                51821,
+                NatType::Open,
+                applicant_tx,
+            )
+            .await?;
+
+        let presence = manager.member_presence(3_000).await;
+        assert_eq!(presence.len(), 1);
+        assert_eq!(
+            presence[&owner_id].state,
+            fuckipv6_common::domain::NetworkMemberOnlineState::Online
+        );
+        assert_eq!(
+            presence[&owner_id].source,
+            fuckipv6_common::domain::NetworkMemberObservationSource::LiveSession
+        );
+        assert_eq!(presence[&owner_id].observed_at_unix_ms, Some(3_000));
+        assert!(manager
+            .member_identity_fingerprints()
+            .await
+            .contains_key(&owner_id));
+        assert!(!manager
+            .member_identity_fingerprints()
+            .await
+            .contains_key(&NodeId::from_public_key(&applicant_identity.public_key())));
+
+        manager
+            .unregister_client(&applicant_identity.client_id().to_string())
+            .await;
+        assert_eq!(
+            manager.member_presence(4_000).await.len(),
+            1,
+            "a pending applicant disconnect must not create an offline observation"
+        );
+
+        manager
+            .unregister_client(&owner_identity.client_id().to_string())
+            .await;
+        let presence = manager.member_presence(5_000).await;
+        assert_eq!(
+            presence[&owner_id].state,
+            fuckipv6_common::domain::NetworkMemberOnlineState::Offline
+        );
+        assert_eq!(
+            presence[&owner_id].source,
+            fuckipv6_common::domain::NetworkMemberObservationSource::DisconnectObserved
+        );
+
+        let (reconnected_tx, _reconnected_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                owner_identity.client_id().to_string(),
+                owner_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41102),
+                51822,
+                NatType::Open,
+                reconnected_tx,
+            )
+            .await?;
+        let presence = manager.member_presence(6_000).await;
+        assert_eq!(
+            presence[&owner_id].state,
+            fuckipv6_common::domain::NetworkMemberOnlineState::Online
+        );
+        assert_eq!(
+            presence[&owner_id].source,
+            fuckipv6_common::domain::NetworkMemberObservationSource::LiveSession
+        );
+
         manager
             .unregister_client(&owner_identity.client_id().to_string())
             .await;

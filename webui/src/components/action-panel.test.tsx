@@ -8,6 +8,7 @@ import type {
   InvitationStatusView,
   IssuedInvitation,
   JoinRequest,
+  NetworkMemberDirectory,
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeCommandOutcome,
@@ -48,6 +49,9 @@ const leaveNetwork = manifest.pages
 const listJoinRequests = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "list_join_requests") as NodeUiAction;
+const listNetworkMembers = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "list_network_members") as NodeUiAction;
 const reviewJoinRequest = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "review_join_request") as NodeUiAction;
@@ -83,6 +87,27 @@ const joinRequestReviewActions = [
 const currentFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const nextFingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+const memberDirectory: NetworkMemberDirectory = {
+  network_id: "net_stable_home",
+  generated_at_unix_ms: 1_700_000_100_000,
+  members: [
+    {
+      node_id: "node-000",
+      display_name: "Alpha owner",
+      identity_fingerprint: currentFingerprint,
+      role: "owner",
+      groups: ["owner"],
+      capabilities: ["coordinator", "file"],
+      status: "active",
+      presence: {
+        state: "online",
+        source: "live_session",
+        observed_at_unix_ms: 1_700_000_095_000,
+      },
+      joined_at_unix_ms: 1_700_000_000_000,
+    },
+  ],
+};
 const identitySnapshot: NodeSnapshot = {
   ...snapshot,
   identity: {
@@ -2216,5 +2241,167 @@ describe("action panel join request review list", () => {
     expect(
       screen.queryByTestId("join-request-selection-bar"),
     ).not.toBeInTheDocument();
+  });
+});
+
+
+describe("action panel network member directory", () => {
+  it("keeps the action expanded and renders the authoritative member directory", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: {
+        status: "network_members",
+        data: memberDirectory,
+      },
+    }));
+    render(
+      <ActionPanel
+        actions={[listNetworkMembers]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const actionHead = screen.getByRole("button", {
+      name: "translated:action.list_network_members",
+    });
+    await user.click(actionHead);
+    await user.type(
+      screen.getByLabelText("translated:field.network_id"),
+      "net_stable_home",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    expect(
+      await screen.findByText("translated:member_directory.title"),
+    ).toBeInTheDocument();
+    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getAllByText("translated:member_directory.privacy_boundary"),
+    ).toHaveLength(2);
+  });
+
+  it("shows the explicit permission boundary and no member data when rejected", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={[listNetworkMembers]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: {
+            status: "rejected",
+            data: {
+              category: "authorization",
+              code: "permission_denied",
+              message: "permission denied",
+              message_key: "member_directory.error.permission_denied",
+              retryable: false,
+            },
+          } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_network_members",
+      }),
+    );
+    await user.type(
+      screen.getByLabelText("translated:field.network_id"),
+      "net_stable_home",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "translated:member_directory.error.permission_denied",
+    );
+    expect(
+      screen.queryByText("translated:member_directory.title"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("member-list")).not.toBeInTheDocument();
+  });
+
+  it("clears a previously loaded directory when the network changes", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: {
+        status: "network_members",
+        data: memberDirectory,
+      },
+    }));
+    const view = render(
+      <ActionPanel
+        actions={[listNetworkMembers]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.list_network_members",
+      }),
+    );
+    await user.type(
+      screen.getByLabelText("translated:field.network_id"),
+      "net_stable_home",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    expect(
+      await screen.findByText("translated:member_directory.title"),
+    ).toBeInTheDocument();
+
+    view.rerender(
+      <ActionPanel
+        actions={[listNetworkMembers]}
+        snapshot={snapshot}
+        selectedNetwork="studio"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("translated:member_directory.title"),
+      ).not.toBeInTheDocument();
+    });
   });
 });

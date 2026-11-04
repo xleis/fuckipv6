@@ -860,6 +860,23 @@
           "type": "object"
         },
         {
+          "description": "Read the Coordinator-authoritative, privacy-filtered member directory.",
+          "properties": {
+            "command": {
+              "const": "list_network_members",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkMembersCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Apply one revision-checked approval decision.",
           "properties": {
             "command": {
@@ -1714,6 +1731,17 @@
       "required": [
         "network_name",
         "index_url"
+      ],
+      "type": "object"
+    },
+    "NodeNetworkMembersCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id"
       ],
       "type": "object"
     },

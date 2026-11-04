@@ -6,9 +6,11 @@ use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
     CapabilityKind, ExitContributionObligation, IdempotencyKey, InvitationPreview, InvitationState,
     InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MembershipRole, NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview,
-    NetworkProfileProjections, NetworkProfileWarningCode, NetworkPublicProfileDocument,
-    NetworkVisibility, OperationError, OperationState, JOIN_REQUEST_MAX_REASON_CHARS,
+    MembershipRole, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+    NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
+    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
+    OperationState, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -20,9 +22,9 @@ use fuckipv6_common::ui_layout::{
     LayoutClass, NavigationModule,
 };
 use gpui::{
-    actions, div, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context, Div, Entity,
-    FocusHandle, KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window, WindowBounds,
-    WindowOptions,
+    actions, div, prelude::*, px, rgba, size, uniform_list, App, Bounds, ClipboardItem, Context,
+    Div, Entity, FocusHandle, KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_base::input::{InputEvent, Textarea, TextareaState};
 
@@ -37,8 +39,10 @@ use super::configuration_workflow::{
 use super::path_picker::{pick_paths, PathPickerMode};
 use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
-    action_block_reason, build_command, build_page_model, default_form_values, network_status_key,
-    search_node_snapshot, validate_manifest_bindings, ActionBinding, OverviewModel, PageKind,
+    action_block_reason, build_command, build_page_model, default_form_values,
+    filter_network_members, network_membership_id, network_status_key, retain_member_selection,
+    search_node_snapshot, sort_network_members, validate_manifest_bindings, ActionBinding,
+    MemberCapabilityFilter, MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind,
     RowModel, RowNavigation, SearchResult, SectionModel,
 };
 use crate::config_manager::ConfigManager;
@@ -253,6 +257,9 @@ struct GpuiShell {
     recent_network_profile_updated: Option<NetworkProfileApplyResult>,
     recent_network_join_preview: Option<NodeNetworkJoinPreview>,
     recent_join_requests: Option<NodeJoinRequestListResult>,
+    recent_network_members: Option<NetworkMemberDirectory>,
+    selected_member_node_id: Option<String>,
+    member_directory_filters: MemberDirectoryFilters,
     join_request_selection: BTreeSet<String>,
     network_join_terms_confirmed: bool,
     network_join_exit_contribution_confirmed: bool,
@@ -329,6 +336,9 @@ impl GpuiShell {
             recent_network_profile_updated: None,
             recent_network_join_preview: None,
             recent_join_requests: None,
+            recent_network_members: None,
+            selected_member_node_id: None,
+            member_directory_filters: MemberDirectoryFilters::default(),
             join_request_selection: BTreeSet::new(),
             network_join_terms_confirmed: false,
             network_join_exit_contribution_confirmed: false,
@@ -783,6 +793,10 @@ impl GpuiShell {
             }
         }
 
+        if action_id == "list_network_members" {
+            self.recent_network_members = None;
+            self.selected_member_node_id = None;
+        }
         let values = self.form_values.clone();
         match build_command(&action, &values) {
             Ok(command) => self.submit_raw(command, cx),
@@ -1264,6 +1278,20 @@ impl GpuiShell {
                     })
                 });
                 self.recent_join_requests = Some(result);
+            }
+            NodeCommandOutcome::NetworkMembers(directory) => {
+                let directory = *directory;
+                let count = directory.members.len();
+                self.selected_member_node_id = retain_member_selection(
+                    self.selected_member_node_id.as_deref(),
+                    &directory.members,
+                );
+                self.recent_network_members = Some(directory);
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.network_members_loaded",
+                    &[("count", &count.to_string())],
+                ));
             }
             NodeCommandOutcome::JoinRequestsReviewed(result) => {
                 self.apply_join_request_review_ack(&result);
@@ -2831,11 +2859,27 @@ impl GpuiShell {
         cx.notify();
     }
 
+    fn open_network_members(
+        &mut self,
+        network_name: String,
+        network_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_network_context(network_name, cx);
+        self.set_field_value("list_network_members", "network_id", network_id);
+        self.sync_text_inputs(cx);
+        self.recent_network_members = None;
+        self.selected_member_node_id = None;
+        self.open_action("networks", "list_network_members", cx);
+    }
+
     fn select_network_context(&mut self, network_name: String, cx: &mut Context<Self>) {
         self.selected_network = Some(network_name.clone());
         self.network_actions_open = None;
         self.recent_join_requests = None;
         self.join_request_selection.clear();
+        self.recent_network_members = None;
+        self.selected_member_node_id = None;
         self.recent_issued_invitation = None;
         self.recent_invitations = None;
         self.recent_invitation_status = None;
@@ -5441,7 +5485,30 @@ impl GpuiShell {
                     let peers_name = network_name.clone();
                     let routing_name = network_name.clone();
                     let traffic_name = network_name.clone();
+                    let members_name = network_name.clone();
                     let leave_name = network_name.clone();
+                    let members_network_id =
+                        network_membership_id(&self.snapshot, network_name).map(str::to_string);
+                    let members_action = members_network_id.map(|network_id| {
+                        button(
+                            SharedString::from(format!("joined-network-members-{}", network_name)),
+                            t(self.locale, "action.list_network_members").to_string(),
+                            ButtonVariant::Ghost,
+                            false,
+                        )
+                        .debug_selector({
+                            let network_name = network_name.clone();
+                            move || format!("visual-discovery-joined-members-{network_name}")
+                        })
+                        .w_full()
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.open_network_members(
+                                members_name.clone(),
+                                network_id.clone(),
+                                cx,
+                            );
+                        }))
+                    });
                     card = card.child(
                         div()
                             .debug_selector(move || {
@@ -5534,6 +5601,7 @@ impl GpuiShell {
                                     },
                                 )),
                             )
+                            .children(members_action)
                             .child(div().h(px(1.0)).mx_2().my_1().bg(rgba(COLOR_BORDER)))
                             .child(
                                 button(
@@ -6476,6 +6544,10 @@ impl GpuiShell {
             .flatten()
             .cloned()
             .map(|result| self.join_requests_card(&result, cx));
+        let network_members_card = (action.id == "list_network_members")
+            .then_some(self.recent_network_members.as_ref())
+            .flatten()
+            .map(|directory| self.member_directory_card(directory, cx));
         let join_request_review_summary =
             guided_join_request_review.then(|| self.join_request_review_form_summary(&action.id));
         let issued_invitation_card = (action.id == "create_invitation")
@@ -6550,6 +6622,10 @@ impl GpuiShell {
                             .entry(toggle_action_id.clone())
                             .or_insert(false);
                         *expanded = !*expanded;
+                        if !*expanded && toggle_action_id == "list_network_members" {
+                            shell.recent_network_members = None;
+                            shell.selected_member_node_id = None;
+                        }
                         cx.notify();
                     }))
                     .child(action_label)
@@ -6565,6 +6641,9 @@ impl GpuiShell {
             );
             if let Some(requests_card) = join_requests_card {
                 body = body.child(requests_card);
+            }
+            if let Some(members_card) = network_members_card {
+                body = body.child(members_card);
             }
             if let Some(review_summary) = join_request_review_summary {
                 body = body.child(review_summary);
@@ -8232,6 +8311,579 @@ impl GpuiShell {
         card.into_any_element()
     }
 
+    fn member_directory_card(
+        &self,
+        directory: &NetworkMemberDirectory,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let filtered = filter_network_members(&directory.members, self.member_directory_filters);
+        let filtered_members = filtered
+            .iter()
+            .map(|member| (*member).clone())
+            .collect::<Vec<_>>();
+        let selected_member = self
+            .selected_member_node_id
+            .as_deref()
+            .and_then(|selected| {
+                filtered
+                    .iter()
+                    .copied()
+                    .find(|member| member.node_id.as_str() == selected)
+            });
+        let count = tr(
+            self.locale,
+            "member_directory.count",
+            &[("count", &format_integer(self.locale, filtered.len() as i64))],
+        );
+        let generated_at = format_diagnostic_timestamp(self.locale, directory.generated_at_unix_ms);
+
+        let filter_group = |title: SharedString, controls: Vec<gpui::AnyElement>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w(px(150.0))
+                .flex_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight(600.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(title),
+                )
+                .child(div().flex().flex_wrap().gap_2().children(controls))
+        };
+
+        let mut role_controls = Vec::new();
+        for (role, selected) in [
+            (None, self.member_directory_filters.role.is_none()),
+            (
+                Some(MembershipRole::Owner),
+                self.member_directory_filters.role == Some(MembershipRole::Owner),
+            ),
+            (
+                Some(MembershipRole::Administrator),
+                self.member_directory_filters.role == Some(MembershipRole::Administrator),
+            ),
+            (
+                Some(MembershipRole::Member),
+                self.member_directory_filters.role == Some(MembershipRole::Member),
+            ),
+        ] {
+            let label = role
+                .map(|role| t(self.locale, join_request_role_key(role)).to_string())
+                .unwrap_or_else(|| t(self.locale, "member_directory.filter.all").to_string());
+            let value = role.map(invitation_role_name).unwrap_or("all");
+            role_controls.push(
+                choice_control(
+                    SharedString::from(format!("member-filter-role-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.member_directory_filters.role = role;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut group_controls = Vec::new();
+        for (group, selected) in [
+            (None, self.member_directory_filters.group.is_none()),
+            (
+                Some(NetworkMemberGroup::Owner),
+                self.member_directory_filters.group == Some(NetworkMemberGroup::Owner),
+            ),
+            (
+                Some(NetworkMemberGroup::Administrator),
+                self.member_directory_filters.group == Some(NetworkMemberGroup::Administrator),
+            ),
+            (
+                Some(NetworkMemberGroup::Member),
+                self.member_directory_filters.group == Some(NetworkMemberGroup::Member),
+            ),
+        ] {
+            let label = group
+                .map(|group| t(self.locale, member_group_key(group)).to_string())
+                .unwrap_or_else(|| t(self.locale, "member_directory.filter.all").to_string());
+            let value = group.map(member_group_value).unwrap_or("all");
+            group_controls.push(
+                choice_control(
+                    SharedString::from(format!("member-filter-group-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.member_directory_filters.group = group;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut capability_controls = Vec::new();
+        let capability_options = [
+            (MemberCapabilityFilter::All, "all"),
+            (MemberCapabilityFilter::Unknown, "unknown"),
+            (
+                MemberCapabilityFilter::Known(CapabilityKind::Coordinator),
+                "coordinator",
+            ),
+            (
+                MemberCapabilityFilter::Known(CapabilityKind::Relay),
+                "relay",
+            ),
+            (MemberCapabilityFilter::Known(CapabilityKind::Exit), "exit"),
+            (MemberCapabilityFilter::Known(CapabilityKind::File), "file"),
+        ];
+        for (capability, value) in capability_options {
+            let label = match capability {
+                MemberCapabilityFilter::All => {
+                    t(self.locale, "member_directory.filter.all").to_string()
+                }
+                MemberCapabilityFilter::Unknown => t(self.locale, "common.unknown").to_string(),
+                MemberCapabilityFilter::Known(capability) => {
+                    t(self.locale, profile_capability_key(capability)).to_string()
+                }
+            };
+            capability_controls.push(
+                choice_control(
+                    SharedString::from(format!("member-filter-capability-{value}")),
+                    label,
+                    self.member_directory_filters.capability == capability,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.member_directory_filters.capability = capability;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut health_controls = Vec::new();
+        health_controls.push(
+            choice_control(
+                "member-filter-health-all".into(),
+                t(self.locale, "member_directory.filter.all").to_string(),
+                self.member_directory_filters.health == MemberHealthFilter::All,
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.member_directory_filters.health = MemberHealthFilter::All;
+                cx.notify();
+            }))
+            .into_any_element(),
+        );
+        for status in [
+            NetworkMemberStatus::Pending,
+            NetworkMemberStatus::Approved,
+            NetworkMemberStatus::Active,
+            NetworkMemberStatus::Degraded,
+            NetworkMemberStatus::Suspended,
+            NetworkMemberStatus::Exited,
+            NetworkMemberStatus::Removed,
+            NetworkMemberStatus::Expired,
+        ] {
+            let selected =
+                self.member_directory_filters.health == MemberHealthFilter::Status(status);
+            let label = tr(
+                self.locale,
+                "member_directory.filter.status",
+                &[("status", t(self.locale, member_status_key(status)))],
+            );
+            health_controls.push(
+                choice_control(
+                    SharedString::from(format!(
+                        "member-filter-health-status-{}",
+                        member_status_value(status)
+                    )),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.member_directory_filters.health = MemberHealthFilter::Status(status);
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+        for presence in [
+            NetworkMemberOnlineState::Online,
+            NetworkMemberOnlineState::Offline,
+            NetworkMemberOnlineState::Unknown,
+        ] {
+            let selected =
+                self.member_directory_filters.health == MemberHealthFilter::Presence(presence);
+            let label = tr(
+                self.locale,
+                "member_directory.filter.presence",
+                &[("presence", t(self.locale, member_presence_key(presence)))],
+            );
+            health_controls.push(
+                choice_control(
+                    SharedString::from(format!(
+                        "member-filter-health-presence-{}",
+                        member_presence_value(presence)
+                    )),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.member_directory_filters.health = MemberHealthFilter::Presence(presence);
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let export_button = button(
+            "member-directory-export".into(),
+            t(self.locale, "member_directory.export").to_string(),
+            ButtonVariant::Secondary,
+            filtered_members.is_empty(),
+        )
+        .debug_selector(|| "visual-member-directory-export".into())
+        .on_click(cx.listener(|shell, _, _, cx| shell.export_network_members(cx)));
+
+        let list_members = filtered_members.clone();
+        let list = if list_members.is_empty() {
+            empty_state(t(self.locale, "member_directory.empty"))
+                .debug_selector(|| "visual-member-directory-empty".into())
+                .into_any_element()
+        } else {
+            let selected_node_id = self.selected_member_node_id.clone();
+            let locale = self.locale;
+            uniform_list(
+                "network-member-list",
+                list_members.len(),
+                cx.processor(
+                    move |shell: &mut GpuiShell, range: std::ops::Range<usize>, _window, cx| {
+                        range
+                            .map(|index| {
+                                let member = &list_members[index];
+                                let node_id = member.node_id.as_str().to_string();
+                                let display_name = member_display_name(member);
+                                let role =
+                                    t(locale, join_request_role_key(member.role)).to_string();
+                                let status =
+                                    t(locale, member_status_key(member.status)).to_string();
+                                let presence =
+                                    t(locale, member_presence_key(member.presence.state))
+                                        .to_string();
+                                let groups = member_groups_text(locale, member);
+                                let selected = selected_node_id.as_deref()
+                                    == Some(node_id.as_str())
+                                    || shell.selected_member_node_id.as_deref()
+                                        == Some(node_id.as_str());
+                                let click_node_id = node_id.clone();
+                                div()
+                                    .id(SharedString::from(format!("network-member-row-{index}")))
+                                    .debug_selector(move || format!("visual-member-row-{index}"))
+                                    .when(index == 0, |row| {
+                                        row.debug_selector(|| "visual-member-first".into())
+                                    })
+                                    .role(Role::Button)
+                                    .aria_label(tr(
+                                        locale,
+                                        "member_directory.select_member",
+                                        &[("member", &display_name)],
+                                    ))
+                                    .focusable()
+                                    .tab_stop(true)
+                                    .h(px(64.0))
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .px_3()
+                                    .border_b_1()
+                                    .border_color(rgba(if selected {
+                                        COLOR_ACCENT
+                                    } else {
+                                        COLOR_BORDER
+                                    }))
+                                    .when(selected, |row| {
+                                        row.bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                                    })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.selected_member_node_id = Some(click_node_id.clone());
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight(600.0))
+                                                    .text_color(rgba(COLOR_TEXT))
+                                                    .child(display_name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .text_color(rgba(COLOR_MUTED))
+                                                    .child(format!("{node_id} · {groups}")),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .justify_end()
+                                            .gap_1()
+                                            .child(profile_status_chip(role))
+                                            .child(profile_status_chip(status))
+                                            .child(profile_status_chip(presence)),
+                                    )
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                ),
+            )
+            .debug_selector(|| "visual-member-directory-list".into())
+            .h(px(320.0))
+            .w_full()
+            .into_any_element()
+        };
+
+        let detail = selected_member
+            .map(|member| self.member_detail_panel(member, directory.generated_at_unix_ms))
+            .unwrap_or_else(|| {
+                div()
+                    .debug_selector(|| "visual-member-detail-hint".into())
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .p_3()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "member_directory.detail_hint").to_string())
+                    .into_any_element()
+            });
+
+        surface_card()
+            .id("network-member-directory")
+            .debug_selector(|| "visual-member-directory".into())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(t(self.locale, "member_directory.title").to_string()),
+                            )
+                            .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(
+                                t(self.locale, "member_directory.privacy_boundary").to_string(),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .debug_selector(|| "visual-member-directory-count".into())
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(count),
+                            )
+                            .child(export_button),
+                    ),
+            )
+            .child(diagnostic_metadata_row(
+                t(self.locale, "member_directory.generated_at"),
+                generated_at,
+            ))
+            .child(
+                div()
+                    .debug_selector(|| "visual-member-directory-filters".into())
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(filter_group(
+                        t(self.locale, "member_directory.filter.role")
+                            .to_string()
+                            .into(),
+                        role_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "member_directory.filter.group")
+                            .to_string()
+                            .into(),
+                        group_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "member_directory.filter.capability")
+                            .to_string()
+                            .into(),
+                        capability_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "member_directory.filter.health")
+                            .to_string()
+                            .into(),
+                        health_controls,
+                    )),
+            )
+            .child(list)
+            .child(detail)
+            .into_any_element()
+    }
+
+    fn export_network_members(&mut self, cx: &mut Context<Self>) {
+        let Some(directory) = self.recent_network_members.as_ref() else {
+            self.error = Some(t(self.locale, "member_directory.export_failed").to_string());
+            cx.notify();
+            return;
+        };
+        let members = filter_network_members(&directory.members, self.member_directory_filters)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let text = export_member_directory(self.locale, &members, directory.generated_at_unix_ms);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notice = Some(tr(
+            self.locale,
+            "member_directory.export_succeeded",
+            &[("count", &format_integer(self.locale, members.len() as i64))],
+        ));
+        self.error = None;
+        cx.notify();
+    }
+
+    fn member_detail_panel(
+        &self,
+        member: &NetworkMember,
+        generated_at_unix_ms: u64,
+    ) -> gpui::AnyElement {
+        let display_name = member_display_name(member);
+        let fingerprint = member
+            .identity_fingerprint
+            .clone()
+            .unwrap_or_else(|| t(self.locale, "member_directory.identity_unknown").to_string());
+        let role = t(self.locale, join_request_role_key(member.role)).to_string();
+        let groups = member_groups_text(self.locale, member);
+        let capabilities = member_capabilities_text(self.locale, member);
+        let status = t(self.locale, member_status_key(member.status)).to_string();
+        let presence = t(self.locale, member_presence_key(member.presence.state)).to_string();
+        let presence_source = t(
+            self.locale,
+            member_presence_source_key(member.presence.source),
+        )
+        .to_string();
+        let observed_at = member
+            .presence
+            .observed_at_unix_ms
+            .map(|observed| format_diagnostic_timestamp(self.locale, observed))
+            .unwrap_or_else(|| t(self.locale, "common.unknown").to_string());
+        let freshness = member_freshness_text(
+            self.locale,
+            member.presence.observed_at_unix_ms,
+            generated_at_unix_ms,
+        )
+        .unwrap_or_else(|| t(self.locale, "common.unknown").to_string());
+        let joined_at = member_joined_at_text(self.locale, member);
+
+        div()
+            .debug_selector(|| "visual-member-detail".into())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_ACCENT))
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .p_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(format!(
+                                "{} · {display_name}",
+                                t(self.locale, "member_directory.detail_title")
+                            )),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "visual-member-presence".into())
+                            .child(profile_status_chip(presence)),
+                    ),
+            )
+            .children([
+                diagnostic_metadata_row(
+                    t(self.locale, "member_directory.display_name"),
+                    display_name,
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "member_directory.node_id"),
+                    member.node_id.as_str().to_string(),
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "member_directory.fingerprint"),
+                    fingerprint,
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "member_directory.role"), role)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "member_directory.groups"), groups)
+                    .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "member_directory.capabilities"),
+                    capabilities,
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "member_directory.status"), status)
+                    .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "member_directory.presence_source"),
+                    presence_source,
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "member_directory.observed_at"),
+                    observed_at,
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "member_directory.freshness"), freshness)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "member_directory.joined_at"), joined_at)
+                    .into_any_element(),
+            ])
+            .into_any_element()
+    }
+
     fn join_preview_card(
         &self,
         preview: &NodeNetworkJoinPreview,
@@ -9672,6 +10324,222 @@ fn profile_capability_key(capability: CapabilityKind) -> &'static str {
     }
 }
 
+fn member_status_key(status: NetworkMemberStatus) -> &'static str {
+    match status {
+        NetworkMemberStatus::Pending => "member_directory.status.pending",
+        NetworkMemberStatus::Approved => "member_directory.status.approved",
+        NetworkMemberStatus::Active => "member_directory.status.active",
+        NetworkMemberStatus::Degraded => "member_directory.status.degraded",
+        NetworkMemberStatus::Suspended => "member_directory.status.suspended",
+        NetworkMemberStatus::Exited => "member_directory.status.exited",
+        NetworkMemberStatus::Removed => "member_directory.status.removed",
+        NetworkMemberStatus::Expired => "member_directory.status.expired",
+    }
+}
+
+fn member_status_value(status: NetworkMemberStatus) -> &'static str {
+    match status {
+        NetworkMemberStatus::Pending => "pending",
+        NetworkMemberStatus::Approved => "approved",
+        NetworkMemberStatus::Active => "active",
+        NetworkMemberStatus::Degraded => "degraded",
+        NetworkMemberStatus::Suspended => "suspended",
+        NetworkMemberStatus::Exited => "exited",
+        NetworkMemberStatus::Removed => "removed",
+        NetworkMemberStatus::Expired => "expired",
+    }
+}
+
+fn member_presence_key(presence: NetworkMemberOnlineState) -> &'static str {
+    match presence {
+        NetworkMemberOnlineState::Online => "member_directory.presence.online",
+        NetworkMemberOnlineState::Offline => "member_directory.presence.offline",
+        NetworkMemberOnlineState::Unknown => "member_directory.presence.unknown",
+    }
+}
+
+fn member_presence_value(presence: NetworkMemberOnlineState) -> &'static str {
+    match presence {
+        NetworkMemberOnlineState::Online => "online",
+        NetworkMemberOnlineState::Offline => "offline",
+        NetworkMemberOnlineState::Unknown => "unknown",
+    }
+}
+
+fn member_presence_source_key(source: NetworkMemberObservationSource) -> &'static str {
+    match source {
+        NetworkMemberObservationSource::LiveSession => "member_directory.source.live_session",
+        NetworkMemberObservationSource::DisconnectObserved => {
+            "member_directory.source.disconnect_observed"
+        }
+        NetworkMemberObservationSource::NotObserved => "member_directory.source.not_observed",
+    }
+}
+
+fn member_group_key(group: NetworkMemberGroup) -> &'static str {
+    match group {
+        NetworkMemberGroup::Owner => "member_directory.group.owner",
+        NetworkMemberGroup::Administrator => "member_directory.group.administrator",
+        NetworkMemberGroup::Member => "member_directory.group.member",
+    }
+}
+
+fn member_group_value(group: NetworkMemberGroup) -> &'static str {
+    match group {
+        NetworkMemberGroup::Owner => "owner",
+        NetworkMemberGroup::Administrator => "administrator",
+        NetworkMemberGroup::Member => "member",
+    }
+}
+
+fn member_display_name(member: &NetworkMember) -> String {
+    member
+        .display_name
+        .clone()
+        .unwrap_or_else(|| member.node_id.as_str().to_string())
+}
+
+fn member_groups_text(locale: Locale, member: &NetworkMember) -> String {
+    if member.groups.is_empty() {
+        return t(locale, "common.none").to_string();
+    }
+    member
+        .groups
+        .iter()
+        .map(|group| t(locale, member_group_key(*group)))
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"))
+}
+
+fn member_capabilities_text(locale: Locale, member: &NetworkMember) -> String {
+    let Some(capabilities) = member.capabilities.as_ref() else {
+        return t(locale, "member_directory.capabilities_unknown").to_string();
+    };
+    if capabilities.is_empty() {
+        return t(locale, "common.none").to_string();
+    }
+    capabilities
+        .iter()
+        .map(|capability| t(locale, profile_capability_key(*capability)))
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"))
+}
+
+fn member_joined_at_text(locale: Locale, member: &NetworkMember) -> String {
+    member
+        .joined_at_unix_ms
+        .map(|joined_at| format_diagnostic_timestamp(locale, joined_at))
+        .unwrap_or_else(|| t(locale, "member_directory.joined_at_unknown").to_string())
+}
+
+fn member_freshness_text(
+    locale: Locale,
+    observed_at_unix_ms: Option<u64>,
+    generated_at_unix_ms: u64,
+) -> Option<String> {
+    let observed_at_unix_ms = observed_at_unix_ms?;
+    let elapsed_seconds = generated_at_unix_ms.saturating_sub(observed_at_unix_ms) / 1_000;
+    if elapsed_seconds < 60 {
+        return Some(t(locale, "member_directory.freshness.just_now").to_string());
+    }
+    let minutes = elapsed_seconds / 60;
+    if minutes < 60 {
+        return Some(tr(
+            locale,
+            "member_directory.freshness.minutes",
+            &[("count", &format_integer(locale, minutes as i64))],
+        ));
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return Some(tr(
+            locale,
+            "member_directory.freshness.hours",
+            &[("count", &format_integer(locale, hours as i64))],
+        ));
+    }
+    Some(tr(
+        locale,
+        "member_directory.freshness.days",
+        &[("count", &format_integer(locale, (hours / 24) as i64))],
+    ))
+}
+
+fn tsv_cell(value: String) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\t' | '\r' | '\n' => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn export_member_directory(
+    locale: Locale,
+    members: &[NetworkMember],
+    generated_at_unix_ms: u64,
+) -> String {
+    let columns = [
+        "member_directory.display_name",
+        "member_directory.node_id",
+        "member_directory.fingerprint",
+        "member_directory.role",
+        "member_directory.groups",
+        "member_directory.capabilities",
+        "member_directory.status",
+        "member_directory.presence",
+        "member_directory.presence_source",
+        "member_directory.observed_at",
+        "member_directory.freshness",
+        "member_directory.joined_at",
+    ]
+    .into_iter()
+    .map(|key| tsv_cell(t(locale, key).to_string()))
+    .collect::<Vec<_>>();
+    let rows = sort_network_members(members)
+        .into_iter()
+        .map(|member| {
+            [
+                tsv_cell(member_display_name(member)),
+                tsv_cell(member.node_id.as_str().to_string()),
+                tsv_cell(
+                    member.identity_fingerprint.clone().unwrap_or_else(|| {
+                        t(locale, "member_directory.identity_unknown").to_string()
+                    }),
+                ),
+                tsv_cell(t(locale, join_request_role_key(member.role)).to_string()),
+                tsv_cell(member_groups_text(locale, member)),
+                tsv_cell(member_capabilities_text(locale, member)),
+                tsv_cell(t(locale, member_status_key(member.status)).to_string()),
+                tsv_cell(t(locale, member_presence_key(member.presence.state)).to_string()),
+                tsv_cell(t(locale, member_presence_source_key(member.presence.source)).to_string()),
+                member
+                    .presence
+                    .observed_at_unix_ms
+                    .map(|observed| format_diagnostic_timestamp(locale, observed))
+                    .unwrap_or_default(),
+                tsv_cell(
+                    member_freshness_text(
+                        locale,
+                        member.presence.observed_at_unix_ms,
+                        generated_at_unix_ms,
+                    )
+                    .unwrap_or_default(),
+                ),
+                tsv_cell(member_joined_at_text(locale, member)),
+            ]
+            .join("\t")
+        })
+        .collect::<Vec<_>>();
+    std::iter::once(columns.join("\t"))
+        .chain(rows)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn join_request_state_key(state: JoinRequestState) -> &'static str {
     match state {
         JoinRequestState::Pending => "join_request.state.pending",
@@ -9929,6 +10797,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "join_network" => "action.join_network",
         "submit_join_request" => "action.submit_join_request",
         "list_join_requests" => "action.list_join_requests",
+        "list_network_members" => "action.list_network_members",
         "review_join_request" => "action.review_join_request",
         "batch_review_join_requests" => "action.batch_review_join_requests",
         "resubmit_join_request" => "action.resubmit_join_request",
@@ -10187,16 +11056,17 @@ mod tests {
     use crate::network_discovery::DISCOVERY_RESULT_STALE_AFTER_MS;
     use crate::node::{
         NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult, NodeEventBus,
-        NodeUiValidation,
+        NodeNetworkMembershipSnapshot, NodeUiValidation,
     };
     use crate::tun::TunCapabilityReason;
     use fuckipv6_common::crypto::Identity;
     use fuckipv6_common::domain::{
         DiscoveryTransport, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview,
-        JoinRequestId, MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord,
-        NetworkEndpoint, NetworkId, NodeId, Signature,
+        JoinRequestId, MembershipState, MembershipTerms, NetworkDiscoveryDocument,
+        NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkMemberPresence, NodeId,
+        Signature,
     };
-    use gpui::{OwnedMenuItem, TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
 
     #[test]
@@ -10392,6 +11262,111 @@ mod tests {
         NodeJoinRequestListResult {
             network_id: network_id.to_string(),
             requests: if empty { Vec::new() } else { vec![request] },
+        }
+    }
+
+    fn network_membership_fixture(
+        network_name: &str,
+        network_id: &str,
+    ) -> NodeNetworkMembershipSnapshot {
+        NodeNetworkMembershipSnapshot {
+            network_name: network_name.into(),
+            network_id: network_id.into(),
+            node_id: "local-node".into(),
+            state: MembershipState::Active,
+            role: MembershipRole::Member,
+            local_policy_revision: 1,
+            network_policy_revision: Some(1),
+            privacy_policy_revision: Some(1),
+            member_limit: None,
+            exit_contribution: Some(ExitContributionObligation::NotRequired),
+            exit_contribution_scope: Some(
+                fuckipv6_common::domain::ExitContributionScope::NotApplicable,
+            ),
+            terms_hash: None,
+            current_terms: None,
+            current_terms_hash: None,
+            policy_confirmation_required: false,
+            acknowledged_at_unix_ms: None,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            suspension_reason: None,
+        }
+    }
+
+    fn directory_member(
+        node_id: &str,
+        display_name: &str,
+        role: MembershipRole,
+        group: NetworkMemberGroup,
+        capabilities: Option<Vec<CapabilityKind>>,
+        status: NetworkMemberStatus,
+        presence: NetworkMemberPresence,
+    ) -> NetworkMember {
+        NetworkMember {
+            node_id: NodeId::from_public_key(node_id.as_bytes()),
+            display_name: Some(display_name.into()),
+            identity_fingerprint: Some(format!("SHA256:{display_name}")),
+            role,
+            groups: vec![group],
+            capabilities,
+            status,
+            presence,
+            joined_at_unix_ms: Some(1_700_000_000_000),
+        }
+    }
+
+    fn member_directory_fixture() -> NetworkMemberDirectory {
+        let mut members = vec![
+            directory_member(
+                "owner-node",
+                "Owner filtered member",
+                MembershipRole::Owner,
+                NetworkMemberGroup::Owner,
+                Some(vec![CapabilityKind::Coordinator]),
+                NetworkMemberStatus::Active,
+                NetworkMemberPresence::live(1_700_000_001_000),
+            ),
+            directory_member(
+                "unknown-node",
+                "Unknown capability member",
+                MembershipRole::Member,
+                NetworkMemberGroup::Member,
+                None,
+                NetworkMemberStatus::Suspended,
+                NetworkMemberPresence::unknown(),
+            ),
+            directory_member(
+                "empty-capability-node",
+                "Empty capability member",
+                MembershipRole::Member,
+                NetworkMemberGroup::Member,
+                Some(Vec::new()),
+                NetworkMemberStatus::Exited,
+                NetworkMemberPresence::disconnected(1_700_000_002_000),
+            ),
+        ];
+        members.extend((0..96).map(|index| {
+            directory_member(
+                &format!("synthetic-member-{index:03}"),
+                &format!("Synthetic member {index:03}"),
+                MembershipRole::Member,
+                NetworkMemberGroup::Member,
+                Some(vec![CapabilityKind::File]),
+                NetworkMemberStatus::Active,
+                NetworkMemberPresence::live(1_700_000_003_000 + index),
+            )
+        }));
+        let first_node_id = sort_network_members(&members)[0].node_id.clone();
+        let first = members
+            .iter_mut()
+            .find(|member| member.node_id == first_node_id)
+            .expect("first sorted member");
+        first.presence = NetworkMemberPresence::unknown();
+        NetworkMemberDirectory {
+            network_id: NetworkId::from_public_key(b"gpui-member-directory-network"),
+            generated_at_unix_ms: 1_700_000_010_000,
+            members,
         }
     }
 
@@ -10909,6 +11884,185 @@ mod tests {
         assert!(visible.debug_bounds("visual-join-requests-list").is_some());
         assert!(visible.debug_bounds("visual-join-requests-empty").is_some());
         assert!(visible.debug_bounds("visual-join-request-first").is_none());
+    }
+
+    #[gpui::test]
+    fn member_directory_virtualizes_rows_and_opens_one_shared_detail_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = member_directory_fixture();
+        let first_node_id = sort_network_members(&directory.members)[0]
+            .node_id
+            .as_str()
+            .to_string();
+        let window = open_shell_window(cx, 3_200.0, 2_400.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.recent_network_members = Some(directory);
+                shell.open_action("networks", "list_network_members", cx);
+            })
+            .expect("install member directory fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-member-directory",
+            "visual-member-directory-count",
+            "visual-member-directory-filters",
+            "visual-member-directory-list",
+            "visual-member-first",
+            "visual-member-directory-export",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing member directory element {selector}"
+            );
+        }
+        assert!(
+            visible.debug_bounds("visual-member-row-95").is_none(),
+            "virtual member list rendered a row outside its viewport"
+        );
+        assert!(visible.debug_bounds("visual-member-detail").is_none());
+        assert!(visible.debug_bounds("visual-member-detail-hint").is_some());
+
+        let first = visible
+            .debug_bounds("visual-member-first")
+            .expect("first virtual member row");
+        visible.simulate_click(first.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-member-detail").is_some());
+        assert!(visible.debug_bounds("visual-member-presence").is_some());
+        assert!(visible.debug_bounds("visual-member-detail-hint").is_none());
+        assert_eq!(
+            member_presence_key(NetworkMemberOnlineState::Unknown),
+            "member_directory.presence.unknown"
+        );
+        assert_ne!(
+            member_presence_key(NetworkMemberOnlineState::Unknown),
+            member_presence_key(NetworkMemberOnlineState::Offline)
+        );
+
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.selected_member_node_id.as_deref(),
+                    Some(first_node_id.as_str())
+                );
+            })
+            .expect("read selected member");
+    }
+
+    #[gpui::test]
+    fn member_directory_exports_only_the_sanitized_filtered_view(cx: &mut TestAppContext) {
+        let directory = member_directory_fixture();
+        let owner = sort_network_members(&directory.members)
+            .into_iter()
+            .find(|member| member.role == MembershipRole::Owner)
+            .expect("owner fixture")
+            .clone();
+        let window = open_shell_window(cx, 3_200.0, 2_400.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.recent_network_members = Some(directory);
+                shell.member_directory_filters.role = Some(MembershipRole::Owner);
+                shell.open_action("networks", "list_network_members", cx);
+            })
+            .expect("install filtered member directory fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-member-directory-export")
+            .is_some());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.export_network_members(cx);
+            })
+            .expect("export filtered member directory");
+        visible.run_until_parked();
+        let exported = visible
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .expect("member directory clipboard export");
+
+        assert_eq!(exported.lines().count(), 2);
+        assert!(exported.contains("Owner filtered member"));
+        assert!(exported.contains(owner.node_id.as_str()));
+        assert!(!exported.contains("Synthetic member 001"));
+        let lowercase = exported.to_ascii_lowercase();
+        for forbidden in [
+            "endpoint",
+            "public key",
+            "private key",
+            "invitation",
+            "approval reason",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "member export leaked forbidden field marker {forbidden}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn joined_network_member_action_uses_the_authoritative_network_id(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let mut snapshot = fixture.snapshot;
+        snapshot.memberships.push(network_membership_fixture(
+            "home",
+            "network-authoritative-id",
+        ));
+        let window = open_shell_window(cx, 1200.0, 1_400.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.network_actions_open = Some("home".into());
+                cx.notify();
+            })
+            .expect("install joined network member action fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        let members = visible
+            .debug_bounds("visual-discovery-joined-members-home")
+            .expect("joined network member action");
+        visible.simulate_click(members.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.selected_page, "networks");
+                assert_eq!(shell.selected_network.as_deref(), Some("home"));
+                assert_eq!(
+                    shell.field_value("list_network_members", "network_id"),
+                    "network-authoritative-id"
+                );
+                assert!(shell.expanded_actions.contains_key("list_network_members"));
+            })
+            .expect("verify authoritative member action");
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.snapshot.memberships.clear();
+                shell.network_actions_open = Some("home".into());
+                cx.notify();
+            })
+            .expect("remove membership identity");
+        visible.run_until_parked();
+        assert!(
+            visible
+                .debug_bounds("visual-discovery-joined-members-home")
+                .is_none(),
+            "member action must not be offered without an authoritative network ID"
+        );
     }
 
     #[gpui::test]

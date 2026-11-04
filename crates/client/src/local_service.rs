@@ -496,6 +496,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListNetworkMembers
         | NodeCommandKind::ListInvitations
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::PreviewInvitation

@@ -140,4 +140,44 @@ describe("membership policy reconfirmation", () => {
     expect(card).toHaveTextContent("translated:join.exit.local_supported");
     expect(card).toHaveTextContent("translated:join.exit.local_enabled");
   });
+
+  it("opens the member directory with the membership network ID", async () => {
+    const user = userEvent.setup();
+    const onRequestAction = renderNetworks(policySnapshot(false));
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:common.actions · home",
+      }),
+    );
+    await user.click(
+      screen.getByRole("menuitem", {
+        name: "translated:action.list_network_members",
+      }),
+    );
+
+    expect(onRequestAction).toHaveBeenCalledWith("list_network_members", {
+      network_id: "net_policy_home",
+    });
+  });
+
+  it("does not expose member navigation for a network without a membership ID", async () => {
+    const user = userEvent.setup();
+    const snapshot = policySnapshot(false);
+    snapshot.memberships = [];
+    const onRequestAction = renderNetworks(snapshot);
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:common.actions · home",
+      }),
+    );
+
+    expect(
+      screen.queryByRole("menuitem", {
+        name: "translated:action.list_network_members",
+      }),
+    ).not.toBeInTheDocument();
+    expect(onRequestAction).not.toHaveBeenCalled();
+  });
 });

@@ -21,6 +21,7 @@ use tokio_tungstenite::{
 
 use super::invitations::InvitationStore;
 use super::join_requests::JoinRequestStore;
+use super::members::build_member_directory;
 use super::session::SessionManager;
 
 fn verify_registration(
@@ -594,6 +595,17 @@ async fn handle_signaling_message(
             handle_invitation_redeem(request, session_manager, tx, client_id, invitation_store)
                 .await?;
         }
+        SignalingMessage::MemberDirectoryList { network_id } => {
+            handle_member_directory_list(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+                invitation_store,
+            )
+            .await?;
+        }
         // These variants are server-to-client events. Accepting one from a
         // client would let it manufacture approval state in another view.
         SignalingMessage::JoinRequestStatus { .. }
@@ -606,7 +618,8 @@ async fn handle_signaling_message(
         | SignalingMessage::InvitationRevokeAck { .. }
         | SignalingMessage::InvitationPreviewAck { .. }
         | SignalingMessage::InvitationRedeemAck { .. }
-        | SignalingMessage::InvitationChanged { .. } => {
+        | SignalingMessage::InvitationChanged { .. }
+        | SignalingMessage::MemberDirectoryListAck { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -789,6 +802,59 @@ async fn handle_join_request_list(
         session_manager,
         SignalingMessage::JoinRequestListResponse { requests },
     )
+}
+
+async fn handle_member_directory_list(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    join_request_store: Option<&JoinRequestStore>,
+    invitation_store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_join_request_store(join_request_store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let directory = match build_member_directory(
+        &network_id,
+        &actor,
+        unix_time_ms(),
+        store,
+        invitation_store,
+        session_manager,
+    )
+    .await
+    {
+        Ok(directory) => directory,
+        Err(error) => {
+            tracing::warn!(%error, "构建成员目录失败，拒绝返回未过滤数据");
+            send_binary(
+                tx,
+                session_manager,
+                member_directory_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::MemberDirectoryListAck { directory },
+    )
+}
+
+fn member_directory_error_message(error: &str) -> SignalingMessage {
+    let code = if error == "member_directory.error.permission_denied" {
+        ErrorCode::Forbidden
+    } else {
+        ErrorCode::Internal
+    };
+    SignalingMessage::protocol_error(code, "Member directory is unavailable")
 }
 
 async fn handle_join_request_review(
@@ -1535,6 +1601,24 @@ mod tests {
         assert!(!encoded.contains("code"));
         assert!(!encoded.contains("fkinv_"));
         assert!(!encoded.contains("SECRET-INVITATION-NOTIFICATION"));
+    }
+
+    #[test]
+    fn member_directory_permission_errors_map_to_forbidden_without_leaking_details() {
+        let permission = member_directory_error_message("member_directory.error.permission_denied");
+        let SignalingMessage::Error { code, message } = permission else {
+            panic!("expected a protocol error");
+        };
+        assert_eq!(code, ErrorCode::Forbidden.as_u16());
+        assert_eq!(message, "Member directory is unavailable");
+        assert!(!message.contains("permission"));
+
+        let internal = member_directory_error_message("filesystem path leaked");
+        let SignalingMessage::Error { code, message } = internal else {
+            panic!("expected a protocol error");
+        };
+        assert_eq!(code, ErrorCode::Internal.as_u16());
+        assert!(!message.contains("filesystem"));
     }
 
     #[test]

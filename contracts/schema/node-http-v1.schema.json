@@ -881,6 +881,15 @@
         "applicant": {
           "$ref": "#/$defs/JoinApplicantProfile"
         },
+        "approved_at_unix_ms": {
+          "description": "Exact admission time. `decided_at_unix_ms` is shared by rejection,\nwithdrawal and expiry and therefore can never be used as join time.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "created_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -1383,6 +1392,141 @@
       ],
       "type": "object"
     },
+    "NetworkMember": {
+      "description": "One sanitized directory row. Fields that are not authorized or not known are\nomitted rather than populated from unrelated network-wide declarations.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/NetworkMemberGroup"
+          },
+          "type": "array"
+        },
+        "identity_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joined_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "presence": {
+          "$ref": "#/$defs/NetworkMemberPresence"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "status": {
+          "$ref": "#/$defs/NetworkMemberStatus"
+        }
+      },
+      "required": [
+        "node_id",
+        "role",
+        "groups",
+        "status",
+        "presence"
+      ],
+      "type": "object"
+    },
+    "NetworkMemberDirectory": {
+      "description": "Server-owned snapshot. A directory never carries endpoints, invitation\nmaterial, approval prose, public-key bytes or transfer metadata.",
+      "properties": {
+        "generated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/NetworkMember"
+          },
+          "type": "array"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "generated_at_unix_ms",
+        "members"
+      ],
+      "type": "object"
+    },
+    "NetworkMemberGroup": {
+      "description": "Current system groups. Custom and dynamic groups are introduced separately;\nrole-derived groups here are never inferred from a client-owned label.",
+      "enum": [
+        "owner",
+        "administrator",
+        "member"
+      ],
+      "type": "string"
+    },
+    "NetworkMemberObservationSource": {
+      "description": "Why presence has its current value. The timestamp lets both UIs display the\nobservation's freshness without inventing a client-side observation.",
+      "enum": [
+        "live_session",
+        "disconnect_observed",
+        "not_observed"
+      ],
+      "type": "string"
+    },
+    "NetworkMemberOnlineState": {
+      "description": "Three-state presence. Unknown means the Coordinator has never observed the\nmember's data-plane session and must never be presented as offline.",
+      "enum": [
+        "online",
+        "offline",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "NetworkMemberPresence": {
+      "properties": {
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/NetworkMemberObservationSource"
+        },
+        "state": {
+          "$ref": "#/$defs/NetworkMemberOnlineState"
+        }
+      },
+      "required": [
+        "state",
+        "source"
+      ],
+      "type": "object"
+    },
     "NetworkMemberProfileProjection": {
       "properties": {
         "administrator_count": {
@@ -1405,6 +1549,20 @@
         "administrator_count"
       ],
       "type": "object"
+    },
+    "NetworkMemberStatus": {
+      "description": "Authoritative, sanitized member status shown by governance surfaces.\n\nThis is deliberately distinct from [`MembershipState`], which tracks the\nlocal node's connection workflow. In particular, an approved roster member\nis not reported as active until a live data-plane session observes it.",
+      "enum": [
+        "pending",
+        "approved",
+        "active",
+        "degraded",
+        "suspended",
+        "exited",
+        "removed",
+        "expired"
+      ],
+      "type": "string"
     },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
@@ -2888,6 +3046,23 @@
           "type": "object"
         },
         {
+          "description": "Read the Coordinator-authoritative, privacy-filtered member directory.",
+          "properties": {
+            "command": {
+              "const": "list_network_members",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeNetworkMembersCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Apply one revision-checked approval decision.",
           "properties": {
             "command": {
@@ -3695,6 +3870,22 @@
             },
             "status": {
               "const": "join_requests",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NetworkMemberDirectory"
+            },
+            "status": {
+              "const": "network_members",
               "type": "string"
             }
           },
@@ -6005,6 +6196,17 @@
       ],
       "type": "object"
     },
+    "NodeNetworkMembersCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id"
+      ],
+      "type": "object"
+    },
     "NodeNetworkMembershipSnapshot": {
       "description": "Public, owner-editable network metadata rendered by every UI adapter.\n\nThis is deliberately a separate projection from `NetworkRecord`: secrets,\nmembers, addresses, topology, activity and invitations are not fields and\ntherefore cannot be serialized by accident.",
       "properties": {
@@ -7557,6 +7759,7 @@
             "join_network",
             "submit_join_request",
             "list_join_requests",
+            "list_network_members",
             "review_join_request",
             "batch_review_join_requests",
             "withdraw_join_request",

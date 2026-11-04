@@ -445,6 +445,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListNetworkMembers
         | NodeCommandKind::ListInvitations
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::RefreshDiscoveryIndex
@@ -537,6 +538,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListNetworkMembers
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
@@ -635,6 +637,9 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
             NetworkTargets::Named(vec![network_name.clone()])
         }
         NodeCommand::ListJoinRequests(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::ListNetworkMembers(command) => {
             NetworkTargets::Named(vec![command.network_id.clone()])
         }
         NodeCommand::SubmitJoinRequest(command) => {

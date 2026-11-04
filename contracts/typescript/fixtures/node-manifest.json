@@ -612,6 +612,28 @@
           "confirmation": null
         },
         {
+          "id": "list_network_members",
+          "label_key": "action.list_network_members",
+          "command": "list_network_members",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": null
+        },
+        {
           "id": "review_join_request",
           "label_key": "action.review_join_request",
           "command": "review_join_request",

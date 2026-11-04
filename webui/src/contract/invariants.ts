@@ -24,6 +24,7 @@ import type {
   NodeUiManifest,
   NodeUiPageState,
   NodeUiPage,
+  NetworkMemberDirectory,
 } from "../../../contracts/typescript/node-contract-v1";
 import { ContractError } from "../api/client";
 
@@ -95,6 +96,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   join_network: "join_network",
   submit_join_request: "submit_join_request",
   list_join_requests: "list_join_requests",
+  list_network_members: "list_network_members",
   review_join_request: "review_join_request",
   batch_review_join_requests: "batch_review_join_requests",
   withdraw_join_request: "withdraw_join_request",
@@ -243,6 +245,11 @@ const OUTCOME_STATUSES = new Set([
   "network_profile_updated",
   "network_join_preview",
   "network_joined",
+  "join_request_submitted",
+  "join_requests",
+  "network_members",
+  "join_requests_reviewed",
+  "join_request_updated",
   "invitation_created",
   "invitations",
   "invitation_status",
@@ -276,6 +283,7 @@ const NETWORK_STATUSES = new Set([
   "failed",
 ]);
 const NETWORK_ROLES = new Set(["member", "discovery", "relay", "exit_node"]);
+const MEMBERSHIP_ROLES = new Set(["owner", "administrator", "member"]);
 const CAPABILITY_KINDS = new Set<CapabilityKind>([
   "coordinator",
   "relay",
@@ -295,10 +303,7 @@ const NETWORK_JOIN_MODES = new Set([
   "approval_required",
   "invite_only",
 ]);
-const EXIT_CONTRIBUTION_OBLIGATIONS = new Set([
-  "required",
-  "not_required",
-]);
+const EXIT_CONTRIBUTION_OBLIGATIONS = new Set(["required", "not_required"]);
 const EXIT_CONTRIBUTION_SCOPES = new Set([
   "not_applicable",
   "joining_members",
@@ -464,7 +469,8 @@ function validateAction(action: NodeUiAction, seen: Set<string>): void {
   if (!BACKEND_STATUSES.has(action.backend_status))
     fail(`unknown backend status for ${action.id}`);
   if (action.confirmation !== undefined && action.confirmation !== null) {
-    if (!record(action.confirmation)) fail(`confirmation invalid for ${action.id}`);
+    if (!record(action.confirmation))
+      fail(`confirmation invalid for ${action.id}`);
     stringValue(
       action.confirmation.title_key,
       `confirmation title missing for ${action.id}`,
@@ -477,9 +483,7 @@ function validateAction(action: NodeUiAction, seen: Set<string>): void {
     );
     if (typeof action.confirmation.destructive !== "boolean")
       fail(`confirmation destructive flag invalid for ${action.id}`);
-    if (
-      typeof action.confirmation.recent_authentication_required !== "boolean"
-    )
+    if (typeof action.confirmation.recent_authentication_required !== "boolean")
       fail(`confirmation reauthentication flag invalid for ${action.id}`);
   }
   if (!Array.isArray(action.fields)) fail(`fields missing for ${action.id}`);
@@ -591,7 +595,11 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
         "network profile snapshot id invalid",
         true,
       );
-      stringValue(profile.purpose, "network profile snapshot purpose invalid", true);
+      stringValue(
+        profile.purpose,
+        "network profile snapshot purpose invalid",
+        true,
+      );
       stringValue(profile.icon, "network profile snapshot icon invalid", true);
       stringValue(
         profile.language,
@@ -613,12 +621,18 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
         fail("network profile snapshot visibility invalid");
       if (!NETWORK_JOIN_MODES.has(String(profile.join_mode)))
         fail("network profile snapshot join mode invalid");
-      nonNegativeInteger(profile.revision, "network profile snapshot revision invalid");
+      nonNegativeInteger(
+        profile.revision,
+        "network profile snapshot revision invalid",
+      );
       nonNegativeInteger(
         profile.policy_revision,
         "network profile snapshot policy revision invalid",
       );
-      if (profile.signed_profile !== undefined && profile.signed_profile !== null) {
+      if (
+        profile.signed_profile !== undefined &&
+        profile.signed_profile !== null
+      ) {
         if (!record(profile.signed_profile))
           fail("signed network profile snapshot invalid");
         nonNegativeInteger(
@@ -774,9 +788,7 @@ export function defaultFieldValue(
     action.id === "preview_network_profile" ||
     action.id === "update_network_profile";
   const profile = profileAction
-    ? (snapshot.network_profiles ?? []).find(
-        (entry) => entry.name === network,
-      )
+    ? (snapshot.network_profiles ?? []).find((entry) => entry.name === network)
     : undefined;
   if (profile) {
     if (field.id === "network_name") return profile.name;
@@ -831,8 +843,7 @@ export function defaultFieldValue(
     if (action.id === "create_invitation") return "member";
     return action.id === "set_relay_role" ? "relay" : "exit_node";
   }
-  if (field.id === "display_name")
-    return snapshot.identity?.display_name ?? "";
+  if (field.id === "display_name") return snapshot.identity?.display_name ?? "";
   if (field.id === "expected_fingerprint")
     return snapshot.identity?.public_key_fingerprint ?? "";
   return "";
@@ -904,7 +915,8 @@ function parseJoinRequestReviews(
     if (!record(item)) {
       throw new Error(label(locale, "join_request.error.invalid_request"));
     }
-    const requestId = typeof item.request_id === "string" ? item.request_id : "";
+    const requestId =
+      typeof item.request_id === "string" ? item.request_id : "";
     if (!validJoinRequestId(requestId)) {
       throw new Error(label(locale, "join_request.error.invalid_request_id"));
     }
@@ -938,10 +950,7 @@ function parseJoinRequestReviews(
     ) {
       throw new Error(label(locale, "join_request.error.information_required"));
     }
-    if (
-      typeof note === "string" &&
-      !validJoinRequestText(note, 500)
-    ) {
+    if (typeof note === "string" && !validJoinRequestText(note, 500)) {
       throw new Error(label(locale, "join_request.error.invalid_action_note"));
     }
     reviews.push({
@@ -1139,8 +1148,14 @@ function networkProfileDocument(value: unknown): void {
     fail("network profile join mode invalid");
   nonNegativeInteger(value.revision, "network profile revision invalid");
   nonNegativeInteger(value.schema_version, "network profile schema invalid");
-  nonNegativeInteger(value.issued_at_unix_ms, "network profile issue time invalid");
-  nonNegativeInteger(value.expires_at_unix_ms, "network profile expiry invalid");
+  nonNegativeInteger(
+    value.issued_at_unix_ms,
+    "network profile issue time invalid",
+  );
+  nonNegativeInteger(
+    value.expires_at_unix_ms,
+    "network profile expiry invalid",
+  );
 }
 
 function networkProfileRecord(value: unknown): void {
@@ -1209,7 +1224,8 @@ function networkProfileProjections(value: unknown): void {
     "network admin policy revision invalid",
   );
 
-  if (!record(value.local_secret)) fail("network local secret projection invalid");
+  if (!record(value.local_secret))
+    fail("network local secret projection invalid");
   booleanValueRaw(
     value.local_secret.identity_present,
     "network local identity flag invalid",
@@ -1223,7 +1239,11 @@ function networkProfileProjections(value: unknown): void {
     "network local fingerprint invalid",
     true,
   );
-  stringValue(value.local_secret.storage, "network local storage invalid", true);
+  stringValue(
+    value.local_secret.storage,
+    "network local storage invalid",
+    true,
+  );
 }
 
 function networkProfileDiff(value: unknown): void {
@@ -1239,7 +1259,11 @@ function networkProfileDiff(value: unknown): void {
 
 function networkProfilePreview(value: unknown): NetworkProfilePreview {
   if (!record(value)) fail("network profile preview invalid");
-  stringValue(value.network_name, "network profile preview network invalid", true);
+  stringValue(
+    value.network_name,
+    "network profile preview network invalid",
+    true,
+  );
   booleanValueRaw(value.can_apply, "network profile can_apply invalid");
   booleanValueRaw(value.conflict, "network profile conflict invalid");
   nonNegativeInteger(
@@ -1262,7 +1286,11 @@ function networkProfilePreview(value: unknown): NetworkProfilePreview {
 
 function networkProfileApplyResult(value: unknown): NetworkProfileApplyResult {
   if (!record(value)) fail("network profile apply result invalid");
-  stringValue(value.network_name, "network profile apply network invalid", true);
+  stringValue(
+    value.network_name,
+    "network profile apply network invalid",
+    true,
+  );
   stringValue(value.audit_action, "network profile audit action invalid", true);
   stringArray(value.changed_paths, "network profile changed paths invalid");
   nonNegativeInteger(
@@ -1286,8 +1314,7 @@ export function validateActionValues(
   locale: Locale,
 ): string[] {
   const errors: string[] = [];
-  const previewJoin =
-    action.id === "join_network" && !blank(values.network_id);
+  const previewJoin = action.id === "join_network" && !blank(values.network_id);
   for (const field of action.fields) {
     const value = values[field.id];
     if (
@@ -1315,10 +1342,7 @@ export function validateActionValues(
       }
     } else if (field.validation === "network_icon") {
       const icon = String(value);
-      if (
-        !/^[a-z0-9._-]{1,64}$/.test(icon) ||
-        icon.trim() !== icon
-      ) {
+      if (!/^[a-z0-9._-]{1,64}$/.test(icon) || icon.trim() !== icon) {
         errors.push(label(locale, "validation.network_icon_invalid"));
       }
     } else if (field.validation === "network_language") {
@@ -1340,10 +1364,7 @@ export function validateActionValues(
       }
       const seen = new Set<string>();
       for (const tag of tags) {
-        if (
-          [...tag].length > 32 ||
-          !/^[\p{L}\p{N}._-]+$/u.test(tag)
-        ) {
+        if ([...tag].length > 32 || !/^[\p{L}\p{N}._-]+$/u.test(tag)) {
           errors.push(
             i18n().tr(locale, "validation.network_tag_invalid", { tag }),
           );
@@ -1689,19 +1710,13 @@ export function buildCommand(
             values.capability_declarations,
           ) as CapabilityKind[],
           visibility: requiredString("visibility") as
-            | "public"
-            | "unlisted"
-            | "private",
+            "public" | "unlisted" | "private",
           join_mode: requiredString("join_mode") as
-            | "open"
-            | "approval_required"
-            | "invite_only",
+            "open" | "approval_required" | "invite_only",
           exit_contribution: requiredString("exit_contribution") as
-            | "required"
-            | "not_required",
-          exit_contribution_scope: requiredString(
-            "exit_contribution_scope",
-          ) as "not_applicable" | "joining_members" | "all_members",
+            "required" | "not_required",
+          exit_contribution_scope: requiredString("exit_contribution_scope") as
+            "not_applicable" | "joining_members" | "all_members",
           signaling_port: Number(requireValue("signaling_port")),
           relay_port: Number(requireValue("relay_port")),
           external_host: optional(values, "external_host"),
@@ -1727,19 +1742,13 @@ export function buildCommand(
             values.capability_declarations,
           ) as CapabilityKind[],
           visibility: requiredString("visibility") as
-            | "public"
-            | "unlisted"
-            | "private",
+            "public" | "unlisted" | "private",
           join_mode: requiredString("join_mode") as
-            | "open"
-            | "approval_required"
-            | "invite_only",
+            "open" | "approval_required" | "invite_only",
           exit_contribution: requiredString("exit_contribution") as
-            | "required"
-            | "not_required",
-          exit_contribution_scope: requiredString(
-            "exit_contribution_scope",
-          ) as "not_applicable" | "joining_members" | "all_members",
+            "required" | "not_required",
+          exit_contribution_scope: requiredString("exit_contribution_scope") as
+            "not_applicable" | "joining_members" | "all_members",
         },
       };
       return action.id === "preview_network_profile"
@@ -1816,6 +1825,11 @@ export function buildCommand(
         command: "list_join_requests",
         payload: { network_id: requiredString("network_id") },
       };
+    case "list_network_members":
+      return {
+        command: "list_network_members",
+        payload: { network_id: requiredString("network_id") },
+      };
     case "review_join_request": {
       const note = optional(values, "note");
       return {
@@ -1830,9 +1844,7 @@ export function buildCommand(
               locale,
             ),
             action: requiredString("action") as
-              | "approve"
-              | "reject"
-              | "request_information",
+              "approve" | "reject" | "request_information",
             ...(note ? { note } : {}),
           },
         },
@@ -2128,11 +2140,151 @@ export function commandEnvelope(
   };
 }
 
+const MEMBER_STATUSES = new Set([
+  "pending",
+  "approved",
+  "active",
+  "degraded",
+  "suspended",
+  "exited",
+  "removed",
+  "expired",
+]);
+const MEMBER_GROUPS = new Set(["owner", "administrator", "member"]);
+const MEMBER_PRESENCE_STATES = new Set(["online", "offline", "unknown"]);
+const MEMBER_OBSERVATION_SOURCES = new Set([
+  "live_session",
+  "disconnect_observed",
+  "not_observed",
+]);
+
+function optionalNullableInteger(value: unknown, message: string): void {
+  if (value !== undefined && value !== null) nonNegativeInteger(value, message);
+}
+
+function memberDirectory(value: unknown): NetworkMemberDirectory {
+  if (!record(value)) fail("member directory invalid");
+  stringValue(value.network_id, "member directory network id invalid", true);
+  nonNegativeInteger(
+    value.generated_at_unix_ms,
+    "member directory generation time invalid",
+  );
+  const members = arrayValue(value.members, "member directory rows invalid");
+  const seenNodeIds: string[] = [];
+  for (const [index, entry] of members.entries()) {
+    if (!record(entry)) fail(`member ${index} invalid`);
+    const nodeId = stringValue(
+      entry.node_id,
+      `member ${index} node id invalid`,
+      true,
+    );
+    seenNodeIds.push(nodeId);
+    if (entry.display_name !== undefined && entry.display_name !== null) {
+      stringValue(
+        entry.display_name,
+        `member ${index} display name invalid`,
+        true,
+      );
+    }
+    if (
+      entry.identity_fingerprint !== undefined &&
+      entry.identity_fingerprint !== null
+    ) {
+      stringValue(
+        entry.identity_fingerprint,
+        `member ${index} fingerprint invalid`,
+        true,
+      );
+    }
+    const role = stringValue(entry.role, `member ${index} role invalid`, true);
+    if (!MEMBERSHIP_ROLES.has(role)) fail(`member ${index} role invalid`);
+    const groups = arrayValue(
+      entry.groups,
+      `member ${index} groups invalid`,
+    ).map((group) => {
+      const value = stringValue(group, `member ${index} group invalid`, true);
+      if (!MEMBER_GROUPS.has(value)) fail(`member ${index} group invalid`);
+      return value;
+    });
+    unique(groups, `member ${index} group`);
+    if (entry.capabilities !== undefined && entry.capabilities !== null) {
+      const capabilities = arrayValue(
+        entry.capabilities,
+        `member ${index} capabilities invalid`,
+      ).map((capability) => {
+        const value = stringValue(
+          capability,
+          `member ${index} capability invalid`,
+          true,
+        );
+        if (!CAPABILITY_KINDS.has(value as CapabilityKind))
+          fail(`member ${index} capability invalid`);
+        return value;
+      });
+      unique(capabilities, `member ${index} capability`);
+    }
+    const status = stringValue(
+      entry.status,
+      `member ${index} status invalid`,
+      true,
+    );
+    if (!MEMBER_STATUSES.has(status)) fail(`member ${index} status invalid`);
+    optionalNullableInteger(
+      entry.joined_at_unix_ms,
+      `member ${index} join time invalid`,
+    );
+
+    if (!record(entry.presence)) fail(`member ${index} presence invalid`);
+    const presenceState = stringValue(
+      entry.presence.state,
+      `member ${index} presence state invalid`,
+      true,
+    );
+    const source = stringValue(
+      entry.presence.source,
+      `member ${index} presence source invalid`,
+      true,
+    );
+    if (!MEMBER_PRESENCE_STATES.has(presenceState))
+      fail(`member ${index} presence state invalid`);
+    if (!MEMBER_OBSERVATION_SOURCES.has(source))
+      fail(`member ${index} presence source invalid`);
+    optionalNullableInteger(
+      entry.presence.observed_at_unix_ms,
+      `member ${index} presence time invalid`,
+    );
+    const observedAt = entry.presence.observed_at_unix_ms;
+    if (presenceState === "unknown") {
+      if (
+        source !== "not_observed" ||
+        (observedAt !== undefined && observedAt !== null)
+      )
+        fail(`member ${index} unknown presence is inconsistent`);
+    } else if (presenceState === "online") {
+      if (
+        source !== "live_session" ||
+        observedAt === undefined ||
+        observedAt === null
+      )
+        fail(`member ${index} online presence is inconsistent`);
+    } else if (
+      source !== "disconnect_observed" ||
+      observedAt === undefined ||
+      observedAt === null
+    ) {
+      fail(`member ${index} offline presence is inconsistent`);
+    }
+  }
+  unique(seenNodeIds, "member node id");
+  return value as NetworkMemberDirectory;
+}
+
 function validatedOutcome(value: unknown): NodeCommandOutcome {
   if (!record(value) || !OUTCOME_STATUSES.has(String(value.status)))
     fail("unknown command outcome");
   const outcome = value as NodeCommandOutcome;
   if (outcome.status === "snapshot") validateSnapshot(outcome.data);
+  if (outcome.status === "network_members") memberDirectory(outcome.data);
   if (outcome.status === "configuration") configurationDocument(outcome.data);
   if (outcome.status === "configuration_preview")
     configurationPreview(outcome.data);
@@ -2174,8 +2326,14 @@ function validatedOutcome(value: unknown): NodeCommandOutcome {
   return outcome;
 }
 
-export function validateOperationSnapshot(value: unknown): NodeOperationSnapshot {
-  if (!record(value) || typeof value.operation_id !== "string" || !value.operation_id)
+export function validateOperationSnapshot(
+  value: unknown,
+): NodeOperationSnapshot {
+  if (
+    !record(value) ||
+    typeof value.operation_id !== "string" ||
+    !value.operation_id
+  )
     fail("operation snapshot is missing its id");
   if (!OPERATION_STATES.has(String(value.state)))
     fail("operation snapshot has an unknown state");
@@ -2315,6 +2473,17 @@ export function outcomeSummary(
     return i18n().tr(locale, "outcome.network_join_previewed", {
       network: outcome.data.network_name,
       members: i18n().formatInteger(locale, outcome.data.member_count),
+    });
+  }
+  if (outcome.status === "network_members") {
+    return i18n().tr(locale, "outcome.network_members_loaded", {
+      count: i18n().formatInteger(locale, outcome.data.members.length),
+      presence: i18n().formatInteger(
+        locale,
+        outcome.data.members.filter(
+          (member) => member.presence.state === "online",
+        ).length,
+      ),
     });
   }
   if (outcome.status === "network_joined") {

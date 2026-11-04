@@ -79,6 +79,7 @@ import {
   type DiscoveryResult,
 } from "../discovery";
 import { t, tr } from "../i18n";
+import { resolveNetworkMembershipId } from "../members";
 import { advancedSettingsGroups } from "../settings";
 
 type PageContentProps = {
@@ -145,12 +146,14 @@ function routingProblemLabel(
 
 function NetworkContextMenu({
   network,
+  networkId,
   locale,
   onSelectNetwork,
   onNavigate,
   onRequestAction,
 }: {
   network: NodeNetworkSnapshot;
+  networkId: string | null;
   locale: Locale;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
@@ -196,6 +199,12 @@ function NetworkContextMenu({
   function leaveNetwork(): void {
     onSelectNetwork(network.name);
     onRequestAction("leave_network", { network_name: network.name });
+  }
+
+  function openMembers(): void {
+    if (!networkId) return;
+    onSelectNetwork(network.name);
+    onRequestAction("list_network_members", { network_id: networkId });
   }
 
   function handleMenuOpenChange(open: boolean): void {
@@ -350,6 +359,14 @@ function NetworkContextMenu({
                   >
                     {label(locale, "nav.traffic")}
                   </DropdownMenu.Item>
+                  {networkId ? (
+                    <DropdownMenu.Item
+                      className="dropdown-item"
+                      onSelect={openMembers}
+                    >
+                      {label(locale, "action.list_network_members")}
+                    </DropdownMenu.Item>
+                  ) : null}
                   <DropdownMenu.Separator className="context-separator" />
                   <DropdownMenu.Item
                     className="dropdown-item danger"
@@ -400,6 +417,11 @@ function NetworkContextMenu({
           >
             {label(locale, "nav.traffic")}
           </ContextMenu.Item>
+          {networkId ? (
+            <ContextMenu.Item className="context-item" onSelect={openMembers}>
+              {label(locale, "action.list_network_members")}
+            </ContextMenu.Item>
+          ) : null}
           <ContextMenu.Separator className="context-separator" />
           <ContextMenu.Item className="context-item danger" onSelect={leaveNetwork}>
             {label(locale, "action.leave_network")}
@@ -1805,6 +1827,10 @@ function Networks({
               <NetworkContextMenu
                 key={network.name}
                 network={network}
+                networkId={resolveNetworkMembershipId(
+                  snapshot.memberships,
+                  network.name,
+                )}
                 locale={locale}
                 onSelectNetwork={onSelectNetwork}
                 onNavigate={onNavigate}

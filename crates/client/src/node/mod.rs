@@ -36,12 +36,12 @@ pub use command::{
     NodeListInvitationsCommand, NodeListJoinRequestsCommand, NodeNetworkAllocation,
     NodeNetworkAllocationSnapshot, NodeNetworkCreationNextStep, NodeNetworkDiscoveryCommand,
     NodeNetworkJoinPreview, NodeNetworkJoinResult, NodeNetworkLeaveResult,
-    NodeNetworkProfileCommand, NodePeerProbeSnapshot, NodePreviewConfigurationCommand,
-    NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand, NodeProbePeerCommand,
-    NodeRedeemInvitationCommand, NodeResidualCleanupResult, NodeResubmitJoinRequestCommand,
-    NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
-    NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand,
-    NodeSetNodeDisplayNameCommand, NodeSubmitJoinRequestCommand,
+    NodeNetworkMembersCommand, NodeNetworkProfileCommand, NodePeerProbeSnapshot,
+    NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand,
+    NodeProbePeerCommand, NodeRedeemInvitationCommand, NodeResidualCleanupResult,
+    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
+    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot,
+    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSubmitJoinRequestCommand,
     NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };
 pub use event::{

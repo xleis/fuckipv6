@@ -412,6 +412,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListNetworkMembers
         | NodeCommandKind::ListInvitations
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::PreviewInvitation
@@ -1082,6 +1083,22 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "list_join_requests",
                         "action.list_join_requests",
                         NodeCommandKind::ListJoinRequests,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NodeRunning,
+                        vec![field(
+                            "network_id",
+                            "field.network_id",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NonEmpty,
+                        )],
+                        None,
+                    ),
+                    action(
+                        "list_network_members",
+                        "action.list_network_members",
+                        NodeCommandKind::ListNetworkMembers,
                         NodeUiBackendStatus::Implemented,
                         NodePermission::ViewState,
                         NodeUiAvailability::NodeRunning,

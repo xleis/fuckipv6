@@ -348,6 +348,12 @@ mod tests {
                 )
                 .to_string(),
             }),
+            NodeCommand::ListNetworkMembers(crate::node::command::NodeNetworkMembersCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+            }),
             NodeCommand::ReviewJoinRequest(crate::node::command::NodeReviewJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
                     b"join-request-network",

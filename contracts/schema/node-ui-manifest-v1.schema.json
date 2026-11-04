@@ -45,6 +45,7 @@
             "join_network",
             "submit_join_request",
             "list_join_requests",
+            "list_network_members",
             "review_join_request",
             "batch_review_join_requests",
             "withdraw_join_request",

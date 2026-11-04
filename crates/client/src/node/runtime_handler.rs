@@ -462,6 +462,18 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "列出加入申请需要运行中的节点控制面"),
                 },
+                super::NodeCommand::ListNetworkMembers(command) => match runtime {
+                    Some(runtime) => {
+                        list_network_members(
+                            &runtime,
+                            discovery.as_ref(),
+                            request_id,
+                            command.network_id,
+                        )
+                        .await
+                    }
+                    None => unavailable(request_id, "列出成员目录需要运行中的节点控制面"),
+                },
                 super::NodeCommand::ReviewJoinRequest(command) => match runtime {
                     Some(runtime) => {
                         review_join_requests(
@@ -2393,6 +2405,35 @@ async fn list_join_requests(
             })),
         ),
         Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn list_network_members(
+    runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    request_id: u64,
+    network_id: String,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "join_request.error.invalid_network_id",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let coordinator_url = approval_coordinator_url(discovery, &network_id).await;
+    match runtime
+        .list_network_members(network_id, coordinator_url)
+        .await
+    {
+        Ok(directory) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::NetworkMembers(Box::new(directory)),
+        ),
+        Err(error) => runtime_rejection(request_id, error),
     }
 }
 

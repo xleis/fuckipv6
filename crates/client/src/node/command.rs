@@ -11,9 +11,9 @@ use fuckipv6_common::domain::{
     InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
     InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
     MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId,
-    NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
-    NetworkVisibility, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
-    NETWORK_PROFILE_MAX_TAG_CHARS,
+    NetworkJoinMode, NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview,
+    NetworkProfileUpdate, NetworkVisibility, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS,
+    JOIN_REQUEST_MAX_REASON_CHARS, NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -85,6 +85,7 @@ pub enum NodeCommandKind {
     JoinNetwork,
     SubmitJoinRequest,
     ListJoinRequests,
+    ListNetworkMembers,
     ReviewJoinRequest,
     BatchReviewJoinRequests,
     WithdrawJoinRequest,
@@ -121,7 +122,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -141,6 +142,7 @@ impl NodeCommandKind {
         Self::JoinNetwork,
         Self::SubmitJoinRequest,
         Self::ListJoinRequests,
+        Self::ListNetworkMembers,
         Self::ReviewJoinRequest,
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
@@ -177,7 +179,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 50] = [
+    pub const ACTIONS: [Self; 51] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -196,6 +198,7 @@ impl NodeCommandKind {
         Self::JoinNetwork,
         Self::SubmitJoinRequest,
         Self::ListJoinRequests,
+        Self::ListNetworkMembers,
         Self::ReviewJoinRequest,
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
@@ -273,6 +276,7 @@ impl NodeCommandKind {
             Self::JoinNetwork => "join_network",
             Self::SubmitJoinRequest => "submit_join_request",
             Self::ListJoinRequests => "list_join_requests",
+            Self::ListNetworkMembers => "list_network_members",
             Self::ReviewJoinRequest => "review_join_request",
             Self::BatchReviewJoinRequests => "batch_review_join_requests",
             Self::WithdrawJoinRequest => "withdraw_join_request",
@@ -418,6 +422,8 @@ pub enum NodeCommand {
     /// List the caller's own requests or every request when the caller is a
     /// current network owner/administrator.
     ListJoinRequests(NodeListJoinRequestsCommand),
+    /// Read the Coordinator-authoritative, privacy-filtered member directory.
+    ListNetworkMembers(NodeNetworkMembersCommand),
     /// Apply one revision-checked approval decision.
     ReviewJoinRequest(NodeReviewJoinRequestCommand),
     /// Apply a revision-checked approval batch atomically.
@@ -507,6 +513,7 @@ impl NodeCommand {
             Self::JoinNetwork(_) => NodeCommandKind::JoinNetwork,
             Self::SubmitJoinRequest(_) => NodeCommandKind::SubmitJoinRequest,
             Self::ListJoinRequests(_) => NodeCommandKind::ListJoinRequests,
+            Self::ListNetworkMembers(_) => NodeCommandKind::ListNetworkMembers,
             Self::ReviewJoinRequest(_) => NodeCommandKind::ReviewJoinRequest,
             Self::BatchReviewJoinRequests(_) => NodeCommandKind::BatchReviewJoinRequests,
             Self::WithdrawJoinRequest(_) => NodeCommandKind::WithdrawJoinRequest,
@@ -620,6 +627,7 @@ impl NodeCommand {
             Self::JoinNetwork(command) => command.validate(),
             Self::SubmitJoinRequest(command) => command.validate(),
             Self::ListJoinRequests(command) => command.validate(),
+            Self::ListNetworkMembers(command) => command.validate(),
             Self::ReviewJoinRequest(command) => command.validate(),
             Self::BatchReviewJoinRequests(command) => command.validate(),
             Self::WithdrawJoinRequest(command) => command.validate(),
@@ -1120,6 +1128,17 @@ pub struct NodeListJoinRequestsCommand {
 }
 
 impl NodeListJoinRequestsCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeNetworkMembersCommand {
+    pub network_id: String,
+}
+
+impl NodeNetworkMembersCommand {
     fn validate(&self) -> Result<(), NodeProblem> {
         validate_network_id_field(&self.network_id)
     }
@@ -2175,6 +2194,7 @@ pub enum NodeCommandOutcome {
     NetworkJoined(Box<NodeNetworkJoinResult>),
     JoinRequestSubmitted(Box<JoinRequest>),
     JoinRequests(Box<NodeJoinRequestListResult>),
+    NetworkMembers(Box<NetworkMemberDirectory>),
     JoinRequestsReviewed(Box<NodeJoinRequestReviewAck>),
     JoinRequestUpdated(Box<JoinRequest>),
     InvitationCreated(Box<IssuedInvitation>),
@@ -3009,6 +3029,12 @@ mod tests {
                 )
                 .to_string(),
             }),
+            NodeCommand::ListNetworkMembers(NodeNetworkMembersCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+            }),
             NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
                     b"join-request-network",
@@ -3206,8 +3232,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 51);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 50);
+        assert_eq!(NodeCommandKind::ALL.len(), 52);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 51);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
@@ -3898,6 +3924,7 @@ mod tests {
             NodeCommandKind::PreviewNetworkProfile,
             NodeCommandKind::PreviewJoinNetwork,
             NodeCommandKind::ListJoinRequests,
+            NodeCommandKind::ListNetworkMembers,
             NodeCommandKind::ListInvitations,
             NodeCommandKind::GetInvitationStatus,
             NodeCommandKind::PreviewInvitation,
@@ -3919,6 +3946,7 @@ mod tests {
                     | NodeCommandKind::PreviewNetworkProfile
                     | NodeCommandKind::PreviewJoinNetwork
                     | NodeCommandKind::ListJoinRequests
+                    | NodeCommandKind::ListNetworkMembers
                     | NodeCommandKind::ListInvitations
                     | NodeCommandKind::GetInvitationStatus
                     | NodeCommandKind::PreviewInvitation

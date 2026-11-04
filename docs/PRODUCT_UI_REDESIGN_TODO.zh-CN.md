@@ -1417,18 +1417,48 @@ WebUI `npm test -- --run`（129 passed）、`npm run typecheck`、`npm run lint`
 
 目标：网络治理对象与拓扑共享同一权威数据、筛选和选择；拓扑是操作入口，不是只读装饰图。
 
-### W9-01 成员列表与权威状态 `[ ]`
+### W9-01 成员列表与权威状态 `[x]`
 
-- [ ] 展示成员名称、身份指纹、角色、组、能力、在线状态和加入时间；
-- [ ] 成员状态覆盖申请中、已批准、活跃、降级、暂停、退出、移除、过期；
-- [ ] 在线状态注明新鲜度和来源，不把未知显示为离线；
-- [ ] 支持按角色、组、能力和健康筛选；
-- [ ] 列表虚拟化并保持选择稳定；
-- [ ] 点击对象打开统一详情面板，不复制页面；
-- [ ] 所有可见字段经过隐私策略过滤；
-- [ ] 支持导出当前视图的脱敏清单。
+- [x] 展示成员名称、身份指纹、角色、组、能力、在线状态和加入时间；
+- [x] 成员状态覆盖申请中、已批准、活跃、降级、暂停、退出、移除、过期；
+- [x] 在线状态注明新鲜度和来源，不把未知显示为离线；
+- [x] 支持按角色、组、能力和健康筛选；
+- [x] 列表虚拟化并保持选择稳定；
+- [x] 点击对象打开统一详情面板，不复制页面；
+- [x] 所有可见字段经过隐私策略过滤；
+- [x] 支持导出当前视图的脱敏清单。
 
 **验收**：成员列表与事件/快照最终一致；权限外字段不会被前端隐藏后仍下发。
+
+**证据（2026-11-04）**：新增服务端权威 `NetworkMemberDirectory` 投影及脱敏成员 DTO，统一生成名称、
+身份指纹、角色、组、能力、状态、presence、观测来源/时间、新鲜度和加入时间；加入时间按
+`approved_at_unix_ms`、兑换记录、Owner 创建时间依次取权威值，未知时不伪造。DTO 与 GPUI/WebUI
+覆盖申请中、已批准、活跃、降级、暂停、退出、移除、过期八种状态，但投影只输出当前数据源能够证明的
+状态，不会从缺失记录推断降级、暂停或移除；能力用 `null` 表示未知、`[]` 表示明确无能力。
+presence 仅由当前网络的 session 观测生成，未知状态显示“未知”并附带来源、观测时间和新鲜度，绝不
+降级显示为离线。`members.rs` 在权限判定前完成过滤，普通成员只能看到自己的待审申请，审批者才获得
+完整目录；邀请码、摘要、审批理由、端点、传输信息与公钥原文均不进入响应。GPUI 与 WebUI 共用相同的
+角色、组、能力、健康筛选语义，使用虚拟列表、单一共享详情面板和稳定的 NodeId 选择，并支持将当前筛选
+视图导出为仅含 DTO allowlist 字段的 TSV；WebUI 在网络切换、刷新、折叠和重新请求时清理失效目录与选择，
+GPUI 仅在成员关系返回真实 `network_id` 时暴露入口。新增并通过
+`projection_omits_sensitive_material_and_preserves_unknown_presence_and_times`、
+`non_member_and_missing_roster_fail_closed`、
+`member_directory_requests_hide_other_applicants_from_ordinary_members`、
+`member_directory_redemptions_are_permission_filtered_and_never_expose_ticket_material`、
+`member_directory_filters_are_stable_and_distinguish_unknown_capabilities`、
+`member_directory_health_filters_cover_statuses_and_unknown_presence`、
+`member_directory_selection_survives_refresh_only_while_member_exists`、
+`member_directory_virtualizes_rows_and_opens_one_shared_detail_panel`、
+`member_directory_exports_only_the_sanitized_filtered_view`、WebUI `members.test.ts`（7 passed）和
+`member-directory.test.tsx`（3 passed）。验证通过：
+`cargo test -p fuckipv6-common --all-features`（199 passed）、
+`cargo test -p fuckipv6-coordinator --all-features`（105 passed，另 2 个 signaling flow）、
+`cargo test -p fuckipv6-client --all-features --lib`（846 passed，3 ignored）、
+WebUI `npm test -- --run`（145 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
+`node ../scripts/test_webui_accessibility.mjs`、
+`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`cargo fmt --all -- --check` 和 `git diff --check`。
 
 ### W9-02 邀请、审批与移除 `[ ]`
 

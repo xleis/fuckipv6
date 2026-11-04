@@ -15,6 +15,7 @@ import type {
   IssuedInvitation,
   JoinRequest,
   JoinRequestReviewAction,
+  NetworkMemberDirectory,
   NetworkProfileApplyResult,
   NetworkProfilePreview,
   NetworkProfileProjections,
@@ -39,6 +40,7 @@ import {
   validateActionValues,
   type ActionValues,
 } from "../contract/invariants";
+import { MemberDirectoryCard } from "../member-directory";
 import { tr } from "../i18n";
 import { pageStateDefinition, type PageStateKind } from "../state-matrix";
 
@@ -2529,6 +2531,8 @@ function ActionCard({
     result: NodeJoinRequestListResult;
     loadedAtUnixMs: number;
   } | null>(null);
+  const [networkMembers, setNetworkMembers] =
+    useState<NetworkMemberDirectory | null>(null);
   const [joinConfirmed, setJoinConfirmed] = useState(false);
   const [joinExitConfirmed, setJoinExitConfirmed] = useState(false);
   const [issuedInvitation, setIssuedInvitation] =
@@ -2617,6 +2621,7 @@ function ActionCard({
     setProfileOutcome(null);
     setJoinPreview(null);
     setJoinRequests(null);
+    setNetworkMembers(null);
     setJoinConfirmed(false);
     setJoinExitConfirmed(false);
     setIssuedInvitation(null);
@@ -2643,6 +2648,7 @@ function ActionCard({
       setProfileOutcome(null);
       setJoinPreview(null);
       setJoinRequests(null);
+      setNetworkMembers(null);
       setJoinConfirmed(false);
       setJoinExitConfirmed(false);
       setIssuedInvitation(null);
@@ -2736,7 +2742,12 @@ function ActionCard({
     try {
       const submission = await onSubmit(action, values, () => {});
       if (submission.outcome?.status === "rejected") {
-        setFailure(outcomeSummary(submission.outcome, locale));
+        setFailure(
+          action.id === "list_network_members" &&
+            submission.outcome.data.code === "permission_denied"
+            ? label(locale, "member_directory.error.permission_denied")
+            : outcomeSummary(submission.outcome, locale),
+        );
       } else if (submission.outcome) {
         setResult(
           invitationOutcomeSummary(submission.outcome, locale) ??
@@ -2754,16 +2765,21 @@ function ActionCard({
           setJoinConfirmed(false);
           setJoinExitConfirmed(false);
           setOpen(true);
+        } else if (submission.outcome.status === "join_requests") {
+          setJoinRequests({
+            result: submission.outcome.data,
+            loadedAtUnixMs: Date.now(),
+          });
+          setNetworkMembers(null);
+          setOpen(true);
+        } else if (submission.outcome.status === "network_members") {
+          setNetworkMembers(submission.outcome.data);
+          setJoinRequests(null);
+          setOpen(true);
         } else if (
           !submission.outcome.status.startsWith("invitation_") &&
           submission.outcome.status !== "invitations"
         ) {
-          if (submission.outcome.status === "join_requests") {
-            setJoinRequests({
-              result: submission.outcome.data,
-              loadedAtUnixMs: Date.now(),
-            });
-          }
           if (
             submission.outcome.status === "network_joined" ||
             submission.outcome.status === "network_left"
@@ -2977,7 +2993,10 @@ function ActionCard({
         className="action-card-head"
         aria-expanded={open}
         onClick={() => {
-          if (!open) setJoinRequests(null);
+          if (!open) {
+            setJoinRequests(null);
+            setNetworkMembers(null);
+          }
           setOpen((current) => !current);
         }}
       >
@@ -3007,6 +3026,12 @@ function ActionCard({
           onExitContributionCheckedChange={setJoinExitConfirmed}
           onPreviewAgain={() => void previewJoinAgain()}
           onConfirm={() => void confirmJoin()}
+        />
+      ) : null}
+      {networkMembers && action.id === "list_network_members" ? (
+        <MemberDirectoryCard
+          directory={networkMembers}
+          locale={locale}
         />
       ) : null}
       {joinRequests ? (

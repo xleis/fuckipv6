@@ -4,6 +4,7 @@ use fuckipv6_common::domain::{
     InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
     IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, NetworkId,
+    NetworkMemberDirectory,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, Identity, JoinRequestBatchReviewItem,
@@ -76,6 +77,7 @@ pub(crate) struct JoinRequestStatusSnapshot {
 pub(crate) enum JoinRequestResponse {
     Status(JoinRequestStatusSnapshot),
     List(Vec<JoinRequest>),
+    MemberDirectory(NetworkMemberDirectory),
     Review {
         network_id: NetworkId,
         reviews: Vec<JoinRequestReviewResult>,
@@ -115,6 +117,7 @@ impl JoinRequestControlError {
 enum PendingJoinRequest {
     Status(JoinRequestId),
     List(NetworkId),
+    MemberDirectory(NetworkId),
     Review {
         network_id: NetworkId,
         request_ids: Vec<JoinRequestId>,
@@ -163,6 +166,13 @@ impl JoinRequestResponseHub {
             SignalingMessage::JoinRequestListResponse { .. } => {
                 self.matches(|expected| matches!(expected, PendingJoinRequest::List(_)))
             }
+            SignalingMessage::MemberDirectoryListAck { directory } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingJoinRequest::MemberDirectory(network_id)
+                        if *network_id == directory.network_id
+                )
+            }),
             SignalingMessage::JoinRequestReviewAck {
                 network_id,
                 reviews,
@@ -184,6 +194,7 @@ impl JoinRequestResponseHub {
             message,
             SignalingMessage::JoinRequestStatus { .. }
                 | SignalingMessage::JoinRequestListResponse { .. }
+                | SignalingMessage::MemberDirectoryListAck { .. }
                 | SignalingMessage::JoinRequestReviewAck { .. }
         );
         if !matches {
@@ -204,6 +215,9 @@ impl JoinRequestResponseHub {
             }),
             SignalingMessage::JoinRequestListResponse { requests } => {
                 JoinRequestResponse::List(requests.clone())
+            }
+            SignalingMessage::MemberDirectoryListAck { directory } => {
+                JoinRequestResponse::MemberDirectory(directory.clone())
             }
             SignalingMessage::JoinRequestReviewAck {
                 network_id,
@@ -689,6 +703,24 @@ impl SignalingClient {
             .await?
         {
             JoinRequestResponse::List(requests) => Ok(requests),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn list_network_members(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<NetworkMemberDirectory, JoinRequestControlError> {
+        match self
+            .send_join_request_operation(
+                SignalingMessage::MemberDirectoryList {
+                    network_id: network_id.clone(),
+                },
+                PendingJoinRequest::MemberDirectory(network_id),
+            )
+            .await?
+        {
+            JoinRequestResponse::MemberDirectory(directory) => Ok(directory),
             _ => Err(JoinRequestControlError::InvalidResponse),
         }
     }
@@ -1523,7 +1555,9 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
             revision,
         }),
 
-        SignalingMessage::JoinRequestSubmit { .. }
+        SignalingMessage::MemberDirectoryList { .. }
+        | SignalingMessage::MemberDirectoryListAck { .. }
+        | SignalingMessage::JoinRequestSubmit { .. }
         | SignalingMessage::JoinRequestList { .. }
         | SignalingMessage::JoinRequestReview { .. }
         | SignalingMessage::JoinRequestBatchReview { .. }

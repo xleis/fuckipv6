@@ -6,7 +6,8 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
     ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkProfileUpdate, NetworkVisibility,
+    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberGroup, NetworkMemberOnlineState,
+    NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -19,13 +20,13 @@ use crate::node::{
     NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
     NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
     NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
-    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand, NodeNetworkRole,
-    NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
-    NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand,
-    NodePrimaryStatus, NodeProbePeerCommand, NodeRedeemInvitationCommand,
-    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
-    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
-    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
+    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
+    NodePreviewJoinNetworkCommand, NodePrimaryStatus, NodeProbePeerCommand,
+    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
+    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
     NodeSubmitJoinRequestCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
     NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
@@ -51,6 +52,103 @@ pub enum PageKind {
     Logs,
     Identity,
     Settings,
+}
+
+/// Filter value for the member capability column. Missing capabilities are a
+/// distinct state from an explicitly empty capability list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemberCapabilityFilter {
+    #[default]
+    All,
+    Unknown,
+    Known(CapabilityKind),
+}
+
+/// A single health selector can address either the authoritative membership
+/// status or the independently observed presence state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemberHealthFilter {
+    #[default]
+    All,
+    Status(NetworkMemberStatus),
+    Presence(NetworkMemberOnlineState),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemberDirectoryFilters {
+    pub role: Option<MembershipRole>,
+    pub group: Option<NetworkMemberGroup>,
+    pub capability: MemberCapabilityFilter,
+    pub health: MemberHealthFilter,
+}
+
+/// Stable presentation order. The UI and clipboard export both consume this
+/// ordering so a refresh cannot reorder equal logical records.
+pub fn sort_network_members(members: &[NetworkMember]) -> Vec<&NetworkMember> {
+    let mut sorted = members.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| left.node_id.as_str().cmp(right.node_id.as_str()));
+    sorted
+}
+
+pub fn filter_network_members(
+    members: &[NetworkMember],
+    filters: MemberDirectoryFilters,
+) -> Vec<&NetworkMember> {
+    sort_network_members(members)
+        .into_iter()
+        .filter(|member| {
+            if filters.role.is_some_and(|role| member.role != role) {
+                return false;
+            }
+            if filters
+                .group
+                .is_some_and(|group| !member.groups.contains(&group))
+            {
+                return false;
+            }
+            match filters.capability {
+                MemberCapabilityFilter::All => {}
+                MemberCapabilityFilter::Unknown if member.capabilities.is_some() => return false,
+                MemberCapabilityFilter::Unknown => {}
+                MemberCapabilityFilter::Known(capability)
+                    if !member
+                        .capabilities
+                        .as_ref()
+                        .is_some_and(|capabilities| capabilities.contains(&capability)) =>
+                {
+                    return false;
+                }
+                MemberCapabilityFilter::Known(_) => {}
+            }
+            match filters.health {
+                MemberHealthFilter::All => true,
+                MemberHealthFilter::Status(status) => member.status == status,
+                MemberHealthFilter::Presence(presence) => member.presence.state == presence,
+            }
+        })
+        .collect()
+}
+
+pub fn retain_member_selection(
+    selected_node_id: Option<&str>,
+    members: &[NetworkMember],
+) -> Option<String> {
+    let selected_node_id = selected_node_id?;
+    members
+        .iter()
+        .any(|member| member.node_id.as_str() == selected_node_id)
+        .then(|| selected_node_id.to_owned())
+}
+
+pub fn network_membership_id<'a>(
+    snapshot: &'a NodeSnapshot,
+    network_name: &str,
+) -> Option<&'a str> {
+    snapshot
+        .memberships
+        .iter()
+        .find(|membership| membership.network_name == network_name)
+        .map(|membership| membership.network_id.as_str())
 }
 
 impl PageKind {
@@ -124,6 +222,7 @@ pub enum ActionBinding {
     JoinNetwork,
     SubmitJoinRequest,
     ListJoinRequests,
+    ListNetworkMembers,
     ReviewJoinRequest,
     BatchReviewJoinRequests,
     WithdrawJoinRequest,
@@ -164,7 +263,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -179,6 +278,7 @@ impl ActionBinding {
         Self::JoinNetwork,
         Self::SubmitJoinRequest,
         Self::ListJoinRequests,
+        Self::ListNetworkMembers,
         Self::ReviewJoinRequest,
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
@@ -234,6 +334,7 @@ impl ActionBinding {
             Self::JoinNetwork => "join_network",
             Self::SubmitJoinRequest => "submit_join_request",
             Self::ListJoinRequests => "list_join_requests",
+            Self::ListNetworkMembers => "list_network_members",
             Self::ReviewJoinRequest => "review_join_request",
             Self::BatchReviewJoinRequests => "batch_review_join_requests",
             Self::WithdrawJoinRequest => "withdraw_join_request",
@@ -838,6 +939,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::ListJoinRequests,
             NodeCommandKind::ListJoinRequests,
         ),
+        "list_network_members" => (
+            ActionBinding::ListNetworkMembers,
+            NodeCommandKind::ListNetworkMembers,
+        ),
         "review_join_request" => (
             ActionBinding::ReviewJoinRequest,
             NodeCommandKind::ReviewJoinRequest,
@@ -1034,6 +1139,10 @@ pub fn default_form_values(
                 (_, "timeout_ms") => "1500".into(),
                 (_, "acknowledged_at_unix_ms") => "1700000000000".into(),
                 ("join_network", "start") => "true".into(),
+                ("list_network_members", "network_id") => selected_network
+                    .and_then(|network| network_membership_id(snapshot, network))
+                    .unwrap_or_default()
+                    .into(),
                 ("create_network", "purpose") => "Owner-created network".into(),
                 ("create_network", "icon") => "network".into(),
                 ("create_network", "language") => "und".into(),
@@ -1369,6 +1478,11 @@ pub fn build_command(
         )),
         Ok(ActionBinding::ListJoinRequests) => {
             Ok(NodeCommand::ListJoinRequests(NodeListJoinRequestsCommand {
+                network_id: field("network_id"),
+            }))
+        }
+        Ok(ActionBinding::ListNetworkMembers) => {
+            Ok(NodeCommand::ListNetworkMembers(NodeNetworkMembersCommand {
                 network_id: field("network_id"),
             }))
         }
@@ -1726,6 +1840,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "join_network" => HashSet::from(["target", "network_name", "start"]),
         "submit_join_request" => HashSet::from(["network_id", "reason"]),
         "list_join_requests" => HashSet::from(["network_id"]),
+        "list_network_members" => HashSet::from(["network_id"]),
         "review_join_request" => HashSet::from([
             "network_id",
             "request_id",
@@ -4184,12 +4299,14 @@ mod tests {
     use super::*;
     use crate::node::{
         node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeIdentitySnapshot, NodeInterfaceAddress,
-        NodeInterfaceSnapshot, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot,
-        NodeProblem, NodeProblemCode, NodeRoutingDefaultAction, NodeRoutingSummarySnapshot,
-        NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeTrafficSnapshot, NodeUiField,
-        NodeUiValidation,
+        NodeInterfaceSnapshot, NodeNetworkMembershipSnapshot, NodeNetworkSnapshot,
+        NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode,
+        NodeRoutingDefaultAction, NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus,
+        NodeRoutingTargetSnapshot, NodeTrafficSnapshot, NodeUiField, NodeUiValidation,
     };
-    use fuckipv6_common::domain::{ActivityEntry, AuditId, AuditOutcome, NodeId};
+    use fuckipv6_common::domain::{
+        ActivityEntry, AuditId, AuditOutcome, MembershipState, NetworkMemberPresence, NodeId,
+    };
     use serde::Deserialize;
     use std::collections::BTreeMap;
 
@@ -4246,6 +4363,288 @@ mod tests {
                     .with_message_key(key)
             }),
         }
+    }
+
+    fn membership_snapshot(network_name: &str, network_id: &str) -> NodeNetworkMembershipSnapshot {
+        NodeNetworkMembershipSnapshot {
+            network_name: network_name.into(),
+            network_id: network_id.into(),
+            node_id: "local-node".into(),
+            state: MembershipState::Active,
+            role: MembershipRole::Member,
+            local_policy_revision: 1,
+            network_policy_revision: Some(1),
+            privacy_policy_revision: Some(1),
+            member_limit: None,
+            exit_contribution: Some(ExitContributionObligation::NotRequired),
+            exit_contribution_scope: Some(ExitContributionScope::NotApplicable),
+            terms_hash: None,
+            current_terms: None,
+            current_terms_hash: None,
+            policy_confirmation_required: false,
+            acknowledged_at_unix_ms: None,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            suspension_reason: None,
+        }
+    }
+
+    fn member_fixture(
+        node_id: &str,
+        role: MembershipRole,
+        group: NetworkMemberGroup,
+        capabilities: Option<Vec<CapabilityKind>>,
+        status: NetworkMemberStatus,
+        presence: NetworkMemberPresence,
+    ) -> NetworkMember {
+        NetworkMember {
+            node_id: NodeId::from_public_key(node_id.as_bytes()),
+            display_name: Some(node_id.into()),
+            identity_fingerprint: Some(format!("fingerprint-{node_id}")),
+            role,
+            groups: vec![group],
+            capabilities,
+            status,
+            presence,
+            joined_at_unix_ms: Some(1_700_000_000_000),
+        }
+    }
+
+    #[test]
+    fn member_directory_defaults_to_the_authoritative_network_id() {
+        let action = node_ui_manifest()
+            .pages
+            .into_iter()
+            .flat_map(|page| page.actions)
+            .find(|action| action.id == "list_network_members")
+            .expect("list member action");
+        let mut snapshot = NodeSnapshot::default();
+        snapshot
+            .memberships
+            .push(membership_snapshot("home", "network-authoritative-id"));
+
+        let values = default_form_values(&action, &snapshot, Some("home"));
+        assert_eq!(
+            values.get("network_id").map(String::as_str),
+            Some("network-authoritative-id")
+        );
+
+        let values = default_form_values(&action, &snapshot, Some("not-joined"));
+        assert_eq!(values.get("network_id").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn member_directory_filters_are_stable_and_distinguish_unknown_capabilities() {
+        let owner = member_fixture(
+            "owner-node",
+            MembershipRole::Owner,
+            NetworkMemberGroup::Owner,
+            Some(vec![CapabilityKind::Coordinator]),
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::live(1_700_000_000_500),
+        );
+        let unknown = member_fixture(
+            "unknown-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            None,
+            NetworkMemberStatus::Suspended,
+            NetworkMemberPresence::unknown(),
+        );
+        let empty = member_fixture(
+            "empty-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            Some(Vec::new()),
+            NetworkMemberStatus::Exited,
+            NetworkMemberPresence::disconnected(1_700_000_000_600),
+        );
+        let file = member_fixture(
+            "file-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            Some(vec![CapabilityKind::File]),
+            NetworkMemberStatus::Approved,
+            NetworkMemberPresence::unknown(),
+        );
+        let owner_id = owner.node_id.as_str().to_string();
+        let unknown_id = unknown.node_id.as_str().to_string();
+        let file_id = file.node_id.as_str().to_string();
+        let members = vec![owner, unknown, empty, file];
+
+        let mut expected = members
+            .iter()
+            .map(|member| member.node_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(
+            sort_network_members(&members)
+                .into_iter()
+                .map(|member| member.node_id.as_str().to_string())
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let no_filters = filter_network_members(&members, MemberDirectoryFilters::default());
+        assert_eq!(no_filters.len(), members.len());
+        assert_eq!(
+            no_filters
+                .iter()
+                .map(|member| member.node_id.as_str().to_string())
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let owners = filter_network_members(
+            &members,
+            MemberDirectoryFilters {
+                role: Some(MembershipRole::Owner),
+                group: Some(NetworkMemberGroup::Owner),
+                ..MemberDirectoryFilters::default()
+            },
+        );
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].node_id.as_str(), owner_id);
+
+        let unknown_capabilities = filter_network_members(
+            &members,
+            MemberDirectoryFilters {
+                capability: MemberCapabilityFilter::Unknown,
+                ..MemberDirectoryFilters::default()
+            },
+        );
+        assert_eq!(unknown_capabilities.len(), 1);
+        assert_eq!(unknown_capabilities[0].node_id.as_str(), unknown_id);
+
+        let file_capabilities = filter_network_members(
+            &members,
+            MemberDirectoryFilters {
+                capability: MemberCapabilityFilter::Known(CapabilityKind::File),
+                ..MemberDirectoryFilters::default()
+            },
+        );
+        assert_eq!(file_capabilities.len(), 1);
+        assert_eq!(file_capabilities[0].node_id.as_str(), file_id);
+    }
+
+    #[test]
+    fn member_directory_health_filters_cover_statuses_and_unknown_presence() {
+        let statuses = [
+            NetworkMemberStatus::Pending,
+            NetworkMemberStatus::Approved,
+            NetworkMemberStatus::Active,
+            NetworkMemberStatus::Degraded,
+            NetworkMemberStatus::Suspended,
+            NetworkMemberStatus::Exited,
+            NetworkMemberStatus::Removed,
+            NetworkMemberStatus::Expired,
+        ];
+        let members = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| {
+                member_fixture(
+                    &format!("status-{index}"),
+                    MembershipRole::Member,
+                    NetworkMemberGroup::Member,
+                    Some(Vec::new()),
+                    status,
+                    NetworkMemberPresence::unknown(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for status in statuses {
+            let filtered = filter_network_members(
+                &members,
+                MemberDirectoryFilters {
+                    health: MemberHealthFilter::Status(status),
+                    ..MemberDirectoryFilters::default()
+                },
+            );
+            assert_eq!(
+                filtered.len(),
+                1,
+                "missing status filter result for {status:?}"
+            );
+            assert_eq!(filtered[0].status, status);
+        }
+
+        let online = member_fixture(
+            "online-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            Some(Vec::new()),
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::live(1_700_000_000_700),
+        );
+        let offline = member_fixture(
+            "offline-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            Some(Vec::new()),
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::disconnected(1_700_000_000_800),
+        );
+        let unknown = member_fixture(
+            "unknown-presence-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            Some(Vec::new()),
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::unknown(),
+        );
+        let presence_members = vec![online, offline, unknown];
+
+        let offline_only = filter_network_members(
+            &presence_members,
+            MemberDirectoryFilters {
+                health: MemberHealthFilter::Presence(NetworkMemberOnlineState::Offline),
+                ..MemberDirectoryFilters::default()
+            },
+        );
+        assert_eq!(offline_only.len(), 1);
+        assert_eq!(
+            offline_only[0].presence.state,
+            NetworkMemberOnlineState::Offline
+        );
+        let unknown_only = filter_network_members(
+            &presence_members,
+            MemberDirectoryFilters {
+                health: MemberHealthFilter::Presence(NetworkMemberOnlineState::Unknown),
+                ..MemberDirectoryFilters::default()
+            },
+        );
+        assert_eq!(unknown_only.len(), 1);
+        assert_eq!(
+            unknown_only[0].presence.state,
+            NetworkMemberOnlineState::Unknown
+        );
+    }
+
+    #[test]
+    fn member_directory_selection_survives_refresh_only_while_member_exists() {
+        let member = member_fixture(
+            "selected-node",
+            MembershipRole::Member,
+            NetworkMemberGroup::Member,
+            Some(Vec::new()),
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::unknown(),
+        );
+        let selected = member.node_id.as_str().to_string();
+        let members = vec![member];
+
+        assert_eq!(
+            retain_member_selection(Some(&selected), &members),
+            Some(selected.clone())
+        );
+        assert_eq!(
+            retain_member_selection(Some("removed-node"), &members),
+            None
+        );
+        assert_eq!(retain_member_selection(None, &members), None);
+        assert_eq!(retain_member_selection(Some(&selected), &[]), None);
     }
 
     fn populated_snapshot() -> NodeSnapshot {
@@ -5101,7 +5500,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 51);
+        assert_eq!(ActionBinding::ALL.len(), 52);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages

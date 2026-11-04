@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use crate::domain::{
     InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
     InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
-    JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId,
+    JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId, NetworkMemberDirectory,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -249,6 +249,15 @@ pub enum SignalingMessage {
         invitation_id: InvitationId,
         state: InvitationState,
         revision: u64,
+    },
+
+    // Sanitized member directory. Appended after all existing variants so
+    // postcard variant numbers remain stable across mixed-version deployments.
+    MemberDirectoryList {
+        network_id: NetworkId,
+    },
+    MemberDirectoryListAck {
+        directory: NetworkMemberDirectory,
     },
 }
 

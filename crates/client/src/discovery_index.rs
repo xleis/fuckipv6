@@ -1567,11 +1567,11 @@ async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
 
 async fn wait_for_retry(
     delay: Duration,
-    mut cancel: Option<&mut watch::Receiver<bool>>,
+    cancel: Option<&mut watch::Receiver<bool>>,
 ) -> Result<(), DiscoveryIndexError> {
     let sleep = tokio::time::sleep(delay);
     tokio::pin!(sleep);
-    match cancel.as_deref_mut() {
+    match cancel {
         Some(cancel) => tokio::select! {
             _ = &mut sleep => Ok(()),
             _ = wait_for_cancel(cancel) => Err(DiscoveryIndexError::new(

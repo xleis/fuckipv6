@@ -1302,6 +1302,7 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::NetworkJoined(_)
         | NodeCommandOutcome::JoinRequestSubmitted(_)
         | NodeCommandOutcome::JoinRequests(_)
+        | NodeCommandOutcome::NetworkMembers(_)
         | NodeCommandOutcome::JoinRequestsReviewed(_)
         | NodeCommandOutcome::JoinRequestUpdated(_)
         | NodeCommandOutcome::InvitationCreated(_)
@@ -1419,6 +1420,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::PreviewNetworkProfile(_)
         | NodeCommand::PreviewJoinNetwork(_)
         | NodeCommand::ListJoinRequests(_)
+        | NodeCommand::ListNetworkMembers(_)
         | NodeCommand::ListInvitations(_)
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
@@ -1444,6 +1446,7 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::UnpublishNetworkDiscovery(command) => network_target(&command.network_name),
         NodeCommand::PreviewJoinNetwork(command) => network_target(&command.network_id),
         NodeCommand::ListJoinRequests(command) => network_target(&command.network_id),
+        NodeCommand::ListNetworkMembers(command) => network_target(&command.network_id),
         NodeCommand::SubmitJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::ReviewJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::BatchReviewJoinRequests(command) => network_target(&command.network_id),

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fuckipv6_common::domain::{
     InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestId, MembershipRole, NetworkId,
+    JoinRequest, JoinRequestId, MembershipRole, NetworkId, NetworkMemberDirectory,
 };
 use fuckipv6_common::{
     ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NatType, NetworkTicket,
@@ -1517,6 +1517,10 @@ enum JoinRequestRuntimeCommand {
         network_id: NetworkId,
         coordinator_url: Option<String>,
     },
+    ListMembers {
+        network_id: NetworkId,
+        coordinator_url: Option<String>,
+    },
     Review {
         network_id: NetworkId,
         reviews: Vec<JoinRequestBatchReviewItem>,
@@ -1538,6 +1542,7 @@ enum JoinRequestRuntimeCommand {
 enum JoinRequestExecutionResult {
     Status(JoinRequestStatusSnapshot),
     List(Vec<JoinRequest>),
+    Members(NetworkMemberDirectory),
     Review(Vec<JoinRequestReviewResult>),
 }
 
@@ -1949,6 +1954,27 @@ impl NetworkRuntimeManager {
                 code: NodeProblemCode::Internal,
                 message_key: "join_request.error.unavailable",
                 message: "审批控制返回了不匹配的列表响应".into(),
+            }),
+        }
+    }
+
+    pub async fn list_network_members(
+        &self,
+        network_id: NetworkId,
+        coordinator_url: Option<String>,
+    ) -> Result<NetworkMemberDirectory, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::ListMembers {
+                network_id,
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::Members(directory) => Ok(directory),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的成员目录响应".into(),
             }),
         }
     }
@@ -2497,6 +2523,20 @@ impl NetworkRuntimeActor {
                     .await;
                 result
                     .map(JoinRequestExecutionResult::List)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::ListMembers {
+                network_id,
+                coordinator_url,
+            } => {
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling.list_network_members(network_id).await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::Members)
                     .map_err(map_join_request_error)
             }
             JoinRequestRuntimeCommand::Review {

@@ -816,6 +816,17 @@
       ],
       "type": "object"
     },
+    "NodeNetworkMembersCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id"
+      ],
+      "type": "object"
+    },
     "NodeNetworkProfileCommand": {
       "properties": {
         "expected_revision": {
@@ -1527,6 +1538,23 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeListJoinRequestsCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Read the Coordinator-authoritative, privacy-filtered member directory.",
+      "properties": {
+        "command": {
+          "const": "list_network_members",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeNetworkMembersCommand"
         }
       },
       "required": [

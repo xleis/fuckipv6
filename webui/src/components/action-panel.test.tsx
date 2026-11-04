@@ -51,6 +51,9 @@ const reviewJoinRequest = manifest.pages
 const batchReviewJoinRequests = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "batch_review_join_requests") as NodeUiAction;
+const submitJoinRequest = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "submit_join_request") as NodeUiAction;
 const joinRequestReviewActions = [
   listJoinRequests,
   reviewJoinRequest,
@@ -927,6 +930,46 @@ describe("action panel operation status", () => {
 });
 
 describe("action panel join request review list", () => {
+  it("explains reason visibility and enforces its character limit", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={[submitJoinRequest]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async () => ({}))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.submit_join_request",
+      }),
+    );
+    const reason = screen.getByPlaceholderText(
+      "translated:placeholder.join_request_reason",
+    ) as HTMLInputElement;
+    expect(reason).toHaveAttribute("maxlength", "1000");
+    const help = document.getElementById(
+      reason.getAttribute("aria-describedby") ?? "",
+    );
+    expect(help).toHaveTextContent(
+      "translated:join_requests.reason_input_help",
+    );
+    expect(help).toHaveTextContent(
+      "translated:join_requests.reason_input_counter",
+    );
+    await user.type(reason, "家庭网络");
+    expect(help).toHaveAttribute("data-character-count", "4");
+  });
+
   it("shows applicant details, reason visibility and approval risks", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({

@@ -8,6 +8,7 @@ use fuckipv6_common::domain::{
     JoinRequestState, MembershipRole, NetworkJoinMode, NetworkProfileApplyResult,
     NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
     NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
+    JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -6177,7 +6178,7 @@ impl GpuiShell {
             _ => self.text_field(action, field, &value, cx),
         };
 
-        div()
+        let mut editor = div()
             .flex()
             .flex_col()
             .gap_1()
@@ -6185,8 +6186,31 @@ impl GpuiShell {
                 "{label}{required} · {} · {:?}",
                 field.id, field.validation
             )))
-            .child(control)
-            .into_any_element()
+            .child(control);
+        if field.input == NodeUiInputKind::JoinRequestReason {
+            let hint = format!(
+                "{} · {}",
+                t(self.locale, "join_requests.reason_input_help"),
+                tr(
+                    self.locale,
+                    "join_requests.reason_input_counter",
+                    &[
+                        ("count", &value.chars().count().to_string()),
+                        ("max", &JOIN_REQUEST_MAX_REASON_CHARS.to_string(),),
+                    ],
+                )
+            );
+            editor = editor.child(
+                div()
+                    .debug_selector(|| {
+                        format!("visual-join-request-reason-help-{}-{}", action.id, field.id)
+                    })
+                    .text_xs()
+                    .text_color(rgba(COLOR_FAINT))
+                    .child(hint),
+            );
+        }
+        editor.into_any_element()
     }
 
     fn text_field(
@@ -9318,6 +9342,42 @@ mod tests {
                 "missing profile preview element {selector}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn join_request_reason_editor_explains_visibility_and_limit(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                let manifest = crate::node::node_ui_manifest();
+                let page_id = manifest
+                    .pages
+                    .iter()
+                    .find(|page| {
+                        page.actions
+                            .iter()
+                            .any(|action| action.id == "submit_join_request")
+                    })
+                    .map(|page| page.id.clone())
+                    .expect("join request action page");
+                shell.manifest = Some(manifest);
+                shell.locale = Locale::En;
+                shell.selected_page = page_id;
+                shell
+                    .expanded_actions
+                    .insert("submit_join_request".into(), true);
+                cx.notify();
+            })
+            .expect("install join request form");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(
+            visible
+                .debug_bounds("visual-join-request-reason-help-submit_join_request-reason")
+                .is_some(),
+            "join request reason editor must explain its visibility and length limit"
+        );
     }
 
     #[gpui::test]

@@ -65,6 +65,7 @@ export type ActionSubmission = {
 };
 
 const numberInputs = new Set(["port", "timeout_ms"]);
+const joinRequestReasonMaxLength = 1000;
 const selectInputs = new Set([
   "network_mode",
   "network_selection",
@@ -187,6 +188,37 @@ function FieldControl({
           placeholder={label(locale, "placeholder.network_purpose")}
           onChange={(event) => onChange(event.target.value)}
         />
+      </label>
+    );
+  }
+  if (field.input === "join_request_reason") {
+    const reason = String(value);
+    const helpId = `${id}-help`;
+    return (
+      <label className="form-field" htmlFor={id}>
+        <span>{fieldLabel}</span>
+        <input
+          id={id}
+          type="text"
+          value={reason}
+          required={field.required}
+          maxLength={joinRequestReasonMaxLength}
+          aria-describedby={helpId}
+          placeholder={label(locale, "placeholder.join_request_reason")}
+          autoComplete="off"
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <small
+          className="field-help"
+          id={helpId}
+          data-character-count={[...reason].length}
+        >
+          {label(locale, "join_requests.reason_input_help")} ·{" "}
+          {tr(locale, "join_requests.reason_input_counter", {
+            count: [...reason].length,
+            max: joinRequestReasonMaxLength,
+          })}
+        </small>
       </label>
     );
   }

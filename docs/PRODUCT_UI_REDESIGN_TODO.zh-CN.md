@@ -1129,7 +1129,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 ### W8-06 审批加入 `[~]`
 
-- [ ] 提供申请理由字段、可见范围说明和长度限制；
+- [x] 提供申请理由字段、可见范围说明和长度限制；
 - [x] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
 - [x] 支持批准、拒绝、要求补充信息和批量审批；
 - [ ] 审批前显示将授予的成员权限和 Exit/File 影响；
@@ -1183,6 +1183,17 @@ updates their pinned revisions`，GPUI
 `cargo fmt --all -- --check` 和 `git diff --check`；生成的 `app.js` / `app.css` 已同步刷新。
 构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。W8-06 其余项仍需继续完成，
 因此章节状态保持进行中。
+
+本轮补齐申请理由输入表面：WebUI 的提交/重申理由字段使用 1000 字符 HTML 长度上限，
+展示“仅网络所有者和管理员可见”的隐私说明与实时 Unicode 字符计数，并通过
+`aria-describedby` 关联帮助文本；GPUI 使用同一共享上限显示可见范围说明和实时计数。
+WebUI 新增 `explains reason visibility and enforces its character limit`，GPUI 新增
+`join_request_reason_editor_explains_visibility_and_limit`。验证通过：
+`cargo test -p fuckipv6-client --all-features --lib gpui::view`（72 passed）、
+`cargo test -p fuckipv6-common i18n`（9 passed）、WebUI 9 个测试文件 114/114、
+`npm run typecheck`、`npm run lint`、`npm run build`、
+`node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
+`cargo fmt --all -- --check` 和 `git diff --check`。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

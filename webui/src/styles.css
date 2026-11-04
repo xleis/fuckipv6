@@ -2026,6 +2026,11 @@ button:disabled {
   font-size: 10px;
   font-weight: var(--font-weight-semibold);
 }
+.form-field > .field-help {
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
 .form-field input,
 .form-field select,
 .form-field textarea {

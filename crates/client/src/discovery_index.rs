@@ -1749,6 +1749,7 @@ mod tests {
     use fuckipv6_coordinator::signaling::{
         invitations::InvitationStore, join_requests::JoinRequestStore,
     };
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::node::{
@@ -2989,6 +2990,84 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.reason_key, Some("join.error.preview_changed"));
+    }
+
+    #[test]
+    fn public_discovery_card_serializes_only_the_signed_allowlist() {
+        let identity = Identity::generate().unwrap();
+        let profile =
+            signed_network_profile_with(&identity, NetworkJoinMode::ApprovalRequired, Some(4), 1);
+        let private_member = profile.members[1].to_string();
+        let record = signed_network_revision_from_profile(&identity, &profile, 1);
+        let document = serde_json::to_value(&record.document).unwrap();
+        let object = document.as_object().unwrap();
+        let allowed = BTreeSet::from([
+            "schema_version",
+            "network_id",
+            "public_key",
+            "publisher",
+            "name",
+            "purpose",
+            "language",
+            "region",
+            "tags",
+            "visibility",
+            "join_mode",
+            "owner",
+            "administrators",
+            "revision",
+            "policy_revision",
+            "privacy_policy_revision",
+            "member_limit",
+            "member_count",
+            "exit_contribution",
+            "exit_contribution_scope",
+            "privacy_changes",
+            "issued_at_unix_ms",
+            "expires_at_unix_ms",
+            "capability_summary",
+            "endpoints",
+        ]);
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            allowed
+        );
+
+        let manager = DiscoveryIndexManager::new(
+            temp_path("public-discovery-card"),
+            Arc::new(FakeTransport::default()),
+        );
+        let digest = record.digest().unwrap();
+        manager
+            .accept_record_locked(record, now_unix_ms(), true)
+            .unwrap();
+        let serialized = serde_json::to_string(&manager.snapshot()).unwrap();
+        for forbidden in [
+            private_member.as_str(),
+            "\"members\"",
+            "assigned_ipv4",
+            "assigned_ipv6",
+            "p2p_listen_addr",
+            "private_key",
+            "signing_key",
+            "invitation_ticket",
+            "invitation_code",
+            "credential",
+            "search_query",
+            "search_text",
+            "request_reason",
+            "activity_history",
+            "topology",
+            "token",
+            "audit",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "public discovery card leaked {forbidden}"
+            );
+        }
+        assert!(serialized.contains(&digest));
+        assert!(!serialized.contains(&private_member));
     }
 
     #[test]

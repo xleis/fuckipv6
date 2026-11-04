@@ -1150,6 +1150,82 @@ mod tests {
     }
 
     #[test]
+    fn invitation_join_rechecks_member_limit_and_capability_policy() {
+        let limit_dir = test_dir("member-limit-change");
+        let mut limited = network_record(vec![]);
+        let limited_path = write_network_record(&limit_dir, &limited);
+        let limit_store = open_store(&limit_dir);
+        let limited_invitation = limit_store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        limited.member_limit = Some(limited.members.len() as u32);
+        persist_network_record(&limited_path, &limited).unwrap();
+        let limited_invitee = invitee("member-limit-change");
+        let limited_preview = limit_store
+            .preview(
+                &network_id(),
+                &limited_invitee,
+                &limited_invitation.code,
+                NOW + 1,
+            )
+            .unwrap();
+        assert!(!limited_preview.can_accept);
+        assert_eq!(
+            limited_preview.denial_key.as_deref(),
+            Some("invitation.error.member_limit_reached")
+        );
+        let limit_error = limit_store
+            .redeem(
+                redemption_request(&limited_invitation, &limited_preview, NOW + 1),
+                &limited_invitee,
+                NOW + 2,
+            )
+            .unwrap_err();
+        assert!(limit_error.to_string().contains("member limit"));
+        let limited_roster = read_network_record(&limited_path, &network_id()).unwrap();
+        assert!(!limited_roster.members.contains(&limited_invitee));
+
+        let policy_dir = test_dir("capability-policy-change");
+        let mut policy_changed = network_record(vec![]);
+        let policy_path = write_network_record(&policy_dir, &policy_changed);
+        let policy_store = open_store(&policy_dir);
+        let policy_invitation = policy_store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        policy_changed
+            .capability_declarations
+            .retain(|capability| *capability != CapabilityKind::File);
+        persist_network_record(&policy_path, &policy_changed).unwrap();
+        let policy_invitee = invitee("capability-policy-change");
+        let policy_preview = policy_store
+            .preview(
+                &network_id(),
+                &policy_invitee,
+                &policy_invitation.code,
+                NOW + 1,
+            )
+            .unwrap();
+        assert!(!policy_preview.can_accept);
+        assert_eq!(
+            policy_preview.denial_key.as_deref(),
+            Some("invitation.error.capability_policy_changed")
+        );
+        let policy_error = policy_store
+            .redeem(
+                redemption_request(&policy_invitation, &policy_preview, NOW + 1),
+                &policy_invitee,
+                NOW + 2,
+            )
+            .unwrap_err();
+        assert_eq!(
+            policy_error.to_string(),
+            "invitation.error.capability_policy_changed"
+        );
+        let policy_roster = read_network_record(&policy_path, &network_id()).unwrap();
+        assert!(!policy_roster.members.contains(&policy_invitee));
+    }
+
+    #[test]
     fn stale_preview_and_concurrent_use_allow_exactly_one_admission() {
         let dir = test_dir("concurrent");
         write_network_record(&dir, &network_record(vec![]));

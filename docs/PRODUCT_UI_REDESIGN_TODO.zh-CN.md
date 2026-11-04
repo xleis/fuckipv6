@@ -1462,7 +1462,7 @@ WebUI `npm test -- --run`（145 passed）、`npm run typecheck`、`npm run lint`
 
 ### W9-02 邀请、审批与移除 `[ ]`
 
-- [ ] 统一成员生命周期操作及允许前置状态；
+- [x] 统一成员生命周期操作及允许前置状态；
 - [ ] 邀请、批准、拒绝、暂停、恢复、退出、移除均使用 operation；
 - [ ] 移除前展示网络访问、File 权限和数据影响；
 - [ ] 移除后立即撤销会话、授权和未完成传输；
@@ -1472,6 +1472,10 @@ WebUI `npm test -- --run`（145 passed）、`npm run typecheck`、`npm run lint`
 - [ ] 所有操作幂等并产生活动与审计。
 
 **验收**：任何治理操作都有清晰状态转移、权限校验、撤销边界和并发测试。
+
+**证据（2026-11-04，进行中）**：`lifecycle_transition_table_covers_every_governance_action` 与
+`illegal_lifecycle_predecessors_fail_closed` 覆盖邀请、批准、拒绝、暂停、恢复、退出、移除和恢复到待审批的全部合法/非法前置状态；
+`concurrent_mutations_use_cas_and_only_one_wins` 验证生命周期存储以 CAS revision 串行化并发治理。
 
 ### W9-03 自定义组与动态组 `[ ]`
 

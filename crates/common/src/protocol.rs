@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
-    JoinRequest, JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId,
+    InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
+    InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
+    JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -199,6 +201,54 @@ pub enum SignalingMessage {
         request_id: JoinRequestId,
         expected_revision: u64,
         reason: String,
+    },
+
+    // Private-network invitations. The plaintext code only appears in create,
+    // preview and redeem messages. `InvitationCode` has a redacted Debug impl;
+    // Coordinator logs must still never format raw frames or decoded messages.
+    InvitationCreate {
+        request: InvitationCreateRequest,
+    },
+    InvitationCreateAck {
+        issued: IssuedInvitation,
+    },
+    InvitationList {
+        network_id: NetworkId,
+    },
+    InvitationListAck {
+        invitations: Vec<InvitationStatusView>,
+    },
+    InvitationStatus {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    },
+    InvitationStatusAck {
+        invitation: InvitationStatusView,
+    },
+    InvitationRevoke {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+        expected_revision: u64,
+    },
+    InvitationRevokeAck {
+        invitation: InvitationStatusView,
+    },
+    InvitationPreview {
+        request: InvitationPreviewRequest,
+    },
+    InvitationPreviewAck {
+        preview: crate::domain::InvitationPreview,
+    },
+    InvitationRedeem {
+        request: InvitationRedeemRequest,
+    },
+    InvitationRedeemAck {
+        redemption: InvitationRedemption,
+    },
+    InvitationChanged {
+        invitation_id: InvitationId,
+        state: InvitationState,
+        revision: u64,
     },
 }
 

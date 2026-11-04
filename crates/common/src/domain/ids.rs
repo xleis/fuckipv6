@@ -111,6 +111,12 @@ prefixed_id!(
     "^join_[A-Za-z0-9_-]{43}$",
     "join request id"
 );
+prefixed_id!(
+    InvitationId,
+    "inv_",
+    "^inv_[A-Za-z0-9_-]{43}$",
+    "invitation id"
+);
 prefixed_id!(GroupId, "group_", "^group_[A-Za-z0-9_-]{43}$", "group id");
 prefixed_id!(
     TrafficRuleId,

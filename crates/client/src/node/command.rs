@@ -3161,6 +3161,7 @@ mod tests {
             NodeCommandKind::GetConfiguration,
             NodeCommandKind::PreviewNetworkProfile,
             NodeCommandKind::PreviewJoinNetwork,
+            NodeCommandKind::ListJoinRequests,
             NodeCommandKind::PreviewConfiguration,
             NodeCommandKind::GetConfigurationHistory,
         ] {
@@ -3178,6 +3179,7 @@ mod tests {
                     | NodeCommandKind::GetConfiguration
                     | NodeCommandKind::PreviewNetworkProfile
                     | NodeCommandKind::PreviewJoinNetwork
+                    | NodeCommandKind::ListJoinRequests
                     | NodeCommandKind::PreviewConfiguration
                     | NodeCommandKind::GetConfigurationHistory
             ) {
@@ -3468,48 +3470,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_request_audit_is_canonical_and_redacts_prose() {
-        let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
+    async fn join_request_audit_and_activity_cover_every_action_without_prose() {
+        let state = NodeStateStore::new();
+        let bus = NodeCommandBus::spawn_with_state(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            8,
+            state.clone(),
+        );
         let network_id = join_request_network_id();
         let request_id = join_request_id("audit-request");
         let context = || NodeCommandContext::local_owner(actor(), "local-ipc:owner");
-
-        bus.execute(
-            context(),
-            NodeCommandRequest::new(
-                60,
-                NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
-                    network_id: network_id.clone(),
-                    reason: "SECRET-AUDIT-REASON".into(),
-                }),
-            ),
-        )
-        .await
-        .expect("submit command result");
-        bus.execute(
-            context(),
-            NodeCommandRequest::new(
-                61,
-                NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
-                    network_id,
-                    review: review_item(
-                        request_id,
+        let commands = vec![
+            NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
+                network_id: network_id.clone(),
+                reason: "SECRET-AUDIT-REASON".into(),
+            }),
+            NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                network_id: network_id.clone(),
+                review: review_item(request_id.clone(), JoinRequestReviewAction::Approve, None),
+            }),
+            NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                network_id: network_id.clone(),
+                review: review_item(
+                    request_id.clone(),
+                    JoinRequestReviewAction::Reject,
+                    Some("SECRET-AUDIT-REJECTION"),
+                ),
+            }),
+            NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                network_id: network_id.clone(),
+                review: review_item(
+                    request_id.clone(),
+                    JoinRequestReviewAction::RequestInformation,
+                    Some("SECRET-AUDIT-INFORMATION"),
+                ),
+            }),
+            NodeCommand::BatchReviewJoinRequests(NodeBatchReviewJoinRequestsCommand {
+                network_id: network_id.clone(),
+                reviews: vec![
+                    review_item(request_id.clone(), JoinRequestReviewAction::Approve, None),
+                    review_item(
+                        join_request_id("second-audit-request"),
                         JoinRequestReviewAction::Reject,
-                        Some("SECRET-AUDIT-NOTE"),
+                        Some("SECRET-AUDIT-BATCH"),
                     ),
-                }),
-            ),
-        )
-        .await
-        .expect("review command result");
+                ],
+            }),
+            NodeCommand::WithdrawJoinRequest(NodeWithdrawJoinRequestCommand {
+                network_id: network_id.clone(),
+                request_id: request_id.clone(),
+            }),
+            NodeCommand::ResubmitJoinRequest(NodeResubmitJoinRequestCommand {
+                network_id,
+                request_id,
+                expected_revision: 2,
+                reason: "SECRET-AUDIT-RESUBMISSION".into(),
+            }),
+        ];
+
+        for (offset, command) in commands.into_iter().enumerate() {
+            let result = bus
+                .execute(
+                    context(),
+                    NodeCommandRequest::new(60 + offset as u64, command),
+                )
+                .await
+                .expect("join request command result");
+            assert!(result.is_success());
+        }
 
         let audit = bus.audit_entries();
-        assert_eq!(audit.len(), 2);
-        assert_eq!(audit[0].action, "network.join_request.submit");
-        assert_eq!(audit[1].action, "network.join_request.review");
-        let debug = format!("{audit:?}");
-        assert!(!debug.contains("SECRET-AUDIT-REASON"));
-        assert!(!debug.contains("SECRET-AUDIT-NOTE"));
+        assert_eq!(
+            audit
+                .iter()
+                .map(|entry| entry.action.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "network.join_request.submit",
+                "network.join_request.review",
+                "network.join_request.review",
+                "network.join_request.review",
+                "network.join_request.batch_review",
+                "network.join_request.withdraw",
+                "network.join_request.resubmit",
+            ]
+        );
+        assert!(audit
+            .iter()
+            .all(|entry| entry.outcome == AuditOutcome::Succeeded));
+
+        let activity = state.snapshot().await.recent_activity;
+        assert_eq!(activity.len(), 5);
+        assert_eq!(
+            activity
+                .iter()
+                .map(|entry| entry.action.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "network.join_request.resubmit",
+                "network.join_request.withdraw",
+                "network.join_request.batch_review",
+                "network.join_request.review",
+                "network.join_request.review",
+            ]
+        );
+        for secret in [
+            "SECRET-AUDIT-REASON",
+            "SECRET-AUDIT-REJECTION",
+            "SECRET-AUDIT-INFORMATION",
+            "SECRET-AUDIT-BATCH",
+            "SECRET-AUDIT-RESUBMISSION",
+        ] {
+            assert!(!format!("{audit:?}").contains(secret));
+            assert!(!format!("{activity:?}").contains(secret));
+        }
     }
 
     #[tokio::test]

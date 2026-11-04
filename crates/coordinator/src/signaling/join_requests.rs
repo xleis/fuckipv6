@@ -1072,6 +1072,14 @@ mod tests {
         assert!(admin_view
             .iter()
             .any(|request| request.request_id == pending.request_id));
+        let recipients = store
+            .notification_recipients(&network_id(), &applicant_id)
+            .unwrap();
+        assert_eq!(recipients.len(), 3);
+        assert!(recipients.contains(&applicant_id));
+        assert!(recipients.contains(&owner()));
+        assert!(recipients.contains(&admin()));
+        assert!(!recipients.contains(&applicant("unrelated-member")));
 
         write_network_record(&dir, &network_record(owner(), vec![]));
         assert!(store

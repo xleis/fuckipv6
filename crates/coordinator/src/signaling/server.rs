@@ -595,11 +595,7 @@ async fn broadcast_join_request_changed(
     revision: u64,
 ) -> Result<()> {
     let recipients = store.notification_recipients(network_id, applicant)?;
-    let message = SignalingMessage::JoinRequestChanged {
-        request_id: request_id.clone(),
-        state,
-        revision,
-    };
+    let message = join_request_changed_message(request_id, state, revision);
     for peer in session_manager.get_all_peers().await {
         let node_id = NodeId::from_public_key(&peer.public_key);
         if recipients.contains(&node_id) {
@@ -609,6 +605,18 @@ async fn broadcast_join_request_changed(
         }
     }
     Ok(())
+}
+
+fn join_request_changed_message(
+    request_id: &JoinRequestId,
+    state: JoinRequestState,
+    revision: u64,
+) -> SignalingMessage {
+    SignalingMessage::JoinRequestChanged {
+        request_id: request_id.clone(),
+        state,
+        revision,
+    }
 }
 
 async fn send_join_request_status(
@@ -1141,6 +1149,30 @@ async fn handle_relay_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_request_changed_notification_contains_only_identity_and_state() {
+        let request_id = JoinRequestId::from_public_key(b"notification-contract-request");
+        let message =
+            join_request_changed_message(&request_id, JoinRequestState::NeedsInformation, 7);
+        let encoded = serde_json::to_string(&message).expect("serialize notification");
+        let decoded: SignalingMessage =
+            serde_json::from_str(&encoded).expect("deserialize notification");
+
+        let SignalingMessage::JoinRequestChanged {
+            request_id: decoded_request_id,
+            state,
+            revision,
+        } = decoded
+        else {
+            panic!("expected a join request changed notification");
+        };
+        assert_eq!(decoded_request_id, request_id);
+        assert_eq!(state, JoinRequestState::NeedsInformation);
+        assert_eq!(revision, 7);
+        assert!(!encoded.contains("reason"));
+        assert!(!encoded.contains("SECRET-NOTIFICATION-PROSE"));
+    }
 
     #[test]
     fn test_verify_registration_signature() -> Result<()> {

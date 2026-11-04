@@ -1127,7 +1127,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 
 **验收**：用户清楚知道加入后发生什么；加入操作幂等，跨网络状态互不污染。
 
-### W8-06 审批加入 `[~]`
+### W8-06 审批加入 `[x]`
 
 - [x] 提供申请理由字段、可见范围说明和长度限制；
 - [x] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
@@ -1136,7 +1136,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 并发审批只能产生一个最终成员状态；
 - [x] 申请过期、撤回、管理员撤权时有一致状态；
 - [x] 申请理由只对获授权角色可见，并纳入保留策略；
-- [ ] 所有审批动作有审计、活动投影和通知。
+- [x] 所有审批动作有审计、活动投影和通知。
 
 **证据（2026-11-04，审批命令与 UI 契约切片）**：加入申请状态机、服务端权限、幂等、
 revision 冲突、审计和活动/通知后端语义已由前序提交落地；本轮把
@@ -1181,8 +1181,7 @@ updates their pinned revisions`，GPUI
 `npm run typecheck`、`npm run lint`、`npm run build`、
 `node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
 `cargo fmt --all -- --check` 和 `git diff --check`；生成的 `app.js` / `app.css` 已同步刷新。
-构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。W8-06 其余项仍需继续完成，
-因此章节状态保持进行中。
+构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 本轮补齐申请理由输入表面：WebUI 的提交/重申理由字段使用 1000 字符 HTML 长度上限，
 展示“仅网络所有者和管理员可见”的隐私说明与实时 Unicode 字符计数，并通过
@@ -1233,7 +1232,23 @@ WebUI 回归测试覆盖单条和批量审批的影响预览，GPUI 新增
 `cargo test -p fuckipv6-common --lib domain::membership::tests`（14 passed）、
 `cargo fmt --all -- --check` 和 `git diff --check`。
 
-**验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
+本轮补齐全部加入申请动作的审计、活动投影和通知契约：Submit、Approve、Reject、
+RequestInformation、BatchReview、Withdraw、Resubmit 七次写入均产生对应 canonical audit action，
+命令入口的授权、成功和失败路径统一记录；写入活动按最新优先保留五条，公开审阅命令的拒绝、
+补充信息和批量说明、重申理由均不进入审计或活动详情。变更通知仅携带 request ID、状态和
+revision，并由持久化通知构造函数的序列化回归测试锁定；申请人和 Owner 始终收到通知，当前
+管理员在名册内时收到、撤权后立即移除，无关节点不在收件人集合。新增
+`join_request_audit_and_activity_cover_every_action_without_prose`、
+`join_request_changed_notification_contains_only_identity_and_state`，并扩展
+`expiry_withdrawal_and_admin_revocation_keep_state_and_roster_consistent`。验证通过：
+`cargo test -p fuckipv6-client --all-features --lib node::command::tests::join_request_audit_and_activity_cover_every_action_without_prose`
+（1 passed）、
+`cargo test -p fuckipv6-coordinator --lib signaling::join_requests::tests`（10 passed）、
+`cargo test -p fuckipv6-coordinator --lib signaling::server::tests::join_request_changed_notification_contains_only_identity_and_state`
+（1 passed）、`cargo fmt --all -- --check` 和 `git diff --check`。
+
+**验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试；所有审批动作的
+审计、活动投影和通知收件人/载荷均有自动化证据。
 
 ### W8-07 私有网络邀请 `[ ]`
 

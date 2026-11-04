@@ -1311,6 +1311,7 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::InvitationPreview(_)
         | NodeCommandOutcome::InvitationRedeemed(_)
         | NodeCommandOutcome::NetworkLeft(_)
+        | NodeCommandOutcome::MembershipPolicyAcknowledged(_)
         | NodeCommandOutcome::IdentityRotated(_)
         | NodeCommandOutcome::Configuration(_)
         | NodeCommandOutcome::ConfigurationPreview(_)
@@ -1390,7 +1391,8 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ResubmitJoinRequest(_)
         | NodeCommand::CreateInvitation(_)
         | NodeCommand::RevokeInvitation(_)
-        | NodeCommand::RedeemInvitation(_) => OperationKind::NetworkApply,
+        | NodeCommand::RedeemInvitation(_)
+        | NodeCommand::AcknowledgeMembershipPolicy(_) => OperationKind::NetworkApply,
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -1462,6 +1464,7 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
             .map(network_target)
             .unwrap_or_else(node_target),
         NodeCommand::LeaveNetwork(command) => network_target(&command.network_name),
+        NodeCommand::AcknowledgeMembershipPolicy(command) => network_target(&command.network_id),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
@@ -3631,6 +3634,7 @@ mod tests {
                     privacy_policy_revision: None,
                     terms_hash: None,
                     acknowledged_at_unix_ms: None,
+                    exit_contribution_acknowledged: None,
                 })),
             ),
             idempotency_key: Some(IdempotencyKey::from_public_key(b"audit-operation-link")),

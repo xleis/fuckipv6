@@ -31,6 +31,27 @@
       ],
       "type": "string"
     },
+    "ExitContributionScope": {
+      "description": "The membership population covered by an Exit contribution obligation.\n`NotApplicable` is the only valid scope when contribution is not required.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_applicable"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "joining_members",
+          "description": "New members accept the obligation when they join. Existing members are\nnotified but retain their previously acknowledged scope.",
+          "type": "string"
+        },
+        {
+          "const": "all_members",
+          "description": "Every member must acknowledge the current obligation. This is used for\na policy migration that expands contribution to the existing roster.",
+          "type": "string"
+        }
+      ]
+    },
     "InvitationCode": {
       "description": "A high-entropy invitation secret. It is intentionally not a URL and its\n`Debug` representation is redacted so generic tracing cannot disclose it.",
       "type": "string"
@@ -47,6 +68,13 @@
         },
         "code": {
           "$ref": "#/$defs/InvitationCode"
+        },
+        "exit_contribution_acknowledged": {
+          "description": "Explicit consent to the current Exit contribution obligation. It is\nrequired when the invited network requires contribution and is never\ninferred from accepting the invitation itself.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "expected_invitation_revision": {
           "format": "uint64",
@@ -122,6 +150,10 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
         },
         "expires_at_unix_ms": {
           "format": "uint64",
@@ -336,6 +368,14 @@
           },
           "type": "array"
         },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
+        },
         "icon": {
           "type": "string"
         },
@@ -380,6 +420,34 @@
         "private"
       ],
       "type": "string"
+    },
+    "NodeAcknowledgeMembershipPolicyCommand": {
+      "description": "Re-confirm the exact signed network terms after a policy migration that\ncovers existing members. The hash pins the disclosure the owner saw; the\nseparate Exit flag can never be inferred from accepting the terms.",
+      "properties": {
+        "acknowledged_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_contribution_acknowledged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expected_terms_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "expected_terms_hash",
+        "acknowledged_at_unix_ms"
+      ],
+      "type": "object"
     },
     "NodeApplyConfigurationCommand": {
       "properties": {
@@ -478,6 +546,14 @@
             "$ref": "#/$defs/CapabilityKind"
           },
           "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
         },
         "external_host": {
           "type": [
@@ -578,6 +654,13 @@
             }
           ],
           "description": "Public signed discovery material selected by the user. It is never\ntrusted as cached authority: the handler replaces or revalidates it from\nthe persisted discovery snapshot immediately before mutation."
+        },
+        "exit_contribution_acknowledged": {
+          "description": "Explicit acknowledgement of the network's Exit contribution obligation.\nA network declaration never enables this node's local Exit service.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "network_id": {
           "description": "Stable network selected from a discovery preview.",
@@ -1631,6 +1714,23 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeLeaveNetworkCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Re-confirm the exact latest terms after an `AllMembers` policy change.",
+      "properties": {
+        "command": {
+          "const": "acknowledge_membership_policy",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeAcknowledgeMembershipPolicyCommand"
         }
       },
       "required": [

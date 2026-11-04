@@ -6126,6 +6126,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: Default::default(),
             join_mode: Default::default(),
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             signaling_port: 0,
             relay_port: 0,
             external_host: None,
@@ -8090,6 +8092,7 @@ mod tests {
                 privacy_policy_revision: None,
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
             })
             .await
             .expect("join ticket");
@@ -8282,6 +8285,7 @@ mod tests {
                     privacy_policy_revision: None,
                     terms_hash: None,
                     acknowledged_at_unix_ms: None,
+                    exit_contribution_acknowledged: None,
                 })
                 .await,
             Err(RuntimeControlError::Conflict(_))

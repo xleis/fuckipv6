@@ -59,6 +59,7 @@ import type {
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   executionBlockReason,
+  i18n,
   label,
   primaryStatus,
   type ActionValues,
@@ -224,6 +225,178 @@ function NetworkContextMenu({
         </ContextMenu.Content>
       </ContextMenu.Portal>
     </ContextMenu.Root>
+  );
+}
+
+function MembershipPolicyNotice({
+  membership,
+  snapshot,
+  locale,
+  onRequestAction,
+}: {
+  membership: NonNullable<NodeSnapshot["memberships"]>[number];
+  snapshot: NodeSnapshot;
+  locale: Locale;
+  onRequestAction(
+    actionId: string,
+    initialValues?: ActionValues,
+  ): void;
+}) {
+  const [exitConfirmed, setExitConfirmed] = useState(false);
+  const currentTerms = membership.current_terms;
+  const currentHash = membership.current_terms_hash;
+  const currentExitObligation =
+    currentTerms?.exit_contribution ?? membership.exit_contribution;
+  const currentExitScope =
+    currentTerms?.exit_contribution_scope ??
+    membership.exit_contribution_scope ??
+    "not_applicable";
+  const exitRequired = currentExitObligation === "required";
+  const policyChanged =
+    Boolean(currentHash) && currentHash !== membership.terms_hash;
+  const confirmationRequired = membership.policy_confirmation_required;
+  const localSupported = snapshot.exit_node_capabilities?.supported === true;
+  const localEnabled = snapshot.networks.some(
+    (network) =>
+      network.name === membership.network_name &&
+      network.roles.includes("exit_node"),
+  );
+
+  return (
+    <article
+      className="membership-policy-card"
+      data-testid={`membership-policy-${membership.network_id}`}
+    >
+      <div className="membership-policy-heading">
+        <div>
+          <strong>{membership.network_name}</strong>
+          <span>{label(locale, "membership.policy.title")}</span>
+        </div>
+        <span
+          className={`status-pill ${confirmationRequired ? "warn" : "good"}`}
+        >
+          {tr(
+            locale,
+            confirmationRequired
+              ? "membership.policy.confirmation_required"
+              : policyChanged
+                ? "membership.policy.notice_only"
+                : "membership.policy.acknowledged",
+            {
+              network: membership.network_name,
+            },
+          )}
+        </span>
+      </div>
+      <dl className="profile-definition-list membership-policy-details">
+        <div>
+          <dt>{label(locale, "join.network_policy_revision")}</dt>
+          <dd>
+            {(currentTerms?.network_policy_revision ??
+              membership.network_policy_revision) == null
+              ? label(locale, "common.none")
+              : i18n().formatInteger(
+                  locale,
+                  currentTerms?.network_policy_revision ??
+                    membership.network_policy_revision ??
+                    0,
+                )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.privacy_policy_revision")}</dt>
+          <dd>
+            {(currentTerms?.privacy_policy_revision ??
+              membership.privacy_policy_revision) == null
+              ? label(locale, "common.none")
+              : i18n().formatInteger(
+                  locale,
+                  currentTerms?.privacy_policy_revision ??
+                    membership.privacy_policy_revision ??
+                    0,
+                )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.exit.scope")}</dt>
+          <dd>
+            {label(
+              locale,
+              currentExitObligation === "required"
+                ? "join.exit.required"
+                : "join.exit.not_required",
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "join.exit_contribution")}</dt>
+          <dd>{label(locale, `join.exit.scope.${currentExitScope}`)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "membership.policy.current")}</dt>
+          <dd>{currentHash ?? membership.terms_hash ?? label(locale, "common.none")}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "membership.policy.local_exit_state")}</dt>
+          <dd>
+            {label(
+              locale,
+              localSupported
+                ? "join.exit.local_supported"
+                : "join.exit.local_unsupported",
+            )}
+            {" · "}
+            {label(
+              locale,
+              localEnabled
+                ? "join.exit.local_enabled"
+                : "join.exit.local_not_enabled",
+            )}
+          </dd>
+        </div>
+      </dl>
+      {confirmationRequired && currentTerms ? (
+        <div className="membership-policy-confirmation">
+          <div className="inline-notice warning">
+            <ShieldCheck size={15} />
+            <span>
+              {label(locale, "join.exit.disclosure.purpose")}{" "}
+              {label(locale, "join.exit.disclosure.bandwidth")}{" "}
+              {label(locale, "join.exit.disclosure.logging")}{" "}
+              {label(locale, "join.exit.disclosure.disable")}
+            </span>
+          </div>
+          {exitRequired ? (
+            <label className="check-field join-terms-check">
+              <input
+                type="checkbox"
+                checked={exitConfirmed}
+                onChange={(event) => setExitConfirmed(event.target.checked)}
+              />
+              <span>{label(locale, "membership.policy.confirm_exit")}</span>
+            </label>
+          ) : null}
+          <p>{label(locale, "membership.policy.local_exit_separate")}</p>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={!currentHash || (exitRequired && !exitConfirmed)}
+            onClick={() =>
+              onRequestAction("acknowledge_membership_policy", {
+                network_id: membership.network_id,
+                expected_terms_hash: currentHash ?? "",
+                acknowledged_at_unix_ms: String(Date.now()),
+                ...(exitRequired
+                  ? { exit_contribution_acknowledged: "true" }
+                  : {}),
+              })
+            }
+          >
+            {label(locale, "membership.policy.confirm")}
+          </button>
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -1458,6 +1631,32 @@ function Networks({
           </div>
         )}
       </section>
+
+      {(snapshot.memberships?.length ?? 0) > 0 ? (
+        <section
+          className="surface-card membership-policy-section"
+          data-testid="membership-policy-section"
+        >
+          <div className="card-heading">
+            <div>
+              <h3>{label(locale, "membership.policy.title")}</h3>
+              <p>{label(locale, "membership.policy.local_exit_separate")}</p>
+            </div>
+            <span>{snapshot.memberships?.length}</span>
+          </div>
+          <div className="membership-policy-grid">
+            {(snapshot.memberships ?? []).map((membership) => (
+              <MembershipPolicyNotice
+                key={membership.network_id}
+                membership={membership}
+                snapshot={snapshot}
+                locale={locale}
+                onRequestAction={onRequestAction}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section
         className="surface-card discovery-section"

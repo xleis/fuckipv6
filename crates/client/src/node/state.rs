@@ -6,8 +6,9 @@ use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
-    ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation, MembershipRole,
-    MembershipState, NetworkJoinMode, NetworkVisibility, OperationRecovery,
+    ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation,
+    ExitContributionScope, MembershipRole, MembershipState, MembershipTerms, NetworkJoinMode,
+    NetworkVisibility, OperationRecovery,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -786,7 +787,18 @@ pub struct NodeNetworkMembershipSnapshot {
     pub privacy_policy_revision: Option<u64>,
     pub member_limit: Option<u32>,
     pub exit_contribution: Option<ExitContributionObligation>,
+    pub exit_contribution_scope: Option<ExitContributionScope>,
     pub terms_hash: Option<String>,
+    /// Signed terms most recently observed from discovery. When these differ
+    /// from `terms_hash`, members see a policy-change notice; the separate
+    /// boolean distinguishes notice-only `JoiningMembers` changes from
+    /// `AllMembers` changes that require explicit acknowledgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_terms: Option<MembershipTerms>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_terms_hash: Option<String>,
+    #[serde(default)]
+    pub policy_confirmation_required: bool,
     pub acknowledged_at_unix_ms: Option<u64>,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
@@ -805,6 +817,8 @@ pub struct NodeNetworkProfileSnapshot {
     pub capability_declarations: Vec<CapabilityKind>,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
+    pub exit_contribution: ExitContributionObligation,
+    pub exit_contribution_scope: ExitContributionScope,
     pub revision: u64,
     pub policy_revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

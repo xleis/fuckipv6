@@ -4,27 +4,28 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
-    CapabilityKind, CapabilityState, ContentHash, InvitationCode, InvitationId,
-    InvitationRedeemRequest, MembershipRole, NetworkId, NetworkJoinMode, NetworkProfileUpdate,
-    NetworkVisibility,
+    CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
+    ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest, MembershipRole,
+    NetworkId, NetworkJoinMode, NetworkProfileUpdate, NetworkVisibility,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    NodeApplyConfigurationCommand, NodeBatchReviewJoinRequestsCommand, NodeClientBlacklistCommand,
-    NodeCommand, NodeCommandKind, NodeControlHealth, NodeCreateInvitationCommand,
-    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand,
-    NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand,
-    NodeJoinRequestReviewItem, NodeLeaveNetworkCommand, NodeListInvitationsCommand,
-    NodeListJoinRequestsCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
-    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
-    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
-    NodePreviewJoinNetworkCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
-    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
-    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
+    NodeBatchReviewJoinRequestsCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
+    NodeControlHealth, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
+    NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
+    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
+    NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
+    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand, NodeNetworkRole,
+    NodeNetworkSelection, NodeNetworkStatus, NodePermission, NodePhase,
+    NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand,
+    NodePrimaryStatus, NodeProbePeerCommand, NodeRedeemInvitationCommand,
+    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
+    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
+    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
     NodeSubmitJoinRequestCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
     NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
@@ -134,6 +135,7 @@ pub enum ActionBinding {
     PreviewInvitation,
     RedeemInvitation,
     LeaveNetwork,
+    AcknowledgeMembershipPolicy,
     StartNetworks,
     StopNetworks,
     RestartNetworks,
@@ -162,7 +164,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -188,6 +190,7 @@ impl ActionBinding {
         Self::PreviewInvitation,
         Self::RedeemInvitation,
         Self::LeaveNetwork,
+        Self::AcknowledgeMembershipPolicy,
         Self::StartNetworks,
         Self::StopNetworks,
         Self::RestartNetworks,
@@ -242,6 +245,7 @@ impl ActionBinding {
             Self::PreviewInvitation => "preview_invitation",
             Self::RedeemInvitation => "redeem_invitation",
             Self::LeaveNetwork => "leave_network",
+            Self::AcknowledgeMembershipPolicy => "acknowledge_membership_policy",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
             Self::RestartNetworks => "restart_networks",
@@ -875,6 +879,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::RedeemInvitation,
         ),
         "leave_network" => (ActionBinding::LeaveNetwork, NodeCommandKind::LeaveNetwork),
+        "acknowledge_membership_policy" => (
+            ActionBinding::AcknowledgeMembershipPolicy,
+            NodeCommandKind::AcknowledgeMembershipPolicy,
+        ),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
         "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
         "restart_networks" => (
@@ -1024,6 +1032,7 @@ pub fn default_form_values(
                 (_, "signaling_port") => "6666".into(),
                 (_, "relay_port") => "6667".into(),
                 (_, "timeout_ms") => "1500".into(),
+                (_, "acknowledged_at_unix_ms") => "1700000000000".into(),
                 ("join_network", "start") => "true".into(),
                 ("create_network", "purpose") => "Owner-created network".into(),
                 ("create_network", "icon") => "network".into(),
@@ -1031,6 +1040,8 @@ pub fn default_form_values(
                 ("create_network", "region") => "ZZ".into(),
                 ("create_network", "visibility") => "unlisted".into(),
                 ("create_network", "join_mode") => "invite_only".into(),
+                ("create_network", "exit_contribution") => "not_required".into(),
+                ("create_network", "exit_contribution_scope") => "not_applicable".into(),
                 ("create_network", "auto_connect") => "true".into(),
                 ("preview_network_profile" | "update_network_profile", "purpose") => profile
                     .map(|profile| profile.purpose.clone())
@@ -1066,6 +1077,21 @@ pub fn default_form_values(
                 ("preview_network_profile" | "update_network_profile", "join_mode") => profile
                     .map(|profile| format!("{:?}", profile.join_mode).to_ascii_lowercase())
                     .unwrap_or_else(|| "invite_only".into()),
+                ("preview_network_profile" | "update_network_profile", "exit_contribution") => {
+                    profile
+                        .map(|profile| {
+                            format!("{:?}", profile.exit_contribution).to_ascii_lowercase()
+                        })
+                        .unwrap_or_else(|| "not_required".into())
+                }
+                (
+                    "preview_network_profile" | "update_network_profile",
+                    "exit_contribution_scope",
+                ) => profile
+                    .map(|profile| {
+                        format!("{:?}", profile.exit_contribution_scope).to_ascii_lowercase()
+                    })
+                    .unwrap_or_else(|| "not_applicable".into()),
                 ("preview_network_profile" | "update_network_profile", "expected_revision") => {
                     profile
                         .map(|profile| profile.revision.to_string())
@@ -1171,6 +1197,14 @@ pub fn build_command(
                 )?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
+                exit_contribution: parse_exit_contribution(
+                    action,
+                    &required("exit_contribution")?,
+                )?,
+                exit_contribution_scope: parse_exit_contribution_scope(
+                    action,
+                    &required("exit_contribution_scope")?,
+                )?,
                 signaling_port: parse_number(
                     action,
                     "signaling_port",
@@ -1195,6 +1229,14 @@ pub fn build_command(
                 )?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
+                exit_contribution: parse_exit_contribution(
+                    action,
+                    &required("exit_contribution")?,
+                )?,
+                exit_contribution_scope: parse_exit_contribution_scope(
+                    action,
+                    &required("exit_contribution_scope")?,
+                )?,
             };
             let command = NodeNetworkProfileCommand {
                 network_name: field("network_name"),
@@ -1312,6 +1354,11 @@ pub fn build_command(
                 privacy_policy_revision,
                 terms_hash,
                 acknowledged_at_unix_ms,
+                exit_contribution_acknowledged: optional_non_empty(field(
+                    "exit_contribution_acknowledged",
+                ))
+                .map(|value| parse_bool(action, "exit_contribution_acknowledged", &value))
+                .transpose()?,
             })))
         }
         Ok(ActionBinding::SubmitJoinRequest) => Ok(NodeCommand::SubmitJoinRequest(
@@ -1472,12 +1519,38 @@ pub fn build_command(
                         "acknowledged_at_unix_ms",
                         &required("acknowledged_at_unix_ms")?,
                     )?,
+                    exit_contribution_acknowledged: Some(parse_bool(
+                        action,
+                        "exit_contribution_acknowledged",
+                        &required("exit_contribution_acknowledged")?,
+                    )?),
                 },
             }))
         }
         Ok(ActionBinding::LeaveNetwork) => Ok(NodeCommand::LeaveNetwork(NodeLeaveNetworkCommand {
             network_name: field("network_name"),
         })),
+        Ok(ActionBinding::AcknowledgeMembershipPolicy) => Ok(
+            NodeCommand::AcknowledgeMembershipPolicy(NodeAcknowledgeMembershipPolicyCommand {
+                network_id: parse_network_id(action, "network_id", &required("network_id")?)?
+                    .to_string(),
+                expected_terms_hash: parse_content_hash(
+                    action,
+                    "expected_terms_hash",
+                    &required("expected_terms_hash")?,
+                )?,
+                acknowledged_at_unix_ms: parse_number(
+                    action,
+                    "acknowledged_at_unix_ms",
+                    &required("acknowledged_at_unix_ms")?,
+                )?,
+                exit_contribution_acknowledged: optional_non_empty(field(
+                    "exit_contribution_acknowledged",
+                ))
+                .map(|value| parse_bool(action, "exit_contribution_acknowledged", &value))
+                .transpose()?,
+            }),
+        ),
         Ok(ActionBinding::StartNetworks) => Ok(NodeCommand::StartNetworks {
             selection: parse_selection(action, "selection", &required("selection")?)?,
         }),
@@ -1621,6 +1694,8 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "capability_declarations",
             "visibility",
             "join_mode",
+            "exit_contribution",
+            "exit_contribution_scope",
             "signaling_port",
             "relay_port",
             "external_host",
@@ -1637,6 +1712,8 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "capability_declarations",
             "visibility",
             "join_mode",
+            "exit_contribution",
+            "exit_contribution_scope",
         ]),
         "publish_network_discovery"
         | "update_network_discovery"
@@ -1683,6 +1760,12 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "acknowledged_at_unix_ms",
         ]),
         "leave_network" => HashSet::from(["network_name"]),
+        "acknowledge_membership_policy" => HashSet::from([
+            "network_id",
+            "expected_terms_hash",
+            "acknowledged_at_unix_ms",
+            "exit_contribution_acknowledged",
+        ]),
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
         "restart_networks" => HashSet::from(["networks", "all"]),
@@ -1805,6 +1888,37 @@ fn parse_join_mode(value: String) -> Result<NetworkJoinMode, CommandBuildError> 
             action_id: "create_network".into(),
             field_id: "join_mode".into(),
             value,
+        }),
+    }
+}
+
+fn parse_exit_contribution(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<ExitContributionObligation, CommandBuildError> {
+    match value {
+        "required" => Ok(ExitContributionObligation::Required),
+        "not_required" => Ok(ExitContributionObligation::NotRequired),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "exit_contribution".into(),
+            value: value.into(),
+        }),
+    }
+}
+
+fn parse_exit_contribution_scope(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<ExitContributionScope, CommandBuildError> {
+    match value {
+        "not_applicable" => Ok(ExitContributionScope::NotApplicable),
+        "joining_members" => Ok(ExitContributionScope::JoiningMembers),
+        "all_members" => Ok(ExitContributionScope::AllMembers),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "exit_contribution_scope".into(),
+            value: value.into(),
         }),
     }
 }
@@ -4954,7 +5068,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 50);
+        assert_eq!(ActionBinding::ALL.len(), 51);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -5014,6 +5128,18 @@ mod tests {
                         "https://coordinator.example.test/session".into(),
                     );
                 }
+                if action.id == "acknowledge_membership_policy" {
+                    values.insert(
+                        "network_id".into(),
+                        NetworkId::from_public_key(b"policy-command-network").to_string(),
+                    );
+                    values.insert(
+                        "expected_terms_hash".into(),
+                        ContentHash::from_bytes(b"policy-command-terms")
+                            .as_str()
+                            .to_string(),
+                    );
+                }
                 if matches!(
                     action.id.as_str(),
                     "create_invitation"
@@ -5050,6 +5176,7 @@ mod tests {
                         ContentHash::from_bytes(b"terms").as_str().to_string(),
                     );
                     values.insert("acknowledged_at_unix_ms".into(), "1700000000000".into());
+                    values.insert("exit_contribution_acknowledged".into(), "true".into());
                 }
                 let command = build_command(action, &values).expect("typed command");
                 assert_ne!(action.id, "");

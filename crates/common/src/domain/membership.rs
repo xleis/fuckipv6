@@ -84,11 +84,28 @@ pub enum ExitContributionObligation {
     NotRequired,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+/// The membership population covered by an Exit contribution obligation.
+/// `NotApplicable` is the only valid scope when contribution is not required.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitContributionScope {
+    #[default]
+    NotApplicable,
+    /// New members accept the obligation when they join. Existing members are
+    /// notified but retain their previously acknowledged scope.
+    JoiningMembers,
+    /// Every member must acknowledge the current obligation. This is used for
+    /// a policy migration that expands contribution to the existing roster.
+    AllMembers,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize)]
 pub struct MembershipTerms {
     pub network_policy_revision: u64,
     pub privacy_policy_revision: u64,
     pub exit_contribution: ExitContributionObligation,
+    #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
     /// Capacity shown when these terms were acknowledged. Omitted for legacy
     /// memberships so their content hash remains stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,9 +114,48 @@ pub struct MembershipTerms {
 
 impl MembershipTerms {
     pub fn content_hash(&self) -> DomainResult<ContentHash> {
-        let bytes = serde_json::to_vec(self)
+        // Required/JoiningMembers and NotRequired/NotApplicable are the
+        // canonical meaning of the pre-scope terms documents. Omitting the
+        // field for those exact pairs keeps old acknowledgements verifiable;
+        // AllMembers and any future non-legacy policy carries the field.
+        #[derive(Serialize)]
+        struct CanonicalTerms<'a> {
+            network_policy_revision: u64,
+            privacy_policy_revision: u64,
+            exit_contribution: ExitContributionObligation,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            exit_contribution_scope: Option<ExitContributionScope>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            member_limit: Option<u32>,
+            #[serde(skip)]
+            _marker: std::marker::PhantomData<&'a ()>,
+        }
+
+        let canonical = CanonicalTerms {
+            network_policy_revision: self.network_policy_revision,
+            privacy_policy_revision: self.privacy_policy_revision,
+            exit_contribution: self.exit_contribution,
+            exit_contribution_scope: (!self.has_legacy_exit_contribution_scope())
+                .then_some(self.exit_contribution_scope),
+            member_limit: self.member_limit,
+            _marker: std::marker::PhantomData,
+        };
+        let bytes = serde_json::to_vec(&canonical)
             .map_err(|_| DomainError::invalid_value("membership terms cannot be encoded"))?;
         Ok(ContentHash::from_bytes(&bytes))
+    }
+
+    fn has_legacy_exit_contribution_scope(&self) -> bool {
+        matches!(
+            (self.exit_contribution, self.exit_contribution_scope),
+            (
+                ExitContributionObligation::Required,
+                ExitContributionScope::JoiningMembers
+            ) | (
+                ExitContributionObligation::NotRequired,
+                ExitContributionScope::NotApplicable
+            )
+        )
     }
 
     pub fn validate(&self) -> DomainResult<()> {
@@ -113,7 +169,52 @@ impl MembershipTerms {
                 "membership member limit must be positive when set",
             ));
         }
+        if (self.exit_contribution == ExitContributionObligation::NotRequired)
+            != (self.exit_contribution_scope == ExitContributionScope::NotApplicable)
+        {
+            return Err(DomainError::invalid_value(
+                "exit contribution obligation and scope must agree",
+            ));
+        }
         Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for MembershipTerms {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawMembershipTerms {
+            network_policy_revision: u64,
+            privacy_policy_revision: u64,
+            exit_contribution: ExitContributionObligation,
+            #[serde(default)]
+            exit_contribution_scope: Option<ExitContributionScope>,
+            #[serde(default)]
+            member_limit: Option<u32>,
+        }
+
+        let raw = RawMembershipTerms::deserialize(deserializer)?;
+        Ok(Self {
+            network_policy_revision: raw.network_policy_revision,
+            privacy_policy_revision: raw.privacy_policy_revision,
+            exit_contribution: raw.exit_contribution,
+            exit_contribution_scope: raw
+                .exit_contribution_scope
+                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+            member_limit: raw.member_limit,
+        })
+    }
+}
+
+pub(crate) fn legacy_exit_contribution_scope(
+    obligation: ExitContributionObligation,
+) -> ExitContributionScope {
+    match obligation {
+        ExitContributionObligation::Required => ExitContributionScope::JoiningMembers,
+        ExitContributionObligation::NotRequired => ExitContributionScope::NotApplicable,
     }
 }
 
@@ -222,7 +323,7 @@ impl JoinApplicantProfile {
 /// Exact authority the member would receive if this request is approved. This
 /// is persisted at submission time so reviewers cannot approve terms different
 /// from those shown in the approval dialog.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize)]
 pub struct JoinRequestGrantPreview {
     pub role: MembershipRole,
     #[serde(default)]
@@ -230,9 +331,45 @@ pub struct JoinRequestGrantPreview {
     #[serde(default)]
     pub exit_contribution: ExitContributionObligation,
     #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
+    #[serde(default)]
     pub file_access: bool,
     #[serde(default)]
     pub grants_data_plane_access: bool,
+}
+
+impl<'de> Deserialize<'de> for JoinRequestGrantPreview {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawGrantPreview {
+            role: MembershipRole,
+            #[serde(default)]
+            capabilities: Vec<CapabilityKind>,
+            #[serde(default)]
+            exit_contribution: ExitContributionObligation,
+            #[serde(default)]
+            exit_contribution_scope: Option<ExitContributionScope>,
+            #[serde(default)]
+            file_access: bool,
+            #[serde(default)]
+            grants_data_plane_access: bool,
+        }
+
+        let raw = RawGrantPreview::deserialize(deserializer)?;
+        Ok(Self {
+            role: raw.role,
+            capabilities: raw.capabilities,
+            exit_contribution: raw.exit_contribution,
+            exit_contribution_scope: raw
+                .exit_contribution_scope
+                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+            file_access: raw.file_access,
+            grants_data_plane_access: raw.grants_data_plane_access,
+        })
+    }
 }
 
 impl JoinRequestGrantPreview {
@@ -253,6 +390,13 @@ impl JoinRequestGrantPreview {
         if self.file_access != self.capabilities.contains(&CapabilityKind::File) {
             return Err(DomainError::invariant(
                 "join request file impact does not match granted capabilities",
+            ));
+        }
+        if (self.exit_contribution == ExitContributionObligation::NotRequired)
+            != (self.exit_contribution_scope == ExitContributionScope::NotApplicable)
+        {
+            return Err(DomainError::invalid_value(
+                "join request Exit contribution obligation and scope must agree",
             ));
         }
         Ok(())
@@ -621,6 +765,11 @@ pub struct NetworkMembership {
     pub local_policy_revision: u64,
     pub terms: Option<MembershipTerms>,
     pub terms_ack: Option<JoinTermsAck>,
+    /// Latest signed network terms observed by this node. This may be newer
+    /// than `terms` while an existing member is deciding whether to accept a
+    /// policy migration. It is never treated as acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_terms: Option<MembershipTerms>,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
     pub suspension_reason: Option<String>,
@@ -641,6 +790,7 @@ impl NetworkMembership {
             local_policy_revision: 1,
             terms: None,
             terms_ack: None,
+            current_terms: None,
             created_at_unix_ms: now_unix_ms,
             updated_at_unix_ms: now_unix_ms,
             suspension_reason: None,
@@ -663,9 +813,88 @@ impl NetworkMembership {
             ));
         }
         self.ensure_transition(MembershipState::Applying)?;
+        self.current_terms = Some(terms.clone());
         self.terms = Some(terms);
         self.terms_ack = Some(ack);
         self.transition_to(MembershipState::Applying, now_unix_ms)
+    }
+
+    /// Record the latest signed network terms without treating them as an
+    /// acknowledgement. Existing members are notified when the terms differ;
+    /// only an `AllMembers` Exit migration requires an explicit re-ack.
+    /// Returns whether the locally persisted observation changed.
+    pub fn observe_current_terms(
+        &mut self,
+        terms: MembershipTerms,
+        now_unix_ms: u64,
+    ) -> DomainResult<bool> {
+        terms.validate()?;
+        if now_unix_ms < self.updated_at_unix_ms {
+            return Err(DomainError::invariant(
+                "membership policy observation time moved backwards",
+            ));
+        }
+        let unchanged = self
+            .current_terms
+            .as_ref()
+            .map(MembershipTerms::content_hash)
+            .transpose()?
+            == Some(terms.content_hash()?);
+        if unchanged {
+            return Ok(false);
+        }
+        self.current_terms = Some(terms);
+        self.updated_at_unix_ms = now_unix_ms;
+        Ok(true)
+    }
+
+    /// Acknowledge exactly the current terms a member was shown. `AllMembers`
+    /// migrations are invalidated unless the expected hash still matches the
+    /// latest observation. Exit consent is validated by the node layer, where
+    /// host capability is known.
+    pub fn acknowledge_current_terms(
+        &mut self,
+        expected_terms_hash: &ContentHash,
+        ack: JoinTermsAck,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        let current = self.current_terms.as_ref().ok_or_else(|| {
+            DomainError::new(
+                "domain.terms_not_acknowledged",
+                "membership has no current network terms to acknowledge",
+            )
+        })?;
+        let current_hash = current.content_hash()?;
+        if &current_hash != expected_terms_hash || ack.terms_hash != current_hash {
+            return Err(DomainError::new(
+                "domain.membership_policy_changed",
+                "membership policy changed after it was displayed",
+            ));
+        }
+        if now_unix_ms < self.updated_at_unix_ms {
+            return Err(DomainError::invariant(
+                "membership policy acknowledgement time moved backwards",
+            ));
+        }
+        self.terms = Some(current.clone());
+        self.terms_ack = Some(ack);
+        self.local_policy_revision = self.local_policy_revision.saturating_add(1);
+        self.updated_at_unix_ms = now_unix_ms;
+        Ok(())
+    }
+
+    /// Whether accepting the latest observed terms is currently required.
+    pub fn policy_confirmation_required(&self) -> bool {
+        let Some(current) = self.current_terms.as_ref() else {
+            return false;
+        };
+        if current.exit_contribution_scope != ExitContributionScope::AllMembers {
+            return false;
+        }
+        match (&self.terms_ack, current.content_hash()) {
+            (Some(ack), Ok(hash)) => ack.terms_hash != hash,
+            _ => true,
+        }
     }
 
     pub fn require_approval(&mut self, now_unix_ms: u64) -> DomainResult<()> {
@@ -771,6 +1000,9 @@ impl NetworkMembership {
                 ));
             }
         }
+        if let Some(current) = &self.current_terms {
+            current.validate()?;
+        }
         Ok(())
     }
 
@@ -806,8 +1038,129 @@ mod tests {
             network_policy_revision: 1,
             privacy_policy_revision: 1,
             exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: ExitContributionScope::JoiningMembers,
             member_limit: None,
         }
+    }
+
+    #[test]
+    fn policy_changes_require_confirmation_only_for_all_members_and_pin_the_hash() {
+        let initial = terms();
+        let mut membership = new_membership();
+        membership
+            .begin_apply(initial.clone(), ack(&initial), 10)
+            .expect("begin applying");
+        membership.accept(11).expect("accept");
+        membership.validate().expect("accepted membership");
+
+        let mut joining_scope_change = initial.clone();
+        joining_scope_change.network_policy_revision = 2;
+        assert!(membership
+            .observe_current_terms(joining_scope_change.clone(), 12)
+            .expect("observe joining-members policy"));
+        assert!(
+            !membership.policy_confirmation_required(),
+            "JoiningMembers changes are notice-only for existing members"
+        );
+        assert!(!membership
+            .observe_current_terms(joining_scope_change, 13)
+            .expect("unchanged observation"));
+
+        let mut all_members = initial;
+        all_members.network_policy_revision = 3;
+        all_members.exit_contribution_scope = ExitContributionScope::AllMembers;
+        assert!(membership
+            .observe_current_terms(all_members.clone(), 14)
+            .expect("observe all-members policy"));
+        assert!(membership.policy_confirmation_required());
+
+        let current_hash = all_members.content_hash().expect("current terms hash");
+        let stale_hash = ContentHash::from_bytes(b"stale-policy");
+        assert!(
+            membership
+                .acknowledge_current_terms(
+                    &stale_hash,
+                    JoinTermsAck {
+                        terms_hash: stale_hash.clone(),
+                        acknowledged_at_unix_ms: 15,
+                    },
+                    15,
+                )
+                .is_err(),
+            "acknowledgement must be pinned to the displayed hash"
+        );
+
+        let revision_before = membership.local_policy_revision;
+        membership
+            .acknowledge_current_terms(
+                &current_hash,
+                JoinTermsAck {
+                    terms_hash: current_hash.clone(),
+                    acknowledged_at_unix_ms: 16,
+                },
+                16,
+            )
+            .expect("acknowledge current terms");
+        assert_eq!(membership.terms.as_ref(), Some(&all_members));
+        assert_eq!(membership.local_policy_revision, revision_before + 1);
+        assert!(!membership.policy_confirmation_required());
+        membership.validate().expect("reconfirmed membership");
+    }
+
+    #[test]
+    fn legacy_terms_scope_defaults_and_hashes_remain_compatible() {
+        let required: MembershipTerms = serde_json::from_value(serde_json::json!({
+            "network_policy_revision": 7,
+            "privacy_policy_revision": 3,
+            "exit_contribution": "required"
+        }))
+        .unwrap();
+        assert_eq!(
+            required.exit_contribution_scope,
+            ExitContributionScope::JoiningMembers
+        );
+        required.validate().unwrap();
+
+        let not_required: MembershipTerms = serde_json::from_value(serde_json::json!({
+            "network_policy_revision": 7,
+            "privacy_policy_revision": 3,
+            "exit_contribution": "not_required"
+        }))
+        .unwrap();
+        assert_eq!(
+            not_required.exit_contribution_scope,
+            ExitContributionScope::NotApplicable
+        );
+        not_required.validate().unwrap();
+
+        #[derive(Serialize)]
+        struct LegacyTerms {
+            network_policy_revision: u64,
+            privacy_policy_revision: u64,
+            exit_contribution: ExitContributionObligation,
+        }
+        let legacy_hash = ContentHash::from_bytes(
+            &serde_json::to_vec(&LegacyTerms {
+                network_policy_revision: 7,
+                privacy_policy_revision: 3,
+                exit_contribution: ExitContributionObligation::Required,
+            })
+            .unwrap(),
+        );
+        assert_eq!(required.content_hash().unwrap(), legacy_hash);
+
+        let mut all_members = required;
+        all_members.exit_contribution_scope = ExitContributionScope::AllMembers;
+        assert_ne!(all_members.content_hash().unwrap(), legacy_hash);
+
+        let explicit_invalid: MembershipTerms = serde_json::from_value(serde_json::json!({
+            "network_policy_revision": 7,
+            "privacy_policy_revision": 3,
+            "exit_contribution": "required",
+            "exit_contribution_scope": "not_applicable"
+        }))
+        .unwrap();
+        assert!(explicit_invalid.validate().is_err());
     }
 
     fn ack(terms: &MembershipTerms) -> JoinTermsAck {
@@ -838,6 +1191,7 @@ mod tests {
                 role: MembershipRole::Member,
                 capabilities: vec![CapabilityKind::File],
                 exit_contribution: ExitContributionObligation::Required,
+                exit_contribution_scope: ExitContributionScope::JoiningMembers,
                 file_access: true,
                 grants_data_plane_access: true,
             },

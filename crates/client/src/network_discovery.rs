@@ -352,6 +352,8 @@ mod tests {
                 member_limit: None,
                 member_count: 1,
                 exit_contribution: fuckipv6_common::domain::ExitContributionObligation::NotRequired,
+                exit_contribution_scope:
+                    fuckipv6_common::domain::ExitContributionScope::NotApplicable,
                 privacy_changes: Vec::new(),
                 issued_at_unix_ms: self.issued_at_unix_ms,
                 expires_at_unix_ms: self.expires_at_unix_ms,

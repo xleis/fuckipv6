@@ -106,6 +106,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   preview_invitation: "preview_invitation",
   redeem_invitation: "redeem_invitation",
   leave_network: "leave_network",
+  acknowledge_membership_policy: "acknowledge_membership_policy",
   start_networks: "start_networks",
   stop_networks: "stop_networks",
   restart_networks: "restart_networks",
@@ -176,6 +177,8 @@ const INPUT_KINDS = new Set([
   "capability_declarations",
   "visibility",
   "join_mode",
+  "exit_contribution",
+  "exit_contribution_scope",
   "join_request_id",
   "join_request_note",
   "join_request_reason",
@@ -217,6 +220,8 @@ const VALIDATIONS = new Set([
   "capability_declarations",
   "visibility",
   "join_mode",
+  "exit_contribution",
+  "exit_contribution_scope",
   "join_request_id",
   "join_request_note",
   "join_request_reason",
@@ -245,6 +250,7 @@ const OUTCOME_STATUSES = new Set([
   "invitation_preview",
   "invitation_redeemed",
   "network_left",
+  "membership_policy_acknowledged",
   "configuration",
   "configuration_preview",
   "configuration_applied",
@@ -288,6 +294,15 @@ const NETWORK_JOIN_MODES = new Set([
   "open",
   "approval_required",
   "invite_only",
+]);
+const EXIT_CONTRIBUTION_OBLIGATIONS = new Set([
+  "required",
+  "not_required",
+]);
+const EXIT_CONTRIBUTION_SCOPES = new Set([
+  "not_applicable",
+  "joining_members",
+  "all_members",
 ]);
 const TUN_PLATFORMS = new Set(["linux", "macos", "windows", "other"]);
 const TUN_CAPABILITY_REASONS = new Set([
@@ -775,6 +790,9 @@ export function defaultFieldValue(
       return profile.capability_declarations.join(",");
     if (field.id === "visibility") return profile.visibility;
     if (field.id === "join_mode") return profile.join_mode;
+    if (field.id === "exit_contribution") return profile.exit_contribution;
+    if (field.id === "exit_contribution_scope")
+      return profile.exit_contribution_scope;
   }
   if (field.id === "purpose") return "Owner-created network";
   if (field.id === "icon") return "network";
@@ -786,6 +804,8 @@ export function defaultFieldValue(
     return snapshot.discovery_index?.index_url ?? "";
   if (field.id === "visibility") return "unlisted";
   if (field.id === "join_mode") return "invite_only";
+  if (field.id === "exit_contribution") return "not_required";
+  if (field.id === "exit_contribution_scope") return "not_applicable";
   if (field.id === "signaling_port") return "6666";
   if (field.id === "relay_port") return "6667";
   if (field.id === "timeout_ms") return "1500";
@@ -1369,6 +1389,16 @@ export function validateActionValues(
     ) {
       errors.push(label(locale, "validation.network_join_mode_invalid"));
     } else if (
+      field.validation === "exit_contribution" &&
+      !EXIT_CONTRIBUTION_OBLIGATIONS.has(String(value))
+    ) {
+      errors.push(label(locale, "validation.exit_contribution_invalid"));
+    } else if (
+      field.validation === "exit_contribution_scope" &&
+      !EXIT_CONTRIBUTION_SCOPES.has(String(value))
+    ) {
+      errors.push(label(locale, "validation.exit_contribution_scope_invalid"));
+    } else if (
       field.validation === "join_request_id" &&
       !validJoinRequestId(String(value))
     ) {
@@ -1654,6 +1684,12 @@ export function buildCommand(
             | "open"
             | "approval_required"
             | "invite_only",
+          exit_contribution: requiredString("exit_contribution") as
+            | "required"
+            | "not_required",
+          exit_contribution_scope: requiredString(
+            "exit_contribution_scope",
+          ) as "not_applicable" | "joining_members" | "all_members",
           signaling_port: Number(requireValue("signaling_port")),
           relay_port: Number(requireValue("relay_port")),
           external_host: optional(values, "external_host"),
@@ -1686,6 +1722,12 @@ export function buildCommand(
             | "open"
             | "approval_required"
             | "invite_only",
+          exit_contribution: requiredString("exit_contribution") as
+            | "required"
+            | "not_required",
+          exit_contribution_scope: requiredString(
+            "exit_contribution_scope",
+          ) as "not_applicable" | "joining_members" | "all_members",
         },
       };
       return action.id === "preview_network_profile"
@@ -1743,6 +1785,9 @@ export function buildCommand(
           acknowledged_at_unix_ms: Number(
             requireValue("acknowledged_at_unix_ms"),
           ),
+          ...(optional(values, "exit_contribution_acknowledged") === "true"
+            ? { exit_contribution_acknowledged: true }
+            : {}),
         },
       };
     }
@@ -1882,6 +1927,9 @@ export function buildCommand(
               label(locale, "field.acknowledged_at"),
               locale,
             ),
+            ...(optional(values, "exit_contribution_acknowledged") === "true"
+              ? { exit_contribution_acknowledged: true }
+              : {}),
           },
         },
       };
@@ -1889,6 +1937,22 @@ export function buildCommand(
       return {
         command: "leave_network",
         payload: { network_name: requiredString("network_name") },
+      };
+    case "acknowledge_membership_policy":
+      return {
+        command: "acknowledge_membership_policy",
+        payload: {
+          network_id: requiredString("network_id"),
+          expected_terms_hash: requiredString("expected_terms_hash"),
+          acknowledged_at_unix_ms: revisionValue(
+            requireValue("acknowledged_at_unix_ms"),
+            label(locale, "field.acknowledged_at"),
+            locale,
+          ),
+          ...(optional(values, "exit_contribution_acknowledged") === "true"
+            ? { exit_contribution_acknowledged: true }
+            : {}),
+        },
       };
     case "start_networks":
       return {

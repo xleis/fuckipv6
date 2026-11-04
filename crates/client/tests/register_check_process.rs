@@ -25,6 +25,8 @@ async fn register_check_command_registers_with_embedded_host() -> Result<()> {
                 capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
             },
             "ws://127.0.0.1:1",
             false,

@@ -580,6 +580,7 @@ impl AppController {
             privacy_policy_revision: None,
             terms_hash: None,
             acknowledged_at_unix_ms: None,
+            exit_contribution_acknowledged: None,
         })))
         .await?;
 
@@ -700,6 +701,8 @@ impl AppController {
                 capability_declarations,
                 visibility,
                 join_mode,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: port,
                 relay_port,
                 external_host,

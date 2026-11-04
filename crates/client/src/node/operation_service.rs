@@ -694,7 +694,8 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ResubmitJoinRequest(_)
         | NodeCommand::CreateInvitation(_)
         | NodeCommand::RevokeInvitation(_)
-        | NodeCommand::RedeemInvitation(_) => OperationKind::NetworkApply,
+        | NodeCommand::RedeemInvitation(_)
+        | NodeCommand::AcknowledgeMembershipPolicy(_) => OperationKind::NetworkApply,
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -762,6 +763,7 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
             .map(network_target)
             .unwrap_or_else(node_target),
         NodeCommand::LeaveNetwork(command) => network_target(&command.network_name),
+        NodeCommand::AcknowledgeMembershipPolicy(command) => network_target(&command.network_id),
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
@@ -1189,6 +1191,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: None,

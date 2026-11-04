@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use super::capability::CapabilityKind;
 use super::ids::{NetworkId, NodeId, PublicKey, Signature};
 use super::membership::{
-    ExitContributionObligation, JoinRequestGrantPreview, MembershipRole, MembershipTerms,
+    legacy_exit_contribution_scope, ExitContributionObligation, ExitContributionScope,
+    JoinRequestGrantPreview, MembershipRole, MembershipTerms,
 };
 use super::{DomainError, DomainResult};
 
@@ -64,7 +65,7 @@ impl NetworkEndpoint {
 
 /// Stable network metadata. The identifier is derived from `public_key`, not
 /// from a Coordinator hostname, endpoint or mutable display name.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize)]
 pub struct NetworkRecord {
     pub network_id: NetworkId,
     pub public_key: PublicKey,
@@ -109,6 +110,10 @@ pub struct NetworkRecord {
     /// never proof that this node has enabled its local Exit service.
     #[serde(default)]
     pub exit_contribution: ExitContributionObligation,
+    /// Population covered by the admission obligation. Kept separate from the
+    /// obligation itself so capability declarations can never imply consent.
+    #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
     /// Plain-language privacy-policy changes disclosed on the join preview.
     #[serde(default)]
     pub privacy_changes: Vec<String>,
@@ -119,6 +124,84 @@ pub struct NetworkRecord {
     /// the mutable record itself as a verified public document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_profile: Option<NetworkPublicProfileRecord>,
+}
+
+impl<'de> Deserialize<'de> for NetworkRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawNetworkRecord {
+            network_id: NetworkId,
+            public_key: PublicKey,
+            name: String,
+            purpose: String,
+            #[serde(default = "default_network_icon")]
+            icon: String,
+            #[serde(default = "default_network_language")]
+            language: String,
+            #[serde(default = "default_network_region")]
+            region: String,
+            #[serde(default)]
+            tags: Vec<String>,
+            #[serde(default)]
+            capability_declarations: Vec<CapabilityKind>,
+            visibility: NetworkVisibility,
+            join_mode: NetworkJoinMode,
+            owner: NodeId,
+            #[serde(default)]
+            administrators: Vec<NodeId>,
+            #[serde(default)]
+            members: Vec<NodeId>,
+            revision: u64,
+            policy_revision: u64,
+            #[serde(default = "default_policy_revision")]
+            privacy_policy_revision: u64,
+            #[serde(default)]
+            member_limit: Option<u32>,
+            #[serde(default)]
+            exit_contribution: ExitContributionObligation,
+            #[serde(default)]
+            exit_contribution_scope: Option<ExitContributionScope>,
+            #[serde(default)]
+            privacy_changes: Vec<String>,
+            created_at_unix_ms: u64,
+            updated_at_unix_ms: u64,
+            #[serde(default)]
+            signed_profile: Option<NetworkPublicProfileRecord>,
+        }
+
+        let raw = RawNetworkRecord::deserialize(deserializer)?;
+        Ok(Self {
+            network_id: raw.network_id,
+            public_key: raw.public_key,
+            name: raw.name,
+            purpose: raw.purpose,
+            icon: raw.icon,
+            language: raw.language,
+            region: raw.region,
+            tags: raw.tags,
+            capability_declarations: raw.capability_declarations,
+            visibility: raw.visibility,
+            join_mode: raw.join_mode,
+            owner: raw.owner,
+            administrators: raw.administrators,
+            members: raw.members,
+            revision: raw.revision,
+            policy_revision: raw.policy_revision,
+            privacy_policy_revision: raw.privacy_policy_revision,
+            member_limit: raw.member_limit,
+            exit_contribution: raw.exit_contribution,
+            exit_contribution_scope: raw
+                .exit_contribution_scope
+                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+            privacy_changes: raw.privacy_changes,
+            created_at_unix_ms: raw.created_at_unix_ms,
+            updated_at_unix_ms: raw.updated_at_unix_ms,
+            signed_profile: raw.signed_profile,
+        })
+    }
 }
 
 impl NetworkRecord {
@@ -156,6 +239,7 @@ impl NetworkRecord {
                 "network privacy changes are invalid",
             ));
         }
+        validate_exit_contribution_policy(self.exit_contribution, self.exit_contribution_scope)?;
         if self.updated_at_unix_ms < self.created_at_unix_ms {
             return Err(DomainError::invariant(
                 "network update time predates creation",
@@ -276,6 +360,13 @@ impl NetworkRecord {
         self.capability_declarations = canonical_capabilities(&update.capability_declarations)?;
         self.visibility = update.visibility;
         self.join_mode = update.join_mode;
+        if self.exit_contribution != update.exit_contribution
+            || self.exit_contribution_scope != update.exit_contribution_scope
+        {
+            self.policy_revision = self.policy_revision.saturating_add(1);
+        }
+        self.exit_contribution = update.exit_contribution;
+        self.exit_contribution_scope = update.exit_contribution_scope;
         self.revision = self.revision.saturating_add(1);
         self.updated_at_unix_ms = self.updated_at_unix_ms.max(now_unix_ms);
         // The old signature no longer covers the mutated fields. The caller
@@ -314,7 +405,8 @@ impl NetworkRecord {
             policy_revision: 1,
             privacy_policy_revision: 1,
             member_limit: None,
-            exit_contribution: ExitContributionObligation::NotRequired,
+            exit_contribution: profile.exit_contribution,
+            exit_contribution_scope: profile.exit_contribution_scope,
             privacy_changes: Vec::new(),
             created_at_unix_ms: now_unix_ms,
             updated_at_unix_ms: now_unix_ms,
@@ -335,6 +427,7 @@ impl NetworkRecord {
             network_policy_revision: self.policy_revision,
             privacy_policy_revision: self.privacy_policy_revision,
             exit_contribution: self.exit_contribution,
+            exit_contribution_scope: self.exit_contribution_scope,
             member_limit: self.member_limit,
         }
     }
@@ -351,6 +444,7 @@ impl NetworkRecord {
             file_access: capabilities.contains(&CapabilityKind::File),
             capabilities,
             exit_contribution: self.exit_contribution,
+            exit_contribution_scope: self.exit_contribution_scope,
             grants_data_plane_access: true,
         }
     }
@@ -399,7 +493,7 @@ impl NetworkRecord {
 
 /// Owner-supplied public profile used to create a network. Hostnames, ports and
 /// runtime settings deliberately do not participate in this contract.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize)]
 pub struct NetworkCreateProfile {
     pub name: String,
     pub purpose: String,
@@ -413,6 +507,54 @@ pub struct NetworkCreateProfile {
     pub capability_declarations: Vec<CapabilityKind>,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
+    #[serde(default)]
+    pub exit_contribution: ExitContributionObligation,
+    #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
+}
+
+impl<'de> Deserialize<'de> for NetworkCreateProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawNetworkCreateProfile {
+            name: String,
+            purpose: String,
+            icon: String,
+            language: String,
+            #[serde(default = "default_network_region")]
+            region: String,
+            #[serde(default)]
+            tags: Vec<String>,
+            #[serde(default)]
+            capability_declarations: Vec<CapabilityKind>,
+            visibility: NetworkVisibility,
+            join_mode: NetworkJoinMode,
+            #[serde(default)]
+            exit_contribution: ExitContributionObligation,
+            #[serde(default)]
+            exit_contribution_scope: Option<ExitContributionScope>,
+        }
+
+        let raw = RawNetworkCreateProfile::deserialize(deserializer)?;
+        Ok(Self {
+            name: raw.name,
+            purpose: raw.purpose,
+            icon: raw.icon,
+            language: raw.language,
+            region: raw.region,
+            tags: raw.tags,
+            capability_declarations: raw.capability_declarations,
+            visibility: raw.visibility,
+            join_mode: raw.join_mode,
+            exit_contribution: raw.exit_contribution,
+            exit_contribution_scope: raw
+                .exit_contribution_scope
+                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+        })
+    }
 }
 
 impl NetworkCreateProfile {
@@ -423,7 +565,8 @@ impl NetworkCreateProfile {
         validate_network_language(&self.language)?;
         validate_network_region(&self.region)?;
         validate_network_tags(&self.tags)?;
-        validate_capability_declarations(&self.capability_declarations)
+        validate_capability_declarations(&self.capability_declarations)?;
+        validate_exit_contribution_policy(self.exit_contribution, self.exit_contribution_scope)
     }
 
     pub fn normalized(mut self) -> DomainResult<Self> {
@@ -436,7 +579,7 @@ impl NetworkCreateProfile {
 
 /// Owner-editable public fields for an existing network. The network name and
 /// stable identity deliberately cannot be changed through this command.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize)]
 pub struct NetworkProfileUpdate {
     pub purpose: String,
     pub icon: String,
@@ -448,6 +591,51 @@ pub struct NetworkProfileUpdate {
     pub capability_declarations: Vec<CapabilityKind>,
     pub visibility: NetworkVisibility,
     pub join_mode: NetworkJoinMode,
+    #[serde(default)]
+    pub exit_contribution: ExitContributionObligation,
+    #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
+}
+
+impl<'de> Deserialize<'de> for NetworkProfileUpdate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawNetworkProfileUpdate {
+            purpose: String,
+            icon: String,
+            language: String,
+            region: String,
+            #[serde(default)]
+            tags: Vec<String>,
+            #[serde(default)]
+            capability_declarations: Vec<CapabilityKind>,
+            visibility: NetworkVisibility,
+            join_mode: NetworkJoinMode,
+            #[serde(default)]
+            exit_contribution: ExitContributionObligation,
+            #[serde(default)]
+            exit_contribution_scope: Option<ExitContributionScope>,
+        }
+
+        let raw = RawNetworkProfileUpdate::deserialize(deserializer)?;
+        Ok(Self {
+            purpose: raw.purpose,
+            icon: raw.icon,
+            language: raw.language,
+            region: raw.region,
+            tags: raw.tags,
+            capability_declarations: raw.capability_declarations,
+            visibility: raw.visibility,
+            join_mode: raw.join_mode,
+            exit_contribution: raw.exit_contribution,
+            exit_contribution_scope: raw
+                .exit_contribution_scope
+                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+        })
+    }
 }
 
 impl NetworkProfileUpdate {
@@ -461,6 +649,8 @@ impl NetworkProfileUpdate {
             capability_declarations: record.capability_declarations.clone(),
             visibility: record.visibility,
             join_mode: record.join_mode,
+            exit_contribution: record.exit_contribution,
+            exit_contribution_scope: record.exit_contribution_scope,
         }
     }
 
@@ -470,7 +660,8 @@ impl NetworkProfileUpdate {
         validate_network_language(&self.language)?;
         validate_network_region(&self.region)?;
         validate_network_tags(&self.tags)?;
-        validate_capability_declarations(&self.capability_declarations)
+        validate_capability_declarations(&self.capability_declarations)?;
+        validate_exit_contribution_policy(self.exit_contribution, self.exit_contribution_scope)
     }
 
     pub fn normalized(mut self) -> DomainResult<Self> {
@@ -531,6 +722,20 @@ fn validate_network_purpose(purpose: &str) -> DomainResult<()> {
         || purpose.chars().any(char::is_control)
     {
         return Err(DomainError::invalid_value("network purpose is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_exit_contribution_policy(
+    obligation: ExitContributionObligation,
+    scope: ExitContributionScope,
+) -> DomainResult<()> {
+    if (obligation == ExitContributionObligation::NotRequired)
+        != (scope == ExitContributionScope::NotApplicable)
+    {
+        return Err(DomainError::invalid_value(
+            "exit contribution obligation and scope must agree",
+        ));
     }
     Ok(())
 }
@@ -934,6 +1139,16 @@ fn network_profile_diff(
         format!("{:?}", current.join_mode).to_ascii_lowercase(),
         format!("{:?}", update.join_mode).to_ascii_lowercase(),
     );
+    compare(
+        "exit_contribution",
+        format!("{:?}", current.exit_contribution).to_ascii_lowercase(),
+        format!("{:?}", update.exit_contribution).to_ascii_lowercase(),
+    );
+    compare(
+        "exit_contribution_scope",
+        format!("{:?}", current.exit_contribution_scope).to_ascii_lowercase(),
+        format!("{:?}", update.exit_contribution_scope).to_ascii_lowercase(),
+    );
     entries
 }
 
@@ -1060,7 +1275,7 @@ pub fn network_profile_projections(
 
 /// Signed discovery data. Endpoints may change between revisions; the stable
 /// network ID remains bound to the immutable network public key.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize)]
 pub struct NetworkDiscoveryDocument {
     pub schema_version: u16,
     pub network_id: NetworkId,
@@ -1097,6 +1312,8 @@ pub struct NetworkDiscoveryDocument {
     #[serde(default)]
     pub exit_contribution: ExitContributionObligation,
     #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
+    #[serde(default)]
     pub privacy_changes: Vec<String>,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
@@ -1109,6 +1326,86 @@ pub struct NetworkDiscoveryDocument {
     /// client accepts one, every older or non-identical successor is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at_unix_ms: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for NetworkDiscoveryDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawNetworkDiscoveryDocument {
+            schema_version: u16,
+            network_id: NetworkId,
+            public_key: PublicKey,
+            publisher: NodeId,
+            name: String,
+            purpose: String,
+            #[serde(default = "default_network_language")]
+            language: String,
+            #[serde(default = "default_network_region")]
+            region: String,
+            #[serde(default)]
+            tags: Vec<String>,
+            visibility: NetworkVisibility,
+            join_mode: NetworkJoinMode,
+            owner: NodeId,
+            #[serde(default)]
+            administrators: Vec<NodeId>,
+            revision: u64,
+            policy_revision: u64,
+            privacy_policy_revision: u64,
+            #[serde(default)]
+            member_limit: Option<u32>,
+            #[serde(default)]
+            member_count: u32,
+            #[serde(default)]
+            exit_contribution: ExitContributionObligation,
+            #[serde(default)]
+            exit_contribution_scope: Option<ExitContributionScope>,
+            #[serde(default)]
+            privacy_changes: Vec<String>,
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+            capability_summary: Vec<CapabilityKind>,
+            #[serde(default)]
+            endpoints: Vec<NetworkEndpoint>,
+            #[serde(default)]
+            revoked_at_unix_ms: Option<u64>,
+        }
+
+        let raw = RawNetworkDiscoveryDocument::deserialize(deserializer)?;
+        Ok(Self {
+            schema_version: raw.schema_version,
+            network_id: raw.network_id,
+            public_key: raw.public_key,
+            publisher: raw.publisher,
+            name: raw.name,
+            purpose: raw.purpose,
+            language: raw.language,
+            region: raw.region,
+            tags: raw.tags,
+            visibility: raw.visibility,
+            join_mode: raw.join_mode,
+            owner: raw.owner,
+            administrators: raw.administrators,
+            revision: raw.revision,
+            policy_revision: raw.policy_revision,
+            privacy_policy_revision: raw.privacy_policy_revision,
+            member_limit: raw.member_limit,
+            member_count: raw.member_count,
+            exit_contribution: raw.exit_contribution,
+            exit_contribution_scope: raw
+                .exit_contribution_scope
+                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+            privacy_changes: raw.privacy_changes,
+            issued_at_unix_ms: raw.issued_at_unix_ms,
+            expires_at_unix_ms: raw.expires_at_unix_ms,
+            capability_summary: raw.capability_summary,
+            endpoints: raw.endpoints,
+            revoked_at_unix_ms: raw.revoked_at_unix_ms,
+        })
+    }
 }
 
 impl NetworkDiscoveryDocument {
@@ -1156,6 +1453,7 @@ impl NetworkDiscoveryDocument {
                 "discovery member counts are invalid",
             ));
         }
+        validate_exit_contribution_policy(self.exit_contribution, self.exit_contribution_scope)?;
         if self
             .member_limit
             .is_some_and(|limit| self.member_count > limit)
@@ -1276,6 +1574,7 @@ impl NetworkDiscoveryDocument {
             member_limit: record.member_limit,
             member_count: u32::try_from(record.members.len()).unwrap_or(u32::MAX),
             exit_contribution: record.exit_contribution,
+            exit_contribution_scope: record.exit_contribution_scope,
             privacy_changes: record.privacy_changes.clone(),
             issued_at_unix_ms,
             expires_at_unix_ms,
@@ -1288,7 +1587,78 @@ impl NetworkDiscoveryDocument {
     }
 
     pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
-        serde_json::to_vec(self)
+        #[derive(Serialize)]
+        struct CanonicalDiscoveryDocument<'a> {
+            schema_version: u16,
+            network_id: &'a NetworkId,
+            public_key: &'a PublicKey,
+            publisher: &'a NodeId,
+            name: &'a str,
+            purpose: &'a str,
+            language: &'a str,
+            region: &'a str,
+            tags: &'a [String],
+            visibility: NetworkVisibility,
+            join_mode: NetworkJoinMode,
+            owner: &'a NodeId,
+            administrators: &'a [NodeId],
+            revision: u64,
+            policy_revision: u64,
+            privacy_policy_revision: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            member_limit: Option<u32>,
+            member_count: u32,
+            exit_contribution: ExitContributionObligation,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            exit_contribution_scope: Option<ExitContributionScope>,
+            privacy_changes: &'a [String],
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+            capability_summary: &'a [CapabilityKind],
+            endpoints: &'a [NetworkEndpoint],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            revoked_at_unix_ms: Option<u64>,
+        }
+
+        let legacy_scope = matches!(
+            (self.exit_contribution, self.exit_contribution_scope),
+            (
+                ExitContributionObligation::Required,
+                ExitContributionScope::JoiningMembers
+            ) | (
+                ExitContributionObligation::NotRequired,
+                ExitContributionScope::NotApplicable
+            )
+        );
+        let canonical = CanonicalDiscoveryDocument {
+            schema_version: self.schema_version,
+            network_id: &self.network_id,
+            public_key: &self.public_key,
+            publisher: &self.publisher,
+            name: &self.name,
+            purpose: &self.purpose,
+            language: &self.language,
+            region: &self.region,
+            tags: &self.tags,
+            visibility: self.visibility,
+            join_mode: self.join_mode,
+            owner: &self.owner,
+            administrators: &self.administrators,
+            revision: self.revision,
+            policy_revision: self.policy_revision,
+            privacy_policy_revision: self.privacy_policy_revision,
+            member_limit: self.member_limit,
+            member_count: self.member_count,
+            exit_contribution: self.exit_contribution,
+            exit_contribution_scope: (!legacy_scope).then_some(self.exit_contribution_scope),
+            privacy_changes: &self.privacy_changes,
+            issued_at_unix_ms: self.issued_at_unix_ms,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+            capability_summary: &self.capability_summary,
+            endpoints: &self.endpoints,
+            revoked_at_unix_ms: self.revoked_at_unix_ms,
+        };
+        serde_json::to_vec(&canonical)
             .map_err(|_| DomainError::invalid_value("discovery payload cannot be encoded"))
     }
 }
@@ -1402,6 +1772,7 @@ mod tests {
             member_limit: None,
             member_count: 1,
             exit_contribution: ExitContributionObligation::NotRequired,
+            exit_contribution_scope: ExitContributionScope::NotApplicable,
             privacy_changes: Vec::new(),
             issued_at_unix_ms: now.saturating_sub(1),
             expires_at_unix_ms: now + 60_000,
@@ -1418,6 +1789,90 @@ mod tests {
             document,
             signature: Signature::from_bytes(signature.to_bytes()),
         }
+    }
+
+    #[test]
+    fn legacy_discovery_scope_defaults_and_signatures_remain_compatible() {
+        let identity = Identity::generate().unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&identity.signing_key_seed());
+        let mut signed = signed_record(1, 100, &key);
+        let mut legacy_json = serde_json::to_value(&signed.document).unwrap();
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("exit_contribution_scope");
+        legacy_json["exit_contribution"] = serde_json::json!("required");
+
+        let required: NetworkDiscoveryDocument =
+            serde_json::from_value(legacy_json.clone()).unwrap();
+        assert_eq!(
+            required.exit_contribution_scope,
+            ExitContributionScope::JoiningMembers
+        );
+        required.validate_at(100).unwrap();
+
+        #[derive(Serialize)]
+        struct LegacyDiscovery<'a> {
+            schema_version: u16,
+            network_id: &'a NetworkId,
+            public_key: &'a PublicKey,
+            publisher: &'a NodeId,
+            name: &'a str,
+            purpose: &'a str,
+            language: &'a str,
+            region: &'a str,
+            tags: &'a [String],
+            visibility: NetworkVisibility,
+            join_mode: NetworkJoinMode,
+            owner: &'a NodeId,
+            administrators: &'a [NodeId],
+            revision: u64,
+            policy_revision: u64,
+            privacy_policy_revision: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            member_limit: Option<u32>,
+            member_count: u32,
+            exit_contribution: ExitContributionObligation,
+            privacy_changes: &'a [String],
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+            capability_summary: &'a [CapabilityKind],
+            endpoints: &'a [NetworkEndpoint],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            revoked_at_unix_ms: Option<u64>,
+        }
+        let legacy = LegacyDiscovery {
+            schema_version: required.schema_version,
+            network_id: &required.network_id,
+            public_key: &required.public_key,
+            publisher: &required.publisher,
+            name: &required.name,
+            purpose: &required.purpose,
+            language: &required.language,
+            region: &required.region,
+            tags: &required.tags,
+            visibility: required.visibility,
+            join_mode: required.join_mode,
+            owner: &required.owner,
+            administrators: &required.administrators,
+            revision: required.revision,
+            policy_revision: required.policy_revision,
+            privacy_policy_revision: required.privacy_policy_revision,
+            member_limit: required.member_limit,
+            member_count: required.member_count,
+            exit_contribution: required.exit_contribution,
+            privacy_changes: &required.privacy_changes,
+            issued_at_unix_ms: required.issued_at_unix_ms,
+            expires_at_unix_ms: required.expires_at_unix_ms,
+            capability_summary: &required.capability_summary,
+            endpoints: &required.endpoints,
+            revoked_at_unix_ms: required.revoked_at_unix_ms,
+        };
+        let legacy_payload = serde_json::to_vec(&legacy).unwrap();
+        assert_eq!(required.signing_payload().unwrap(), legacy_payload);
+        signed.document = required;
+        signed.signature = Signature::from_bytes(key.sign(&legacy_payload).to_bytes());
+        signed.validate_at(100).unwrap();
     }
 
     fn signed_network_record(identity: &Identity, issued_at_unix_ms: u64) -> NetworkRecord {
@@ -1617,6 +2072,7 @@ mod tests {
             privacy_policy_revision: 1,
             member_limit: None,
             exit_contribution: ExitContributionObligation::NotRequired,
+            exit_contribution_scope: ExitContributionScope::NotApplicable,
             privacy_changes: Vec::new(),
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
@@ -1638,6 +2094,8 @@ mod tests {
             capability_declarations: vec![CapabilityKind::Relay, CapabilityKind::Coordinator],
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: ExitContributionObligation::NotRequired,
+            exit_contribution_scope: ExitContributionScope::NotApplicable,
         }
     }
 

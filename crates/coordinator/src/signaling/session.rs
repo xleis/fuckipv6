@@ -2690,6 +2690,8 @@ mod tests {
                 capability_declarations: vec![CapabilityKind::File],
                 visibility: NetworkVisibility::Private,
                 join_mode: NetworkJoinMode::ApprovalRequired,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
             },
             PublicKey::from_bytes([42; 32]),
             owner_id.clone(),

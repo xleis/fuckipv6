@@ -386,6 +386,11 @@ pub struct InvitationRedeemRequest {
     pub preview_digest: ContentHash,
     pub terms_hash: ContentHash,
     pub acknowledged_at_unix_ms: u64,
+    /// Explicit consent to the current Exit contribution obligation. It is
+    /// required when the invited network requires contribution and is never
+    /// inferred from accepting the invitation itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_contribution_acknowledged: Option<bool>,
 }
 
 impl fmt::Debug for InvitationRedeemRequest {
@@ -402,6 +407,10 @@ impl fmt::Debug for InvitationRedeemRequest {
             .field("preview_digest", &self.preview_digest)
             .field("terms_hash", &self.terms_hash)
             .field("acknowledged_at_unix_ms", &self.acknowledged_at_unix_ms)
+            .field(
+                "exit_contribution_acknowledged",
+                &self.exit_contribution_acknowledged,
+            )
             .finish()
     }
 }
@@ -545,6 +554,7 @@ mod tests {
             network_policy_revision: 1,
             privacy_policy_revision: 1,
             exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             member_limit: None,
         };
         let mut preview = InvitationPreview {

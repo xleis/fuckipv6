@@ -7,12 +7,12 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionObligation, InvitationCode, InvitationCreateRequest, InvitationId,
-    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState, MembershipRole,
-    NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
-    JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
+    ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationCreateRequest,
+    InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
+    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
+    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId,
+    NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
+    NetworkVisibility, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
@@ -96,6 +96,7 @@ pub enum NodeCommandKind {
     PreviewInvitation,
     RedeemInvitation,
     LeaveNetwork,
+    AcknowledgeMembershipPolicy,
     UpdateRouting,
     SetNetworkRole,
     SetNodeDisplayName,
@@ -120,7 +121,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -151,6 +152,7 @@ impl NodeCommandKind {
         Self::PreviewInvitation,
         Self::RedeemInvitation,
         Self::LeaveNetwork,
+        Self::AcknowledgeMembershipPolicy,
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::SetNodeDisplayName,
@@ -175,7 +177,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 49] = [
+    pub const ACTIONS: [Self; 50] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -205,6 +207,7 @@ impl NodeCommandKind {
         Self::PreviewInvitation,
         Self::RedeemInvitation,
         Self::LeaveNetwork,
+        Self::AcknowledgeMembershipPolicy,
         Self::UpdateRouting,
         Self::SetNetworkRole,
         Self::SetNodeDisplayName,
@@ -281,6 +284,7 @@ impl NodeCommandKind {
             Self::PreviewInvitation => "preview_invitation",
             Self::RedeemInvitation => "redeem_invitation",
             Self::LeaveNetwork => "leave_network",
+            Self::AcknowledgeMembershipPolicy => "acknowledge_membership_policy",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
             Self::SetNodeDisplayName => "set_node_display_name",
@@ -332,6 +336,7 @@ impl NodeCommandKind {
                 | Self::RevokeInvitation
                 | Self::RedeemInvitation
                 | Self::LeaveNetwork
+                | Self::AcknowledgeMembershipPolicy
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
                 | Self::SetNodeDisplayName
@@ -435,6 +440,8 @@ pub enum NodeCommand {
     RedeemInvitation(NodeRedeemInvitationCommand),
     /// Remove only this network's local configuration and membership.
     LeaveNetwork(NodeLeaveNetworkCommand),
+    /// Re-confirm the exact latest terms after an `AllMembers` policy change.
+    AcknowledgeMembershipPolicy(NodeAcknowledgeMembershipPolicyCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
     SetNodeDisplayName(NodeSetNodeDisplayNameCommand),
@@ -511,6 +518,7 @@ impl NodeCommand {
             Self::PreviewInvitation(_) => NodeCommandKind::PreviewInvitation,
             Self::RedeemInvitation(_) => NodeCommandKind::RedeemInvitation,
             Self::LeaveNetwork(_) => NodeCommandKind::LeaveNetwork,
+            Self::AcknowledgeMembershipPolicy(_) => NodeCommandKind::AcknowledgeMembershipPolicy,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
             Self::SetNodeDisplayName(_) => NodeCommandKind::SetNodeDisplayName,
@@ -623,6 +631,7 @@ impl NodeCommand {
             Self::PreviewInvitation(command) => command.validate(),
             Self::RedeemInvitation(command) => command.validate(),
             Self::LeaveNetwork(command) => command.validate(),
+            Self::AcknowledgeMembershipPolicy(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
             Self::SetNodeDisplayName(command) => command.validate(),
@@ -698,6 +707,10 @@ pub struct NodeCreateNetworkCommand {
     pub visibility: NetworkVisibility,
     #[serde(default)]
     pub join_mode: NetworkJoinMode,
+    #[serde(default)]
+    pub exit_contribution: ExitContributionObligation,
+    #[serde(default)]
+    pub exit_contribution_scope: ExitContributionScope,
     pub signaling_port: u16,
     pub relay_port: u16,
     pub external_host: Option<String>,
@@ -759,6 +772,15 @@ impl NodeCreateNetworkCommand {
         }
         validate_profile_tags(&self.tags, &mut issues);
         validate_profile_capabilities(&self.capability_declarations, &mut issues);
+        if (self.exit_contribution == ExitContributionObligation::NotRequired)
+            != (self.exit_contribution_scope == ExitContributionScope::NotApplicable)
+        {
+            issues.push(NodeValidationIssue {
+                path: "exit_contribution_scope".into(),
+                code: "invalid_exit_contribution_policy".into(),
+                message: "Exit 贡献义务与生效范围必须一致".into(),
+            });
+        }
         if self.signaling_port == 0 {
             issues.push(NodeValidationIssue {
                 path: "signaling_port".into(),
@@ -812,6 +834,8 @@ impl NodeCreateNetworkCommand {
             capability_declarations: self.capability_declarations.clone(),
             visibility: self.visibility,
             join_mode: self.join_mode,
+            exit_contribution: self.exit_contribution,
+            exit_contribution_scope: self.exit_contribution_scope,
         }
     }
 }
@@ -1016,6 +1040,10 @@ pub struct NodeJoinNetworkCommand {
     pub terms_hash: Option<ContentHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledged_at_unix_ms: Option<u64>,
+    /// Explicit acknowledgement of the network's Exit contribution obligation.
+    /// A network declaration never enables this node's local Exit service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_contribution_acknowledged: Option<bool>,
 }
 
 impl NodeJoinNetworkCommand {
@@ -1488,6 +1516,21 @@ pub struct NodeNetworkJoinPreview {
     pub member_count: u32,
     pub member_limit: Option<u32>,
     pub exit_contribution: ExitContributionObligation,
+    pub exit_contribution_scope: ExitContributionScope,
+    /// Stable disclosure keys cover what the local owner is consenting to.
+    /// They never enable or advertise the local Exit service by themselves.
+    pub exit_contribution_purpose_key: String,
+    pub exit_contribution_bandwidth_impact_key: String,
+    pub exit_contribution_logging_boundary_key: String,
+    pub exit_contribution_disable_key: String,
+    /// Local host support is separate from the network's declaration.
+    pub local_exit_available: bool,
+    /// This is the node's actual local role state, never inferred from terms.
+    pub local_exit_enabled: bool,
+    /// True only when a member can join without promising Exit contribution.
+    pub can_join_without_local_exit: bool,
+    /// The direct join confirmation must explicitly acknowledge this obligation.
+    pub join_requires_exit_consent: bool,
     pub privacy_changes: Vec<String>,
     pub already_member: bool,
     pub can_join: bool,
@@ -1503,6 +1546,29 @@ pub struct NodeNetworkJoinPreview {
     /// is disclosed separately as Exit contribution.
     pub locally_contributed_capabilities: Vec<CapabilityKind>,
     pub contribution_policy_key: String,
+}
+
+/// Re-confirm the exact signed network terms after a policy migration that
+/// covers existing members. The hash pins the disclosure the owner saw; the
+/// separate Exit flag can never be inferred from accepting the terms.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeAcknowledgeMembershipPolicyCommand {
+    pub network_id: String,
+    pub expected_terms_hash: ContentHash,
+    pub acknowledged_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_contribution_acknowledged: Option<bool>,
+}
+
+impl NodeAcknowledgeMembershipPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        if self.acknowledged_at_unix_ms == 0 {
+            return Err(invalid("确认成员策略前必须记录有效的知情确认时间")
+                .with_message_key("membership.policy.error.invalid_consent"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -2118,6 +2184,7 @@ pub enum NodeCommandOutcome {
     InvitationPreview(Box<InvitationPreview>),
     InvitationRedeemed(Box<InvitationRedemption>),
     NetworkLeft(Box<NodeNetworkLeaveResult>),
+    MembershipPolicyAcknowledged(Box<crate::node::NodeNetworkMembershipSnapshot>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
     ConfigurationPreview(Box<ConfigurationPreview>),
@@ -2177,6 +2244,8 @@ impl CommandAuditTrail {
         &self,
         context: &NodeCommandContext,
         request: &NodeCommandRequest,
+        result: Option<&NodeCommandResult>,
+        snapshot: Option<&NodeSnapshot>,
         outcome: AuditOutcome,
         reason: &str,
     ) {
@@ -2210,6 +2279,7 @@ impl CommandAuditTrail {
         if let Some(network_id) = &network_id {
             details.insert("network_id".into(), network_id.to_string());
         }
+        insert_membership_policy_audit_details(&mut details, request, result, snapshot);
         let summary = match outcome {
             AuditOutcome::Succeeded => "节点命令执行成功",
             AuditOutcome::Failed => "节点命令执行失败",
@@ -2251,6 +2321,299 @@ impl CommandAuditTrail {
             .lock()
             .map(|activity| activity.clone())
             .unwrap_or_default()
+    }
+}
+
+fn exit_contribution_obligation_audit_value(
+    obligation: ExitContributionObligation,
+) -> &'static str {
+    match obligation {
+        ExitContributionObligation::Required => "required",
+        ExitContributionObligation::NotRequired => "not_required",
+    }
+}
+
+fn exit_contribution_scope_audit_value(scope: ExitContributionScope) -> &'static str {
+    match scope {
+        ExitContributionScope::NotApplicable => "not_applicable",
+        ExitContributionScope::JoiningMembers => "joining_members",
+        ExitContributionScope::AllMembers => "all_members",
+    }
+}
+
+fn insert_optional_audit_detail(
+    details: &mut BTreeMap<String, String>,
+    key: &str,
+    value: Option<impl ToString>,
+) {
+    if let Some(value) = value {
+        details.insert(key.into(), value.to_string());
+    }
+}
+
+/// Record the membership/Exit facts needed to prove that consent, network
+/// policy and local runtime state stayed separate. Only allowlisted typed fields
+/// are projected here; rejection prose and invitation credentials never enter
+/// the audit details.
+fn insert_membership_policy_audit_details(
+    details: &mut BTreeMap<String, String>,
+    request: &NodeCommandRequest,
+    result: Option<&NodeCommandResult>,
+    snapshot: Option<&NodeSnapshot>,
+) {
+    let mut network_id = None::<String>;
+    let mut network_name = None::<String>;
+    let mut consent = None::<&'static str>;
+    let mut acknowledgement_time = None::<u64>;
+
+    match &request.command {
+        NodeCommand::CreateNetwork(command) => {
+            network_name = Some(command.name.clone());
+            details.insert(
+                "exit_contribution".into(),
+                exit_contribution_obligation_audit_value(command.exit_contribution).into(),
+            );
+            details.insert(
+                "exit_contribution_scope".into(),
+                exit_contribution_scope_audit_value(command.exit_contribution_scope).into(),
+            );
+            if let Some(NodeCommandResult {
+                outcome: NodeCommandOutcome::NetworkCreated(created),
+                ..
+            }) = result
+            {
+                network_id = Some(created.network_id.clone());
+                network_name = Some(created.network_name.clone());
+            }
+            // A newly created network starts at policy revision 1 on every
+            // surface. The command result only exposes the public profile
+            // revision, so keep this value explicit and verifiable.
+            details.insert("network_policy_revision".into(), "1".into());
+            details.insert("privacy_policy_revision".into(), "1".into());
+        }
+        NodeCommand::UpdateNetworkProfile(command) => {
+            network_name = Some(command.network_name.clone());
+            details.insert(
+                "exit_contribution".into(),
+                exit_contribution_obligation_audit_value(command.update.exit_contribution).into(),
+            );
+            details.insert(
+                "exit_contribution_scope".into(),
+                exit_contribution_scope_audit_value(command.update.exit_contribution_scope).into(),
+            );
+            if let Some(NodeCommandResult {
+                outcome: NodeCommandOutcome::NetworkProfileUpdated(updated),
+                ..
+            }) = result
+            {
+                details.insert(
+                    "network_policy_revision".into(),
+                    updated
+                        .projections
+                        .administrator_view
+                        .policy_revision
+                        .to_string(),
+                );
+            }
+        }
+        NodeCommand::JoinNetwork(command) => {
+            network_id = command.network_id.clone();
+            network_name = command.network_name.clone();
+            consent = Some(match command.exit_contribution_acknowledged {
+                Some(true) => "accepted",
+                Some(false) => "declined",
+                None => "not_confirmed",
+            });
+            acknowledgement_time = command.acknowledged_at_unix_ms;
+            insert_optional_audit_detail(
+                details,
+                "network_policy_revision",
+                command.network_policy_revision,
+            );
+            insert_optional_audit_detail(
+                details,
+                "privacy_policy_revision",
+                command.privacy_policy_revision,
+            );
+            insert_optional_audit_detail(
+                details,
+                "terms_hash",
+                command.terms_hash.as_ref().map(|hash| hash.as_str()),
+            );
+            insert_optional_audit_detail(
+                details,
+                "preview_digest",
+                command.preview_digest.as_deref(),
+            );
+        }
+        NodeCommand::RedeemInvitation(command) => {
+            network_id = Some(command.request.network_id.to_string());
+            consent = Some(match command.request.exit_contribution_acknowledged {
+                Some(true) => "accepted",
+                Some(false) => "declined",
+                None => "not_confirmed",
+            });
+            acknowledgement_time = Some(command.request.acknowledged_at_unix_ms);
+            details.insert(
+                "invitation_revision".into(),
+                command.request.expected_invitation_revision.to_string(),
+            );
+            details.insert(
+                "terms_hash".into(),
+                command.request.terms_hash.as_str().to_owned(),
+            );
+            details.insert(
+                "preview_digest".into(),
+                command.request.preview_digest.as_str().to_owned(),
+            );
+        }
+        NodeCommand::AcknowledgeMembershipPolicy(command) => {
+            network_id = Some(command.network_id.clone());
+            consent = Some(match command.exit_contribution_acknowledged {
+                Some(true) => "accepted",
+                Some(false) => "declined",
+                None => "not_confirmed",
+            });
+            acknowledgement_time = Some(command.acknowledged_at_unix_ms);
+            details.insert(
+                "terms_hash".into(),
+                command.expected_terms_hash.as_str().to_owned(),
+            );
+        }
+        _ => return,
+    }
+
+    if let Some(consent) = consent {
+        details.insert("exit_contribution_user_consent".into(), consent.into());
+    }
+    if let Some(time) = acknowledgement_time {
+        details.insert(
+            "exit_contribution_acknowledged_at_unix_ms".into(),
+            time.to_string(),
+        );
+    }
+    if let Some(id) = network_id.as_deref() {
+        details.insert("membership_network_id".into(), id.into());
+    }
+
+    let result_membership = result.and_then(|result| match &result.outcome {
+        NodeCommandOutcome::NetworkJoined(joined) => Some(&joined.membership),
+        NodeCommandOutcome::MembershipPolicyAcknowledged(membership) => Some(membership.as_ref()),
+        _ => None,
+    });
+    if let Some(membership) = result_membership {
+        network_id = Some(membership.network_id.clone());
+        network_name = Some(membership.network_name.clone());
+    } else if network_id.is_none() {
+        if let Some(snapshot) = snapshot {
+            if let Some(membership) = snapshot
+                .memberships
+                .iter()
+                .find(|membership| Some(&membership.network_name) == network_name.as_ref())
+            {
+                network_id = Some(membership.network_id.clone());
+                network_name = Some(membership.network_name.clone());
+            }
+        }
+    }
+
+    let snapshot_membership = snapshot.and_then(|snapshot| {
+        snapshot.memberships.iter().find(|membership| {
+            network_id
+                .as_deref()
+                .is_some_and(|id| membership.network_id == id)
+                || network_name
+                    .as_deref()
+                    .is_some_and(|name| membership.network_name == name)
+        })
+    });
+    let membership = result_membership.or(snapshot_membership);
+    if let Some(membership) = membership {
+        details.insert(
+            "membership_local_policy_revision".into(),
+            membership.local_policy_revision.to_string(),
+        );
+        details.insert(
+            "policy_confirmation_required".into(),
+            membership.policy_confirmation_required.to_string(),
+        );
+        insert_optional_audit_detail(
+            details,
+            "network_policy_revision",
+            membership.network_policy_revision,
+        );
+        insert_optional_audit_detail(
+            details,
+            "privacy_policy_revision",
+            membership.privacy_policy_revision,
+        );
+        insert_optional_audit_detail(details, "terms_hash", membership.terms_hash.as_ref());
+        insert_optional_audit_detail(
+            details,
+            "exit_contribution",
+            membership
+                .exit_contribution
+                .map(exit_contribution_obligation_audit_value),
+        );
+        insert_optional_audit_detail(
+            details,
+            "exit_contribution_scope",
+            membership
+                .exit_contribution_scope
+                .map(exit_contribution_scope_audit_value),
+        );
+        insert_optional_audit_detail(
+            details,
+            "acknowledged_at_unix_ms",
+            membership.acknowledged_at_unix_ms,
+        );
+    }
+
+    // A rejected command still carries server-validated policy facts through
+    // the stable problem params. Copy only the typed allowlist, never prose.
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::Rejected(problem),
+        ..
+    }) = result
+    {
+        for (source, target) in [
+            ("policy_exit_contribution", "exit_contribution"),
+            ("policy_exit_contribution_scope", "exit_contribution_scope"),
+            ("policy_network_revision", "network_policy_revision"),
+            ("policy_privacy_revision", "privacy_policy_revision"),
+            ("policy_terms_hash", "terms_hash"),
+        ] {
+            if let Some(value) = problem.params.get(source) {
+                details.insert(target.into(), value.clone());
+            }
+        }
+    }
+
+    if let Some(snapshot) = snapshot.or_else(|| match result.map(|result| &result.outcome) {
+        Some(NodeCommandOutcome::NetworkJoined(joined)) => Some(&joined.snapshot),
+        _ => None,
+    }) {
+        details.insert(
+            "local_exit_capability".into(),
+            snapshot.exit_node_capabilities.supported.to_string(),
+        );
+        let effective_name = network_name.as_deref().or_else(|| {
+            network_id.as_deref().and_then(|id| {
+                snapshot
+                    .memberships
+                    .iter()
+                    .find(|membership| membership.network_id == id)
+                    .map(|membership| membership.network_name.as_str())
+            })
+        });
+        let local_exit_enabled = effective_name.is_some_and(|name| {
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.name == name)
+                .is_some_and(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
+        });
+        details.insert("local_exit_enabled".into(), local_exit_enabled.to_string());
     }
 }
 
@@ -2369,6 +2732,7 @@ impl NodeCommandBus {
             self.record_and_publish_activity(
                 &context,
                 &request,
+                Some(&result),
                 AuditOutcome::Denied,
                 &denial.reason,
             )
@@ -2396,6 +2760,7 @@ impl NodeCommandBus {
                 self.record_and_publish_activity(
                     &context,
                     &audit_request,
+                    Some(&result),
                     if result.is_success() {
                         AuditOutcome::Succeeded
                     } else {
@@ -2410,6 +2775,7 @@ impl NodeCommandBus {
                 self.record_and_publish_activity(
                     &context,
                     &audit_request,
+                    None,
                     AuditOutcome::Failed,
                     "handler response channel closed",
                 )
@@ -2423,10 +2789,16 @@ impl NodeCommandBus {
         &self,
         context: &NodeCommandContext,
         request: &NodeCommandRequest,
+        result: Option<&NodeCommandResult>,
         outcome: AuditOutcome,
         reason: &str,
     ) {
-        self.audit.record(context, request, outcome, reason);
+        let snapshot = match &self.activity_state {
+            Some(state) => Some(state.snapshot().await),
+            None => None,
+        };
+        self.audit
+            .record(context, request, result, snapshot.as_ref(), outcome, reason);
         if let Some(state) = &self.activity_state {
             state
                 .set_recent_activity(self.audit.recent_activity())
@@ -2518,6 +2890,7 @@ mod tests {
                 preview_digest: invitation_hash(b"preview"),
                 terms_hash: invitation_hash(b"terms"),
                 acknowledged_at_unix_ms: 1_700_000_000_000,
+                exit_contribution_acknowledged: None,
             },
         }
     }
@@ -2551,6 +2924,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("vpn.example.com".into()),
@@ -2568,6 +2943,8 @@ mod tests {
                     capability_declarations: Vec::new(),
                     visibility: NetworkVisibility::Unlisted,
                     join_mode: NetworkJoinMode::InviteOnly,
+                    exit_contribution: Default::default(),
+                    exit_contribution_scope: Default::default(),
                 },
             }),
             NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
@@ -2582,6 +2959,8 @@ mod tests {
                     capability_declarations: Vec::new(),
                     visibility: NetworkVisibility::Unlisted,
                     join_mode: NetworkJoinMode::InviteOnly,
+                    exit_contribution: Default::default(),
+                    exit_contribution_scope: Default::default(),
                 },
             }),
             NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
@@ -2615,6 +2994,7 @@ mod tests {
                 privacy_policy_revision: None,
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
             })),
             NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
@@ -2708,6 +3088,12 @@ mod tests {
             NodeCommand::RedeemInvitation(valid_redeem_command()),
             NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
                 network_name: "office".into(),
+            }),
+            NodeCommand::AcknowledgeMembershipPolicy(NodeAcknowledgeMembershipPolicyCommand {
+                network_id: invitation_network_id().to_string(),
+                expected_terms_hash: invitation_hash(b"membership policy"),
+                acknowledged_at_unix_ms: 1_700_000_000_000,
+                exit_contribution_acknowledged: Some(true),
             }),
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),
@@ -2820,8 +3206,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 50);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 49);
+        assert_eq!(NodeCommandKind::ALL.len(), 51);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 50);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
@@ -2919,6 +3305,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -2948,6 +3336,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -2966,6 +3356,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Private,
             join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: Some("vpn.example.com".into()),
@@ -3144,6 +3536,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 0,
                 relay_port: 6667,
                 external_host: None,
@@ -3159,6 +3553,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6666,
                 external_host: None,
@@ -3174,6 +3570,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("  ".into()),
@@ -3190,6 +3588,7 @@ mod tests {
                 privacy_policy_revision: None,
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
             })),
             NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "ws://127.0.0.1:6666".into(),
@@ -3202,6 +3601,7 @@ mod tests {
                 privacy_policy_revision: None,
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
             })),
             NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
                 network_id: "not-a-network-id".into(),
@@ -3735,6 +4135,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Private,
             join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -3792,6 +4194,7 @@ mod tests {
                         privacy_policy_revision: None,
                         terms_hash: None,
                         acknowledged_at_unix_ms: None,
+                        exit_contribution_acknowledged: None,
                     })),
                 ),
             )
@@ -3927,6 +4330,232 @@ mod tests {
             assert!(!format!("{audit:?}").contains(secret));
             assert!(!format!("{activity:?}").contains(secret));
         }
+    }
+
+    fn policy_membership(
+        acknowledged_at_unix_ms: u64,
+        terms_hash: ContentHash,
+        policy_confirmation_required: bool,
+    ) -> crate::node::NodeNetworkMembershipSnapshot {
+        let terms = fuckipv6_common::domain::MembershipTerms {
+            network_policy_revision: 5,
+            privacy_policy_revision: 2,
+            exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: ExitContributionScope::AllMembers,
+            member_limit: Some(16),
+        };
+        crate::node::NodeNetworkMembershipSnapshot {
+            network_name: "home".into(),
+            network_id: NetworkId::from_public_key(b"policy-audit-network").to_string(),
+            node_id: "node-command-bus-test".into(),
+            state: fuckipv6_common::domain::MembershipState::Active,
+            role: MembershipRole::Member,
+            local_policy_revision: 5,
+            network_policy_revision: Some(5),
+            privacy_policy_revision: Some(2),
+            member_limit: Some(16),
+            exit_contribution: Some(ExitContributionObligation::Required),
+            exit_contribution_scope: Some(ExitContributionScope::AllMembers),
+            terms_hash: Some(terms_hash.as_str().to_owned()),
+            current_terms: Some(terms),
+            current_terms_hash: Some(terms_hash.as_str().to_owned()),
+            policy_confirmation_required,
+            acknowledged_at_unix_ms: Some(acknowledged_at_unix_ms),
+            created_at_unix_ms: 1_700_000_000_000,
+            updated_at_unix_ms: acknowledged_at_unix_ms,
+            suspension_reason: None,
+        }
+    }
+
+    fn policy_audit_snapshot(
+        membership: crate::node::NodeNetworkMembershipSnapshot,
+        exit_enabled: bool,
+    ) -> NodeSnapshot {
+        use crate::node::{NodeNetworkSnapshot, NodeNetworkStatus, NodeTrafficSnapshot};
+
+        NodeSnapshot {
+            exit_node_capabilities: fuckipv6_common::ExitNodeCapabilities {
+                supported: true,
+                ..fuckipv6_common::ExitNodeCapabilities::default()
+            },
+            memberships: vec![membership],
+            networks: vec![NodeNetworkSnapshot {
+                name: "home".into(),
+                tun_name: "fk-home".into(),
+                status: NodeNetworkStatus::Online,
+                assigned_ipv6: None,
+                assigned_ipv4: None,
+                p2p_listen_addr: None,
+                uptime_secs: 60,
+                roles: if exit_enabled {
+                    vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
+                } else {
+                    vec![NodeNetworkRole::Member]
+                },
+                peer_count: 2,
+                traffic: NodeTrafficSnapshot::default(),
+            }],
+            ..NodeSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn join_audit_separates_consent_policy_and_actual_local_exit_state() {
+        let network_id = NetworkId::from_public_key(b"policy-audit-network").to_string();
+        let terms_hash = ContentHash::from_bytes(b"policy audit terms");
+        let acknowledged_at = 1_700_000_000_123;
+        let membership = policy_membership(acknowledged_at, terms_hash.clone(), false);
+        let snapshot = policy_audit_snapshot(membership.clone(), true);
+        let request = NodeCommandRequest::new(
+            77,
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
+                target: "fk://policy-audit".into(),
+                network_name: Some("home".into()),
+                start: true,
+                discovery_record: None,
+                network_id: Some(network_id.clone()),
+                preview_digest: Some("preview-digest".into()),
+                network_policy_revision: Some(5),
+                privacy_policy_revision: Some(2),
+                terms_hash: Some(terms_hash.clone()),
+                acknowledged_at_unix_ms: Some(acknowledged_at),
+                exit_contribution_acknowledged: Some(true),
+            })),
+        );
+        let result = NodeCommandResult::completed(
+            77,
+            NodeCommandOutcome::NetworkJoined(Box::new(NodeNetworkJoinResult {
+                membership,
+                snapshot: snapshot.clone(),
+                idempotent: false,
+                config_saved: true,
+                started: true,
+            })),
+        );
+
+        let mut details = BTreeMap::new();
+        insert_membership_policy_audit_details(
+            &mut details,
+            &request,
+            Some(&result),
+            Some(&snapshot),
+        );
+
+        assert_eq!(details["exit_contribution_user_consent"], "accepted");
+        assert_eq!(
+            details["exit_contribution_acknowledged_at_unix_ms"],
+            acknowledged_at.to_string()
+        );
+        assert_eq!(details["network_policy_revision"], "5");
+        assert_eq!(details["privacy_policy_revision"], "2");
+        assert_eq!(details["terms_hash"], terms_hash.as_str());
+        assert_eq!(details["exit_contribution"], "required");
+        assert_eq!(details["exit_contribution_scope"], "all_members");
+        assert_eq!(details["local_exit_capability"], "true");
+        assert_eq!(details["local_exit_enabled"], "true");
+        assert_eq!(details["policy_confirmation_required"], "false");
+        assert_eq!(details["membership_network_id"], network_id);
+    }
+
+    #[test]
+    fn declined_redemption_audit_keeps_typed_policy_facts_and_drops_sensitive_params() {
+        let network_id = invitation_network_id();
+        let terms_hash = invitation_hash(b"new policy terms");
+        let acknowledged_at = 1_700_000_000_456;
+        let membership = policy_membership(acknowledged_at, terms_hash.clone(), true);
+        let snapshot = policy_audit_snapshot(membership, false);
+        let request = NodeCommandRequest::new(
+            78,
+            NodeCommand::RedeemInvitation(NodeRedeemInvitationCommand {
+                coordinator_url: "wss://coordinator.example.test/signaling".into(),
+                request: InvitationRedeemRequest {
+                    network_id: network_id.clone(),
+                    code: invitation_code(),
+                    invitation_id: invitation_id(),
+                    expected_invitation_revision: 9,
+                    preview_digest: invitation_hash(b"policy preview"),
+                    terms_hash: terms_hash.clone(),
+                    acknowledged_at_unix_ms: acknowledged_at,
+                    exit_contribution_acknowledged: Some(false),
+                },
+            }),
+        );
+        let secret_code = "fkinv_SECRET_MUST_NOT_APPEAR";
+        let mut problem = NodeProblem::new(NodeProblemCode::Conflict, "policy changed")
+            .with_param("policy_exit_contribution", "required")
+            .with_param("policy_exit_contribution_scope", "all_members")
+            .with_param("policy_network_revision", "5")
+            .with_param("policy_privacy_revision", "2")
+            .with_param("policy_terms_hash", terms_hash.as_str())
+            .with_param("invitation_code", secret_code)
+            .with_param("reviewer_note", "PRIVATE-FREE-TEXT");
+        problem.message_key = "membership.policy.confirmation_required".into();
+        let result = NodeCommandResult::rejected(78, problem);
+
+        let mut details = BTreeMap::new();
+        insert_membership_policy_audit_details(
+            &mut details,
+            &request,
+            Some(&result),
+            Some(&snapshot),
+        );
+
+        assert_eq!(details["exit_contribution_user_consent"], "declined");
+        assert_eq!(details["exit_contribution"], "required");
+        assert_eq!(details["exit_contribution_scope"], "all_members");
+        assert_eq!(details["network_policy_revision"], "5");
+        assert_eq!(details["privacy_policy_revision"], "2");
+        assert_eq!(details["terms_hash"], terms_hash.as_str());
+        assert_eq!(details["local_exit_capability"], "true");
+        assert_eq!(details["local_exit_enabled"], "false");
+        let encoded = format!("{details:?}");
+        assert!(!encoded.contains(secret_code));
+        assert!(!encoded.contains("PRIVATE-FREE-TEXT"));
+    }
+
+    #[test]
+    fn policy_reconfirmation_audit_records_the_exact_acknowledged_version() {
+        let network_id = NetworkId::from_public_key(b"policy-audit-network").to_string();
+        let terms_hash = ContentHash::from_bytes(b"reconfirmed policy terms");
+        let acknowledged_at = 1_700_000_000_789;
+        let membership = policy_membership(acknowledged_at, terms_hash.clone(), false);
+        let snapshot = policy_audit_snapshot(membership.clone(), false);
+        let request = NodeCommandRequest::new(
+            79,
+            NodeCommand::AcknowledgeMembershipPolicy(NodeAcknowledgeMembershipPolicyCommand {
+                network_id: network_id.clone(),
+                expected_terms_hash: terms_hash.clone(),
+                acknowledged_at_unix_ms: acknowledged_at,
+                exit_contribution_acknowledged: Some(true),
+            }),
+        );
+        let result = NodeCommandResult::completed(
+            79,
+            NodeCommandOutcome::MembershipPolicyAcknowledged(Box::new(membership)),
+        );
+
+        let mut details = BTreeMap::new();
+        insert_membership_policy_audit_details(
+            &mut details,
+            &request,
+            Some(&result),
+            Some(&snapshot),
+        );
+
+        assert_eq!(details["exit_contribution_user_consent"], "accepted");
+        assert_eq!(
+            details["exit_contribution_acknowledged_at_unix_ms"],
+            acknowledged_at.to_string()
+        );
+        assert_eq!(details["terms_hash"], terms_hash.as_str());
+        assert_eq!(details["network_policy_revision"], "5");
+        assert_eq!(details["privacy_policy_revision"], "2");
+        assert_eq!(details["exit_contribution"], "required");
+        assert_eq!(details["exit_contribution_scope"], "all_members");
+        assert_eq!(details["policy_confirmation_required"], "false");
+        assert_eq!(details["local_exit_capability"], "true");
+        assert_eq!(details["local_exit_enabled"], "false");
+        assert_eq!(details["membership_network_id"], network_id);
     }
 
     #[tokio::test]

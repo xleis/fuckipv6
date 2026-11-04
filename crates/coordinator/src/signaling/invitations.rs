@@ -864,6 +864,8 @@ mod tests {
                 capability_declarations: vec![CapabilityKind::File, CapabilityKind::Exit],
                 visibility: NetworkVisibility::Private,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
             },
             network_public_key(),
             owner(),
@@ -916,6 +918,7 @@ mod tests {
             preview_digest: preview.preview_digest.clone(),
             terms_hash: preview.terms_hash.clone(),
             acknowledged_at_unix_ms,
+            exit_contribution_acknowledged: None,
         }
     }
 
@@ -1016,6 +1019,8 @@ mod tests {
                 capability_declarations: vec![CapabilityKind::File],
                 visibility: NetworkVisibility::Private,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
             },
             second_key,
             NodeId::from_public_key(b"other-owner"),

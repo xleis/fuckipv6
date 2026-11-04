@@ -54,7 +54,7 @@
 | W5 设计系统 | `[~]` | P0 | W1,W4 | 令牌、组件、i18n、a11y、视觉基线 |
 | W6 外壳与概览 | `[~]` | P1 | W4,W5 | 五导航与单一主状态已落地；概览、设置和状态矩阵待完成 |
 | W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥、W7-05 诊断恢复与 W7-06 状态权限矩阵已完成；W7-02 接口/TUN 的实机平台验收进行中 |
-| W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、申请已落地；审批契约已暴露，完整审批工作流待完成 |
+| W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、开放/审批/私有邀请和强制 Exit 知情已完成；索引故障隔离与发现全链路测试待完成 |
 | W9 成员、组与拓扑 | `[ ]` | P1 | W8 | 拓扑、列表、邀请、批量操作 |
 | W10 安全与隐私 | `[ ]` | P1 | W9 | ACL、字段权限、测试器、审计 |
 | W11 流量路由 | `[ ]` | P1 | W7,W10 | 规则、测试、原子应用、失败关闭 |
@@ -1280,16 +1280,50 @@ preview digest 与 terms hash；兑换前展示角色、能力、File/数据面�
 
 **验收**：邀请可安全传递、审计和撤销；泄漏单个邀请不能越权加入其他网络。
 
-### W8-08 强制 Exit 贡献知情 `[ ]`
+### W8-08 强制 Exit 贡献知情 `[x]`
 
-- [ ] 网络可配置“加入即贡献 Exit”及生效范围；
-- [ ] 加入前明确展示出口用途、带宽影响、日志边界和关闭条件；
-- [ ] 节点本地 owner 始终保留最终启停权；
-- [ ] 管理员不能远程强制启用节点本地 Exit；
-- [ ] 用户拒绝本地贡献时显示可加入/不可加入的准确结果；
-- [ ] 策略变更时通知现有成员并获得必要确认；
-- [ ] 能力声明与实际启用状态分离；
-- [ ] 审计记录策略版本、同意/拒绝和生效状态。
+- [x] 网络可配置“加入即贡献 Exit”及生效范围；
+- [x] 加入前明确展示出口用途、带宽影响、日志边界和关闭条件；
+- [x] 节点本地 owner 始终保留最终启停权；
+- [x] 管理员不能远程强制启用节点本地 Exit；
+- [x] 用户拒绝本地贡献时显示可加入/不可加入的准确结果；
+- [x] 策略变更时通知现有成员并获得必要确认；
+- [x] 能力声明与实际启用状态分离；
+- [x] 审计记录策略版本、同意/拒绝和生效状态。
+
+**证据（2026-11-04）**：领域模型新增 `ExitContributionObligation`
+（`required` / `not_required`）与 `ExitContributionScope`（`joining_members` /
+`all_members` / `not_applicable`），并贯通创建网络、资料更新、公开资料、加入预览、
+邀请预览、成员条款和网络记录；旧数据有兼容迁移和签名回归测试。加入与邀请预览固定展示
+出口用途、带宽影响、日志边界和本地关闭条件，邀请兑换和加入提交均要求独立
+`exit_contribution_acknowledged`，普通条款同意或能力声明不会隐式产生该同意。Required 网络在
+本机不支持 Exit 时明确显示不可加入，NotRequired 网络仍可加入；网络策略不能远程启用本机
+Exit，本地 owner 继续通过本机能力状态和启停动作保留最终控制权。AllMembers 策略变化会设置
+成员待确认状态，新增 `acknowledge_membership_policy` 命令持久化接受或拒绝及精确策略版本；
+GPUI 与 WebUI 均要求单独勾选 Exit 同意并在加入、邀请兑换和策略重确认时提交。快照和能力
+注册表把“支持 Exit”与“Exit 当前启用”分开展示，Required/NotRequired 与实际本地降级状态
+不会互相冒充。审计使用 typed allowlist 记录策略版本、接受/拒绝、是否生效和确认时间，不记录
+邀请码、自由文本或敏感参数。新增并通过
+`join_audit_separates_consent_policy_and_actual_local_exit_state`、
+`declined_redemption_audit_keeps_typed_policy_facts_and_drops_sensitive_params`、
+`policy_reconfirmation_audit_records_the_exact_acknowledged_version`、
+`exit_contribution_requires_capability_and_explicit_consent`、
+`policy_reconfirmation_requires_exit_consent_and_clears_pending_state`、
+`required_invitation_exit_obligation_requires_separate_consent`、
+`required_exit_without_local_support_is_explicitly_not_joinable`、
+`required_exit_with_local_support_keeps_capability_and_enabled_state_separate`、
+`optional_exit_join_remains_available_without_local_exit_support`、
+`policy_changes_require_confirmation_only_for_all_members_and_pin_the_hash`、
+`policy_observations_are_atomic_and_acknowledgements_persist` 和 WebUI
+`requires a distinct Exit consent and blocks Required invitations when local Exit is unsupported`。
+验证通过：`cargo test -p fuckipv6-common --all-features`（198 passed）、
+`cargo test -p fuckipv6-client --all-features --lib`（821 passed，3 ignored）、
+`cargo test -p fuckipv6-coordinator --lib signaling::`（59 passed）、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`（Rust、TypeScript 和 Android DTO）、
+WebUI `npm test -- --run`（124 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
+`node ../scripts/test_webui_accessibility.mjs`、`cargo fmt --all -- --check` 和
+`git diff --check`。构建仅保留既有 Vite i18n 非 module 提示及大于 500 kB chunk 警告。
 
 **验收**：不存在隐式贡献；网络声明与节点实际能力不一致时 UI 必须明确降级。
 

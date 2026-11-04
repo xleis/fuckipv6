@@ -19,8 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    ContentHash, DomainError, MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord,
-    NetworkJoinMode, NodeId, OperationId, NETWORK_DISCOVERY_VALIDITY_MS,
+    ContentHash, DomainError, ExitContributionObligation, MembershipTerms,
+    NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkJoinMode, NodeId, OperationId,
+    NETWORK_DISCOVERY_VALIDITY_MS,
 };
 use fuckipv6_common::Identity;
 use schemars::JsonSchema;
@@ -417,6 +418,7 @@ struct JoinPreviewDigest<'a> {
     member_count: u32,
     member_limit: Option<u32>,
     exit_contribution: fuckipv6_common::domain::ExitContributionObligation,
+    exit_contribution_scope: fuckipv6_common::domain::ExitContributionScope,
     capability_summary: &'a [fuckipv6_common::domain::CapabilityKind],
     endpoints: &'a [fuckipv6_common::domain::NetworkEndpoint],
     privacy_changes: &'a [String],
@@ -1083,6 +1085,7 @@ fn preview_from_record(
         network_policy_revision: document.policy_revision,
         privacy_policy_revision: document.privacy_policy_revision,
         exit_contribution: document.exit_contribution,
+        exit_contribution_scope: document.exit_contribution_scope,
         member_limit: document.member_limit,
     };
     let terms_hash = terms
@@ -1103,6 +1106,7 @@ fn preview_from_record(
         member_count: document.member_count,
         member_limit: document.member_limit,
         exit_contribution: document.exit_contribution,
+        exit_contribution_scope: document.exit_contribution_scope,
         capability_summary: &document.capability_summary,
         endpoints: &document.endpoints,
         privacy_changes: &document.privacy_changes,
@@ -1152,6 +1156,17 @@ fn preview_from_record(
         member_count: document.member_count,
         member_limit: document.member_limit,
         exit_contribution: document.exit_contribution,
+        exit_contribution_scope: document.exit_contribution_scope,
+        exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
+        exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
+        exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
+        exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
+        local_exit_available: false,
+        local_exit_enabled: false,
+        can_join_without_local_exit: document.exit_contribution
+            == ExitContributionObligation::NotRequired,
+        join_requires_exit_consent: document.exit_contribution
+            == ExitContributionObligation::Required,
         privacy_changes: document.privacy_changes.clone(),
         already_member,
         can_join: blocked_reason_key.is_none(),
@@ -1404,6 +1419,8 @@ mod tests {
                 capability_declarations: vec![CapabilityKind::Relay],
                 visibility: NetworkVisibility::Public,
                 join_mode,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
             },
             public_key,
             owner,
@@ -1419,6 +1436,8 @@ mod tests {
         record.policy_revision = 7;
         record.privacy_policy_revision = 3;
         record.exit_contribution = ExitContributionObligation::Required;
+        record.exit_contribution_scope =
+            fuckipv6_common::domain::ExitContributionScope::JoiningMembers;
         record.privacy_changes = vec!["Network operators can observe connection metadata".into()];
         let now = now_unix_ms();
         record

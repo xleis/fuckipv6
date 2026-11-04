@@ -430,6 +430,27 @@
       ],
       "type": "string"
     },
+    "ExitContributionScope": {
+      "description": "The membership population covered by an Exit contribution obligation.\n`NotApplicable` is the only valid scope when contribution is not required.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_applicable"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "joining_members",
+          "description": "New members accept the obligation when they join. Existing members are\nnotified but retain their previously acknowledged scope.",
+          "type": "string"
+        },
+        {
+          "const": "all_members",
+          "description": "Every member must acknowledge the current obligation. This is used for\na policy migration that expands contribution to the existing roster.",
+          "type": "string"
+        }
+      ]
+    },
     "ExitNodeCapabilities": {
       "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable.",
       "properties": {
@@ -692,6 +713,13 @@
         },
         "code": {
           "$ref": "#/$defs/InvitationCode"
+        },
+        "exit_contribution_acknowledged": {
+          "description": "Explicit consent to the current Exit contribution obligation. It is\nrequired when the invited network requires contribution and is never\ninferred from accepting the invitation itself.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "expected_invitation_revision": {
           "format": "uint64",
@@ -967,6 +995,10 @@
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
         },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
+        },
         "file_access": {
           "default": false,
           "type": "boolean"
@@ -1045,6 +1077,10 @@
       "properties": {
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
         },
         "member_limit": {
           "description": "Capacity shown when these terms were acknowledged. Omitted for legacy\nmemberships so their content hash remains stable.",
@@ -1136,6 +1172,10 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
         },
         "expires_at_unix_ms": {
           "format": "uint64",
@@ -1552,6 +1592,14 @@
           },
           "type": "array"
         },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
+        },
         "icon": {
           "type": "string"
         },
@@ -1774,6 +1822,34 @@
         "trusted_control_plane"
       ],
       "type": "string"
+    },
+    "NodeAcknowledgeMembershipPolicyCommand": {
+      "description": "Re-confirm the exact signed network terms after a policy migration that\ncovers existing members. The hash pins the disclosure the owner saw; the\nseparate Exit flag can never be inferred from accepting the terms.",
+      "properties": {
+        "acknowledged_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_contribution_acknowledged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expected_terms_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "network_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "expected_terms_hash",
+        "acknowledged_at_unix_ms"
+      ],
+      "type": "object"
     },
     "NodeApiCommandResponse": {
       "description": "Versioned command result returned by `POST /api/v1/commands`.",
@@ -2999,6 +3075,23 @@
           "type": "object"
         },
         {
+          "description": "Re-confirm the exact latest terms after an `AllMembers` policy change.",
+          "properties": {
+            "command": {
+              "const": "acknowledge_membership_policy",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeAcknowledgeMembershipPolicyCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "command": {
               "const": "update_routing",
@@ -3761,6 +3854,22 @@
         {
           "properties": {
             "data": {
+              "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
+            },
+            "status": {
+              "const": "membership_policy_acknowledged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
               "$ref": "#/$defs/NodeIdentityRotationSnapshot"
             },
             "status": {
@@ -4012,6 +4121,14 @@
             "$ref": "#/$defs/CapabilityKind"
           },
           "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation",
+          "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
         },
         "external_host": {
           "type": [
@@ -5095,6 +5212,13 @@
           ],
           "description": "Public signed discovery material selected by the user. It is never\ntrusted as cached authority: the handler replaces or revalidates it from\nthe persisted discovery snapshot immediately before mutation."
         },
+        "exit_contribution_acknowledged": {
+          "description": "Explicit acknowledgement of the network's Exit contribution obligation.\nA network declaration never enables this node's local Exit service.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "network_id": {
           "description": "Stable network selected from a discovery preview.",
           "type": [
@@ -5587,6 +5711,10 @@
         "can_join": {
           "type": "boolean"
         },
+        "can_join_without_local_exit": {
+          "description": "True only when a member can join without promising Exit contribution.",
+          "type": "boolean"
+        },
         "capability_summary": {
           "items": {
             "$ref": "#/$defs/CapabilityKind"
@@ -5610,6 +5738,22 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation"
         },
+        "exit_contribution_bandwidth_impact_key": {
+          "type": "string"
+        },
+        "exit_contribution_disable_key": {
+          "type": "string"
+        },
+        "exit_contribution_logging_boundary_key": {
+          "type": "string"
+        },
+        "exit_contribution_purpose_key": {
+          "description": "Stable disclosure keys cover what the local owner is consenting to.\nThey never enable or advertise the local Exit service by themselves.",
+          "type": "string"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope"
+        },
         "expires_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -5622,6 +5766,18 @@
         },
         "join_mode": {
           "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "join_requires_exit_consent": {
+          "description": "The direct join confirmation must explicitly acknowledge this obligation.",
+          "type": "boolean"
+        },
+        "local_exit_available": {
+          "description": "Local host support is separate from the network's declaration.",
+          "type": "boolean"
+        },
+        "local_exit_enabled": {
+          "description": "This is the node's actual local role state, never inferred from terms.",
+          "type": "boolean"
         },
         "locally_contributed_capabilities": {
           "description": "Capabilities remain locally controlled. The only admission obligation\nis disclosed separately as Exit contribution.",
@@ -5698,6 +5854,15 @@
         "endpoints",
         "member_count",
         "exit_contribution",
+        "exit_contribution_scope",
+        "exit_contribution_purpose_key",
+        "exit_contribution_bandwidth_impact_key",
+        "exit_contribution_logging_boundary_key",
+        "exit_contribution_disable_key",
+        "local_exit_available",
+        "local_exit_enabled",
+        "can_join_without_local_exit",
+        "join_requires_exit_consent",
         "privacy_changes",
         "already_member",
         "can_join",
@@ -5772,10 +5937,37 @@
           "minimum": 0,
           "type": "integer"
         },
+        "current_terms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MembershipTerms"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Signed terms most recently observed from discovery. When these differ\nfrom `terms_hash`, members see a policy-change notice; the separate\nboolean distinguishes notice-only `JoiningMembers` changes from\n`AllMembers` changes that require explicit acknowledgement."
+        },
+        "current_terms_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "exit_contribution": {
           "anyOf": [
             {
               "$ref": "#/$defs/ExitContributionObligation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit_contribution_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionScope"
             },
             {
               "type": "null"
@@ -5811,6 +6003,10 @@
         },
         "node_id": {
           "type": "string"
+        },
+        "policy_confirmation_required": {
+          "default": false,
+          "type": "boolean"
         },
         "privacy_policy_revision": {
           "format": "uint64",
@@ -5885,6 +6081,12 @@
           },
           "type": "array"
         },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope"
+        },
         "icon": {
           "type": "string"
         },
@@ -5947,6 +6149,8 @@
         "capability_declarations",
         "visibility",
         "join_mode",
+        "exit_contribution",
+        "exit_contribution_scope",
         "revision",
         "policy_revision"
       ],
@@ -7270,6 +7474,7 @@
             "preview_invitation",
             "redeem_invitation",
             "leave_network",
+            "acknowledge_membership_policy",
             "update_routing",
             "set_network_role",
             "set_node_display_name",
@@ -7468,6 +7673,8 @@
         "capability_declarations",
         "visibility",
         "join_mode",
+        "exit_contribution",
+        "exit_contribution_scope",
         "join_request_id",
         "join_request_note",
         "join_request_reason",
@@ -7590,6 +7797,8 @@
         "capability_declarations",
         "visibility",
         "join_mode",
+        "exit_contribution",
+        "exit_contribution_scope",
         "join_request_id",
         "join_request_note",
         "join_request_reason",

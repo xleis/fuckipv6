@@ -474,6 +474,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::PreviewInvitation
         | NodeCommandKind::RedeemInvitation
         | NodeCommandKind::LeaveNetwork
+        | NodeCommandKind::AcknowledgeMembershipPolicy
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
         | NodeCommandKind::UpdateNetworkAllocation
@@ -510,6 +511,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::PreviewInvitation
             | NodeCommandKind::RedeemInvitation
             | NodeCommandKind::LeaveNetwork
+            | NodeCommandKind::AcknowledgeMembershipPolicy
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
             | NodeCommandKind::StartNode
@@ -570,6 +572,9 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::WithdrawJoinRequest
         | NodeCommandKind::ResubmitJoinRequest => (PolicyAction::Update, ResourceKind::Membership),
         NodeCommandKind::LeaveNetwork => (PolicyAction::Remove, ResourceKind::Membership),
+        NodeCommandKind::AcknowledgeMembershipPolicy => {
+            (PolicyAction::Update, ResourceKind::Membership)
+        }
         NodeCommandKind::UpdateRouting => (PolicyAction::Update, ResourceKind::TrafficPolicy),
         NodeCommandKind::SetNetworkRole => (PolicyAction::Update, ResourceKind::Capability),
         NodeCommandKind::BanClient | NodeCommandKind::UnbanClient => {
@@ -667,6 +672,9 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::LeaveNetwork(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::AcknowledgeMembershipPolicy(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
         }
         NodeCommand::UpdateRouting(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
@@ -840,6 +848,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: fuckipv6_common::domain::NetworkVisibility::Unlisted,
             join_mode: fuckipv6_common::domain::NetworkJoinMode::InviteOnly,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -928,6 +938,7 @@ mod tests {
                     preview_digest: fuckipv6_common::domain::ContentHash::from_bytes(b"preview"),
                     terms_hash: fuckipv6_common::domain::ContentHash::from_bytes(b"terms"),
                     acknowledged_at_unix_ms: 1_700_000_000_000,
+                    exit_contribution_acknowledged: Some(true),
                 },
             }),
         ]

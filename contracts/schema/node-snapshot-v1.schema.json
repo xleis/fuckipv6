@@ -141,6 +141,27 @@
       ],
       "type": "string"
     },
+    "ExitContributionScope": {
+      "description": "The membership population covered by an Exit contribution obligation.\n`NotApplicable` is the only valid scope when contribution is not required.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_applicable"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "joining_members",
+          "description": "New members accept the obligation when they join. Existing members are\nnotified but retain their previously acknowledged scope.",
+          "type": "string"
+        },
+        {
+          "const": "all_members",
+          "description": "Every member must acknowledge the current obligation. This is used for\na policy migration that expands contribution to the existing roster.",
+          "type": "string"
+        }
+      ]
+    },
     "ExitNodeCapabilities": {
       "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable.",
       "properties": {
@@ -236,6 +257,42 @@
       ],
       "type": "string"
     },
+    "MembershipTerms": {
+      "properties": {
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
+        },
+        "member_limit": {
+          "description": "Capacity shown when these terms were acknowledged. Omitted for legacy\nmemberships so their content hash remains stable.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_policy_revision",
+        "privacy_policy_revision",
+        "exit_contribution"
+      ],
+      "type": "object"
+    },
     "NetworkDiscoveryDocument": {
       "description": "Signed discovery data. Endpoints may change between revisions; the stable\nnetwork ID remains bound to the immutable network public key.",
       "properties": {
@@ -264,6 +321,10 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope",
+          "default": "not_applicable"
         },
         "expires_at_unix_ms": {
           "format": "uint64",
@@ -1087,10 +1148,37 @@
           "minimum": 0,
           "type": "integer"
         },
+        "current_terms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MembershipTerms"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Signed terms most recently observed from discovery. When these differ\nfrom `terms_hash`, members see a policy-change notice; the separate\nboolean distinguishes notice-only `JoiningMembers` changes from\n`AllMembers` changes that require explicit acknowledgement."
+        },
+        "current_terms_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "exit_contribution": {
           "anyOf": [
             {
               "$ref": "#/$defs/ExitContributionObligation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit_contribution_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionScope"
             },
             {
               "type": "null"
@@ -1126,6 +1214,10 @@
         },
         "node_id": {
           "type": "string"
+        },
+        "policy_confirmation_required": {
+          "default": false,
+          "type": "boolean"
         },
         "privacy_policy_revision": {
           "format": "uint64",
@@ -1178,6 +1270,12 @@
             "$ref": "#/$defs/CapabilityKind"
           },
           "type": "array"
+        },
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope"
         },
         "icon": {
           "type": "string"
@@ -1241,6 +1339,8 @@
         "capability_declarations",
         "visibility",
         "join_mode",
+        "exit_contribution",
+        "exit_contribution_scope",
         "revision",
         "policy_revision"
       ],

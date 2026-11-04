@@ -263,6 +263,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 41000,
                 relay_port: 42000,
                 external_host: None,
@@ -280,6 +282,8 @@ mod tests {
                     capability_declarations: Vec::new(),
                     visibility: Default::default(),
                     join_mode: Default::default(),
+                    exit_contribution: Default::default(),
+                    exit_contribution_scope: Default::default(),
                 },
             }),
             NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
@@ -294,6 +298,8 @@ mod tests {
                     capability_declarations: Vec::new(),
                     visibility: Default::default(),
                     join_mode: Default::default(),
+                    exit_contribution: Default::default(),
+                    exit_contribution_scope: Default::default(),
                 },
             }),
             NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
@@ -327,6 +333,7 @@ mod tests {
                 privacy_policy_revision: None,
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
             })),
             NodeCommand::SubmitJoinRequest(crate::node::command::NodeSubmitJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
@@ -433,11 +440,20 @@ mod tests {
                     preview_digest: ContentHash::from_bytes(b"invitation-preview"),
                     terms_hash: ContentHash::from_bytes(b"invitation-terms"),
                     acknowledged_at_unix_ms: 1_700_000_000_000,
+                    exit_contribution_acknowledged: Some(true),
                 },
             }),
             NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
                 network_name: "office".into(),
             }),
+            NodeCommand::AcknowledgeMembershipPolicy(
+                crate::node::NodeAcknowledgeMembershipPolicyCommand {
+                    network_id: NetworkId::from_public_key(b"invitation-network").to_string(),
+                    expected_terms_hash: ContentHash::from_bytes(b"membership-terms"),
+                    acknowledged_at_unix_ms: 1_700_000_000_000,
+                    exit_contribution_acknowledged: Some(true),
+                },
+            ),
             NodeCommand::UpdateRouting(NodeUpdateRoutingCommand {
                 network_name: "home".into(),
                 mode: super::super::NodeRoutingMode::MeshOnly,

@@ -4,11 +4,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
 
 use fuckipv6_common::domain::{
-    CapabilityKind, InvitationCreateRequest, InvitationPreview, InvitationRedeemRequest,
-    InvitationRedemption, InvitationState, JoinApplicantProfile, JoinRequest,
-    JoinRequestGrantPreview, JoinRequestId, JoinTermsAck, MembershipRole, MembershipTerms,
-    NetworkDiscoveryRecord, NetworkId, NetworkMembership, NetworkProfileWarning,
-    NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
+    CapabilityKind, ExitContributionObligation, ExitContributionScope, InvitationCreateRequest,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
+    JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, JoinTermsAck,
+    MembershipRole, MembershipTerms, NetworkDiscoveryRecord, NetworkId, NetworkMembership,
+    NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId,
+    JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
 
@@ -17,8 +18,8 @@ use super::state::{NodeNetworkProfileSnapshot, NodeSignedNetworkProfileSnapshot}
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
     NodeCommandContext, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome,
-    NodeCommandRequest, NodeCommandResult, NodePeerProbeSnapshot, NodeProblem, NodeProblemCode,
-    NodeStateStore, NodeValidationIssue,
+    NodeCommandRequest, NodeCommandResult, NodeNetworkJoinPreview, NodePeerProbeSnapshot,
+    NodeProblem, NodeProblemCode, NodeStateStore, NodeValidationIssue,
 };
 use crate::config_manager::{ConfigManager, NetworkProfileError};
 use crate::config_transaction::{ConfigurationTransactionError, ConfigurationValidationCode};
@@ -408,6 +409,12 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "加入预览需要持久化签名发现记录"),
                 },
+                super::NodeCommand::AcknowledgeMembershipPolicy(command) => match configs {
+                    Some(configs) => {
+                        acknowledge_membership_policy(&state, &configs, request_id, command).await
+                    }
+                    None => unavailable(request_id, "确认成员策略需要节点配置管理器"),
+                },
                 super::NodeCommand::LeaveNetwork(command) => match (runtime, configs) {
                     (Some(runtime), Some(configs)) => {
                         leave_runtime_network(
@@ -697,8 +704,32 @@ async fn refresh_network_memberships(
     state: &NodeStateStore,
     configs: &ConfigManager,
 ) -> Result<(), String> {
+    let current_terms = state
+        .snapshot()
+        .await
+        .discovery_index
+        .records
+        .iter()
+        .filter(|record| record.discoverable)
+        .map(|record| {
+            let document = &record.record.document;
+            (
+                document.network_id.as_str().to_owned(),
+                fuckipv6_common::domain::MembershipTerms {
+                    network_policy_revision: document.policy_revision,
+                    privacy_policy_revision: document.privacy_policy_revision,
+                    exit_contribution: document.exit_contribution,
+                    exit_contribution_scope: document.exit_contribution_scope,
+                    member_limit: document.member_limit,
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let configs = configs.clone();
     let memberships = tokio::task::spawn_blocking(move || {
+        configs
+            .observe_joined_membership_policies(&current_terms, unix_time_ms())
+            .map_err(|error| error.to_string())?;
         let mut memberships = configs
             .list_joined_memberships()
             .map_err(|error| error.to_string())?;
@@ -743,10 +774,21 @@ fn network_membership_snapshot(
             .terms
             .as_ref()
             .map(|terms| terms.exit_contribution),
+        exit_contribution_scope: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.exit_contribution_scope),
         terms_hash: membership
             .terms_ack
             .as_ref()
             .map(|ack| ack.terms_hash.as_str().to_owned()),
+        current_terms: membership.current_terms.clone(),
+        current_terms_hash: membership
+            .current_terms
+            .as_ref()
+            .and_then(|terms| terms.content_hash().ok())
+            .map(|hash| hash.as_str().to_owned()),
+        policy_confirmation_required: membership.policy_confirmation_required(),
         acknowledged_at_unix_ms: membership
             .terms_ack
             .as_ref()
@@ -769,6 +811,8 @@ fn network_profile_snapshot(record: NetworkRecord) -> NodeNetworkProfileSnapshot
         capability_declarations: record.capability_declarations,
         visibility: record.visibility,
         join_mode: record.join_mode,
+        exit_contribution: record.exit_contribution,
+        exit_contribution_scope: record.exit_contribution_scope,
         revision: record.revision,
         policy_revision: record.policy_revision,
         signed_profile: record
@@ -1394,6 +1438,17 @@ async fn preview_discovery_join(
         Err(error) => return NodeCommandResult::rejected(request_id, discovery_problem(error)),
     };
     let snapshot = state.snapshot().await;
+    apply_local_join_capabilities(&mut preview, &snapshot);
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::NetworkJoinPreview(Box::new(preview)),
+    )
+}
+
+fn apply_local_join_capabilities(
+    preview: &mut NodeNetworkJoinPreview,
+    snapshot: &super::NodeSnapshot,
+) {
     preview.locally_contributed_capabilities = snapshot
         .capabilities
         .capabilities
@@ -1401,10 +1456,18 @@ async fn preview_discovery_join(
         .filter(|capability| capability.state.is_operational())
         .map(|capability| capability.kind)
         .collect();
-    NodeCommandResult::completed(
-        request_id,
-        NodeCommandOutcome::NetworkJoinPreview(Box::new(preview)),
-    )
+    preview.local_exit_available = snapshot.exit_node_capabilities.supported;
+    preview.local_exit_enabled = snapshot
+        .networks
+        .iter()
+        .find(|network| network.name == preview.network_name)
+        .is_some_and(|network| network.roles.contains(&super::NodeNetworkRole::ExitNode));
+    if preview.exit_contribution == ExitContributionObligation::Required
+        && !preview.local_exit_available
+    {
+        preview.can_join = false;
+        preview.blocked_reason_key = Some("join.error.exit_capability_required".into());
+    }
 }
 
 async fn join_membership_exists(
@@ -1507,12 +1570,14 @@ fn approval_join_request_from_record(
         network_policy_revision: document.policy_revision,
         privacy_policy_revision: document.privacy_policy_revision,
         exit_contribution: document.exit_contribution,
+        exit_contribution_scope: document.exit_contribution_scope,
         member_limit: document.member_limit,
     };
     let grant_preview = JoinRequestGrantPreview {
         role: MembershipRole::Member,
         capabilities: document.capability_summary.clone(),
         exit_contribution: document.exit_contribution,
+        exit_contribution_scope: document.exit_contribution_scope,
         file_access: document.capability_summary.contains(&CapabilityKind::File),
         grants_data_plane_access: true,
     };
@@ -1664,6 +1729,92 @@ fn invitation_conflict(message: impl Into<String>, network_name: Option<&str>) -
     problem
 }
 
+fn exit_contribution_obligation_audit_value(
+    obligation: ExitContributionObligation,
+) -> &'static str {
+    match obligation {
+        ExitContributionObligation::Required => "required",
+        ExitContributionObligation::NotRequired => "not_required",
+    }
+}
+
+fn exit_contribution_scope_audit_value(scope: ExitContributionScope) -> &'static str {
+    match scope {
+        ExitContributionScope::NotApplicable => "not_applicable",
+        ExitContributionScope::JoiningMembers => "joining_members",
+        ExitContributionScope::AllMembers => "all_members",
+    }
+}
+
+/// Enforce the two independent conditions for an Exit contribution obligation.
+/// Network policy can require informed consent, but it can never manufacture
+/// host capability or enable the local Exit service.
+fn validate_exit_contribution_admission(
+    snapshot: &super::NodeSnapshot,
+    obligation: ExitContributionObligation,
+    scope: ExitContributionScope,
+    acknowledged: Option<bool>,
+    network_name: &str,
+) -> Result<(), NodeProblem> {
+    if (obligation == ExitContributionObligation::NotRequired)
+        != (scope == ExitContributionScope::NotApplicable)
+    {
+        return Err(NodeProblem::new(
+            NodeProblemCode::InvalidRequest,
+            "Exit 贡献义务与生效范围不一致",
+        )
+        .with_message_key("join.error.invalid_exit_contribution_policy")
+        .with_param(
+            "policy_exit_contribution",
+            exit_contribution_obligation_audit_value(obligation),
+        )
+        .with_param(
+            "policy_exit_contribution_scope",
+            exit_contribution_scope_audit_value(scope),
+        )
+        .retryable(false)
+        .for_network(network_name.to_owned()));
+    }
+    if obligation == ExitContributionObligation::NotRequired {
+        return Ok(());
+    }
+    if !snapshot.exit_node_capabilities.supported {
+        return Err(NodeProblem::new(
+            NodeProblemCode::Unsupported,
+            "当前节点不支持 Exit 能力，无法接受要求贡献 Exit 的网络",
+        )
+        .with_message_key("join.error.exit_capability_required")
+        .with_param(
+            "policy_exit_contribution",
+            exit_contribution_obligation_audit_value(obligation),
+        )
+        .with_param(
+            "policy_exit_contribution_scope",
+            exit_contribution_scope_audit_value(scope),
+        )
+        .retryable(false)
+        .for_network(network_name.to_owned()));
+    }
+    if acknowledged != Some(true) {
+        return Err(NodeProblem::new(
+            NodeProblemCode::InvalidRequest,
+            "加入前必须单独确认 Exit 贡献用途、带宽、日志边界与关闭条件",
+        )
+        .with_message_key("join.error.exit_contribution_consent_required")
+        .with_param(
+            "policy_exit_contribution",
+            exit_contribution_obligation_audit_value(obligation),
+        )
+        .with_param(
+            "policy_exit_contribution_scope",
+            exit_contribution_scope_audit_value(scope),
+        )
+        .retryable(false)
+        .for_network(network_name.to_owned()));
+    }
+    Ok(())
+}
+
 /// Bind consent to the exact preview digest and independently verify every
 /// security-relevant field before the credential is sent to the Coordinator.
 fn validate_invitation_preview(
@@ -1695,7 +1846,16 @@ fn validate_invitation_preview(
         return Err(invitation_conflict(
             "邀请条款或权限预览已变化，请重新预览并确认",
             Some(&preview.network_name),
-        ));
+        )
+        .with_param(
+            "policy_network_revision",
+            preview.terms.network_policy_revision.to_string(),
+        )
+        .with_param(
+            "policy_privacy_revision",
+            preview.terms.privacy_policy_revision.to_string(),
+        )
+        .with_param("policy_terms_hash", preview.terms_hash.as_str()));
     }
     if preview.state != InvitationState::Active
         || !preview.can_accept
@@ -1736,6 +1896,34 @@ fn validate_invitation_preview(
             "邀请必须创建普通成员关系，不能创建永久身份",
             Some(&preview.network_name),
         ));
+    }
+    if preview.terms.exit_contribution == ExitContributionObligation::Required
+        && request.exit_contribution_acknowledged != Some(true)
+    {
+        return Err(NodeProblem::new(
+            NodeProblemCode::InvalidRequest,
+            "接受邀请前必须单独确认 Exit 贡献义务",
+        )
+        .with_message_key("join.error.exit_contribution_consent_required")
+        .with_param(
+            "policy_exit_contribution",
+            exit_contribution_obligation_audit_value(preview.terms.exit_contribution),
+        )
+        .with_param(
+            "policy_exit_contribution_scope",
+            exit_contribution_scope_audit_value(preview.terms.exit_contribution_scope),
+        )
+        .with_param(
+            "policy_network_revision",
+            preview.terms.network_policy_revision.to_string(),
+        )
+        .with_param(
+            "policy_privacy_revision",
+            preview.terms.privacy_policy_revision.to_string(),
+        )
+        .with_param("policy_terms_hash", preview.terms_hash.as_str())
+        .retryable(false)
+        .for_network(preview.network_name.clone()));
     }
     if now_unix_ms
         > request
@@ -1839,6 +2027,15 @@ async fn redeem_invitation(
     if let Err(problem) = validate_invitation_preview(&command.request, &preview, unix_time_ms()) {
         return NodeCommandResult::rejected(request_id, problem);
     }
+    if let Err(problem) = validate_exit_contribution_admission(
+        &state.snapshot().await,
+        preview.terms.exit_contribution,
+        preview.terms.exit_contribution_scope,
+        command.request.exit_contribution_acknowledged,
+        &preview.network_name,
+    ) {
+        return NodeCommandResult::rejected(request_id, problem);
+    }
 
     let conflicting_config = configs.list_networks().ok().and_then(|networks| {
         networks.into_iter().find(|network| {
@@ -1907,6 +2104,7 @@ async fn redeem_invitation(
         privacy_policy_revision: Some(preview.terms.privacy_policy_revision),
         terms_hash: Some(command.request.terms_hash.clone()),
         acknowledged_at_unix_ms: Some(command.request.acknowledged_at_unix_ms),
+        exit_contribution_acknowledged: command.request.exit_contribution_acknowledged,
     };
     if let Err(error) = runtime.join(join_command).await {
         tracing::warn!(
@@ -1929,6 +2127,166 @@ async fn redeem_invitation(
     NodeCommandResult::completed(
         request_id,
         NodeCommandOutcome::InvitationRedeemed(Box::new(redemption)),
+    )
+}
+
+async fn acknowledge_membership_policy(
+    state: &NodeStateStore,
+    configs: &ConfigManager,
+    request_id: u64,
+    command: crate::node::NodeAcknowledgeMembershipPolicyCommand,
+) -> NodeCommandResult {
+    let loaded_configs = configs.clone();
+    let network_id = command.network_id.clone();
+    let loaded = tokio::task::spawn_blocking(move || loaded_configs.joined_membership(&network_id))
+        .await
+        .map_err(|error| format!("读取成员策略任务失败: {error}"));
+    let joined = match loaded {
+        Ok(Ok(Some(joined))) => joined,
+        Ok(Ok(None)) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(NodeProblemCode::NotFound, "本地不存在该网络的成员关系")
+                    .with_message_key("membership.policy.error.not_found")
+                    .retryable(false),
+            )
+        }
+        Ok(Err(error)) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!("读取成员策略失败: {error}"),
+                )
+                .with_message_key("membership.policy.error.storage")
+                .retryable(true),
+            )
+        }
+        Err(error) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!("读取成员策略任务失败: {error}"),
+                )
+                .with_message_key("membership.policy.error.storage")
+                .retryable(true),
+            )
+        }
+    };
+    let Some(current_terms) = joined.membership.current_terms.as_ref() else {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Conflict, "尚无待确认的成员策略")
+                .with_message_key("membership.policy.error.no_pending_policy")
+                .retryable(true)
+                .for_network(joined.network_name.clone()),
+        );
+    };
+    let Ok(current_hash) = current_terms.content_hash() else {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Internal, "成员策略内容哈希失败")
+                .with_message_key("membership.policy.error.invalid_terms")
+                .retryable(false)
+                .for_network(joined.network_name.clone()),
+        );
+    };
+    if current_hash != command.expected_terms_hash {
+        let mut problem = NodeProblem::new(
+            NodeProblemCode::Conflict,
+            "成员策略在确认前已变化，请查看最新条款后重新确认",
+        )
+        .with_message_key("membership.policy.error.changed")
+        .retryable(true)
+        .for_network(joined.network_name.clone());
+        problem.details = Some(Box::new(super::NodeProblemDetails {
+            current_revision: Some(current_terms.network_policy_revision),
+            ..Default::default()
+        }));
+        return NodeCommandResult::rejected(request_id, problem);
+    }
+    let now = unix_time_ms();
+    if command.acknowledged_at_unix_ms > now.saturating_add(5 * 60 * 1000)
+        || now
+            > command
+                .acknowledged_at_unix_ms
+                .saturating_add(5 * 60 * 1000)
+    {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(NodeProblemCode::Conflict, "成员策略确认已过期，请重新确认")
+                .with_message_key("membership.policy.error.stale_consent")
+                .retryable(true)
+                .for_network(joined.network_name.clone()),
+        );
+    }
+    if let Err(problem) = validate_exit_contribution_admission(
+        &state.snapshot().await,
+        current_terms.exit_contribution,
+        current_terms.exit_contribution_scope,
+        command.exit_contribution_acknowledged,
+        &joined.network_name,
+    ) {
+        return NodeCommandResult::rejected(request_id, problem);
+    }
+
+    let ack = JoinTermsAck {
+        terms_hash: current_hash,
+        acknowledged_at_unix_ms: command.acknowledged_at_unix_ms,
+    };
+    let saved_configs = configs.clone();
+    let expected_hash = command.expected_terms_hash;
+    let saved = tokio::task::spawn_blocking(move || {
+        saved_configs.acknowledge_joined_membership_policy(
+            joined.membership.network_id.as_str(),
+            &expected_hash,
+            ack,
+            command.acknowledged_at_unix_ms,
+        )
+    })
+    .await;
+    let saved = match saved {
+        Ok(Ok(saved)) => saved,
+        Ok(Err(error)) => {
+            let error = error.to_string();
+            let code = if error.contains("策略变化") {
+                NodeProblemCode::Conflict
+            } else {
+                NodeProblemCode::Unavailable
+            };
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(code, format!("保存成员策略确认失败: {error}"))
+                    .with_message_key("membership.policy.error.storage")
+                    .retryable(code == NodeProblemCode::Unavailable),
+            );
+        }
+        Err(error) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!("保存成员策略确认任务失败: {error}"),
+                )
+                .with_message_key("membership.policy.error.storage")
+                .retryable(true),
+            )
+        }
+    };
+    if let Err(error) = refresh_network_memberships(state, configs).await {
+        tracing::warn!(%error, "成员策略确认后刷新成员关系失败");
+    }
+    let snapshot = state.snapshot().await;
+    let membership = snapshot
+        .memberships
+        .iter()
+        .find(|membership| membership.network_id == saved.membership.network_id.as_str())
+        .cloned()
+        .unwrap_or_else(|| network_membership_snapshot(&saved));
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::MembershipPolicyAcknowledged(Box::new(membership)),
     )
 }
 
@@ -2314,6 +2672,17 @@ async fn join_runtime_network(
         }
         confirmed_record = Some(record);
     }
+    if let Some(record) = confirmed_record.as_ref() {
+        if let Err(problem) = validate_exit_contribution_admission(
+            &state.snapshot().await,
+            record.document.exit_contribution,
+            record.document.exit_contribution_scope,
+            command.exit_contribution_acknowledged,
+            &record.document.name,
+        ) {
+            return NodeCommandResult::rejected(request_id, problem);
+        }
+    }
 
     // Persist acceptance before creating configuration or starting a data
     // plane. On any later failure only the record inserted by this operation is
@@ -2441,6 +2810,7 @@ async fn persist_joined_membership(
             network_policy_revision: record.document.policy_revision,
             privacy_policy_revision: record.document.privacy_policy_revision,
             exit_contribution: record.document.exit_contribution,
+            exit_contribution_scope: record.document.exit_contribution_scope,
             member_limit: record.document.member_limit,
         };
         let identity = configs
@@ -2949,6 +3319,7 @@ mod tests {
             network_policy_revision: 7,
             privacy_policy_revision: 3,
             exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
             member_limit: Some(25),
         };
         let mut preview = InvitationPreview {
@@ -2984,6 +3355,7 @@ mod tests {
             preview_digest: preview.preview_digest.clone(),
             terms_hash: preview.terms_hash.clone(),
             acknowledged_at_unix_ms: 90_000,
+            exit_contribution_acknowledged: Some(true),
         }
     }
 
@@ -3043,6 +3415,7 @@ mod tests {
             member_limit: Some(16),
             member_count: 4,
             exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
             privacy_changes: vec!["仅公开审批所需的资料".into()],
             issued_at_unix_ms: now_unix_ms.saturating_sub(1_000),
             expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
@@ -3563,6 +3936,8 @@ mod tests {
                 capability_declarations: Vec::new(),
                 visibility: Default::default(),
                 join_mode: Default::default(),
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: None,
@@ -3579,6 +3954,7 @@ mod tests {
                 privacy_policy_revision: None,
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
             })),
         ];
 
@@ -3680,6 +4056,205 @@ mod tests {
         rebind_preview_digest(&mut preview);
         let request = invitation_redeem_request(&preview);
         assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+    }
+
+    #[test]
+    fn exit_contribution_requires_capability_and_explicit_consent() {
+        let mut snapshot = super::super::NodeSnapshot::default();
+        let unsupported = validate_exit_contribution_admission(
+            &snapshot,
+            ExitContributionObligation::Required,
+            ExitContributionScope::JoiningMembers,
+            Some(true),
+            "lab",
+        )
+        .expect_err("unsupported hosts cannot accept an Exit obligation");
+        assert_problem(&unsupported, NodeProblemCode::Unsupported, false);
+        assert_eq!(
+            unsupported.message_key,
+            "join.error.exit_capability_required"
+        );
+
+        snapshot.exit_node_capabilities = ExitNodeCapabilities {
+            schema_version: EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+            platform: ExitNodePlatform::Linux,
+            supported: true,
+            ipv4_forwarding: true,
+            ipv6_forwarding: true,
+            nat: true,
+            cleanup: true,
+            unsupported_reasons: Vec::new(),
+        };
+        let missing_consent = validate_exit_contribution_admission(
+            &snapshot,
+            ExitContributionObligation::Required,
+            ExitContributionScope::AllMembers,
+            None,
+            "lab",
+        )
+        .expect_err("capability must not imply consent");
+        assert_problem(&missing_consent, NodeProblemCode::InvalidRequest, false);
+        assert_eq!(
+            missing_consent.message_key,
+            "join.error.exit_contribution_consent_required"
+        );
+        assert!(validate_exit_contribution_admission(
+            &snapshot,
+            ExitContributionObligation::Required,
+            ExitContributionScope::JoiningMembers,
+            Some(true),
+            "lab",
+        )
+        .is_ok());
+        assert!(validate_exit_contribution_admission(
+            &snapshot,
+            ExitContributionObligation::NotRequired,
+            ExitContributionScope::NotApplicable,
+            None,
+            "lab",
+        )
+        .is_ok());
+        assert!(validate_exit_contribution_admission(
+            &snapshot,
+            ExitContributionObligation::NotRequired,
+            ExitContributionScope::AllMembers,
+            Some(true),
+            "lab",
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn policy_reconfirmation_requires_exit_consent_and_clears_pending_state() {
+        use crate::config_manager::ConfigManager;
+        use fuckipv6_common::domain::{JoinTermsAck, MembershipState};
+
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-policy-reconfirmation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let configs = ConfigManager::new_for_dir(dir.clone()).expect("config manager");
+        let now = unix_time_ms();
+        let network_id = NetworkId::from_public_key(b"policy-reconfirmation-network");
+        let node_id = fuckipv6_common::domain::NodeId::from_public_key(b"policy-local-node");
+        let initial_terms = MembershipTerms {
+            network_policy_revision: 1,
+            privacy_policy_revision: 1,
+            exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: ExitContributionScope::JoiningMembers,
+            member_limit: None,
+        };
+        let mut membership = fuckipv6_common::domain::NetworkMembership::new(
+            network_id.clone(),
+            node_id,
+            MembershipRole::Member,
+            now.saturating_sub(20),
+        );
+        membership
+            .begin_apply(
+                initial_terms.clone(),
+                JoinTermsAck {
+                    terms_hash: initial_terms.content_hash().expect("initial hash"),
+                    acknowledged_at_unix_ms: now.saturating_sub(20),
+                },
+                now.saturating_sub(20),
+            )
+            .expect("begin applying");
+        membership
+            .accept(now.saturating_sub(19))
+            .expect("accept membership");
+        assert_eq!(membership.state, MembershipState::Accepted);
+        configs
+            .upsert_joined_membership("policy-lab", membership)
+            .expect("persist membership");
+
+        let mut current_terms = initial_terms;
+        current_terms.network_policy_revision = 2;
+        current_terms.exit_contribution_scope = ExitContributionScope::AllMembers;
+        let current_hash = current_terms.content_hash().expect("current hash");
+        configs
+            .observe_joined_membership_policies(
+                &[(network_id.as_str().to_owned(), current_terms.clone())]
+                    .into_iter()
+                    .collect(),
+                now.saturating_sub(5),
+            )
+            .expect("observe policy change");
+
+        let state = NodeStateStore::new();
+        state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = ExitNodeCapabilities {
+                    schema_version: EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                    platform: ExitNodePlatform::Linux,
+                    supported: true,
+                    ipv4_forwarding: true,
+                    ipv6_forwarding: true,
+                    nat: true,
+                    cleanup: true,
+                    unsupported_reasons: Vec::new(),
+                };
+            })
+            .await;
+
+        let command = |exit_acknowledged| crate::node::NodeAcknowledgeMembershipPolicyCommand {
+            network_id: network_id.as_str().to_owned(),
+            expected_terms_hash: current_hash.clone(),
+            acknowledged_at_unix_ms: now,
+            exit_contribution_acknowledged: exit_acknowledged,
+        };
+        let rejected = acknowledge_membership_policy(&state, &configs, 1, command(None)).await;
+        let NodeCommandOutcome::Rejected(problem) = rejected.outcome else {
+            panic!("ordinary policy acceptance must not imply Exit consent");
+        };
+        assert_eq!(
+            problem.message_key,
+            "join.error.exit_contribution_consent_required"
+        );
+
+        let acknowledged =
+            acknowledge_membership_policy(&state, &configs, 2, command(Some(true))).await;
+        let NodeCommandOutcome::MembershipPolicyAcknowledged(snapshot) = acknowledged.outcome
+        else {
+            panic!("policy acknowledgement must complete");
+        };
+        assert_eq!(snapshot.current_terms.as_ref(), Some(&current_terms));
+        assert!(!snapshot.policy_confirmation_required);
+        assert_eq!(snapshot.terms_hash.as_deref(), Some(current_hash.as_str()));
+
+        let persisted = configs
+            .joined_membership(network_id.as_str())
+            .expect("load persisted membership")
+            .expect("persisted membership");
+        assert_eq!(persisted.membership.local_policy_revision, 2);
+        assert!(!persisted.membership.policy_confirmation_required());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn required_invitation_exit_obligation_requires_separate_consent() {
+        let mut preview = invitation_preview();
+        preview.terms.exit_contribution = ExitContributionObligation::Required;
+        preview.terms.exit_contribution_scope = ExitContributionScope::JoiningMembers;
+        preview.terms_hash = preview.terms.content_hash().expect("terms hash");
+        rebind_preview_digest(&mut preview);
+        let mut request = invitation_redeem_request(&preview);
+
+        request.exit_contribution_acknowledged = None;
+        let problem = validate_invitation_preview(&request, &preview, 95_000)
+            .expect_err("terms acceptance cannot imply Exit contribution consent");
+        assert_problem(&problem, NodeProblemCode::InvalidRequest, false);
+        assert_eq!(
+            problem.message_key,
+            "join.error.exit_contribution_consent_required"
+        );
+
+        request.exit_contribution_acknowledged = Some(false);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+        request.exit_contribution_acknowledged = Some(true);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_ok());
     }
 
     #[test]
@@ -3816,6 +4391,176 @@ mod tests {
                 outcome => panic!("unexpected outcome: {outcome:?}"),
             }
         }
+    }
+
+    fn join_preview_for_local_capability_test(
+        exit_contribution: ExitContributionObligation,
+    ) -> NodeNetworkJoinPreview {
+        NodeNetworkJoinPreview {
+            network_id: NetworkId::from_public_key(b"local-exit-preview").to_string(),
+            network_name: "exit-lab".into(),
+            public_key: "network-public-key".into(),
+            owner: "network-owner".into(),
+            administrators: Vec::new(),
+            discovery_revision: 12,
+            network_policy_revision: 4,
+            privacy_policy_revision: 2,
+            join_mode: fuckipv6_common::domain::NetworkJoinMode::Open,
+            visibility: fuckipv6_common::domain::NetworkVisibility::Public,
+            capability_summary: vec![CapabilityKind::Exit],
+            endpoints: vec![fuckipv6_common::domain::NetworkEndpoint {
+                transport: fuckipv6_common::domain::DiscoveryTransport::Websocket,
+                host: "coordinator.example.test".into(),
+                port: 443,
+            }],
+            member_count: 3,
+            member_limit: Some(16),
+            exit_contribution,
+            exit_contribution_scope: ExitContributionScope::JoiningMembers,
+            exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
+            exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
+            exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
+            exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
+            local_exit_available: false,
+            local_exit_enabled: false,
+            can_join_without_local_exit: exit_contribution
+                == ExitContributionObligation::NotRequired,
+            join_requires_exit_consent: exit_contribution == ExitContributionObligation::Required,
+            privacy_changes: Vec::new(),
+            already_member: false,
+            can_join: true,
+            blocked_reason_key: None,
+            terms_hash: ContentHash::from_bytes(b"local exit preview terms"),
+            preview_digest: "preview-digest".into(),
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_100_000,
+            locally_contributed_capabilities: Vec::new(),
+            contribution_policy_key: "join.exit.contribution_policy".into(),
+        }
+    }
+
+    fn local_capability_snapshot(
+        supported: bool,
+        exit_role_enabled: bool,
+        exit_capability_state: fuckipv6_common::domain::CapabilityState,
+    ) -> crate::node::NodeSnapshot {
+        use crate::node::state::{NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot};
+        use crate::node::{NodeNetworkSnapshot, NodeNetworkStatus, NodeTrafficSnapshot};
+
+        crate::node::NodeSnapshot {
+            exit_node_capabilities: ExitNodeCapabilities {
+                supported,
+                ..ExitNodeCapabilities::default()
+            },
+            capabilities: NodeCapabilityRegistrySnapshot {
+                capabilities: vec![
+                    NodeCapabilitySnapshot {
+                        kind: CapabilityKind::Exit,
+                        state: exit_capability_state,
+                    },
+                    NodeCapabilitySnapshot {
+                        kind: CapabilityKind::File,
+                        state: fuckipv6_common::domain::CapabilityState::Enabled,
+                    },
+                ],
+            },
+            networks: vec![NodeNetworkSnapshot {
+                name: "exit-lab".into(),
+                tun_name: "fk-exit-lab".into(),
+                status: NodeNetworkStatus::Online,
+                assigned_ipv6: None,
+                assigned_ipv4: None,
+                p2p_listen_addr: None,
+                uptime_secs: 30,
+                roles: if exit_role_enabled {
+                    vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
+                } else {
+                    vec![NodeNetworkRole::Member]
+                },
+                peer_count: 2,
+                traffic: NodeTrafficSnapshot::default(),
+            }],
+            ..crate::node::NodeSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn required_exit_without_local_support_is_explicitly_not_joinable() {
+        let mut preview =
+            join_preview_for_local_capability_test(ExitContributionObligation::Required);
+        let snapshot = local_capability_snapshot(
+            false,
+            false,
+            fuckipv6_common::domain::CapabilityState::Unsupported,
+        );
+
+        apply_local_join_capabilities(&mut preview, &snapshot);
+
+        assert!(!preview.can_join);
+        assert_eq!(
+            preview.blocked_reason_key.as_deref(),
+            Some("join.error.exit_capability_required")
+        );
+        assert!(!preview.can_join_without_local_exit);
+        assert!(preview.join_requires_exit_consent);
+        assert!(!preview.local_exit_available);
+        assert!(!preview.local_exit_enabled);
+        assert_eq!(
+            preview.locally_contributed_capabilities,
+            vec![CapabilityKind::File]
+        );
+    }
+
+    #[test]
+    fn required_exit_with_local_support_keeps_capability_and_enabled_state_separate() {
+        let mut preview =
+            join_preview_for_local_capability_test(ExitContributionObligation::Required);
+        let snapshot = local_capability_snapshot(
+            true,
+            false,
+            fuckipv6_common::domain::CapabilityState::Enabled,
+        );
+
+        apply_local_join_capabilities(&mut preview, &snapshot);
+
+        assert!(preview.can_join);
+        assert_eq!(preview.blocked_reason_key, None);
+        assert!(!preview.can_join_without_local_exit);
+        assert!(preview.join_requires_exit_consent);
+        assert!(preview.local_exit_available);
+        assert!(!preview.local_exit_enabled);
+        assert_eq!(
+            preview.locally_contributed_capabilities,
+            vec![CapabilityKind::Exit, CapabilityKind::File]
+        );
+
+        let enabled_snapshot = local_capability_snapshot(
+            true,
+            true,
+            fuckipv6_common::domain::CapabilityState::Enabled,
+        );
+        apply_local_join_capabilities(&mut preview, &enabled_snapshot);
+        assert!(preview.local_exit_enabled);
+    }
+
+    #[test]
+    fn optional_exit_join_remains_available_without_local_exit_support() {
+        let mut preview =
+            join_preview_for_local_capability_test(ExitContributionObligation::NotRequired);
+        let snapshot = local_capability_snapshot(
+            false,
+            false,
+            fuckipv6_common::domain::CapabilityState::Unsupported,
+        );
+
+        apply_local_join_capabilities(&mut preview, &snapshot);
+
+        assert!(preview.can_join);
+        assert_eq!(preview.blocked_reason_key, None);
+        assert!(preview.can_join_without_local_exit);
+        assert!(!preview.join_requires_exit_consent);
+        assert!(!preview.local_exit_available);
+        assert!(!preview.local_exit_enabled);
     }
 
     #[tokio::test]

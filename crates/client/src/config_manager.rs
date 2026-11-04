@@ -5,10 +5,11 @@ use crate::config_transaction::{
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
-    preview_network_profile, AuditEntry, AuditId, AuditLog, AuditOutcome, NetworkCreateProfile,
-    NetworkId, NetworkMembership, NetworkProfileApplyResult, NetworkProfileDiffEntry,
-    NetworkProfilePreview, NetworkProfileUpdate, NetworkRecord, NodeId as DomainNodeId,
-    OperationId, PublicKey, NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
+    preview_network_profile, AuditEntry, AuditId, AuditLog, AuditOutcome, ContentHash,
+    JoinTermsAck, MembershipTerms, NetworkCreateProfile, NetworkId, NetworkMembership,
+    NetworkProfileApplyResult, NetworkProfileDiffEntry, NetworkProfilePreview,
+    NetworkProfileUpdate, NetworkRecord, NodeId as DomainNodeId, OperationId, PublicKey,
+    NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
 };
 use fuckipv6_common::i18n::LanguagePreference;
 use fuckipv6_common::{ClientConfig, Identity};
@@ -370,6 +371,61 @@ impl ConfigManager {
         file.memberships.insert(network_id, stored.clone());
         self.persist_joined_membership_file(&file)?;
         Ok((stored, true))
+    }
+
+    /// Persist signed policy observations for joined memberships. A single
+    /// lock and atomic replacement cover the whole batch so a partial policy
+    /// refresh cannot leave memberships disagreeing with each other.
+    pub(crate) fn observe_joined_membership_policies(
+        &self,
+        current_terms: &BTreeMap<String, MembershipTerms>,
+        now_unix_ms: u64,
+    ) -> Result<bool> {
+        if current_terms.is_empty() {
+            return Ok(false);
+        }
+        let _lock = self.lock_joined_memberships()?;
+        let mut file = self.load_joined_membership_file()?;
+        let mut changed = false;
+        for (network_id, terms) in current_terms {
+            if let Some(joined) = file.memberships.get_mut(network_id) {
+                changed |= joined
+                    .membership
+                    .observe_current_terms(terms.clone(), now_unix_ms)
+                    .context("记录本地成员关系策略变更失败")?;
+            }
+        }
+        if changed {
+            self.persist_joined_membership_file(&file)?;
+        }
+        Ok(changed)
+    }
+
+    /// Re-confirm the exact current terms for one existing membership. The
+    /// network ID and expected hash pin the decision against policy changes.
+    pub(crate) fn acknowledge_joined_membership_policy(
+        &self,
+        network_id: &str,
+        expected_terms_hash: &ContentHash,
+        ack: JoinTermsAck,
+        now_unix_ms: u64,
+    ) -> Result<JoinedNetworkMembership> {
+        let network_id = NetworkId::parse(network_id.to_owned())
+            .map_err(|error| anyhow::anyhow!("网络 ID 格式无效: {error}"))?;
+        let _lock = self.lock_joined_memberships()?;
+        let mut file = self.load_joined_membership_file()?;
+        let joined = file
+            .memberships
+            .get_mut(network_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("本地不存在该网络的成员关系"))?;
+        joined
+            .membership
+            .acknowledge_current_terms(expected_terms_hash, ack, now_unix_ms)
+            .context("确认本地成员关系策略失败")?;
+        joined.membership.validate().context("本地成员关系无效")?;
+        let stored = joined.clone();
+        self.persist_joined_membership_file(&file)?;
+        Ok(stored)
     }
 
     /// Remove only one stable network membership. Other network relationships
@@ -1557,8 +1613,8 @@ fn url_to_network_slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use fuckipv6_common::domain::{
-        CapabilityKind, ExitContributionObligation, JoinTermsAck, MembershipRole, MembershipState,
-        MembershipTerms, NetworkJoinMode, NetworkVisibility,
+        CapabilityKind, ExitContributionObligation, ExitContributionScope, JoinTermsAck,
+        MembershipRole, MembershipState, MembershipTerms, NetworkJoinMode, NetworkVisibility,
     };
 
     use super::*;
@@ -1579,6 +1635,8 @@ mod tests {
             capability_declarations: Vec::new(),
             visibility: NetworkVisibility::Unlisted,
             join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
         }
     }
 
@@ -1589,6 +1647,7 @@ mod tests {
             network_policy_revision: 7,
             privacy_policy_revision: 3,
             exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: ExitContributionScope::JoiningMembers,
             member_limit: Some(25),
         };
         let now = 1_000;
@@ -1762,6 +1821,8 @@ mod tests {
             capability_declarations: vec![CapabilityKind::Exit, CapabilityKind::Relay],
             visibility: NetworkVisibility::Public,
             join_mode: NetworkJoinMode::ApprovalRequired,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
         };
 
         let result = manager
@@ -2252,6 +2313,74 @@ mod tests {
         let memberships = reopened.list_joined_memberships()?;
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].network_name, "beta");
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_observations_are_atomic_and_acknowledgements_persist() -> anyhow::Result<()> {
+        let dir = temp_config_dir("membership-policy-observation");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let joining = accepted_membership("policy-joining-members");
+        let all_members = accepted_membership("policy-all-members");
+        manager.upsert_joined_membership("joining", joining.clone())?;
+        manager.upsert_joined_membership("all", all_members.clone())?;
+
+        let mut joining_terms = joining.terms.clone().expect("joining terms");
+        joining_terms.network_policy_revision += 1;
+        let mut all_terms = all_members.terms.clone().expect("all terms");
+        all_terms.network_policy_revision += 1;
+        all_terms.exit_contribution_scope = ExitContributionScope::AllMembers;
+        let current = [
+            (
+                joining.network_id.as_str().to_owned(),
+                joining_terms.clone(),
+            ),
+            (
+                all_members.network_id.as_str().to_owned(),
+                all_terms.clone(),
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert!(manager.observe_joined_membership_policies(&current, 1_100)?);
+        let persisted_joining = manager
+            .joined_membership(joining.network_id.as_str())?
+            .expect("joining membership");
+        let persisted_all = manager
+            .joined_membership(all_members.network_id.as_str())?
+            .expect("all-members membership");
+        assert_eq!(
+            persisted_joining.membership.current_terms.as_ref(),
+            Some(&joining_terms)
+        );
+        assert!(!persisted_joining.membership.policy_confirmation_required());
+        assert!(persisted_all.membership.policy_confirmation_required());
+
+        let terms_hash = all_terms.content_hash()?;
+        manager.acknowledge_joined_membership_policy(
+            all_members.network_id.as_str(),
+            &terms_hash,
+            JoinTermsAck {
+                terms_hash: terms_hash.clone(),
+                acknowledged_at_unix_ms: 1_101,
+            },
+            1_101,
+        )?;
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        let persisted_all = reopened
+            .joined_membership(all_members.network_id.as_str())?
+            .expect("reopened all-members membership");
+        assert_eq!(persisted_all.membership.terms.as_ref(), Some(&all_terms));
+        assert!(!persisted_all.membership.policy_confirmation_required());
+        assert_eq!(
+            persisted_all.membership.local_policy_revision,
+            all_members.local_policy_revision + 1
+        );
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

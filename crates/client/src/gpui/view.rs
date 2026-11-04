@@ -253,11 +253,13 @@ struct GpuiShell {
     recent_join_requests: Option<NodeJoinRequestListResult>,
     join_request_selection: BTreeSet<String>,
     network_join_terms_confirmed: bool,
+    network_join_exit_contribution_confirmed: bool,
     recent_issued_invitation: Option<IssuedInvitation>,
     recent_invitations: Option<Vec<InvitationStatusView>>,
     recent_invitation_status: Option<InvitationStatusView>,
     recent_invitation_preview: Option<InvitationPreview>,
     invitation_terms_confirmed: bool,
+    invitation_exit_contribution_confirmed: bool,
     invitation_copy_notice: Option<String>,
     error: Option<String>,
     notice: Option<String>,
@@ -325,11 +327,13 @@ impl GpuiShell {
             recent_join_requests: None,
             join_request_selection: BTreeSet::new(),
             network_join_terms_confirmed: false,
+            network_join_exit_contribution_confirmed: false,
             recent_issued_invitation: None,
             recent_invitations: None,
             recent_invitation_status: None,
             recent_invitation_preview: None,
             invitation_terms_confirmed: false,
+            invitation_exit_contribution_confirmed: false,
             invitation_copy_notice: None,
             error: None,
             notice: None,
@@ -1217,6 +1221,7 @@ impl GpuiShell {
                     t(self.locale, "network.member_count")
                 ));
                 self.network_join_terms_confirmed = false;
+                self.network_join_exit_contribution_confirmed = false;
                 self.set_join_preview_fields(&preview);
                 self.recent_network_join_preview = Some(preview);
                 self.open_action("networks", "join_network", cx);
@@ -1300,15 +1305,25 @@ impl GpuiShell {
                 self.set_invitation_preview_fields(&preview);
                 self.recent_invitation_preview = Some(preview);
                 self.invitation_terms_confirmed = false;
+                self.invitation_exit_contribution_confirmed = false;
                 self.notice = Some(t(self.locale, "invitations.preview_notice").to_string());
             }
             NodeCommandOutcome::InvitationRedeemed(redemption) => {
                 self.recent_invitation_preview = None;
                 self.invitation_terms_confirmed = false;
+                self.invitation_exit_contribution_confirmed = false;
                 self.notice = Some(tr(
                     self.locale,
                     "invitations.redeemed_notice",
                     &[("role", invitation_role_name(redemption.role))],
+                ));
+                self.submit_raw(NodeCommand::GetSnapshot, cx);
+            }
+            NodeCommandOutcome::MembershipPolicyAcknowledged(membership) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.membership_policy_acknowledged",
+                    &[("network", &membership.network_name)],
                 ));
                 self.submit_raw(NodeCommand::GetSnapshot, cx);
             }
@@ -1589,6 +1604,8 @@ impl GpuiShell {
                         | NodeUiInputKind::NetworkSelection
                         | NodeUiInputKind::Visibility
                         | NodeUiInputKind::JoinMode
+                        | NodeUiInputKind::ExitContribution
+                        | NodeUiInputKind::ExitContributionScope
                         | NodeUiInputKind::JoinRequestReviewAction
                 ) {
                     let key = self.field_key(&action.id, &field.id);
@@ -1863,6 +1880,7 @@ impl GpuiShell {
     fn clear_join_preview_state(&mut self) {
         self.recent_network_join_preview = None;
         self.network_join_terms_confirmed = false;
+        self.network_join_exit_contribution_confirmed = false;
         for field in [
             "network_id",
             "preview_digest",
@@ -1870,6 +1888,7 @@ impl GpuiShell {
             "privacy_policy_revision",
             "terms_hash",
             "acknowledged_at_unix_ms",
+            "exit_contribution_acknowledged",
         ] {
             self.set_field_value("join_network", field, "");
         }
@@ -1886,10 +1905,26 @@ impl GpuiShell {
             cx.notify();
             return;
         }
+        if preview.join_requires_exit_consent && !self.network_join_exit_contribution_confirmed {
+            self.error =
+                Some(t(self.locale, "join.error.exit_contribution_consent_required").to_string());
+            cx.notify();
+            return;
+        }
+        let join_requires_exit_consent = preview.join_requires_exit_consent;
         self.set_field_value(
             "join_network",
             "acknowledged_at_unix_ms",
             unix_time_ms().to_string(),
+        );
+        self.set_field_value(
+            "join_network",
+            "exit_contribution_acknowledged",
+            if join_requires_exit_consent {
+                "true"
+            } else {
+                "false"
+            },
         );
         self.submit_manifest_action("join_network", cx);
     }
@@ -1957,6 +1992,7 @@ impl GpuiShell {
     fn clear_invitation_preview(&mut self) {
         self.recent_invitation_preview = None;
         self.invitation_terms_confirmed = false;
+        self.invitation_exit_contribution_confirmed = false;
         for field in [
             "network_id",
             "code",
@@ -1966,6 +2002,7 @@ impl GpuiShell {
             "preview_digest",
             "terms_hash",
             "acknowledged_at_unix_ms",
+            "exit_contribution_acknowledged",
         ] {
             self.set_field_value("redeem_invitation", field, "");
         }
@@ -1987,10 +2024,29 @@ impl GpuiShell {
             cx.notify();
             return;
         }
+        if preview.terms.exit_contribution == ExitContributionObligation::Required
+            && !self.invitation_exit_contribution_confirmed
+        {
+            self.error =
+                Some(t(self.locale, "join.error.exit_contribution_consent_required").to_string());
+            cx.notify();
+            return;
+        }
+        let exit_contribution_required =
+            preview.terms.exit_contribution == ExitContributionObligation::Required;
         self.set_field_value(
             "redeem_invitation",
             "acknowledged_at_unix_ms",
             unix_time_ms().to_string(),
+        );
+        self.set_field_value(
+            "redeem_invitation",
+            "exit_contribution_acknowledged",
+            if exit_contribution_required {
+                "true"
+            } else {
+                "false"
+            },
         );
         self.submit_manifest_action("redeem_invitation", cx);
     }
@@ -6384,6 +6440,33 @@ impl GpuiShell {
                 ],
                 cx,
             ),
+            NodeUiInputKind::ExitContribution => self.choice_field(
+                action,
+                field,
+                &value,
+                &[
+                    ("not_required", "choice.exit_contribution.not_required"),
+                    ("required", "choice.exit_contribution.required"),
+                ],
+                cx,
+            ),
+            NodeUiInputKind::ExitContributionScope => self.choice_field(
+                action,
+                field,
+                &value,
+                &[
+                    (
+                        "not_applicable",
+                        "choice.exit_contribution_scope.not_applicable",
+                    ),
+                    (
+                        "joining_members",
+                        "choice.exit_contribution_scope.joining_members",
+                    ),
+                    ("all_members", "choice.exit_contribution_scope.all_members"),
+                ],
+                cx,
+            ),
             NodeUiInputKind::JoinRequestReviewAction => self.choice_field(
                 action,
                 field,
@@ -7090,12 +7173,16 @@ impl GpuiShell {
             member_limit,
         ]
         .join(" · ");
+        let exit_required = preview.terms.exit_contribution == ExitContributionObligation::Required;
+        let local_exit_available = self.snapshot.exit_node_capabilities.supported;
         let can_accept = preview.can_accept
             && preview.state == InvitationState::Active
             && preview.remaining_uses > 0
             && preview.expires_at_unix_ms > unix_time_ms()
-            && !preview.creates_permanent_membership;
+            && !preview.creates_permanent_membership
+            && (!exit_required || local_exit_available);
         let checked = self.invitation_terms_confirmed;
+        let exit_checked = self.invitation_exit_contribution_confirmed;
         let pending = self.pending_commands > 0;
         let denial = t(
             self.locale,
@@ -7105,6 +7192,7 @@ impl GpuiShell {
                 .unwrap_or("invitations.denied"),
         )
         .to_string();
+        let local_capability_denial = exit_required && !local_exit_available;
         let confirmation_pending =
             self.pending_confirmation.as_deref() == Some("redeem_invitation");
         let terms_control = checkbox_control(
@@ -7127,6 +7215,25 @@ impl GpuiShell {
                 cx.notify();
             }
         }));
+        let exit_control = checkbox_control(
+            SharedString::from("invitation-exit-contribution"),
+            t(self.locale, "join.exit.consent"),
+            exit_checked,
+            !can_accept || pending,
+        )
+        .debug_selector(|| "visual-invitation-exit-contribution".into())
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if shell.pending_commands == 0
+                && shell
+                    .recent_invitation_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.can_accept)
+            {
+                shell.invitation_exit_contribution_confirmed =
+                    !shell.invitation_exit_contribution_confirmed;
+                cx.notify();
+            }
+        }));
         let confirm_label = if confirmation_pending {
             t(self.locale, "invitations.confirm_accept")
         } else {
@@ -7136,12 +7243,21 @@ impl GpuiShell {
             SharedString::from("accept-invitation"),
             confirm_label,
             ButtonVariant::Primary,
-            !can_accept || !checked || pending,
+            !can_accept || !checked || (exit_required && !exit_checked) || pending,
         )
         .debug_selector(|| "visual-invitation-confirm".into())
         .w_full()
         .on_click(cx.listener(|shell, _, _, cx| {
-            if shell.pending_commands == 0 && shell.invitation_terms_confirmed {
+            if shell.pending_commands == 0
+                && shell.invitation_terms_confirmed
+                && shell
+                    .recent_invitation_preview
+                    .as_ref()
+                    .is_some_and(|preview| {
+                        preview.terms.exit_contribution != ExitContributionObligation::Required
+                            || shell.invitation_exit_contribution_confirmed
+                    })
+            {
                 shell.confirm_invitation_preview(cx);
             }
         }));
@@ -7196,7 +7312,36 @@ impl GpuiShell {
                         .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
                         .text_xs()
                         .text_color(rgba(COLOR_WARNING))
-                        .child(denial.clone()),
+                        .child(if local_capability_denial {
+                            t(self.locale, "join.error.exit_capability_required").to_string()
+                        } else {
+                            denial.clone()
+                        }),
+                )
+            })
+            .when(exit_required, |card| {
+                card.child(
+                    div()
+                        .debug_selector(|| "visual-invitation-exit-disclosure".into())
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                        .child(t(self.locale, "join.exit.scope_all_members_hint"))
+                        .child(t(self.locale, "join.exit.disclosure.purpose"))
+                        .child(t(self.locale, "join.exit.disclosure.bandwidth"))
+                        .child(t(self.locale, "join.exit.disclosure.logging"))
+                        .child(t(self.locale, "join.exit.disclosure.disable"))
+                        .child(t(
+                            self.locale,
+                            if local_exit_available {
+                                "join.exit.local_supported"
+                            } else {
+                                "join.exit.local_unsupported"
+                            },
+                        ))
+                        .child(t(self.locale, "join.exit.local_not_enabled")),
                 )
             })
             .children([
@@ -7244,6 +7389,7 @@ impl GpuiShell {
                     .child(t(self.locale, "invitations.not_permanent")),
             )
             .child(terms_control)
+            .when(exit_required, |card| card.child(exit_control))
             .child(confirm)
             .into_any_element()
     }
@@ -9497,6 +9643,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "redeem_invitation" => "action.redeem_invitation",
         "withdraw_join_request" => "action.withdraw_join_request",
         "leave_network" => "action.leave_network",
+        "acknowledge_membership_policy" => "action.acknowledge_membership_policy",
         "start_networks" => "action.start_networks",
         "stop_networks" => "action.stop_networks",
         "restart_networks" => "action.restart_networks",
@@ -9870,6 +10017,7 @@ mod tests {
                 member_limit: None,
                 member_count: 1,
                 exit_contribution: fuckipv6_common::domain::ExitContributionObligation::NotRequired,
+                exit_contribution_scope: Default::default(),
                 privacy_changes: Vec::new(),
                 issued_at_unix_ms: self.accepted_at_unix_ms.saturating_sub(1_000),
                 expires_at_unix_ms: self.accepted_at_unix_ms.saturating_add(3_600_000),
@@ -9926,12 +10074,16 @@ mod tests {
                 network_policy_revision: 4,
                 privacy_policy_revision: 2,
                 exit_contribution: ExitContributionObligation::Required,
+                exit_contribution_scope:
+                    fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
                 member_limit: Some(16),
             },
             JoinRequestGrantPreview {
                 role: MembershipRole::Member,
                 capabilities: vec![CapabilityKind::File],
                 exit_contribution: ExitContributionObligation::Required,
+                exit_contribution_scope:
+                    fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
                 file_access: true,
                 grants_data_plane_access: true,
             },
@@ -9968,6 +10120,15 @@ mod tests {
             member_count: 4,
             member_limit: Some(8),
             exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
+            exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
+            exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
+            exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
+            exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
+            local_exit_available: true,
+            local_exit_enabled: false,
+            can_join_without_local_exit: false,
+            join_requires_exit_consent: true,
             privacy_changes: vec!["No member activity is published".into()],
             already_member: false,
             can_join: true,
@@ -10015,6 +10176,7 @@ mod tests {
             network_policy_revision: 7,
             privacy_policy_revision: 3,
             exit_contribution: ExitContributionObligation::NotRequired,
+            exit_contribution_scope: Default::default(),
             member_limit: Some(12),
         };
         let mut preview = InvitationPreview {
@@ -10133,6 +10295,8 @@ mod tests {
                 capability_declarations: vec![CapabilityKind::Relay],
                 visibility: NetworkVisibility::Unlisted,
                 join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
             },
             public_key,
             owner,

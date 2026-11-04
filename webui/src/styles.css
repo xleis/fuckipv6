@@ -2195,6 +2195,68 @@ button:disabled {
   align-items: flex-start;
   padding-block: var(--space-1);
 }
+.exit-contribution-disclosure {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-raised) 88%, var(--accent-soft));
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.exit-contribution-disclosure.required {
+  border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
+  background: color-mix(in srgb, var(--surface-raised) 86%, var(--warning-soft));
+}
+.exit-contribution-disclosure h4,
+.exit-contribution-disclosure p {
+  margin: 0;
+}
+.membership-policy-section {
+  padding: var(--space-4);
+}
+.membership-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.membership-policy-card {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+}
+.membership-policy-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.membership-policy-heading > div {
+  display: grid;
+  gap: 2px;
+}
+.membership-policy-heading > div > span {
+  color: var(--text-faint);
+  font-size: var(--font-size-xs);
+}
+.membership-policy-details {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+}
+.membership-policy-confirmation {
+  display: grid;
+  gap: var(--space-2);
+}
+.membership-policy-confirmation > p {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--font-size-xs);
+}
 .join-request-list {
   display: grid;
   min-width: 0;

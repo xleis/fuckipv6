@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -266,6 +266,31 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown ExitContributionObligation wire value: " + value);
+        }
+    }
+
+    public enum ExitContributionScope {
+        NOT_APPLICABLE("not_applicable"),
+        JOINING_MEMBERS("joining_members"),
+        ALL_MEMBERS("all_members");
+
+        private final String wireName;
+
+        ExitContributionScope(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ExitContributionScope fromWireName(String value) {
+            for (ExitContributionScope candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ExitContributionScope wire value: " + value);
         }
     }
 
@@ -664,6 +689,7 @@ public final class NodeContractV1 {
     }
 
     public enum NodeCommandKind {
+        ACKNOWLEDGE_MEMBERSHIP_POLICY("acknowledge_membership_policy"),
         APPLY_CONFIGURATION("apply_configuration"),
         BAN_CLIENT("ban_client"),
         BATCH_REVIEW_JOIN_REQUESTS("batch_review_join_requests"),
@@ -1443,6 +1469,8 @@ public final class NodeContractV1 {
         CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode"),
+        EXIT_CONTRIBUTION("exit_contribution"),
+        EXIT_CONTRIBUTION_SCOPE("exit_contribution_scope"),
         JOIN_REQUEST_ID("join_request_id"),
         JOIN_REQUEST_NOTE("join_request_note"),
         JOIN_REQUEST_REASON("join_request_reason"),
@@ -1536,6 +1564,8 @@ public final class NodeContractV1 {
         CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode"),
+        EXIT_CONTRIBUTION("exit_contribution"),
+        EXIT_CONTRIBUTION_SCOPE("exit_contribution_scope"),
         JOIN_REQUEST_ID("join_request_id"),
         JOIN_REQUEST_NOTE("join_request_note"),
         JOIN_REQUEST_REASON("join_request_reason"),
@@ -2073,15 +2103,17 @@ public final class NodeContractV1 {
     public static final class InvitationRedeemRequest {
         public final Long acknowledged_at_unix_ms;
         public final String code;
+        public final Boolean exit_contribution_acknowledged;
         public final Long expected_invitation_revision;
         public final String invitation_id;
         public final String network_id;
         public final String preview_digest;
         public final String terms_hash;
 
-        public InvitationRedeemRequest(Long acknowledged_at_unix_ms, String code, Long expected_invitation_revision, String invitation_id, String network_id, String preview_digest, String terms_hash) {
+        public InvitationRedeemRequest(Long acknowledged_at_unix_ms, String code, Boolean exit_contribution_acknowledged, Long expected_invitation_revision, String invitation_id, String network_id, String preview_digest, String terms_hash) {
             this.acknowledged_at_unix_ms = acknowledged_at_unix_ms;
             this.code = code;
+            this.exit_contribution_acknowledged = exit_contribution_acknowledged;
             this.expected_invitation_revision = expected_invitation_revision;
             this.invitation_id = invitation_id;
             this.network_id = network_id;
@@ -2199,13 +2231,15 @@ public final class NodeContractV1 {
     public static final class JoinRequestGrantPreview {
         public final List<CapabilityKind> capabilities;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final Boolean file_access;
         public final Boolean grants_data_plane_access;
         public final MembershipRole role;
 
-        public JoinRequestGrantPreview(List<CapabilityKind> capabilities, ExitContributionObligation exit_contribution, Boolean file_access, Boolean grants_data_plane_access, MembershipRole role) {
+        public JoinRequestGrantPreview(List<CapabilityKind> capabilities, ExitContributionObligation exit_contribution, String exit_contribution_scope, Boolean file_access, Boolean grants_data_plane_access, MembershipRole role) {
             this.capabilities = capabilities;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.file_access = file_access;
             this.grants_data_plane_access = grants_data_plane_access;
             this.role = role;
@@ -2215,12 +2249,14 @@ public final class NodeContractV1 {
     /** DTO for MembershipTerms. */
     public static final class MembershipTerms {
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final Long member_limit;
         public final Long network_policy_revision;
         public final Long privacy_policy_revision;
 
-        public MembershipTerms(ExitContributionObligation exit_contribution, Long member_limit, Long network_policy_revision, Long privacy_policy_revision) {
+        public MembershipTerms(ExitContributionObligation exit_contribution, String exit_contribution_scope, Long member_limit, Long network_policy_revision, Long privacy_policy_revision) {
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.member_limit = member_limit;
             this.network_policy_revision = network_policy_revision;
             this.privacy_policy_revision = privacy_policy_revision;
@@ -2250,6 +2286,7 @@ public final class NodeContractV1 {
         public final List<CapabilityKind> capability_summary;
         public final List<NetworkEndpoint> endpoints;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final Long expires_at_unix_ms;
         public final Long issued_at_unix_ms;
         public final String join_mode;
@@ -2272,11 +2309,12 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NetworkDiscoveryDocument(List<String> administrators, List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String language, Long member_count, Long member_limit, String name, String network_id, String owner, Long policy_revision, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String publisher, String purpose, String region, Long revision, Long revoked_at_unix_ms, Integer schema_version, List<String> tags, NetworkVisibility visibility) {
+        public NetworkDiscoveryDocument(List<String> administrators, List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, String exit_contribution_scope, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String language, Long member_count, Long member_limit, String name, String network_id, String owner, Long policy_revision, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String publisher, String purpose, String region, Long revision, Long revoked_at_unix_ms, Integer schema_version, List<String> tags, NetworkVisibility visibility) {
             this.administrators = administrators;
             this.capability_summary = capability_summary;
             this.endpoints = endpoints;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.expires_at_unix_ms = expires_at_unix_ms;
             this.issued_at_unix_ms = issued_at_unix_ms;
             this.join_mode = join_mode;
@@ -2434,6 +2472,8 @@ public final class NodeContractV1 {
     /** DTO for NetworkProfileUpdate. */
     public static final class NetworkProfileUpdate {
         public final List<CapabilityKind> capability_declarations;
+        public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final String icon;
         public final String join_mode;
         public final String language;
@@ -2442,8 +2482,10 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NetworkProfileUpdate(List<CapabilityKind> capability_declarations, String icon, String join_mode, String language, String purpose, String region, List<String> tags, NetworkVisibility visibility) {
+        public NetworkProfileUpdate(List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_scope, String icon, String join_mode, String language, String purpose, String region, List<String> tags, NetworkVisibility visibility) {
             this.capability_declarations = capability_declarations;
+            this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.icon = icon;
             this.join_mode = join_mode;
             this.language = language;
@@ -2529,6 +2571,21 @@ public final class NodeContractV1 {
         public NetworkPublicProfileRecord(NetworkPublicProfileDocument document, String signature) {
             this.document = document;
             this.signature = signature;
+        }
+    }
+
+    /** DTO for NodeAcknowledgeMembershipPolicyCommand. */
+    public static final class NodeAcknowledgeMembershipPolicyCommand {
+        public final Long acknowledged_at_unix_ms;
+        public final Boolean exit_contribution_acknowledged;
+        public final String expected_terms_hash;
+        public final String network_id;
+
+        public NodeAcknowledgeMembershipPolicyCommand(Long acknowledged_at_unix_ms, Boolean exit_contribution_acknowledged, String expected_terms_hash, String network_id) {
+            this.acknowledged_at_unix_ms = acknowledged_at_unix_ms;
+            this.exit_contribution_acknowledged = exit_contribution_acknowledged;
+            this.expected_terms_hash = expected_terms_hash;
+            this.network_id = network_id;
         }
     }
 
@@ -2818,6 +2875,8 @@ public final class NodeContractV1 {
     public static final class NodeCreateNetworkCommand {
         public final Boolean auto_connect;
         public final List<CapabilityKind> capability_declarations;
+        public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final String external_host;
         public final String icon;
         public final String join_mode;
@@ -2830,9 +2889,11 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NodeCreateNetworkCommand(Boolean auto_connect, List<CapabilityKind> capability_declarations, String external_host, String icon, String join_mode, String language, String name, String purpose, String region, Integer relay_port, Integer signaling_port, List<String> tags, NetworkVisibility visibility) {
+        public NodeCreateNetworkCommand(Boolean auto_connect, List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_scope, String external_host, String icon, String join_mode, String language, String name, String purpose, String region, Integer relay_port, Integer signaling_port, List<String> tags, NetworkVisibility visibility) {
             this.auto_connect = auto_connect;
             this.capability_declarations = capability_declarations;
+            this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.external_host = external_host;
             this.icon = icon;
             this.join_mode = join_mode;
@@ -3178,6 +3239,7 @@ public final class NodeContractV1 {
     public static final class NodeJoinNetworkCommand {
         public final Long acknowledged_at_unix_ms;
         public final NetworkDiscoveryRecord discovery_record;
+        public final Boolean exit_contribution_acknowledged;
         public final String network_id;
         public final String network_name;
         public final Long network_policy_revision;
@@ -3187,9 +3249,10 @@ public final class NodeContractV1 {
         public final String target;
         public final String terms_hash;
 
-        public NodeJoinNetworkCommand(Long acknowledged_at_unix_ms, NetworkDiscoveryRecord discovery_record, String network_id, String network_name, Long network_policy_revision, String preview_digest, Long privacy_policy_revision, Boolean start, String target, String terms_hash) {
+        public NodeJoinNetworkCommand(Long acknowledged_at_unix_ms, NetworkDiscoveryRecord discovery_record, Boolean exit_contribution_acknowledged, String network_id, String network_name, Long network_policy_revision, String preview_digest, Long privacy_policy_revision, Boolean start, String target, String terms_hash) {
             this.acknowledged_at_unix_ms = acknowledged_at_unix_ms;
             this.discovery_record = discovery_record;
+            this.exit_contribution_acknowledged = exit_contribution_acknowledged;
             this.network_id = network_id;
             this.network_name = network_name;
             this.network_policy_revision = network_policy_revision;
@@ -3419,14 +3482,23 @@ public final class NodeContractV1 {
         public final Boolean already_member;
         public final String blocked_reason_key;
         public final Boolean can_join;
+        public final Boolean can_join_without_local_exit;
         public final List<CapabilityKind> capability_summary;
         public final String contribution_policy_key;
         public final Long discovery_revision;
         public final List<NetworkEndpoint> endpoints;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_bandwidth_impact_key;
+        public final String exit_contribution_disable_key;
+        public final String exit_contribution_logging_boundary_key;
+        public final String exit_contribution_purpose_key;
+        public final String exit_contribution_scope;
         public final Long expires_at_unix_ms;
         public final Long issued_at_unix_ms;
         public final String join_mode;
+        public final Boolean join_requires_exit_consent;
+        public final Boolean local_exit_available;
+        public final Boolean local_exit_enabled;
         public final List<CapabilityKind> locally_contributed_capabilities;
         public final Long member_count;
         public final Long member_limit;
@@ -3441,19 +3513,28 @@ public final class NodeContractV1 {
         public final String terms_hash;
         public final NetworkVisibility visibility;
 
-        public NodeNetworkJoinPreview(List<String> administrators, Boolean already_member, String blocked_reason_key, Boolean can_join, List<CapabilityKind> capability_summary, String contribution_policy_key, Long discovery_revision, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, List<CapabilityKind> locally_contributed_capabilities, Long member_count, Long member_limit, String network_id, String network_name, Long network_policy_revision, String owner, String preview_digest, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String terms_hash, NetworkVisibility visibility) {
+        public NodeNetworkJoinPreview(List<String> administrators, Boolean already_member, String blocked_reason_key, Boolean can_join, Boolean can_join_without_local_exit, List<CapabilityKind> capability_summary, String contribution_policy_key, Long discovery_revision, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, String exit_contribution_bandwidth_impact_key, String exit_contribution_disable_key, String exit_contribution_logging_boundary_key, String exit_contribution_purpose_key, String exit_contribution_scope, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, Boolean join_requires_exit_consent, Boolean local_exit_available, Boolean local_exit_enabled, List<CapabilityKind> locally_contributed_capabilities, Long member_count, Long member_limit, String network_id, String network_name, Long network_policy_revision, String owner, String preview_digest, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String terms_hash, NetworkVisibility visibility) {
             this.administrators = administrators;
             this.already_member = already_member;
             this.blocked_reason_key = blocked_reason_key;
             this.can_join = can_join;
+            this.can_join_without_local_exit = can_join_without_local_exit;
             this.capability_summary = capability_summary;
             this.contribution_policy_key = contribution_policy_key;
             this.discovery_revision = discovery_revision;
             this.endpoints = endpoints;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_bandwidth_impact_key = exit_contribution_bandwidth_impact_key;
+            this.exit_contribution_disable_key = exit_contribution_disable_key;
+            this.exit_contribution_logging_boundary_key = exit_contribution_logging_boundary_key;
+            this.exit_contribution_purpose_key = exit_contribution_purpose_key;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.expires_at_unix_ms = expires_at_unix_ms;
             this.issued_at_unix_ms = issued_at_unix_ms;
             this.join_mode = join_mode;
+            this.join_requires_exit_consent = join_requires_exit_consent;
+            this.local_exit_available = local_exit_available;
+            this.local_exit_enabled = local_exit_enabled;
             this.locally_contributed_capabilities = locally_contributed_capabilities;
             this.member_count = member_count;
             this.member_limit = member_limit;
@@ -3504,13 +3585,17 @@ public final class NodeContractV1 {
     public static final class NodeNetworkMembershipSnapshot {
         public final Long acknowledged_at_unix_ms;
         public final Long created_at_unix_ms;
+        public final MembershipTerms current_terms;
+        public final String current_terms_hash;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final Long local_policy_revision;
         public final Long member_limit;
         public final String network_id;
         public final String network_name;
         public final Long network_policy_revision;
         public final String node_id;
+        public final Boolean policy_confirmation_required;
         public final Long privacy_policy_revision;
         public final MembershipRole role;
         public final MembershipState state;
@@ -3518,16 +3603,20 @@ public final class NodeContractV1 {
         public final String terms_hash;
         public final Long updated_at_unix_ms;
 
-        public NodeNetworkMembershipSnapshot(Long acknowledged_at_unix_ms, Long created_at_unix_ms, ExitContributionObligation exit_contribution, Long local_policy_revision, Long member_limit, String network_id, String network_name, Long network_policy_revision, String node_id, Long privacy_policy_revision, MembershipRole role, MembershipState state, String suspension_reason, String terms_hash, Long updated_at_unix_ms) {
+        public NodeNetworkMembershipSnapshot(Long acknowledged_at_unix_ms, Long created_at_unix_ms, MembershipTerms current_terms, String current_terms_hash, ExitContributionObligation exit_contribution, String exit_contribution_scope, Long local_policy_revision, Long member_limit, String network_id, String network_name, Long network_policy_revision, String node_id, Boolean policy_confirmation_required, Long privacy_policy_revision, MembershipRole role, MembershipState state, String suspension_reason, String terms_hash, Long updated_at_unix_ms) {
             this.acknowledged_at_unix_ms = acknowledged_at_unix_ms;
             this.created_at_unix_ms = created_at_unix_ms;
+            this.current_terms = current_terms;
+            this.current_terms_hash = current_terms_hash;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.local_policy_revision = local_policy_revision;
             this.member_limit = member_limit;
             this.network_id = network_id;
             this.network_name = network_name;
             this.network_policy_revision = network_policy_revision;
             this.node_id = node_id;
+            this.policy_confirmation_required = policy_confirmation_required;
             this.privacy_policy_revision = privacy_policy_revision;
             this.role = role;
             this.state = state;
@@ -3553,6 +3642,8 @@ public final class NodeContractV1 {
     /** DTO for NodeNetworkProfileSnapshot. */
     public static final class NodeNetworkProfileSnapshot {
         public final List<CapabilityKind> capability_declarations;
+        public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_scope;
         public final String icon;
         public final String join_mode;
         public final String language;
@@ -3566,8 +3657,10 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NodeNetworkProfileSnapshot(List<CapabilityKind> capability_declarations, String icon, String join_mode, String language, String name, String network_id, Long policy_revision, String purpose, String region, Long revision, NodeSignedNetworkProfileSnapshot signed_profile, List<String> tags, NetworkVisibility visibility) {
+        public NodeNetworkProfileSnapshot(List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_scope, String icon, String join_mode, String language, String name, String network_id, Long policy_revision, String purpose, String region, Long revision, NodeSignedNetworkProfileSnapshot signed_profile, List<String> tags, NetworkVisibility visibility) {
             this.capability_declarations = capability_declarations;
+            this.exit_contribution = exit_contribution;
+            this.exit_contribution_scope = exit_contribution_scope;
             this.icon = icon;
             this.join_mode = join_mode;
             this.language = language;
@@ -4698,6 +4791,15 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class AcknowledgeMembershipPolicy extends NodeCommand {
+            public final NodeAcknowledgeMembershipPolicyCommand payload;
+
+            public AcknowledgeMembershipPolicy(NodeAcknowledgeMembershipPolicyCommand payload) {
+                super(NodeCommandKind.ACKNOWLEDGE_MEMBERSHIP_POLICY);
+                this.payload = payload;
+            }
+        }
+
         public static final class UpdateRouting extends NodeCommand {
             public final NodeUpdateRoutingCommand payload;
 
@@ -5098,6 +5200,15 @@ public final class NodeContractV1 {
 
             public NetworkLeft(NodeNetworkLeaveResult data) {
                 super("network_left");
+                this.data = data;
+            }
+        }
+
+        public static final class MembershipPolicyAcknowledged extends NodeCommandOutcome {
+            public final NodeNetworkMembershipSnapshot data;
+
+            public MembershipPolicyAcknowledged(NodeNetworkMembershipSnapshot data) {
+                super("membership_policy_acknowledged");
                 this.data = data;
             }
         }
@@ -5558,7 +5669,8 @@ public final class NodeContractV1 {
     }
 
     public static boolean isManifestAction(NodeCommandKind command) {
-        return             command == NodeCommandKind.APPLY_CONFIGURATION ||
+        return             command == NodeCommandKind.ACKNOWLEDGE_MEMBERSHIP_POLICY ||
+            command == NodeCommandKind.APPLY_CONFIGURATION ||
             command == NodeCommandKind.BAN_CLIENT ||
             command == NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS ||
             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||

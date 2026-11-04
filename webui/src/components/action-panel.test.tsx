@@ -212,6 +212,8 @@ const profileSnapshot: NodeSnapshot = {
       capability_declarations: publicProfile.capability_declarations,
       visibility: publicProfile.visibility,
       join_mode: publicProfile.join_mode,
+      exit_contribution: "not_required",
+      exit_contribution_scope: "not_applicable",
       revision: publicProfile.revision,
       policy_revision: 2,
       signed_profile: {
@@ -241,6 +243,15 @@ const joinPreview: NodeNetworkJoinPreview = {
   member_count: 8,
   member_limit: 16,
   exit_contribution: "required",
+  exit_contribution_scope: "joining_members",
+  exit_contribution_purpose_key: "join.exit.disclosure.purpose",
+  exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth",
+  exit_contribution_logging_boundary_key: "join.exit.disclosure.logging",
+  exit_contribution_disable_key: "join.exit.disclosure.disable",
+  local_exit_available: true,
+  local_exit_enabled: false,
+  can_join_without_local_exit: false,
+  join_requires_exit_consent: true,
   privacy_changes: ["Operators can observe connection metadata"],
   already_member: false,
   can_join: true,
@@ -858,12 +869,27 @@ describe("action panel operation status", () => {
       name: "translated:join.confirm",
     });
     expect(confirm).toBeDisabled();
+    const terms = within(preview).getByRole("checkbox", {
+      name: "translated:join.terms_checkbox",
+    });
+    const exitConsent = within(preview).getByRole("checkbox", {
+      name: "translated:join.exit.consent",
+    });
+    await user.click(terms);
+    expect(confirm).toBeDisabled();
     await user.click(
       within(preview).getByRole("checkbox", {
         name: "translated:join.terms_checkbox",
       }),
     );
+    await user.click(terms);
+    expect(confirm).toBeDisabled();
+    await user.click(exitConsent);
     expect(confirm).toBeEnabled();
+    expect(preview).toHaveTextContent("translated:join.exit.local_not_enabled");
+    expect(preview).toHaveTextContent(
+      "translated:join.exit.cannot_join_without_local_exit",
+    );
     await user.click(confirm);
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
@@ -877,6 +903,7 @@ describe("action panel operation status", () => {
       terms_hash: "terms-hash-family",
       acknowledged_at_unix_ms: "1700000000123",
       start: true,
+      exit_contribution_acknowledged: "true",
     });
     expect(
       await screen.findByText("translated:outcome.network_joined"),
@@ -933,7 +960,11 @@ describe("action panel operation status", () => {
     const checkbox = within(preview).getByRole("checkbox", {
       name: "translated:join.terms_checkbox",
     });
+    const exitConsent = within(preview).getByRole("checkbox", {
+      name: "translated:join.exit.consent",
+    });
     await user.click(checkbox);
+    await user.click(exitConsent);
     await user.click(
       within(preview).getByRole("button", {
         name: "translated:join.confirm",
@@ -945,6 +976,7 @@ describe("action panel operation status", () => {
     );
     expect(screen.getByTestId("network-join-preview")).toBeInTheDocument();
     expect(checkbox).toBeChecked();
+    expect(exitConsent).toBeChecked();
 
     await user.click(
       within(screen.getByTestId("network-join-preview")).getByRole("button", {
@@ -1363,6 +1395,160 @@ describe("action panel private invitation workflows", () => {
     ).toBeInTheDocument();
     expect(screen.queryByTestId("invitation-preview")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(invitationCode);
+    now.mockRestore();
+  });
+
+  it("requires a distinct Exit consent and blocks Required invitations when local Exit is unsupported", async () => {
+    const requiredPreview: InvitationPreview = {
+      ...invitationPreview,
+      terms: {
+        ...invitationPreview.terms,
+        exit_contribution: "required",
+        exit_contribution_scope: "all_members",
+      },
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_123);
+
+    const renderRequiredPreview = async (
+      preview: InvitationPreview,
+      renderSnapshot: NodeSnapshot,
+    ) => {
+      const onSubmit = vi
+        .fn<
+          (
+            action: NodeUiAction,
+            values: ActionValues,
+            onOperation: (operation: NodeOperationSnapshot) => void,
+          ) => Promise<ActionSubmission>
+        >()
+        .mockResolvedValueOnce({
+          outcome: {
+            status: "invitation_preview",
+            data: preview,
+          } as NodeCommandOutcome,
+        })
+        .mockResolvedValueOnce({
+          outcome: {
+            status: "invitation_redeemed",
+            data: {
+              invitation_id: invitationId,
+              network_id: invitationNetworkId,
+              node_id: "node-current",
+              role: "member",
+              capabilities: ["file"],
+              network_revision: 8,
+              invitation_revision: 3,
+              joined_at_unix_ms: 1_700_000_000_123,
+              already_redeemed: false,
+              grants_permanent_membership: false,
+            },
+          } as NodeCommandOutcome,
+        });
+
+      const view = render(
+        <ActionPanel
+          actions={[previewInvitation, redeemInvitation]}
+          snapshot={renderSnapshot}
+          selectedNetwork="home"
+          locale="zh-CN"
+          pendingAction={null}
+          interactionBlocked={null}
+          requestedAction={{
+            actionId: "preview_invitation",
+            values: {
+              network_id: invitationNetworkId,
+              coordinator_url: "https://coordinator.example.test",
+              code: invitationCode,
+            },
+          }}
+          operation={null}
+          onRequestedActionOpened={() => {}}
+          onCancel={vi.fn(async () => {})}
+          onSubmit={onSubmit}
+        />,
+      );
+      const user = userEvent.setup();
+      await user.click(
+        screen.getByRole("button", { name: "translated:common.execute" }),
+      );
+      const confirmation = await screen.findByRole("dialog");
+      await user.click(
+        within(confirmation).getByRole("button", {
+          name: "translated:common.execute",
+        }),
+      );
+      return { user, view, onSubmit, previewCard: await screen.findByTestId("invitation-preview") };
+    };
+
+    const supported = await renderRequiredPreview(requiredPreview, snapshot);
+    const supportedCard = supported.previewCard;
+    expect(supportedCard).toHaveTextContent("translated:join.exit.local_supported");
+    expect(supportedCard).toHaveTextContent("translated:join.exit.local_enabled");
+    expect(supportedCard).toHaveTextContent("translated:join.exit.cannot_join_without_local_exit");
+    const terms = within(supportedCard).getByRole("checkbox", {
+      name: "translated:invitations.terms_checkbox",
+    });
+    const exitConsent = within(supportedCard).getByRole("checkbox", {
+      name: "translated:join.exit.consent",
+    });
+    const accept = within(supportedCard).getByRole("button", {
+      name: "translated:invitations.accept",
+    });
+    expect(accept).toBeDisabled();
+    await supported.user.click(terms);
+    expect(accept).toBeDisabled();
+    await supported.user.click(exitConsent);
+    expect(accept).toBeEnabled();
+    await supported.user.click(accept);
+    await waitFor(() => expect(supported.onSubmit).toHaveBeenCalledTimes(2));
+    expect(supported.onSubmit.mock.calls[1]?.[1]).toEqual({
+      network_id: invitationNetworkId,
+      coordinator_url: "https://coordinator.example.test",
+      code: invitationCode,
+      invitation_id: invitationId,
+      expected_invitation_revision: "3",
+      preview_digest: requiredPreview.preview_digest,
+      terms_hash: requiredPreview.terms_hash,
+      acknowledged_at_unix_ms: "1700000000123",
+      exit_contribution_acknowledged: "true",
+    });
+    supported.view.unmount();
+
+    const unsupportedSnapshot: NodeSnapshot = {
+      ...snapshot,
+      exit_node_capabilities: {
+        ...snapshot.exit_node_capabilities,
+        schema_version: 1,
+        platform: "windows",
+        supported: false,
+        ipv4_forwarding: false,
+        ipv6_forwarding: false,
+        nat: false,
+        cleanup: false,
+        unsupported_reasons: ["platform_not_linux"],
+      },
+    };
+    const unsupported = await renderRequiredPreview(
+      requiredPreview,
+      unsupportedSnapshot,
+    );
+    expect(unsupported.previewCard).toHaveTextContent(
+      "translated:join.exit.local_unsupported",
+    );
+    expect(unsupported.previewCard).toHaveTextContent(
+      "translated:join.exit.cannot_join_without_local_exit",
+    );
+    expect(
+      within(unsupported.previewCard).getByRole("button", {
+        name: "translated:invitations.accept",
+      }),
+    ).toBeDisabled();
+    expect(
+      within(unsupported.previewCard).getByRole("checkbox", {
+        name: "translated:invitations.terms_checkbox",
+      }),
+    ).toBeDisabled();
+    expect(unsupported.onSubmit).toHaveBeenCalledTimes(1);
     now.mockRestore();
   });
 

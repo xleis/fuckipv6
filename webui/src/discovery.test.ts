@@ -31,6 +31,7 @@ function document(
     member_limit: null,
     member_count: 1,
     exit_contribution: "not_required",
+    exit_contribution_scope: "not_applicable",
     privacy_changes: [],
     name,
     purpose: `${name} purpose`,

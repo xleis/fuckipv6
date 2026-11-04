@@ -117,6 +117,20 @@
               "validation": "join_mode"
             },
             {
+              "id": "exit_contribution",
+              "label_key": "field.exit_contribution",
+              "input": "exit_contribution",
+              "required": true,
+              "validation": "exit_contribution"
+            },
+            {
+              "id": "exit_contribution_scope",
+              "label_key": "field.exit_contribution_scope",
+              "input": "exit_contribution_scope",
+              "required": true,
+              "validation": "exit_contribution_scope"
+            },
+            {
               "id": "signaling_port",
               "label_key": "field.signaling_port",
               "input": "port",
@@ -228,6 +242,20 @@
               "input": "join_mode",
               "required": true,
               "validation": "join_mode"
+            },
+            {
+              "id": "exit_contribution",
+              "label_key": "field.exit_contribution",
+              "input": "exit_contribution",
+              "required": true,
+              "validation": "exit_contribution"
+            },
+            {
+              "id": "exit_contribution_scope",
+              "label_key": "field.exit_contribution_scope",
+              "input": "exit_contribution_scope",
+              "required": true,
+              "validation": "exit_contribution_scope"
             }
           ],
           "confirmation": null
@@ -313,6 +341,20 @@
               "input": "join_mode",
               "required": true,
               "validation": "join_mode"
+            },
+            {
+              "id": "exit_contribution",
+              "label_key": "field.exit_contribution",
+              "input": "exit_contribution",
+              "required": true,
+              "validation": "exit_contribution"
+            },
+            {
+              "id": "exit_contribution_scope",
+              "label_key": "field.exit_contribution_scope",
+              "input": "exit_contribution_scope",
+              "required": true,
+              "validation": "exit_contribution_scope"
             }
           ],
           "confirmation": {
@@ -1030,6 +1072,54 @@
             "title_key": "confirm.leave_network.title",
             "consequence_key": "confirm.leave_network.consequence",
             "destructive": true,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "acknowledge_membership_policy",
+          "label_key": "action.acknowledge_membership_policy",
+          "command": "acknowledge_membership_policy",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.membership.policy.acknowledge"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "expected_terms_hash",
+              "label_key": "field.terms_hash",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            },
+            {
+              "id": "acknowledged_at_unix_ms",
+              "label_key": "field.acknowledged_at",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "exit_contribution_acknowledged",
+              "label_key": "membership.policy.confirm_exit",
+              "input": "boolean",
+              "required": false,
+              "validation": "none"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.acknowledge_membership_policy.title",
+            "consequence_key": "confirm.acknowledge_membership_policy.consequence",
+            "destructive": false,
             "recent_authentication_required": false
           }
         },

@@ -666,7 +666,10 @@ function NetworkProfileResultCard({
   );
 }
 
-function joinPreviewValues(preview: NodeNetworkJoinPreview): ActionValues {
+function joinPreviewValues(
+  preview: NodeNetworkJoinPreview,
+  exitContributionAcknowledged: boolean,
+): ActionValues {
   return {
     target: "",
     network_id: preview.network_id,
@@ -676,12 +679,16 @@ function joinPreviewValues(preview: NodeNetworkJoinPreview): ActionValues {
     privacy_policy_revision: String(preview.privacy_policy_revision),
     terms_hash: preview.terms_hash,
     start: true,
+    ...(exitContributionAcknowledged
+      ? { exit_contribution_acknowledged: "true" }
+      : {}),
   };
 }
 
 function invitationPreviewValues(
   preview: InvitationPreview,
   source: ActionValues,
+  exitContributionAcknowledged: boolean,
 ): ActionValues {
   return {
     network_id: preview.network_id,
@@ -692,6 +699,9 @@ function invitationPreviewValues(
     preview_digest: preview.preview_digest,
     terms_hash: preview.terms_hash,
     acknowledged_at_unix_ms: String(Date.now()),
+    ...(exitContributionAcknowledged
+      ? { exit_contribution_acknowledged: "true" }
+      : {}),
   };
 }
 
@@ -897,24 +907,108 @@ function joinList(
     : label(locale, emptyKey);
 }
 
+function ExitContributionDisclosure({
+  locale,
+  obligation,
+  scope,
+  purposeKey = "join.exit.disclosure.purpose",
+  bandwidthKey = "join.exit.disclosure.bandwidth",
+  loggingKey = "join.exit.disclosure.logging",
+  disableKey = "join.exit.disclosure.disable",
+  localSupported,
+  localEnabled,
+  canJoinWithoutLocalExit,
+}: {
+  locale: Locale;
+  obligation: NodeNetworkJoinPreview["exit_contribution"];
+  scope: NodeNetworkJoinPreview["exit_contribution_scope"];
+  purposeKey?: string;
+  bandwidthKey?: string;
+  loggingKey?: string;
+  disableKey?: string;
+  localSupported: boolean;
+  localEnabled: boolean;
+  canJoinWithoutLocalExit: boolean;
+}) {
+  const required = obligation === "required";
+  return (
+    <section
+      className={`exit-contribution-disclosure ${required ? "required" : ""}`}
+      data-testid="exit-contribution-disclosure"
+    >
+      <h4>{label(locale, "join.exit_contribution")}</h4>
+      <p>
+        <strong>
+          {label(
+            locale,
+            required ? "join.exit.required" : "join.exit.not_required",
+          )}
+        </strong>
+      </p>
+      {required ? (
+        <>
+          <p>{label(locale, purposeKey)}</p>
+          <p>{label(locale, bandwidthKey)}</p>
+          <p>{label(locale, loggingKey)}</p>
+          <p>{label(locale, disableKey)}</p>
+          <p>{label(locale, `join.exit.scope.${scope}`)}</p>
+        </>
+      ) : null}
+      <p>
+        {label(
+          locale,
+          localSupported
+            ? "join.exit.local_supported"
+            : "join.exit.local_unsupported",
+        )}
+      </p>
+      <p>
+        {label(
+          locale,
+          localEnabled
+            ? "join.exit.local_enabled"
+            : "join.exit.local_not_enabled",
+        )}
+      </p>
+      <p>
+        {label(
+          locale,
+          canJoinWithoutLocalExit
+            ? "join.exit.can_join_without_local_exit"
+            : "join.exit.cannot_join_without_local_exit",
+        )}
+      </p>
+    </section>
+  );
+}
+
 function JoinPreviewCard({
   preview,
   locale,
   checked,
+  exitContributionChecked,
   pending,
   blockedReason,
   onCheckedChange,
+  onExitContributionCheckedChange,
   onConfirm,
 }: {
   preview: NodeNetworkJoinPreview;
   locale: Locale;
   checked: boolean;
+  exitContributionChecked: boolean;
   pending: boolean;
   blockedReason: string;
   onCheckedChange(checked: boolean): void;
+  onExitContributionCheckedChange(checked: boolean): void;
   onConfirm(): void;
 }) {
-  const canConfirm = preview.can_join && checked && !pending && !blockedReason;
+  const canConfirm =
+    preview.can_join &&
+    checked &&
+    (!preview.join_requires_exit_consent || exitContributionChecked) &&
+    !pending &&
+    !blockedReason;
   return (
     <section
       className="network-profile-result join-preview-result"
@@ -1076,6 +1170,18 @@ function JoinPreviewCard({
         <ShieldAlert size={15} />
         <span>{label(locale, "join.local_revocable")}</span>
       </div>
+      <ExitContributionDisclosure
+        locale={locale}
+        obligation={preview.exit_contribution}
+        scope={preview.exit_contribution_scope}
+        purposeKey={preview.exit_contribution_purpose_key}
+        bandwidthKey={preview.exit_contribution_bandwidth_impact_key}
+        loggingKey={preview.exit_contribution_logging_boundary_key}
+        disableKey={preview.exit_contribution_disable_key}
+        localSupported={preview.local_exit_available}
+        localEnabled={preview.local_exit_enabled}
+        canJoinWithoutLocalExit={preview.can_join_without_local_exit}
+      />
       <label className="check-field join-terms-check">
         <input
           type="checkbox"
@@ -1085,6 +1191,19 @@ function JoinPreviewCard({
         />
         <span>{label(locale, "join.terms_checkbox")}</span>
       </label>
+      {preview.join_requires_exit_consent ? (
+        <label className="check-field join-terms-check">
+          <input
+            type="checkbox"
+            checked={exitContributionChecked}
+            disabled={pending || !preview.can_join}
+            onChange={(event) =>
+              onExitContributionCheckedChange(event.target.checked)
+            }
+          />
+          <span>{label(locale, "join.exit.consent")}</span>
+        </label>
+      ) : null}
       <button
         className="primary-button"
         type="button"
@@ -1329,31 +1448,45 @@ function InvitationPreviewCard({
   preview,
   locale,
   checked,
+  exitContributionChecked,
+  localExitAvailable,
+  localExitEnabled,
   pending,
   blockedReason,
   sourceValues,
   previewLoadedAtUnixMs,
   onCheckedChange,
+  onExitContributionCheckedChange,
   onConfirm,
 }: {
   preview: InvitationPreview;
   locale: Locale;
   checked: boolean;
+  exitContributionChecked: boolean;
+  localExitAvailable: boolean;
+  localExitEnabled: boolean;
   pending: boolean;
   blockedReason: string;
   sourceValues: ActionValues;
   previewLoadedAtUnixMs: number;
   onCheckedChange(checked: boolean): void;
+  onExitContributionCheckedChange(checked: boolean): void;
   onConfirm(values: ActionValues): void;
 }) {
+  const exitRequired = preview.terms.exit_contribution === "required";
   const previewAcceptable =
     preview.can_accept &&
     preview.state === "active" &&
     preview.remaining_uses > 0 &&
     preview.expires_at_unix_ms > previewLoadedAtUnixMs &&
-    !preview.creates_permanent_membership;
+    !preview.creates_permanent_membership &&
+    (!exitRequired || localExitAvailable);
   const canConfirm =
-    previewAcceptable && checked && !pending && !blockedReason;
+    previewAcceptable &&
+    checked &&
+    (!exitRequired || exitContributionChecked) &&
+    !pending &&
+    !blockedReason;
   const terms = [
     tr(locale, "invitations.terms.network_policy", {
       revision: i18n().formatInteger(locale, preview.terms.network_policy_revision),
@@ -1445,6 +1578,17 @@ function InvitationPreviewCard({
           <span>{label(locale, "invitations.reauthentication_required")}</span>
         </div>
       ) : null}
+      <ExitContributionDisclosure
+        locale={locale}
+        obligation={preview.terms.exit_contribution}
+        scope={
+          preview.terms.exit_contribution_scope ??
+          (exitRequired ? "joining_members" : "not_applicable")
+        }
+        localSupported={localExitAvailable}
+        localEnabled={localExitEnabled}
+        canJoinWithoutLocalExit={!exitRequired}
+      />
       <p className="profile-muted">{label(locale, "invitations.ordinary_membership")}</p>
       <p className="profile-muted">{label(locale, "invitations.not_permanent")}</p>
       <label className="check-field join-terms-check">
@@ -1456,11 +1600,28 @@ function InvitationPreviewCard({
         />
         <span>{label(locale, "invitations.terms_checkbox")}</span>
       </label>
+      {exitRequired ? (
+        <label className="check-field join-terms-check">
+          <input
+            type="checkbox"
+            checked={exitContributionChecked}
+            disabled={pending || !previewAcceptable}
+            onChange={(event) =>
+              onExitContributionCheckedChange(event.target.checked)
+            }
+          />
+          <span>{label(locale, "join.exit.consent")}</span>
+        </label>
+      ) : null}
       <button
         className="primary-button"
         type="button"
         disabled={!canConfirm}
-        onClick={() => onConfirm(invitationPreviewValues(preview, sourceValues))}
+        onClick={() =>
+          onConfirm(
+            invitationPreviewValues(preview, sourceValues, exitRequired),
+          )
+        }
       >
         {pending
           ? label(locale, "common.operation_in_progress")
@@ -2205,6 +2366,24 @@ function JoinRequestListCard({
   );
 }
 
+function localExitState(
+  snapshot: NodeSnapshot,
+  networkId: string,
+  networkName: string,
+): { supported: boolean; enabled: boolean } {
+  const membershipName = snapshot.memberships?.find(
+    (membership) => membership.network_id === networkId,
+  )?.network_name;
+  const resolvedName = membershipName ?? networkName;
+  return {
+    supported: snapshot.exit_node_capabilities?.supported === true,
+    enabled: snapshot.networks.some(
+      (network) =>
+        network.name === resolvedName && network.roles.includes("exit_node"),
+    ),
+  };
+}
+
 function ActionCard({
   action,
   snapshot,
@@ -2267,6 +2446,7 @@ function ActionCard({
     loadedAtUnixMs: number;
   } | null>(null);
   const [joinConfirmed, setJoinConfirmed] = useState(false);
+  const [joinExitConfirmed, setJoinExitConfirmed] = useState(false);
   const [issuedInvitation, setIssuedInvitation] =
     useState<IssuedInvitation | null>(null);
   const [invitations, setInvitations] = useState<{
@@ -2282,6 +2462,7 @@ function ActionCard({
   const [invitationPreviewLoadedAtUnixMs, setInvitationPreviewLoadedAtUnixMs] =
     useState(0);
   const [invitationConfirmed, setInvitationConfirmed] = useState(false);
+  const [invitationExitConfirmed, setInvitationExitConfirmed] = useState(false);
   const [failure, setFailure] = useState("");
   const editedFields = useRef(new Set<string>());
   const fingerprint = snapshot.identity?.public_key_fingerprint ?? "";
@@ -2353,12 +2534,14 @@ function ActionCard({
     setJoinPreview(null);
     setJoinRequests(null);
     setJoinConfirmed(false);
+    setJoinExitConfirmed(false);
     setIssuedInvitation(null);
     setInvitations(null);
     setInvitationStatus(null);
     setInvitationPreview(null);
     setInvitationPreviewLoadedAtUnixMs(0);
     setInvitationConfirmed(false);
+    setInvitationExitConfirmed(false);
   }, [action, selectedNetwork, snapshot]);
 
   if (requested !== previousRequested) {
@@ -2377,12 +2560,14 @@ function ActionCard({
       setJoinPreview(null);
       setJoinRequests(null);
       setJoinConfirmed(false);
+      setJoinExitConfirmed(false);
       setIssuedInvitation(null);
       setInvitations(null);
       setInvitationStatus(null);
       setInvitationPreview(null);
       setInvitationPreviewLoadedAtUnixMs(0);
       setInvitationConfirmed(false);
+      setInvitationExitConfirmed(false);
     }
   }
 
@@ -2443,12 +2628,14 @@ function ActionCard({
       setInvitationPreview(outcome.data);
       setInvitationPreviewLoadedAtUnixMs(Date.now());
       setInvitationConfirmed(false);
+      setInvitationExitConfirmed(false);
       return;
     }
     if (outcome.status === "invitation_redeemed") {
       setInvitationPreview(null);
       setInvitationPreviewLoadedAtUnixMs(0);
       setInvitationConfirmed(false);
+      setInvitationExitConfirmed(false);
     }
   }
 
@@ -2481,6 +2668,7 @@ function ActionCard({
         if (submission.outcome.status === "network_join_preview") {
           setJoinPreview(submission.outcome.data);
           setJoinConfirmed(false);
+          setJoinExitConfirmed(false);
           setOpen(true);
         } else if (
           !submission.outcome.status.startsWith("invitation_") &&
@@ -2498,6 +2686,7 @@ function ActionCard({
           ) {
             setJoinPreview(null);
             setJoinConfirmed(false);
+            setJoinExitConfirmed(false);
           }
           setOpen(false);
         }
@@ -2512,7 +2701,14 @@ function ActionCard({
   }
 
   async function confirmJoin(): Promise<void> {
-    if (!joinPreview || !joinAction || !joinConfirmed) return;
+    if (
+      !joinPreview ||
+      !joinAction ||
+      !joinConfirmed ||
+      (joinPreview.join_requires_exit_consent && !joinExitConfirmed)
+    ) {
+      return;
+    }
     setErrors([]);
     setFailure("");
     setResult("");
@@ -2520,7 +2716,10 @@ function ActionCard({
       const submission = await onSubmit(
         joinAction,
         {
-          ...joinPreviewValues(joinPreview),
+          ...joinPreviewValues(
+            joinPreview,
+            joinPreview.join_requires_exit_consent && joinExitConfirmed,
+          ),
           acknowledged_at_unix_ms: String(Date.now()),
         },
         () => {},
@@ -2532,6 +2731,7 @@ function ActionCard({
         if (submission.outcome.status === "network_joined") {
           setJoinPreview(null);
           setJoinConfirmed(false);
+          setJoinExitConfirmed(false);
           setOpen(false);
         }
       } else if (submission.operation) {
@@ -2549,6 +2749,8 @@ function ActionCard({
       !invitationPreview ||
       !redeemInvitationAction ||
       !invitationConfirmed ||
+      (invitationPreview.terms.exit_contribution === "required" &&
+        !invitationExitConfirmed) ||
       invitationRedeemBlockedReason ||
       redeemInvitationPending
     ) {
@@ -2649,9 +2851,11 @@ function ActionCard({
           preview={joinPreview}
           locale={locale}
           checked={joinConfirmed}
+          exitContributionChecked={joinExitConfirmed}
           pending={joinPending}
           blockedReason={joinBlockedReason}
           onCheckedChange={setJoinConfirmed}
+          onExitContributionCheckedChange={setJoinExitConfirmed}
           onConfirm={() => void confirmJoin()}
         />
       ) : null}
@@ -2701,11 +2905,27 @@ function ActionCard({
           preview={invitationPreview}
           locale={locale}
           checked={invitationConfirmed}
+          exitContributionChecked={invitationExitConfirmed}
+          localExitAvailable={
+            localExitState(
+              snapshot,
+              invitationPreview.network_id,
+              invitationPreview.network_name,
+            ).supported
+          }
+          localExitEnabled={
+            localExitState(
+              snapshot,
+              invitationPreview.network_id,
+              invitationPreview.network_name,
+            ).enabled
+          }
           pending={redeemInvitationPending}
           blockedReason={invitationRedeemBlockedReason}
           sourceValues={values}
           previewLoadedAtUnixMs={invitationPreviewLoadedAtUnixMs}
           onCheckedChange={setInvitationConfirmed}
+          onExitContributionCheckedChange={setInvitationExitConfirmed}
           onConfirm={(confirmValues) => void confirmInvitation(confirmValues)}
         />
       ) : null}

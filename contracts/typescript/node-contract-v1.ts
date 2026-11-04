@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["apply_configuration", "ban_client", "batch_review_join_requests", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "list_invitations", "list_join_requests", "preview_configuration", "preview_invitation", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
+export const NODE_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "ban_client", "batch_review_join_requests", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "list_invitations", "list_join_requests", "preview_configuration", "preview_invitation", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["apply_configuration", "ban_client", "batch_review_join_requests", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "leave_network", "list_invitations", "list_join_requests", "preview_configuration", "preview_invitation", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "ban_client", "batch_review_join_requests", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "leave_network", "list_invitations", "list_join_requests", "preview_configuration", "preview_invitation", "preview_join_network", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -108,6 +108,8 @@ export type DomainObjectRef = {
 
 export type ExitContributionObligation = "required" | "not_required";
 
+export type ExitContributionScope = "not_applicable" | "joining_members" | "all_members";
+
 export type ExitNodeCapabilities = {
   "cleanup": boolean;
   "ipv4_forwarding": boolean;
@@ -168,6 +170,7 @@ export type InvitationRecord = {
 export type InvitationRedeemRequest = {
   "acknowledged_at_unix_ms": number;
   "code": InvitationCode;
+  "exit_contribution_acknowledged"?: boolean | null;
   "expected_invitation_revision": number;
   "invitation_id": InvitationId;
   "network_id": NetworkId;
@@ -230,6 +233,7 @@ export type JoinRequest = {
 export type JoinRequestGrantPreview = {
   "capabilities"?: Array<CapabilityKind>;
   "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_scope"?: ExitContributionScope;
   "file_access"?: boolean;
   "grants_data_plane_access"?: boolean;
   "role": MembershipRole;
@@ -249,6 +253,7 @@ export type MembershipState = "discovered" | "applying" | "pending_approval" | "
 
 export type MembershipTerms = {
   "exit_contribution": ExitContributionObligation;
+  "exit_contribution_scope"?: ExitContributionScope;
   "member_limit"?: number | null;
   "network_policy_revision": number;
   "privacy_policy_revision": number;
@@ -267,6 +272,7 @@ export type NetworkDiscoveryDocument = {
   "capability_summary": Array<CapabilityKind>;
   "endpoints"?: Array<NetworkEndpoint>;
   "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_scope"?: ExitContributionScope;
   "expires_at_unix_ms": number;
   "issued_at_unix_ms": number;
   "join_mode": NetworkJoinMode;
@@ -359,6 +365,8 @@ export type NetworkProfileProjections = {
 
 export type NetworkProfileUpdate = {
   "capability_declarations"?: Array<CapabilityKind>;
+  "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_scope"?: ExitContributionScope;
   "icon": string;
   "join_mode": NetworkJoinMode;
   "language": string;
@@ -410,6 +418,13 @@ export type NetworkPublicProfileRecord = {
 export type NetworkVisibility = "public" | "unlisted" | "private";
 
 export type NodeAccessModel = "trusted_control_plane";
+
+export type NodeAcknowledgeMembershipPolicyCommand = {
+  "acknowledged_at_unix_ms": number;
+  "exit_contribution_acknowledged"?: boolean | null;
+  "expected_terms_hash": ContentHash;
+  "network_id": string;
+};
 
 export type NodeApiCommandResponse = {
   "operation"?: NodeOperationSnapshot | null;
@@ -657,6 +672,9 @@ export type NodeCommand = {
   "command": "leave_network";
   "payload": NodeLeaveNetworkCommand;
 } | {
+  "command": "acknowledge_membership_policy";
+  "payload": NodeAcknowledgeMembershipPolicyCommand;
+} | {
   "command": "update_routing";
   "payload": NodeUpdateRoutingCommand;
 } | {
@@ -800,6 +818,9 @@ export type NodeCommandOutcome = {
   "data": NodeNetworkLeaveResult;
   "status": "network_left";
 } | {
+  "data": NodeNetworkMembershipSnapshot;
+  "status": "membership_policy_acknowledged";
+} | {
   "data": NodeIdentityRotationSnapshot;
   "status": "identity_rotated";
 } | {
@@ -856,6 +877,8 @@ export type NodeCreateInvitationCommand = {
 export type NodeCreateNetworkCommand = {
   "auto_connect": boolean;
   "capability_declarations"?: Array<CapabilityKind>;
+  "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_scope"?: ExitContributionScope;
   "external_host"?: string | null;
   "icon"?: string;
   "join_mode"?: NetworkJoinMode;
@@ -1105,6 +1128,7 @@ export type NodeInterfaceStatus = "up" | "down" | "unknown";
 export type NodeJoinNetworkCommand = {
   "acknowledged_at_unix_ms"?: number | null;
   "discovery_record"?: NetworkDiscoveryRecord | null;
+  "exit_contribution_acknowledged"?: boolean | null;
   "network_id"?: string | null;
   "network_name"?: string | null;
   "network_policy_revision"?: number | null;
@@ -1223,14 +1247,23 @@ export type NodeNetworkJoinPreview = {
   "already_member": boolean;
   "blocked_reason_key"?: string | null;
   "can_join": boolean;
+  "can_join_without_local_exit": boolean;
   "capability_summary": Array<CapabilityKind>;
   "contribution_policy_key": string;
   "discovery_revision": number;
   "endpoints": Array<NetworkEndpoint>;
   "exit_contribution": ExitContributionObligation;
+  "exit_contribution_bandwidth_impact_key": string;
+  "exit_contribution_disable_key": string;
+  "exit_contribution_logging_boundary_key": string;
+  "exit_contribution_purpose_key": string;
+  "exit_contribution_scope": ExitContributionScope;
   "expires_at_unix_ms": number;
   "issued_at_unix_ms": number;
   "join_mode": NetworkJoinMode;
+  "join_requires_exit_consent": boolean;
+  "local_exit_available": boolean;
+  "local_exit_enabled": boolean;
   "locally_contributed_capabilities": Array<CapabilityKind>;
   "member_count": number;
   "member_limit"?: number | null;
@@ -1263,13 +1296,17 @@ export type NodeNetworkLeaveResult = {
 export type NodeNetworkMembershipSnapshot = {
   "acknowledged_at_unix_ms"?: number | null;
   "created_at_unix_ms": number;
+  "current_terms"?: MembershipTerms | null;
+  "current_terms_hash"?: string | null;
   "exit_contribution"?: ExitContributionObligation | null;
+  "exit_contribution_scope"?: ExitContributionScope | null;
   "local_policy_revision": number;
   "member_limit"?: number | null;
   "network_id": string;
   "network_name": string;
   "network_policy_revision"?: number | null;
   "node_id": string;
+  "policy_confirmation_required"?: boolean;
   "privacy_policy_revision"?: number | null;
   "role": MembershipRole;
   "state": MembershipState;
@@ -1286,6 +1323,8 @@ export type NodeNetworkProfileCommand = {
 
 export type NodeNetworkProfileSnapshot = {
   "capability_declarations": Array<CapabilityKind>;
+  "exit_contribution": ExitContributionObligation;
+  "exit_contribution_scope": ExitContributionScope;
   "icon": string;
   "join_mode": NetworkJoinMode;
   "language": string;
@@ -1562,7 +1601,7 @@ export type NodeUiAction = {
   "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
   "backend_status": NodeUiBackendStatus;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "acknowledge_membership_policy" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
   "fields": Array<NodeUiField>;
   "id": string;
@@ -1598,7 +1637,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -1616,7 +1655,7 @@ export type NodeUiPage = {
 
 export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "invitation_code" | "coordinator_url";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "invitation_code" | "coordinator_url";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;

@@ -483,6 +483,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::CreateInvitation
         | NodeCommandKind::RevokeInvitation
         | NodeCommandKind::RedeemInvitation
+        | NodeCommandKind::AcknowledgeMembershipPolicy
         | NodeCommandKind::LeaveNetwork
         | NodeCommandKind::StartNode
         | NodeCommandKind::StopNode

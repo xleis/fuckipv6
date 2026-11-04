@@ -232,7 +232,12 @@ impl OperationService {
         };
         let operation_id = new_operation_id()?;
         let now = unix_time_ms();
-        let cancellable = request.command.kind() == super::NodeCommandKind::GetDiagnostics;
+        let cancellable = matches!(
+            request.command.kind(),
+            super::NodeCommandKind::GetDiagnostics
+                | super::NodeCommandKind::RefreshDiscoveryIndex
+                | super::NodeCommandKind::RetryDiscoveryIndex
+        );
         let operation = Operation {
             operation_id: operation_id.clone(),
             kind: operation_kind(&request.command),

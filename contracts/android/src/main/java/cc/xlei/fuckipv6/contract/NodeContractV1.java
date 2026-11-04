@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -844,11 +844,16 @@ public final class NodeContractV1 {
     public enum NodeDiscoveryIndexErrorCategory {
         OFFLINE("offline"),
         TIMEOUT("timeout"),
+        TLS("tls"),
+        SIGNATURE("signature"),
+        PARTIAL_CORRUPTION("partial_corruption"),
+        INCOMPATIBLE_VERSION("incompatible_version"),
         UNSUPPORTED("unsupported"),
         REJECTED("rejected"),
         INVALID_RESPONSE("invalid_response"),
         STORAGE("storage"),
-        SERVER("server");
+        SERVER("server"),
+        CANCELLED("cancelled");
 
         private final String wireName;
 
@@ -867,6 +872,32 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown NodeDiscoveryIndexErrorCategory wire value: " + value);
+        }
+    }
+
+    public enum NodeDiscoveryIndexSource {
+        NONE("none"),
+        CACHE("cache"),
+        NETWORK("network"),
+        JOIN("join");
+
+        private final String wireName;
+
+        NodeDiscoveryIndexSource(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeDiscoveryIndexSource fromWireName(String value) {
+            for (NodeDiscoveryIndexSource candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeDiscoveryIndexSource wire value: " + value);
         }
     }
 
@@ -3005,6 +3036,29 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeDiscoveryIndexMetrics. */
+    public static final class NodeDiscoveryIndexMetrics {
+        public final Long cancellations;
+        public final Long last_request_duration_ms;
+        public final Long records_accepted;
+        public final Long records_rejected;
+        public final Long request_attempts;
+        public final Long requests_failed;
+        public final Long requests_succeeded;
+        public final Long retries_scheduled;
+
+        public NodeDiscoveryIndexMetrics(Long cancellations, Long last_request_duration_ms, Long records_accepted, Long records_rejected, Long request_attempts, Long requests_failed, Long requests_succeeded, Long retries_scheduled) {
+            this.cancellations = cancellations;
+            this.last_request_duration_ms = last_request_duration_ms;
+            this.records_accepted = records_accepted;
+            this.records_rejected = records_rejected;
+            this.request_attempts = request_attempts;
+            this.requests_failed = requests_failed;
+            this.requests_succeeded = requests_succeeded;
+            this.retries_scheduled = retries_scheduled;
+        }
+    }
+
     /** DTO for NodeDiscoveryIndexRecordSnapshot. */
     public static final class NodeDiscoveryIndexRecordSnapshot {
         public final Long accepted_at_unix_ms;
@@ -3012,13 +3066,15 @@ public final class NodeContractV1 {
         public final Boolean discoverable;
         public final String invalid_reason;
         public final NetworkDiscoveryRecord record;
+        public final NodeDiscoveryIndexSource source;
 
-        public NodeDiscoveryIndexRecordSnapshot(Long accepted_at_unix_ms, String digest, Boolean discoverable, String invalid_reason, NetworkDiscoveryRecord record) {
+        public NodeDiscoveryIndexRecordSnapshot(Long accepted_at_unix_ms, String digest, Boolean discoverable, String invalid_reason, NetworkDiscoveryRecord record, NodeDiscoveryIndexSource source) {
             this.accepted_at_unix_ms = accepted_at_unix_ms;
             this.digest = digest;
             this.discoverable = discoverable;
             this.invalid_reason = invalid_reason;
             this.record = record;
+            this.source = source;
         }
     }
 
@@ -3029,20 +3085,24 @@ public final class NodeContractV1 {
         public final Long last_attempt_unix_ms;
         public final NodeDiscoveryIndexError last_error;
         public final Long last_success_unix_ms;
+        public final NodeDiscoveryIndexMetrics metrics;
         public final List<NodeDiscoveryIndexRecordSnapshot> records;
         public final Long rejected_record_count;
         public final Boolean search_history_stored;
+        public final NodeDiscoveryIndexSource source;
         public final NodeDiscoveryIndexState state;
 
-        public NodeDiscoveryIndexSnapshot(Boolean data_plane_affected, String index_url, Long last_attempt_unix_ms, NodeDiscoveryIndexError last_error, Long last_success_unix_ms, List<NodeDiscoveryIndexRecordSnapshot> records, Long rejected_record_count, Boolean search_history_stored, NodeDiscoveryIndexState state) {
+        public NodeDiscoveryIndexSnapshot(Boolean data_plane_affected, String index_url, Long last_attempt_unix_ms, NodeDiscoveryIndexError last_error, Long last_success_unix_ms, NodeDiscoveryIndexMetrics metrics, List<NodeDiscoveryIndexRecordSnapshot> records, Long rejected_record_count, Boolean search_history_stored, NodeDiscoveryIndexSource source, NodeDiscoveryIndexState state) {
             this.data_plane_affected = data_plane_affected;
             this.index_url = index_url;
             this.last_attempt_unix_ms = last_attempt_unix_ms;
             this.last_error = last_error;
             this.last_success_unix_ms = last_success_unix_ms;
+            this.metrics = metrics;
             this.records = records;
             this.rejected_record_count = rejected_record_count;
             this.search_history_stored = search_history_stored;
+            this.source = source;
             this.state = state;
         }
     }

@@ -384,14 +384,16 @@ impl NodeRuntimeHandler {
                 }
                 super::NodeCommand::RefreshDiscoveryIndex { index_url } => match discovery {
                     Some(discovery) => {
-                        let result = discovery.refresh(&state, index_url.as_deref()).await;
+                        let result = discovery
+                            .refresh_cancellable(&state, index_url.as_deref(), cancel)
+                            .await;
                         discovery_command_result(request_id, result)
                     }
                     None => unavailable(request_id, "发现索引管理器尚未初始化"),
                 },
                 super::NodeCommand::RetryDiscoveryIndex => match discovery {
                     Some(discovery) => {
-                        let result = discovery.retry(&state).await;
+                        let result = discovery.retry_cancellable(&state, cancel).await;
                         discovery_command_result(request_id, result)
                     }
                     None => unavailable(request_id, "发现索引管理器尚未初始化"),
@@ -1405,11 +1407,17 @@ fn discovery_command_result(
 
 fn discovery_problem(error: DiscoveryIndexError) -> NodeProblem {
     let code = match error.category {
-        NodeDiscoveryIndexErrorCategory::Unsupported => NodeProblemCode::Unsupported,
-        NodeDiscoveryIndexErrorCategory::Rejected => NodeProblemCode::InvalidRequest,
+        NodeDiscoveryIndexErrorCategory::Unsupported
+        | NodeDiscoveryIndexErrorCategory::IncompatibleVersion => NodeProblemCode::Unsupported,
+        NodeDiscoveryIndexErrorCategory::Rejected | NodeDiscoveryIndexErrorCategory::Signature => {
+            NodeProblemCode::InvalidRequest
+        }
         NodeDiscoveryIndexErrorCategory::Storage => NodeProblemCode::Internal,
+        NodeDiscoveryIndexErrorCategory::Cancelled => NodeProblemCode::Cancelled,
         NodeDiscoveryIndexErrorCategory::Offline
         | NodeDiscoveryIndexErrorCategory::Timeout
+        | NodeDiscoveryIndexErrorCategory::Tls
+        | NodeDiscoveryIndexErrorCategory::PartialCorruption
         | NodeDiscoveryIndexErrorCategory::InvalidResponse
         | NodeDiscoveryIndexErrorCategory::Server => NodeProblemCode::Unavailable,
     };

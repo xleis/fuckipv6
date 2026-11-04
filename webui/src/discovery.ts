@@ -4,7 +4,9 @@ import type {
   NetworkJoinMode,
   NetworkVisibility,
   NodeDiscoveryIndexErrorCategory,
+  NodeDiscoveryIndexMetrics,
   NodeDiscoveryIndexSnapshot,
+  NodeDiscoveryIndexSource,
   NodeSnapshot,
 } from "../../contracts/typescript/node-contract-v1";
 
@@ -53,8 +55,10 @@ export type DiscoveryProjection = {
   partial: boolean;
   noMoreResults: boolean;
   lastSuccessUnixMs: number | null;
-  errorCategory: NodeDiscoveryIndexErrorCategory | null;
   lastAttemptUnixMs: number | null;
+  source: NodeDiscoveryIndexSource;
+  metrics: NodeDiscoveryIndexMetrics;
+  errorCategory: NodeDiscoveryIndexErrorCategory | null;
 };
 
 export type DiscoveryFacets = {
@@ -264,8 +268,18 @@ export function projectDiscovery(
     partial,
     noMoreResults: state === "ready" && results.length > 0,
     lastSuccessUnixMs: index?.last_success_unix_ms ?? null,
-    errorCategory: index?.last_error?.category ?? null,
     lastAttemptUnixMs: index?.last_attempt_unix_ms ?? null,
+    source: index?.source ?? "none",
+    metrics: index?.metrics ?? {
+      request_attempts: 0,
+      requests_succeeded: 0,
+      requests_failed: 0,
+      retries_scheduled: 0,
+      cancellations: 0,
+      records_accepted: 0,
+      records_rejected: 0,
+    },
+    errorCategory: index?.last_error?.category ?? null,
   };
 }
 

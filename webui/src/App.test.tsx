@@ -172,6 +172,7 @@ function discoveryRecord(
     digest: `digest-${name}`,
     discoverable: true,
     invalid_reason: null,
+    source: "network",
     record: {
       document: {
         schema_version: 3,
@@ -219,6 +220,16 @@ function discoverySnapshot(
       records,
       rejected_record_count: 0,
       search_history_stored: false,
+      source: "network",
+      metrics: {
+        request_attempts: 1,
+        requests_succeeded: 1,
+        requests_failed: 0,
+        retries_scheduled: 0,
+        cancellations: 0,
+        records_accepted: records.length,
+        records_rejected: 0,
+      },
       state: "ready",
       ...overrides,
     },

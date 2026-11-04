@@ -1781,6 +1781,9 @@ function Networks({
                     })}
                   </small>
                 ) : null}
+                {projection.state === "pending" ? (
+                  <small>{label(locale, "discovery.pending.cancel_hint")}</small>
+                ) : null}
               </div>
             ) : null}
             {projection.partial ? (
@@ -1801,6 +1804,29 @@ function Networks({
               <small className="discovery-last-success">
                 {tr(locale, "discovery.last_success", {
                   time: formatTimestamp(locale, projection.lastSuccessUnixMs),
+                })}
+              </small>
+            ) : null}
+            {projection.lastAttemptUnixMs != null ? (
+              <small data-testid="discovery-last-attempt">
+                {tr(locale, "discovery.last_attempt", {
+                  time: formatTimestamp(locale, projection.lastAttemptUnixMs),
+                })}
+              </small>
+            ) : null}
+            <small data-testid="discovery-source">
+              {tr(locale, "discovery.source.detail", {
+                source: label(locale, `discovery.source.${projection.source}`),
+              })}
+            </small>
+            {projection.metrics.request_attempts > 0 ? (
+              <small data-testid="discovery-metrics">
+                {tr(locale, "discovery.metrics.summary", {
+                  attempts: String(projection.metrics.request_attempts),
+                  succeeded: String(projection.metrics.requests_succeeded),
+                  failed: String(projection.metrics.requests_failed),
+                  retries: String(projection.metrics.retries_scheduled),
+                  cancellations: String(projection.metrics.cancellations),
                 })}
               </small>
             ) : null}

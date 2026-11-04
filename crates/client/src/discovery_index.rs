@@ -16,7 +16,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     ContentHash, DomainError, ExitContributionObligation, MembershipTerms,
@@ -26,7 +26,7 @@ use fuckipv6_common::domain::{
 use fuckipv6_common::Identity;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{watch, Mutex as AsyncMutex};
 
 use crate::config_manager::{write_json_atomic, ConfigManager};
 use crate::node::NodeStateStore;
@@ -36,6 +36,9 @@ const DISCOVERY_INDEX_SCHEMA_VERSION: u16 = 1;
 const DISCOVERY_INDEX_WIRE_SCHEMA_VERSION: u16 = 1;
 const MAX_INDEX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const INDEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const INDEX_MAX_ATTEMPTS: usize = 3;
+const INDEX_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+const INDEX_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -71,11 +74,16 @@ impl NodeDiscoveryIndexState {
 pub enum NodeDiscoveryIndexErrorCategory {
     Offline,
     Timeout,
+    Tls,
+    Signature,
+    PartialCorruption,
+    IncompatibleVersion,
     Unsupported,
     Rejected,
     InvalidResponse,
     Storage,
     Server,
+    Cancelled,
 }
 
 impl NodeDiscoveryIndexErrorCategory {
@@ -83,27 +91,45 @@ impl NodeDiscoveryIndexErrorCategory {
         match self {
             Self::Offline => "offline",
             Self::Timeout => "timeout",
+            Self::Tls => "tls",
+            Self::Signature => "signature",
+            Self::PartialCorruption => "partial_corruption",
+            Self::IncompatibleVersion => "incompatible_version",
             Self::Unsupported => "unsupported",
             Self::Rejected => "rejected",
             Self::InvalidResponse => "invalid_response",
             Self::Storage => "storage",
             Self::Server => "server",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub const fn retryable(self) -> bool {
-        !matches!(self, Self::Unsupported)
+        matches!(
+            self,
+            Self::Offline
+                | Self::Timeout
+                | Self::Tls
+                | Self::PartialCorruption
+                | Self::InvalidResponse
+                | Self::Server
+        )
     }
 
     pub const fn message_key(self) -> &'static str {
         match self {
             Self::Offline => "discovery.error.offline",
             Self::Timeout => "discovery.error.timeout",
+            Self::Tls => "discovery.error.tls",
+            Self::Signature => "discovery.error.signature",
+            Self::PartialCorruption => "discovery.error.partial_corruption",
+            Self::IncompatibleVersion => "discovery.error.incompatible_version",
             Self::Unsupported => "discovery.error.unsupported",
             Self::Rejected => "discovery.error.rejected",
             Self::InvalidResponse => "discovery.error.invalid_response",
             Self::Storage => "discovery.error.storage",
             Self::Server => "discovery.error.server",
+            Self::Cancelled => "discovery.error.cancelled",
         }
     }
 }
@@ -132,11 +158,57 @@ impl NodeDiscoveryIndexError {
 /// `discoverable` is false for expired, malformed or revoked records. The raw
 /// signed record is retained so revocations and revision watermarks survive a
 /// restart and can reject later rollback attempts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeDiscoveryIndexSource {
+    #[default]
+    None,
+    Cache,
+    Network,
+    Join,
+}
+
+impl NodeDiscoveryIndexSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Cache => "cache",
+            Self::Network => "network",
+            Self::Join => "join",
+        }
+    }
+
+    pub const fn message_key(self) -> &'static str {
+        match self {
+            Self::None => "discovery.source.none",
+            Self::Cache => "discovery.source.cache",
+            Self::Network => "discovery.source.network",
+            Self::Join => "discovery.source.join",
+        }
+    }
+}
+
+/// Aggregate-only discovery telemetry. It deliberately has no URL, response
+/// body, search text, record name or free-form error text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeDiscoveryIndexMetrics {
+    pub request_attempts: u64,
+    pub requests_succeeded: u64,
+    pub requests_failed: u64,
+    pub retries_scheduled: u64,
+    pub cancellations: u64,
+    pub records_accepted: u64,
+    pub records_rejected: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_request_duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeDiscoveryIndexRecordSnapshot {
     pub record: NetworkDiscoveryRecord,
     pub digest: String,
     pub accepted_at_unix_ms: u64,
+    pub source: NodeDiscoveryIndexSource,
     pub discoverable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalid_reason: Option<String>,
@@ -154,8 +226,10 @@ pub struct NodeDiscoveryIndexSnapshot {
     pub last_success_unix_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<NodeDiscoveryIndexError>,
+    pub source: NodeDiscoveryIndexSource,
     pub rejected_record_count: usize,
     pub records: Vec<NodeDiscoveryIndexRecordSnapshot>,
+    pub metrics: NodeDiscoveryIndexMetrics,
     /// The discovery index is a control-plane convenience. Its state never
     /// changes any joined network's lifecycle or forwarding data plane.
     pub data_plane_affected: bool,
@@ -172,8 +246,10 @@ impl Default for NodeDiscoveryIndexSnapshot {
             last_attempt_unix_ms: None,
             last_success_unix_ms: None,
             last_error: None,
+            source: NodeDiscoveryIndexSource::None,
             rejected_record_count: 0,
             records: Vec::new(),
+            metrics: NodeDiscoveryIndexMetrics::default(),
             data_plane_affected: false,
             search_history_stored: false,
         }
@@ -216,15 +292,18 @@ impl DiscoveryIndexError {
 
     fn from_domain(error: DomainError) -> Self {
         let category = match error.code() {
+            "domain.discovery_unsupported_version" => {
+                NodeDiscoveryIndexErrorCategory::IncompatibleVersion
+            }
+            "domain.invalid_signature" | "domain.discovery_publisher_mismatch" => {
+                NodeDiscoveryIndexErrorCategory::Signature
+            }
             "domain.discovery_profile_unsigned"
             | "domain.discovery_profile_expired"
             | "domain.discovery_expired"
             | "domain.discovery_rollback"
             | "domain.discovery_conflict"
-            | "domain.discovery_already_revoked"
-            | "domain.discovery_unsupported_version"
-            | "domain.discovery_publisher_mismatch"
-            | "domain.invalid_signature" => NodeDiscoveryIndexErrorCategory::Rejected,
+            | "domain.discovery_already_revoked" => NodeDiscoveryIndexErrorCategory::Rejected,
             _ => NodeDiscoveryIndexErrorCategory::InvalidResponse,
         };
         Self::new(category)
@@ -237,6 +316,15 @@ impl fmt::Display for NodeDiscoveryIndexError {
     }
 }
 
+/// Result of one untrusted index fetch. Malformed records are counted instead
+/// of discarding the entire response, allowing valid records to remain cached
+/// while the projection is explicitly marked degraded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveryIndexFetchResult {
+    pub records: Vec<NetworkDiscoveryRecord>,
+    pub malformed_record_count: usize,
+}
+
 /// Injectable transport used by tests and embedders. Production uses
 /// [`HttpDiscoveryIndexTransport`]. The command layer verifies every record
 /// after transport, so a transport is never trusted as an authenticity source.
@@ -244,7 +332,7 @@ pub trait DiscoveryIndexTransport: Send + Sync + 'static {
     fn fetch<'a>(
         &'a self,
         index_url: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<NetworkDiscoveryRecord>, DiscoveryIndexError>>;
+    ) -> BoxFuture<'a, Result<DiscoveryIndexFetchResult, DiscoveryIndexError>>;
 
     fn publish<'a>(
         &'a self,
@@ -277,14 +365,14 @@ impl Default for HttpDiscoveryIndexTransport {
 #[derive(Serialize, Deserialize)]
 struct DiscoveryIndexWireResponse {
     schema_version: u16,
-    records: Vec<NetworkDiscoveryRecord>,
+    records: Vec<serde_json::Value>,
 }
 
 impl DiscoveryIndexTransport for HttpDiscoveryIndexTransport {
     fn fetch<'a>(
         &'a self,
         index_url: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<NetworkDiscoveryRecord>, DiscoveryIndexError>> {
+    ) -> BoxFuture<'a, Result<DiscoveryIndexFetchResult, DiscoveryIndexError>> {
         Box::pin(async move {
             let endpoint = format!("{}/v1/discovery/networks", index_url.trim_end_matches('/'));
             let response = self.client.get(endpoint).send().await.map_err(http_error)?;
@@ -309,10 +397,21 @@ impl DiscoveryIndexTransport for HttpDiscoveryIndexTransport {
                 })?;
             if response.schema_version != DISCOVERY_INDEX_WIRE_SCHEMA_VERSION {
                 return Err(DiscoveryIndexError::new(
-                    NodeDiscoveryIndexErrorCategory::Unsupported,
+                    NodeDiscoveryIndexErrorCategory::IncompatibleVersion,
                 ));
             }
-            Ok(response.records)
+            let mut records = Vec::with_capacity(response.records.len());
+            let mut malformed_record_count = 0usize;
+            for value in response.records {
+                match serde_json::from_value::<NetworkDiscoveryRecord>(value) {
+                    Ok(record) => records.push(record),
+                    Err(_) => malformed_record_count += 1,
+                }
+            }
+            Ok(DiscoveryIndexFetchResult {
+                records,
+                malformed_record_count,
+            })
         })
     }
 
@@ -347,10 +446,23 @@ impl DiscoveryIndexTransport for HttpDiscoveryIndexTransport {
 fn http_error(error: reqwest::Error) -> DiscoveryIndexError {
     let category = if error.is_timeout() {
         NodeDiscoveryIndexErrorCategory::Timeout
+    } else if is_tls_error(&error) {
+        NodeDiscoveryIndexErrorCategory::Tls
     } else {
         NodeDiscoveryIndexErrorCategory::Offline
     };
     DiscoveryIndexError::new(category)
+}
+
+fn is_tls_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = error.source();
+    while let Some(error) = source {
+        if error.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+        source = error.source();
+    }
+    false
 }
 
 fn require_success(response: reqwest::Response) -> Result<reqwest::Response, DiscoveryIndexError> {
@@ -380,7 +492,11 @@ struct PersistedDiscoveryIndex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_error: Option<NodeDiscoveryIndexErrorCategory>,
     #[serde(default)]
+    source: NodeDiscoveryIndexSource,
+    #[serde(default)]
     rejected_record_count: usize,
+    #[serde(default)]
+    metrics: NodeDiscoveryIndexMetrics,
     #[serde(default)]
     records: BTreeMap<String, PersistedDiscoveryRecord>,
     #[serde(skip)]
@@ -397,6 +513,8 @@ struct PersistedDiscoveryRecord {
     record: NetworkDiscoveryRecord,
     digest: String,
     accepted_at_unix_ms: u64,
+    #[serde(default)]
+    source: NodeDiscoveryIndexSource,
 }
 
 /// Canonical pre-join acknowledgement material. Every mutable governance or
@@ -528,6 +646,23 @@ impl DiscoveryIndexManager {
         state: &NodeStateStore,
         index_url: Option<&str>,
     ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
+        self.refresh_cancellable(state, index_url, None).await
+    }
+
+    /// Refresh with cooperative cancellation. Cancellation never turns an
+    /// offline or partially loaded index into an empty result: the last
+    /// verified projection is restored and only aggregate counters advance.
+    pub async fn refresh_cancellable(
+        &self,
+        state: &NodeStateStore,
+        index_url: Option<&str>,
+        mut cancel: Option<watch::Receiver<bool>>,
+    ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
+        if cancellation_requested(cancel.as_ref()) {
+            return Err(DiscoveryIndexError::new(
+                NodeDiscoveryIndexErrorCategory::Cancelled,
+            ));
+        }
         let _operation = self.operation.lock().await;
         let url = match index_url {
             Some(url) => validate_index_url(url)?,
@@ -541,7 +676,7 @@ impl DiscoveryIndexManager {
                     DiscoveryIndexError::new(NodeDiscoveryIndexErrorCategory::Rejected)
                 })?,
         };
-        self.refresh_locked(state, url).await
+        self.refresh_locked(state, url, cancel.as_mut()).await
     }
 
     pub async fn retry(
@@ -549,6 +684,14 @@ impl DiscoveryIndexManager {
         state: &NodeStateStore,
     ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
         self.refresh(state, None).await
+    }
+
+    pub async fn retry_cancellable(
+        &self,
+        state: &NodeStateStore,
+        cancel: Option<watch::Receiver<bool>>,
+    ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
+        self.refresh_cancellable(state, None, cancel).await
     }
 
     /// Verify signed material supplied by a join flow against the local
@@ -698,25 +841,50 @@ impl DiscoveryIndexManager {
         {
             Ok(record) => record,
             Err(error) => {
-                self.fail_request(state, &url, error.category, now).await?;
+                self.fail_request(
+                    state,
+                    &url,
+                    error.category,
+                    now,
+                    DiscoveryAttemptSummary::default(),
+                )
+                .await?;
                 return Err(error);
             }
         };
         if let Err(error) = record.validate_at(now) {
             let error = DiscoveryIndexError::from_domain(error);
-            self.fail_request(state, &url, error.category, now).await?;
+            self.fail_request(
+                state,
+                &url,
+                error.category,
+                now,
+                DiscoveryAttemptSummary::default(),
+            )
+            .await?;
             return Err(error);
         }
 
+        let mut summary = DiscoveryAttemptSummary::default();
         let mut last_error = None;
-        for attempt in 0..2 {
-            match self.transport.publish(&url, &record).await {
+        for attempt in 0..INDEX_MAX_ATTEMPTS {
+            summary.attempts = summary.attempts.saturating_add(1);
+            let started = Instant::now();
+            let result = self.transport.publish(&url, &record).await;
+            summary.duration_ms = elapsed_ms(started);
+            match result {
                 Ok(()) => {
                     last_error = None;
                     break;
                 }
-                Err(error) if error.retryable() && attempt == 0 => {
+                Err(error) if error.retryable() && attempt + 1 < INDEX_MAX_ATTEMPTS => {
                     last_error = Some(error);
+                    summary.retries = summary.retries.saturating_add(1);
+                    if let Err(cancel_error) = wait_for_retry(retry_delay(attempt), None).await {
+                        self.fail_request(state, &url, cancel_error.category, now, summary)
+                            .await?;
+                        return Err(cancel_error);
+                    }
                 }
                 Err(error) => {
                     last_error = Some(error);
@@ -725,8 +893,22 @@ impl DiscoveryIndexManager {
             }
         }
         if let Some(error) = last_error {
-            self.fail_request(state, &url, error.category, now).await?;
+            self.fail_request(state, &url, error.category, now, summary)
+                .await?;
             return Err(error);
+        }
+        {
+            let mut current = self
+                .persisted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            apply_attempt_metrics(&mut current.metrics, summary, true);
+            self.persist_candidate(&current)?;
+            *self
+                .persisted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
         }
 
         let snapshot = match self.accept_record_locked(record, now, true) {
@@ -823,21 +1005,52 @@ impl DiscoveryIndexManager {
         &self,
         state: &NodeStateStore,
         url: String,
+        mut cancel: Option<&mut watch::Receiver<bool>>,
     ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
+        let before = self.snapshot();
         let now = now_unix_ms();
         self.set_pending(state, &url).await;
-
-        let mut response = None;
+        let mut summary = DiscoveryAttemptSummary::default();
         let mut last_error = None;
-        for attempt in 0..2 {
-            match self.transport.fetch(&url).await {
-                Ok(records) => {
-                    response = Some(records);
-                    last_error = None;
-                    break;
+
+        for attempt in 0..INDEX_MAX_ATTEMPTS {
+            summary.attempts = summary.attempts.saturating_add(1);
+            let started = Instant::now();
+            let request = self.transport.fetch(&url);
+            let result = match cancel.as_deref_mut() {
+                Some(cancel) => tokio::select! {
+                    result = request => result,
+                    _ = wait_for_cancel(cancel) => {
+                        summary.duration_ms = elapsed_ms(started);
+                        self.finish_cancelled(state, &before, now, summary).await?;
+                        return Err(DiscoveryIndexError::new(
+                            NodeDiscoveryIndexErrorCategory::Cancelled,
+                        ));
+                    }
+                },
+                None => request.await,
+            };
+            summary.duration_ms = elapsed_ms(started);
+            match result {
+                Ok(fetch) => {
+                    summary.fetched_records = summary
+                        .fetched_records
+                        .saturating_add(fetch.records.len() as u64);
+                    summary.malformed_records = summary
+                        .malformed_records
+                        .saturating_add(fetch.malformed_record_count as u64);
+                    return self.apply_fetch(state, url, now, fetch, summary).await;
                 }
-                Err(error) if error.retryable() && attempt == 0 => {
+                Err(error) if error.retryable() && attempt + 1 < INDEX_MAX_ATTEMPTS => {
                     last_error = Some(error);
+                    summary.retries = summary.retries.saturating_add(1);
+                    match wait_for_retry(retry_delay(attempt), cancel.as_deref_mut()).await {
+                        Ok(()) => {}
+                        Err(cancel_error) => {
+                            self.finish_cancelled(state, &before, now, summary).await?;
+                            return Err(cancel_error);
+                        }
+                    }
                 }
                 Err(error) => {
                     last_error = Some(error);
@@ -845,14 +1058,22 @@ impl DiscoveryIndexManager {
                 }
             }
         }
-        let Some(records) = response else {
-            let error = last_error.unwrap_or_else(|| {
-                DiscoveryIndexError::new(NodeDiscoveryIndexErrorCategory::Offline)
-            });
-            self.fail_request(state, &url, error.category, now).await?;
-            return Err(error);
-        };
 
+        let error = last_error
+            .unwrap_or_else(|| DiscoveryIndexError::new(NodeDiscoveryIndexErrorCategory::Offline));
+        self.fail_request(state, &url, error.category, now, summary)
+            .await?;
+        Err(error)
+    }
+
+    async fn apply_fetch(
+        &self,
+        state: &NodeStateStore,
+        url: String,
+        now: u64,
+        fetch: DiscoveryIndexFetchResult,
+        mut summary: DiscoveryAttemptSummary,
+    ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
         let mut current = self
             .persisted
             .lock()
@@ -861,8 +1082,13 @@ impl DiscoveryIndexManager {
         current.schema_version = DISCOVERY_INDEX_SCHEMA_VERSION;
         current.index_url = Some(url);
         current.last_attempt_unix_ms = Some(now);
-        let mut rejected = 0usize;
-        for record in records {
+        current.source = NodeDiscoveryIndexSource::Network;
+
+        let mut rejected = fetch.malformed_record_count;
+        let mut rejected_category = (fetch.malformed_record_count > 0)
+            .then_some(NodeDiscoveryIndexErrorCategory::InvalidResponse);
+        let mut accepted_batch = 0usize;
+        for record in fetch.records {
             let id = record.document.network_id.as_str().to_owned();
             let validation = match current.records.get(&id) {
                 Some(existing) => record.validate_successor(
@@ -873,12 +1099,18 @@ impl DiscoveryIndexManager {
                 ),
                 None => record.validate_at(now),
             };
-            let Ok(()) = validation else {
-                rejected += 1;
+            if let Err(error) = validation {
+                rejected = rejected.saturating_add(1);
+                let category = DiscoveryIndexError::from_domain(error).category;
+                merge_rejected_category(&mut rejected_category, category);
                 continue;
-            };
+            }
             let Ok(digest) = record.digest() else {
-                rejected += 1;
+                rejected = rejected.saturating_add(1);
+                merge_rejected_category(
+                    &mut rejected_category,
+                    NodeDiscoveryIndexErrorCategory::PartialCorruption,
+                );
                 continue;
             };
             current.records.insert(
@@ -887,37 +1119,54 @@ impl DiscoveryIndexManager {
                     record,
                     digest,
                     accepted_at_unix_ms: now,
+                    source: NodeDiscoveryIndexSource::Network,
                 },
             );
+            accepted_batch = accepted_batch.saturating_add(1);
         }
         current.rejected_record_count = rejected;
+        summary.accepted_records = accepted_batch as u64;
+        summary.rejected_records = rejected as u64;
+        apply_attempt_metrics(&mut current.metrics, summary, true);
+
         if rejected == 0 {
             current.last_success_unix_ms = Some(now);
             current.last_error = None;
             current.state = NodeDiscoveryIndexState::Ready;
         } else {
-            current.last_error = Some(NodeDiscoveryIndexErrorCategory::Rejected);
+            let category = match rejected_category {
+                Some(NodeDiscoveryIndexErrorCategory::InvalidResponse)
+                    if fetch.malformed_record_count > 0 =>
+                {
+                    NodeDiscoveryIndexErrorCategory::PartialCorruption
+                }
+                Some(category) => category,
+                None => NodeDiscoveryIndexErrorCategory::PartialCorruption,
+            };
+            current.last_success_unix_ms = Some(now);
+            current.last_error = Some(category);
+            current.source = NodeDiscoveryIndexSource::Cache;
             current.state = if current.records.is_empty() {
                 NodeDiscoveryIndexState::Failed
             } else {
                 NodeDiscoveryIndexState::Degraded
             };
+            self.persist_candidate(&current)?;
+            let snapshot = snapshot_from_persisted(&current, now);
+            *self
+                .persisted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
+            state.replace_discovery_index(snapshot).await;
+            return Err(DiscoveryIndexError::new(category));
         }
-        if let Err(error) = self.persist_candidate(&current) {
-            self.restore_state(state).await;
-            return Err(error);
-        }
+        self.persist_candidate(&current)?;
         let snapshot = snapshot_from_persisted(&current, now);
         *self
             .persisted
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
         state.replace_discovery_index(snapshot.clone()).await;
-        if rejected > 0 {
-            return Err(DiscoveryIndexError::new(
-                NodeDiscoveryIndexErrorCategory::Rejected,
-            ));
-        }
         Ok(snapshot)
     }
 
@@ -940,8 +1189,9 @@ impl DiscoveryIndexManager {
         url: &str,
         category: NodeDiscoveryIndexErrorCategory,
         now: u64,
+        summary: DiscoveryAttemptSummary,
     ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
-        match self.finish_failure(url, category, now).await {
+        match self.finish_failure(url, category, now, summary).await {
             Ok(snapshot) => {
                 state.replace_discovery_index(snapshot.clone()).await;
                 Ok(snapshot)
@@ -962,6 +1212,7 @@ impl DiscoveryIndexManager {
         url: &str,
         category: NodeDiscoveryIndexErrorCategory,
         now: u64,
+        summary: DiscoveryAttemptSummary,
     ) -> Result<NodeDiscoveryIndexSnapshot, DiscoveryIndexError> {
         let mut current = self
             .persisted
@@ -971,7 +1222,13 @@ impl DiscoveryIndexManager {
         current.index_url = Some(url.to_owned());
         current.last_attempt_unix_ms = Some(now);
         current.last_error = Some(category);
+        current.source = if current.records.is_empty() {
+            NodeDiscoveryIndexSource::None
+        } else {
+            NodeDiscoveryIndexSource::Cache
+        };
         current.state = state_for(category, !current.records.is_empty());
+        apply_attempt_metrics(&mut current.metrics, summary, false);
         self.persist_candidate(&current)?;
         let snapshot = snapshot_from_persisted(&current, now);
         *self
@@ -979,6 +1236,34 @@ impl DiscoveryIndexManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
         Ok(snapshot)
+    }
+
+    async fn finish_cancelled(
+        &self,
+        state: &NodeStateStore,
+        before: &NodeDiscoveryIndexSnapshot,
+        now: u64,
+        mut summary: DiscoveryAttemptSummary,
+    ) -> Result<(), DiscoveryIndexError> {
+        let mut current = self
+            .persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        current.last_attempt_unix_ms = Some(now);
+        current.source = before.source;
+        current.last_error = before.last_error.as_ref().map(|error| error.category);
+        current.state = before.state;
+        summary.cancelled = true;
+        apply_attempt_metrics(&mut current.metrics, summary, false);
+        self.persist_candidate(&current)?;
+        let snapshot = snapshot_from_persisted(&current, now);
+        *self
+            .persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
+        state.replace_discovery_index(snapshot).await;
+        Ok(())
     }
 
     fn accept_record_locked(
@@ -1013,14 +1298,23 @@ impl DiscoveryIndexManager {
                 record,
                 digest,
                 accepted_at_unix_ms: now,
+                source: if retry_failed_request {
+                    NodeDiscoveryIndexSource::Network
+                } else {
+                    NodeDiscoveryIndexSource::Join
+                },
             },
         );
         current.last_attempt_unix_ms = Some(now);
+        current.metrics.records_accepted = current.metrics.records_accepted.saturating_add(1);
         if retry_failed_request {
             current.last_success_unix_ms = Some(now);
             current.last_error = None;
             current.rejected_record_count = 0;
+            current.source = NodeDiscoveryIndexSource::Network;
             current.state = NodeDiscoveryIndexState::Ready;
+        } else {
+            current.source = NodeDiscoveryIndexSource::Join;
         }
         self.persist_candidate(&current)?;
         let snapshot = snapshot_from_persisted(&current, now);
@@ -1187,6 +1481,110 @@ enum DiscoveryMutation {
     Unpublish,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DiscoveryAttemptSummary {
+    attempts: u64,
+    retries: u64,
+    duration_ms: u64,
+    fetched_records: u64,
+    malformed_records: u64,
+    accepted_records: u64,
+    rejected_records: u64,
+    cancelled: bool,
+}
+
+fn apply_attempt_metrics(
+    metrics: &mut NodeDiscoveryIndexMetrics,
+    summary: DiscoveryAttemptSummary,
+    succeeded: bool,
+) {
+    if summary.attempts > 0 {
+        metrics.request_attempts = metrics.request_attempts.saturating_add(summary.attempts);
+        metrics.requests_succeeded = metrics
+            .requests_succeeded
+            .saturating_add(u64::from(succeeded));
+        metrics.requests_failed = metrics
+            .requests_failed
+            .saturating_add(u64::from(!succeeded && !summary.cancelled));
+        if summary.duration_ms > 0 {
+            metrics.last_request_duration_ms = Some(summary.duration_ms);
+        }
+    }
+    metrics.retries_scheduled = metrics.retries_scheduled.saturating_add(summary.retries);
+    metrics.cancellations = metrics
+        .cancellations
+        .saturating_add(u64::from(summary.cancelled));
+    metrics.records_accepted = metrics
+        .records_accepted
+        .saturating_add(summary.accepted_records);
+    metrics.records_rejected = metrics
+        .records_rejected
+        .saturating_add(summary.rejected_records);
+}
+
+fn merge_rejected_category(
+    current: &mut Option<NodeDiscoveryIndexErrorCategory>,
+    category: NodeDiscoveryIndexErrorCategory,
+) {
+    fn priority(category: NodeDiscoveryIndexErrorCategory) -> u8 {
+        match category {
+            NodeDiscoveryIndexErrorCategory::Signature => 4,
+            NodeDiscoveryIndexErrorCategory::IncompatibleVersion => 3,
+            NodeDiscoveryIndexErrorCategory::Rejected => 2,
+            _ => 1,
+        }
+    }
+    if current.is_none_or(|existing| priority(category) > priority(existing)) {
+        *current = Some(category);
+    }
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1u32 << attempt.min(8);
+    INDEX_RETRY_BASE_DELAY
+        .saturating_mul(multiplier)
+        .min(INDEX_RETRY_MAX_DELAY)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn cancellation_requested(cancel: Option<&watch::Receiver<bool>>) -> bool {
+    cancel.is_some_and(|cancel| *cancel.borrow())
+}
+
+async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    while cancel.changed().await.is_ok() {
+        if *cancel.borrow() {
+            return;
+        }
+    }
+}
+
+async fn wait_for_retry(
+    delay: Duration,
+    mut cancel: Option<&mut watch::Receiver<bool>>,
+) -> Result<(), DiscoveryIndexError> {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    match cancel.as_deref_mut() {
+        Some(cancel) => tokio::select! {
+            _ = &mut sleep => Ok(()),
+            _ = wait_for_cancel(cancel) => Err(DiscoveryIndexError::new(
+                NodeDiscoveryIndexErrorCategory::Cancelled,
+            )),
+        },
+        None => {
+            sleep.await;
+            Ok(())
+        }
+    }
+}
+
 fn load_persisted(
     path: &Path,
 ) -> (
@@ -1217,9 +1615,14 @@ fn load_persisted(
     if persisted.schema_version != DISCOVERY_INDEX_SCHEMA_VERSION {
         return (
             PersistedDiscoveryIndex::default(),
-            Some(NodeDiscoveryIndexErrorCategory::Unsupported),
+            Some(NodeDiscoveryIndexErrorCategory::IncompatibleVersion),
         );
     }
+    persisted.source = if persisted.records.is_empty() {
+        NodeDiscoveryIndexSource::None
+    } else {
+        NodeDiscoveryIndexSource::Cache
+    };
     persisted.state = state_for_loaded(&persisted);
     (persisted, None)
 }
@@ -1238,7 +1641,11 @@ fn state_for(
     category: NodeDiscoveryIndexErrorCategory,
     has_records: bool,
 ) -> NodeDiscoveryIndexState {
-    if category == NodeDiscoveryIndexErrorCategory::Unsupported {
+    if matches!(
+        category,
+        NodeDiscoveryIndexErrorCategory::Unsupported
+            | NodeDiscoveryIndexErrorCategory::IncompatibleVersion
+    ) {
         NodeDiscoveryIndexState::Unsupported
     } else if has_records {
         NodeDiscoveryIndexState::Degraded
@@ -1262,6 +1669,7 @@ fn snapshot_from_persisted(
                 record: accepted.record.clone(),
                 digest: accepted.digest.clone(),
                 accepted_at_unix_ms: accepted.accepted_at_unix_ms,
+                source: accepted.source,
                 discoverable,
                 invalid_reason: validation.err().map(|error| error.code().to_owned()),
             }
@@ -1286,8 +1694,10 @@ fn snapshot_from_persisted(
         last_attempt_unix_ms: persisted.last_attempt_unix_ms,
         last_success_unix_ms: persisted.last_success_unix_ms,
         last_error: persisted.last_error.map(NodeDiscoveryIndexError::new),
+        source: persisted.source,
         rejected_record_count: persisted.rejected_record_count,
         records,
+        metrics: persisted.metrics.clone(),
         data_plane_affected: false,
         search_history_stored: false,
     }
@@ -1330,15 +1740,25 @@ fn now_unix_ms() -> u64 {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CapabilityKind, DiscoveryTransport, ExitContributionObligation, NetworkCreateProfile,
-        NetworkEndpoint, NetworkJoinMode, NetworkRecord, NetworkVisibility, PublicKey,
+        CapabilityKind, DiscoveryTransport, ExitContributionObligation, MembershipRole,
+        MembershipState, NetworkCreateProfile, NetworkEndpoint, NetworkJoinMode, NetworkRecord,
+        NetworkVisibility, PublicKey,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::node::{
+        NodeNetworkMembershipSnapshot, NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus,
+        NodeTrafficSnapshot,
+    };
 
     #[derive(Default)]
     struct FakeTransport {
         records: Mutex<Vec<NetworkDiscoveryRecord>>,
         fail_fetch: AtomicUsize,
+        fail_categories: Mutex<Vec<NodeDiscoveryIndexErrorCategory>>,
+        fail_publish: Mutex<Vec<NodeDiscoveryIndexErrorCategory>>,
+        malformed_record_count: AtomicUsize,
+        fetch_attempts: AtomicUsize,
         published: Mutex<Vec<NetworkDiscoveryRecord>>,
     }
 
@@ -1346,15 +1766,30 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _index_url: &'a str,
-        ) -> BoxFuture<'a, Result<Vec<NetworkDiscoveryRecord>, DiscoveryIndexError>> {
+        ) -> BoxFuture<'a, Result<DiscoveryIndexFetchResult, DiscoveryIndexError>> {
             Box::pin(async move {
-                if self.fail_fetch.load(Ordering::SeqCst) > 0 {
-                    self.fail_fetch.fetch_sub(1, Ordering::SeqCst);
-                    return Err(DiscoveryIndexError::new(
-                        NodeDiscoveryIndexErrorCategory::Timeout,
-                    ));
+                self.fetch_attempts.fetch_add(1, Ordering::SeqCst);
+                let category = self
+                    .fail_categories
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pop()
+                    .or_else(|| {
+                        (self
+                            .fail_fetch
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                                remaining.checked_sub(1)
+                            })
+                            .is_ok())
+                        .then_some(NodeDiscoveryIndexErrorCategory::Timeout)
+                    });
+                if let Some(category) = category {
+                    return Err(DiscoveryIndexError::new(category));
                 }
-                Ok(self.records.lock().unwrap().clone())
+                Ok(DiscoveryIndexFetchResult {
+                    records: self.records.lock().unwrap().clone(),
+                    malformed_record_count: self.malformed_record_count.load(Ordering::SeqCst),
+                })
             })
         }
 
@@ -1364,6 +1799,14 @@ mod tests {
             record: &'a NetworkDiscoveryRecord,
         ) -> BoxFuture<'a, Result<(), DiscoveryIndexError>> {
             Box::pin(async move {
+                if let Some(category) = self
+                    .fail_publish
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pop()
+                {
+                    return Err(DiscoveryIndexError::new(category));
+                }
                 self.published.lock().unwrap().push(record.clone());
                 Ok(())
             })
@@ -1392,6 +1835,7 @@ mod tests {
                     record,
                     digest,
                     accepted_at_unix_ms: now_unix_ms(),
+                    source: NodeDiscoveryIndexSource::Network,
                 },
             );
     }
@@ -1514,7 +1958,9 @@ mod tests {
             NodeDiscoveryIndexErrorCategory::Rejected
         );
         assert_eq!(degraded.records[0].record.document.revision, 2);
-        transport.fail_fetch.store(2, Ordering::SeqCst);
+        transport
+            .fail_fetch
+            .store(INDEX_MAX_ATTEMPTS, Ordering::SeqCst);
         assert_eq!(
             manager.retry(&state).await.unwrap_err().category,
             NodeDiscoveryIndexErrorCategory::Timeout
@@ -1534,7 +1980,9 @@ mod tests {
     async fn failed_fetch_without_records_becomes_failed() {
         let path = temp_path("failed-empty");
         let transport = Arc::new(FakeTransport::default());
-        transport.fail_fetch.store(2, Ordering::SeqCst);
+        transport
+            .fail_fetch
+            .store(INDEX_MAX_ATTEMPTS, Ordering::SeqCst);
         let manager = DiscoveryIndexManager::new(path, transport);
         let state = NodeStateStore::new();
 
@@ -1568,7 +2016,9 @@ mod tests {
             .await
             .unwrap();
 
-        transport.fail_fetch.store(2, Ordering::SeqCst);
+        transport
+            .fail_fetch
+            .store(INDEX_MAX_ATTEMPTS, Ordering::SeqCst);
         assert_eq!(
             manager.retry(&state).await.unwrap_err().category,
             NodeDiscoveryIndexErrorCategory::Timeout
@@ -1598,7 +2048,9 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        transport.fail_fetch.store(2, Ordering::SeqCst);
+        transport
+            .fail_fetch
+            .store(INDEX_MAX_ATTEMPTS, Ordering::SeqCst);
         assert_eq!(
             manager.retry(&state).await.unwrap_err().category,
             NodeDiscoveryIndexErrorCategory::Storage
@@ -1610,6 +2062,279 @@ mod tests {
         assert_eq!(after.last_error, before.last_error);
         assert_eq!(after.records, before.records);
         assert_eq!(manager.snapshot().records, before.records);
+    }
+
+    #[tokio::test]
+    async fn tls_and_timeout_refreshes_are_bounded_and_leave_metrics_sanitized() {
+        for category in [
+            NodeDiscoveryIndexErrorCategory::Timeout,
+            NodeDiscoveryIndexErrorCategory::Tls,
+        ] {
+            let path = temp_path(&format!("bounded-{}", category.as_str()));
+            let transport = Arc::new(FakeTransport::default());
+            *transport.fail_categories.lock().unwrap() = vec![category; INDEX_MAX_ATTEMPTS];
+            let manager = DiscoveryIndexManager::new(path, transport.clone());
+            let state = NodeStateStore::new();
+
+            assert_eq!(
+                manager
+                    .refresh(&state, Some("https://index.example"))
+                    .await
+                    .unwrap_err()
+                    .category,
+                category
+            );
+            let snapshot = state.snapshot().await.discovery_index;
+            assert_eq!(
+                transport.fetch_attempts.load(Ordering::SeqCst),
+                INDEX_MAX_ATTEMPTS
+            );
+            assert_eq!(snapshot.metrics.request_attempts, INDEX_MAX_ATTEMPTS as u64);
+            assert_eq!(snapshot.metrics.requests_failed, 1);
+            assert_eq!(snapshot.metrics.retries_scheduled, 2);
+            assert_eq!(snapshot.state, NodeDiscoveryIndexState::Failed);
+            assert_eq!(snapshot.source, NodeDiscoveryIndexSource::None);
+
+            let metrics = serde_json::to_string(&snapshot.metrics).unwrap();
+            for forbidden in ["https://", "index.example", "search", "query", "token"] {
+                assert!(!metrics.contains(forbidden));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn signature_failure_is_not_retried_and_never_replaces_cache() {
+        let path = temp_path("signature");
+        let transport = Arc::new(FakeTransport::default());
+        let manager = DiscoveryIndexManager::new(path, transport.clone());
+        let state = NodeStateStore::new();
+        let (mut record, _) = signed_network();
+        record.document.name = "tampered".into();
+        *transport.records.lock().unwrap() = vec![record];
+
+        assert_eq!(
+            manager
+                .refresh(&state, Some("https://index.example"))
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Signature
+        );
+        let snapshot = state.snapshot().await.discovery_index;
+        assert_eq!(transport.fetch_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.state, NodeDiscoveryIndexState::Failed);
+        assert_eq!(
+            snapshot.last_error.unwrap().category,
+            NodeDiscoveryIndexErrorCategory::Signature
+        );
+        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.metrics.retries_scheduled, 0);
+    }
+
+    #[tokio::test]
+    async fn partial_corruption_keeps_valid_records_and_reports_a_degraded_cache() {
+        let path = temp_path("partial-corruption");
+        let transport = Arc::new(FakeTransport::default());
+        let manager = DiscoveryIndexManager::new(path, transport.clone());
+        let state = NodeStateStore::new();
+        let (record, _) = signed_network();
+        *transport.records.lock().unwrap() = vec![record];
+        transport.malformed_record_count.store(1, Ordering::SeqCst);
+
+        assert_eq!(
+            manager
+                .refresh(&state, Some("https://index.example"))
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::PartialCorruption
+        );
+        let snapshot = state.snapshot().await.discovery_index;
+        assert_eq!(snapshot.state, NodeDiscoveryIndexState::Degraded);
+        assert_eq!(snapshot.source, NodeDiscoveryIndexSource::Cache);
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(
+            snapshot.records[0].source,
+            NodeDiscoveryIndexSource::Network
+        );
+        assert_eq!(snapshot.rejected_record_count, 1);
+        assert_eq!(snapshot.metrics.records_accepted, 1);
+        assert_eq!(snapshot.metrics.records_rejected, 1);
+        assert!(!snapshot.data_plane_affected);
+    }
+
+    #[test]
+    fn persisted_incompatible_schema_is_distinct_from_a_missing_feature() {
+        let path = temp_path("incompatible-persisted");
+        std::fs::write(&path, r#"{"schema_version":2}"#).unwrap();
+        let manager = DiscoveryIndexManager::new(path, Arc::new(FakeTransport::default()));
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.state, NodeDiscoveryIndexState::Unsupported);
+        assert_eq!(
+            snapshot.last_error.unwrap().category,
+            NodeDiscoveryIndexErrorCategory::IncompatibleVersion
+        );
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_and_capped() {
+        assert_eq!(retry_delay(0), Duration::from_millis(250));
+        assert_eq!(retry_delay(1), Duration::from_millis(500));
+        assert_eq!(retry_delay(2), Duration::from_secs(1));
+        assert_eq!(retry_delay(3), INDEX_RETRY_MAX_DELAY);
+        assert_eq!(retry_delay(usize::MAX), INDEX_RETRY_MAX_DELAY);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_retry_restores_projection_and_stops_attempts() {
+        let path = temp_path("cancel-retry");
+        let transport = Arc::new(FakeTransport::default());
+        *transport.fail_categories.lock().unwrap() =
+            vec![NodeDiscoveryIndexErrorCategory::Timeout; INDEX_MAX_ATTEMPTS];
+        let manager = Arc::new(DiscoveryIndexManager::new(path, transport.clone()));
+        let state = NodeStateStore::new();
+        let (cancel, cancel_rx) = watch::channel(false);
+        let task_manager = manager.clone();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            task_manager
+                .refresh_cancellable(&task_state, Some("https://index.example"), Some(cancel_rx))
+                .await
+        });
+
+        while transport.fetch_attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        cancel.send(true).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancellation must interrupt retry backoff")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.category, NodeDiscoveryIndexErrorCategory::Cancelled);
+
+        let snapshot = state.snapshot().await.discovery_index;
+        assert_eq!(snapshot.state, NodeDiscoveryIndexState::Idle);
+        assert!(snapshot.last_attempt_unix_ms.is_some());
+        assert_eq!(snapshot.metrics.cancellations, 1);
+        assert_eq!(snapshot.metrics.requests_failed, 0);
+        assert_eq!(transport.fetch_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn offline_index_preserves_joined_network_and_membership_projections() {
+        let path = temp_path("offline-joined-network");
+        let transport = Arc::new(FakeTransport::default());
+        *transport.fail_categories.lock().unwrap() =
+            vec![NodeDiscoveryIndexErrorCategory::Offline; INDEX_MAX_ATTEMPTS];
+        let manager = DiscoveryIndexManager::new(path, transport);
+        let state = NodeStateStore::new();
+        let network = NodeNetworkSnapshot {
+            name: "home".into(),
+            tun_name: "fk-home".into(),
+            status: NodeNetworkStatus::Online,
+            assigned_ipv6: None,
+            assigned_ipv4: None,
+            p2p_listen_addr: None,
+            uptime_secs: 42,
+            roles: vec![NodeNetworkRole::Member],
+            peer_count: 2,
+            traffic: NodeTrafficSnapshot::default(),
+        };
+        let membership = NodeNetworkMembershipSnapshot {
+            network_name: "home".into(),
+            network_id: "network-home".into(),
+            node_id: "node-local".into(),
+            state: MembershipState::Active,
+            role: MembershipRole::Member,
+            local_policy_revision: 3,
+            network_policy_revision: Some(3),
+            privacy_policy_revision: Some(2),
+            member_limit: Some(20),
+            exit_contribution: Some(ExitContributionObligation::Required),
+            exit_contribution_scope: None,
+            terms_hash: None,
+            current_terms: None,
+            current_terms_hash: None,
+            policy_confirmation_required: false,
+            acknowledged_at_unix_ms: Some(100),
+            created_at_unix_ms: 50,
+            updated_at_unix_ms: 100,
+            suspension_reason: None,
+        };
+        let expected_network = network.clone();
+        let expected_membership = membership.clone();
+        state
+            .update(|snapshot| {
+                snapshot.networks.push(network);
+                snapshot.memberships.push(membership);
+            })
+            .await;
+
+        assert_eq!(
+            manager
+                .refresh(&state, Some("https://index.example"))
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Offline
+        );
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.networks, vec![expected_network]);
+        assert_eq!(snapshot.memberships, vec![expected_membership]);
+        assert_eq!(
+            snapshot.discovery_index.state,
+            NodeDiscoveryIndexState::Failed
+        );
+        assert!(!snapshot.discovery_index.data_plane_affected);
+    }
+
+    #[tokio::test]
+    async fn publication_failure_preserves_the_local_network_record() {
+        let root = temp_path("publish-preserves-local").with_extension("config");
+        let _ = std::fs::remove_dir_all(&root);
+        let configs = ConfigManager::new_for_dir(root).unwrap();
+        let profile = NetworkCreateProfile {
+            name: "home".into(),
+            purpose: "Home network".into(),
+            icon: "home".into(),
+            language: "en".into(),
+            region: "US".into(),
+            tags: vec!["home".into()],
+            capability_declarations: vec![CapabilityKind::Relay],
+            visibility: NetworkVisibility::Public,
+            join_mode: NetworkJoinMode::Open,
+            exit_contribution: Default::default(),
+            exit_contribution_scope: Default::default(),
+        };
+        let created = configs
+            .create_owned_network(profile, "ws://127.0.0.1:6666", true)
+            .unwrap();
+        let before = configs.load_network_record("home").unwrap();
+        assert_eq!(before.network_id, created.record.network_id);
+
+        let transport = Arc::new(FakeTransport::default());
+        *transport.fail_publish.lock().unwrap() =
+            vec![NodeDiscoveryIndexErrorCategory::Timeout; INDEX_MAX_ATTEMPTS];
+        let manager =
+            DiscoveryIndexManager::new(temp_path("publish-preserves-local-index"), transport);
+        let state = NodeStateStore::new();
+        assert_eq!(
+            manager
+                .publish(&state, &configs, "home", "https://index.example", None)
+                .await
+                .unwrap_err()
+                .category,
+            NodeDiscoveryIndexErrorCategory::Timeout
+        );
+
+        let after = configs.load_network_record("home").unwrap();
+        assert_eq!(after.network_id, before.network_id);
+        assert!(configs
+            .list_networks()
+            .unwrap()
+            .iter()
+            .any(|network| network.name == "home"));
     }
 
     #[tokio::test]
@@ -1887,7 +2612,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .category,
-            NodeDiscoveryIndexErrorCategory::Rejected
+            NodeDiscoveryIndexErrorCategory::Signature
         );
     }
 

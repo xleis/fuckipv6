@@ -942,7 +942,18 @@ export type NodeDiscoveryIndexError = {
   "retryable": boolean;
 };
 
-export type NodeDiscoveryIndexErrorCategory = "offline" | "timeout" | "unsupported" | "rejected" | "invalid_response" | "storage" | "server";
+export type NodeDiscoveryIndexErrorCategory = "offline" | "timeout" | "tls" | "signature" | "partial_corruption" | "incompatible_version" | "unsupported" | "rejected" | "invalid_response" | "storage" | "server" | "cancelled";
+
+export type NodeDiscoveryIndexMetrics = {
+  "cancellations": number;
+  "last_request_duration_ms"?: number | null;
+  "records_accepted": number;
+  "records_rejected": number;
+  "request_attempts": number;
+  "requests_failed": number;
+  "requests_succeeded": number;
+  "retries_scheduled": number;
+};
 
 export type NodeDiscoveryIndexRecordSnapshot = {
   "accepted_at_unix_ms": number;
@@ -950,6 +961,7 @@ export type NodeDiscoveryIndexRecordSnapshot = {
   "discoverable": boolean;
   "invalid_reason"?: string | null;
   "record": NetworkDiscoveryRecord;
+  "source": NodeDiscoveryIndexSource;
 };
 
 export type NodeDiscoveryIndexSnapshot = {
@@ -958,11 +970,15 @@ export type NodeDiscoveryIndexSnapshot = {
   "last_attempt_unix_ms"?: number | null;
   "last_error"?: NodeDiscoveryIndexError | null;
   "last_success_unix_ms"?: number | null;
+  "metrics": NodeDiscoveryIndexMetrics;
   "records": Array<NodeDiscoveryIndexRecordSnapshot>;
   "rejected_record_count": number;
   "search_history_stored": boolean;
+  "source": NodeDiscoveryIndexSource;
   "state": NodeDiscoveryIndexState;
 };
+
+export type NodeDiscoveryIndexSource = "none" | "cache" | "network" | "join";
 
 export type NodeDiscoveryIndexState = "idle" | "pending" | "ready" | "degraded" | "failed" | "unsupported";
 

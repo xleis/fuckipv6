@@ -45,6 +45,7 @@ use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
     ConfigurationChangeAction, ConfigurationHistoryEntry, ConfigurationImpact,
 };
+use crate::discovery_index::NodeDiscoveryIndexErrorCategory;
 use crate::network_discovery::{
     project_discovery, DiscoveryFilters, DiscoveryProjection, DiscoveryProjectionState,
     DiscoveryResult, DiscoveryVisibilityFilter,
@@ -5786,6 +5787,13 @@ impl GpuiShell {
                 semantic,
             ));
         }
+        if projection.state == DiscoveryProjectionState::Pending {
+            notices.push(discovery_notice(
+                "visual-discovery-cancel-hint",
+                t(self.locale, "discovery.pending.cancel_hint").to_string(),
+                SemanticState::Info,
+            ));
+        }
         if projection.rejected_record_count > 0 {
             notices.push(discovery_notice(
                 "visual-discovery-rejected",
@@ -5812,7 +5820,11 @@ impl GpuiShell {
                     "discovery.error.detail",
                     &[("message", t(self.locale, category.message_key()))],
                 ),
-                SemanticState::Danger,
+                if category == NodeDiscoveryIndexErrorCategory::Cancelled {
+                    SemanticState::Info
+                } else {
+                    SemanticState::Danger
+                },
             ));
         }
         if let Some(last_success) = projection.last_success_unix_ms {
@@ -5825,6 +5837,51 @@ impl GpuiShell {
                         "time",
                         &format_diagnostic_timestamp(self.locale, last_success),
                     )],
+                ),
+                SemanticState::Neutral,
+            ));
+        }
+        notices.push(discovery_notice(
+            "visual-discovery-source",
+            tr(
+                self.locale,
+                "discovery.source.detail",
+                &[("source", t(self.locale, projection.source.message_key()))],
+            ),
+            SemanticState::Neutral,
+        ));
+        if let Some(last_attempt) = projection.last_attempt_unix_ms {
+            notices.push(discovery_notice(
+                "visual-discovery-last-attempt",
+                tr(
+                    self.locale,
+                    "discovery.last_attempt",
+                    &[(
+                        "time",
+                        &format_diagnostic_timestamp(self.locale, last_attempt),
+                    )],
+                ),
+                SemanticState::Neutral,
+            ));
+        }
+        if projection.metrics.request_attempts > 0 {
+            let attempts = projection.metrics.request_attempts.to_string();
+            let succeeded = projection.metrics.requests_succeeded.to_string();
+            let failed = projection.metrics.requests_failed.to_string();
+            let retries = projection.metrics.retries_scheduled.to_string();
+            let cancellations = projection.metrics.cancellations.to_string();
+            notices.push(discovery_notice(
+                "visual-discovery-metrics",
+                tr(
+                    self.locale,
+                    "discovery.metrics.summary",
+                    &[
+                        ("attempts", &attempts),
+                        ("succeeded", &succeeded),
+                        ("failed", &failed),
+                        ("retries", &retries),
+                        ("cancellations", &cancellations),
+                    ],
                 ),
                 SemanticState::Neutral,
             ));
@@ -9884,7 +9941,7 @@ mod tests {
     use super::*;
     use crate::discovery_index::{
         NodeDiscoveryIndexError, NodeDiscoveryIndexErrorCategory, NodeDiscoveryIndexRecordSnapshot,
-        NodeDiscoveryIndexSnapshot, NodeDiscoveryIndexState,
+        NodeDiscoveryIndexSnapshot, NodeDiscoveryIndexSource, NodeDiscoveryIndexState,
     };
     use crate::gpui::view_model::{ActionBlockReason, SearchResultKind};
     use crate::network_discovery::DISCOVERY_RESULT_STALE_AFTER_MS;
@@ -10038,6 +10095,7 @@ mod tests {
                 digest: record.digest().expect("discovery digest"),
                 record,
                 accepted_at_unix_ms: self.accepted_at_unix_ms,
+                source: NodeDiscoveryIndexSource::Network,
                 discoverable: true,
                 invalid_reason: None,
             }

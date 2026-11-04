@@ -7,7 +7,10 @@
 
 use fuckipv6_common::domain::{CapabilityKind, NetworkId, NetworkJoinMode, NetworkVisibility};
 
-use crate::discovery_index::{NodeDiscoveryIndexErrorCategory, NodeDiscoveryIndexState};
+use crate::discovery_index::{
+    NodeDiscoveryIndexErrorCategory, NodeDiscoveryIndexMetrics, NodeDiscoveryIndexSource,
+    NodeDiscoveryIndexState,
+};
 use crate::node::NodeSnapshot;
 
 /// Cached records older than this are still shown when signature-valid, but
@@ -76,6 +79,9 @@ pub struct DiscoveryProjection {
     /// result list with this flag set must say that no more results exist.
     pub no_more_results: bool,
     pub last_success_unix_ms: Option<u64>,
+    pub last_attempt_unix_ms: Option<u64>,
+    pub source: NodeDiscoveryIndexSource,
+    pub metrics: NodeDiscoveryIndexMetrics,
     pub error_category: Option<NodeDiscoveryIndexErrorCategory>,
 }
 
@@ -186,6 +192,9 @@ pub fn project_discovery(
         rejected_record_count: index.rejected_record_count,
         partial,
         last_success_unix_ms: index.last_success_unix_ms,
+        last_attempt_unix_ms: index.last_attempt_unix_ms,
+        source: index.source,
+        metrics: index.metrics.clone(),
         error_category,
     }
 }
@@ -285,6 +294,7 @@ mod tests {
     use super::*;
     use crate::discovery_index::{
         NodeDiscoveryIndexError, NodeDiscoveryIndexRecordSnapshot, NodeDiscoveryIndexSnapshot,
+        NodeDiscoveryIndexSource,
     };
 
     struct RecordFixture<'a> {
@@ -374,6 +384,7 @@ mod tests {
                 digest: record.digest().unwrap(),
                 record,
                 accepted_at_unix_ms: self.accepted_at_unix_ms,
+                source: NodeDiscoveryIndexSource::Network,
                 discoverable: true,
                 invalid_reason: None,
             }

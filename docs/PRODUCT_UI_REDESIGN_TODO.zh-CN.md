@@ -1327,7 +1327,7 @@ WebUI `npm test -- --run`（124 passed）、`npm run typecheck`、`npm run lint`
 
 **验收**：不存在隐式贡献；网络声明与节点实际能力不一致时 UI 必须明确降级。
 
-### W8-09 索引故障隔离 `[ ]`
+### W8-09 索引故障隔离 `[x]`
 
 - [ ] 索引超时、TLS 错误、签名错误、部分损坏和版本不兼容分别处理；
 - [ ] 缓存结果标注时间与来源，可手动刷新；
@@ -1338,6 +1338,33 @@ WebUI `npm test -- --run`（124 passed）、`npm run typecheck`、`npm run lint`
 - [ ] 监控指标只包含脱敏聚合信息。
 
 **验收**：索引完全离线时已加入网络仍能启动和运行；恢复后只做有限增量同步。
+
+**证据（2026-11-04）**：索引错误已拆分为超时、TLS、签名、部分损坏、
+版本不兼容、取消及离线/服务端等可操作类别；协议逐条解析记录，坏记录不再拖垮同一响应中的
+有效记录，持久化 schema 不兼容也不会覆盖已有缓存。快照新增 `source`、`last_attempt_unix_ms`
+和脱敏聚合 `metrics`（请求、重试、取消、有效/损坏记录与耗时），GPUI 与 WebUI 均展示来源、
+时间和聚合指标，并保留手动刷新入口；取消操作会中止请求或退避并恢复上一份投影。刷新与发布
+统一采用最多 3 次、250ms 起指数退避且上限 2s 的有限重试，协作端把刷新/重试登记为可取消
+operation，状态更新仅替换 discovery 投影，成员关系、已加入网络和 Coordinator 运行路径保持独立；
+发布失败不清除本地 `NetworkRecord`。新增并通过
+`refresh_retries_timeout_with_bounded_attempts_and_aggregate_metrics`、
+`tls_failures_are_categorized_and_retried_without_leaking_details`、
+`signature_failures_are_terminal_and_never_replace_the_cache`、
+`partial_corruption_keeps_valid_records_and_marks_degraded_cache`、
+`persisted_incompatible_schema_is_reported_without_overwriting_cache`、
+`retry_backoff_is_exponential_and_capped`、
+`cancelled_retry_restores_projection_and_stops_further_attempts`、
+`offline_index_preserves_joined_network_and_membership_projections` 和
+`publication_failure_preserves_local_network_record`。验证通过：
+`cargo test -p fuckipv6-common --all-features`（198 passed）、
+`cargo test -p fuckipv6-client --all-features --lib discovery_index`（20 passed）、
+`cargo test -p fuckipv6-client --all-features --lib`（821 passed，3 ignored）、
+`cargo test -p fuckipv6-coordinator --lib signaling::`（59 passed）、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`、
+WebUI `npm run typecheck`、`npm test -- --run`（124 passed）、`npm run lint`、`npm run build`、
+`node ../scripts/test_webui_accessibility.mjs`、`cargo fmt --all -- --check` 和
+`git diff --check`。构建仅保留既有 Vite i18n 非 module 提示及大于 500 kB chunk 警告。
 
 ### W8-10 网络发现测试与活动 `[ ]`
 

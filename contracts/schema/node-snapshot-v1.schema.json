@@ -618,16 +618,78 @@
       "enum": [
         "offline",
         "timeout",
+        "tls",
+        "signature",
+        "partial_corruption",
+        "incompatible_version",
         "unsupported",
         "rejected",
         "invalid_response",
         "storage",
-        "server"
+        "server",
+        "cancelled"
       ],
       "type": "string"
     },
+    "NodeDiscoveryIndexMetrics": {
+      "description": "Aggregate-only discovery telemetry. It deliberately has no URL, response\nbody, search text, record name or free-form error text.",
+      "properties": {
+        "cancellations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_request_duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "records_accepted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "records_rejected": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_attempts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests_failed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests_succeeded": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retries_scheduled": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_attempts",
+        "requests_succeeded",
+        "requests_failed",
+        "retries_scheduled",
+        "cancellations",
+        "records_accepted",
+        "records_rejected"
+      ],
+      "type": "object"
+    },
     "NodeDiscoveryIndexRecordSnapshot": {
-      "description": "One signed record accepted from the index or supplied by a join flow.\n\n`discoverable` is false for expired, malformed or revoked records. The raw\nsigned record is retained so revocations and revision watermarks survive a\nrestart and can reject later rollback attempts.",
       "properties": {
         "accepted_at_unix_ms": {
           "format": "uint64",
@@ -648,12 +710,16 @@
         },
         "record": {
           "$ref": "#/$defs/NetworkDiscoveryRecord"
+        },
+        "source": {
+          "$ref": "#/$defs/NodeDiscoveryIndexSource"
         }
       },
       "required": [
         "record",
         "digest",
         "accepted_at_unix_ms",
+        "source",
         "discoverable"
       ],
       "type": "object"
@@ -697,6 +763,9 @@
             "null"
           ]
         },
+        "metrics": {
+          "$ref": "#/$defs/NodeDiscoveryIndexMetrics"
+        },
         "records": {
           "items": {
             "$ref": "#/$defs/NodeDiscoveryIndexRecordSnapshot"
@@ -712,18 +781,33 @@
           "description": "The discovery index client has no search-query field. This explicit flag\ndocuments the privacy contract for generated UI and Android clients.",
           "type": "boolean"
         },
+        "source": {
+          "$ref": "#/$defs/NodeDiscoveryIndexSource"
+        },
         "state": {
           "$ref": "#/$defs/NodeDiscoveryIndexState"
         }
       },
       "required": [
         "state",
+        "source",
         "rejected_record_count",
         "records",
+        "metrics",
         "data_plane_affected",
         "search_history_stored"
       ],
       "type": "object"
+    },
+    "NodeDiscoveryIndexSource": {
+      "description": "One signed record accepted from the index or supplied by a join flow.\n\n`discoverable` is false for expired, malformed or revoked records. The raw\nsigned record is retained so revocations and revision watermarks survive a\nrestart and can reject later rollback attempts.",
+      "enum": [
+        "none",
+        "cache",
+        "network",
+        "join"
+      ],
+      "type": "string"
     },
     "NodeDiscoveryIndexState": {
       "description": "Stable discovery-index states consumed by every UI adapter.",
@@ -2106,9 +2190,19 @@
       "$ref": "#/$defs/NodeDiscoveryIndexSnapshot",
       "default": {
         "data_plane_affected": false,
+        "metrics": {
+          "cancellations": 0,
+          "records_accepted": 0,
+          "records_rejected": 0,
+          "request_attempts": 0,
+          "requests_failed": 0,
+          "requests_succeeded": 0,
+          "retries_scheduled": 0
+        },
         "records": [],
         "rejected_record_count": 0,
         "search_history_stored": false,
+        "source": "none",
         "state": "idle"
       },
       "description": "Signed public discovery-index projection. This control-plane state is\nisolated from joined network lifecycle and forwarding data planes."

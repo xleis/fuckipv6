@@ -847,6 +847,18 @@ mod tests {
         .unwrap()
     }
 
+    fn assert_terminal_reason_retention(mut request: JoinRequest) {
+        let deadline = request
+            .reason_retention_until_unix_ms
+            .expect("terminal request must have a retention deadline");
+        assert!(!request.scrub_expired_reason(deadline - 1));
+        assert!(request.reason.is_some());
+        assert!(request.scrub_expired_reason(deadline));
+        assert!(request.reason.is_none());
+        assert!(request.information_request.is_none());
+        request.validate().unwrap();
+    }
+
     #[test]
     fn join_request_reason_limits_count_unicode_scalars_and_reject_control_characters() {
         validate_join_request_reason(&"界".repeat(JOIN_REQUEST_MAX_REASON_CHARS)).unwrap();
@@ -1031,8 +1043,20 @@ mod tests {
 
     #[test]
     fn terminal_reason_is_retained_then_scrubbed_at_retention_deadline() {
-        let mut request = join_request(100);
-        request
+        let mut approved = join_request(100);
+        approved
+            .review(
+                1,
+                JoinRequestReviewAction::Approve,
+                applicant("admin"),
+                None,
+                110,
+            )
+            .unwrap();
+        assert_terminal_reason_retention(approved);
+
+        let mut rejected = join_request(100);
+        rejected
             .review(
                 1,
                 JoinRequestReviewAction::Reject,
@@ -1041,13 +1065,16 @@ mod tests {
                 110,
             )
             .unwrap();
-        let deadline = request.reason_retention_until_unix_ms.unwrap();
-        assert!(!request.scrub_expired_reason(deadline - 1));
-        assert!(request.reason.is_some());
-        assert!(request.scrub_expired_reason(deadline));
-        assert!(request.reason.is_none());
-        assert!(request.information_request.is_none());
-        request.validate().unwrap();
+        assert_terminal_reason_retention(rejected);
+
+        let mut withdrawn = join_request(100);
+        withdrawn.withdraw(&applicant("applicant"), 110).unwrap();
+        assert_terminal_reason_retention(withdrawn);
+
+        let mut expired = join_request(100);
+        let expires_at = expired.expires_at_unix_ms;
+        assert!(expired.expire_if_due(expires_at).unwrap());
+        assert_terminal_reason_retention(expired);
     }
 
     #[test]

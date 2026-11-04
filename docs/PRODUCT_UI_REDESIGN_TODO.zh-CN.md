@@ -1135,7 +1135,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 审批前显示将授予的成员权限和 Exit/File 影响；
 - [x] 并发审批只能产生一个最终成员状态；
 - [x] 申请过期、撤回、管理员撤权时有一致状态；
-- [ ] 申请理由只对获授权角色可见，并纳入保留策略；
+- [x] 申请理由只对获授权角色可见，并纳入保留策略；
 - [ ] 所有审批动作有审计、活动投影和通知。
 
 **证据（2026-11-04，审批命令与 UI 契约切片）**：加入申请状态机、服务端权限、幂等、
@@ -1221,6 +1221,17 @@ WebUI 回归测试覆盖单条和批量审批的影响预览，GPUI 新增
 该测试同时校验过期、撤回、撤权三个阶段及最终批准后的网络名册，确保请求账本和成员投影一致。
 验证通过：`cargo test -p fuckipv6-coordinator --lib signaling::join_requests::tests`
 （9 passed，76 filtered）、`cargo fmt --all -- --check` 和 `git diff --check`。
+
+本轮补齐申请理由的授权可见性与保留期验证：Coordinator 存储按当前 Owner/管理员名册过滤完整
+请求，申请人只能读取自己的申请，无关节点既不能通过列表也不能通过 request ID 读取理由；
+`JoinRequest` 的 Debug 输出继续脱敏请求理由和管理员补充说明，变更通知仅携带 request ID、
+状态与 revision。拒绝、撤回、过期和批准四种终态共用 30 天保留期限，存储读取事务到期后原子
+擦除申请理由及补充说明，测试重新打开持久化文件后确认原文不可恢复。新增
+`reason_visibility_and_retention_are_enforced_in_the_durable_store`，并扩展
+`terminal_reason_is_retained_then_scrubbed_at_retention_deadline` 覆盖全部终态。验证通过：
+`cargo test -p fuckipv6-coordinator --lib signaling::join_requests::tests`（10 passed）、
+`cargo test -p fuckipv6-common --lib domain::membership::tests`（14 passed）、
+`cargo fmt --all -- --check` 和 `git diff --check`。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

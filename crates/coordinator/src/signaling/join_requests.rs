@@ -1128,6 +1128,97 @@ mod tests {
     }
 
     #[test]
+    fn reason_visibility_and_retention_are_enforced_in_the_durable_store() {
+        let dir = test_dir("reason-retention");
+        let store = test_store(&dir);
+        let applicant_seed = "private-reason-applicant";
+        let applicant_id = applicant(applicant_seed);
+        let request = request(applicant_seed, "private-reason", 1_000);
+        let private_reason = request.reason.clone().unwrap();
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                request.clone(),
+                1_001,
+            )
+            .unwrap();
+
+        let applicant_view = store
+            .status(&network_id(), &applicant_id, &request.request_id, 1_002)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            applicant_view.reason.as_deref(),
+            Some(private_reason.as_str())
+        );
+        for reviewer in [owner(), admin()] {
+            let reviewer_view = store
+                .status(&network_id(), &reviewer, &request.request_id, 1_002)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                reviewer_view.reason.as_deref(),
+                Some(private_reason.as_str())
+            );
+        }
+        let outsider = applicant("reason-outsider");
+        assert!(store
+            .status(&network_id(), &outsider, &request.request_id, 1_002)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .list(&network_id(), &outsider, 1_002)
+            .unwrap()
+            .is_empty());
+
+        let decided_at = 2_000;
+        store
+            .review(
+                &network_id(),
+                &owner(),
+                vec![JoinRequestBatchReviewItem {
+                    request_id: request.request_id.clone(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Reject,
+                    note: Some("Private reviewer note".into()),
+                }],
+                decided_at,
+            )
+            .unwrap();
+        let deadline = decided_at + fuckipv6_common::domain::JOIN_REQUEST_REASON_RETENTION_MS;
+        let retained = store
+            .status(&network_id(), &owner(), &request.request_id, deadline - 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.reason.as_deref(), Some(private_reason.as_str()));
+        let durable_before = std::fs::read_to_string(dir.join("join_requests.json")).unwrap();
+        assert!(durable_before.contains(&private_reason));
+
+        let scrubbed = store
+            .status(&network_id(), &applicant_id, &request.request_id, deadline)
+            .unwrap()
+            .unwrap();
+        assert!(scrubbed.reason.is_none());
+        assert!(scrubbed.information_request.is_none());
+        let durable_after = std::fs::read_to_string(dir.join("join_requests.json")).unwrap();
+        assert!(!durable_after.contains(&private_reason));
+        assert!(!durable_after.contains("Private reviewer note"));
+        let reopened = JoinRequestStore::new(
+            dir.join("join_requests.json"),
+            Some(dir.join("network.json")),
+            None,
+            vec![],
+        )
+        .unwrap();
+        let listed = reopened
+            .list(&network_id(), &owner(), deadline + 1)
+            .unwrap();
+        assert!(listed[0].reason.is_none());
+    }
+
+    #[test]
     fn reviewer_cannot_approve_their_own_request() {
         let dir = test_dir("self-review");
         let applicant_seed = "self-reviewer";

@@ -1740,9 +1740,14 @@ fn now_unix_ms() -> u64 {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CapabilityKind, DiscoveryTransport, ExitContributionObligation, MembershipRole,
-        MembershipState, NetworkCreateProfile, NetworkEndpoint, NetworkJoinMode, NetworkRecord,
-        NetworkVisibility, PublicKey,
+        CapabilityKind, DiscoveryTransport, ExitContributionObligation, InvitationCreateRequest,
+        InvitationRedeemRequest, JoinApplicantProfile, JoinRequest, JoinRequestReviewAction,
+        MembershipRole, MembershipState, MembershipTerms, NetworkCreateProfile, NetworkEndpoint,
+        NetworkJoinMode, NetworkRecord, NetworkVisibility, PublicKey,
+    };
+    use fuckipv6_common::JoinRequestBatchReviewItem;
+    use fuckipv6_coordinator::signaling::{
+        invitations::InvitationStore, join_requests::JoinRequestStore,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2614,6 +2619,235 @@ mod tests {
                 .category,
             NodeDiscoveryIndexErrorCategory::Signature
         );
+    }
+
+    fn write_network_record_for_store(dir: &std::path::Path, record: &NetworkRecord) -> PathBuf {
+        let path = dir.join("network.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(record).unwrap()).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn open_join_end_to_end_uses_signed_discovery_preview_and_confirmation() {
+        let manager =
+            DiscoveryIndexManager::new(temp_path("e2e-open"), Arc::new(FakeTransport::default()));
+        let state = NodeStateStore::new();
+        let identity = Identity::generate().unwrap();
+        let profile = signed_network_profile(&identity);
+        let record = signed_network_revision_from_profile(&identity, &profile, 1);
+        let network_id = record.document.network_id.to_string();
+        let expected_digest = record.digest().unwrap();
+
+        manager
+            .accept_join_record(&state, record)
+            .await
+            .expect("signed open network record is accepted");
+        let preview = manager
+            .preview_join_record(&network_id, false)
+            .await
+            .unwrap();
+        assert!(preview.can_join);
+        assert_eq!(preview.join_mode, NetworkJoinMode::Open);
+        assert_eq!(preview.network_policy_revision, profile.policy_revision);
+        assert_eq!(
+            preview.privacy_policy_revision,
+            profile.privacy_policy_revision
+        );
+
+        manager
+            .confirm_join_record(
+                &network_id,
+                &preview.preview_digest,
+                preview.network_policy_revision,
+                preview.privacy_policy_revision,
+                &preview.terms_hash,
+                false,
+            )
+            .await
+            .expect("the exact disclosed signed record is confirmed");
+        let snapshot = state.snapshot().await.discovery_index;
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].digest, expected_digest);
+        assert!(snapshot.records[0].discoverable);
+    }
+
+    #[tokio::test]
+    async fn approval_join_end_to_end_submits_reviews_and_admits_the_applicant() {
+        let discovery_path = temp_path("e2e-approval");
+        let dir = discovery_path.parent().unwrap().to_path_buf();
+        let manager =
+            DiscoveryIndexManager::new(discovery_path, Arc::new(FakeTransport::default()));
+        let state = NodeStateStore::new();
+        let owner_identity = Identity::generate().unwrap();
+        let profile = signed_network_profile_with(
+            &owner_identity,
+            NetworkJoinMode::ApprovalRequired,
+            Some(4),
+            0,
+        );
+        let record = signed_network_revision_from_profile(&owner_identity, &profile, 1);
+        let network_id = record.document.network_id.clone();
+        manager
+            .accept_join_record(&state, record)
+            .await
+            .expect("signed approval network record is accepted");
+        let approved_record = manager
+            .approval_join_record(network_id.as_str())
+            .await
+            .expect("approval path re-reads the signed record");
+        assert_eq!(
+            approved_record.document.join_mode,
+            NetworkJoinMode::ApprovalRequired
+        );
+
+        let network_path = write_network_record_for_store(&dir, &profile);
+        let store = JoinRequestStore::new(
+            dir.join("join_requests.json"),
+            Some(network_path.clone()),
+            None,
+            vec![],
+        )
+        .unwrap();
+        let applicant_identity = Identity::generate().unwrap();
+        let applicant_id = NodeId::from_public_key(&applicant_identity.public_key_bytes());
+        let now = now_unix_ms();
+        let request = JoinRequest::new(
+            JoinRequest::derived_id(&network_id, &applicant_id, "e2e-approval"),
+            network_id.clone(),
+            JoinApplicantProfile {
+                node_id: applicant_id.clone(),
+                display_name: Some("Applicant".into()),
+                public_key_fingerprint: Identity::public_key_fingerprint(
+                    &applicant_identity.public_key_bytes(),
+                ),
+            },
+            "Please allow this node to join for file collaboration.",
+            MembershipTerms {
+                network_policy_revision: approved_record.document.policy_revision,
+                privacy_policy_revision: approved_record.document.privacy_policy_revision,
+                exit_contribution: approved_record.document.exit_contribution,
+                exit_contribution_scope: approved_record.document.exit_contribution_scope,
+                member_limit: approved_record.document.member_limit,
+            },
+            profile.approval_grant_preview(),
+            now,
+            now.saturating_add(60_000),
+        )
+        .unwrap();
+        let submitted = store
+            .submit(
+                &network_id,
+                &applicant_id,
+                &applicant_identity.public_key_bytes(),
+                request.clone(),
+                now,
+            )
+            .unwrap();
+        assert_eq!(submitted.request_id, request.request_id);
+        let pending = store
+            .list(&network_id, &profile.owner, now)
+            .expect("owner sees the pending request");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].state,
+            fuckipv6_common::domain::JoinRequestState::Pending
+        );
+
+        let reviewed = store
+            .review(
+                &network_id,
+                &profile.owner,
+                vec![JoinRequestBatchReviewItem {
+                    request_id: request.request_id,
+                    expected_revision: request.revision,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+                now.saturating_add(1),
+            )
+            .unwrap();
+        assert_eq!(
+            reviewed[0].state,
+            fuckipv6_common::domain::JoinRequestState::Approved
+        );
+        let persisted: NetworkRecord =
+            serde_json::from_slice(&std::fs::read(network_path).unwrap()).unwrap();
+        assert!(persisted.members.contains(&applicant_id));
+    }
+
+    #[tokio::test]
+    async fn private_invitation_end_to_end_previews_redeems_and_admits_the_invitee() {
+        let discovery_path = temp_path("e2e-invite");
+        let dir = discovery_path.parent().unwrap().to_path_buf();
+        let manager =
+            DiscoveryIndexManager::new(discovery_path, Arc::new(FakeTransport::default()));
+        let state = NodeStateStore::new();
+        let owner_identity = Identity::generate().unwrap();
+        let profile =
+            signed_network_profile_with(&owner_identity, NetworkJoinMode::InviteOnly, Some(4), 0);
+        let record = signed_network_revision_from_profile(&owner_identity, &profile, 1);
+        let network_id = record.document.network_id.clone();
+        manager
+            .accept_join_record(&state, record)
+            .await
+            .expect("signed invitation network record is accepted");
+        let network_path = write_network_record_for_store(&dir, &profile);
+        let store = InvitationStore::new(
+            dir.join("invitations.json"),
+            Some(network_path.clone()),
+            None,
+            vec![],
+        )
+        .unwrap();
+        let now = now_unix_ms();
+        let issued = store
+            .create(
+                &network_id,
+                &profile.owner,
+                InvitationCreateRequest::new(
+                    network_id.clone(),
+                    MembershipRole::Member,
+                    vec![CapabilityKind::Relay],
+                    1,
+                    60 * 60 * 1000,
+                ),
+                now,
+            )
+            .unwrap();
+        let invitee_identity = Identity::generate().unwrap();
+        let invitee = NodeId::from_public_key(&invitee_identity.public_key_bytes());
+        let preview = store
+            .preview(&network_id, &invitee, &issued.code, now.saturating_add(1))
+            .expect("invitee can preview the invitation");
+        assert!(preview.can_accept);
+        assert!(!preview.creates_permanent_membership);
+        assert_eq!(
+            preview.invitation_id,
+            issued.status.invitation.invitation_id
+        );
+
+        let redeemed = store
+            .redeem(
+                InvitationRedeemRequest {
+                    network_id: network_id.clone(),
+                    code: issued.code,
+                    invitation_id: preview.invitation_id.clone(),
+                    expected_invitation_revision: preview.invitation_revision,
+                    preview_digest: preview.preview_digest,
+                    terms_hash: preview.terms_hash,
+                    acknowledged_at_unix_ms: now.saturating_add(1),
+                    exit_contribution_acknowledged: Some(true),
+                },
+                &invitee,
+                now.saturating_add(2),
+            )
+            .unwrap();
+        assert_eq!(redeemed.node_id, invitee);
+        assert!(!redeemed.already_redeemed);
+        assert!(!redeemed.grants_permanent_membership);
+        let persisted: NetworkRecord =
+            serde_json::from_slice(&std::fs::read(network_path).unwrap()).unwrap();
+        assert!(persisted.members.contains(&invitee));
     }
 
     #[tokio::test]

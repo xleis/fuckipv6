@@ -2161,6 +2161,163 @@ describe("React WebUI shell", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens the joined-network menu from its visible keyboard trigger and restores focus", async () => {
+    authenticate(populatedSnapshot);
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      }),
+    );
+    const joined = await screen.findByTestId("joined-networks-section");
+    const trigger = within(joined).getByRole("button", {
+      name: "translated:common.actions · home",
+    });
+
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    expect(
+      await screen.findByRole("menuitem", {
+        name: "translated:action.leave_network",
+      }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(
+      screen.queryByRole("menuitem", {
+        name: "translated:action.leave_network",
+      }),
+    ).not.toBeInTheDocument();
+
+    await user.keyboard(" ");
+    expect(
+      await screen.findByRole("menuitem", {
+        name: "translated:action.leave_network",
+      }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("opens the joined-network action sheet after a touch long press", async () => {
+    authenticate(populatedSnapshot);
+    renderApp();
+
+    await screen.findByRole("button", {
+      name: /translated:shortcut\.discover_networks/,
+    }).then((button) => button.click());
+    const joined = await screen.findByTestId("joined-networks-section");
+    const homeCard = within(joined).getByText("home").closest("article");
+    expect(homeCard).not.toBeNull();
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(homeCard!, {
+        pointerType: "touch",
+        clientX: 12,
+        clientY: 18,
+      });
+      act(() => vi.advanceTimersByTime(449));
+      expect(
+        screen.queryByRole("menuitem", {
+          name: "translated:action.leave_network",
+        }),
+      ).not.toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1));
+      expect(
+        screen.getByRole("menuitem", {
+          name: "translated:action.leave_network",
+        }),
+      ).toBeInTheDocument();
+      expect(window.history.state.networkActionSheet).toBe("home");
+    } finally {
+      window.history.replaceState(null, "");
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a touch long press on scroll or pointer movement", async () => {
+    authenticate(populatedSnapshot);
+    renderApp();
+
+    await screen.findByRole("button", {
+      name: /translated:shortcut\.discover_networks/,
+    }).then((button) => button.click());
+    const joined = await screen.findByTestId("joined-networks-section");
+    const homeCard = within(joined).getByText("home").closest("article");
+    expect(homeCard).not.toBeNull();
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(homeCard!, {
+        pointerType: "touch",
+        clientX: 12,
+        clientY: 18,
+      });
+      fireEvent.scroll(window);
+      act(() => vi.advanceTimersByTime(450));
+
+      fireEvent.pointerDown(homeCard!, {
+        pointerType: "touch",
+        clientX: 12,
+        clientY: 18,
+      });
+      fireEvent.pointerMove(homeCard!, {
+        pointerType: "touch",
+        clientX: 24,
+        clientY: 18,
+      });
+      act(() => vi.advanceTimersByTime(450));
+
+      expect(
+        screen.queryByRole("menuitem", {
+          name: "translated:action.leave_network",
+        }),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a long-press action sheet on browser back and restores focus", async () => {
+    authenticate(populatedSnapshot);
+    renderApp();
+
+    await screen.findByRole("button", {
+      name: /translated:shortcut\.discover_networks/,
+    }).then((button) => button.click());
+    const joined = await screen.findByTestId("joined-networks-section");
+    const homeCard = within(joined).getByText("home").closest("article");
+    const trigger = within(joined).getByRole("button", {
+      name: "translated:common.actions · home",
+    });
+    expect(homeCard).not.toBeNull();
+
+    fireEvent.pointerDown(homeCard!, {
+      pointerType: "touch",
+      clientX: 12,
+      clientY: 18,
+    });
+    expect(
+      await screen.findByRole("menuitem", {
+        name: "translated:action.leave_network",
+      }),
+    ).toBeInTheDocument();
+    expect(window.history.state.networkActionSheet).toBe("home");
+
+    act(() => window.history.back());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("menuitem", {
+          name: "translated:action.leave_network",
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
   it("shows degraded partial and stale discovery without calling it empty", async () => {
     authenticate(
       discoverySnapshot(

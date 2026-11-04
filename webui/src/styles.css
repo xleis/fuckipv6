@@ -1143,6 +1143,16 @@ button:disabled {
 }
 .network-card {
   padding: var(--space-3);
+  touch-action: pan-y;
+}
+.network-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.network-actions-trigger {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
 }
 .network-card-head {
   display: flex;
@@ -2882,6 +2892,11 @@ button:disabled {
   background: var(--danger-soft);
   color: var(--danger);
 }
+.context-separator {
+  height: 1px;
+  margin: var(--space-1) var(--space-2);
+  background: var(--border);
+}
 .dropdown-label {
   padding: var(--space-2) var(--space-3) var(--space-1);
   color: var(--text-faint);
@@ -3716,6 +3731,24 @@ button:disabled {
 }
 
 @media (max-width: 600px) {
+  .network-actions-menu {
+    position: fixed !important;
+    inset: auto var(--space-3) var(--space-3) !important;
+    width: auto !important;
+    max-height: min(70vh, 520px);
+    min-width: 0;
+    overflow-y: auto;
+    padding: var(--space-2);
+    border-radius: var(--radius-lg);
+    transform: none !important;
+  }
+  .network-actions-menu .dropdown-label {
+    padding-top: var(--space-1);
+  }
+  .network-actions-menu .dropdown-item,
+  .network-actions-menu .context-item {
+    min-height: 44px;
+  }
   .brand-lockup {
     display: none;
   }

@@ -1,4 +1,5 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   flexRender,
@@ -19,6 +20,7 @@ import {
   Cpu,
   Database,
   DoorOpen,
+  Ellipsis,
   Gauge,
   Globe2,
   KeyRound,
@@ -35,11 +37,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type JSX,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import type {
@@ -150,10 +155,148 @@ function NetworkContextMenu({
   onNavigate(pageId: string): void;
   onRequestAction(actionId: string, initialValues?: ActionValues): void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressScrollAbortRef = useRef<AbortController | null>(null);
+  const suppressClickRef = useRef(false);
+  const suppressClickTimerRef = useRef<number | null>(null);
+  const openedByHistoryRef = useRef(false);
+
+  const cancelLongPress = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressOriginRef.current = null;
+    longPressScrollAbortRef.current?.abort();
+    longPressScrollAbortRef.current = null;
+  }, []);
+
+  useEffect(() => cancelLongPress, [cancelLongPress]);
+
+  useEffect(() => {
+    const closeFromHistory = () => {
+      if (!openedByHistoryRef.current) return;
+      openedByHistoryRef.current = false;
+      setMenuOpen(false);
+      window.requestAnimationFrame(() => menuButtonRef.current?.focus());
+    };
+    window.addEventListener("popstate", closeFromHistory);
+    return () => window.removeEventListener("popstate", closeFromHistory);
+  }, []);
+
+  function navigate(pageId: string): void {
+    onSelectNetwork(network.name);
+    onNavigate(pageId);
+  }
+
+  function leaveNetwork(): void {
+    onSelectNetwork(network.name);
+    onRequestAction("leave_network", { network_name: network.name });
+  }
+
+  function handleMenuOpenChange(open: boolean): void {
+    if (open) {
+      setMenuOpen(true);
+      return;
+    }
+    if (
+      openedByHistoryRef.current &&
+      window.history.state?.networkActionSheet === network.name
+    ) {
+      window.history.back();
+      return;
+    }
+    setMenuOpen(false);
+  }
+
+  function startLongPress(event: ReactPointerEvent<HTMLElement>): void {
+    if (
+      event.pointerType === "mouse" ||
+      (event.target as Element).closest("button")
+    ) {
+      return;
+    }
+    cancelLongPress();
+    longPressOriginRef.current = { x: event.clientX, y: event.clientY };
+    const scrollAbort = new AbortController();
+    longPressScrollAbortRef.current = scrollAbort;
+    window.addEventListener("scroll", cancelLongPress, {
+      capture: true,
+      passive: true,
+      signal: scrollAbort.signal,
+    });
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      longPressOriginRef.current = null;
+      suppressClickRef.current = true;
+      openedByHistoryRef.current = true;
+      window.history.pushState(
+        {
+          ...(window.history.state ?? {}),
+          networkActionSheet: network.name,
+        },
+        "",
+      );
+      setMenuOpen(true);
+    }, 450);
+  }
+
+  function finishLongPress(): void {
+    cancelLongPress();
+    if (!suppressClickRef.current) return;
+    if (suppressClickTimerRef.current !== null) {
+      window.clearTimeout(suppressClickTimerRef.current);
+    }
+    suppressClickTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false;
+      suppressClickTimerRef.current = null;
+    }, 500);
+  }
+
+  function moveLongPress(event: ReactPointerEvent<HTMLElement>): void {
+    const origin = longPressOriginRef.current;
+    if (
+      origin &&
+      (Math.abs(event.clientX - origin.x) > 10 ||
+        Math.abs(event.clientY - origin.y) > 10)
+    ) {
+      cancelLongPress();
+    }
+  }
+
+  function blockClickAfterLongPress(event: ReactMouseEvent<HTMLElement>): void {
+    if (!suppressClickRef.current) return;
+    suppressClickRef.current = false;
+    if (suppressClickTimerRef.current !== null) {
+      window.clearTimeout(suppressClickTimerRef.current);
+      suppressClickTimerRef.current = null;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   return (
-    <ContextMenu.Root>
+    <ContextMenu.Root
+      onOpenChange={(open) => {
+        if (!open && document.activeElement === document.body) {
+          menuButtonRef.current?.focus();
+        }
+      }}
+    >
       <ContextMenu.Trigger asChild>
-        <article className={`network-card ${statusTone(network.status)}`}>
+        <article
+          className={`network-card ${statusTone(network.status)}`}
+          tabIndex={-1}
+          onPointerDown={startLongPress}
+          onPointerMove={moveLongPress}
+          onPointerUp={finishLongPress}
+          onPointerCancel={cancelLongPress}
+          onPointerLeave={cancelLongPress}
+          onClickCapture={blockClickAfterLongPress}
+        >
           <div className="network-card-head">
             <div className="network-icon">
               <Network size={18} />
@@ -165,6 +308,57 @@ function NetworkContextMenu({
             <span className={`status-pill ${statusTone(network.status)}`}>
               {t(locale, `status.network.${network.status}`)}
             </span>
+            <DropdownMenu.Root
+              open={menuOpen}
+              onOpenChange={handleMenuOpenChange}
+            >
+              <DropdownMenu.Trigger asChild>
+                <button
+                  ref={menuButtonRef}
+                  className="icon-button network-actions-trigger"
+                  type="button"
+                  aria-label={`${label(locale, "common.actions")} · ${network.name}`}
+                >
+                  <Ellipsis size={16} />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  className="dropdown-content network-actions-menu"
+                  align="end"
+                  sideOffset={8}
+                >
+                  <DropdownMenu.Label className="dropdown-label">
+                    {label(locale, "common.navigation")}
+                  </DropdownMenu.Label>
+                  <DropdownMenu.Item
+                    className="dropdown-item"
+                    onSelect={() => navigate("peers")}
+                  >
+                    {label(locale, "nav.peers")}
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    className="dropdown-item"
+                    onSelect={() => navigate("routing")}
+                  >
+                    {label(locale, "nav.routing")}
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    className="dropdown-item"
+                    onSelect={() => navigate("traffic")}
+                  >
+                    {label(locale, "nav.traffic")}
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Separator className="context-separator" />
+                  <DropdownMenu.Item
+                    className="dropdown-item danger"
+                    onSelect={leaveNetwork}
+                  >
+                    {label(locale, "action.leave_network")}
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
           </div>
           <div className="network-metrics">
             <div>
@@ -183,43 +377,30 @@ function NetworkContextMenu({
         </article>
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
-        <ContextMenu.Content className="context-menu">
+        <ContextMenu.Content className="context-menu network-actions-menu">
+          <ContextMenu.Label className="dropdown-label">
+            {label(locale, "common.navigation")}
+          </ContextMenu.Label>
           <ContextMenu.Item
             className="context-item"
-            onSelect={() => {
-              onSelectNetwork(network.name);
-              onNavigate("peers");
-            }}
+            onSelect={() => navigate("peers")}
           >
             {label(locale, "nav.peers")}
           </ContextMenu.Item>
           <ContextMenu.Item
             className="context-item"
-            onSelect={() => {
-              onSelectNetwork(network.name);
-              onNavigate("routing");
-            }}
+            onSelect={() => navigate("routing")}
           >
             {label(locale, "nav.routing")}
           </ContextMenu.Item>
           <ContextMenu.Item
             className="context-item"
-            onSelect={() => {
-              onSelectNetwork(network.name);
-              onNavigate("traffic");
-            }}
+            onSelect={() => navigate("traffic")}
           >
             {label(locale, "nav.traffic")}
           </ContextMenu.Item>
-          <ContextMenu.Item
-            className="context-item danger"
-            onSelect={() => {
-              onSelectNetwork(network.name);
-              onRequestAction("leave_network", {
-                network_name: network.name,
-              });
-            }}
-          >
+          <ContextMenu.Separator className="context-separator" />
+          <ContextMenu.Item className="context-item danger" onSelect={leaveNetwork}>
             {label(locale, "action.leave_network")}
           </ContextMenu.Item>
         </ContextMenu.Content>

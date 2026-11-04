@@ -267,6 +267,7 @@ struct GpuiShell {
     pending_notice_after_snapshot: Option<String>,
     language_menu_open: bool,
     network_menu_open: bool,
+    network_actions_open: Option<String>,
 }
 
 impl GpuiShell {
@@ -341,6 +342,7 @@ impl GpuiShell {
             pending_notice_after_snapshot: None,
             language_menu_open: false,
             network_menu_open: false,
+            network_actions_open: None,
         };
 
         let search_input = cx.new(|cx| {
@@ -2816,12 +2818,14 @@ impl GpuiShell {
         }
         self.selected_page = page_id.to_string();
         self.pending_confirmation = None;
+        self.network_actions_open = None;
         self.expanded_actions.insert(action_id.to_string(), true);
         cx.notify();
     }
 
     fn select_network_context(&mut self, network_name: String, cx: &mut Context<Self>) {
         self.selected_network = Some(network_name.clone());
+        self.network_actions_open = None;
         self.recent_join_requests = None;
         self.join_request_selection.clear();
         self.recent_issued_invitation = None;
@@ -2885,6 +2889,7 @@ impl GpuiShell {
         self.pending_confirmation = None;
         self.language_menu_open = false;
         self.network_menu_open = false;
+        self.network_actions_open = None;
         self.search_query.clear();
         if let Some(input) = &self.search_input {
             input.update(cx, |input, cx| input.set_value("", cx));
@@ -5341,7 +5346,11 @@ impl GpuiShell {
                         })
                     })
                     .unwrap_or(status);
-                div()
+                let actions_open =
+                    self.network_actions_open.as_deref() == Some(network_name.as_str());
+                let trigger_name = network_name.clone();
+                let trigger_selector_name = network_name.clone();
+                let mut card = div()
                     .debug_selector(|| "visual-discovery-joined-network".into())
                     .flex()
                     .flex_col()
@@ -5351,13 +5360,171 @@ impl GpuiShell {
                     .bg(rgba(COLOR_PANEL_RAISED))
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight(600.0))
-                            .text_color(rgba(COLOR_TEXT))
-                            .child(network_name.clone()),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(network_name.clone()),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "joined-network-actions-{}",
+                                        network_name
+                                    )),
+                                    t(self.locale, "common.actions").to_string(),
+                                    ButtonVariant::Ghost,
+                                    false,
+                                )
+                                .debug_selector(move || {
+                                    format!(
+                                        "visual-discovery-joined-actions-{}",
+                                        trigger_selector_name
+                                    )
+                                })
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.network_actions_open =
+                                            if shell.network_actions_open.as_deref()
+                                                == Some(trigger_name.as_str())
+                                            {
+                                                None
+                                            } else {
+                                                Some(trigger_name.clone())
+                                            };
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     )
-                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(detail))
-                    .into_any_element()
+                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(detail));
+
+                if actions_open {
+                    let menu_name = network_name.clone();
+                    let peers_name = network_name.clone();
+                    let routing_name = network_name.clone();
+                    let traffic_name = network_name.clone();
+                    let leave_name = network_name.clone();
+                    card = card.child(
+                        div()
+                            .debug_selector(move || {
+                                format!("visual-discovery-joined-menu-{}", menu_name)
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(rgba(COLOR_BORDER))
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_FAINT))
+                                    .child(t(self.locale, "common.navigation").to_string()),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "joined-network-peers-{}",
+                                        network_name
+                                    )),
+                                    t(self.locale, "nav.peers").to_string(),
+                                    ButtonVariant::Ghost,
+                                    false,
+                                )
+                                .w_full()
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.navigate_to_row(
+                                            &RowNavigation {
+                                                page_id: "peers".into(),
+                                                network_name: Some(peers_name.clone()),
+                                                label: t(shell.locale, "nav.peers").to_string(),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "joined-network-routing-{}",
+                                        network_name
+                                    )),
+                                    t(self.locale, "nav.routing").to_string(),
+                                    ButtonVariant::Ghost,
+                                    false,
+                                )
+                                .w_full()
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.navigate_to_row(
+                                            &RowNavigation {
+                                                page_id: "routing".into(),
+                                                network_name: Some(routing_name.clone()),
+                                                label: t(shell.locale, "nav.routing").to_string(),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "joined-network-traffic-{}",
+                                        network_name
+                                    )),
+                                    t(self.locale, "nav.traffic").to_string(),
+                                    ButtonVariant::Ghost,
+                                    false,
+                                )
+                                .w_full()
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.navigate_to_row(
+                                            &RowNavigation {
+                                                page_id: "traffic".into(),
+                                                network_name: Some(traffic_name.clone()),
+                                                label: t(shell.locale, "nav.traffic").to_string(),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                            .child(div().h(px(1.0)).mx_2().my_1().bg(rgba(COLOR_BORDER)))
+                            .child(
+                                button(
+                                    SharedString::from(format!(
+                                        "joined-network-leave-{}",
+                                        network_name
+                                    )),
+                                    t(self.locale, "action.leave_network").to_string(),
+                                    ButtonVariant::Danger,
+                                    false,
+                                )
+                                .w_full()
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.select_network_context(leave_name.clone(), cx);
+                                        shell.open_action("networks", "leave_network", cx);
+                                    },
+                                )),
+                            ),
+                    );
+                }
+                card.into_any_element()
             })
             .collect::<Vec<_>>();
 
@@ -10866,6 +11033,7 @@ mod tests {
             "visual-discovery-networks",
             "visual-discovery-joined",
             "visual-discovery-joined-network",
+            "visual-discovery-joined-actions-home",
             "visual-discovery-results",
             "visual-discovery-search",
             "visual-discovery-filters",
@@ -10888,6 +11056,60 @@ mod tests {
         assert!(visible
             .debug_bounds("visual-discovery-empty-results")
             .is_none());
+    }
+
+    #[gpui::test]
+    fn joined_network_actions_are_keyboard_reachable_and_route_in_network_context(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.selected_network = Some("studio".into());
+                shell.network_actions_open = Some("home".into());
+                cx.notify();
+            })
+            .expect("install joined network actions fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-discovery-joined-actions-home",
+            "visual-discovery-joined-menu-home",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing keyboard-reachable joined network action {selector}"
+            );
+        }
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.navigate_to_row(
+                    &RowNavigation {
+                        page_id: "peers".into(),
+                        network_name: Some("home".into()),
+                        label: t(shell.locale, "nav.peers").to_string(),
+                    },
+                    cx,
+                );
+                assert_eq!(shell.selected_page, "peers");
+                assert_eq!(shell.selected_network.as_deref(), Some("home"));
+                assert_eq!(shell.network_actions_open, None);
+
+                shell.select_network_context("home".into(), cx);
+                shell.open_action("networks", "leave_network", cx);
+                assert_eq!(shell.selected_page, "networks");
+                assert_eq!(shell.selected_network.as_deref(), Some("home"));
+                assert!(shell.expanded_actions.contains_key("leave_network"));
+            })
+            .expect("exercise joined network menu routes");
     }
 
     #[gpui::test]

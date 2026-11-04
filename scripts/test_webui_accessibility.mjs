@@ -392,9 +392,13 @@ async function main() {
     assert.match(reactActionPanel, /<Dialog\.Description/);
     assert.match(reactStyles, /:focus-visible/);
     assert.match(reactPageContent, /@radix-ui\/react-context-menu/);
-    assert.match(reactPageContent, /<ContextMenu\.Root>/);
+    assert.match(reactPageContent, /@radix-ui\/react-dropdown-menu/);
+    assert.match(reactPageContent, /<ContextMenu\.Root/);
     assert.match(reactPageContent, /<ContextMenu\.Trigger asChild>/);
     assert.match(reactPageContent, /<ContextMenu\.Content/);
+    assert.match(reactPageContent, /<DropdownMenu\.Trigger asChild>/);
+    assert.match(reactPageContent, /onPointerDown=\{startLongPress\}/);
+    assert.match(reactPageContent, /network-actions-menu/);
     assert.match(reactPageContent, /className="topology-list"/);
     assert.match(reactPageContent, /network\.peer_count/);
 

@@ -1374,7 +1374,7 @@ WebUI `npm run typecheck`、`npm test -- --run`（124 passed）、`npm run lint`
 - [x] 验证公开卡片不含敏感字段；
 - [x] 验证所有创建、发布、加入、审批、邀请动作可追溯；
 - [x] GPUI/WebUI 完成同一流程和行为对比；
-- [ ] 移动端完成长按、键盘替代和返回路径；
+- [x] 移动端完成长按、键盘替代和返回路径；
 - [ ] 所有失败都有可执行恢复动作。
 
 **验收**：网络创建与发现形成完整垂直切片，不依赖静态列表、假审批结果或未签名的公开数据。
@@ -1396,9 +1396,14 @@ owner 角色下验证创建、发布、加入、审批、邀请分别产生稳�
 `matches the shared discovery flow fixture` 分别校验 manifest 动作/命令、全部表单字段、确认预览派生字段
 和最终序列化命令完全一致。夹具只使用邀请票据占位符，测试运行时生成临时值；WebUI 校验同时支持
 后端实际的 `inv_` 邀请 ID 与 `hash_` 内容摘要格式。
+移动端交互已补齐：已加入网络卡片提供可见、可聚焦的动作菜单按钮，Enter/Space 与右键共用
+“导航 → 分隔线 → 危险操作”菜单；触摸长按 450 ms 打开底部 Action Sheet，滚动、指针移出或
+超过 10 px 位移会取消，浏览器返回/Escape 关闭后焦点回到菜单按钮。GPUI 的已加入网络卡片提供
+同构可聚焦动作入口，并覆盖网络上下文导航与离开网络动作。
 命令：`cargo test -p fuckipv6-client --all-features --lib gpui::view_model::tests`（36 passed）、
-WebUI `npm test -- --run`（125 passed）、`npm run typecheck`、`npm run lint`、`cargo fmt --all -- --check`
-和 `git diff --check`。
+`cargo test -p fuckipv6-client --all-features --lib gpui::view::tests`（42 passed）、
+WebUI `npm test -- --run`（129 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
+`node ../scripts/test_webui_accessibility.mjs`、`cargo fmt --all -- --check` 和 `git diff --check`。
 
 ## 12. W9：成员、组与拓扑
 

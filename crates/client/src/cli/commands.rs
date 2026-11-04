@@ -2756,6 +2756,19 @@ async fn handle_signaling_event(
             );
         }
 
+        SignalingEvent::InvitationChanged {
+            invitation_id,
+            state,
+            revision,
+        } => {
+            tracing::debug!(
+                "邀请变更通知: invitation={}, state={:?}, revision={}",
+                invitation_id,
+                state,
+                revision
+            );
+        }
+
         SignalingEvent::Error { code, message } => {
             tracing::error!("信令错误 {}: {}", code, message);
         }

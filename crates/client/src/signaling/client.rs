@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use fuckipv6_common::domain::{JoinRequest, JoinRequestId, JoinRequestState, NetworkId};
+use fuckipv6_common::domain::{
+    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
+    InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, NetworkId,
+};
 use fuckipv6_common::{
     codec, validate_signaling_message_len, Identity, JoinRequestBatchReviewItem,
     JoinRequestReviewResult, NatType, PeerInfo, RelayEndpoint, SignalingMessage, VirtualIps,
@@ -21,6 +25,7 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const JOIN_REQUEST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const INVITATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SignalingCloseError {
@@ -55,6 +60,8 @@ pub struct SignalingClient {
     task: StdMutex<Option<JoinHandle<()>>>,
     join_requests: Arc<JoinRequestResponseHub>,
     join_request_gate: Arc<Mutex<()>>,
+    invitations: Arc<InvitationResponseHub>,
+    invitation_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +255,240 @@ impl JoinRequestResponseHub {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InvitationControlError {
+    Disconnected,
+    TimedOut,
+    Rejected(u16),
+    InvalidResponse,
+    Unavailable,
+}
+
+impl std::fmt::Display for InvitationControlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Disconnected => "邀请控制连接已断开",
+            Self::TimedOut => "邀请控制请求超时",
+            Self::Rejected(401) => "邀请控制请求需要重新认证",
+            Self::Rejected(403) => "邀请控制请求无权限",
+            Self::Rejected(404) => "邀请不存在或不可见",
+            Self::Rejected(409 | 412) => "邀请状态已变化，请刷新后重试",
+            Self::Rejected(429) => "邀请控制请求过于频繁",
+            Self::Rejected(503) => "协调服务器暂时不可用",
+            Self::Rejected(_) => "邀请控制请求被拒绝",
+            Self::InvalidResponse => "邀请控制响应无效",
+            Self::Unavailable => "邀请控制连接尚未就绪",
+        })
+    }
+}
+
+impl std::error::Error for InvitationControlError {}
+
+impl InvitationControlError {
+    pub(crate) fn message_key(self) -> &'static str {
+        match self {
+            Self::Disconnected | Self::Unavailable => "invitation.error.unavailable",
+            Self::TimedOut => "invitation.error.timeout",
+            Self::Rejected(401) => "invitation.error.reauthentication_required",
+            Self::Rejected(403) => "invitation.error.forbidden",
+            Self::Rejected(404) => "invitation.error.not_found",
+            Self::Rejected(409 | 412) => "invitation.error.preview_changed",
+            Self::Rejected(429) => "invitation.error.rate_limited",
+            Self::Rejected(503) => "invitation.error.overloaded",
+            Self::Rejected(_) | Self::InvalidResponse => "invitation.error.unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingInvitation {
+    Create(NetworkId),
+    List(NetworkId),
+    Status {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    },
+    Revoke {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    },
+    Preview(NetworkId),
+    Redeem {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InvitationResponse {
+    Created(IssuedInvitation),
+    List(Vec<InvitationStatusView>),
+    Status(InvitationStatusView),
+    Revoked(InvitationStatusView),
+    Preview(Box<InvitationPreview>),
+    Redemption(Box<InvitationRedemption>),
+}
+
+struct PendingInvitationResponse {
+    expected: PendingInvitation,
+    sender: oneshot::Sender<std::result::Result<InvitationResponse, InvitationControlError>>,
+}
+
+#[derive(Default)]
+struct InvitationResponseHub {
+    pending: StdMutex<Option<PendingInvitationResponse>>,
+}
+
+impl InvitationResponseHub {
+    fn register(
+        &self,
+        expected: PendingInvitation,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<InvitationResponse, InvitationControlError>>,
+        InvitationControlError,
+    > {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.is_some() {
+            return Err(InvitationControlError::Unavailable);
+        }
+        *pending = Some(PendingInvitationResponse { expected, sender });
+        Ok(receiver)
+    }
+
+    /// Correlate one invitation acknowledgement. All invitation acknowledgements
+    /// are removed from the data-plane event stream; `InvitationChanged` remains
+    /// available as a redacted projection notification.
+    fn route(&self, message: &SignalingMessage) -> bool {
+        let matches = match message {
+            SignalingMessage::Error { .. } => self.has_pending(),
+            SignalingMessage::InvitationCreateAck { issued } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingInvitation::Create(network_id)
+                        if network_id == &issued.status.invitation.network_id
+                )
+            }),
+            SignalingMessage::InvitationListAck { .. } => {
+                self.matches(|expected| matches!(expected, PendingInvitation::List(_)))
+            }
+            SignalingMessage::InvitationStatusAck { invitation } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingInvitation::Status {
+                        network_id,
+                        invitation_id,
+                    } if network_id == &invitation.invitation.network_id
+                        && invitation_id == &invitation.invitation.invitation_id
+                )
+            }),
+            SignalingMessage::InvitationRevokeAck { invitation } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingInvitation::Revoke {
+                        network_id,
+                        invitation_id,
+                    } if network_id == &invitation.invitation.network_id
+                        && invitation_id == &invitation.invitation.invitation_id
+                )
+            }),
+            SignalingMessage::InvitationPreviewAck { preview } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingInvitation::Preview(network_id) if network_id == &preview.network_id
+                )
+            }),
+            SignalingMessage::InvitationRedeemAck { redemption } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingInvitation::Redeem {
+                        network_id,
+                        invitation_id,
+                    } if network_id == &redemption.network_id
+                        && invitation_id == &redemption.invitation_id
+                )
+            }),
+            _ => return false,
+        };
+
+        let is_invitation_response = matches!(
+            message,
+            SignalingMessage::InvitationCreateAck { .. }
+                | SignalingMessage::InvitationListAck { .. }
+                | SignalingMessage::InvitationStatusAck { .. }
+                | SignalingMessage::InvitationRevokeAck { .. }
+                | SignalingMessage::InvitationPreviewAck { .. }
+                | SignalingMessage::InvitationRedeemAck { .. }
+        );
+        if !matches {
+            return is_invitation_response;
+        }
+
+        let response = match message {
+            SignalingMessage::InvitationCreateAck { issued } => {
+                InvitationResponse::Created(issued.clone())
+            }
+            SignalingMessage::InvitationListAck { invitations } => {
+                InvitationResponse::List(invitations.clone())
+            }
+            SignalingMessage::InvitationStatusAck { invitation } => {
+                InvitationResponse::Status(invitation.clone())
+            }
+            SignalingMessage::InvitationRevokeAck { invitation } => {
+                InvitationResponse::Revoked(invitation.clone())
+            }
+            SignalingMessage::InvitationPreviewAck { preview } => {
+                InvitationResponse::Preview(Box::new(preview.clone()))
+            }
+            SignalingMessage::InvitationRedeemAck { redemption } => {
+                InvitationResponse::Redemption(Box::new(redemption.clone()))
+            }
+            SignalingMessage::Error { code, .. } => {
+                return self.finish(Err(InvitationControlError::Rejected(*code)));
+            }
+            _ => unreachable!("invitation response match was checked above"),
+        };
+        self.finish(Ok(response))
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    fn matches(&self, predicate: impl FnOnce(&PendingInvitation) -> bool) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|pending| predicate(&pending.expected))
+    }
+
+    fn finish(
+        &self,
+        result: std::result::Result<InvitationResponse, InvitationControlError>,
+    ) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.sender.send(result);
+        }
+        true
+    }
+
+    fn fail_pending(&self, error: InvitationControlError) {
+        let _ = self.finish(Err(error));
+    }
+}
+
 #[derive(Clone)]
 struct RegistrationIdentity {
     client_id: String,
@@ -281,6 +522,7 @@ struct ConnectionChannels<'a> {
     relay_endpoints_tx: &'a watch::Sender<Vec<RelayEndpoint>>,
     known_peers_tx: &'a watch::Sender<Vec<PeerInfo>>,
     join_requests: &'a JoinRequestResponseHub,
+    invitations: &'a InvitationResponseHub,
 }
 
 struct ConnectionState {
@@ -328,6 +570,7 @@ impl SignalingClient {
         let (known_peers_tx, known_peers_rx) = watch::channel(Vec::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join_requests = Arc::new(JoinRequestResponseHub::default());
+        let invitations = Arc::new(InvitationResponseHub::default());
 
         let registration = RegistrationIdentity {
             client_id: identity.client_id().to_string(),
@@ -355,6 +598,7 @@ impl SignalingClient {
             relay_endpoints_tx,
             known_peers_tx,
             join_requests.clone(),
+            invitations.clone(),
             shutdown_rx,
         ));
 
@@ -370,6 +614,8 @@ impl SignalingClient {
             task: StdMutex::new(Some(task)),
             join_requests,
             join_request_gate: Arc::new(Mutex::new(())),
+            invitations,
+            invitation_gate: Arc::new(Mutex::new(())),
         };
 
         client.wait_for_initial_registration().await?;
@@ -556,6 +802,155 @@ impl SignalingClient {
         }
     }
 
+    pub(crate) async fn create_invitation(
+        &self,
+        request: InvitationCreateRequest,
+    ) -> std::result::Result<IssuedInvitation, InvitationControlError> {
+        let network_id = request.network_id.clone();
+        match self
+            .send_invitation_operation(
+                SignalingMessage::InvitationCreate { request },
+                PendingInvitation::Create(network_id),
+            )
+            .await?
+        {
+            InvitationResponse::Created(issued) => Ok(issued),
+            _ => Err(InvitationControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn list_invitations(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<Vec<InvitationStatusView>, InvitationControlError> {
+        match self
+            .send_invitation_operation(
+                SignalingMessage::InvitationList {
+                    network_id: network_id.clone(),
+                },
+                PendingInvitation::List(network_id),
+            )
+            .await?
+        {
+            InvitationResponse::List(invitations) => Ok(invitations),
+            _ => Err(InvitationControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn get_invitation_status(
+        &self,
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    ) -> std::result::Result<InvitationStatusView, InvitationControlError> {
+        match self
+            .send_invitation_operation(
+                SignalingMessage::InvitationStatus {
+                    network_id: network_id.clone(),
+                    invitation_id: invitation_id.clone(),
+                },
+                PendingInvitation::Status {
+                    network_id,
+                    invitation_id,
+                },
+            )
+            .await?
+        {
+            InvitationResponse::Status(invitation) => Ok(invitation),
+            _ => Err(InvitationControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn revoke_invitation(
+        &self,
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+        expected_revision: u64,
+    ) -> std::result::Result<InvitationStatusView, InvitationControlError> {
+        match self
+            .send_invitation_operation(
+                SignalingMessage::InvitationRevoke {
+                    network_id: network_id.clone(),
+                    invitation_id: invitation_id.clone(),
+                    expected_revision,
+                },
+                PendingInvitation::Revoke {
+                    network_id,
+                    invitation_id,
+                },
+            )
+            .await?
+        {
+            InvitationResponse::Revoked(invitation) => Ok(invitation),
+            _ => Err(InvitationControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn preview_invitation(
+        &self,
+        network_id: NetworkId,
+        code: InvitationCode,
+    ) -> std::result::Result<InvitationPreview, InvitationControlError> {
+        match self
+            .send_invitation_operation(
+                SignalingMessage::InvitationPreview {
+                    request: fuckipv6_common::domain::InvitationPreviewRequest {
+                        network_id: network_id.clone(),
+                        code,
+                    },
+                },
+                PendingInvitation::Preview(network_id),
+            )
+            .await?
+        {
+            InvitationResponse::Preview(preview) => Ok(*preview),
+            _ => Err(InvitationControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn redeem_invitation(
+        &self,
+        request: InvitationRedeemRequest,
+    ) -> std::result::Result<InvitationRedemption, InvitationControlError> {
+        let network_id = request.network_id.clone();
+        let invitation_id = request.invitation_id.clone();
+        match self
+            .send_invitation_operation(
+                SignalingMessage::InvitationRedeem { request },
+                PendingInvitation::Redeem {
+                    network_id,
+                    invitation_id,
+                },
+            )
+            .await?
+        {
+            InvitationResponse::Redemption(redemption) => Ok(*redemption),
+            _ => Err(InvitationControlError::InvalidResponse),
+        }
+    }
+
+    async fn send_invitation_operation(
+        &self,
+        message: SignalingMessage,
+        expected: PendingInvitation,
+    ) -> std::result::Result<InvitationResponse, InvitationControlError> {
+        let _gate = self.invitation_gate.lock().await;
+        let receiver = self.invitations.register(expected)?;
+        if self.send(message).is_err() {
+            self.invitations
+                .fail_pending(InvitationControlError::Disconnected);
+            return Err(InvitationControlError::Unavailable);
+        }
+        match tokio::time::timeout(INVITATION_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(InvitationControlError::Disconnected),
+            Err(_) => {
+                self.invitations
+                    .fail_pending(InvitationControlError::TimedOut);
+                Err(InvitationControlError::TimedOut)
+            }
+        }
+    }
+
     /// 关闭信令连接，并等待连接任务退出。
     pub async fn close(&self) -> Result<()> {
         self.close_bounded(CLOSE_TIMEOUT).await?;
@@ -641,6 +1036,7 @@ async fn connection_manager(
     relay_endpoints_tx: watch::Sender<Vec<RelayEndpoint>>,
     known_peers_tx: watch::Sender<Vec<PeerInfo>>,
     join_requests: Arc<JoinRequestResponseHub>,
+    invitations: Arc<InvitationResponseHub>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let channels = ConnectionChannels {
@@ -651,6 +1047,7 @@ async fn connection_manager(
         relay_endpoints_tx: &relay_endpoints_tx,
         known_peers_tx: &known_peers_tx,
         join_requests: &join_requests,
+        invitations: &invitations,
     };
     let mut pending_outbound = Vec::new();
     let mut state = ConnectionState {
@@ -748,6 +1145,9 @@ fn notify_disconnected(channels: ConnectionChannels<'_>, reason: String) {
     channels
         .join_requests
         .fail_pending(JoinRequestControlError::Disconnected);
+    channels
+        .invitations
+        .fail_pending(InvitationControlError::Disconnected);
     let _ = channels.assigned_ip_tx.send(None);
     let _ = channels.relay_endpoint_tx.send(None);
     let _ = channels
@@ -930,6 +1330,10 @@ fn handle_incoming_message(
         return Ok(());
     }
 
+    if channels.invitations.route(&msg) {
+        return Ok(());
+    }
+
     if let Some(event) = signaling_message_to_event(msg) {
         let _ = channels.event_tx.send(event);
     }
@@ -1109,12 +1513,34 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
             revision,
         }),
 
+        SignalingMessage::InvitationChanged {
+            invitation_id,
+            state,
+            revision,
+        } => Some(SignalingEvent::InvitationChanged {
+            invitation_id,
+            state,
+            revision,
+        }),
+
         SignalingMessage::JoinRequestSubmit { .. }
         | SignalingMessage::JoinRequestList { .. }
         | SignalingMessage::JoinRequestReview { .. }
         | SignalingMessage::JoinRequestBatchReview { .. }
         | SignalingMessage::JoinRequestWithdraw { .. }
-        | SignalingMessage::JoinRequestResubmit { .. } => None,
+        | SignalingMessage::JoinRequestResubmit { .. }
+        | SignalingMessage::InvitationCreate { .. }
+        | SignalingMessage::InvitationCreateAck { .. }
+        | SignalingMessage::InvitationList { .. }
+        | SignalingMessage::InvitationListAck { .. }
+        | SignalingMessage::InvitationStatus { .. }
+        | SignalingMessage::InvitationStatusAck { .. }
+        | SignalingMessage::InvitationRevoke { .. }
+        | SignalingMessage::InvitationRevokeAck { .. }
+        | SignalingMessage::InvitationPreview { .. }
+        | SignalingMessage::InvitationPreviewAck { .. }
+        | SignalingMessage::InvitationRedeem { .. }
+        | SignalingMessage::InvitationRedeemAck { .. } => None,
 
         _ => None,
     }
@@ -1187,6 +1613,14 @@ pub enum SignalingEvent {
         revision: u64,
     },
 
+    /// Redacted invitation projection notification. Plaintext codes and
+    /// invitation records are deliberately excluded.
+    InvitationChanged {
+        invitation_id: InvitationId,
+        state: InvitationState,
+        revision: u64,
+    },
+
     /// 错误
     Error { code: u16, message: String },
 }
@@ -1194,6 +1628,7 @@ pub enum SignalingEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{MembershipRole, NodeId};
     use futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
@@ -1229,6 +1664,8 @@ mod tests {
             task: StdMutex::new(Some(task)),
             join_requests: Arc::new(JoinRequestResponseHub::default()),
             join_request_gate: Arc::new(Mutex::new(())),
+            invitations: Arc::new(InvitationResponseHub::default()),
+            invitation_gate: Arc::new(Mutex::new(())),
         };
 
         let error = client
@@ -1347,6 +1784,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invitation_responses_are_correlated_and_unmatched_acks_are_swallowed() {
+        let hub = InvitationResponseHub::default();
+        let network_id = NetworkId::from_public_key(b"invitation-network");
+        let invitation_id = InvitationId::from_public_key(b"invitation-id");
+        let mut receiver = hub
+            .register(PendingInvitation::Status {
+                network_id: network_id.clone(),
+                invitation_id: invitation_id.clone(),
+            })
+            .expect("register pending invitation status");
+
+        let mismatched = InvitationStatusView::new(
+            fuckipv6_common::domain::InvitationRecord::new(
+                InvitationId::from_public_key(b"other-invitation"),
+                network_id.clone(),
+                NodeId::from_public_key(b"owner"),
+                MembershipRole::Member,
+                Vec::new(),
+                1,
+                1,
+                1_000,
+            )
+            .expect("valid invitation"),
+            10,
+        );
+        assert!(
+            hub.route(&SignalingMessage::InvitationStatusAck {
+                invitation: mismatched,
+            }),
+            "an unmatched invitation acknowledgement must not enter the data-plane event stream"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an unmatched acknowledgement must not complete the pending operation"
+        );
+
+        let matching = InvitationStatusView::new(
+            fuckipv6_common::domain::InvitationRecord::new(
+                invitation_id,
+                network_id,
+                NodeId::from_public_key(b"owner"),
+                MembershipRole::Member,
+                Vec::new(),
+                1,
+                1,
+                1_000,
+            )
+            .expect("valid invitation"),
+            10,
+        );
+        assert!(hub.route(&SignalingMessage::InvitationStatusAck {
+            invitation: matching.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching response channel"),
+            Ok(InvitationResponse::Status(matching))
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_fails_the_pending_invitation() {
+        let hub = InvitationResponseHub::default();
+        let network_id = NetworkId::from_public_key(b"disconnect-invitation-network");
+        let receiver = hub
+            .register(PendingInvitation::List(network_id))
+            .expect("register pending invitation list");
+        hub.fail_pending(InvitationControlError::Disconnected);
+        assert_eq!(
+            receiver
+                .await
+                .expect("disconnect must not drop the response channel"),
+            Err(InvitationControlError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn invitation_notifications_are_redacted_and_never_include_plaintext_codes() {
+        let plaintext = format!("fkinv_{}", "A".repeat(43));
+        let event = signaling_message_to_event(SignalingMessage::InvitationChanged {
+            invitation_id: InvitationId::from_public_key(b"notification"),
+            state: InvitationState::Active,
+            revision: 1,
+        })
+        .expect("invitation changed event");
+        assert!(!format!("{event:?}").contains(&plaintext));
+        assert!(!format!("{event:?}").contains("fkinv_"));
+    }
+
+    #[tokio::test]
     async fn disconnect_fails_the_pending_join_request() {
         let hub = JoinRequestResponseHub::default();
         let network_id = NetworkId::from_public_key(b"disconnect-network");
@@ -1419,6 +1947,7 @@ mod tests {
             relay_endpoints_tx,
             known_peers_tx,
             Arc::new(JoinRequestResponseHub::default()),
+            Arc::new(InvitationResponseHub::default()),
             shutdown_rx,
         ));
 

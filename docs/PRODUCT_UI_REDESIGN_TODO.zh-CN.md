@@ -1133,7 +1133,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
 - [x] 支持批准、拒绝、要求补充信息和批量审批；
 - [x] 审批前显示将授予的成员权限和 Exit/File 影响；
-- [ ] 并发审批只能产生一个最终成员状态；
+- [x] 并发审批只能产生一个最终成员状态；
 - [ ] 申请过期、撤回、管理员撤权时有一致状态；
 - [ ] 申请理由只对获授权角色可见，并纳入保留策略；
 - [ ] 所有审批动作有审计、活动投影和通知。
@@ -1206,6 +1206,14 @@ WebUI 回归测试覆盖单条和批量审批的影响预览，GPUI 新增
 `node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
 `cargo fmt --all -- --check` 和 `git diff --check`；生成的 `app.js` / `app.css` 已同步刷新。
 构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
+
+并发审批由请求文件锁、Coordinator 进程锁和网络 profile 锁共同串行化：审批先在候选请求账本
+中校验 revision、更新状态并收集准入成员，再验证请求/名册投影，最后原子持久化；任何一步失败
+都不会留下部分成员状态。回归测试
+`concurrent_approval_produces_one_final_member_state` 使用两个线程同时批准同一申请，断言只有
+一次审批成功且网络名册中该申请人恰好出现一次。验证通过：
+`cargo test -p fuckipv6-coordinator --lib signaling::join_requests::tests::concurrent_approval_produces_one_final_member_state -- --exact`
+（1 passed，83 filtered）。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

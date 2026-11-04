@@ -496,6 +496,15 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "重申加入申请需要运行中的节点控制面"),
                 },
+                super::NodeCommand::CreateInvitation(_)
+                | super::NodeCommand::ListInvitations(_)
+                | super::NodeCommand::GetInvitationStatus(_)
+                | super::NodeCommand::RevokeInvitation(_)
+                | super::NodeCommand::PreviewInvitation(_)
+                | super::NodeCommand::RedeemInvitation(_) => unavailable(
+                    request_id,
+                    "私有邀请运行时尚未接线；当前不会伪造邀请或成员结果",
+                ),
                 super::NodeCommand::UpdateRouting(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
                     if command.is_exit_node && !capabilities.supported {

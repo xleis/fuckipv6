@@ -1260,6 +1260,28 @@ impl GpuiShell {
                     ],
                 ));
             }
+            NodeCommandOutcome::InvitationCreated(_) => {
+                self.notice = Some("邀请已创建；一次性凭据只在专用邀请面板中安全展示".to_string());
+            }
+            NodeCommandOutcome::Invitations(invitations) => {
+                self.notice = Some(format!("已加载 {} 条邀请", invitations.len()));
+            }
+            NodeCommandOutcome::InvitationStatus(_) => {
+                self.notice = Some("邀请状态已刷新".to_string());
+            }
+            NodeCommandOutcome::InvitationRevoked(_) => {
+                self.notice = Some("邀请已撤销".to_string());
+            }
+            NodeCommandOutcome::InvitationPreview(_) => {
+                self.notice = Some("邀请预览已刷新；接受前仍需重新认证并确认权限变化".to_string());
+            }
+            NodeCommandOutcome::InvitationRedeemed(redemption) => {
+                self.notice = Some(format!(
+                    "已接受邀请并加入网络（角色: {:?}）",
+                    redemption.role
+                ));
+                self.submit_raw(NodeCommand::GetSnapshot, cx);
+            }
             NodeCommandOutcome::NetworkLeft(result) => {
                 self.apply_snapshot(result.snapshot, cx);
                 self.notice = Some(format!(
@@ -8673,6 +8695,12 @@ fn action_label(locale: Locale, id: &str) -> String {
         "review_join_request" => "action.review_join_request",
         "batch_review_join_requests" => "action.batch_review_join_requests",
         "resubmit_join_request" => "action.resubmit_join_request",
+        "create_invitation" => "action.create_invitation",
+        "list_invitations" => "action.list_invitations",
+        "get_invitation_status" => "action.get_invitation_status",
+        "revoke_invitation" => "action.revoke_invitation",
+        "preview_invitation" => "action.preview_invitation",
+        "redeem_invitation" => "action.redeem_invitation",
         "withdraw_join_request" => "action.withdraw_join_request",
         "leave_network" => "action.leave_network",
         "start_networks" => "action.start_networks",

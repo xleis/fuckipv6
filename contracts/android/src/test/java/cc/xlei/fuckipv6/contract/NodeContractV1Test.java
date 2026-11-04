@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 132,
+                NodeContractV1.DTO_CLASS_NAMES.length == 144,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -157,6 +157,25 @@ public final class NodeContractV1Test {
                 NodeCommandKind.ROTATE_NODE_IDENTITY,
                 NodeCommandKind.fromWireName("rotate_node_identity"),
                 "node identity rotation command");
+        assertSame(
+                NodeCommandKind.CREATE_INVITATION,
+                NodeCommandKind.fromWireName("create_invitation"),
+                "invitation creation command");
+        assertSame(
+                NodeCommandKind.REDEEM_INVITATION,
+                NodeCommandKind.fromWireName("redeem_invitation"),
+                "invitation redemption command");
+        for (String field : new String[] {
+            "capabilities", "expires_in_ms", "max_uses", "network_id", "role"
+        }) {
+            NodeContractV1.NodeCreateInvitationCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "can_accept", "capabilities", "creates_permanent_membership", "invitation_id",
+            "role", "terms", "terms_hash"
+        }) {
+            NodeContractV1.InvitationPreview.class.getDeclaredField(field);
+        }
         NodeContractV1.NodeRotateNodeIdentityCommand.class.getDeclaredField(
                 "expected_fingerprint");
         for (String field : new String[] {

@@ -4,7 +4,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
-    CapabilityKind, CapabilityState, NetworkJoinMode, NetworkProfileUpdate, NetworkVisibility,
+    CapabilityKind, CapabilityState, ContentHash, InvitationCode, InvitationId,
+    InvitationRedeemRequest, MembershipRole, NetworkId, NetworkJoinMode, NetworkProfileUpdate,
+    NetworkVisibility,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -12,14 +14,16 @@ use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     NodeApplyConfigurationCommand, NodeBatchReviewJoinRequestsCommand, NodeClientBlacklistCommand,
-    NodeCommand, NodeCommandKind, NodeControlHealth, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
-    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
+    NodeCommand, NodeCommandKind, NodeControlHealth, NodeCreateInvitationCommand,
+    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand,
+    NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand,
+    NodeJoinRequestReviewItem, NodeLeaveNetworkCommand, NodeListInvitationsCommand,
     NodeListJoinRequestsCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
     NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
-    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewJoinNetworkCommand,
-    NodePrimaryStatus, NodeProbePeerCommand, NodeResubmitJoinRequestCommand,
-    NodeReviewJoinRequestCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
+    NodePreviewJoinNetworkCommand, NodePrimaryStatus, NodeProbePeerCommand,
+    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
+    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
     NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
     NodeSubmitJoinRequestCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
@@ -123,6 +127,12 @@ pub enum ActionBinding {
     BatchReviewJoinRequests,
     WithdrawJoinRequest,
     ResubmitJoinRequest,
+    CreateInvitation,
+    ListInvitations,
+    GetInvitationStatus,
+    RevokeInvitation,
+    PreviewInvitation,
+    RedeemInvitation,
     LeaveNetwork,
     StartNetworks,
     StopNetworks,
@@ -152,7 +162,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 50] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -171,6 +181,12 @@ impl ActionBinding {
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
         Self::ResubmitJoinRequest,
+        Self::CreateInvitation,
+        Self::ListInvitations,
+        Self::GetInvitationStatus,
+        Self::RevokeInvitation,
+        Self::PreviewInvitation,
+        Self::RedeemInvitation,
         Self::LeaveNetwork,
         Self::StartNetworks,
         Self::StopNetworks,
@@ -219,6 +235,12 @@ impl ActionBinding {
             Self::BatchReviewJoinRequests => "batch_review_join_requests",
             Self::WithdrawJoinRequest => "withdraw_join_request",
             Self::ResubmitJoinRequest => "resubmit_join_request",
+            Self::CreateInvitation => "create_invitation",
+            Self::ListInvitations => "list_invitations",
+            Self::GetInvitationStatus => "get_invitation_status",
+            Self::RevokeInvitation => "revoke_invitation",
+            Self::PreviewInvitation => "preview_invitation",
+            Self::RedeemInvitation => "redeem_invitation",
             Self::LeaveNetwork => "leave_network",
             Self::StartNetworks => "start_networks",
             Self::StopNetworks => "stop_networks",
@@ -828,6 +850,30 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::ResubmitJoinRequest,
             NodeCommandKind::ResubmitJoinRequest,
         ),
+        "create_invitation" => (
+            ActionBinding::CreateInvitation,
+            NodeCommandKind::CreateInvitation,
+        ),
+        "list_invitations" => (
+            ActionBinding::ListInvitations,
+            NodeCommandKind::ListInvitations,
+        ),
+        "get_invitation_status" => (
+            ActionBinding::GetInvitationStatus,
+            NodeCommandKind::GetInvitationStatus,
+        ),
+        "revoke_invitation" => (
+            ActionBinding::RevokeInvitation,
+            NodeCommandKind::RevokeInvitation,
+        ),
+        "preview_invitation" => (
+            ActionBinding::PreviewInvitation,
+            NodeCommandKind::PreviewInvitation,
+        ),
+        "redeem_invitation" => (
+            ActionBinding::RedeemInvitation,
+            NodeCommandKind::RedeemInvitation,
+        ),
         "leave_network" => (ActionBinding::LeaveNetwork, NodeCommandKind::LeaveNetwork),
         "start_networks" => (ActionBinding::StartNetworks, NodeCommandKind::StartNetworks),
         "stop_networks" => (ActionBinding::StopNetworks, NodeCommandKind::StopNetworks),
@@ -1118,9 +1164,11 @@ pub fn build_command(
                 language: field("language"),
                 region: field("region"),
                 tags: split_names(&field("tags")),
-                capability_declarations: parse_capability_declarations(&field(
+                capability_declarations: parse_capability_declarations(
+                    action,
                     "capability_declarations",
-                ))?,
+                    &field("capability_declarations"),
+                )?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
                 signaling_port: parse_number(
@@ -1140,9 +1188,11 @@ pub fn build_command(
                 language: field("language"),
                 region: field("region"),
                 tags: split_names(&field("tags")),
-                capability_declarations: parse_capability_declarations(&field(
+                capability_declarations: parse_capability_declarations(
+                    action,
                     "capability_declarations",
-                ))?,
+                    &field("capability_declarations"),
+                )?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
             };
@@ -1345,6 +1395,86 @@ pub fn build_command(
                 reason: field("reason"),
             },
         )),
+        Ok(ActionBinding::CreateInvitation) => {
+            Ok(NodeCommand::CreateInvitation(NodeCreateInvitationCommand {
+                network_id: parse_network_id(action, "network_id", &field("network_id"))?,
+                role: parse_invitation_role(action, &required("role")?)?,
+                capabilities: parse_capability_declarations(
+                    action,
+                    "capabilities",
+                    &field("capabilities"),
+                )?,
+                max_uses: parse_number(action, "max_uses", &required("max_uses")?)?,
+                expires_in_ms: parse_number(action, "expires_in_ms", &required("expires_in_ms")?)?,
+            }))
+        }
+        Ok(ActionBinding::ListInvitations) => {
+            Ok(NodeCommand::ListInvitations(NodeListInvitationsCommand {
+                network_id: parse_network_id(action, "network_id", &field("network_id"))?,
+            }))
+        }
+        Ok(ActionBinding::GetInvitationStatus) => Ok(NodeCommand::GetInvitationStatus(
+            NodeGetInvitationStatusCommand {
+                network_id: parse_network_id(action, "network_id", &field("network_id"))?,
+                invitation_id: parse_invitation_id(
+                    action,
+                    "invitation_id",
+                    &required("invitation_id")?,
+                )?,
+            },
+        )),
+        Ok(ActionBinding::RevokeInvitation) => {
+            Ok(NodeCommand::RevokeInvitation(NodeRevokeInvitationCommand {
+                network_id: parse_network_id(action, "network_id", &field("network_id"))?,
+                invitation_id: parse_invitation_id(
+                    action,
+                    "invitation_id",
+                    &required("invitation_id")?,
+                )?,
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+            }))
+        }
+        Ok(ActionBinding::PreviewInvitation) => Ok(NodeCommand::PreviewInvitation(
+            NodePreviewInvitationCommand {
+                network_id: parse_network_id(action, "network_id", &field("network_id"))?,
+                coordinator_url: field("coordinator_url"),
+                code: parse_invitation_code(action, &required("code")?)?,
+            },
+        )),
+        Ok(ActionBinding::RedeemInvitation) => {
+            Ok(NodeCommand::RedeemInvitation(NodeRedeemInvitationCommand {
+                coordinator_url: field("coordinator_url"),
+                request: InvitationRedeemRequest {
+                    network_id: parse_network_id(action, "network_id", &field("network_id"))?,
+                    code: parse_invitation_code(action, &required("code")?)?,
+                    invitation_id: parse_invitation_id(
+                        action,
+                        "invitation_id",
+                        &required("invitation_id")?,
+                    )?,
+                    expected_invitation_revision: parse_number(
+                        action,
+                        "expected_invitation_revision",
+                        &required("expected_invitation_revision")?,
+                    )?,
+                    preview_digest: parse_content_hash(
+                        action,
+                        "preview_digest",
+                        &required("preview_digest")?,
+                    )?,
+                    terms_hash: parse_content_hash(action, "terms_hash", &required("terms_hash")?)?,
+                    acknowledged_at_unix_ms: parse_number(
+                        action,
+                        "acknowledged_at_unix_ms",
+                        &required("acknowledged_at_unix_ms")?,
+                    )?,
+                },
+            }))
+        }
         Ok(ActionBinding::LeaveNetwork) => Ok(NodeCommand::LeaveNetwork(NodeLeaveNetworkCommand {
             network_name: field("network_name"),
         })),
@@ -1531,6 +1661,27 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "resubmit_join_request" => {
             HashSet::from(["network_id", "request_id", "expected_revision", "reason"])
         }
+        "create_invitation" => HashSet::from([
+            "network_id",
+            "role",
+            "capabilities",
+            "max_uses",
+            "expires_in_ms",
+        ]),
+        "list_invitations" => HashSet::from(["network_id"]),
+        "get_invitation_status" => HashSet::from(["network_id", "invitation_id"]),
+        "revoke_invitation" => HashSet::from(["network_id", "invitation_id", "expected_revision"]),
+        "preview_invitation" => HashSet::from(["network_id", "coordinator_url", "code"]),
+        "redeem_invitation" => HashSet::from([
+            "network_id",
+            "coordinator_url",
+            "code",
+            "invitation_id",
+            "expected_invitation_revision",
+            "preview_digest",
+            "terms_hash",
+            "acknowledged_at_unix_ms",
+        ]),
         "leave_network" => HashSet::from(["network_name"]),
         "start_networks" => HashSet::from(["selection"]),
         "stop_networks" => HashSet::from(["networks", "all"]),
@@ -1782,7 +1933,11 @@ fn split_names(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_capability_declarations(value: &str) -> Result<Vec<CapabilityKind>, CommandBuildError> {
+fn parse_capability_declarations(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<Vec<CapabilityKind>, CommandBuildError> {
     split_names(value)
         .into_iter()
         .map(|value| match value.as_str() {
@@ -1791,12 +1946,74 @@ fn parse_capability_declarations(value: &str) -> Result<Vec<CapabilityKind>, Com
             "exit" | "exit_node" | "exit-node" => Ok(CapabilityKind::Exit),
             "file" => Ok(CapabilityKind::File),
             _ => Err(CommandBuildError::InvalidField {
-                action_id: "create_network".into(),
-                field_id: "capability_declarations".into(),
+                action_id: action.id.clone(),
+                field_id: field_id.into(),
                 value,
             }),
         })
         .collect()
+}
+
+fn parse_network_id(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<NetworkId, CommandBuildError> {
+    NetworkId::parse(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_invitation_id(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<InvitationId, CommandBuildError> {
+    InvitationId::parse(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_content_hash(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<ContentHash, CommandBuildError> {
+    ContentHash::parse(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_invitation_code(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<InvitationCode, CommandBuildError> {
+    InvitationCode::parse(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: "code".into(),
+        value: "[redacted]".into(),
+    })
+}
+
+fn parse_invitation_role(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<MembershipRole, CommandBuildError> {
+    match value.trim() {
+        "member" => Ok(MembershipRole::Member),
+        "administrator" | "admin" => Ok(MembershipRole::Administrator),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "role".into(),
+            value: value.into(),
+        }),
+    }
 }
 
 fn project_page(
@@ -4737,7 +4954,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 44);
+        assert_eq!(ActionBinding::ALL.len(), 50);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -4796,6 +5013,43 @@ mod tests {
                         "target".into(),
                         "https://coordinator.example.test/session".into(),
                     );
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "create_invitation"
+                        | "list_invitations"
+                        | "get_invitation_status"
+                        | "revoke_invitation"
+                        | "preview_invitation"
+                        | "redeem_invitation"
+                ) {
+                    values.insert(
+                        "network_id".into(),
+                        NetworkId::from_public_key(b"invitation-command-network").to_string(),
+                    );
+                    values.insert("role".into(), "member".into());
+                    values.insert("max_uses".into(), "1".into());
+                    values.insert("expires_in_ms".into(), "86400000".into());
+                    values.insert(
+                        "invitation_id".into(),
+                        InvitationId::from_public_key(b"invitation-command").to_string(),
+                    );
+                    values.insert("expected_revision".into(), "1".into());
+                    values.insert(
+                        "coordinator_url".into(),
+                        "wss://coordinator.example.test/signaling".into(),
+                    );
+                    values.insert("code".into(), format!("fkinv_{}", "A".repeat(43)));
+                    values.insert("expected_invitation_revision".into(), "1".into());
+                    values.insert(
+                        "preview_digest".into(),
+                        ContentHash::from_bytes(b"preview").as_str().to_string(),
+                    );
+                    values.insert(
+                        "terms_hash".into(),
+                        ContentHash::from_bytes(b"terms").as_str().to_string(),
+                    );
+                    values.insert("acknowledged_at_unix_ms".into(), "1700000000000".into());
                 }
                 let command = build_command(action, &values).expect("typed command");
                 assert_ne!(action.id, "");

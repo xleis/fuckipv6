@@ -691,7 +691,10 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ReviewJoinRequest(_)
         | NodeCommand::BatchReviewJoinRequests(_)
         | NodeCommand::WithdrawJoinRequest(_)
-        | NodeCommand::ResubmitJoinRequest(_) => OperationKind::NetworkApply,
+        | NodeCommand::ResubmitJoinRequest(_)
+        | NodeCommand::CreateInvitation(_)
+        | NodeCommand::RevokeInvitation(_)
+        | NodeCommand::RedeemInvitation(_) => OperationKind::NetworkApply,
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
@@ -714,6 +717,9 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::PreviewNetworkProfile(_)
         | NodeCommand::PreviewJoinNetwork(_)
         | NodeCommand::ListJoinRequests(_)
+        | NodeCommand::ListInvitations(_)
+        | NodeCommand::GetInvitationStatus(_)
+        | NodeCommand::PreviewInvitation(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
     }
 }
@@ -741,6 +747,14 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
         NodeCommand::BatchReviewJoinRequests(command) => network_target(&command.network_id),
         NodeCommand::WithdrawJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::ResubmitJoinRequest(command) => network_target(&command.network_id),
+        NodeCommand::CreateInvitation(command) => network_target(command.network_id.as_str()),
+        NodeCommand::ListInvitations(command) => network_target(command.network_id.as_str()),
+        NodeCommand::GetInvitationStatus(command) => network_target(command.network_id.as_str()),
+        NodeCommand::RevokeInvitation(command) => network_target(command.network_id.as_str()),
+        NodeCommand::PreviewInvitation(command) => network_target(command.network_id.as_str()),
+        NodeCommand::RedeemInvitation(command) => {
+            network_target(command.request.network_id.as_str())
+        }
         NodeCommand::JoinNetwork(command) => command
             .network_name
             .as_deref()

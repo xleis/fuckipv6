@@ -649,6 +649,13 @@
               "input": "join_request_reviews",
               "required": true,
               "validation": "join_request_reviews"
+            },
+            {
+              "id": "note",
+              "label_key": "field.join_request_note",
+              "input": "join_request_note",
+              "required": false,
+              "validation": "join_request_note"
             }
           ],
           "confirmation": {
@@ -734,6 +741,270 @@
             }
           ],
           "confirmation": null
+        },
+        {
+          "id": "create_invitation",
+          "label_key": "action.create_invitation",
+          "command": "create_invitation",
+          "backend_status": "unavailable",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.invitation.create"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "role",
+              "label_key": "field.invitation_role",
+              "input": "role",
+              "required": true,
+              "validation": "role"
+            },
+            {
+              "id": "capabilities",
+              "label_key": "field.capability_declarations",
+              "input": "capability_declarations",
+              "required": false,
+              "validation": "capability_declarations"
+            },
+            {
+              "id": "max_uses",
+              "label_key": "field.invitation_max_uses",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "expires_in_ms",
+              "label_key": "field.invitation_expires_in_ms",
+              "input": "timeout_ms",
+              "required": true,
+              "validation": "positive_timeout"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.create_invitation.title",
+            "consequence_key": "confirm.create_invitation.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "list_invitations",
+          "label_key": "action.list_invitations",
+          "command": "list_invitations",
+          "backend_status": "unavailable",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "get_invitation_status",
+          "label_key": "action.get_invitation_status",
+          "command": "get_invitation_status",
+          "backend_status": "unavailable",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "invitation_id",
+              "label_key": "field.invitation_id",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "revoke_invitation",
+          "label_key": "action.revoke_invitation",
+          "command": "revoke_invitation",
+          "backend_status": "unavailable",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.invitation.revoke"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "invitation_id",
+              "label_key": "field.invitation_id",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.revoke_invitation.title",
+            "consequence_key": "confirm.revoke_invitation.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "preview_invitation",
+          "label_key": "action.preview_invitation",
+          "command": "preview_invitation",
+          "backend_status": "unavailable",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "coordinator_url",
+              "label_key": "field.coordinator_url",
+              "input": "coordinator_url",
+              "required": true,
+              "validation": "coordinator_url"
+            },
+            {
+              "id": "code",
+              "label_key": "field.invitation_code",
+              "input": "invitation_code",
+              "required": true,
+              "validation": "invitation_code"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.preview_invitation.title",
+            "consequence_key": "confirm.preview_invitation.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "redeem_invitation",
+          "label_key": "action.redeem_invitation",
+          "command": "redeem_invitation",
+          "backend_status": "unavailable",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.invitation.redeem"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "coordinator_url",
+              "label_key": "field.coordinator_url",
+              "input": "coordinator_url",
+              "required": true,
+              "validation": "coordinator_url"
+            },
+            {
+              "id": "code",
+              "label_key": "field.invitation_code",
+              "input": "invitation_code",
+              "required": true,
+              "validation": "invitation_code"
+            },
+            {
+              "id": "invitation_id",
+              "label_key": "field.invitation_id",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            },
+            {
+              "id": "expected_invitation_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "preview_digest",
+              "label_key": "field.preview_digest",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            },
+            {
+              "id": "terms_hash",
+              "label_key": "field.terms_hash",
+              "input": "fingerprint",
+              "required": true,
+              "validation": "fingerprint"
+            },
+            {
+              "id": "acknowledged_at_unix_ms",
+              "label_key": "field.acknowledged_at",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.redeem_invitation.title",
+            "consequence_key": "confirm.redeem_invitation.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
         },
         {
           "id": "leave_network",

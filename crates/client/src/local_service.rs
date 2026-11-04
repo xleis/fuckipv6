@@ -480,6 +480,9 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::BatchReviewJoinRequests
         | NodeCommandKind::WithdrawJoinRequest
         | NodeCommandKind::ResubmitJoinRequest
+        | NodeCommandKind::CreateInvitation
+        | NodeCommandKind::RevokeInvitation
+        | NodeCommandKind::RedeemInvitation
         | NodeCommandKind::LeaveNetwork
         | NodeCommandKind::StartNode
         | NodeCommandKind::StopNode
@@ -492,6 +495,9 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListInvitations
+        | NodeCommandKind::GetInvitationStatus
+        | NodeCommandKind::PreviewInvitation
         | NodeCommandKind::GetBlacklist
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient

@@ -7,8 +7,10 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionObligation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkJoinMode,
+    ExitContributionObligation, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState, MembershipRole,
+    NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
     NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
@@ -87,6 +89,12 @@ pub enum NodeCommandKind {
     BatchReviewJoinRequests,
     WithdrawJoinRequest,
     ResubmitJoinRequest,
+    CreateInvitation,
+    ListInvitations,
+    GetInvitationStatus,
+    RevokeInvitation,
+    PreviewInvitation,
+    RedeemInvitation,
     LeaveNetwork,
     UpdateRouting,
     SetNetworkRole,
@@ -112,7 +120,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 50] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -136,6 +144,12 @@ impl NodeCommandKind {
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
         Self::ResubmitJoinRequest,
+        Self::CreateInvitation,
+        Self::ListInvitations,
+        Self::GetInvitationStatus,
+        Self::RevokeInvitation,
+        Self::PreviewInvitation,
+        Self::RedeemInvitation,
         Self::LeaveNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -161,7 +175,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 43] = [
+    pub const ACTIONS: [Self; 49] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -184,6 +198,12 @@ impl NodeCommandKind {
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
         Self::ResubmitJoinRequest,
+        Self::CreateInvitation,
+        Self::ListInvitations,
+        Self::GetInvitationStatus,
+        Self::RevokeInvitation,
+        Self::PreviewInvitation,
+        Self::RedeemInvitation,
         Self::LeaveNetwork,
         Self::UpdateRouting,
         Self::SetNetworkRole,
@@ -222,6 +242,10 @@ impl NodeCommandKind {
                 | Self::SetNodeDisplayName
                 | Self::RotateNodeIdentity
                 | Self::CleanupResiduals
+                | Self::CreateInvitation
+                | Self::RevokeInvitation
+                | Self::PreviewInvitation
+                | Self::RedeemInvitation
         )
     }
 
@@ -250,6 +274,12 @@ impl NodeCommandKind {
             Self::BatchReviewJoinRequests => "batch_review_join_requests",
             Self::WithdrawJoinRequest => "withdraw_join_request",
             Self::ResubmitJoinRequest => "resubmit_join_request",
+            Self::CreateInvitation => "create_invitation",
+            Self::ListInvitations => "list_invitations",
+            Self::GetInvitationStatus => "get_invitation_status",
+            Self::RevokeInvitation => "revoke_invitation",
+            Self::PreviewInvitation => "preview_invitation",
+            Self::RedeemInvitation => "redeem_invitation",
             Self::LeaveNetwork => "leave_network",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
@@ -298,6 +328,9 @@ impl NodeCommandKind {
                 | Self::BatchReviewJoinRequests
                 | Self::WithdrawJoinRequest
                 | Self::ResubmitJoinRequest
+                | Self::CreateInvitation
+                | Self::RevokeInvitation
+                | Self::RedeemInvitation
                 | Self::LeaveNetwork
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
@@ -388,6 +421,18 @@ pub enum NodeCommand {
     WithdrawJoinRequest(NodeWithdrawJoinRequestCommand),
     /// Answer an information request and return it to pending review.
     ResubmitJoinRequest(NodeResubmitJoinRequestCommand),
+    /// Create a one-time authenticated invitation and reveal its credential once.
+    CreateInvitation(NodeCreateInvitationCommand),
+    /// List redacted invitation metadata for one managed network.
+    ListInvitations(NodeListInvitationsCommand),
+    /// Read one invitation's redacted status.
+    GetInvitationStatus(NodeGetInvitationStatusCommand),
+    /// Revoke an invitation using its current revision.
+    RevokeInvitation(NodeRevokeInvitationCommand),
+    /// Preview an invitation before local-owner reauthentication and consent.
+    PreviewInvitation(NodePreviewInvitationCommand),
+    /// Consume an invitation and create ordinary network membership.
+    RedeemInvitation(NodeRedeemInvitationCommand),
     /// Remove only this network's local configuration and membership.
     LeaveNetwork(NodeLeaveNetworkCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
@@ -459,6 +504,12 @@ impl NodeCommand {
             Self::BatchReviewJoinRequests(_) => NodeCommandKind::BatchReviewJoinRequests,
             Self::WithdrawJoinRequest(_) => NodeCommandKind::WithdrawJoinRequest,
             Self::ResubmitJoinRequest(_) => NodeCommandKind::ResubmitJoinRequest,
+            Self::CreateInvitation(_) => NodeCommandKind::CreateInvitation,
+            Self::ListInvitations(_) => NodeCommandKind::ListInvitations,
+            Self::GetInvitationStatus(_) => NodeCommandKind::GetInvitationStatus,
+            Self::RevokeInvitation(_) => NodeCommandKind::RevokeInvitation,
+            Self::PreviewInvitation(_) => NodeCommandKind::PreviewInvitation,
+            Self::RedeemInvitation(_) => NodeCommandKind::RedeemInvitation,
             Self::LeaveNetwork(_) => NodeCommandKind::LeaveNetwork,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
@@ -565,6 +616,12 @@ impl NodeCommand {
             Self::BatchReviewJoinRequests(command) => command.validate(),
             Self::WithdrawJoinRequest(command) => command.validate(),
             Self::ResubmitJoinRequest(command) => command.validate(),
+            Self::CreateInvitation(command) => command.validate(),
+            Self::ListInvitations(command) => command.validate(),
+            Self::GetInvitationStatus(command) => command.validate(),
+            Self::RevokeInvitation(command) => command.validate(),
+            Self::PreviewInvitation(command) => command.validate(),
+            Self::RedeemInvitation(command) => command.validate(),
             Self::LeaveNetwork(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
@@ -1179,6 +1236,157 @@ impl std::fmt::Debug for NodeResubmitJoinRequestCommand {
             .field("reason", &"[redacted]")
             .finish()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCreateInvitationCommand {
+    pub network_id: NetworkId,
+    pub role: MembershipRole,
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityKind>,
+    pub max_uses: u32,
+    /// Requested lifetime in milliseconds. The domain bounds this to one minute
+    /// through thirty days.
+    pub expires_in_ms: u64,
+}
+
+impl NodeCreateInvitationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        InvitationCreateRequest::new(
+            self.network_id.clone(),
+            self.role,
+            self.capabilities.clone(),
+            self.max_uses,
+            self.expires_in_ms,
+        )
+        .validate()
+        .map_err(|_| {
+            invitation_invalid(
+                "invitation.error.invalid_create_request",
+                "邀请参数无效：角色只能是成员或管理员，使用次数、有效期或能力声明不符合要求",
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeListInvitationsCommand {
+    pub network_id: NetworkId,
+}
+
+impl NodeListInvitationsCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeGetInvitationStatusCommand {
+    pub network_id: NetworkId,
+    pub invitation_id: InvitationId,
+}
+
+impl NodeGetInvitationStatusCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRevokeInvitationCommand {
+    pub network_id: NetworkId,
+    pub invitation_id: InvitationId,
+    pub expected_revision: u64,
+}
+
+impl NodeRevokeInvitationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        if self.expected_revision == 0 {
+            return Err(invitation_invalid(
+                "invitation.error.invalid_revision",
+                "邀请 revision 必须大于零",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewInvitationCommand {
+    pub network_id: NetworkId,
+    /// Coordinator endpoint is a separate routing hint, never part of the
+    /// invitation credential and never placed in the URL query.
+    pub coordinator_url: String,
+    pub code: InvitationCode,
+}
+
+impl NodePreviewInvitationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_invitation_coordinator_url(&self.coordinator_url)
+    }
+}
+
+impl std::fmt::Debug for NodePreviewInvitationCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodePreviewInvitationCommand")
+            .field("network_id", &self.network_id)
+            .field("coordinator_url", &self.coordinator_url)
+            .field("code", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRedeemInvitationCommand {
+    /// Coordinator endpoint is a separate routing hint, never part of the
+    /// invitation credential and never placed in the URL query.
+    pub coordinator_url: String,
+    pub request: InvitationRedeemRequest,
+}
+
+impl NodeRedeemInvitationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_invitation_coordinator_url(&self.coordinator_url)?;
+        if self.request.expected_invitation_revision == 0
+            || self.request.acknowledged_at_unix_ms == 0
+        {
+            return Err(invitation_invalid(
+                "invitation.error.invalid_consent",
+                "接受邀请前必须展示并确认当前邀请条款",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for NodeRedeemInvitationCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeRedeemInvitationCommand")
+            .field("coordinator_url", &self.coordinator_url)
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
+fn validate_invitation_coordinator_url(url: &str) -> Result<(), NodeProblem> {
+    if url.is_empty()
+        || url.trim() != url
+        || url.len() > 2048
+        || url.chars().any(char::is_control)
+        || (!url.starts_with("ws://") && !url.starts_with("wss://"))
+    {
+        return Err(invitation_invalid(
+            "invitation.error.invalid_coordinator_url",
+            "协调服务器地址必须以 ws:// 或 wss:// 开头，且不能包含空白或控制字符",
+        ));
+    }
+    Ok(())
+}
+
+fn invitation_invalid(code: &str, message: &str) -> NodeProblem {
+    NodeProblem::new(NodeProblemCode::InvalidRequest, message).with_param("reason", code)
 }
 
 fn validate_network_id_field(network_id: &str) -> Result<(), NodeProblem> {
@@ -1903,6 +2111,12 @@ pub enum NodeCommandOutcome {
     JoinRequests(Box<NodeJoinRequestListResult>),
     JoinRequestsReviewed(Box<NodeJoinRequestReviewAck>),
     JoinRequestUpdated(Box<JoinRequest>),
+    InvitationCreated(Box<IssuedInvitation>),
+    Invitations(Vec<InvitationStatusView>),
+    InvitationStatus(Box<InvitationStatusView>),
+    InvitationRevoked(Box<InvitationStatusView>),
+    InvitationPreview(Box<InvitationPreview>),
+    InvitationRedeemed(Box<InvitationRedemption>),
     NetworkLeft(Box<NodeNetworkLeaveResult>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
@@ -2277,6 +2491,37 @@ mod tests {
     use crate::node::NodePermission;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn invitation_code() -> InvitationCode {
+        InvitationCode::parse(format!("fkinv_{}", "A".repeat(43))).expect("valid test code")
+    }
+
+    fn invitation_network_id() -> NetworkId {
+        NetworkId::from_public_key(b"invitation-command-network")
+    }
+
+    fn invitation_id() -> InvitationId {
+        InvitationId::from_public_key(b"invitation-command")
+    }
+
+    fn invitation_hash(label: &[u8]) -> ContentHash {
+        ContentHash::from_bytes(label)
+    }
+
+    fn valid_redeem_command() -> NodeRedeemInvitationCommand {
+        NodeRedeemInvitationCommand {
+            coordinator_url: "wss://coordinator.example.test/signaling".into(),
+            request: InvitationRedeemRequest {
+                network_id: invitation_network_id(),
+                code: invitation_code(),
+                invitation_id: invitation_id(),
+                expected_invitation_revision: 1,
+                preview_digest: invitation_hash(b"preview"),
+                terms_hash: invitation_hash(b"terms"),
+                acknowledged_at_unix_ms: 1_700_000_000_000,
+            },
+        }
+    }
+
     fn valid_commands() -> Vec<NodeCommand> {
         vec![
             NodeCommand::GetSnapshot,
@@ -2436,6 +2681,31 @@ mod tests {
                 expected_revision: 2,
                 reason: "Updated reason after the reviewer requested clarification.".into(),
             }),
+            NodeCommand::CreateInvitation(NodeCreateInvitationCommand {
+                network_id: invitation_network_id(),
+                role: MembershipRole::Member,
+                capabilities: vec![CapabilityKind::File],
+                max_uses: 2,
+                expires_in_ms: 86_400_000,
+            }),
+            NodeCommand::ListInvitations(NodeListInvitationsCommand {
+                network_id: invitation_network_id(),
+            }),
+            NodeCommand::GetInvitationStatus(NodeGetInvitationStatusCommand {
+                network_id: invitation_network_id(),
+                invitation_id: invitation_id(),
+            }),
+            NodeCommand::RevokeInvitation(NodeRevokeInvitationCommand {
+                network_id: invitation_network_id(),
+                invitation_id: invitation_id(),
+                expected_revision: 1,
+            }),
+            NodeCommand::PreviewInvitation(NodePreviewInvitationCommand {
+                network_id: invitation_network_id(),
+                coordinator_url: "wss://coordinator.example.test/signaling".into(),
+                code: invitation_code(),
+            }),
+            NodeCommand::RedeemInvitation(valid_redeem_command()),
             NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
                 network_name: "office".into(),
             }),
@@ -2546,6 +2816,72 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[test]
+    fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
+        assert_eq!(NodeCommandKind::ALL.len(), 50);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 49);
+        for kind in [
+            NodeCommandKind::CreateInvitation,
+            NodeCommandKind::RevokeInvitation,
+            NodeCommandKind::PreviewInvitation,
+            NodeCommandKind::RedeemInvitation,
+        ] {
+            assert!(kind.requires_recent_reauthentication(), "{kind:?}");
+        }
+        for kind in [
+            NodeCommandKind::ListInvitations,
+            NodeCommandKind::GetInvitationStatus,
+        ] {
+            assert!(!kind.requires_recent_reauthentication(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn invitation_debug_output_never_contains_the_credential() {
+        let code = invitation_code();
+        let plaintext = code.as_str().to_owned();
+        let preview = NodeCommand::PreviewInvitation(NodePreviewInvitationCommand {
+            network_id: invitation_network_id(),
+            coordinator_url: "wss://coordinator.example.test/signaling".into(),
+            code: code.clone(),
+        });
+        let redeem = NodeCommand::RedeemInvitation(valid_redeem_command());
+        assert!(!format!("{preview:?}").contains(&plaintext));
+        assert!(!format!("{redeem:?}").contains(&plaintext));
+        assert!(format!("{preview:?}").contains("[redacted]"));
+        assert!(format!("{redeem:?}").contains("[redacted]"));
+    }
+
+    #[test]
+    fn invitation_commands_reject_non_websocket_and_missing_consent() {
+        let mut preview = NodePreviewInvitationCommand {
+            network_id: invitation_network_id(),
+            coordinator_url: "https://coordinator.example.test/?code=leak".into(),
+            code: invitation_code(),
+        };
+        assert_eq!(
+            NodeCommand::PreviewInvitation(preview.clone())
+                .validate()
+                .unwrap_err()
+                .code,
+            NodeProblemCode::InvalidRequest
+        );
+        preview.coordinator_url = "ws://coordinator.example.test/signaling".into();
+        NodeCommand::PreviewInvitation(preview)
+            .validate()
+            .expect("websocket coordinator URL is accepted");
+
+        let mut redeem = valid_redeem_command();
+        redeem.request.acknowledged_at_unix_ms = 0;
+        assert_eq!(
+            NodeCommand::RedeemInvitation(redeem)
+                .validate()
+                .unwrap_err()
+                .code,
+            NodeProblemCode::InvalidRequest
+        );
     }
 
     #[test]
@@ -3162,6 +3498,9 @@ mod tests {
             NodeCommandKind::PreviewNetworkProfile,
             NodeCommandKind::PreviewJoinNetwork,
             NodeCommandKind::ListJoinRequests,
+            NodeCommandKind::ListInvitations,
+            NodeCommandKind::GetInvitationStatus,
+            NodeCommandKind::PreviewInvitation,
             NodeCommandKind::PreviewConfiguration,
             NodeCommandKind::GetConfigurationHistory,
         ] {
@@ -3180,6 +3519,9 @@ mod tests {
                     | NodeCommandKind::PreviewNetworkProfile
                     | NodeCommandKind::PreviewJoinNetwork
                     | NodeCommandKind::ListJoinRequests
+                    | NodeCommandKind::ListInvitations
+                    | NodeCommandKind::GetInvitationStatus
+                    | NodeCommandKind::PreviewInvitation
                     | NodeCommandKind::PreviewConfiguration
                     | NodeCommandKind::GetConfigurationHistory
             ) {

@@ -130,12 +130,22 @@ impl NodeCommandContext {
         scopes: impl IntoIterator<Item = (String, NetworkCommandScope)>,
         recently_reauthenticated: bool,
     ) -> Self {
+        let mut network_scopes = BTreeMap::new();
+        for (label, scope) in scopes {
+            // Transports historically keyed scopes by the local network name,
+            // while typed command payloads carry the stable network ID. Index
+            // both aliases so a valid binding cannot fail open or be mistaken
+            // for an out-of-scope target based only on which representation the
+            // command uses.
+            network_scopes.insert(scope.network_id.to_string(), scope.clone());
+            network_scopes.insert(label, scope);
+        }
         Self {
             actor,
             source: source.into(),
             capabilities: capabilities.into_iter().collect(),
             local_policy: Vec::new(),
-            network_scopes: scopes.into_iter().collect(),
+            network_scopes,
             recent_reauthentication: recently_reauthenticated,
             local_owner: false,
             authenticated: true,
@@ -435,6 +445,8 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListInvitations
+        | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex
         | NodeCommandKind::GetConfigurationHistory => NodePermission::ViewState,
@@ -457,6 +469,10 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::BatchReviewJoinRequests
         | NodeCommandKind::WithdrawJoinRequest
         | NodeCommandKind::ResubmitJoinRequest
+        | NodeCommandKind::CreateInvitation
+        | NodeCommandKind::RevokeInvitation
+        | NodeCommandKind::PreviewInvitation
+        | NodeCommandKind::RedeemInvitation
         | NodeCommandKind::LeaveNetwork
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
@@ -491,6 +507,8 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::SubmitJoinRequest
             | NodeCommandKind::WithdrawJoinRequest
             | NodeCommandKind::ResubmitJoinRequest
+            | NodeCommandKind::PreviewInvitation
+            | NodeCommandKind::RedeemInvitation
             | NodeCommandKind::LeaveNetwork
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
@@ -539,9 +557,14 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
             (PolicyAction::Create, ResourceKind::Network)
         }
-        NodeCommandKind::JoinNetwork | NodeCommandKind::SubmitJoinRequest => {
-            (PolicyAction::Create, ResourceKind::Membership)
-        }
+        NodeCommandKind::JoinNetwork
+        | NodeCommandKind::SubmitJoinRequest
+        | NodeCommandKind::CreateInvitation
+        | NodeCommandKind::RedeemInvitation => (PolicyAction::Create, ResourceKind::Membership),
+        NodeCommandKind::ListInvitations
+        | NodeCommandKind::GetInvitationStatus
+        | NodeCommandKind::PreviewInvitation => (PolicyAction::Read, ResourceKind::Membership),
+        NodeCommandKind::RevokeInvitation => (PolicyAction::Remove, ResourceKind::Membership),
         NodeCommandKind::ReviewJoinRequest
         | NodeCommandKind::BatchReviewJoinRequests
         | NodeCommandKind::WithdrawJoinRequest
@@ -623,6 +646,24 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::ResubmitJoinRequest(command) => {
             NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::CreateInvitation(command) => {
+            NetworkTargets::Named(vec![command.network_id.to_string()])
+        }
+        NodeCommand::ListInvitations(command) => {
+            NetworkTargets::Named(vec![command.network_id.to_string()])
+        }
+        NodeCommand::GetInvitationStatus(command) => {
+            NetworkTargets::Named(vec![command.network_id.to_string()])
+        }
+        NodeCommand::RevokeInvitation(command) => {
+            NetworkTargets::Named(vec![command.network_id.to_string()])
+        }
+        NodeCommand::PreviewInvitation(command) => {
+            NetworkTargets::Named(vec![command.network_id.to_string()])
+        }
+        NodeCommand::RedeemInvitation(command) => {
+            NetworkTargets::Named(vec![command.request.network_id.to_string()])
         }
         NodeCommand::LeaveNetwork(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
@@ -836,6 +877,60 @@ mod tests {
                 note: None,
             },
         })
+    }
+
+    fn invitation_code() -> fuckipv6_common::domain::InvitationCode {
+        fuckipv6_common::domain::InvitationCode::parse(format!("fkinv_{}", "A".repeat(43)))
+            .expect("valid invitation code")
+    }
+
+    fn invitation_network() -> NetworkId {
+        network_id("home")
+    }
+
+    fn invitation_id() -> fuckipv6_common::domain::InvitationId {
+        fuckipv6_common::domain::InvitationId::from_public_key(b"authorization-invitation")
+    }
+
+    fn invitation_commands() -> Vec<NodeCommand> {
+        vec![
+            NodeCommand::CreateInvitation(crate::node::NodeCreateInvitationCommand {
+                network_id: invitation_network(),
+                role: fuckipv6_common::domain::MembershipRole::Member,
+                capabilities: vec![fuckipv6_common::domain::CapabilityKind::File],
+                max_uses: 2,
+                expires_in_ms: 86_400_000,
+            }),
+            NodeCommand::ListInvitations(crate::node::NodeListInvitationsCommand {
+                network_id: invitation_network(),
+            }),
+            NodeCommand::GetInvitationStatus(crate::node::NodeGetInvitationStatusCommand {
+                network_id: invitation_network(),
+                invitation_id: invitation_id(),
+            }),
+            NodeCommand::RevokeInvitation(crate::node::NodeRevokeInvitationCommand {
+                network_id: invitation_network(),
+                invitation_id: invitation_id(),
+                expected_revision: 1,
+            }),
+            NodeCommand::PreviewInvitation(crate::node::NodePreviewInvitationCommand {
+                network_id: invitation_network(),
+                coordinator_url: "wss://coordinator.example.test/signaling".into(),
+                code: invitation_code(),
+            }),
+            NodeCommand::RedeemInvitation(crate::node::NodeRedeemInvitationCommand {
+                coordinator_url: "wss://coordinator.example.test/signaling".into(),
+                request: fuckipv6_common::domain::InvitationRedeemRequest {
+                    network_id: invitation_network(),
+                    code: invitation_code(),
+                    invitation_id: invitation_id(),
+                    expected_invitation_revision: 1,
+                    preview_digest: fuckipv6_common::domain::ContentHash::from_bytes(b"preview"),
+                    terms_hash: fuckipv6_common::domain::ContentHash::from_bytes(b"terms"),
+                    acknowledged_at_unix_ms: 1_700_000_000_000,
+                },
+            }),
+        ]
     }
 
     fn start_policies() -> (Vec<PermissionRule>, Vec<PermissionRule>) {
@@ -1260,6 +1355,170 @@ mod tests {
             }),
         )
         .expect("desktop owner can rename the node without a WebUI session");
+    }
+
+    #[test]
+    fn invitation_permissions_are_enforced_at_the_command_boundary() {
+        assert_eq!(
+            required_permission(NodeCommandKind::CreateInvitation),
+            NodePermission::ManageNetworks
+        );
+        assert_eq!(
+            required_permission(NodeCommandKind::RevokeInvitation),
+            NodePermission::ManageNetworks
+        );
+        assert_eq!(
+            required_permission(NodeCommandKind::PreviewInvitation),
+            NodePermission::ManageNetworks
+        );
+        assert_eq!(
+            required_permission(NodeCommandKind::RedeemInvitation),
+            NodePermission::ManageNetworks
+        );
+        assert_eq!(
+            required_permission(NodeCommandKind::ListInvitations),
+            NodePermission::ViewState
+        );
+        assert_eq!(
+            required_permission(NodeCommandKind::GetInvitationStatus),
+            NodePermission::ViewState
+        );
+
+        let (local_policy, network_policy) = (
+            vec![allow(
+                b"local-read-membership",
+                SubjectSelector::AnyMember,
+                PolicyAction::Read,
+                ResourceKind::Membership,
+            )],
+            vec![allow(
+                b"network-read-membership",
+                SubjectSelector::AnyMember,
+                PolicyAction::Read,
+                ResourceKind::Membership,
+            )],
+        );
+        let active_member = network_context(
+            NetworkRole::Member,
+            [NodePermission::ViewState],
+            &["home"],
+            MembershipState::Active,
+            local_policy.clone(),
+            network_policy.clone(),
+        );
+        for command in invitation_commands().into_iter().filter(|command| {
+            matches!(
+                command.kind(),
+                NodeCommandKind::ListInvitations | NodeCommandKind::GetInvitationStatus
+            )
+        }) {
+            authorize_command(&active_member, &command)
+                .expect("active member with ViewState may inspect invitation metadata");
+        }
+
+        let no_view = network_context(
+            NetworkRole::Member,
+            [],
+            &["home"],
+            MembershipState::Active,
+            local_policy,
+            network_policy,
+        );
+        assert_denied(
+            &no_view,
+            NodeCommand::ListInvitations(crate::node::NodeListInvitationsCommand {
+                network_id: invitation_network(),
+            }),
+            "permission.capability_denied",
+        );
+    }
+
+    #[test]
+    fn invitation_preview_and_redemption_are_local_owner_only() {
+        let (local_policy, network_policy) = (
+            vec![
+                allow(
+                    b"local-invitation-create",
+                    SubjectSelector::AnyMember,
+                    PolicyAction::Create,
+                    ResourceKind::Membership,
+                ),
+                allow(
+                    b"local-invitation-read",
+                    SubjectSelector::AnyMember,
+                    PolicyAction::Read,
+                    ResourceKind::Membership,
+                ),
+            ],
+            vec![
+                allow(
+                    b"network-invitation-create",
+                    SubjectSelector::AnyMember,
+                    PolicyAction::Create,
+                    ResourceKind::Membership,
+                ),
+                allow(
+                    b"network-invitation-read",
+                    SubjectSelector::AnyMember,
+                    PolicyAction::Read,
+                    ResourceKind::Membership,
+                ),
+            ],
+        );
+        let administrator = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy,
+            network_policy,
+        );
+        let commands = invitation_commands();
+        for command in [&commands[4], &commands[5]] {
+            assert_denied(
+                &administrator,
+                command.clone(),
+                "permission.local_owner_required",
+            );
+        }
+
+        let owner = NodeCommandContext::local_owner(actor(), "gpui");
+        for command in commands {
+            authorize_command(&owner, &command)
+                .expect("local owner may manage invitation preview and redemption");
+        }
+    }
+
+    #[test]
+    fn stale_invitation_owner_is_forced_to_reauthenticate_before_secret_use() {
+        let stale = NodeCommandContext::owner_session(actor(), "webui", false);
+        let commands = invitation_commands();
+        for command in [&commands[0], &commands[3], &commands[4], &commands[5]] {
+            assert_denied(
+                &stale,
+                command.clone(),
+                "permission.recent_authentication_required",
+            );
+        }
+        authorize_command(&stale, &commands[1]).expect("list does not require reauthentication");
+        authorize_command(&stale, &commands[2]).expect("status does not require reauthentication");
+
+        let fresh = NodeCommandContext::owner_session(actor(), "webui", true);
+        authorize_command(&fresh, &commands[5]).expect("fresh owner may redeem");
+    }
+
+    #[test]
+    fn invitation_network_target_contains_only_the_stable_network_id() {
+        let command = NodeCommand::PreviewInvitation(crate::node::NodePreviewInvitationCommand {
+            network_id: invitation_network(),
+            coordinator_url: "wss://coordinator.example.test/signaling".into(),
+            code: invitation_code(),
+        });
+        let NetworkTargets::Named(targets) = command_network_targets(&command) else {
+            panic!("invitation command must be network-scoped");
+        };
+        assert_eq!(targets, vec![invitation_network().to_string()]);
+        assert!(!format!("{targets:?}").contains("fkinv_"));
     }
 
     #[test]

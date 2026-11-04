@@ -49,6 +49,12 @@
             "batch_review_join_requests",
             "withdraw_join_request",
             "resubmit_join_request",
+            "create_invitation",
+            "list_invitations",
+            "get_invitation_status",
+            "revoke_invitation",
+            "preview_invitation",
+            "redeem_invitation",
             "leave_network",
             "update_routing",
             "set_network_role",
@@ -253,6 +259,8 @@
         "join_request_reason",
         "join_request_review_action",
         "join_request_reviews",
+        "invitation_code",
+        "coordinator_url",
         "port",
         "revision",
         "role",
@@ -336,7 +344,9 @@
         "join_request_note",
         "join_request_reason",
         "join_request_review_action",
-        "join_request_reviews"
+        "join_request_reviews",
+        "invitation_code",
+        "coordinator_url"
       ],
       "type": "string"
     }

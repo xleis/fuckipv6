@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -319,6 +319,32 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown ExitNodeUnsupportedReason wire value: " + value);
+        }
+    }
+
+    public enum InvitationState {
+        ACTIVE("active"),
+        EXHAUSTED("exhausted"),
+        EXPIRED("expired"),
+        REVOKED("revoked");
+
+        private final String wireName;
+
+        InvitationState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static InvitationState fromWireName(String value) {
+            for (InvitationState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown InvitationState wire value: " + value);
         }
     }
 
@@ -642,29 +668,35 @@ public final class NodeContractV1 {
         BAN_CLIENT("ban_client"),
         BATCH_REVIEW_JOIN_REQUESTS("batch_review_join_requests"),
         CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
+        CREATE_INVITATION("create_invitation"),
         CREATE_NETWORK("create_network"),
         GET_BLACKLIST("get_blacklist"),
         GET_CONFIGURATION("get_configuration"),
         GET_CONFIGURATION_HISTORY("get_configuration_history"),
+        GET_INVITATION_STATUS("get_invitation_status"),
         GET_NETWORK_ALLOCATION("get_network_allocation"),
         GET_NODE_DIAGNOSTICS("get_node_diagnostics"),
         GET_SNAPSHOT("get_snapshot"),
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
         LEAVE_NETWORK("leave_network"),
+        LIST_INVITATIONS("list_invitations"),
         LIST_JOIN_REQUESTS("list_join_requests"),
         PREVIEW_CONFIGURATION("preview_configuration"),
+        PREVIEW_INVITATION("preview_invitation"),
         PREVIEW_JOIN_NETWORK("preview_join_network"),
         PREVIEW_NETWORK_PROFILE("preview_network_profile"),
         PROBE_PEER("probe_peer"),
         PUBLISH_NETWORK_DISCOVERY("publish_network_discovery"),
         REBUILD_TUN("rebuild_tun"),
+        REDEEM_INVITATION("redeem_invitation"),
         REFRESH_DISCOVERY_INDEX("refresh_discovery_index"),
         RESTART_NETWORKS("restart_networks"),
         RESTART_NODE("restart_node"),
         RESUBMIT_JOIN_REQUEST("resubmit_join_request"),
         RETRY_DISCOVERY_INDEX("retry_discovery_index"),
         REVIEW_JOIN_REQUEST("review_join_request"),
+        REVOKE_INVITATION("revoke_invitation"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
         ROTATE_NODE_IDENTITY("rotate_node_identity"),
         SET_NETWORK_ROLE("set_network_role"),
@@ -1416,6 +1448,8 @@ public final class NodeContractV1 {
         JOIN_REQUEST_REASON("join_request_reason"),
         JOIN_REQUEST_REVIEW_ACTION("join_request_review_action"),
         JOIN_REQUEST_REVIEWS("join_request_reviews"),
+        INVITATION_CODE("invitation_code"),
+        COORDINATOR_URL("coordinator_url"),
         PORT("port"),
         REVISION("revision"),
         ROLE("role"),
@@ -1506,7 +1540,9 @@ public final class NodeContractV1 {
         JOIN_REQUEST_NOTE("join_request_note"),
         JOIN_REQUEST_REASON("join_request_reason"),
         JOIN_REQUEST_REVIEW_ACTION("join_request_review_action"),
-        JOIN_REQUEST_REVIEWS("join_request_reviews");
+        JOIN_REQUEST_REVIEWS("join_request_reviews"),
+        INVITATION_CODE("invitation_code"),
+        COORDINATOR_URL("coordinator_url");
 
         private final String wireName;
 
@@ -1956,6 +1992,152 @@ public final class NodeContractV1 {
             this.schema_version = schema_version;
             this.supported = supported;
             this.unsupported_reasons = unsupported_reasons;
+        }
+    }
+
+    /** DTO for InvitationPreview. */
+    public static final class InvitationPreview {
+        public final Boolean can_accept;
+        public final List<CapabilityKind> capabilities;
+        public final Boolean creates_permanent_membership;
+        public final String denial_key;
+        public final Long expires_at_unix_ms;
+        public final String invitation_id;
+        public final Long invitation_revision;
+        public final String network_id;
+        public final String network_name;
+        public final Long network_revision;
+        public final List<String> permission_changes;
+        public final String preview_digest;
+        public final Long remaining_uses;
+        public final Boolean requires_recent_reauthentication;
+        public final MembershipRole role;
+        public final InvitationState state;
+        public final MembershipTerms terms;
+        public final String terms_hash;
+
+        public InvitationPreview(Boolean can_accept, List<CapabilityKind> capabilities, Boolean creates_permanent_membership, String denial_key, Long expires_at_unix_ms, String invitation_id, Long invitation_revision, String network_id, String network_name, Long network_revision, List<String> permission_changes, String preview_digest, Long remaining_uses, Boolean requires_recent_reauthentication, MembershipRole role, InvitationState state, MembershipTerms terms, String terms_hash) {
+            this.can_accept = can_accept;
+            this.capabilities = capabilities;
+            this.creates_permanent_membership = creates_permanent_membership;
+            this.denial_key = denial_key;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.invitation_id = invitation_id;
+            this.invitation_revision = invitation_revision;
+            this.network_id = network_id;
+            this.network_name = network_name;
+            this.network_revision = network_revision;
+            this.permission_changes = permission_changes;
+            this.preview_digest = preview_digest;
+            this.remaining_uses = remaining_uses;
+            this.requires_recent_reauthentication = requires_recent_reauthentication;
+            this.role = role;
+            this.state = state;
+            this.terms = terms;
+            this.terms_hash = terms_hash;
+        }
+    }
+
+    /** DTO for InvitationRecord. */
+    public static final class InvitationRecord {
+        public final List<CapabilityKind> capabilities;
+        public final Long created_at_unix_ms;
+        public final String created_by;
+        public final Long expires_at_unix_ms;
+        public final String invitation_id;
+        public final Long max_uses;
+        public final String network_id;
+        public final Long revision;
+        public final Long revoked_at_unix_ms;
+        public final String revoked_by;
+        public final MembershipRole role;
+        public final Long used_count;
+
+        public InvitationRecord(List<CapabilityKind> capabilities, Long created_at_unix_ms, String created_by, Long expires_at_unix_ms, String invitation_id, Long max_uses, String network_id, Long revision, Long revoked_at_unix_ms, String revoked_by, MembershipRole role, Long used_count) {
+            this.capabilities = capabilities;
+            this.created_at_unix_ms = created_at_unix_ms;
+            this.created_by = created_by;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.invitation_id = invitation_id;
+            this.max_uses = max_uses;
+            this.network_id = network_id;
+            this.revision = revision;
+            this.revoked_at_unix_ms = revoked_at_unix_ms;
+            this.revoked_by = revoked_by;
+            this.role = role;
+            this.used_count = used_count;
+        }
+    }
+
+    /** DTO for InvitationRedeemRequest. */
+    public static final class InvitationRedeemRequest {
+        public final Long acknowledged_at_unix_ms;
+        public final String code;
+        public final Long expected_invitation_revision;
+        public final String invitation_id;
+        public final String network_id;
+        public final String preview_digest;
+        public final String terms_hash;
+
+        public InvitationRedeemRequest(Long acknowledged_at_unix_ms, String code, Long expected_invitation_revision, String invitation_id, String network_id, String preview_digest, String terms_hash) {
+            this.acknowledged_at_unix_ms = acknowledged_at_unix_ms;
+            this.code = code;
+            this.expected_invitation_revision = expected_invitation_revision;
+            this.invitation_id = invitation_id;
+            this.network_id = network_id;
+            this.preview_digest = preview_digest;
+            this.terms_hash = terms_hash;
+        }
+    }
+
+    /** DTO for InvitationRedemption. */
+    public static final class InvitationRedemption {
+        public final Boolean already_redeemed;
+        public final List<CapabilityKind> capabilities;
+        public final Boolean grants_permanent_membership;
+        public final String invitation_id;
+        public final Long invitation_revision;
+        public final Long joined_at_unix_ms;
+        public final String network_id;
+        public final Long network_revision;
+        public final String node_id;
+        public final MembershipRole role;
+
+        public InvitationRedemption(Boolean already_redeemed, List<CapabilityKind> capabilities, Boolean grants_permanent_membership, String invitation_id, Long invitation_revision, Long joined_at_unix_ms, String network_id, Long network_revision, String node_id, MembershipRole role) {
+            this.already_redeemed = already_redeemed;
+            this.capabilities = capabilities;
+            this.grants_permanent_membership = grants_permanent_membership;
+            this.invitation_id = invitation_id;
+            this.invitation_revision = invitation_revision;
+            this.joined_at_unix_ms = joined_at_unix_ms;
+            this.network_id = network_id;
+            this.network_revision = network_revision;
+            this.node_id = node_id;
+            this.role = role;
+        }
+    }
+
+    /** DTO for InvitationStatusView. */
+    public static final class InvitationStatusView {
+        public final InvitationRecord invitation;
+        public final Long remaining_uses;
+        public final InvitationState state;
+
+        public InvitationStatusView(InvitationRecord invitation, Long remaining_uses, InvitationState state) {
+            this.invitation = invitation;
+            this.remaining_uses = remaining_uses;
+            this.state = state;
+        }
+    }
+
+    /** DTO for IssuedInvitation. */
+    public static final class IssuedInvitation {
+        public final String code;
+        public final InvitationStatusView status;
+
+        public IssuedInvitation(String code, InvitationStatusView status) {
+            this.code = code;
+            this.status = status;
         }
     }
 
@@ -2615,6 +2797,23 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeCreateInvitationCommand. */
+    public static final class NodeCreateInvitationCommand {
+        public final List<CapabilityKind> capabilities;
+        public final Long expires_in_ms;
+        public final Long max_uses;
+        public final String network_id;
+        public final MembershipRole role;
+
+        public NodeCreateInvitationCommand(List<CapabilityKind> capabilities, Long expires_in_ms, Long max_uses, String network_id, MembershipRole role) {
+            this.capabilities = capabilities;
+            this.expires_in_ms = expires_in_ms;
+            this.max_uses = max_uses;
+            this.network_id = network_id;
+            this.role = role;
+        }
+    }
+
     /** DTO for NodeCreateNetworkCommand. */
     public static final class NodeCreateNetworkCommand {
         public final Boolean auto_connect;
@@ -2823,6 +3022,17 @@ public final class NodeContractV1 {
         public NodeEventCursor(Long sequence, Long snapshot_revision) {
             this.sequence = sequence;
             this.snapshot_revision = snapshot_revision;
+        }
+    }
+
+    /** DTO for NodeGetInvitationStatusCommand. */
+    public static final class NodeGetInvitationStatusCommand {
+        public final String invitation_id;
+        public final String network_id;
+
+        public NodeGetInvitationStatusCommand(String invitation_id, String network_id) {
+            this.invitation_id = invitation_id;
+            this.network_id = network_id;
         }
     }
 
@@ -3062,6 +3272,15 @@ public final class NodeContractV1 {
             this.configured_networks = configured_networks;
             this.failed_networks = failed_networks;
             this.phase = phase;
+        }
+    }
+
+    /** DTO for NodeListInvitationsCommand. */
+    public static final class NodeListInvitationsCommand {
+        public final String network_id;
+
+        public NodeListInvitationsCommand(String network_id) {
+            this.network_id = network_id;
         }
     }
 
@@ -3498,6 +3717,19 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodePreviewInvitationCommand. */
+    public static final class NodePreviewInvitationCommand {
+        public final String code;
+        public final String coordinator_url;
+        public final String network_id;
+
+        public NodePreviewInvitationCommand(String code, String coordinator_url, String network_id) {
+            this.code = code;
+            this.coordinator_url = coordinator_url;
+            this.network_id = network_id;
+        }
+    }
+
     /** DTO for NodePreviewJoinNetworkCommand. */
     public static final class NodePreviewJoinNetworkCommand {
         public final String network_id;
@@ -3558,6 +3790,17 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeRedeemInvitationCommand. */
+    public static final class NodeRedeemInvitationCommand {
+        public final String coordinator_url;
+        public final InvitationRedeemRequest request;
+
+        public NodeRedeemInvitationCommand(String coordinator_url, InvitationRedeemRequest request) {
+            this.coordinator_url = coordinator_url;
+            this.request = request;
+        }
+    }
+
     /** DTO for NodeResidualCleanupResult. */
     public static final class NodeResidualCleanupResult {
         public final List<String> cleaned_networks;
@@ -3594,6 +3837,19 @@ public final class NodeContractV1 {
         public NodeReviewJoinRequestCommand(String network_id, NodeJoinRequestReviewItem review) {
             this.network_id = network_id;
             this.review = review;
+        }
+    }
+
+    /** DTO for NodeRevokeInvitationCommand. */
+    public static final class NodeRevokeInvitationCommand {
+        public final Long expected_revision;
+        public final String invitation_id;
+        public final String network_id;
+
+        public NodeRevokeInvitationCommand(Long expected_revision, String invitation_id, String network_id) {
+            this.expected_revision = expected_revision;
+            this.invitation_id = invitation_id;
+            this.network_id = network_id;
         }
     }
 
@@ -4379,6 +4635,60 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class CreateInvitation extends NodeCommand {
+            public final NodeCreateInvitationCommand payload;
+
+            public CreateInvitation(NodeCreateInvitationCommand payload) {
+                super(NodeCommandKind.CREATE_INVITATION);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ListInvitations extends NodeCommand {
+            public final NodeListInvitationsCommand payload;
+
+            public ListInvitations(NodeListInvitationsCommand payload) {
+                super(NodeCommandKind.LIST_INVITATIONS);
+                this.payload = payload;
+            }
+        }
+
+        public static final class GetInvitationStatus extends NodeCommand {
+            public final NodeGetInvitationStatusCommand payload;
+
+            public GetInvitationStatus(NodeGetInvitationStatusCommand payload) {
+                super(NodeCommandKind.GET_INVITATION_STATUS);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RevokeInvitation extends NodeCommand {
+            public final NodeRevokeInvitationCommand payload;
+
+            public RevokeInvitation(NodeRevokeInvitationCommand payload) {
+                super(NodeCommandKind.REVOKE_INVITATION);
+                this.payload = payload;
+            }
+        }
+
+        public static final class PreviewInvitation extends NodeCommand {
+            public final NodePreviewInvitationCommand payload;
+
+            public PreviewInvitation(NodePreviewInvitationCommand payload) {
+                super(NodeCommandKind.PREVIEW_INVITATION);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RedeemInvitation extends NodeCommand {
+            public final NodeRedeemInvitationCommand payload;
+
+            public RedeemInvitation(NodeRedeemInvitationCommand payload) {
+                super(NodeCommandKind.REDEEM_INVITATION);
+                this.payload = payload;
+            }
+        }
+
         public static final class LeaveNetwork extends NodeCommand {
             public final NodeLeaveNetworkCommand payload;
 
@@ -4725,6 +5035,60 @@ public final class NodeContractV1 {
 
             public JoinRequestUpdated(JoinRequest data) {
                 super("join_request_updated");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationCreated extends NodeCommandOutcome {
+            public final IssuedInvitation data;
+
+            public InvitationCreated(IssuedInvitation data) {
+                super("invitation_created");
+                this.data = data;
+            }
+        }
+
+        public static final class Invitations extends NodeCommandOutcome {
+            public final List<InvitationStatusView> data;
+
+            public Invitations(List<InvitationStatusView> data) {
+                super("invitations");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationStatus extends NodeCommandOutcome {
+            public final InvitationStatusView data;
+
+            public InvitationStatus(InvitationStatusView data) {
+                super("invitation_status");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationRevoked extends NodeCommandOutcome {
+            public final InvitationStatusView data;
+
+            public InvitationRevoked(InvitationStatusView data) {
+                super("invitation_revoked");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationPreview extends NodeCommandOutcome {
+            public final InvitationPreview data;
+
+            public InvitationPreview(InvitationPreview data) {
+                super("invitation_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationRedeemed extends NodeCommandOutcome {
+            public final InvitationRedemption data;
+
+            public InvitationRedeemed(InvitationRedemption data) {
+                super("invitation_redeemed");
                 this.data = data;
             }
         }
@@ -5198,28 +5562,34 @@ public final class NodeContractV1 {
             command == NodeCommandKind.BAN_CLIENT ||
             command == NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS ||
             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
+            command == NodeCommandKind.CREATE_INVITATION ||
             command == NodeCommandKind.CREATE_NETWORK ||
             command == NodeCommandKind.GET_BLACKLIST ||
             command == NodeCommandKind.GET_CONFIGURATION ||
             command == NodeCommandKind.GET_CONFIGURATION_HISTORY ||
+            command == NodeCommandKind.GET_INVITATION_STATUS ||
             command == NodeCommandKind.GET_NETWORK_ALLOCATION ||
             command == NodeCommandKind.GET_NODE_DIAGNOSTICS ||
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.LEAVE_NETWORK ||
+            command == NodeCommandKind.LIST_INVITATIONS ||
             command == NodeCommandKind.LIST_JOIN_REQUESTS ||
             command == NodeCommandKind.PREVIEW_CONFIGURATION ||
+            command == NodeCommandKind.PREVIEW_INVITATION ||
             command == NodeCommandKind.PREVIEW_JOIN_NETWORK ||
             command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.PUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.REBUILD_TUN ||
+            command == NodeCommandKind.REDEEM_INVITATION ||
             command == NodeCommandKind.REFRESH_DISCOVERY_INDEX ||
             command == NodeCommandKind.RESTART_NETWORKS ||
             command == NodeCommandKind.RESTART_NODE ||
             command == NodeCommandKind.RESUBMIT_JOIN_REQUEST ||
             command == NodeCommandKind.RETRY_DISCOVERY_INDEX ||
             command == NodeCommandKind.REVIEW_JOIN_REQUEST ||
+            command == NodeCommandKind.REVOKE_INVITATION ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
             command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||

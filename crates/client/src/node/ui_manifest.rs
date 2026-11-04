@@ -412,6 +412,9 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewNetworkProfile
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListInvitations
+        | NodeCommandKind::GetInvitationStatus
+        | NodeCommandKind::PreviewInvitation
         | NodeCommandKind::GetConfigurationHistory => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
@@ -437,6 +440,9 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::ResubmitJoinRequest => {
             NodeUiAudit::record("network.join_request.resubmit")
         }
+        NodeCommandKind::CreateInvitation => NodeUiAudit::record("network.invitation.create"),
+        NodeCommandKind::RevokeInvitation => NodeUiAudit::record("network.invitation.revoke"),
+        NodeCommandKind::RedeemInvitation => NodeUiAudit::record("network.invitation.redeem"),
         NodeCommandKind::LeaveNetwork => NodeUiAudit::record("network.leave"),
         NodeCommandKind::StartNetworks => NodeUiAudit::record("network.start"),
         NodeCommandKind::StopNetworks => NodeUiAudit::record("network.stop"),
@@ -508,6 +514,8 @@ pub enum NodeUiInputKind {
     JoinRequestReason,
     JoinRequestReviewAction,
     JoinRequestReviews,
+    InvitationCode,
+    CoordinatorUrl,
     Port,
     Revision,
     Role,
@@ -547,6 +555,8 @@ pub enum NodeUiValidation {
     JoinRequestReason,
     JoinRequestReviewAction,
     JoinRequestReviews,
+    InvitationCode,
+    CoordinatorUrl,
 }
 
 pub fn node_ui_manifest() -> NodeUiManifest {
@@ -1191,6 +1201,244 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             ),
                         ],
                         None,
+                    ),
+                    action(
+                        "create_invitation",
+                        "action.create_invitation",
+                        NodeCommandKind::CreateInvitation,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "role",
+                                "field.invitation_role",
+                                NodeUiInputKind::Role,
+                                true,
+                                NodeUiValidation::Role,
+                            ),
+                            field(
+                                "capabilities",
+                                "field.capability_declarations",
+                                NodeUiInputKind::CapabilityDeclarations,
+                                false,
+                                NodeUiValidation::CapabilityDeclarations,
+                            ),
+                            field(
+                                "max_uses",
+                                "field.invitation_max_uses",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "expires_in_ms",
+                                "field.invitation_expires_in_ms",
+                                NodeUiInputKind::TimeoutMs,
+                                true,
+                                NodeUiValidation::PositiveTimeout,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::CreateInvitation,
+                            "confirm.create_invitation.title",
+                            "confirm.create_invitation.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "list_invitations",
+                        "action.list_invitations",
+                        NodeCommandKind::ListInvitations,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NodeRunning,
+                        vec![field(
+                            "network_id",
+                            "field.network_id",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NonEmpty,
+                        )],
+                        None,
+                    ),
+                    action(
+                        "get_invitation_status",
+                        "action.get_invitation_status",
+                        NodeCommandKind::GetInvitationStatus,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "invitation_id",
+                                "field.invitation_id",
+                                NodeUiInputKind::Fingerprint,
+                                true,
+                                NodeUiValidation::Fingerprint,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "revoke_invitation",
+                        "action.revoke_invitation",
+                        NodeCommandKind::RevokeInvitation,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "invitation_id",
+                                "field.invitation_id",
+                                NodeUiInputKind::Fingerprint,
+                                true,
+                                NodeUiValidation::Fingerprint,
+                            ),
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::RevokeInvitation,
+                            "confirm.revoke_invitation.title",
+                            "confirm.revoke_invitation.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "preview_invitation",
+                        "action.preview_invitation",
+                        NodeCommandKind::PreviewInvitation,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "coordinator_url",
+                                "field.coordinator_url",
+                                NodeUiInputKind::CoordinatorUrl,
+                                true,
+                                NodeUiValidation::CoordinatorUrl,
+                            ),
+                            field(
+                                "code",
+                                "field.invitation_code",
+                                NodeUiInputKind::InvitationCode,
+                                true,
+                                NodeUiValidation::InvitationCode,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::PreviewInvitation,
+                            "confirm.preview_invitation.title",
+                            "confirm.preview_invitation.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "redeem_invitation",
+                        "action.redeem_invitation",
+                        NodeCommandKind::RedeemInvitation,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "coordinator_url",
+                                "field.coordinator_url",
+                                NodeUiInputKind::CoordinatorUrl,
+                                true,
+                                NodeUiValidation::CoordinatorUrl,
+                            ),
+                            field(
+                                "code",
+                                "field.invitation_code",
+                                NodeUiInputKind::InvitationCode,
+                                true,
+                                NodeUiValidation::InvitationCode,
+                            ),
+                            field(
+                                "invitation_id",
+                                "field.invitation_id",
+                                NodeUiInputKind::Fingerprint,
+                                true,
+                                NodeUiValidation::Fingerprint,
+                            ),
+                            field(
+                                "expected_invitation_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "preview_digest",
+                                "field.preview_digest",
+                                NodeUiInputKind::Fingerprint,
+                                true,
+                                NodeUiValidation::Fingerprint,
+                            ),
+                            field(
+                                "terms_hash",
+                                "field.terms_hash",
+                                NodeUiInputKind::Fingerprint,
+                                true,
+                                NodeUiValidation::Fingerprint,
+                            ),
+                            field(
+                                "acknowledged_at_unix_ms",
+                                "field.acknowledged_at",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::RedeemInvitation,
+                            "confirm.redeem_invitation.title",
+                            "confirm.redeem_invitation.consequence",
+                            false,
+                        )),
                     ),
                     action(
                         "leave_network",
@@ -2340,6 +2588,87 @@ mod tests {
         assert!(!encoded.contains("server_mode"));
         assert!(encoded.contains("set_exit_node_role"));
         assert!(encoded.contains("set_relay_role"));
+    }
+
+    #[test]
+    fn invitation_actions_publish_safe_fields_and_honest_backend_state() {
+        let manifest = node_ui_manifest();
+        let action = |command| {
+            manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .find(|action| action.command == command)
+                .expect("invitation action")
+        };
+
+        for command in [
+            NodeCommandKind::CreateInvitation,
+            NodeCommandKind::ListInvitations,
+            NodeCommandKind::GetInvitationStatus,
+            NodeCommandKind::RevokeInvitation,
+            NodeCommandKind::PreviewInvitation,
+            NodeCommandKind::RedeemInvitation,
+        ] {
+            let action = action(command);
+            assert_eq!(action.backend_status, NodeUiBackendStatus::Unavailable);
+            assert!(!action.fields.is_empty());
+        }
+
+        for command in [
+            NodeCommandKind::ListInvitations,
+            NodeCommandKind::GetInvitationStatus,
+        ] {
+            assert_eq!(action(command).permission, NodePermission::ViewState);
+        }
+        for command in [
+            NodeCommandKind::CreateInvitation,
+            NodeCommandKind::RevokeInvitation,
+            NodeCommandKind::PreviewInvitation,
+            NodeCommandKind::RedeemInvitation,
+        ] {
+            assert_eq!(action(command).permission, NodePermission::ManageNetworks);
+        }
+
+        let preview = action(NodeCommandKind::PreviewInvitation);
+        let code = preview
+            .fields
+            .iter()
+            .find(|field| field.id == "code")
+            .expect("invitation code field");
+        assert_eq!(code.input, NodeUiInputKind::InvitationCode);
+        assert_eq!(code.validation, NodeUiValidation::InvitationCode);
+        let coordinator = preview
+            .fields
+            .iter()
+            .find(|field| field.id == "coordinator_url")
+            .expect("coordinator field");
+        assert_eq!(coordinator.input, NodeUiInputKind::CoordinatorUrl);
+        assert_eq!(coordinator.validation, NodeUiValidation::CoordinatorUrl);
+
+        for command in [
+            NodeCommandKind::CreateInvitation,
+            NodeCommandKind::RevokeInvitation,
+            NodeCommandKind::PreviewInvitation,
+            NodeCommandKind::RedeemInvitation,
+        ] {
+            assert!(action(command)
+                .confirmation
+                .as_ref()
+                .is_some_and(|confirmation| confirmation.recent_authentication_required));
+        }
+        assert_eq!(
+            crate::node::audit_for_command(NodeCommandKind::CreateInvitation)
+                .action
+                .as_deref(),
+            Some("network.invitation.create")
+        );
+        assert_eq!(
+            crate::node::audit_for_command(NodeCommandKind::RedeemInvitation)
+                .action
+                .as_deref(),
+            Some("network.invitation.redeem")
+        );
     }
 
     #[test]

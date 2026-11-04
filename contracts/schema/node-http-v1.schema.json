@@ -500,6 +500,331 @@
     "IdempotencyKey": {
       "type": "string"
     },
+    "InvitationCode": {
+      "description": "A high-entropy invitation secret. It is intentionally not a URL and its\n`Debug` representation is redacted so generic tracing cannot disclose it.",
+      "type": "string"
+    },
+    "InvitationId": {
+      "type": "string"
+    },
+    "InvitationPreview": {
+      "description": "Everything the accepting user must see before confirming. It contains no\nroster addresses, topology, activity prose or invitation credential.",
+      "properties": {
+        "can_accept": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "creates_permanent_membership": {
+          "description": "Redemption creates ordinary membership and never an invitation-owned or\npermanent relationship.",
+          "type": "boolean"
+        },
+        "denial_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "invitation_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "network_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "permission_changes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "preview_digest": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "remaining_uses": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requires_recent_reauthentication": {
+          "type": "boolean"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "state": {
+          "$ref": "#/$defs/InvitationState"
+        },
+        "terms": {
+          "$ref": "#/$defs/MembershipTerms"
+        },
+        "terms_hash": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "required": [
+        "invitation_id",
+        "invitation_revision",
+        "network_id",
+        "network_name",
+        "network_revision",
+        "role",
+        "capabilities",
+        "remaining_uses",
+        "expires_at_unix_ms",
+        "state",
+        "terms",
+        "terms_hash",
+        "preview_digest",
+        "permission_changes",
+        "creates_permanent_membership",
+        "requires_recent_reauthentication",
+        "can_accept"
+      ],
+      "type": "object"
+    },
+    "InvitationRecord": {
+      "description": "Durable invitation metadata. It never contains plaintext invitation code\nmaterial; the Coordinator stores only `InvitationCode::digest()` in its\nprivate ledger.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "created_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_by": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "max_uses": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revoked_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revoked_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "used_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "invitation_id",
+        "network_id",
+        "created_by",
+        "role",
+        "max_uses",
+        "used_count",
+        "created_at_unix_ms",
+        "expires_at_unix_ms",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "InvitationRedeemRequest": {
+      "properties": {
+        "acknowledged_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "code": {
+          "$ref": "#/$defs/InvitationCode"
+        },
+        "expected_invitation_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "preview_digest": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "terms_hash": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "required": [
+        "network_id",
+        "code",
+        "invitation_id",
+        "expected_invitation_revision",
+        "preview_digest",
+        "terms_hash",
+        "acknowledged_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "InvitationRedemption": {
+      "properties": {
+        "already_redeemed": {
+          "description": "True only for an idempotent retry by the same authenticated node.",
+          "type": "boolean"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "grants_permanent_membership": {
+          "type": "boolean"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "invitation_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "joined_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "network_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        }
+      },
+      "required": [
+        "invitation_id",
+        "network_id",
+        "node_id",
+        "role",
+        "capabilities",
+        "network_revision",
+        "invitation_revision",
+        "joined_at_unix_ms",
+        "already_redeemed",
+        "grants_permanent_membership"
+      ],
+      "type": "object"
+    },
+    "InvitationState": {
+      "enum": [
+        "active",
+        "exhausted",
+        "expired",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "InvitationStatusView": {
+      "properties": {
+        "invitation": {
+          "$ref": "#/$defs/InvitationRecord"
+        },
+        "remaining_uses": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/InvitationState"
+        }
+      },
+      "required": [
+        "invitation",
+        "state",
+        "remaining_uses"
+      ],
+      "type": "object"
+    },
+    "IssuedInvitation": {
+      "description": "Safe response from creation. The plaintext code may be displayed/copied once\nand is deliberately excluded from list/status responses.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/InvitationCode"
+        },
+        "status": {
+          "$ref": "#/$defs/InvitationStatusView"
+        }
+      },
+      "required": [
+        "status",
+        "code"
+      ],
+      "type": "object"
+    },
     "JoinApplicantProfile": {
       "description": "Public applicant metadata shown to authorized reviewers. It contains no\nprivate network address, endpoint, activity or credential material.",
       "properties": {
@@ -2555,6 +2880,108 @@
           "type": "object"
         },
         {
+          "description": "Create a one-time authenticated invitation and reveal its credential once.",
+          "properties": {
+            "command": {
+              "const": "create_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeCreateInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "List redacted invitation metadata for one managed network.",
+          "properties": {
+            "command": {
+              "const": "list_invitations",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeListInvitationsCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Read one invitation's redacted status.",
+          "properties": {
+            "command": {
+              "const": "get_invitation_status",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeGetInvitationStatusCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Revoke an invitation using its current revision.",
+          "properties": {
+            "command": {
+              "const": "revoke_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRevokeInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Preview an invitation before local-owner reauthentication and consent.",
+          "properties": {
+            "command": {
+              "const": "preview_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodePreviewInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Consume an invitation and create ordinary network membership.",
+          "properties": {
+            "command": {
+              "const": "redeem_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRedeemInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Remove only this network's local configuration and membership.",
           "properties": {
             "command": {
@@ -3219,6 +3646,105 @@
         {
           "properties": {
             "data": {
+              "$ref": "#/$defs/IssuedInvitation"
+            },
+            "status": {
+              "const": "invitation_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "items": {
+                "$ref": "#/$defs/InvitationStatusView"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "invitations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationStatusView"
+            },
+            "status": {
+              "const": "invitation_status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationStatusView"
+            },
+            "status": {
+              "const": "invitation_revoked",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationPreview"
+            },
+            "status": {
+              "const": "invitation_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationRedemption"
+            },
+            "status": {
+              "const": "invitation_redeemed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
               "$ref": "#/$defs/NodeNetworkLeaveResult"
             },
             "status": {
@@ -3439,6 +3965,41 @@
         "unavailable"
       ],
       "type": "string"
+    },
+    "NodeCreateInvitationCommand": {
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "expires_in_ms": {
+          "description": "Requested lifetime in milliseconds. The domain bounds this to one minute\nthrough thirty days.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_uses": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        }
+      },
+      "required": [
+        "network_id",
+        "role",
+        "max_uses",
+        "expires_in_ms"
+      ],
+      "type": "object"
     },
     "NodeCreateNetworkCommand": {
       "properties": {
@@ -4211,6 +4772,21 @@
       ],
       "type": "string"
     },
+    "NodeGetInvitationStatusCommand": {
+      "properties": {
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "invitation_id"
+      ],
+      "type": "object"
+    },
     "NodeHttpErrorCode": {
       "description": "Stable error codes for HTTP version negotiation and backend failures.",
       "enum": [
@@ -4702,6 +5278,17 @@
         "configured_networks",
         "active_networks",
         "failed_networks"
+      ],
+      "type": "object"
+    },
+    "NodeListInvitationsCommand": {
+      "properties": {
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id"
       ],
       "type": "object"
     },
@@ -5739,6 +6326,26 @@
       ],
       "type": "object"
     },
+    "NodePreviewInvitationCommand": {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/InvitationCode"
+        },
+        "coordinator_url": {
+          "description": "Coordinator endpoint is a separate routing hint, never part of the\ninvitation credential and never placed in the URL query.",
+          "type": "string"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "coordinator_url",
+        "code"
+      ],
+      "type": "object"
+    },
     "NodePreviewJoinNetworkCommand": {
       "properties": {
         "network_id": {
@@ -5882,6 +6489,22 @@
       },
       "type": "object"
     },
+    "NodeRedeemInvitationCommand": {
+      "properties": {
+        "coordinator_url": {
+          "description": "Coordinator endpoint is a separate routing hint, never part of the\ninvitation credential and never placed in the URL query.",
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/InvitationRedeemRequest"
+        }
+      },
+      "required": [
+        "coordinator_url",
+        "request"
+      ],
+      "type": "object"
+    },
     "NodeResidualCleanupResult": {
       "description": "Partial-success aware result for explicit residual cleanup.",
       "properties": {
@@ -5945,6 +6568,27 @@
       "required": [
         "network_id",
         "review"
+      ],
+      "type": "object"
+    },
+    "NodeRevokeInvitationCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "invitation_id",
+        "expected_revision"
       ],
       "type": "object"
     },
@@ -6619,6 +7263,12 @@
             "batch_review_join_requests",
             "withdraw_join_request",
             "resubmit_join_request",
+            "create_invitation",
+            "list_invitations",
+            "get_invitation_status",
+            "revoke_invitation",
+            "preview_invitation",
+            "redeem_invitation",
             "leave_network",
             "update_routing",
             "set_network_role",
@@ -6823,6 +7473,8 @@
         "join_request_reason",
         "join_request_review_action",
         "join_request_reviews",
+        "invitation_code",
+        "coordinator_url",
         "port",
         "revision",
         "role",
@@ -6942,7 +7594,9 @@
         "join_request_note",
         "join_request_reason",
         "join_request_review_action",
-        "join_request_reviews"
+        "join_request_reviews",
+        "invitation_code",
+        "coordinator_url"
       ],
       "type": "string"
     },

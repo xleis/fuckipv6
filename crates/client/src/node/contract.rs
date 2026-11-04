@@ -216,14 +216,22 @@ fn enum_string_values(value: &Value, key: &str, output: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::node::{
-        NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateNetworkCommand,
-        NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
+        NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateInvitationCommand,
+        NodeCreateNetworkCommand, NodeGetInvitationStatusCommand, NodeJoinNetworkCommand,
+        NodeListInvitationsCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
         NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
-        NodePreviewConfigurationCommand, NodeProbePeerCommand, NodeRollbackConfigurationCommand,
+        NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodeProbePeerCommand,
+        NodeRedeemInvitationCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
         NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
-    use fuckipv6_common::{domain::NetworkProfileUpdate, NetworkMode};
+    use fuckipv6_common::{
+        domain::{
+            ContentHash, InvitationCode, InvitationId, InvitationRedeemRequest, MembershipRole,
+            NetworkId, NetworkProfileUpdate,
+        },
+        NetworkMode,
+    };
     use std::path::PathBuf;
 
     fn sample_commands() -> Vec<NodeCommand> {
@@ -391,6 +399,42 @@ mod tests {
                     reason: "The requested details are attached.".into(),
                 },
             ),
+            NodeCommand::CreateInvitation(NodeCreateInvitationCommand {
+                network_id: NetworkId::from_public_key(b"invitation-network"),
+                role: MembershipRole::Member,
+                capabilities: vec![fuckipv6_common::domain::CapabilityKind::File],
+                max_uses: 2,
+                expires_in_ms: 86_400_000,
+            }),
+            NodeCommand::ListInvitations(NodeListInvitationsCommand {
+                network_id: NetworkId::from_public_key(b"invitation-network"),
+            }),
+            NodeCommand::GetInvitationStatus(NodeGetInvitationStatusCommand {
+                network_id: NetworkId::from_public_key(b"invitation-network"),
+                invitation_id: InvitationId::from_public_key(b"invitation-sample"),
+            }),
+            NodeCommand::RevokeInvitation(NodeRevokeInvitationCommand {
+                network_id: NetworkId::from_public_key(b"invitation-network"),
+                invitation_id: InvitationId::from_public_key(b"invitation-sample"),
+                expected_revision: 1,
+            }),
+            NodeCommand::PreviewInvitation(NodePreviewInvitationCommand {
+                network_id: NetworkId::from_public_key(b"invitation-network"),
+                coordinator_url: "wss://coordinator.example.test/signaling".into(),
+                code: InvitationCode::parse(format!("fkinv_{}", "A".repeat(43))).unwrap(),
+            }),
+            NodeCommand::RedeemInvitation(NodeRedeemInvitationCommand {
+                coordinator_url: "wss://coordinator.example.test/signaling".into(),
+                request: InvitationRedeemRequest {
+                    network_id: NetworkId::from_public_key(b"invitation-network"),
+                    code: InvitationCode::parse(format!("fkinv_{}", "A".repeat(43))).unwrap(),
+                    invitation_id: InvitationId::from_public_key(b"invitation-sample"),
+                    expected_invitation_revision: 1,
+                    preview_digest: ContentHash::from_bytes(b"invitation-preview"),
+                    terms_hash: ContentHash::from_bytes(b"invitation-terms"),
+                    acknowledged_at_unix_ms: 1_700_000_000_000,
+                },
+            }),
             NodeCommand::LeaveNetwork(crate::node::NodeLeaveNetworkCommand {
                 network_name: "office".into(),
             }),

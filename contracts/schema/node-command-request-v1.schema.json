@@ -31,11 +31,66 @@
       ],
       "type": "string"
     },
+    "InvitationCode": {
+      "description": "A high-entropy invitation secret. It is intentionally not a URL and its\n`Debug` representation is redacted so generic tracing cannot disclose it.",
+      "type": "string"
+    },
+    "InvitationId": {
+      "type": "string"
+    },
+    "InvitationRedeemRequest": {
+      "properties": {
+        "acknowledged_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "code": {
+          "$ref": "#/$defs/InvitationCode"
+        },
+        "expected_invitation_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "preview_digest": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "terms_hash": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "required": [
+        "network_id",
+        "code",
+        "invitation_id",
+        "expected_invitation_revision",
+        "preview_digest",
+        "terms_hash",
+        "acknowledged_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "JoinRequestReviewAction": {
       "enum": [
         "approve",
         "reject",
         "request_information"
+      ],
+      "type": "string"
+    },
+    "MembershipRole": {
+      "description": "A member's governance role. Temporary Coordinator authority is intentionally\nrepresented by `CoordinatorTerm`, never by mutating this durable role.",
+      "enum": [
+        "owner",
+        "administrator",
+        "member"
       ],
       "type": "string"
     },
@@ -805,6 +860,108 @@
           "type": "object"
         },
         {
+          "description": "Create a one-time authenticated invitation and reveal its credential once.",
+          "properties": {
+            "command": {
+              "const": "create_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeCreateInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "List redacted invitation metadata for one managed network.",
+          "properties": {
+            "command": {
+              "const": "list_invitations",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeListInvitationsCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Read one invitation's redacted status.",
+          "properties": {
+            "command": {
+              "const": "get_invitation_status",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeGetInvitationStatusCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Revoke an invitation using its current revision.",
+          "properties": {
+            "command": {
+              "const": "revoke_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRevokeInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Preview an invitation before local-owner reauthentication and consent.",
+          "properties": {
+            "command": {
+              "const": "preview_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodePreviewInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Consume an invitation and create ordinary network membership.",
+          "properties": {
+            "command": {
+              "const": "redeem_invitation",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRedeemInvitationCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Remove only this network's local configuration and membership.",
           "properties": {
             "command": {
@@ -1159,6 +1316,41 @@
         }
       ]
     },
+    "NodeCreateInvitationCommand": {
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "expires_in_ms": {
+          "description": "Requested lifetime in milliseconds. The domain bounds this to one minute\nthrough thirty days.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_uses": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        }
+      },
+      "required": [
+        "network_id",
+        "role",
+        "max_uses",
+        "expires_in_ms"
+      ],
+      "type": "object"
+    },
     "NodeCreateNetworkCommand": {
       "properties": {
         "auto_connect": {
@@ -1229,6 +1421,21 @@
         "signaling_port",
         "relay_port",
         "auto_connect"
+      ],
+      "type": "object"
+    },
+    "NodeGetInvitationStatusCommand": {
+      "properties": {
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "invitation_id"
       ],
       "type": "object"
     },
@@ -1350,6 +1557,17 @@
       },
       "required": [
         "network_name"
+      ],
+      "type": "object"
+    },
+    "NodeListInvitationsCommand": {
+      "properties": {
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id"
       ],
       "type": "object"
     },
@@ -1481,6 +1699,26 @@
       ],
       "type": "object"
     },
+    "NodePreviewInvitationCommand": {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/InvitationCode"
+        },
+        "coordinator_url": {
+          "description": "Coordinator endpoint is a separate routing hint, never part of the\ninvitation credential and never placed in the URL query.",
+          "type": "string"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "coordinator_url",
+        "code"
+      ],
+      "type": "object"
+    },
     "NodePreviewJoinNetworkCommand": {
       "properties": {
         "network_id": {
@@ -1510,6 +1748,22 @@
         "network_name",
         "target",
         "timeout_ms"
+      ],
+      "type": "object"
+    },
+    "NodeRedeemInvitationCommand": {
+      "properties": {
+        "coordinator_url": {
+          "description": "Coordinator endpoint is a separate routing hint, never part of the\ninvitation credential and never placed in the URL query.",
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/InvitationRedeemRequest"
+        }
+      },
+      "required": [
+        "coordinator_url",
+        "request"
       ],
       "type": "object"
     },
@@ -1550,6 +1804,27 @@
       "required": [
         "network_id",
         "review"
+      ],
+      "type": "object"
+    },
+    "NodeRevokeInvitationCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invitation_id": {
+          "$ref": "#/$defs/InvitationId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "invitation_id",
+        "expected_revision"
       ],
       "type": "object"
     },

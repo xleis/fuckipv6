@@ -1373,7 +1373,7 @@ WebUI `npm run typecheck`、`npm test -- --run`（124 passed）、`npm run lint`
 - [x] 建立加入竞争、成员上限和策略变化测试；
 - [x] 验证公开卡片不含敏感字段；
 - [x] 验证所有创建、发布、加入、审批、邀请动作可追溯；
-- [ ] GPUI/WebUI 完成同一流程和行为对比；
+- [x] GPUI/WebUI 完成同一流程和行为对比；
 - [ ] 移动端完成长按、键盘替代和返回路径；
 - [ ] 所有失败都有可执行恢复动作。
 
@@ -1390,6 +1390,15 @@ owner 角色下验证创建、发布、加入、审批、邀请分别产生稳�
 `network.discovery.publish`、`network.join`、`network.join_request.review`、
 `network.invitation.create` 动作，并核对 actor、request、受信任 operation ID、结果与脱敏活动；
 邀请票据和审批说明不会进入审计或活动投影。
+`contracts/typescript/fixtures/discovery-ui-parity.json` 作为 GPUI 与 WebUI 共用的发现流程夹具，
+依次覆盖创建、发布、加入预览、确认加入、审批、创建邀请、邀请预览、兑换邀请和索引重试；
+`discovery_flow_parity_fixture_matches_gpui_command_building` 与
+`matches the shared discovery flow fixture` 分别校验 manifest 动作/命令、全部表单字段、确认预览派生字段
+和最终序列化命令完全一致。夹具只使用邀请票据占位符，测试运行时生成临时值；WebUI 校验同时支持
+后端实际的 `inv_` 邀请 ID 与 `hash_` 内容摘要格式。
+命令：`cargo test -p fuckipv6-client --all-features --lib gpui::view_model::tests`（36 passed）、
+WebUI `npm test -- --run`（125 passed）、`npm run typecheck`、`npm run lint`、`cargo fmt --all -- --check`
+和 `git diff --check`。
 
 ## 12. W9：成员、组与拓扑
 

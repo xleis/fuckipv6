@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productVisualFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
+import discoveryParityFixture from "../../../contracts/typescript/fixtures/discovery-ui-parity.json";
 import type {
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeApiManifestResponse,
+  NodeCommand,
   NodeCommandOutcome,
   NodeOperationSnapshot,
   NodeSnapshot,
@@ -1076,5 +1078,55 @@ describe("node UI contract invariants", () => {
         reason: "Added the requested device details.",
       },
     });
+  });
+
+  it("matches the shared discovery flow fixture", () => {
+    const invitationCode = `fkinv_${"A".repeat(43)}`;
+    const fixture = JSON.parse(
+      JSON.stringify(discoveryParityFixture).replaceAll(
+        "$INVITATION_CODE",
+        invitationCode,
+      ),
+    ) as {
+      schema_version: number;
+      steps: Array<{
+        action_id: string;
+        values: Record<string, string>;
+        wire: NodeCommand;
+      }>;
+    };
+    expect(fixture.schema_version).toBe(1);
+    expect(fixture.steps.map((step) => step.action_id)).toEqual([
+      "create_network",
+      "publish_network_discovery",
+      "preview_join_network",
+      "join_network",
+      "review_join_request",
+      "create_invitation",
+      "preview_invitation",
+      "redeem_invitation",
+      "retry_discovery_index",
+    ]);
+
+    const actions = new Map(
+      manifest.pages
+        .flatMap((page) => page.actions)
+        .map((action) => [action.id, action]),
+    );
+    for (const step of fixture.steps) {
+      const action = actions.get(step.action_id);
+      expect(action, `missing manifest action ${step.action_id}`).toBeDefined();
+      expect(action!.command).toBe(step.wire.command);
+      for (const field of action!.fields) {
+        expect(
+          step.values,
+          `${step.action_id} fixture value ${field.id}`,
+        ).toHaveProperty(field.id);
+      }
+      expect(
+        buildCommand(action!, step.values, "en"),
+        `WebUI command mismatch for ${step.action_id}`,
+      ).toEqual(step.wire);
+    }
   });
 });

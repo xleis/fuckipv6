@@ -4190,7 +4190,40 @@ mod tests {
         NodeUiValidation,
     };
     use fuckipv6_common::domain::{ActivityEntry, AuditId, AuditOutcome, NodeId};
+    use serde::Deserialize;
     use std::collections::BTreeMap;
+
+    #[derive(Debug, Deserialize)]
+    struct DiscoveryUiParityFixture {
+        schema_version: u32,
+        steps: Vec<DiscoveryUiParityStep>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DiscoveryUiParityStep {
+        action_id: String,
+        values: HashMap<String, String>,
+        wire: serde_json::Value,
+    }
+
+    fn replace_discovery_fixture_placeholder(value: &mut serde_json::Value, invitation_code: &str) {
+        match value {
+            serde_json::Value::String(value) if value == "$INVITATION_CODE" => {
+                *value = invitation_code.into();
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    replace_discovery_fixture_placeholder(value, invitation_code);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values_mut() {
+                    replace_discovery_fixture_placeholder(value, invitation_code);
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn routing_summary(
         network_name: &str,
@@ -5182,6 +5215,76 @@ mod tests {
                 assert_ne!(action.id, "");
                 assert!(!format!("{command:?}").is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn discovery_flow_parity_fixture_matches_gpui_command_building() {
+        let invitation_code = format!("fkinv_{}", "A".repeat(43));
+        let mut fixture: DiscoveryUiParityFixture = serde_json::from_str(include_str!(
+            "../../../../contracts/typescript/fixtures/discovery-ui-parity.json"
+        ))
+        .expect("discovery UI parity fixture");
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(
+            fixture
+                .steps
+                .iter()
+                .map(|step| step.action_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "create_network",
+                "publish_network_discovery",
+                "preview_join_network",
+                "join_network",
+                "review_join_request",
+                "create_invitation",
+                "preview_invitation",
+                "redeem_invitation",
+                "retry_discovery_index",
+            ]
+        );
+
+        let manifest = node_ui_manifest();
+        for step in &mut fixture.steps {
+            for value in step.values.values_mut() {
+                if value == "$INVITATION_CODE" {
+                    *value = invitation_code.clone();
+                }
+            }
+            replace_discovery_fixture_placeholder(&mut step.wire, &invitation_code);
+
+            let action = manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .find(|action| action.id == step.action_id)
+                .unwrap_or_else(|| panic!("missing manifest action {}", step.action_id));
+            assert_eq!(
+                action.command.as_str(),
+                step.wire["command"]
+                    .as_str()
+                    .expect("fixture command must be a string"),
+                "manifest command mismatch for {}",
+                step.action_id
+            );
+            for field in &action.fields {
+                assert!(
+                    step.values.contains_key(&field.id),
+                    "fixture is missing {} for {}",
+                    field.id,
+                    step.action_id
+                );
+            }
+
+            let command = build_command(action, &step.values)
+                .unwrap_or_else(|error| panic!("{} failed: {error:?}", step.action_id));
+            assert_eq!(
+                serde_json::to_value(command).expect("serialize command"),
+                step.wire,
+                "GPUI command mismatch for {}",
+                step.action_id
+            );
         }
     }
 

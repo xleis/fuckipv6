@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "scenario": "network discovery, open join, approval review and private invitation",
+  "steps": [
+    {
+      "action_id": "create_network",
+      "values": {
+        "name": "family",
+        "purpose": "Family devices across two homes",
+        "icon": "home",
+        "language": "zh-CN",
+        "region": "CN",
+        "tags": "family,smart-home",
+        "capability_declarations": "relay",
+        "visibility": "public",
+        "join_mode": "approval_required",
+        "exit_contribution": "not_required",
+        "exit_contribution_scope": "not_applicable",
+        "signaling_port": "6666",
+        "relay_port": "6667",
+        "external_host": "vpn.example.test",
+        "auto_connect": "true"
+      },
+      "wire": {
+        "command": "create_network",
+        "payload": {
+          "name": "family",
+          "purpose": "Family devices across two homes",
+          "icon": "home",
+          "language": "zh-CN",
+          "region": "CN",
+          "tags": ["family", "smart-home"],
+          "capability_declarations": ["relay"],
+          "visibility": "public",
+          "join_mode": "approval_required",
+          "exit_contribution": "not_required",
+          "exit_contribution_scope": "not_applicable",
+          "signaling_port": 6666,
+          "relay_port": 6667,
+          "external_host": "vpn.example.test",
+          "auto_connect": true
+        }
+      }
+    },
+    {
+      "action_id": "publish_network_discovery",
+      "values": {
+        "network_name": "family",
+        "index_url": "https://index.example.test/v1/discovery"
+      },
+      "wire": {
+        "command": "publish_network_discovery",
+        "payload": {
+          "network_name": "family",
+          "index_url": "https://index.example.test/v1/discovery"
+        }
+      }
+    },
+    {
+      "action_id": "preview_join_network",
+      "values": {
+        "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "wire": {
+        "command": "preview_join_network",
+        "payload": {
+          "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      }
+    },
+    {
+      "action_id": "join_network",
+      "values": {
+        "target": "",
+        "network_name": "family",
+        "start": "true",
+        "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "preview_digest": "signed-preview-digest",
+        "network_policy_revision": "7",
+        "privacy_policy_revision": "3",
+        "terms_hash": "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "acknowledged_at_unix_ms": "1700000000000"
+      },
+      "wire": {
+        "command": "join_network",
+        "payload": {
+          "target": "",
+          "network_name": "family",
+          "start": true,
+          "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "preview_digest": "signed-preview-digest",
+          "network_policy_revision": 7,
+          "privacy_policy_revision": 3,
+          "terms_hash": "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "acknowledged_at_unix_ms": 1700000000000
+        }
+      }
+    },
+    {
+      "action_id": "review_join_request",
+      "values": {
+        "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "request_id": "join_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expected_revision": "4",
+        "action": "request_information",
+        "note": "Please describe which devices need file access."
+      },
+      "wire": {
+        "command": "review_join_request",
+        "payload": {
+          "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "review": {
+            "request_id": "join_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "expected_revision": 4,
+            "action": "request_information",
+            "note": "Please describe which devices need file access."
+          }
+        }
+      }
+    },
+    {
+      "action_id": "create_invitation",
+      "values": {
+        "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "role": "administrator",
+        "capabilities": "file",
+        "max_uses": "2",
+        "expires_in_ms": "3600000"
+      },
+      "wire": {
+        "command": "create_invitation",
+        "payload": {
+          "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "role": "administrator",
+          "capabilities": ["file"],
+          "max_uses": 2,
+          "expires_in_ms": 3600000
+        }
+      }
+    },
+    {
+      "action_id": "preview_invitation",
+      "values": {
+        "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "coordinator_url": "wss://coordinator.example.test/signaling",
+        "code": "$INVITATION_CODE"
+      },
+      "wire": {
+        "command": "preview_invitation",
+        "payload": {
+          "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "coordinator_url": "wss://coordinator.example.test/signaling",
+          "code": "$INVITATION_CODE"
+        }
+      }
+    },
+    {
+      "action_id": "redeem_invitation",
+      "values": {
+        "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "coordinator_url": "wss://coordinator.example.test/signaling",
+        "code": "$INVITATION_CODE",
+        "invitation_id": "inv_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expected_invitation_revision": "3",
+        "preview_digest": "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "terms_hash": "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "acknowledged_at_unix_ms": "1700000000123",
+        "exit_contribution_acknowledged": "true"
+      },
+      "wire": {
+        "command": "redeem_invitation",
+        "payload": {
+          "coordinator_url": "wss://coordinator.example.test/signaling",
+          "request": {
+            "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "code": "$INVITATION_CODE",
+            "invitation_id": "inv_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "expected_invitation_revision": 3,
+            "preview_digest": "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "terms_hash": "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "acknowledged_at_unix_ms": 1700000000123,
+            "exit_contribution_acknowledged": true
+          }
+        }
+      }
+    },
+    {
+      "action_id": "retry_discovery_index",
+      "values": {},
+      "wire": {
+        "command": "retry_discovery_index"
+      }
+    }
+  ]
+}

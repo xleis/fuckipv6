@@ -1518,12 +1518,24 @@ export function validateActionValues(
       }
     } else if (field.validation === "fingerprint") {
       const fingerprint = String(value);
-      if (!/^[A-Za-z0-9_-]{43}$/.test(fingerprint)) {
+      const prefix =
+        field.id === "invitation_id"
+          ? "inv_"
+          : ["preview_digest", "terms_hash", "expected_terms_hash"].includes(
+                field.id,
+              )
+            ? "hash_"
+            : "";
+      const encoded = prefix ? fingerprint.slice(prefix.length) : fingerprint;
+      if (
+        (prefix && !fingerprint.startsWith(prefix)) ||
+        !/^[A-Za-z0-9_-]{43}$/.test(encoded)
+      ) {
         errors.push(label(locale, "validation.fingerprint_invalid"));
       } else {
         try {
           const decoded = atob(
-            fingerprint.replace(/-/g, "+").replace(/_/g, "/") + "=",
+            encoded.replace(/-/g, "+").replace(/_/g, "/") + "=",
           );
           if (decoded.length !== 32) {
             errors.push(label(locale, "validation.fingerprint_invalid"));

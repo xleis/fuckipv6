@@ -488,6 +488,28 @@ impl InvitationStore {
         result
     }
 
+    /// Return the identity/state required for a server-originated change
+    /// notification. This is intentionally separate from the manager-only
+    /// status API because an invited node may trigger the final redemption.
+    pub fn notification_metadata(
+        &self,
+        invitation_id: &InvitationId,
+        now_unix_ms: u64,
+    ) -> Result<(NetworkId, NodeId, InvitationState, u64)> {
+        self.with_file_lock(|file| {
+            let stored = file
+                .invitations
+                .get(invitation_id)
+                .context("invitation not found")?;
+            Ok((
+                stored.record.network_id.clone(),
+                stored.record.created_by.clone(),
+                stored.record.state_at(now_unix_ms),
+                stored.record.revision,
+            ))
+        })
+    }
+
     pub fn notification_recipients(
         &self,
         network_id: &NetworkId,

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use fuckipv6_common::domain::{JoinRequest, JoinRequestId, JoinRequestState, NetworkId, NodeId};
+use fuckipv6_common::domain::{
+    InvitationId, InvitationState, JoinRequest, JoinRequestId, JoinRequestState, NetworkId, NodeId,
+};
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
     ErrorCode, Identity, JoinRequestBatchReviewItem, RelayEndpoint, SignalingMessage,
@@ -17,6 +19,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 
+use super::invitations::InvitationStore;
 use super::join_requests::JoinRequestStore;
 use super::session::SessionManager;
 
@@ -50,6 +53,7 @@ pub struct SignalingServer {
     relay_endpoint: Option<RelayEndpoint>,
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
     join_request_store: Option<Arc<JoinRequestStore>>,
+    invitation_store: Option<Arc<InvitationStore>>,
     listener: Option<TcpListener>,
 }
 
@@ -64,6 +68,7 @@ impl SignalingServer {
             relay_endpoint: None,
             relay_endpoints: Arc::new(Vec::new()),
             join_request_store: None,
+            invitation_store: None,
             listener: None,
         })
     }
@@ -75,6 +80,7 @@ impl SignalingServer {
             relay_endpoint: None,
             relay_endpoints: Arc::new(Vec::new()),
             join_request_store: None,
+            invitation_store: None,
             listener: None,
         }
     }
@@ -132,6 +138,28 @@ impl SignalingServer {
         Ok(self)
     }
 
+    /// Attach the durable invitation ledger. Without one, invitation messages
+    /// fail closed while unrelated signaling continues to work.
+    pub fn with_invitation_store(mut self, store: Arc<InvitationStore>) -> Self {
+        self.invitation_store = Some(store);
+        self
+    }
+
+    pub fn with_invitation_store_from_config(
+        mut self,
+        state_dir: impl AsRef<std::path::Path>,
+        config: &CoordinatorConfig,
+    ) -> Result<Self> {
+        let store = InvitationStore::new(
+            state_dir.as_ref().join("invitations.json"),
+            config.network_record_path.clone(),
+            config.owner_node_id.clone(),
+            config.administrator_node_ids.clone(),
+        )?;
+        self.invitation_store = Some(Arc::new(store));
+        Ok(self)
+    }
+
     pub fn session_manager(&self) -> Arc<SessionManager> {
         self.session_manager.clone()
     }
@@ -155,6 +183,7 @@ impl SignalingServer {
                     let relay_endpoint = self.relay_endpoint.clone();
                     let relay_endpoints = self.relay_endpoints.clone();
                     let join_request_store = self.join_request_store.clone();
+                    let invitation_store = self.invitation_store.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -164,6 +193,7 @@ impl SignalingServer {
                             relay_endpoint,
                             relay_endpoints,
                             join_request_store,
+                            invitation_store,
                         )
                         .await
                         {
@@ -210,6 +240,7 @@ async fn handle_connection(
     relay_endpoint: Option<RelayEndpoint>,
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
     join_request_store: Option<Arc<JoinRequestStore>>,
+    invitation_store: Option<Arc<InvitationStore>>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
     let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
@@ -233,6 +264,7 @@ async fn handle_connection(
             relay_endpoint.as_ref(),
             &relay_endpoints,
             join_request_store.as_deref(),
+            invitation_store.as_deref(),
         )
         .await
         {
@@ -273,6 +305,7 @@ async fn handle_connection_message(
     relay_endpoint: Option<&RelayEndpoint>,
     relay_endpoints: &[RelayEndpoint],
     join_request_store: Option<&JoinRequestStore>,
+    invitation_store: Option<&InvitationStore>,
 ) -> bool {
     match msg {
         Ok(Message::Binary(data)) => {
@@ -286,6 +319,7 @@ async fn handle_connection_message(
                 relay_endpoint,
                 relay_endpoints,
                 join_request_store,
+                invitation_store,
             )
             .await;
             true
@@ -314,9 +348,9 @@ async fn handle_binary_message(
     relay_endpoint: Option<&RelayEndpoint>,
     relay_endpoints: &[RelayEndpoint],
     join_request_store: Option<&JoinRequestStore>,
+    invitation_store: Option<&InvitationStore>,
 ) {
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
-    tracing::trace!("数据前32字节: {:?}", &data[..data.len().min(32)]);
     session_manager.record_signaling_rx(data.len());
     if let Err(error) = validate_signaling_message_len(data.len()) {
         tracing::warn!("拒绝超限信令帧 (来自 {addr}): {error:#}");
@@ -325,7 +359,6 @@ async fn handle_binary_message(
 
     match codec::decode::<SignalingMessage>(data) {
         Ok(msg) => {
-            tracing::trace!("消息解析成功: {:?}", msg);
             if let Err(e) = handle_signaling_message(
                 msg,
                 &addr,
@@ -336,6 +369,7 @@ async fn handle_binary_message(
                 relay_endpoint,
                 relay_endpoints,
                 join_request_store,
+                invitation_store,
             )
             .await
             {
@@ -397,6 +431,7 @@ async fn handle_signaling_message(
     relay_endpoint: Option<&RelayEndpoint>,
     relay_endpoints: &[RelayEndpoint],
     join_request_store: Option<&JoinRequestStore>,
+    invitation_store: Option<&InvitationStore>,
 ) -> Result<()> {
     match msg {
         SignalingMessage::Register { .. } => {
@@ -513,18 +548,71 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::InvitationCreate { request } => {
+            handle_invitation_create(request, session_manager, tx, client_id, invitation_store)
+                .await?;
+        }
+        SignalingMessage::InvitationList { network_id } => {
+            handle_invitation_list(network_id, session_manager, tx, client_id, invitation_store)
+                .await?;
+        }
+        SignalingMessage::InvitationStatus {
+            network_id,
+            invitation_id,
+        } => {
+            handle_invitation_status(
+                network_id,
+                invitation_id,
+                session_manager,
+                tx,
+                client_id,
+                invitation_store,
+            )
+            .await?;
+        }
+        SignalingMessage::InvitationRevoke {
+            network_id,
+            invitation_id,
+            expected_revision,
+        } => {
+            handle_invitation_revoke(
+                network_id,
+                invitation_id,
+                expected_revision,
+                session_manager,
+                tx,
+                client_id,
+                invitation_store,
+            )
+            .await?;
+        }
+        SignalingMessage::InvitationPreview { request } => {
+            handle_invitation_preview(request, session_manager, tx, client_id, invitation_store)
+                .await?;
+        }
+        SignalingMessage::InvitationRedeem { request } => {
+            handle_invitation_redeem(request, session_manager, tx, client_id, invitation_store)
+                .await?;
+        }
         // These variants are server-to-client events. Accepting one from a
         // client would let it manufacture approval state in another view.
         SignalingMessage::JoinRequestStatus { .. }
         | SignalingMessage::JoinRequestListResponse { .. }
         | SignalingMessage::JoinRequestReviewAck { .. }
-        | SignalingMessage::JoinRequestChanged { .. } => {
+        | SignalingMessage::JoinRequestChanged { .. }
+        | SignalingMessage::InvitationCreateAck { .. }
+        | SignalingMessage::InvitationListAck { .. }
+        | SignalingMessage::InvitationStatusAck { .. }
+        | SignalingMessage::InvitationRevokeAck { .. }
+        | SignalingMessage::InvitationPreviewAck { .. }
+        | SignalingMessage::InvitationRedeemAck { .. }
+        | SignalingMessage::InvitationChanged { .. } => {
             send_binary(
                 tx,
                 session_manager,
                 SignalingMessage::protocol_error(
                     ErrorCode::BadRequest,
-                    "Approval response messages are server-originated",
+                    "This response message is server-originated",
                 ),
             )?;
         }
@@ -827,6 +915,256 @@ async fn handle_join_request_withdraw(
         result.revision,
     )
     .await
+}
+
+fn require_invitation_store<'a>(
+    store: Option<&'a InvitationStore>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a InvitationStore>> {
+    if let Some(store) = store {
+        return Ok(Some(store));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Private invitation joining is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+async fn broadcast_invitation_changed(
+    store: &InvitationStore,
+    session_manager: &SessionManager,
+    network_id: &NetworkId,
+    creator: &NodeId,
+    invitation_id: &InvitationId,
+    state: InvitationState,
+    revision: u64,
+) -> Result<()> {
+    let recipients = store.notification_recipients(network_id, creator)?;
+    let message = invitation_changed_message(invitation_id, state, revision);
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if recipients.contains(&node_id) {
+            session_manager
+                .send_to_client(&peer.client_id, message.clone())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn invitation_changed_message(
+    invitation_id: &InvitationId,
+    state: InvitationState,
+    revision: u64,
+) -> SignalingMessage {
+    SignalingMessage::InvitationChanged {
+        invitation_id: invitation_id.clone(),
+        state,
+        revision,
+    }
+}
+
+async fn broadcast_invitation_by_id(
+    store: &InvitationStore,
+    session_manager: &SessionManager,
+    invitation_id: &InvitationId,
+) -> Result<()> {
+    let (network_id, creator, state, revision) =
+        store.notification_metadata(invitation_id, unix_time_ms())?;
+    broadcast_invitation_changed(
+        store,
+        session_manager,
+        &network_id,
+        &creator,
+        invitation_id,
+        state,
+        revision,
+    )
+    .await
+}
+
+async fn handle_invitation_create(
+    request: fuckipv6_common::domain::InvitationCreateRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_invitation_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let network_id = request.network_id.clone();
+    let issued = store.create(&network_id, &actor, request, unix_time_ms())?;
+    let invitation_id = issued.status.invitation.invitation_id.clone();
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::InvitationCreateAck {
+            issued: issued.clone(),
+        },
+    )?;
+    broadcast_invitation_changed(
+        store,
+        session_manager,
+        &network_id,
+        &actor,
+        &invitation_id,
+        issued.status.state,
+        issued.status.invitation.revision,
+    )
+    .await
+}
+
+async fn handle_invitation_list(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_invitation_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let invitations = store.list(&network_id, &actor, unix_time_ms())?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::InvitationListAck { invitations },
+    )
+}
+
+async fn handle_invitation_status(
+    network_id: NetworkId,
+    invitation_id: InvitationId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_invitation_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let invitation = store.status(&network_id, &actor, &invitation_id, unix_time_ms())?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::InvitationStatusAck { invitation },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_invitation_revoke(
+    network_id: NetworkId,
+    invitation_id: InvitationId,
+    expected_revision: u64,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_invitation_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let invitation = store.revoke(
+        &network_id,
+        &actor,
+        &invitation_id,
+        expected_revision,
+        unix_time_ms(),
+    )?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::InvitationRevokeAck {
+            invitation: invitation.clone(),
+        },
+    )?;
+    broadcast_invitation_changed(
+        store,
+        session_manager,
+        &network_id,
+        &invitation.invitation.created_by,
+        &invitation_id,
+        invitation.state,
+        invitation.invitation.revision,
+    )
+    .await
+}
+
+async fn handle_invitation_preview(
+    request: fuckipv6_common::domain::InvitationPreviewRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_invitation_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let preview = store.preview(&request.network_id, &actor, &request.code, unix_time_ms())?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::InvitationPreviewAck { preview },
+    )
+}
+
+async fn handle_invitation_redeem(
+    request: fuckipv6_common::domain::InvitationRedeemRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&InvitationStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_invitation_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let invitation_id = request.invitation_id.clone();
+    let redemption = store.redeem(request, &actor, unix_time_ms())?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::InvitationRedeemAck {
+            redemption: redemption.clone(),
+        },
+    )?;
+    broadcast_invitation_by_id(store, session_manager, &invitation_id).await
 }
 
 fn unix_time_ms() -> u64 {
@@ -1172,6 +1510,30 @@ mod tests {
         assert_eq!(revision, 7);
         assert!(!encoded.contains("reason"));
         assert!(!encoded.contains("SECRET-NOTIFICATION-PROSE"));
+    }
+
+    #[test]
+    fn invitation_changed_notification_contains_only_identity_and_state() {
+        let invitation_id = InvitationId::from_public_key(b"notification-invitation");
+        let message = invitation_changed_message(&invitation_id, InvitationState::Active, 9);
+        let encoded = serde_json::to_string(&message).expect("serialize notification");
+        let decoded: SignalingMessage =
+            serde_json::from_str(&encoded).expect("deserialize notification");
+
+        let SignalingMessage::InvitationChanged {
+            invitation_id: decoded_invitation_id,
+            state,
+            revision,
+        } = decoded
+        else {
+            panic!("expected an invitation changed notification");
+        };
+        assert_eq!(decoded_invitation_id, invitation_id);
+        assert_eq!(state, InvitationState::Active);
+        assert_eq!(revision, 9);
+        assert!(!encoded.contains("code"));
+        assert!(!encoded.contains("fkinv_"));
+        assert!(!encoded.contains("SECRET-INVITATION-NOTIFICATION"));
     }
 
     #[test]

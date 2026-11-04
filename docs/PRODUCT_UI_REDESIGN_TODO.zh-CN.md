@@ -1366,7 +1366,7 @@ WebUI `npm run typecheck`、`npm test -- --run`（124 passed）、`npm run lint`
 `node ../scripts/test_webui_accessibility.mjs`、`cargo fmt --all -- --check` 和
 `git diff --check`。构建仅保留既有 Vite i18n 非 module 提示及大于 500 kB chunk 警告。
 
-### W8-10 网络发现测试与活动 `[ ]`
+### W8-10 网络发现测试与活动 `[x]`
 
 - [x] 建立签名、重放、伪造、过期、吊销和索引离线测试；
 - [x] 建立开放、审批、私有邀请三条 E2E；
@@ -1375,11 +1375,11 @@ WebUI `npm run typecheck`、`npm test -- --run`（124 passed）、`npm run lint`
 - [x] 验证所有创建、发布、加入、审批、邀请动作可追溯；
 - [x] GPUI/WebUI 完成同一流程和行为对比；
 - [x] 移动端完成长按、键盘替代和返回路径；
-- [ ] 所有失败都有可执行恢复动作。
+- [x] 所有失败都有可执行恢复动作。
 
 **验收**：网络创建与发现形成完整垂直切片，不依赖静态列表、假审批结果或未签名的公开数据。
 
-**证据（进行中，2026-11-04）**：`join_acceptance_rejects_forgery_expiry_revocation_replay_and_offline_index`
+**证据（2026-11-04）**：`join_acceptance_rejects_forgery_expiry_revocation_replay_and_offline_index`
 覆盖签名、重放、伪造、过期、吊销和索引离线；`open_join_end_to_end_uses_signed_discovery_preview_and_confirmation`、
 `approval_join_end_to_end_submits_reviews_and_admits_the_applicant` 和
 `private_invitation_end_to_end_previews_redeems_and_admits_the_invitee` 覆盖三条加入 E2E；
@@ -1400,8 +1400,16 @@ owner 角色下验证创建、发布、加入、审批、邀请分别产生稳�
 “导航 → 分隔线 → 危险操作”菜单；触摸长按 450 ms 打开底部 Action Sheet，滚动、指针移出或
 超过 10 px 位移会取消，浏览器返回/Escape 关闭后焦点回到菜单按钮。GPUI 的已加入网络卡片提供
 同构可聚焦动作入口，并覆盖网络上下文导航与离开网络动作。
+失败恢复已补齐：GPUI 与 WebUI 的 operation 终态可重试失败显示重试动作，WebUI 以原命令和参数重发并
+复用同一提交幂等键；加入与邀请预览提供“重新预览”，不可接受邀请可返回编辑且保留源输入；发现索引
+失败按钮直接提交 `retry_discovery_index`，无可用动作的页面仍渲染操作状态卡以保留恢复入口。
+`operation_card_offers_retry_only_for_terminal_retryable_failures`、
+`keeps an unconfirmed preview available when the final join is rejected`、
+`returning_to_invitation_edit_preserves_source_inputs`、`shows structured failure details and copies the diagnostic id`
+和 `distinguishes discovery failure from an empty result and exposes retry` 覆盖上述恢复路径。
 命令：`cargo test -p fuckipv6-client --all-features --lib gpui::view_model::tests`（36 passed）、
-`cargo test -p fuckipv6-client --all-features --lib gpui::view::tests`（42 passed）、
+`cargo test -p fuckipv6-client --all-features --lib gpui::view::tests`（44 passed）、
+`cargo test -p fuckipv6-client --all-features --lib`（839 passed，3 ignored）、
 WebUI `npm test -- --run`（129 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
 `node ../scripts/test_webui_accessibility.mjs`、`cargo fmt --all -- --check` 和 `git diff --check`。
 

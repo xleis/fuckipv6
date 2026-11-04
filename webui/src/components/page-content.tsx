@@ -94,6 +94,7 @@ type PageContentProps = {
     actionId: string,
     initialValues?: ActionValues,
   ): void;
+  onRunAction(actionId: string): Promise<void>;
 };
 
 function empty(text: string): JSX.Element {
@@ -1753,6 +1754,7 @@ function Networks({
   onSelectNetwork,
   onNavigate,
   onRequestAction,
+  onRunAction,
 }: Omit<PageContentProps, "page" | "selectedNetwork">) {
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -2031,7 +2033,7 @@ function Networks({
                 className="secondary-button"
                 type="button"
                 disabled={discoveryActionPending}
-                onClick={() => onRequestAction("retry_discovery_index")}
+                onClick={() => void onRunAction("retry_discovery_index")}
               >
                 {label(locale, "discovery.action.retry")}
               </button>

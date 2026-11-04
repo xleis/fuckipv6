@@ -593,6 +593,7 @@ describe("action panel selected network synchronization", () => {
 describe("action panel operation status", () => {
   it("shows structured failure details and copies the diagnostic id", async () => {
     const user = userEvent.setup();
+    const onRetry = vi.fn(async () => {});
     const writeText = vi
       .spyOn(navigator.clipboard, "writeText")
       .mockResolvedValue(undefined);
@@ -617,7 +618,7 @@ describe("action panel operation status", () => {
 
     render(
       <ActionPanel
-        actions={[restart]}
+        actions={[]}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -625,6 +626,7 @@ describe("action panel operation status", () => {
         interactionBlocked={null}
         requestedAction={null}
         operation={operation}
+        onRetryOperation={onRetry}
         onRequestedActionOpened={() => {}}
         onCancel={vi.fn(async () => {})}
         onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({ operation }))}
@@ -654,6 +656,13 @@ describe("action panel operation status", () => {
     expect(
       within(status).getByRole("status"),
     ).toHaveTextContent("translated:operation.diagnostic_copied");
+
+    await user.click(
+      within(status).getByRole("button", {
+        name: "translated:operation.retry",
+      }),
+    );
+    expect(onRetry).toHaveBeenCalledOnce();
   });
 
   it("only offers cancellation for a non-terminal cancellable operation", async () => {
@@ -913,8 +922,18 @@ describe("action panel operation status", () => {
 
   it("keeps an unconfirmed preview available when the final join is rejected", async () => {
     const user = userEvent.setup();
+    const refreshedJoinPreview = {
+      ...joinPreview,
+      preview_digest: "preview-digest-family-refreshed",
+    };
     const onSubmit = vi
-      .fn<() => Promise<ActionSubmission>>()
+      .fn<
+        (
+          action: NodeUiAction,
+          values: ActionValues,
+          onOperation: (operation: NodeOperationSnapshot) => void,
+        ) => Promise<ActionSubmission>
+      >()
       .mockResolvedValueOnce({
         outcome: joinPreviewOutcome as NodeCommandOutcome,
       })
@@ -929,6 +948,12 @@ describe("action panel operation status", () => {
             retryable: true,
             network_name: "family",
           },
+        } as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "network_join_preview",
+          data: refreshedJoinPreview,
         } as NodeCommandOutcome,
       })
       .mockResolvedValueOnce({
@@ -979,11 +1004,28 @@ describe("action panel operation status", () => {
     expect(exitConsent).toBeChecked();
 
     await user.click(
-      within(screen.getByTestId("network-join-preview")).getByRole("button", {
-        name: "translated:join.confirm",
+      within(preview).getByRole("button", {
+        name: "translated:join.preview_again",
       }),
     );
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(3));
+    expect(onSubmit.mock.calls[2]?.[0]).toBe(previewJoin);
+    expect(onSubmit.mock.calls[2]?.[1]).toEqual({
+      network_id: "network-family",
+    });
+    await waitFor(() => expect(checkbox).not.toBeChecked());
+    expect(exitConsent).not.toBeChecked();
+    expect(
+      within(preview).getByRole("button", { name: "translated:join.confirm" }),
+    ).toBeDisabled();
+
+    await user.click(checkbox);
+    await user.click(exitConsent);
+    await user.click(
+      within(preview).getByRole("button", { name: "translated:join.confirm" }),
+    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(4));
+    expect(screen.queryByTestId("network-join-preview")).not.toBeInTheDocument();
   });
 
   it("renders applied profile audit data and changed paths", async () => {
@@ -1595,7 +1637,13 @@ describe("action panel private invitation workflows", () => {
     async ({ preview: rejectedPreview }) => {
       const user = userEvent.setup();
       const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_123);
-      const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      const onSubmit = vi.fn<
+        (
+          action: NodeUiAction,
+          values: ActionValues,
+          onOperation: (operation: NodeOperationSnapshot) => void,
+        ) => Promise<ActionSubmission>
+      >(async () => ({
         outcome: {
           status: "invitation_preview",
           data: rejectedPreview,
@@ -1646,6 +1694,30 @@ describe("action panel private invitation workflows", () => {
         }),
       ).toBeDisabled();
       expect(onSubmit).toHaveBeenCalledOnce();
+
+      await user.click(
+        within(preview).getByRole("button", {
+          name: "translated:invitations.preview_again",
+        }),
+      );
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+      expect(onSubmit.mock.calls[1]?.[0]).toBe(previewInvitation);
+      expect(onSubmit.mock.calls[1]?.[1]).toEqual({
+        network_id: invitationNetworkId,
+        coordinator_url: "https://coordinator.example.test",
+        code: invitationCode,
+      });
+
+      await user.click(
+        within(preview).getByRole("button", {
+          name: "translated:invitations.back_to_edit",
+        }),
+      );
+      expect(screen.queryByTestId("invitation-preview")).not.toBeInTheDocument();
+      expect(
+        screen.getByDisplayValue("https://coordinator.example.test"),
+      ).toBeInTheDocument();
+      expect(screen.getByDisplayValue(invitationCode)).toBeInTheDocument();
       now.mockRestore();
     },
   );

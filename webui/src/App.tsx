@@ -676,6 +676,10 @@ function AppShell({
   const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const idempotencyKeys = useRef(new Map<string, string>());
+  const lastOperationSubmission = useRef<{
+    action: NodeUiAction;
+    values: ActionValues;
+  } | null>(null);
   const reauthenticationAttempt = useRef<ReauthenticationAttempt | null>(null);
   const [reauthenticationOpen, setReauthenticationOpen] = useState(false);
   const [reauthenticationPending, setReauthenticationPending] =
@@ -882,6 +886,12 @@ function AppShell({
         idempotencyKey,
       );
       const response = await sendWithReauthentication(envelope);
+      if (response.operation) {
+        lastOperationSubmission.current = {
+          action,
+          values: { ...values },
+        };
+      }
       const submission = response.result
         ? {
             outcome: response.result.outcome,
@@ -944,6 +954,27 @@ function AppShell({
   async function cancelActiveOperation(operationId: string): Promise<void> {
     const operation = await cancelOperation(operationId);
     setActiveOperation(operation);
+  }
+
+  async function retryActiveOperation(): Promise<void> {
+    const last = lastOperationSubmission.current;
+    if (!last) throw new Error(label(locale, "common.operation_failed"));
+    await submitAction(last.action, last.values, setActiveOperation);
+  }
+
+  async function runDirectAction(actionId: string): Promise<void> {
+    const action = activePage?.actions.find(
+      (candidate) => candidate.id === actionId,
+    );
+    if (!action || pendingAction) return;
+    try {
+      const submission = await submitAction(action, {}, setActiveOperation);
+      if (submission.outcome?.status === "rejected") {
+        setRefreshFailure(new Error(submission.outcome.data.message));
+      }
+    } catch (error) {
+      setRefreshFailure(error);
+    }
   }
 
   async function submitConfigurationAction(
@@ -1283,6 +1314,7 @@ function AppShell({
                   onSelectNetwork={setSelectedNetworkState}
                   onNavigate={navigate}
                   onRequestAction={requestAction}
+                  onRunAction={runDirectAction}
                 />
               </div>
               <ActionPanel
@@ -1298,6 +1330,7 @@ function AppShell({
                 operation={activeOperation}
                 onRequestedActionOpened={() => setRequestedAction(null)}
                 onCancel={cancelActiveOperation}
+                onRetryOperation={retryActiveOperation}
                 onSubmit={submitAction}
               />
             </>

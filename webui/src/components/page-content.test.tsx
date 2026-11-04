@@ -73,6 +73,7 @@ function renderNetworks(snapshot: NodeSnapshot, onRequestAction = vi.fn()) {
       onSelectNetwork={() => {}}
       onNavigate={() => {}}
       onRequestAction={onRequestAction}
+      onRunAction={async () => {}}
     />,
   );
   return onRequestAction;

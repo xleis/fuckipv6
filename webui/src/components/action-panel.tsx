@@ -54,6 +54,7 @@ type ActionPanelProps = {
     values?: ActionValues;
   } | null;
   operation: NodeOperationSnapshot | null;
+  onRetryOperation?: () => Promise<void>;
   onRequestedActionOpened(): void;
   onCancel(operationId: string): Promise<void>;
   onSubmit(
@@ -991,6 +992,7 @@ function JoinPreviewCard({
   blockedReason,
   onCheckedChange,
   onExitContributionCheckedChange,
+  onPreviewAgain,
   onConfirm,
 }: {
   preview: NodeNetworkJoinPreview;
@@ -1001,6 +1003,7 @@ function JoinPreviewCard({
   blockedReason: string;
   onCheckedChange(checked: boolean): void;
   onExitContributionCheckedChange(checked: boolean): void;
+  onPreviewAgain(): void;
   onConfirm(): void;
 }) {
   const canConfirm =
@@ -1204,16 +1207,26 @@ function JoinPreviewCard({
           <span>{label(locale, "join.exit.consent")}</span>
         </label>
       ) : null}
-      <button
-        className="primary-button"
-        type="button"
-        disabled={!canConfirm}
-        onClick={onConfirm}
-      >
-        {pending
-          ? label(locale, "common.operation_in_progress")
-          : label(locale, "join.confirm")}
-      </button>
+      <div className="recovery-actions">
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={pending}
+          onClick={onPreviewAgain}
+        >
+          {label(locale, "join.preview_again")}
+        </button>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!canConfirm}
+          onClick={onConfirm}
+        >
+          {pending
+            ? label(locale, "common.operation_in_progress")
+            : label(locale, "join.confirm")}
+        </button>
+      </div>
     </section>
   );
 }
@@ -1457,6 +1470,8 @@ function InvitationPreviewCard({
   previewLoadedAtUnixMs,
   onCheckedChange,
   onExitContributionCheckedChange,
+  onRetryPreview,
+  onBackToEdit,
   onConfirm,
 }: {
   preview: InvitationPreview;
@@ -1471,6 +1486,8 @@ function InvitationPreviewCard({
   previewLoadedAtUnixMs: number;
   onCheckedChange(checked: boolean): void;
   onExitContributionCheckedChange(checked: boolean): void;
+  onRetryPreview(): void;
+  onBackToEdit(): void;
   onConfirm(values: ActionValues): void;
 }) {
   const exitRequired = preview.terms.exit_contribution === "required";
@@ -1613,20 +1630,40 @@ function InvitationPreviewCard({
           <span>{label(locale, "join.exit.consent")}</span>
         </label>
       ) : null}
-      <button
-        className="primary-button"
-        type="button"
-        disabled={!canConfirm}
-        onClick={() =>
-          onConfirm(
-            invitationPreviewValues(preview, sourceValues, exitRequired),
-          )
-        }
-      >
-        {pending
-          ? label(locale, "common.operation_in_progress")
-          : label(locale, "invitations.accept")}
-      </button>
+      <div className="recovery-actions">
+        {!previewAcceptable ? (
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={pending}
+            onClick={onBackToEdit}
+          >
+            {label(locale, "invitations.back_to_edit")}
+          </button>
+        ) : null}
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={pending}
+          onClick={onRetryPreview}
+        >
+          {label(locale, "invitations.preview_again")}
+        </button>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!canConfirm}
+          onClick={() =>
+            onConfirm(
+              invitationPreviewValues(preview, sourceValues, exitRequired),
+            )
+          }
+        >
+          {pending
+            ? label(locale, "common.operation_in_progress")
+            : label(locale, "invitations.accept")}
+        </button>
+      </div>
     </section>
   );
 }
@@ -1635,15 +1672,19 @@ function OperationStatusCard({
   operation,
   locale,
   onCancel,
+  onRetry,
 }: {
   operation: NodeOperationSnapshot;
   locale: Locale;
   onCancel(operationId: string): Promise<void>;
+  onRetry?: () => Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
   const [copyFailure, setCopyFailure] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
   const [cancelFailure, setCancelFailure] = useState("");
+  const [retryPending, setRetryPending] = useState(false);
+  const [retryFailure, setRetryFailure] = useState("");
   const cancellation = operation.cancellable
     ? label(locale, "operation.cancellable_yes")
     : tr(locale, "operation.cancellable_no", {
@@ -1680,8 +1721,29 @@ function OperationStatusCard({
     }
   }
 
+  async function retry(): Promise<void> {
+    if (!onRetry || retryPending) return;
+    setRetryPending(true);
+    setRetryFailure("");
+    try {
+      await onRetry();
+    } catch (error) {
+      setRetryFailure(
+        tr(locale, "operation.retry_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } finally {
+      setRetryPending(false);
+    }
+  }
+
   const showCancel =
     operation.cancellable && !operationStateIsTerminal(operation.state);
+  const showRetry =
+    operationStateIsTerminal(operation.state) &&
+    operation.error?.retryable === true &&
+    Boolean(onRetry);
 
   return (
     <section className="operation-status" data-testid="operation-status">
@@ -1691,6 +1753,18 @@ function OperationStatusCard({
           <strong>{label(locale, `operation.state.${operation.state}`)}</strong>
         </div>
         <div className="operation-status-actions">
+          {showRetry ? (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={retryPending}
+              onClick={() => void retry()}
+            >
+              {retryPending
+                ? label(locale, "operation.retrying")
+                : label(locale, "operation.retry")}
+            </button>
+          ) : null}
           {showCancel ? (
             <button
               className="secondary-button"
@@ -1753,6 +1827,12 @@ function OperationStatusCard({
         <div className="inline-notice warning" role="alert">
           <AlertTriangle size={15} />
           <span>{cancelFailure}</span>
+        </div>
+      ) : null}
+      {retryFailure ? (
+        <div className="inline-notice warning" role="alert">
+          <AlertTriangle size={15} />
+          <span>{retryFailure}</span>
         </div>
       ) : null}
       {copyFailure ? (
@@ -2395,10 +2475,12 @@ function ActionCard({
   requestedValues,
   joinAction,
   joinPending,
+  previewJoinAction,
   statusInvitationAction,
   revokeInvitationAction,
   redeemInvitationAction,
   redeemInvitationPending,
+  previewInvitationAction,
   activePendingAction,
   reviewJoinRequestAction,
   batchReviewJoinRequestsAction,
@@ -2415,10 +2497,12 @@ function ActionCard({
   requestedValues?: ActionValues;
   joinAction?: NodeUiAction;
   joinPending: boolean;
+  previewJoinAction?: NodeUiAction;
   statusInvitationAction?: NodeUiAction;
   revokeInvitationAction?: NodeUiAction;
   redeemInvitationAction?: NodeUiAction;
   redeemInvitationPending: boolean;
+  previewInvitationAction?: NodeUiAction;
   activePendingAction: string | null;
   reviewJoinRequestAction?: NodeUiAction;
   batchReviewJoinRequestsAction?: NodeUiAction;
@@ -2744,6 +2828,37 @@ function ActionCard({
     }
   }
 
+  async function previewJoinAgain(): Promise<void> {
+    if (!joinPreview || !previewJoinAction) {
+      setFailure(label(locale, "join.action_unavailable"));
+      return;
+    }
+    setErrors([]);
+    setFailure("");
+    setResult("");
+    try {
+      const submission = await onSubmit(
+        previewJoinAction,
+        { network_id: joinPreview.network_id },
+        () => {},
+      );
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome?.status === "network_join_preview") {
+        setJoinPreview(submission.outcome.data);
+        setJoinConfirmed(false);
+        setJoinExitConfirmed(false);
+        setOpen(true);
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function confirmInvitation(confirmValues: ActionValues): Promise<void> {
     if (
       !invitationPreview ||
@@ -2784,6 +2899,40 @@ function ActionCard({
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function retryInvitationPreview(): Promise<void> {
+    if (!previewInvitationAction) {
+      setFailure(label(locale, "invitations.actions_unavailable"));
+      return;
+    }
+    setErrors([]);
+    setFailure("");
+    setResult("");
+    try {
+      const submission = await onSubmit(previewInvitationAction, values, () => {});
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome?.status === "invitation_preview") {
+        applyInvitationOutcome(submission.outcome);
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function returnToInvitationEdit(): void {
+    setInvitationPreview(null);
+    setInvitationPreviewLoadedAtUnixMs(0);
+    setInvitationConfirmed(false);
+    setInvitationExitConfirmed(false);
+    setFailure("");
+    setResult("");
+    setOpen(true);
   }
 
   function handleJoinRequestsReviewed(ack: NodeJoinRequestReviewAck): void {
@@ -2856,6 +3005,7 @@ function ActionCard({
           blockedReason={joinBlockedReason}
           onCheckedChange={setJoinConfirmed}
           onExitContributionCheckedChange={setJoinExitConfirmed}
+          onPreviewAgain={() => void previewJoinAgain()}
           onConfirm={() => void confirmJoin()}
         />
       ) : null}
@@ -2926,6 +3076,8 @@ function ActionCard({
           previewLoadedAtUnixMs={invitationPreviewLoadedAtUnixMs}
           onCheckedChange={setInvitationConfirmed}
           onExitContributionCheckedChange={setInvitationExitConfirmed}
+          onRetryPreview={() => void retryInvitationPreview()}
+          onBackToEdit={returnToInvitationEdit}
           onConfirm={(confirmValues) => void confirmInvitation(confirmValues)}
         />
       ) : null}
@@ -3086,6 +3238,14 @@ export function ActionPanel(props: ActionPanelProps) {
         <p className="empty-copy">
           {label(locale, "common.page_actions_empty")}
         </p>
+        {props.operation ? (
+          <OperationStatusCard
+            operation={props.operation}
+            locale={locale}
+            onCancel={props.onCancel}
+            onRetry={props.onRetryOperation}
+          />
+        ) : null}
       </aside>
     );
   }
@@ -3103,6 +3263,7 @@ export function ActionPanel(props: ActionPanelProps) {
           operation={props.operation}
           locale={locale}
           onCancel={props.onCancel}
+          onRetry={props.onRetryOperation}
         />
       ) : null}
       <div className="action-list">
@@ -3125,6 +3286,9 @@ export function ActionPanel(props: ActionPanelProps) {
               (candidate) => candidate.id === "join_network",
             )}
             joinPending={pendingAction === "join_network"}
+            previewJoinAction={actions.find(
+              (candidate) => candidate.id === "preview_join_network",
+            )}
             statusInvitationAction={actions.find(
               (candidate) => candidate.id === "get_invitation_status",
             )}
@@ -3135,6 +3299,9 @@ export function ActionPanel(props: ActionPanelProps) {
               (candidate) => candidate.id === "redeem_invitation",
             )}
             redeemInvitationPending={pendingAction === "redeem_invitation"}
+            previewInvitationAction={actions.find(
+              (candidate) => candidate.id === "preview_invitation",
+            )}
             activePendingAction={pendingAction}
             reviewJoinRequestAction={actions.find(
               (candidate) => candidate.id === "review_join_request",

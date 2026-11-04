@@ -1648,7 +1648,7 @@ describe("React WebUI shell", () => {
     await user.click(
       within(panel).getByRole("button", { name: "translated:common.execute" }),
     );
-    let dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog");
     await user.click(
       within(dialog).getByRole("button", { name: "translated:common.execute" }),
     );
@@ -1657,21 +1657,19 @@ describe("React WebUI shell", () => {
         "translated:error.node_restart_failed",
       );
     });
-    expect(await screen.findByTestId("operation-status")).toHaveTextContent(
-      "op-restart-failed",
-    );
+    const operationStatus = await screen.findByTestId("operation-status");
+    expect(operationStatus).toHaveTextContent("op-restart-failed");
 
     await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
-    dialog = await screen.findByRole("dialog");
-    await user.click(
-      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+      within(operationStatus).getByRole("button", {
+        name: "translated:operation.retry",
+      }),
     );
     await waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(2));
 
     const first = vi.mocked(sendCommand).mock.calls[0][0];
     const second = vi.mocked(sendCommand).mock.calls[1][0];
+    expect(second.request.command).toEqual(first.request.command);
     expect(second.idempotency_key).toBe(first.idempotency_key);
   });
 
@@ -2376,13 +2374,9 @@ describe("React WebUI shell", () => {
         name: "translated:discovery.action.retry",
       }),
     );
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
-    });
+    await waitFor(() => expect(sendCommand).toHaveBeenCalled());
     expect(
-      within(panel).getByRole("button", {
-        name: "translated:action.retry_discovery_index",
-      }),
-    ).toHaveAttribute("aria-expanded", "true");
+      vi.mocked(sendCommand).mock.calls.at(-1)![0].request.command,
+    ).toEqual({ command: "retry_discovery_index" });
   });
 });

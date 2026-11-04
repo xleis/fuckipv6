@@ -244,6 +244,7 @@ struct GpuiShell {
     operation: Option<NodeOperationSnapshot>,
     operation_fingerprint: Option<String>,
     operation_idempotency_key: Option<IdempotencyKey>,
+    last_operation_command: Option<NodeCommand>,
     operation_cancel_pending: bool,
     operation_cancel_error: Option<String>,
     recent_diagnostics: Option<NodeDiagnosticsSnapshot>,
@@ -319,6 +320,7 @@ impl GpuiShell {
             operation: None,
             operation_fingerprint: None,
             operation_idempotency_key: None,
+            last_operation_command: None,
             operation_cancel_pending: false,
             operation_cancel_error: None,
             recent_diagnostics: None,
@@ -499,6 +501,7 @@ impl GpuiShell {
             cx.notify();
             return;
         };
+        self.last_operation_command = Some(command.clone());
         let fingerprint =
             serde_json::to_string(&command).unwrap_or_else(|_| command.kind().as_str().to_owned());
         if self.operation_fingerprint.as_deref() != Some(fingerprint.as_str()) {
@@ -2009,6 +2012,11 @@ impl GpuiShell {
         ] {
             self.set_field_value("redeem_invitation", field, "");
         }
+    }
+
+    fn return_to_invitation_edit(&mut self, cx: &mut Context<Self>) {
+        self.clear_invitation_preview();
+        self.open_action("networks", "preview_invitation", cx);
     }
 
     fn confirm_invitation_preview(&mut self, cx: &mut Context<Self>) {
@@ -5161,8 +5169,31 @@ impl GpuiShell {
         );
         let cancel_pending = self.operation_cancel_pending;
         let cancel_error = self.operation_cancel_error.clone();
+        let retry_command = self.last_operation_command.clone();
+        let can_retry = terminal
+            && operation
+                .operation
+                .error
+                .as_ref()
+                .is_some_and(|error| error.retryable)
+            && retry_command.is_some();
 
         let mut actions = div().flex().flex_wrap().items_center().gap_2();
+        if can_retry {
+            let retry_command = retry_command.expect("retry command checked above");
+            actions = actions.child(
+                button(
+                    SharedString::from("retry-operation"),
+                    t(self.locale, "operation.retry"),
+                    ButtonVariant::Secondary,
+                    false,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.submit_operation(retry_command.clone(), cx);
+                }))
+                .debug_selector(|| "visual-operation-retry".into()),
+            );
+        }
         if can_cancel {
             actions = actions.child(
                 button(
@@ -5806,7 +5837,7 @@ impl GpuiShell {
                 )
                 .debug_selector(|| "visual-discovery-retry".into())
                 .on_click(cx.listener(|shell, _, _, cx| {
-                    shell.open_action("networks", "retry_discovery_index", cx);
+                    shell.submit_raw(NodeCommand::RetryDiscoveryIndex, cx);
                 }))
             });
 
@@ -7470,7 +7501,6 @@ impl GpuiShell {
             !can_accept || !checked || (exit_required && !exit_checked) || pending,
         )
         .debug_selector(|| "visual-invitation-confirm".into())
-        .w_full()
         .on_click(cx.listener(|shell, _, _, cx| {
             if shell.pending_commands == 0
                 && shell.invitation_terms_confirmed
@@ -7485,6 +7515,33 @@ impl GpuiShell {
                 shell.confirm_invitation_preview(cx);
             }
         }));
+        let preview_again = button(
+            SharedString::from("preview-invitation-again"),
+            t(self.locale, "invitations.preview_again"),
+            ButtonVariant::Secondary,
+            pending,
+        )
+        .debug_selector(|| "visual-invitation-preview-again".into())
+        .on_click(cx.listener(|shell, _, _, cx| {
+            shell.submit_manifest_action("preview_invitation", cx);
+        }));
+        let back_to_edit = (!can_accept).then(|| {
+            button(
+                SharedString::from("back-to-invitation-edit"),
+                t(self.locale, "invitations.back_to_edit"),
+                ButtonVariant::Secondary,
+                pending,
+            )
+            .debug_selector(|| "visual-invitation-back-to-edit".into())
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.return_to_invitation_edit(cx);
+            }))
+        });
+        let mut preview_actions = div().flex().flex_wrap().gap_2();
+        if let Some(back_to_edit) = back_to_edit {
+            preview_actions = preview_actions.child(back_to_edit);
+        }
+        preview_actions = preview_actions.child(preview_again).child(confirm);
         div()
             .id("visual-invitation-preview")
             .debug_selector(|| "visual-invitation-preview".into())
@@ -7614,7 +7671,7 @@ impl GpuiShell {
             )
             .child(terms_control)
             .when(exit_required, |card| card.child(exit_control))
-            .child(confirm)
+            .child(preview_actions)
             .into_any_element()
     }
 
@@ -8288,7 +8345,6 @@ impl GpuiShell {
             !can_join || !checked || pending,
         )
         .debug_selector(|| "visual-join-network-confirm".into())
-        .w_full()
         .on_click(cx.listener(|shell, _, _, cx| {
             if shell.pending_commands == 0
                 && shell.network_join_terms_confirmed
@@ -8299,6 +8355,16 @@ impl GpuiShell {
             {
                 shell.confirm_join_preview(cx);
             }
+        }));
+        let preview_again = button(
+            SharedString::from("join-network-preview-again"),
+            t(self.locale, "join.preview_again"),
+            ButtonVariant::Secondary,
+            pending,
+        )
+        .debug_selector(|| "visual-join-network-preview-again".into())
+        .on_click(cx.listener(|shell, _, _, cx| {
+            shell.submit_manifest_action("preview_join_network", cx);
         }));
         let status_color = if can_join {
             COLOR_ACCENT
@@ -8458,7 +8524,14 @@ impl GpuiShell {
                 SemanticState::Info,
             ))
             .child(terms_control)
-            .child(confirm);
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(preview_again)
+                    .child(confirm),
+            );
 
         card.into_any_element()
     }
@@ -11380,6 +11453,7 @@ mod tests {
             "visual-join-network-preview",
             "visual-join-network-terms",
             "visual-join-network-confirm",
+            "visual-join-network-preview-again",
         ] {
             assert!(
                 visible.debug_bounds(selector).is_some(),
@@ -11556,6 +11630,7 @@ mod tests {
             "visual-invitation-preview",
             "visual-invitation-terms",
             "visual-invitation-confirm",
+            "visual-invitation-preview-again",
             "visual-invitation-ordinary-membership",
             "visual-invitation-not-permanent",
         ] {
@@ -11601,9 +11676,57 @@ mod tests {
                             "This invitation cannot be accepted. Refresh its status or contact a network administrator."
                         )
                     );
+                    shell.open_action("networks", "preview_invitation", cx);
                 })
                 .expect("install non-accepting invitation fixture");
+
+            let mut visible = VisualTestContext::from_window(window.into(), cx);
+            visible.run_until_parked();
+            for selector in [
+                "visual-invitation-preview-again",
+                "visual-invitation-back-to-edit",
+            ] {
+                assert!(
+                    visible.debug_bounds(selector).is_some(),
+                    "missing invitation recovery element {selector} for {state:?}"
+                );
+            }
         }
+    }
+
+    #[gpui::test]
+    fn returning_to_invitation_edit_preserves_source_inputs(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.set_field_value(
+                    "preview_invitation",
+                    "coordinator_url",
+                    "https://coordinator.example.test",
+                );
+                shell.set_field_value("preview_invitation", "code", "fkinv_preview_secret");
+                shell.set_field_value("redeem_invitation", "preview_digest", "stale-digest");
+                shell.recent_invitation_preview = Some(invitation_preview_fixture());
+                shell.invitation_terms_confirmed = true;
+
+                shell.return_to_invitation_edit(cx);
+
+                assert!(shell.recent_invitation_preview.is_none());
+                assert!(!shell.invitation_terms_confirmed);
+                assert_eq!(
+                    shell.field_value("preview_invitation", "coordinator_url"),
+                    "https://coordinator.example.test"
+                );
+                assert_eq!(
+                    shell.field_value("preview_invitation", "code"),
+                    "fkinv_preview_secret"
+                );
+                assert_eq!(shell.field_value("redeem_invitation", "preview_digest"), "");
+                assert!(shell.expanded_actions.contains_key("preview_invitation"));
+            })
+            .expect("return to invitation edit");
     }
 
     #[gpui::test]
@@ -11694,6 +11817,52 @@ mod tests {
                 visible.debug_bounds("visual-operation-cancel").is_some(),
                 expected,
                 "unexpected cancel visibility for state={state:?} cancellable={cancellable}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn operation_card_offers_retry_only_for_terminal_retryable_failures(cx: &mut TestAppContext) {
+        for (state, retryable, with_command, expected) in [
+            (OperationState::Failed, true, true, true),
+            (OperationState::TimedOut, true, true, true),
+            (OperationState::Failed, false, true, false),
+            (OperationState::Failed, true, false, false),
+            (OperationState::Running, true, true, false),
+        ] {
+            let fixture: ProductVisualFixture =
+                serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+                    .expect("parse shared product visual fixture");
+            let mut operation = operation_fixture(state, false);
+            operation.operation.error = Some(OperationError {
+                code: "operation.test_failed".into(),
+                message_key: "error.operation_test_failed".into(),
+                params: Default::default(),
+                object: None,
+                retryable,
+                recovery: None,
+                partial_changes: Vec::new(),
+            });
+            let window = open_shell_window(cx, 1200.0, 900.0);
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.manifest = Some(crate::node::node_ui_manifest());
+                    shell.snapshot = fixture.snapshot;
+                    shell.locale = Locale::En;
+                    shell.selected_page = "node_runtime".into();
+                    shell.operation = Some(operation);
+                    shell.last_operation_command =
+                        with_command.then_some(NodeCommand::GetDiagnostics);
+                    cx.notify();
+                })
+                .expect("install operation fixture");
+
+            let mut visible = VisualTestContext::from_window(window.into(), cx);
+            visible.run_until_parked();
+            assert_eq!(
+                visible.debug_bounds("visual-operation-retry").is_some(),
+                expected,
+                "unexpected retry visibility for state={state:?} retryable={retryable} with_command={with_command}"
             );
         }
     }

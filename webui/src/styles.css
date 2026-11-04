@@ -1941,6 +1941,15 @@ button:disabled {
   justify-content: flex-end;
   gap: var(--space-2);
 }
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.recovery-actions .primary-button {
+  flex: 1 1 180px;
+}
 .operation-copy {
   min-height: 30px;
   flex: 0 0 auto;
@@ -3830,6 +3839,12 @@ button:disabled {
   .operation-status-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+  .recovery-actions {
+    width: 100%;
+  }
+  .recovery-actions > button {
+    flex: 1 1 160px;
   }
   .profile-projection-grid {
     grid-template-columns: 1fr;

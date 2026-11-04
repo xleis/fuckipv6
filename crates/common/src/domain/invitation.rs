@@ -124,6 +124,22 @@ pub struct InvitationCreateRequest {
 }
 
 impl InvitationCreateRequest {
+    pub fn new(
+        network_id: NetworkId,
+        role: MembershipRole,
+        capabilities: Vec<CapabilityKind>,
+        max_uses: u32,
+        expires_in_ms: u64,
+    ) -> Self {
+        Self {
+            network_id,
+            role,
+            capabilities,
+            max_uses,
+            expires_in_ms,
+        }
+    }
+
     pub fn validate(&self) -> DomainResult<()> {
         if !matches!(
             self.role,
@@ -154,6 +170,10 @@ impl InvitationCreateRequest {
             ));
         }
         Ok(())
+    }
+
+    pub fn expires_in_ms(&self) -> u64 {
+        self.expires_in_ms
     }
 }
 

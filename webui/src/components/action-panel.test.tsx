@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
+  InvitationPreview,
+  InvitationStatusView,
+  IssuedInvitation,
   JoinRequest,
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
@@ -54,6 +57,24 @@ const batchReviewJoinRequests = manifest.pages
 const submitJoinRequest = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "submit_join_request") as NodeUiAction;
+const createInvitation = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "create_invitation") as NodeUiAction;
+const listInvitations = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "list_invitations") as NodeUiAction;
+const getInvitationStatus = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "get_invitation_status") as NodeUiAction;
+const revokeInvitation = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "revoke_invitation") as NodeUiAction;
+const previewInvitation = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "preview_invitation") as NodeUiAction;
+const redeemInvitation = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "redeem_invitation") as NodeUiAction;
 const joinRequestReviewActions = [
   listJoinRequests,
   reviewJoinRequest,
@@ -70,6 +91,56 @@ const identitySnapshot: NodeSnapshot = {
     public_key_fingerprint: currentFingerprint,
     created_at_unix_ms: 1_700_000_000_000,
   },
+};
+
+const invitationCode = `fkinv_${"A".repeat(43)}`;
+const invitationNetworkId = "net_stable_home";
+const invitationId = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const invitationCreatedAt = 1_700_000_000_000;
+const invitationStatus: InvitationStatusView = {
+  invitation: {
+    invitation_id: invitationId,
+    network_id: invitationNetworkId,
+    created_by: "node-owner",
+    role: "member",
+    capabilities: ["file"],
+    max_uses: 2,
+    used_count: 0,
+    created_at_unix_ms: invitationCreatedAt,
+    expires_at_unix_ms: invitationCreatedAt + 3_600_000,
+    revision: 3,
+  },
+  state: "active",
+  remaining_uses: 2,
+};
+const issuedInvitation: IssuedInvitation = {
+  code: invitationCode,
+  status: invitationStatus,
+};
+const invitationPreview: InvitationPreview = {
+  invitation_id: invitationId,
+  invitation_revision: 3,
+  network_id: invitationNetworkId,
+  network_name: "home",
+  network_revision: 8,
+  role: "member",
+  capabilities: ["file"],
+  remaining_uses: 2,
+  expires_at_unix_ms: invitationCreatedAt + 3_600_000,
+  state: "active",
+  terms: {
+    network_policy_revision: 4,
+    privacy_policy_revision: 3,
+    exit_contribution: "not_required",
+    member_limit: 16,
+  },
+  terms_hash: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  preview_digest: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+  permission_changes: ["File access is limited to shared folders"],
+  creates_permanent_membership: false,
+  requires_recent_reauthentication: true,
+  can_accept: true,
+  denial_key: null,
 };
 
 const publicProfile: NetworkPublicProfileDocument = {
@@ -927,6 +998,471 @@ describe("action panel operation status", () => {
     expect(result).toHaveTextContent("tags");
     expect(result).toHaveTextContent("translated:profile.revision");
   });
+});
+
+describe("action panel private invitation workflows", () => {
+  it("creates an invitation, shows its code once and copies it without putting it in the notice", async () => {
+    const user = userEvent.setup();
+    const writeText = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockResolvedValue(undefined);
+    const administratorIssued: IssuedInvitation = {
+      ...issuedInvitation,
+      status: {
+        ...issuedInvitation.status,
+        invitation: {
+          ...issuedInvitation.status.invitation,
+          role: "administrator",
+        },
+      },
+    };
+    const onSubmit = vi.fn<
+      (
+        action: NodeUiAction,
+        values: ActionValues,
+        onOperation: (operation: NodeOperationSnapshot) => void,
+      ) => Promise<ActionSubmission>
+    >(async () => ({
+      outcome: {
+        status: "invitation_created",
+        data: administratorIssued,
+      } as NodeCommandOutcome,
+    }));
+    render(
+      <ActionPanel
+        actions={[createInvitation]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.create_invitation",
+      }),
+    );
+    const role = screen.getByRole("combobox", {
+      name: "translated:field.invitation_role",
+    });
+    expect(role).toHaveValue("member");
+    expect(
+      within(role).getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([
+      "translated:join_request.role.member",
+      "translated:join_request.role.administrator",
+    ]);
+
+    const network = screen.getByRole("textbox", {
+      name: "translated:field.network_id",
+    });
+    await user.clear(network);
+    await user.type(network, invitationNetworkId);
+    await user.selectOptions(role, "administrator");
+    await user.type(
+      screen.getByRole("textbox", {
+        name: "translated:field.capability_declarations",
+      }),
+      "file",
+    );
+    await user.type(
+      screen.getByRole("textbox", {
+        name: "translated:field.invitation_max_uses",
+      }),
+      "2",
+    );
+    await user.type(
+      screen.getByRole("spinbutton", {
+        name: "translated:field.invitation_expires_in_ms",
+      }),
+      "3600000",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const confirmation = await screen.findByRole("dialog");
+    expect(confirmation).toHaveTextContent(
+      "translated:confirm.reauthentication_required",
+    );
+    await user.click(
+      within(confirmation).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    const created = await screen.findByTestId("invitation-created");
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0]?.[0]).toBe(createInvitation);
+    expect(onSubmit.mock.calls[0]?.[1]).toMatchObject({
+      network_id: invitationNetworkId,
+      role: "administrator",
+      capabilities: "file",
+      max_uses: "2",
+      expires_in_ms: "3600000",
+    });
+    expect(screen.getAllByText(invitationCode)).toHaveLength(1);
+    expect(created).toHaveTextContent("translated:invitations.code_once");
+    expect(created).toHaveTextContent("translated:join_request.role.administrator");
+    expect(created).toHaveTextContent("translated:invitations.ordinary_membership");
+    expect(created).toHaveTextContent("translated:invitations.not_permanent");
+
+    const article = created.closest("article");
+    expect(article?.querySelector(".form-success")).toHaveTextContent(
+      "translated:invitations.created_notice",
+    );
+    expect(article?.querySelector(".form-success")).not.toHaveTextContent(
+      invitationCode,
+    );
+
+    await user.click(
+      within(created).getByRole("button", {
+        name: "translated:invitations.copy",
+      }),
+    );
+    expect(writeText).toHaveBeenCalledWith(invitationCode);
+    expect(within(created).getByRole("status")).toHaveTextContent(
+      "translated:invitations.copied",
+    );
+  });
+
+  it("lists only redacted metadata, refreshes status and revokes with a pinned revision", async () => {
+    const user = userEvent.setup();
+    const refreshed: InvitationStatusView = {
+      ...invitationStatus,
+      invitation: { ...invitationStatus.invitation, revision: 4 },
+    };
+    const revoked: InvitationStatusView = {
+      ...refreshed,
+      state: "revoked",
+      invitation: {
+        ...refreshed.invitation,
+        revision: 5,
+        revoked_at_unix_ms: invitationCreatedAt + 120_000,
+        revoked_by: "node-owner",
+      },
+    };
+    const onSubmit = vi
+      .fn<
+        (
+          action: NodeUiAction,
+          values: ActionValues,
+          onOperation: (operation: NodeOperationSnapshot) => void,
+        ) => Promise<ActionSubmission>
+      >()
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "invitations",
+          data: [invitationStatus],
+        } as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "invitation_status",
+          data: refreshed,
+        } as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "invitation_revoked",
+          data: revoked,
+        } as NodeCommandOutcome,
+      });
+    render(
+      <ActionPanel
+        actions={[listInvitations, getInvitationStatus, revokeInvitation]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "list_invitations",
+          values: { network_id: invitationNetworkId },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const list = await screen.findByTestId("invitation-list");
+    expect(list).toHaveTextContent("translated:invitations.state.active");
+    expect(list).toHaveTextContent("translated:join_request.role.member");
+    expect(list).toHaveTextContent("translated:capability.file");
+    expect(list).toHaveTextContent("translated:invitations.privacy_boundary");
+    expect(list).not.toHaveTextContent(invitationCode);
+    expect(onSubmit.mock.calls[0]?.[1]).toEqual({
+      network_id: invitationNetworkId,
+    });
+
+    await user.click(
+      within(list).getByRole("button", {
+        name: "translated:invitations.status_refresh",
+      }),
+    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1]?.[0]).toBe(getInvitationStatus);
+    expect(onSubmit.mock.calls[1]?.[1]).toEqual({
+      network_id: invitationNetworkId,
+      invitation_id: invitationId,
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("invitation-list")).toHaveTextContent(
+        "translated:invitations.revision",
+      ),
+    );
+
+    await user.click(
+      within(screen.getByTestId("invitation-list")).getByRole("button", {
+        name: "translated:invitations.revoke",
+      }),
+    );
+    const confirmation = await screen.findByRole("dialog");
+    expect(confirmation).toHaveTextContent(
+      "translated:confirm.revoke_invitation.consequence",
+    );
+    expect(confirmation).toHaveTextContent(
+      "translated:confirm.reauthentication_required",
+    );
+    await user.click(
+      within(confirmation).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(3));
+    expect(onSubmit.mock.calls[2]?.[0]).toBe(revokeInvitation);
+    expect(onSubmit.mock.calls[2]?.[1]).toEqual({
+      network_id: invitationNetworkId,
+      invitation_id: invitationId,
+      expected_revision: "4",
+    });
+    expect(screen.getByTestId("invitation-list")).toHaveTextContent(
+      "translated:invitations.state.revoked",
+    );
+    expect(screen.getByTestId("invitation-list")).not.toHaveTextContent(
+      invitationCode,
+    );
+  });
+
+  it("shows permission changes and submits the exact pinned preview for redemption", async () => {
+    const user = userEvent.setup();
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_123);
+    const onSubmit = vi
+      .fn<
+        (
+          action: NodeUiAction,
+          values: ActionValues,
+          onOperation: (operation: NodeOperationSnapshot) => void,
+        ) => Promise<ActionSubmission>
+      >()
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "invitation_preview",
+          data: invitationPreview,
+        } as NodeCommandOutcome,
+      })
+      .mockResolvedValueOnce({
+        outcome: {
+          status: "invitation_redeemed",
+          data: {
+            invitation_id: invitationId,
+            network_id: invitationNetworkId,
+            node_id: "node-current",
+            role: "member",
+            capabilities: ["file"],
+            network_revision: 8,
+            invitation_revision: 3,
+            joined_at_unix_ms: 1_700_000_000_123,
+            already_redeemed: false,
+            grants_permanent_membership: false,
+          },
+        } as NodeCommandOutcome,
+      });
+    render(
+      <ActionPanel
+        actions={[previewInvitation, redeemInvitation]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "preview_invitation",
+          values: {
+            network_id: invitationNetworkId,
+            coordinator_url: "https://coordinator.example.test",
+            code: invitationCode,
+          },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const previewConfirmation = await screen.findByRole("dialog");
+    await user.click(
+      within(previewConfirmation).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+    const preview = await screen.findByTestId("invitation-preview");
+    expect(preview).toHaveTextContent("translated:invitations.can_accept");
+    expect(preview).not.toHaveTextContent("translated:invitations.denied");
+    expect(preview).toHaveTextContent("home");
+    expect(preview).toHaveTextContent("translated:join_request.role.member");
+    expect(preview).toHaveTextContent("File access is limited to shared folders");
+    expect(preview).toHaveTextContent(
+      "translated:invitations.reauthentication_required",
+    );
+    expect(preview).toHaveTextContent("translated:invitations.ordinary_membership");
+    expect(preview).toHaveTextContent("translated:invitations.not_permanent");
+    expect(document.body).not.toHaveTextContent(invitationCode);
+
+    const checkbox = within(preview).getByRole("checkbox", {
+      name: "translated:invitations.terms_checkbox",
+    });
+    const accept = within(preview).getByRole("button", {
+      name: "translated:invitations.accept",
+    });
+    expect(accept).toBeDisabled();
+    await user.click(checkbox);
+    expect(accept).toBeEnabled();
+    await user.click(accept);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1]?.[0]).toBe(redeemInvitation);
+    expect(onSubmit.mock.calls[1]?.[1]).toEqual({
+      network_id: invitationNetworkId,
+      coordinator_url: "https://coordinator.example.test",
+      code: invitationCode,
+      invitation_id: invitationId,
+      expected_invitation_revision: "3",
+      preview_digest: invitationPreview.preview_digest,
+      terms_hash: invitationPreview.terms_hash,
+      acknowledged_at_unix_ms: "1700000000123",
+    });
+    expect(
+      await screen.findByText("translated:invitations.redeemed_notice"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("invitation-preview")).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(invitationCode);
+    now.mockRestore();
+  });
+
+  const unacceptableInvitationPreviews: Array<{
+    name: string;
+    preview: InvitationPreview;
+  }> = [
+    {
+      name: "expired",
+      preview: {
+        ...invitationPreview,
+        state: "expired",
+        denial_key: "invitations.state.expired",
+      },
+    },
+    {
+      name: "revoked",
+      preview: {
+        ...invitationPreview,
+        state: "revoked",
+        denial_key: "invitations.state.revoked",
+      },
+    },
+    {
+      name: "exhausted",
+      preview: {
+        ...invitationPreview,
+        state: "exhausted",
+        remaining_uses: 0,
+        denial_key: "invitations.state.exhausted",
+      },
+    },
+    {
+      name: "permanent membership",
+      preview: {
+        ...invitationPreview,
+        creates_permanent_membership: true,
+      },
+    },
+  ];
+
+  it.each(unacceptableInvitationPreviews)(
+    "blocks confirmation for $name invitations even if the preview claims acceptance",
+    async ({ preview: rejectedPreview }) => {
+      const user = userEvent.setup();
+      const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_123);
+      const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+        outcome: {
+          status: "invitation_preview",
+          data: rejectedPreview,
+        } as NodeCommandOutcome,
+      }));
+      render(
+        <ActionPanel
+          actions={[previewInvitation, redeemInvitation]}
+          snapshot={snapshot}
+          selectedNetwork="home"
+          locale="zh-CN"
+          pendingAction={null}
+          interactionBlocked={null}
+          requestedAction={{
+            actionId: "preview_invitation",
+            values: {
+              network_id: invitationNetworkId,
+              coordinator_url: "https://coordinator.example.test",
+              code: invitationCode,
+            },
+          }}
+          operation={null}
+          onRequestedActionOpened={() => {}}
+          onCancel={vi.fn(async () => {})}
+          onSubmit={onSubmit}
+        />,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: "translated:common.execute" }),
+      );
+      const confirmation = await screen.findByRole("dialog");
+      await user.click(
+        within(confirmation).getByRole("button", {
+          name: "translated:common.execute",
+        }),
+      );
+      const preview = await screen.findByTestId("invitation-preview");
+      expect(preview).toHaveTextContent("translated:invitations.cannot_accept");
+      expect(
+        within(preview).getByRole("checkbox", {
+          name: "translated:invitations.terms_checkbox",
+        }),
+      ).toBeDisabled();
+      expect(
+        within(preview).getByRole("button", {
+          name: "translated:invitations.accept",
+        }),
+      ).toBeDisabled();
+      expect(onSubmit).toHaveBeenCalledOnce();
+      now.mockRestore();
+    },
+  );
 });
 
 describe("action panel join request review list", () => {

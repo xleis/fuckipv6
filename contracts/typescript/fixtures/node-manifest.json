@@ -746,7 +746,7 @@
           "id": "create_invitation",
           "label_key": "action.create_invitation",
           "command": "create_invitation",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "manage_networks",
           "audit": {
             "policy": "record_outcome",
@@ -801,7 +801,7 @@
           "id": "list_invitations",
           "label_key": "action.list_invitations",
           "command": "list_invitations",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "view_state",
           "audit": {
             "policy": "none",
@@ -823,7 +823,7 @@
           "id": "get_invitation_status",
           "label_key": "action.get_invitation_status",
           "command": "get_invitation_status",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "view_state",
           "audit": {
             "policy": "none",
@@ -852,7 +852,7 @@
           "id": "revoke_invitation",
           "label_key": "action.revoke_invitation",
           "command": "revoke_invitation",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "manage_networks",
           "audit": {
             "policy": "record_outcome",
@@ -893,7 +893,7 @@
           "id": "preview_invitation",
           "label_key": "action.preview_invitation",
           "command": "preview_invitation",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "manage_networks",
           "audit": {
             "policy": "none",
@@ -934,7 +934,7 @@
           "id": "redeem_invitation",
           "label_key": "action.redeem_invitation",
           "command": "redeem_invitation",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "manage_networks",
           "audit": {
             "policy": "record_outcome",

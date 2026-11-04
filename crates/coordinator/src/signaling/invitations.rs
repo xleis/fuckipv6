@@ -574,6 +574,7 @@ impl InvitationStore {
         let lock_path = self.path.with_extension("json.lock");
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

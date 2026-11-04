@@ -9,6 +9,10 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type {
+  InvitationPreview,
+  InvitationState,
+  InvitationStatusView,
+  IssuedInvitation,
   JoinRequest,
   JoinRequestReviewAction,
   NetworkProfileApplyResult,
@@ -107,6 +111,12 @@ function selectOptions(
     ];
   }
   if (field.input === "role") {
+    if (field.label_key === "field.invitation_role") {
+      return ["member", "administrator"].map((value) => ({
+        value,
+        text: label(locale, `join_request.role.${value}`),
+      }));
+    }
     return ["member", "discovery", "relay", "exit_node"].map((value) => ({
       value,
       text: value,
@@ -669,6 +679,214 @@ function joinPreviewValues(preview: NodeNetworkJoinPreview): ActionValues {
   };
 }
 
+function invitationPreviewValues(
+  preview: InvitationPreview,
+  source: ActionValues,
+): ActionValues {
+  return {
+    network_id: preview.network_id,
+    coordinator_url: String(source.coordinator_url ?? ""),
+    code: String(source.code ?? ""),
+    invitation_id: preview.invitation_id,
+    expected_invitation_revision: String(preview.invitation_revision),
+    preview_digest: preview.preview_digest,
+    terms_hash: preview.terms_hash,
+    acknowledged_at_unix_ms: String(Date.now()),
+  };
+}
+
+function invitationStateKey(state: InvitationState): string {
+  return `invitations.state.${state}`;
+}
+
+function invitationRoleLabel(
+  role: InvitationStatusView["invitation"]["role"],
+  locale: Locale,
+): string {
+  return label(locale, `join_request.role.${role}`);
+}
+
+function capabilityList(
+  capabilities: InvitationStatusView["invitation"]["capabilities"],
+  locale: Locale,
+): string {
+  return joinList(
+    (capabilities ?? []).map((capability) =>
+      label(locale, `capability.${capability}`),
+    ),
+    locale,
+  );
+}
+
+function invitationOutcomeSummary(
+  outcome: NodeCommandOutcome,
+  locale: Locale,
+): string | null {
+  switch (outcome.status) {
+    case "invitation_created":
+      return label(locale, "invitations.created_notice");
+    case "invitations":
+      return tr(locale, "invitations.loaded_notice", {
+        count: i18n().formatInteger(locale, outcome.data.length),
+      });
+    case "invitation_status":
+      return label(locale, "invitations.status_notice");
+    case "invitation_revoked":
+      return label(locale, "invitations.revoked_notice");
+    case "invitation_preview":
+      return label(locale, "invitations.preview_notice");
+    case "invitation_redeemed":
+      return tr(locale, "invitations.redeemed_notice", {
+        role: invitationRoleLabel(outcome.data.role, locale),
+      });
+    default:
+      return null;
+  }
+}
+
+function InvitationCodeCard({
+  issued,
+  locale,
+}: {
+  issued: IssuedInvitation;
+  locale: Locale;
+}) {
+  const [copyNotice, setCopyNotice] = useState("");
+  const { invitation, remaining_uses } = issued.status;
+  async function copyCode(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(issued.code);
+      setCopyNotice(label(locale, "invitations.copied"));
+    } catch {
+      setCopyNotice(label(locale, "invitations.copy_failed"));
+    }
+  }
+  return (
+    <section
+      className="network-profile-result invitation-code-result"
+      data-testid="invitation-created"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>{label(locale, "invitations.issued_title")}</span>
+          <strong>{label(locale, invitationStateKey(issued.status.state))}</strong>
+        </div>
+        <Check size={16} />
+      </div>
+      <code className="profile-fingerprint invitation-code" data-testid="invitation-code">
+        {issued.code}
+      </code>
+      <div className="inline-notice warning">
+        <ShieldAlert size={15} />
+        <span>{label(locale, "invitations.code_once")}</span>
+      </div>
+      <button className="secondary-button" type="button" onClick={() => void copyCode()}>
+        <Copy size={14} />
+        {label(locale, "invitations.copy")}
+      </button>
+      {copyNotice ? (
+        <p className="profile-muted" role="status">
+          {copyNotice}
+        </p>
+      ) : null}
+      <InvitationMetadata
+        invitation={invitation}
+        remainingUses={remaining_uses}
+        locale={locale}
+      />
+      <p className="profile-muted">
+        {label(locale, "invitations.ordinary_membership")}
+      </p>
+      <p className="profile-muted">{label(locale, "invitations.not_permanent")}</p>
+      <p className="profile-muted">{label(locale, "invitations.privacy_boundary")}</p>
+    </section>
+  );
+}
+
+function InvitationMetadata({
+  invitation,
+  remainingUses,
+  locale,
+}: {
+  invitation: InvitationStatusView["invitation"];
+  remainingUses: number;
+  locale: Locale;
+}) {
+  return (
+    <dl className="profile-definition-list invitation-metadata">
+      <div>
+        <dt>{label(locale, "invitations.role")}</dt>
+        <dd>{invitationRoleLabel(invitation.role, locale)}</dd>
+      </div>
+      <div>
+        <dt>{label(locale, "invitations.capabilities")}</dt>
+        <dd>{capabilityList(invitation.capabilities, locale)}</dd>
+      </div>
+      <div>
+        <dt>{label(locale, "invitations.used_count")}</dt>
+        <dd>
+          {tr(locale, "invitations.used_count", {
+            used: i18n().formatInteger(locale, invitation.used_count),
+            max: i18n().formatInteger(locale, invitation.max_uses),
+          })}
+        </dd>
+      </div>
+      <div>
+        <dt>{label(locale, "invitations.remaining_uses")}</dt>
+        <dd>{i18n().formatInteger(locale, remainingUses)}</dd>
+      </div>
+      <div>
+        <dt>{label(locale, "invitations.expires_at")}</dt>
+        <dd>{i18n().formatTimestamp(locale, invitation.expires_at_unix_ms)}</dd>
+      </div>
+      <div>
+        <dt>{label(locale, "invitations.revision")}</dt>
+        <dd>{i18n().formatInteger(locale, invitation.revision)}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function InvitationStatusCard({
+  status,
+  locale,
+  refreshedAtUnixMs,
+}: {
+  status: InvitationStatusView;
+  locale: Locale;
+  refreshedAtUnixMs?: number;
+}) {
+  return (
+    <section
+      className="network-profile-result"
+      data-testid="invitation-status"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>{label(locale, "invitations.status_title")}</span>
+          <strong>{label(locale, invitationStateKey(status.state))}</strong>
+        </div>
+        {status.state === "active" ? <Check size={16} /> : <ShieldAlert size={16} />}
+      </div>
+      <InvitationMetadata
+        invitation={status.invitation}
+        remainingUses={status.remaining_uses}
+        locale={locale}
+      />
+      {refreshedAtUnixMs ? (
+        <p className="profile-muted">
+          {tr(locale, "invitations.refreshed_at", {
+            time: i18n().formatTimestamp(locale, refreshedAtUnixMs),
+          })}
+        </p>
+      ) : null}
+      <p className="profile-muted">{label(locale, "invitations.privacy_boundary")}</p>
+    </section>
+  );
+}
+
 function joinList(
   values: string[],
   locale: Locale,
@@ -876,6 +1094,377 @@ function JoinPreviewCard({
         {pending
           ? label(locale, "common.operation_in_progress")
           : label(locale, "join.confirm")}
+      </button>
+    </section>
+  );
+}
+
+function InvitationListCard({
+  invitations,
+  loadedAtUnixMs,
+  locale,
+  statusAction,
+  revokeAction,
+  statusBlockedReason,
+  revokeBlockedReason,
+  pendingAction,
+  onSubmit,
+  onOutcome,
+}: {
+  invitations: InvitationStatusView[];
+  loadedAtUnixMs: number;
+  locale: Locale;
+  statusAction?: NodeUiAction;
+  revokeAction?: NodeUiAction;
+  statusBlockedReason: string;
+  revokeBlockedReason: string;
+  pendingAction: string | null;
+  onSubmit(
+    action: NodeUiAction,
+    values: ActionValues,
+    onOperation: (operation: NodeOperationSnapshot) => void,
+  ): Promise<ActionSubmission>;
+  onOutcome(outcome: NodeCommandOutcome): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const [revokeTarget, setRevokeTarget] =
+    useState<InvitationStatusView | null>(null);
+
+  async function refreshInvitation(status: InvitationStatusView): Promise<void> {
+    if (!statusAction || busy || statusBlockedReason) return;
+    setBusy(true);
+    setFailure("");
+    try {
+      const submission = await onSubmit(
+        statusAction,
+        {
+          network_id: status.invitation.network_id,
+          invitation_id: status.invitation.invitation_id,
+        },
+        () => {},
+      );
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome) {
+        onOutcome(submission.outcome);
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeInvitation(): Promise<void> {
+    if (!revokeAction || !revokeTarget || busy || revokeBlockedReason) return;
+    setBusy(true);
+    setFailure("");
+    try {
+      const submission = await onSubmit(
+        revokeAction,
+        {
+          network_id: revokeTarget.invitation.network_id,
+          invitation_id: revokeTarget.invitation.invitation_id,
+          expected_revision: String(revokeTarget.invitation.revision),
+        },
+        () => {},
+      );
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome) {
+        onOutcome(submission.outcome);
+        setRevokeTarget(null);
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <section
+        className="network-profile-result"
+        data-testid="invitation-list"
+        aria-live="polite"
+      >
+        <div className="network-profile-result-heading">
+          <div>
+            <span>{label(locale, "invitations.list_title")}</span>
+            <strong>
+              {tr(locale, "invitations.count", {
+                count: i18n().formatInteger(locale, invitations.length),
+              })}
+            </strong>
+          </div>
+          <ShieldAlert size={16} />
+        </div>
+        <p className="profile-muted">
+          {tr(locale, "invitations.refreshed_at", {
+            time: i18n().formatTimestamp(locale, loadedAtUnixMs),
+          })}
+        </p>
+        <p className="profile-muted">{label(locale, "invitations.privacy_boundary")}</p>
+        {failure ? (
+          <p className="form-error" role="alert">
+            {failure}
+          </p>
+        ) : null}
+        {statusBlockedReason || revokeBlockedReason ? (
+          <div className="inline-notice warning">
+            <ShieldAlert size={15} />
+            <span>{statusBlockedReason || revokeBlockedReason}</span>
+          </div>
+        ) : null}
+        {invitations.length === 0 ? (
+          <p className="profile-muted" data-testid="invitation-empty">
+            {label(locale, "invitations.empty")}
+          </p>
+        ) : (
+          <ul className="profile-warning-list invitation-list">
+            {invitations.map((status) => (
+              <li key={status.invitation.invitation_id}>
+                <ShieldAlert size={14} />
+                <div>
+                  <strong>{label(locale, invitationStateKey(status.state))}</strong>
+                  <InvitationMetadata
+                    invitation={status.invitation}
+                    remainingUses={status.remaining_uses}
+                    locale={locale}
+                  />
+                  <div className="invitation-row-actions">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={busy || Boolean(statusBlockedReason) || !statusAction}
+                      onClick={() => void refreshInvitation(status)}
+                    >
+                      {busy && pendingAction === statusAction?.id
+                        ? label(locale, "common.operation_in_progress")
+                        : label(locale, "invitations.status_refresh")}
+                    </button>
+                    <button
+                      className="danger-button"
+                      type="button"
+                      disabled={
+                        busy ||
+                        Boolean(revokeBlockedReason) ||
+                        !revokeAction ||
+                        status.state !== "active"
+                      }
+                      onClick={() => setRevokeTarget(status)}
+                    >
+                      {label(locale, "invitations.revoke")}
+                    </button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <Dialog.Root
+        open={revokeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRevokeTarget(null);
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content confirm-dialog">
+            <div className="dialog-heading">
+              <div className="dialog-icon danger">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <Dialog.Title>{label(locale, "confirm.revoke_invitation.title")}</Dialog.Title>
+                <Dialog.Description>
+                  {label(locale, "confirm.revoke_invitation.consequence")}
+                </Dialog.Description>
+                <p className="dialog-secondary-copy">
+                  {label(locale, "confirm.reauthentication_required")}
+                </p>
+              </div>
+            </div>
+            {failure ? (
+              <p className="form-error" role="alert">
+                {failure}
+              </p>
+            ) : null}
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button className="secondary-button" type="button">
+                  {label(locale, "common.cancel")}
+                </button>
+              </Dialog.Close>
+              <button
+                className="danger-button"
+                type="button"
+                disabled={busy || Boolean(revokeBlockedReason)}
+                onClick={() => void revokeInvitation()}
+              >
+                {busy
+                  ? label(locale, "common.operation_in_progress")
+                  : label(locale, "common.execute")}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </>
+  );
+}
+
+function InvitationPreviewCard({
+  preview,
+  locale,
+  checked,
+  pending,
+  blockedReason,
+  sourceValues,
+  previewLoadedAtUnixMs,
+  onCheckedChange,
+  onConfirm,
+}: {
+  preview: InvitationPreview;
+  locale: Locale;
+  checked: boolean;
+  pending: boolean;
+  blockedReason: string;
+  sourceValues: ActionValues;
+  previewLoadedAtUnixMs: number;
+  onCheckedChange(checked: boolean): void;
+  onConfirm(values: ActionValues): void;
+}) {
+  const previewAcceptable =
+    preview.can_accept &&
+    preview.state === "active" &&
+    preview.remaining_uses > 0 &&
+    preview.expires_at_unix_ms > previewLoadedAtUnixMs &&
+    !preview.creates_permanent_membership;
+  const canConfirm =
+    previewAcceptable && checked && !pending && !blockedReason;
+  const terms = [
+    tr(locale, "invitations.terms.network_policy", {
+      revision: i18n().formatInteger(locale, preview.terms.network_policy_revision),
+    }),
+    tr(locale, "invitations.terms.privacy_policy", {
+      revision: i18n().formatInteger(locale, preview.terms.privacy_policy_revision),
+    }),
+    label(
+      locale,
+      preview.terms.exit_contribution === "required"
+        ? "invitations.terms.exit_required"
+        : "invitations.terms.exit_not_required",
+    ),
+    preview.terms.member_limit == null
+      ? label(locale, "common.unlimited")
+      : tr(locale, "invitations.terms.member_limit", {
+          limit: i18n().formatInteger(locale, preview.terms.member_limit),
+        }),
+  ];
+  return (
+    <section
+      className="network-profile-result join-preview-result"
+      data-testid="invitation-preview"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>{label(locale, "invitations.preview_title")}</span>
+          <strong>{preview.network_name}</strong>
+        </div>
+        {previewAcceptable ? <Check size={16} /> : <ShieldAlert size={16} />}
+      </div>
+      <div className="profile-result-status">
+        <span>
+          {label(
+            locale,
+            previewAcceptable
+              ? "invitations.can_accept"
+              : "invitations.cannot_accept",
+          )}
+        </span>
+        <span>{label(locale, invitationStateKey(preview.state))}</span>
+      </div>
+      {previewAcceptable ? null : (
+        <div className="inline-notice danger">
+          <ShieldAlert size={15} />
+          <span>
+            {preview.denial_key
+              ? label(locale, preview.denial_key)
+              : label(locale, "invitations.denied")}
+          </span>
+        </div>
+      )}
+      {blockedReason ? (
+        <div className="inline-notice warning">
+          <ShieldAlert size={15} />
+          <span>{blockedReason}</span>
+        </div>
+      ) : null}
+      <dl className="profile-definition-list invitation-preview-details">
+        <div>
+          <dt>{label(locale, "invitations.role")}</dt>
+          <dd>{invitationRoleLabel(preview.role, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "invitations.capabilities")}</dt>
+          <dd>{capabilityList(preview.capabilities, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "invitations.permission_changes")}</dt>
+          <dd>{joinList(preview.permission_changes, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "invitations.terms")}</dt>
+          <dd>{joinList(terms, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "invitations.expires_at")}</dt>
+          <dd>{i18n().formatTimestamp(locale, preview.expires_at_unix_ms)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "invitations.remaining_uses")}</dt>
+          <dd>{i18n().formatInteger(locale, preview.remaining_uses)}</dd>
+        </div>
+      </dl>
+      {preview.requires_recent_reauthentication ? (
+        <div className="inline-notice warning">
+          <ShieldAlert size={15} />
+          <span>{label(locale, "invitations.reauthentication_required")}</span>
+        </div>
+      ) : null}
+      <p className="profile-muted">{label(locale, "invitations.ordinary_membership")}</p>
+      <p className="profile-muted">{label(locale, "invitations.not_permanent")}</p>
+      <label className="check-field join-terms-check">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={pending || !previewAcceptable}
+          onChange={(event) => onCheckedChange(event.target.checked)}
+        />
+        <span>{label(locale, "invitations.terms_checkbox")}</span>
+      </label>
+      <button
+        className="primary-button"
+        type="button"
+        disabled={!canConfirm}
+        onClick={() => onConfirm(invitationPreviewValues(preview, sourceValues))}
+      >
+        {pending
+          ? label(locale, "common.operation_in_progress")
+          : label(locale, "invitations.accept")}
       </button>
     </section>
   );
@@ -1627,6 +2216,10 @@ function ActionCard({
   requestedValues,
   joinAction,
   joinPending,
+  statusInvitationAction,
+  revokeInvitationAction,
+  redeemInvitationAction,
+  redeemInvitationPending,
   activePendingAction,
   reviewJoinRequestAction,
   batchReviewJoinRequestsAction,
@@ -1643,6 +2236,10 @@ function ActionCard({
   requestedValues?: ActionValues;
   joinAction?: NodeUiAction;
   joinPending: boolean;
+  statusInvitationAction?: NodeUiAction;
+  revokeInvitationAction?: NodeUiAction;
+  redeemInvitationAction?: NodeUiAction;
+  redeemInvitationPending: boolean;
   activePendingAction: string | null;
   reviewJoinRequestAction?: NodeUiAction;
   batchReviewJoinRequestsAction?: NodeUiAction;
@@ -1670,6 +2267,21 @@ function ActionCard({
     loadedAtUnixMs: number;
   } | null>(null);
   const [joinConfirmed, setJoinConfirmed] = useState(false);
+  const [issuedInvitation, setIssuedInvitation] =
+    useState<IssuedInvitation | null>(null);
+  const [invitations, setInvitations] = useState<{
+    items: InvitationStatusView[];
+    loadedAtUnixMs: number;
+  } | null>(null);
+  const [invitationStatus, setInvitationStatus] = useState<{
+    status: InvitationStatusView;
+    refreshedAtUnixMs: number;
+  } | null>(null);
+  const [invitationPreview, setInvitationPreview] =
+    useState<InvitationPreview | null>(null);
+  const [invitationPreviewLoadedAtUnixMs, setInvitationPreviewLoadedAtUnixMs] =
+    useState(0);
+  const [invitationConfirmed, setInvitationConfirmed] = useState(false);
   const [failure, setFailure] = useState("");
   const editedFields = useRef(new Set<string>());
   const fingerprint = snapshot.identity?.public_key_fingerprint ?? "";
@@ -1712,6 +2324,21 @@ function ActionCard({
   const batchReviewBlockedReason = joinRequestReviewBlockedReason(
     batchReviewJoinRequestsAction,
   );
+  function invitationActionBlockedReason(target?: NodeUiAction): string {
+    if (pageBlocked) return label(locale, pageBlocked.titleKey);
+    if (!target) return label(locale, "invitations.actions_unavailable");
+    const reason = executionBlockReason(target, snapshot, selectedNetwork);
+    return reason ? blockReasonText(reason, locale) : "";
+  }
+  const invitationStatusBlockedReason = invitationActionBlockedReason(
+    statusInvitationAction,
+  );
+  const invitationRevokeBlockedReason = invitationActionBlockedReason(
+    revokeInvitationAction,
+  );
+  const invitationRedeemBlockedReason = invitationActionBlockedReason(
+    redeemInvitationAction,
+  );
   const [previousRequested, setPreviousRequested] = useState(requested);
   const previousSelectedNetwork = useRef(selectedNetwork);
 
@@ -1726,6 +2353,12 @@ function ActionCard({
     setJoinPreview(null);
     setJoinRequests(null);
     setJoinConfirmed(false);
+    setIssuedInvitation(null);
+    setInvitations(null);
+    setInvitationStatus(null);
+    setInvitationPreview(null);
+    setInvitationPreviewLoadedAtUnixMs(0);
+    setInvitationConfirmed(false);
   }, [action, selectedNetwork, snapshot]);
 
   if (requested !== previousRequested) {
@@ -1744,6 +2377,12 @@ function ActionCard({
       setJoinPreview(null);
       setJoinRequests(null);
       setJoinConfirmed(false);
+      setIssuedInvitation(null);
+      setInvitations(null);
+      setInvitationStatus(null);
+      setInvitationPreview(null);
+      setInvitationPreviewLoadedAtUnixMs(0);
+      setInvitationConfirmed(false);
     }
   }
 
@@ -1765,6 +2404,54 @@ function ActionCard({
     }
   }, [action.fields, fingerprint]);
 
+  function applyInvitationOutcome(outcome: NodeCommandOutcome): void {
+    if (outcome.status === "invitation_created") {
+      setIssuedInvitation(outcome.data);
+      setInvitationStatus({
+        status: outcome.data.status,
+        refreshedAtUnixMs: Date.now(),
+      });
+      return;
+    }
+    if (outcome.status === "invitations") {
+      setInvitations({
+        items: outcome.data,
+        loadedAtUnixMs: Date.now(),
+      });
+      return;
+    }
+    if (
+      outcome.status === "invitation_status" ||
+      outcome.status === "invitation_revoked"
+    ) {
+      setInvitationStatus({
+        status: outcome.data,
+        refreshedAtUnixMs: Date.now(),
+      });
+      setInvitations((current) => {
+        if (!current) return current;
+        const updated = current.items.map((status) =>
+          status.invitation.invitation_id === outcome.data.invitation.invitation_id
+            ? outcome.data
+            : status,
+        );
+        return { ...current, items: updated };
+      });
+      return;
+    }
+    if (outcome.status === "invitation_preview") {
+      setInvitationPreview(outcome.data);
+      setInvitationPreviewLoadedAtUnixMs(Date.now());
+      setInvitationConfirmed(false);
+      return;
+    }
+    if (outcome.status === "invitation_redeemed") {
+      setInvitationPreview(null);
+      setInvitationPreviewLoadedAtUnixMs(0);
+      setInvitationConfirmed(false);
+    }
+  }
+
   async function submit(): Promise<void> {
     const validation = validateActionValues(action, values, locale);
     if (validation.length > 0) {
@@ -1780,7 +2467,11 @@ function ActionCard({
       if (submission.outcome?.status === "rejected") {
         setFailure(outcomeSummary(submission.outcome, locale));
       } else if (submission.outcome) {
-        setResult(outcomeSummary(submission.outcome, locale));
+        setResult(
+          invitationOutcomeSummary(submission.outcome, locale) ??
+            outcomeSummary(submission.outcome, locale),
+        );
+        applyInvitationOutcome(submission.outcome);
         if (
           submission.outcome.status === "network_profile_preview" ||
           submission.outcome.status === "network_profile_updated"
@@ -1791,7 +2482,10 @@ function ActionCard({
           setJoinPreview(submission.outcome.data);
           setJoinConfirmed(false);
           setOpen(true);
-        } else {
+        } else if (
+          !submission.outcome.status.startsWith("invitation_") &&
+          submission.outcome.status !== "invitations"
+        ) {
           if (submission.outcome.status === "join_requests") {
             setJoinRequests({
               result: submission.outcome.data,
@@ -1838,6 +2532,46 @@ function ActionCard({
         if (submission.outcome.status === "network_joined") {
           setJoinPreview(null);
           setJoinConfirmed(false);
+          setOpen(false);
+        }
+      } else if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+      } else {
+        setFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function confirmInvitation(confirmValues: ActionValues): Promise<void> {
+    if (
+      !invitationPreview ||
+      !redeemInvitationAction ||
+      !invitationConfirmed ||
+      invitationRedeemBlockedReason ||
+      redeemInvitationPending
+    ) {
+      return;
+    }
+    setErrors([]);
+    setFailure("");
+    setResult("");
+    try {
+      const submission = await onSubmit(
+        redeemInvitationAction,
+        confirmValues,
+        () => {},
+      );
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.outcome) {
+        setResult(
+          invitationOutcomeSummary(submission.outcome, locale) ??
+            outcomeSummary(submission.outcome, locale),
+        );
+        applyInvitationOutcome(submission.outcome);
+        if (submission.outcome.status === "invitation_redeemed") {
           setOpen(false);
         }
       } else if (submission.operation) {
@@ -1936,7 +2670,46 @@ function ActionCard({
           onReviewed={handleJoinRequestsReviewed}
         />
       ) : null}
-      {open ? (
+      {issuedInvitation && action.id === "create_invitation" ? (
+        <InvitationCodeCard issued={issuedInvitation} locale={locale} />
+      ) : null}
+      {invitations && action.id === "list_invitations" ? (
+        <InvitationListCard
+          invitations={invitations.items}
+          loadedAtUnixMs={invitations.loadedAtUnixMs}
+          locale={locale}
+          statusAction={statusInvitationAction}
+          revokeAction={revokeInvitationAction}
+          statusBlockedReason={invitationStatusBlockedReason}
+          revokeBlockedReason={invitationRevokeBlockedReason}
+          pendingAction={activePendingAction}
+          onSubmit={onSubmit}
+          onOutcome={applyInvitationOutcome}
+        />
+      ) : null}
+      {invitationStatus &&
+      (action.id === "get_invitation_status" ||
+        action.id === "revoke_invitation") ? (
+        <InvitationStatusCard
+          status={invitationStatus.status}
+          refreshedAtUnixMs={invitationStatus.refreshedAtUnixMs}
+          locale={locale}
+        />
+      ) : null}
+      {invitationPreview && action.id === "preview_invitation" ? (
+        <InvitationPreviewCard
+          preview={invitationPreview}
+          locale={locale}
+          checked={invitationConfirmed}
+          pending={redeemInvitationPending}
+          blockedReason={invitationRedeemBlockedReason}
+          sourceValues={values}
+          previewLoadedAtUnixMs={invitationPreviewLoadedAtUnixMs}
+          onCheckedChange={setInvitationConfirmed}
+          onConfirm={(confirmValues) => void confirmInvitation(confirmValues)}
+        />
+      ) : null}
+      {open && !invitationPreview ? (
         <form className="action-form" onSubmit={handleSubmit}>
           {pageBlocked || executionBlocked ? (
             <div className="inline-notice warning">
@@ -2132,6 +2905,16 @@ export function ActionPanel(props: ActionPanelProps) {
               (candidate) => candidate.id === "join_network",
             )}
             joinPending={pendingAction === "join_network"}
+            statusInvitationAction={actions.find(
+              (candidate) => candidate.id === "get_invitation_status",
+            )}
+            revokeInvitationAction={actions.find(
+              (candidate) => candidate.id === "revoke_invitation",
+            )}
+            redeemInvitationAction={actions.find(
+              (candidate) => candidate.id === "redeem_invitation",
+            )}
+            redeemInvitationPending={pendingAction === "redeem_invitation"}
             activePendingAction={pendingAction}
             reviewJoinRequestAction={actions.find(
               (candidate) => candidate.id === "review_join_request",

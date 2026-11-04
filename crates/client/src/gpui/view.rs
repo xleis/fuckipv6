@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinRequest,
-    JoinRequestReviewAction, JoinRequestState, MembershipRole, NetworkJoinMode,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
-    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
-    OperationState, JOIN_REQUEST_MAX_REASON_CHARS,
+    CapabilityKind, ExitContributionObligation, IdempotencyKey, InvitationPreview, InvitationState,
+    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
+    MembershipRole, NetworkJoinMode, NetworkProfileApplyResult, NetworkProfilePreview,
+    NetworkProfileProjections, NetworkProfileWarningCode, NetworkPublicProfileDocument,
+    NetworkVisibility, OperationError, OperationState, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -253,6 +253,12 @@ struct GpuiShell {
     recent_join_requests: Option<NodeJoinRequestListResult>,
     join_request_selection: BTreeSet<String>,
     network_join_terms_confirmed: bool,
+    recent_issued_invitation: Option<IssuedInvitation>,
+    recent_invitations: Option<Vec<InvitationStatusView>>,
+    recent_invitation_status: Option<InvitationStatusView>,
+    recent_invitation_preview: Option<InvitationPreview>,
+    invitation_terms_confirmed: bool,
+    invitation_copy_notice: Option<String>,
     error: Option<String>,
     notice: Option<String>,
     pending_notice_after_snapshot: Option<String>,
@@ -319,6 +325,12 @@ impl GpuiShell {
             recent_join_requests: None,
             join_request_selection: BTreeSet::new(),
             network_join_terms_confirmed: false,
+            recent_issued_invitation: None,
+            recent_invitations: None,
+            recent_invitation_status: None,
+            recent_invitation_preview: None,
+            invitation_terms_confirmed: false,
+            invitation_copy_notice: None,
             error: None,
             notice: None,
             pending_notice_after_snapshot: None,
@@ -1260,25 +1272,43 @@ impl GpuiShell {
                     ],
                 ));
             }
-            NodeCommandOutcome::InvitationCreated(_) => {
-                self.notice = Some("邀请已创建；一次性凭据只在专用邀请面板中安全展示".to_string());
+            NodeCommandOutcome::InvitationCreated(issued) => {
+                let issued = *issued;
+                self.recent_invitation_status = Some(issued.status.clone());
+                self.recent_issued_invitation = Some(issued);
+                self.invitation_copy_notice = None;
+                self.notice = Some(t(self.locale, "invitations.created_notice").to_string());
             }
             NodeCommandOutcome::Invitations(invitations) => {
-                self.notice = Some(format!("已加载 {} 条邀请", invitations.len()));
+                self.notice = Some(tr(
+                    self.locale,
+                    "invitations.loaded_notice",
+                    &[("count", &invitations.len().to_string())],
+                ));
+                self.recent_invitations = Some(invitations.to_vec());
             }
-            NodeCommandOutcome::InvitationStatus(_) => {
-                self.notice = Some("邀请状态已刷新".to_string());
+            NodeCommandOutcome::InvitationStatus(status) => {
+                self.recent_invitation_status = Some(*status);
+                self.notice = Some(t(self.locale, "invitations.status_notice").to_string());
             }
-            NodeCommandOutcome::InvitationRevoked(_) => {
-                self.notice = Some("邀请已撤销".to_string());
+            NodeCommandOutcome::InvitationRevoked(status) => {
+                self.update_invitation_status(*status);
+                self.notice = Some(t(self.locale, "invitations.revoked_notice").to_string());
             }
-            NodeCommandOutcome::InvitationPreview(_) => {
-                self.notice = Some("邀请预览已刷新；接受前仍需重新认证并确认权限变化".to_string());
+            NodeCommandOutcome::InvitationPreview(preview) => {
+                let preview = *preview;
+                self.set_invitation_preview_fields(&preview);
+                self.recent_invitation_preview = Some(preview);
+                self.invitation_terms_confirmed = false;
+                self.notice = Some(t(self.locale, "invitations.preview_notice").to_string());
             }
             NodeCommandOutcome::InvitationRedeemed(redemption) => {
-                self.notice = Some(format!(
-                    "已接受邀请并加入网络（角色: {:?}）",
-                    redemption.role
+                self.recent_invitation_preview = None;
+                self.invitation_terms_confirmed = false;
+                self.notice = Some(tr(
+                    self.locale,
+                    "invitations.redeemed_notice",
+                    &[("role", invitation_role_name(redemption.role))],
                 ));
                 self.submit_raw(NodeCommand::GetSnapshot, cx);
             }
@@ -1862,6 +1892,142 @@ impl GpuiShell {
             unix_time_ms().to_string(),
         );
         self.submit_manifest_action("join_network", cx);
+    }
+
+    fn update_invitation_status(&mut self, status: InvitationStatusView) {
+        if let Some(invitations) = self.recent_invitations.as_mut() {
+            if let Some(existing) = invitations.iter_mut().find(|candidate| {
+                candidate.invitation.invitation_id == status.invitation.invitation_id
+            }) {
+                *existing = status.clone();
+            }
+        }
+        self.recent_invitation_status = Some(status);
+    }
+
+    fn invitation_action_available(&self, action_id: &str) -> bool {
+        let Some(action) = self.manifest.as_ref().and_then(|manifest| {
+            manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .find(|action| action.id == action_id)
+        }) else {
+            return false;
+        };
+        self.pending_commands == 0
+            && action.backend_status == NodeUiBackendStatus::Implemented
+            && action_block_reason(action, &self.snapshot, self.selected_network.as_deref())
+                .is_none()
+    }
+
+    fn set_invitation_preview_fields(&mut self, preview: &InvitationPreview) {
+        self.set_field_value(
+            "redeem_invitation",
+            "network_id",
+            preview.network_id.as_str(),
+        );
+        self.set_field_value(
+            "redeem_invitation",
+            "invitation_id",
+            preview.invitation_id.as_str(),
+        );
+        self.set_field_value(
+            "redeem_invitation",
+            "expected_invitation_revision",
+            preview.invitation_revision.to_string(),
+        );
+        self.set_field_value(
+            "redeem_invitation",
+            "preview_digest",
+            preview.preview_digest.as_str(),
+        );
+        self.set_field_value(
+            "redeem_invitation",
+            "terms_hash",
+            preview.terms_hash.as_str(),
+        );
+        self.set_field_value("redeem_invitation", "acknowledged_at_unix_ms", "");
+        for field in ["code", "coordinator_url"] {
+            let source = self.field_value("preview_invitation", field);
+            self.set_field_value("redeem_invitation", field, source);
+        }
+    }
+
+    fn clear_invitation_preview(&mut self) {
+        self.recent_invitation_preview = None;
+        self.invitation_terms_confirmed = false;
+        for field in [
+            "network_id",
+            "code",
+            "coordinator_url",
+            "invitation_id",
+            "expected_invitation_revision",
+            "preview_digest",
+            "terms_hash",
+            "acknowledged_at_unix_ms",
+        ] {
+            self.set_field_value("redeem_invitation", field, "");
+        }
+    }
+
+    fn confirm_invitation_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.recent_invitation_preview.as_ref() else {
+            self.error = Some(t(self.locale, "invitations.denied").to_string());
+            cx.notify();
+            return;
+        };
+        if !preview.can_accept
+            || preview.state != InvitationState::Active
+            || preview.remaining_uses == 0
+            || preview.expires_at_unix_ms <= unix_time_ms()
+            || !self.invitation_terms_confirmed
+        {
+            self.error = Some(t(self.locale, "invitations.denied").to_string());
+            cx.notify();
+            return;
+        }
+        self.set_field_value(
+            "redeem_invitation",
+            "acknowledged_at_unix_ms",
+            unix_time_ms().to_string(),
+        );
+        self.submit_manifest_action("redeem_invitation", cx);
+    }
+
+    fn prepare_invitation_status(&mut self, status: &InvitationStatusView, cx: &mut Context<Self>) {
+        self.set_field_value(
+            "get_invitation_status",
+            "network_id",
+            status.invitation.network_id.as_str(),
+        );
+        self.set_field_value(
+            "get_invitation_status",
+            "invitation_id",
+            status.invitation.invitation_id.as_str(),
+        );
+        self.sync_text_inputs(cx);
+        self.open_action("networks", "get_invitation_status", cx);
+    }
+
+    fn prepare_invitation_revoke(&mut self, status: &InvitationStatusView, cx: &mut Context<Self>) {
+        self.set_field_value(
+            "revoke_invitation",
+            "network_id",
+            status.invitation.network_id.as_str(),
+        );
+        self.set_field_value(
+            "revoke_invitation",
+            "invitation_id",
+            status.invitation.invitation_id.as_str(),
+        );
+        self.set_field_value(
+            "revoke_invitation",
+            "expected_revision",
+            status.invitation.revision.to_string(),
+        );
+        self.sync_text_inputs(cx);
+        self.open_action("networks", "revoke_invitation", cx);
     }
 
     fn fill_empty_network_fields(&mut self) {
@@ -2601,6 +2767,11 @@ impl GpuiShell {
         self.selected_network = Some(network_name.clone());
         self.recent_join_requests = None;
         self.join_request_selection.clear();
+        self.recent_issued_invitation = None;
+        self.recent_invitations = None;
+        self.recent_invitation_status = None;
+        self.clear_invitation_preview();
+        self.invitation_copy_notice = None;
         if let Some(manifest) = &self.manifest {
             let network_fields = manifest
                 .pages
@@ -5996,6 +6167,25 @@ impl GpuiShell {
             .map(|result| self.join_requests_card(&result, cx));
         let join_request_review_summary =
             guided_join_request_review.then(|| self.join_request_review_form_summary(&action.id));
+        let issued_invitation_card = (action.id == "create_invitation")
+            .then_some(self.recent_issued_invitation.as_ref())
+            .flatten()
+            .map(|issued| self.issued_invitation_card(issued, cx));
+        let invitations_card = (action.id == "list_invitations")
+            .then_some(self.recent_invitations.as_deref())
+            .flatten()
+            .map(|invitations| self.invitations_card(invitations, cx));
+        let invitation_status_card = matches!(
+            action.id.as_str(),
+            "get_invitation_status" | "revoke_invitation"
+        )
+        .then_some(self.recent_invitation_status.as_ref())
+        .flatten()
+        .map(|status| self.invitation_status_card(status, cx));
+        let invitation_preview_card = (action.id == "preview_invitation")
+            .then_some(self.recent_invitation_preview.as_ref())
+            .flatten()
+            .map(|preview| self.invitation_preview_card(preview, cx));
         let status = match action.backend_status {
             NodeUiBackendStatus::Implemented => t(self.locale, "status.backend.implemented"),
             NodeUiBackendStatus::Unavailable => t(self.locale, "status.backend.unavailable"),
@@ -6068,7 +6258,18 @@ impl GpuiShell {
             if let Some(review_summary) = join_request_review_summary {
                 body = body.child(review_summary);
             }
-            if let Some(preview_card) = join_preview_card {
+            if let Some(issued_card) = issued_invitation_card {
+                body = body.child(issued_card);
+            }
+            if let Some(invitations_card) = invitations_card {
+                body = body.child(invitations_card);
+            }
+            if let Some(status_card) = invitation_status_card {
+                body = body.child(status_card);
+            }
+            if let Some(preview_card) = invitation_preview_card {
+                body = body.child(preview_card);
+            } else if let Some(preview_card) = join_preview_card {
                 // A discovery-backed join must always pass through the
                 // signed preview and explicit terms acknowledgement. Hide the
                 // generic ticket fields so they cannot be mistaken for the
@@ -6406,7 +6607,7 @@ impl GpuiShell {
                 .join(" · ")
         };
         div()
-            .debug_selector(move || debug_selector.clone().into())
+            .debug_selector(move || debug_selector.clone())
             .flex()
             .flex_col()
             .gap_1()
@@ -6465,6 +6666,585 @@ impl GpuiShell {
                 )
                 .to_string(),
             ))
+            .into_any_element()
+    }
+
+    fn invitation_status_row(
+        &self,
+        status: &InvitationStatusView,
+        index: usize,
+        show_actions: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let invitation = &status.invitation;
+        let state = t(self.locale, invitation_state_key(status.state)).to_string();
+        let role = t(self.locale, join_request_role_key(invitation.role)).to_string();
+        let capabilities = if invitation.capabilities.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            invitation
+                .capabilities
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let expires = format_diagnostic_timestamp(self.locale, invitation.expires_at_unix_ms);
+        let remaining = tr(
+            self.locale,
+            "invitations.remaining_uses",
+            &[("count", &status.remaining_uses.to_string())],
+        );
+        let used = tr(
+            self.locale,
+            "invitations.used_count",
+            &[
+                ("used", &invitation.used_count.to_string()),
+                ("max", &invitation.max_uses.to_string()),
+            ],
+        );
+        let active = status.state == InvitationState::Active;
+        let refresh_available = self.invitation_action_available("get_invitation_status");
+        let revoke_available = active && self.invitation_action_available("revoke_invitation");
+        let status_for_refresh = status.clone();
+        let status_for_revoke = status.clone();
+        let controls = show_actions.then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    button(
+                        SharedString::from(format!("invitation-status-{index}")),
+                        t(self.locale, "invitations.status_refresh"),
+                        ButtonVariant::Ghost,
+                        !refresh_available,
+                    )
+                    .debug_selector(move || format!("visual-invitation-refresh-{index}"))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if shell.invitation_action_available("get_invitation_status") {
+                            shell.prepare_invitation_status(&status_for_refresh, cx);
+                        }
+                    })),
+                )
+                .child(
+                    button(
+                        SharedString::from(format!("invitation-revoke-{index}")),
+                        t(self.locale, "invitations.revoke"),
+                        ButtonVariant::Danger,
+                        !revoke_available,
+                    )
+                    .debug_selector(move || format!("visual-invitation-revoke-{index}"))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if shell.invitation_action_available("revoke_invitation")
+                            && status_for_revoke.state == InvitationState::Active
+                        {
+                            shell.prepare_invitation_revoke(&status_for_revoke, cx);
+                        }
+                    })),
+                )
+                .into_any_element()
+        });
+
+        div()
+            .debug_selector(move || format!("visual-invitation-status-{index}"))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(if active { COLOR_ACCENT } else { COLOR_BORDER }))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(format!(
+                                "{} · {}",
+                                t(self.locale, "invitations.status_title"),
+                                state
+                            )),
+                    )
+                    .child(profile_status_chip(remaining)),
+            )
+            .children([
+                diagnostic_metadata_row(
+                    t(self.locale, "invitations.network"),
+                    invitation.network_id.as_str(),
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "invitations.invitation_id"),
+                    invitation.invitation_id.as_str(),
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.role"), role)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.capabilities"), capabilities)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.used_count"), used)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.expires_at"), expires)
+                    .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "invitations.revision"),
+                    invitation.revision.to_string(),
+                )
+                .into_any_element(),
+            ])
+            .children(controls)
+            .when(
+                show_actions && status.state != InvitationState::Active,
+                |row| {
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "invitations.denied")),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+
+    fn issued_invitation_card(
+        &self,
+        issued: &IssuedInvitation,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let status = &issued.status;
+        let role = t(self.locale, join_request_role_key(status.invitation.role)).to_string();
+        let capabilities = if status.invitation.capabilities.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            status
+                .invitation
+                .capabilities
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let expires =
+            format_diagnostic_timestamp(self.locale, status.invitation.expires_at_unix_ms);
+        let code = issued.code.as_str().to_string();
+        let copy_code = code.clone();
+        let pending = self.pending_commands > 0;
+        div()
+            .id("visual-invitation-issued")
+            .debug_selector(|| "visual-invitation-issued".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "invitations.issued_title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(COLOR_ACCENT))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "invitations.issued_title")),
+                    )
+                    .child(profile_status_chip(t(
+                        self.locale,
+                        invitation_state_key(status.state),
+                    ))),
+            )
+            .child(
+                div()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_BG))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .font_family("monospace")
+                    .text_sm()
+                    .text_color(rgba(COLOR_TEXT))
+                    .debug_selector(|| "visual-invitation-code".into())
+                    .child(code),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_WARNING))
+                    .child(t(self.locale, "invitations.code_once")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        button(
+                            SharedString::from("copy-invitation-code"),
+                            t(self.locale, "invitations.copy"),
+                            ButtonVariant::Secondary,
+                            pending,
+                        )
+                        .debug_selector(|| "visual-invitation-copy".into())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            if shell.pending_commands > 0 {
+                                return;
+                            }
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_code.clone()));
+                            shell.invitation_copy_notice =
+                                Some(t(shell.locale, "invitations.copied").to_string());
+                            cx.notify();
+                        })),
+                    )
+                    .children(self.invitation_copy_notice.as_ref().map(|notice| {
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(notice.clone())
+                            .into_any_element()
+                    })),
+            )
+            .children([
+                diagnostic_metadata_row(t(self.locale, "invitations.role"), role)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.capabilities"), capabilities)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.expires_at"), expires)
+                    .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "invitations.remaining_uses"),
+                    status.remaining_uses.to_string(),
+                )
+                .into_any_element(),
+            ])
+            .child(
+                div()
+                    .debug_selector(|| "visual-invitation-ordinary-membership".into())
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "invitations.ordinary_membership")),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "visual-invitation-not-permanent".into())
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "invitations.not_permanent")),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "visual-invitation-privacy-boundary".into())
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "invitations.privacy_boundary")),
+            )
+            .into_any_element()
+    }
+
+    fn invitations_card(
+        &self,
+        invitations: &[InvitationStatusView],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let rows = invitations
+            .iter()
+            .enumerate()
+            .map(|(index, status)| self.invitation_status_row(status, index, true, cx))
+            .collect::<Vec<_>>();
+        let mut card = div()
+            .id("visual-invitation-list")
+            .debug_selector(|| "visual-invitation-list".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "invitations.list_title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "invitations.list_title")),
+                    )
+                    .child(profile_status_chip(tr(
+                        self.locale,
+                        "invitations.count",
+                        &[("count", &invitations.len().to_string())],
+                    ))),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "invitations.privacy_boundary")),
+            );
+        if rows.is_empty() {
+            card = card.child(
+                empty_state(t(self.locale, "invitations.empty"))
+                    .debug_selector(|| "visual-invitation-empty".into()),
+            );
+        } else {
+            card = card.child(div().flex().flex_col().gap_2().children(rows));
+        }
+        card.into_any_element()
+    }
+
+    fn invitation_status_card(
+        &self,
+        status: &InvitationStatusView,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.invitation_status_row(status, 0, true, cx)
+    }
+
+    fn invitation_preview_card(
+        &self,
+        preview: &InvitationPreview,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let role = t(self.locale, join_request_role_key(preview.role)).to_string();
+        let capabilities = if preview.capabilities.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            preview
+                .capabilities
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let permission_changes = if preview.permission_changes.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            preview.permission_changes.join(" · ")
+        };
+        let expires = format_diagnostic_timestamp(self.locale, preview.expires_at_unix_ms);
+        let terms_exit = t(
+            self.locale,
+            if preview.terms.exit_contribution == ExitContributionObligation::Required {
+                "invitations.terms.exit_required"
+            } else {
+                "invitations.terms.exit_not_required"
+            },
+        )
+        .to_string();
+        let member_limit = preview
+            .terms
+            .member_limit
+            .map(|limit| {
+                tr(
+                    self.locale,
+                    "invitations.terms.member_limit",
+                    &[("limit", &limit.to_string())],
+                )
+            })
+            .unwrap_or_else(|| t(self.locale, "common.unlimited").to_string());
+        let terms = [
+            tr(
+                self.locale,
+                "invitations.terms.network_policy",
+                &[(
+                    "revision",
+                    &preview.terms.network_policy_revision.to_string(),
+                )],
+            ),
+            tr(
+                self.locale,
+                "invitations.terms.privacy_policy",
+                &[(
+                    "revision",
+                    &preview.terms.privacy_policy_revision.to_string(),
+                )],
+            ),
+            terms_exit,
+            member_limit,
+        ]
+        .join(" · ");
+        let can_accept = preview.can_accept
+            && preview.state == InvitationState::Active
+            && preview.remaining_uses > 0
+            && preview.expires_at_unix_ms > unix_time_ms()
+            && !preview.creates_permanent_membership;
+        let checked = self.invitation_terms_confirmed;
+        let pending = self.pending_commands > 0;
+        let denial = t(
+            self.locale,
+            preview
+                .denial_key
+                .as_deref()
+                .unwrap_or("invitations.denied"),
+        )
+        .to_string();
+        let confirmation_pending =
+            self.pending_confirmation.as_deref() == Some("redeem_invitation");
+        let terms_control = checkbox_control(
+            SharedString::from("invitation-terms"),
+            t(self.locale, "invitations.terms_checkbox"),
+            checked,
+            !can_accept || pending,
+        )
+        .debug_selector(|| "visual-invitation-terms".into())
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if shell.pending_commands > 0 {
+                return;
+            }
+            let can_accept = shell
+                .recent_invitation_preview
+                .as_ref()
+                .is_some_and(|preview| preview.can_accept);
+            if can_accept {
+                shell.invitation_terms_confirmed = !shell.invitation_terms_confirmed;
+                cx.notify();
+            }
+        }));
+        let confirm_label = if confirmation_pending {
+            t(self.locale, "invitations.confirm_accept")
+        } else {
+            t(self.locale, "invitations.accept")
+        };
+        let confirm = button(
+            SharedString::from("accept-invitation"),
+            confirm_label,
+            ButtonVariant::Primary,
+            !can_accept || !checked || pending,
+        )
+        .debug_selector(|| "visual-invitation-confirm".into())
+        .w_full()
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if shell.pending_commands == 0 && shell.invitation_terms_confirmed {
+                shell.confirm_invitation_preview(cx);
+            }
+        }));
+        div()
+            .id("visual-invitation-preview")
+            .debug_selector(|| "visual-invitation-preview".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "invitations.preview_title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(if can_accept {
+                COLOR_ACCENT
+            } else {
+                COLOR_WARNING
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(format!(
+                                "{} · {}",
+                                t(self.locale, "invitations.preview_title"),
+                                preview.network_name
+                            )),
+                    )
+                    .child(profile_status_chip(t(
+                        self.locale,
+                        if can_accept {
+                            "invitations.can_accept"
+                        } else {
+                            "invitations.cannot_accept"
+                        },
+                    ))),
+            )
+            .when(!can_accept, |card| {
+                card.child(
+                    div()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                        .text_xs()
+                        .text_color(rgba(COLOR_WARNING))
+                        .child(denial.clone()),
+                )
+            })
+            .children([
+                diagnostic_metadata_row(t(self.locale, "invitations.role"), role)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.capabilities"), capabilities)
+                    .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "invitations.permission_changes"),
+                    permission_changes,
+                )
+                .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.terms"), terms)
+                    .into_any_element(),
+                diagnostic_metadata_row(t(self.locale, "invitations.expires_at"), expires)
+                    .into_any_element(),
+                diagnostic_metadata_row(
+                    t(self.locale, "invitations.remaining_uses"),
+                    preview.remaining_uses.to_string(),
+                )
+                .into_any_element(),
+            ])
+            .when(preview.requires_recent_reauthentication, |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_WARNING))
+                        .child(t(self.locale, "invitations.reauthentication_required")),
+                )
+            })
+            .child(
+                div()
+                    .debug_selector(|| "visual-invitation-ordinary-membership".into())
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "invitations.ordinary_membership")),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "visual-invitation-not-permanent".into())
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "invitations.not_permanent")),
+            )
+            .child(terms_control)
+            .child(confirm)
             .into_any_element()
     }
 
@@ -6622,7 +7402,6 @@ impl GpuiShell {
                                 )
                                 .debug_selector(move || {
                                     format!("visual-join-request-review-{index}-{action_key}")
-                                        .into()
                                 })
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     if shell.join_request_action_available("review_join_request") {
@@ -6826,7 +7605,7 @@ impl GpuiShell {
                                         !review_action_available,
                                     )
                                     .debug_selector(move || {
-                                        format!("visual-join-request-select-{index}").into()
+                                        format!("visual-join-request-select-{index}")
                                     })
                                     .on_click(cx.listener(
                                         move |shell, _, _, cx| {
@@ -6946,9 +7725,7 @@ impl GpuiShell {
                             variant,
                             selected_count == 0 || !batch_action_available,
                         )
-                        .debug_selector(move || {
-                            format!("visual-join-request-batch-{action_key}").into()
-                        })
+                        .debug_selector(move || format!("visual-join-request-batch-{action_key}"))
                         .on_click(cx.listener(move |shell, _, _, cx| {
                             if !requests.is_empty()
                                 && shell.join_request_action_available("batch_review_join_requests")
@@ -8479,6 +9256,23 @@ fn join_request_role_key(role: MembershipRole) -> &'static str {
     }
 }
 
+fn invitation_role_name(role: MembershipRole) -> &'static str {
+    match role {
+        MembershipRole::Owner => "owner",
+        MembershipRole::Administrator => "administrator",
+        MembershipRole::Member => "member",
+    }
+}
+
+fn invitation_state_key(state: InvitationState) -> &'static str {
+    match state {
+        InvitationState::Active => "invitations.state.active",
+        InvitationState::Exhausted => "invitations.state.exhausted",
+        InvitationState::Expired => "invitations.state.expired",
+        InvitationState::Revoked => "invitations.state.revoked",
+    }
+}
+
 fn discovery_transport_name(
     transport: fuckipv6_common::domain::DiscoveryTransport,
 ) -> &'static str {
@@ -9185,6 +9979,67 @@ mod tests {
             locally_contributed_capabilities: vec![CapabilityKind::Exit],
             contribution_policy_key: "join.contribution.local_control".into(),
         }
+    }
+
+    fn invitation_status_fixture() -> InvitationStatusView {
+        let now = unix_time_ms();
+        let invitation = fuckipv6_common::domain::InvitationRecord::new(
+            fuckipv6_common::domain::InvitationId::from_public_key(b"gpui-invitation"),
+            NetworkId::from_public_key(b"gpui-invitation-network"),
+            NodeId::from_public_key(b"gpui-invitation-owner"),
+            MembershipRole::Member,
+            vec![CapabilityKind::File],
+            2,
+            now.saturating_sub(60_000),
+            now.saturating_add(3_600_000),
+        )
+        .expect("invitation record fixture");
+        InvitationStatusView::new(invitation, now)
+    }
+
+    fn invitation_issued_fixture() -> IssuedInvitation {
+        IssuedInvitation {
+            status: invitation_status_fixture(),
+            code: fuckipv6_common::domain::InvitationCode::parse(format!(
+                "fkinv_{}",
+                "A".repeat(43)
+            ))
+            .expect("invitation code fixture"),
+        }
+    }
+
+    fn invitation_preview_fixture() -> InvitationPreview {
+        let status = invitation_status_fixture();
+        let now = unix_time_ms();
+        let terms = MembershipTerms {
+            network_policy_revision: 7,
+            privacy_policy_revision: 3,
+            exit_contribution: ExitContributionObligation::NotRequired,
+            member_limit: Some(12),
+        };
+        let mut preview = InvitationPreview {
+            invitation_id: status.invitation.invitation_id.clone(),
+            invitation_revision: status.invitation.revision,
+            network_id: status.invitation.network_id.clone(),
+            network_name: "private-lab".into(),
+            network_revision: 11,
+            role: MembershipRole::Member,
+            capabilities: vec![CapabilityKind::File],
+            remaining_uses: status.remaining_uses,
+            expires_at_unix_ms: status.invitation.expires_at_unix_ms,
+            state: InvitationState::Active,
+            terms_hash: terms.content_hash().expect("invitation terms hash"),
+            terms,
+            preview_digest: fuckipv6_common::domain::ContentHash::from_bytes(b"placeholder"),
+            permission_changes: vec!["member:file".into()],
+            creates_permanent_membership: false,
+            requires_recent_reauthentication: true,
+            can_accept: true,
+            denial_key: None,
+        };
+        preview.preview_digest = preview.compute_digest().expect("invitation preview digest");
+        assert!(preview.expires_at_unix_ms > now);
+        preview
     }
 
     fn diagnostics_fixture(snapshot: &NodeSnapshot) -> NodeDiagnosticsSnapshot {
@@ -10086,6 +10941,224 @@ mod tests {
                 visible.debug_bounds(selector).is_some(),
                 "missing join preview element {selector}"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn invitation_creation_shows_the_code_once_and_never_puts_it_in_the_notice(
+        cx: &mut TestAppContext,
+    ) {
+        let issued = invitation_issued_fixture();
+        let code = issued.code.as_str().to_string();
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot::default();
+                shell.locale = Locale::En;
+                shell.apply_command_result(
+                    Ok(NodeCommandResult::completed(
+                        90,
+                        NodeCommandOutcome::InvitationCreated(Box::new(issued)),
+                    )),
+                    cx,
+                );
+                assert_eq!(
+                    shell.notice.as_deref(),
+                    Some(
+                        "Invitation created; the one-time credential is shown only in the dedicated invitation panel."
+                    )
+                );
+                assert!(!shell
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains(&code)));
+                assert!(!format!("{:?}", shell.recent_issued_invitation).contains(&code));
+                shell.open_action("networks", "create_invitation", cx);
+            })
+            .expect("install issued invitation fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-invitation-issued",
+            "visual-invitation-code",
+            "visual-invitation-copy",
+            "visual-invitation-ordinary-membership",
+            "visual-invitation-not-permanent",
+            "visual-invitation-privacy-boundary",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing invitation creation element {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn invitation_status_and_revoke_actions_pin_current_revisions(cx: &mut TestAppContext) {
+        let status = invitation_status_fixture();
+        let invitation_id = status.invitation.invitation_id.as_str().to_string();
+        let network_id = status.invitation.network_id.as_str().to_string();
+        let revision = status.invitation.revision;
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot::default();
+                shell.locale = Locale::En;
+                shell.recent_invitations = Some(vec![status.clone()]);
+                shell.prepare_invitation_status(&status, cx);
+                assert_eq!(
+                    shell.field_value("get_invitation_status", "network_id"),
+                    network_id
+                );
+                assert_eq!(
+                    shell.field_value("get_invitation_status", "invitation_id"),
+                    invitation_id
+                );
+                shell.prepare_invitation_revoke(&status, cx);
+                assert_eq!(
+                    shell.field_value("revoke_invitation", "network_id"),
+                    network_id
+                );
+                assert_eq!(
+                    shell.field_value("revoke_invitation", "invitation_id"),
+                    invitation_id
+                );
+                assert_eq!(
+                    shell.field_value("revoke_invitation", "expected_revision"),
+                    revision.to_string()
+                );
+                shell.open_action("networks", "list_invitations", cx);
+            })
+            .expect("install invitation list fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-invitation-list",
+            "visual-invitation-status-0",
+            "visual-invitation-refresh-0",
+            "visual-invitation-revoke-0",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing invitation list element {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn invitation_preview_prefills_pinned_redemption_fields_and_requires_terms(
+        cx: &mut TestAppContext,
+    ) {
+        let preview = invitation_preview_fixture();
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot::default();
+                shell.locale = Locale::En;
+                shell.set_field_value(
+                    "preview_invitation",
+                    "coordinator_url",
+                    "https://coordinator.example.test",
+                );
+                shell.set_field_value("preview_invitation", "code", "fkinv_preview_secret");
+                shell.apply_command_result(
+                    Ok(NodeCommandResult::completed(
+                        91,
+                        NodeCommandOutcome::InvitationPreview(Box::new(preview.clone())),
+                    )),
+                    cx,
+                );
+                assert!(!shell.invitation_terms_confirmed);
+                assert_eq!(
+                    shell.field_value("redeem_invitation", "invitation_id"),
+                    preview.invitation_id.as_str()
+                );
+                assert_eq!(
+                    shell.field_value("redeem_invitation", "expected_invitation_revision"),
+                    preview.invitation_revision.to_string()
+                );
+                assert_eq!(
+                    shell.field_value("redeem_invitation", "preview_digest"),
+                    preview.preview_digest.as_str()
+                );
+                assert_eq!(
+                    shell.field_value("redeem_invitation", "terms_hash"),
+                    preview.terms_hash.as_str()
+                );
+                assert_eq!(
+                    shell.field_value("redeem_invitation", "code"),
+                    "fkinv_preview_secret"
+                );
+                shell.confirm_invitation_preview(cx);
+                assert_eq!(
+                    shell.error.as_deref(),
+                    Some(
+                        "This invitation cannot be accepted. Refresh its status or contact a network administrator."
+                    )
+                );
+                shell.error = None;
+                shell.open_action("networks", "preview_invitation", cx);
+            })
+            .expect("install invitation preview fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-invitation-preview",
+            "visual-invitation-terms",
+            "visual-invitation-confirm",
+            "visual-invitation-ordinary-membership",
+            "visual-invitation-not-permanent",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing invitation preview element {selector}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn non_accepting_invitation_states_never_submit_redemption(cx: &mut TestAppContext) {
+        for state in [
+            InvitationState::Expired,
+            InvitationState::Revoked,
+            InvitationState::Exhausted,
+        ] {
+            let window = open_shell_window(cx, 1200.0, 900.0);
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.manifest = Some(crate::node::node_ui_manifest());
+                    shell.snapshot = NodeSnapshot::default();
+                    shell.locale = Locale::En;
+                    let mut preview = invitation_preview_fixture();
+                    preview.state = state;
+                    preview.can_accept = false;
+                    preview.remaining_uses = if state == InvitationState::Exhausted {
+                        0
+                    } else {
+                        preview.remaining_uses
+                    };
+                    if state == InvitationState::Expired {
+                        preview.expires_at_unix_ms = 1;
+                    }
+                    shell.recent_invitation_preview = Some(preview);
+                    shell.invitation_terms_confirmed = true;
+                    let pending_commands = shell.pending_commands;
+                    shell.confirm_invitation_preview(cx);
+                    assert_eq!(shell.pending_commands, pending_commands);
+                    assert_eq!(
+                        shell.error.as_deref(),
+                        Some(
+                            "This invitation cannot be accepted. Refresh its status or contact a network administrator."
+                        )
+                    );
+                })
+                .expect("install non-accepting invitation fixture");
         }
     }
 

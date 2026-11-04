@@ -99,6 +99,12 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   batch_review_join_requests: "batch_review_join_requests",
   withdraw_join_request: "withdraw_join_request",
   resubmit_join_request: "resubmit_join_request",
+  create_invitation: "create_invitation",
+  list_invitations: "list_invitations",
+  get_invitation_status: "get_invitation_status",
+  revoke_invitation: "revoke_invitation",
+  preview_invitation: "preview_invitation",
+  redeem_invitation: "redeem_invitation",
   leave_network: "leave_network",
   start_networks: "start_networks",
   stop_networks: "stop_networks",
@@ -179,6 +185,8 @@ const INPUT_KINDS = new Set([
   "role",
   "routing_mode",
   "url_or_ticket",
+  "coordinator_url",
+  "invitation_code",
   "timeout_ms",
   "revision",
   "configuration_json",
@@ -214,6 +222,8 @@ const VALIDATIONS = new Set([
   "join_request_reason",
   "join_request_review_action",
   "join_request_reviews",
+  "coordinator_url",
+  "invitation_code",
 ]);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
@@ -228,6 +238,12 @@ const OUTCOME_STATUSES = new Set([
   "network_profile_updated",
   "network_join_preview",
   "network_joined",
+  "invitation_created",
+  "invitations",
+  "invitation_status",
+  "invitation_revoked",
+  "invitation_preview",
+  "invitation_redeemed",
   "network_left",
   "configuration",
   "configuration_preview",
@@ -791,8 +807,10 @@ export function defaultFieldValue(
   );
   if (field.id === "mode") return config?.routing_mode ?? "mesh_only";
   if (field.id === "exit_node") return config?.exit_node ?? "";
-  if (field.id === "role")
+  if (field.id === "role") {
+    if (action.id === "create_invitation") return "member";
     return action.id === "set_relay_role" ? "relay" : "exit_node";
+  }
   if (field.id === "display_name")
     return snapshot.identity?.display_name ?? "";
   if (field.id === "expected_fingerprint")
@@ -1419,11 +1437,13 @@ export function validateActionValues(
           seen.add(name);
         }
       }
-    } else if (
-      field.validation === "role" &&
-      !NETWORK_ROLES.has(String(value))
-    ) {
-      errors.push(label(locale, "validation.role_invalid"));
+    } else if (field.validation === "role") {
+      const allowedRoles =
+        field.label_key === "field.invitation_role"
+          ? new Set(["member", "administrator"])
+          : NETWORK_ROLES;
+      if (!allowedRoles.has(String(value)))
+        errors.push(label(locale, "validation.role_invalid"));
     } else if (
       field.validation === "routing_mode" &&
       !["mesh_only", "bypass_mainland", "global_proxy"].includes(String(value))
@@ -1481,6 +1501,14 @@ export function validateActionValues(
         } catch {
           errors.push(label(locale, "validation.fingerprint_invalid"));
         }
+      }
+    } else if (field.validation === "invitation_code") {
+      const invitationCode = String(value).trim();
+      if (
+        !/^fkinv_[A-Za-z0-9_-]{43}$/.test(invitationCode) ||
+        invitationCode.includes("=")
+      ) {
+        errors.push(label(locale, "validation.invitation_code_invalid"));
       }
     }
   }
@@ -1781,6 +1809,80 @@ export function buildCommand(
             locale,
           ),
           reason: requiredString("reason"),
+        },
+      };
+    case "create_invitation":
+      return {
+        command: "create_invitation",
+        payload: {
+          network_id: requiredString("network_id"),
+          role: requiredString("role") as "member" | "administrator",
+          capabilities: splitNames(values.capabilities) as CapabilityKind[],
+          max_uses: revisionValue(
+            requireValue("max_uses"),
+            label(locale, "field.invitation_max_uses"),
+            locale,
+          ),
+          expires_in_ms: Number(requireValue("expires_in_ms")),
+        },
+      };
+    case "list_invitations":
+      return {
+        command: "list_invitations",
+        payload: { network_id: requiredString("network_id") },
+      };
+    case "get_invitation_status":
+      return {
+        command: "get_invitation_status",
+        payload: {
+          network_id: requiredString("network_id"),
+          invitation_id: requiredString("invitation_id"),
+        },
+      };
+    case "revoke_invitation":
+      return {
+        command: "revoke_invitation",
+        payload: {
+          network_id: requiredString("network_id"),
+          invitation_id: requiredString("invitation_id"),
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+        },
+      };
+    case "preview_invitation":
+      return {
+        command: "preview_invitation",
+        payload: {
+          network_id: requiredString("network_id"),
+          coordinator_url: requiredString("coordinator_url"),
+          code: requiredString("code"),
+        },
+      };
+    case "redeem_invitation":
+      return {
+        command: "redeem_invitation",
+        payload: {
+          coordinator_url: requiredString("coordinator_url"),
+          request: {
+            network_id: requiredString("network_id"),
+            code: requiredString("code"),
+            invitation_id: requiredString("invitation_id"),
+            expected_invitation_revision: revisionValue(
+              requireValue("expected_invitation_revision"),
+              label(locale, "field.expected_revision"),
+              locale,
+            ),
+            preview_digest: requiredString("preview_digest"),
+            terms_hash: requiredString("terms_hash"),
+            acknowledged_at_unix_ms: revisionValue(
+              requireValue("acknowledged_at_unix_ms"),
+              label(locale, "field.acknowledged_at"),
+              locale,
+            ),
+          },
         },
       };
     case "leave_network":

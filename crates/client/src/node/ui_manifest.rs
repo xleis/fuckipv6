@@ -1206,7 +1206,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "create_invitation",
                         "action.create_invitation",
                         NodeCommandKind::CreateInvitation,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -1257,7 +1257,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "list_invitations",
                         "action.list_invitations",
                         NodeCommandKind::ListInvitations,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ViewState,
                         NodeUiAvailability::NodeRunning,
                         vec![field(
@@ -1273,7 +1273,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "get_invitation_status",
                         "action.get_invitation_status",
                         NodeCommandKind::GetInvitationStatus,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ViewState,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -1298,7 +1298,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "revoke_invitation",
                         "action.revoke_invitation",
                         NodeCommandKind::RevokeInvitation,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -1335,7 +1335,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "preview_invitation",
                         "action.preview_invitation",
                         NodeCommandKind::PreviewInvitation,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -1372,7 +1372,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "redeem_invitation",
                         "action.redeem_invitation",
                         NodeCommandKind::RedeemInvitation,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::NodeRunning,
                         vec![
@@ -2611,7 +2611,7 @@ mod tests {
             NodeCommandKind::RedeemInvitation,
         ] {
             let action = action(command);
-            assert_eq!(action.backend_status, NodeUiBackendStatus::Unavailable);
+            assert_eq!(action.backend_status, NodeUiBackendStatus::Implemented);
             assert!(!action.fields.is_empty());
         }
 

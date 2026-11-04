@@ -962,7 +962,7 @@ mod tests {
     fn expired_request_cannot_later_be_approved() {
         let mut request = join_request(100);
         let expires = request.expires_at_unix_ms;
-        assert!(request.expire_if_due(expires - 1).unwrap() == false);
+        assert!(!request.expire_if_due(expires - 1).unwrap());
         assert!(request.expire_if_due(expires).unwrap());
         assert_eq!(request.state, JoinRequestState::Expired);
         assert_eq!(request.revision, 2);

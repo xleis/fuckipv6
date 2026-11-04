@@ -848,6 +848,7 @@ async fn handle_join_request_review(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_join_request_resubmit(
     network_id: NetworkId,
     request_id: JoinRequestId,

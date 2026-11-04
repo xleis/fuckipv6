@@ -1512,6 +1512,31 @@ function JoinRequestListCard({
             <p className="join-request-revision-notice">
               {label(locale, "join_requests.revision_pinned")}
             </p>
+            {dialog ? (
+              <section
+                className="join-request-review-grants"
+                aria-label={label(locale, "join_requests.grant_impact")}
+              >
+                <h3>{label(locale, "join_requests.grant_impact")}</h3>
+                {dialog.requests.map((request) => (
+                  <div
+                    className="join-request-review-grant"
+                    data-testid="join-request-review-grant"
+                    key={request.request_id}
+                  >
+                    <strong>
+                      {request.applicant.display_name ??
+                        request.applicant.node_id}
+                    </strong>
+                    <JoinRequestRisk
+                      request={request}
+                      locale={locale}
+                      loadedAtUnixMs={loadedAtUnixMs}
+                    />
+                  </div>
+                ))}
+              </section>
+            ) : null}
             {dialog?.action !== "approve" ? (
               <label className="form-field" htmlFor="join-request-review-note">
                 <span id="join-request-review-note-label">

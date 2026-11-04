@@ -1163,6 +1163,23 @@ describe("action panel join request review list", () => {
     );
     expect(dialog).toHaveTextContent("Branch office router");
     expect(dialog).toHaveTextContent("translated:join_requests.revision_pinned");
+    const grantImpactSection = within(dialog).getByRole("region", {
+      name: "translated:join_requests.grant_impact",
+    });
+    expect(grantImpactSection).toHaveTextContent(
+      "translated:join_requests.grant_impact",
+    );
+    const grantImpact = within(grantImpactSection).getByTestId(
+      "join-request-review-grant",
+    );
+    expect(grantImpact).toHaveTextContent("translated:join_requests.role");
+    expect(grantImpact).toHaveTextContent("translated:join_request.role.member");
+    expect(grantImpact).toHaveTextContent("translated:capability.relay");
+    expect(grantImpact).toHaveTextContent("translated:capability.file");
+    expect(grantImpact).toHaveTextContent("translated:join_requests.exit.required");
+    expect(grantImpact).toHaveTextContent(
+      "translated:join_requests.file_access.granted",
+    );
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:join_requests.confirm_review",
@@ -1374,6 +1391,9 @@ describe("action panel join request review list", () => {
       "translated:join_requests.batch_dialog_title",
     );
     expect(dialog).toHaveTextContent("Warehouse gateway");
+    expect(
+      within(dialog).getAllByTestId("join-request-review-grant"),
+    ).toHaveLength(2);
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:join_requests.confirm_review",

@@ -1132,7 +1132,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 提供申请理由字段、可见范围说明和长度限制；
 - [x] 管理员可查看待审批列表、申请人公开资料、理由和风险提示；
 - [x] 支持批准、拒绝、要求补充信息和批量审批；
-- [ ] 审批前显示将授予的成员权限和 Exit/File 影响；
+- [x] 审批前显示将授予的成员权限和 Exit/File 影响；
 - [ ] 并发审批只能产生一个最终成员状态；
 - [ ] 申请过期、撤回、管理员撤权时有一致状态；
 - [ ] 申请理由只对获授权角色可见，并纳入保留策略；
@@ -1194,6 +1194,18 @@ WebUI 新增 `explains reason visibility and enforces its character limit`，GPU
 `npm run typecheck`、`npm run lint`、`npm run build`、
 `node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
 `cargo fmt --all -- --check` 和 `git diff --check`。
+
+本轮补齐审批前影响预览：WebUI 的单条与批量审批对话框会逐个展示将授予的 role、
+capabilities、Exit 要求、File access 与数据面访问范围，并为影响区提供可访问名称；
+GPUI 引导审批按勾选的 request ID 查找当前申请，在确认前展示同一组权限与影响信息。
+WebUI 回归测试覆盖单条和批量审批的影响预览，GPUI 新增
+`visual-join-request-review-grant-*` 选择器断言。验证通过：
+`cargo test -p fuckipv6-client --all-features --lib gpui::view`（72 passed）、
+`cargo test -p fuckipv6-common i18n`（9 passed）、WebUI 9 个测试文件 114/114、
+`npm run typecheck`、`npm run lint`、`npm run build`、
+`node scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、
+`cargo fmt --all -- --check` 和 `git diff --check`；生成的 `app.js` / `app.css` 已同步刷新。
+构建仅保留既有 Vite 非 module i18n 提示与大于 500 kB chunk 警告。
 
 **验收**：审批状态机无重复成员和悬空申请；隐私范围与拒绝路径经过测试。
 

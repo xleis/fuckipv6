@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinRequestReviewAction,
-    JoinRequestState, MembershipRole, NetworkJoinMode, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
-    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
-    JOIN_REQUEST_MAX_REASON_CHARS,
+    CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinRequest,
+    JoinRequestReviewAction, JoinRequestState, MembershipRole, NetworkJoinMode,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
+    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
+    OperationState, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -6299,7 +6299,34 @@ impl GpuiShell {
                 action
             )
         };
-        div()
+        let selected_request_ids = if action_id == "batch_review_join_requests" {
+            serde_json::from_str::<Vec<NodeJoinRequestReviewItem>>(
+                &self.field_value(action_id, "reviews"),
+            )
+            .map(|reviews| {
+                reviews
+                    .into_iter()
+                    .map(|review| review.request_id)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default()
+        } else {
+            BTreeSet::from([self.field_value(action_id, "request_id")])
+        };
+        let selected_requests = self
+            .recent_join_requests
+            .as_ref()
+            .map(|result| {
+                result
+                    .requests
+                    .iter()
+                    .filter(|request| selected_request_ids.contains(request.request_id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut summary = div()
             .debug_selector(|| "visual-join-request-review-summary".into())
             .flex()
             .flex_col()
@@ -6321,7 +6348,101 @@ impl GpuiShell {
                     .text_xs()
                     .text_color(rgba(COLOR_MUTED))
                     .child(t(self.locale, "join_requests.revision_pinned").to_string()),
-            )
+            );
+        if !selected_requests.is_empty() {
+            summary = summary.child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "join_requests.grant_impact").to_string()),
+            );
+            for (index, request) in selected_requests.iter().enumerate() {
+                summary = summary.child(self.join_request_grant_impact(
+                    request,
+                    format!("visual-join-request-review-grant-{action_id}-{index}"),
+                ));
+            }
+        }
+        summary.into_any_element()
+    }
+
+    fn join_request_grant_impact(
+        &self,
+        request: &JoinRequest,
+        debug_selector: String,
+    ) -> gpui::AnyElement {
+        let capabilities = if request.grant_preview.capabilities.is_empty() {
+            t(self.locale, "common.none").to_string()
+        } else {
+            request
+                .grant_preview
+                .capabilities
+                .iter()
+                .map(|capability| t(self.locale, profile_capability_key(*capability)).to_string())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        div()
+            .debug_selector(move || debug_selector.clone().into())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_sm()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .border_1()
+            .border_color(rgba(COLOR_WARNING))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "join_requests.role"),
+                t(
+                    self.locale,
+                    join_request_role_key(request.grant_preview.role),
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "join_requests.capabilities"),
+                capabilities,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "join_requests.exit"),
+                t(
+                    self.locale,
+                    if request.grant_preview.exit_contribution
+                        == ExitContributionObligation::Required
+                    {
+                        "join_requests.exit.required"
+                    } else {
+                        "join_requests.exit.not_required"
+                    },
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "join_requests.file_access"),
+                t(
+                    self.locale,
+                    if request.grant_preview.file_access {
+                        "join_requests.file_access.granted"
+                    } else {
+                        "join_requests.file_access.not_granted"
+                    },
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "join_requests.data_plane"),
+                t(
+                    self.locale,
+                    if request.grant_preview.grants_data_plane_access {
+                        "join_requests.data_plane.granted"
+                    } else {
+                        "join_requests.data_plane.not_granted"
+                    },
+                )
+                .to_string(),
+            ))
             .into_any_element()
     }
 
@@ -9520,6 +9641,19 @@ mod tests {
                 assert!(!shell.join_request_selection.contains(&request_id));
             })
             .expect("exercise guided join request review actions");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-join-request-review-summary",
+            "visual-join-request-review-grant-review_join_request-0",
+            "visual-join-request-review-grant-batch_review_join_requests-0",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing guided join request approval detail {selector}"
+            );
+        }
     }
 
     #[gpui::test]

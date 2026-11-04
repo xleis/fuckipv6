@@ -2254,6 +2254,27 @@ button:disabled {
   border-radius: var(--radius-sm);
   background: var(--surface);
 }
+.join-request-review-grants {
+  display: grid;
+  max-height: min(42vh, 420px);
+  gap: var(--space-2);
+  overflow: auto;
+}
+.join-request-review-grants h3 {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.join-request-review-grant {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+}
+.join-request-review-grant > strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--font-size-xs);
+}
 .join-request-empty {
   padding: var(--space-4);
   border: 1px dashed var(--border);

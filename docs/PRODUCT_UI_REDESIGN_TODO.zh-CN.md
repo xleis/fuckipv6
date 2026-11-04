@@ -1368,16 +1368,28 @@ WebUI `npm run typecheck`、`npm test -- --run`（124 passed）、`npm run lint`
 
 ### W8-10 网络发现测试与活动 `[ ]`
 
-- [ ] 建立签名、重放、伪造、过期、吊销和索引离线测试；
-- [ ] 建立开放、审批、私有邀请三条 E2E；
-- [ ] 建立加入竞争、成员上限和策略变化测试；
-- [ ] 验证公开卡片不含敏感字段；
-- [ ] 验证所有创建、发布、加入、审批、邀请动作可追溯；
+- [x] 建立签名、重放、伪造、过期、吊销和索引离线测试；
+- [x] 建立开放、审批、私有邀请三条 E2E；
+- [x] 建立加入竞争、成员上限和策略变化测试；
+- [x] 验证公开卡片不含敏感字段；
+- [x] 验证所有创建、发布、加入、审批、邀请动作可追溯；
 - [ ] GPUI/WebUI 完成同一流程和行为对比；
 - [ ] 移动端完成长按、键盘替代和返回路径；
 - [ ] 所有失败都有可执行恢复动作。
 
 **验收**：网络创建与发现形成完整垂直切片，不依赖静态列表、假审批结果或未签名的公开数据。
+
+**证据（进行中，2026-11-04）**：`join_acceptance_rejects_forgery_expiry_revocation_replay_and_offline_index`
+覆盖签名、重放、伪造、过期、吊销和索引离线；`open_join_end_to_end_uses_signed_discovery_preview_and_confirmation`、
+`approval_join_end_to_end_submits_reviews_and_admits_the_applicant` 和
+`private_invitation_end_to_end_previews_redeems_and_admits_the_invitee` 覆盖三条加入 E2E；
+`invitation_join_rechecks_member_limit_and_capability_policy` 与既有并发审批测试覆盖成员上限和策略变化；
+`public_discovery_card_serializes_only_the_signed_allowlist` 校验公开卡片仅包含签名公开字段。
+命令总线新增 `network_discovery_actions_have_traceable_actor_action_and_operation_ids`，在同一声明来源和
+owner 角色下验证创建、发布、加入、审批、邀请分别产生稳定的 `network.create`、
+`network.discovery.publish`、`network.join`、`network.join_request.review`、
+`network.invitation.create` 动作，并核对 actor、request、受信任 operation ID、结果与脱敏活动；
+邀请票据和审批说明不会进入审计或活动投影。
 
 ## 12. W9：成员、组与拓扑
 

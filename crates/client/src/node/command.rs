@@ -4215,6 +4215,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_discovery_actions_have_traceable_actor_action_and_operation_ids() {
+        let state = NodeStateStore::new();
+        let bus = NodeCommandBus::spawn_with_state(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            8,
+            state.clone(),
+        );
+        let network_id = NetworkId::from_public_key(b"traceable-network");
+        let request_id =
+            fuckipv6_common::domain::JoinRequestId::from_public_key(b"traceable-join-request");
+        let actor = actor();
+        let commands = vec![
+            NodeCommand::CreateNetwork(valid_create_network_command()),
+            NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
+                network_name: "home".into(),
+                index_url: "https://discovery.example.test".into(),
+            }),
+            NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
+                target: "fk://SECRET-TRACE-TICKET@example.test:6666".into(),
+                network_name: Some("home".into()),
+                start: false,
+                discovery_record: None,
+                network_id: None,
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
+            })),
+            NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
+                network_id: network_id.to_string(),
+                review: NodeJoinRequestReviewItem {
+                    request_id: request_id.to_string(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::RequestInformation,
+                    note: Some("SECRET-TRACE-REVIEW-NOTE".into()),
+                },
+            }),
+            NodeCommand::CreateInvitation(NodeCreateInvitationCommand {
+                network_id,
+                role: MembershipRole::Member,
+                capabilities: vec![CapabilityKind::File],
+                max_uses: 1,
+                expires_in_ms: 3_600_000,
+            }),
+        ];
+        let expected_actions = [
+            "network.create",
+            "network.discovery.publish",
+            "network.join",
+            "network.join_request.review",
+            "network.invitation.create",
+        ];
+        let mut operation_ids = Vec::new();
+
+        for (offset, command) in commands.into_iter().enumerate() {
+            let operation_id = fuckipv6_common::domain::OperationId::from_public_key(
+                format!("traceable-network-operation-{offset}").as_bytes(),
+            );
+            let result = bus
+                .execute(
+                    NodeCommandContext::local_owner(actor.clone(), "control-api:owner-session")
+                        .with_audit_operation_id(operation_id.clone()),
+                    NodeCommandRequest::new(80 + offset as u64, command),
+                )
+                .await
+                .expect("traceable network command result");
+            assert!(result.is_success());
+            operation_ids.push(operation_id);
+        }
+
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), expected_actions.len());
+        for (index, (entry, expected_action)) in audit.iter().zip(expected_actions).enumerate() {
+            assert_eq!(entry.actor, actor);
+            assert_eq!(entry.action, expected_action);
+            assert_eq!(entry.operation_id.as_ref(), Some(&operation_ids[index]));
+            assert_eq!(entry.outcome, AuditOutcome::Succeeded);
+            assert_eq!(entry.details["actor_source"], "control-api:owner-session");
+            assert_eq!(entry.details["role"], "owner");
+            assert_eq!(entry.details["request_id"], (80 + index as u64).to_string());
+        }
+
+        let activity = state.snapshot().await.recent_activity;
+        assert_eq!(activity.len(), 5);
+        assert!(activity
+            .iter()
+            .all(|entry| entry.actor == actor && entry.outcome == AuditOutcome::Succeeded));
+        let debug = format!("{audit:?}{activity:?}");
+        assert!(!debug.contains("SECRET-TRACE-TICKET"));
+        assert!(!debug.contains("SECRET-TRACE-REVIEW-NOTE"));
+    }
+
+    #[tokio::test]
     async fn join_request_audit_and_activity_cover_every_action_without_prose() {
         let state = NodeStateStore::new();
         let bus = NodeCommandBus::spawn_with_state(

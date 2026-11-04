@@ -5,7 +5,9 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use crate::domain::{
     InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
     InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
-    JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId, NetworkMemberDirectory,
+    JoinRequestId, JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
+    NetworkMemberDirectory,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -258,6 +260,24 @@ pub enum SignalingMessage {
     },
     MemberDirectoryListAck {
         directory: NetworkMemberDirectory,
+    },
+
+    // Unified member lifecycle. Requests are CAS + idempotency protected;
+    // acknowledgements and change events are server-originated only.
+    MemberRemovalPreview {
+        request: MemberRemovalPreviewRequest,
+    },
+    MemberRemovalPreviewAck {
+        preview: MemberRemovalPreview,
+    },
+    MemberLifecycleChange {
+        request: MemberLifecycleChangeRequest,
+    },
+    MemberLifecycleChangeAck {
+        change: MemberLifecycleChange,
+    },
+    MemberLifecycleChanged {
+        change: MemberLifecycleChange,
     },
 }
 

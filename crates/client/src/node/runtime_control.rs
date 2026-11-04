@@ -5,7 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuckipv6_common::domain::{JoinRequest, JoinRequestId, MembershipRole, NetworkId};
+use fuckipv6_common::domain::{
+    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
+    InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
+    JoinRequest, JoinRequestId, MembershipRole, NetworkId,
+};
 use fuckipv6_common::{
     ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NatType, NetworkTicket,
 };
@@ -34,7 +38,7 @@ use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
 use crate::signaling::client::{
-    JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
+    InvitationControlError, JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
 };
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -118,6 +122,12 @@ pub(crate) enum RuntimeControlError {
         message_key: &'static str,
         message: String,
     },
+    #[error("{message}")]
+    Invitation {
+        code: NodeProblemCode,
+        message_key: &'static str,
+        message: String,
+    },
 }
 
 impl RuntimeControlError {
@@ -136,6 +146,7 @@ impl RuntimeControlError {
             | Self::Launch(_) => NodeProblemCode::Unavailable,
             Self::Timeout(_) => NodeProblemCode::TimedOut,
             Self::JoinRequest { code, .. } => *code,
+            Self::Invitation { code, .. } => *code,
         }
     }
 
@@ -145,6 +156,7 @@ impl RuntimeControlError {
             Self::CreationConflict { .. } => "error.conflict",
             Self::PermissionDenied(_) => "error.permission_denied",
             Self::JoinRequest { message_key, .. } => message_key,
+            Self::Invitation { message_key, .. } => message_key,
             _ => self.problem_code().message_key(),
         }
     }
@@ -164,6 +176,17 @@ impl RuntimeControlError {
                     ..
                 }
                 | Self::JoinRequest {
+                    code: NodeProblemCode::AuthenticationRequired
+                        | NodeProblemCode::InvalidRequest
+                        | NodeProblemCode::NotFound
+                        | NodeProblemCode::Conflict
+                        | NodeProblemCode::PermissionDenied
+                        | NodeProblemCode::Cancelled
+                        | NodeProblemCode::Unsupported
+                        | NodeProblemCode::Internal,
+                    ..
+                }
+                | Self::Invitation {
                     code: NodeProblemCode::AuthenticationRequired
                         | NodeProblemCode::InvalidRequest
                         | NodeProblemCode::NotFound
@@ -229,6 +252,36 @@ fn join_request_unavailable(message: impl Into<String>) -> RuntimeControlError {
     RuntimeControlError::JoinRequest {
         code: NodeProblemCode::Unavailable,
         message_key: "join_request.error.unavailable",
+        message: message.into(),
+    }
+}
+
+fn map_invitation_error(error: InvitationControlError) -> RuntimeControlError {
+    let message = error.to_string();
+    let code = match error {
+        InvitationControlError::Disconnected
+        | InvitationControlError::Unavailable
+        | InvitationControlError::Rejected(429 | 503) => NodeProblemCode::Unavailable,
+        InvitationControlError::TimedOut => NodeProblemCode::TimedOut,
+        InvitationControlError::Rejected(401) => NodeProblemCode::AuthenticationRequired,
+        InvitationControlError::Rejected(403) => NodeProblemCode::PermissionDenied,
+        InvitationControlError::Rejected(404) => NodeProblemCode::NotFound,
+        InvitationControlError::Rejected(409 | 412) => NodeProblemCode::Conflict,
+        InvitationControlError::Rejected(_) | InvitationControlError::InvalidResponse => {
+            NodeProblemCode::InvalidRequest
+        }
+    };
+    RuntimeControlError::Invitation {
+        code,
+        message_key: error.message_key(),
+        message,
+    }
+}
+
+fn invitation_unavailable(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::Invitation {
+        code: NodeProblemCode::Unavailable,
+        message_key: "invitation.error.unavailable",
         message: message.into(),
     }
 }
@@ -1410,6 +1463,10 @@ enum RuntimeControlCommand {
         command: JoinRequestRuntimeCommand,
         reply: oneshot::Sender<Result<JoinRequestExecutionResult, RuntimeControlError>>,
     },
+    Invitation {
+        command: InvitationRuntimeCommand,
+        reply: oneshot::Sender<Result<InvitationExecutionResult, RuntimeControlError>>,
+    },
     Stop {
         networks: Vec<String>,
         all: bool,
@@ -1482,6 +1539,40 @@ enum JoinRequestExecutionResult {
     Status(JoinRequestStatusSnapshot),
     List(Vec<JoinRequest>),
     Review(Vec<JoinRequestReviewResult>),
+}
+
+enum InvitationRuntimeCommand {
+    Create(InvitationCreateRequest),
+    List {
+        network_id: NetworkId,
+    },
+    Status {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    },
+    Revoke {
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+        expected_revision: u64,
+    },
+    Preview {
+        network_id: NetworkId,
+        coordinator_url: String,
+        code: InvitationCode,
+    },
+    Redeem {
+        coordinator_url: String,
+        request: InvitationRedeemRequest,
+    },
+}
+
+enum InvitationExecutionResult {
+    Created(IssuedInvitation),
+    List(Vec<InvitationStatusView>),
+    Status(InvitationStatusView),
+    Revoked(InvitationStatusView),
+    Preview(InvitationPreview),
+    Redeemed(InvitationRedemption),
 }
 
 fn routing_summary_timestamp() -> u64 {
@@ -1945,6 +2036,116 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn create_invitation(
+        &self,
+        request: InvitationCreateRequest,
+    ) -> Result<IssuedInvitation, RuntimeControlError> {
+        match self
+            .execute_invitation(InvitationRuntimeCommand::Create(request))
+            .await?
+        {
+            InvitationExecutionResult::Created(issued) => Ok(issued),
+            _ => Err(invitation_unavailable("邀请控制返回了不匹配的创建响应")),
+        }
+    }
+
+    pub async fn list_invitations(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<Vec<InvitationStatusView>, RuntimeControlError> {
+        match self
+            .execute_invitation(InvitationRuntimeCommand::List { network_id })
+            .await?
+        {
+            InvitationExecutionResult::List(invitations) => Ok(invitations),
+            _ => Err(invitation_unavailable("邀请控制返回了不匹配的列表响应")),
+        }
+    }
+
+    pub async fn get_invitation_status(
+        &self,
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+    ) -> Result<InvitationStatusView, RuntimeControlError> {
+        match self
+            .execute_invitation(InvitationRuntimeCommand::Status {
+                network_id,
+                invitation_id,
+            })
+            .await?
+        {
+            InvitationExecutionResult::Status(invitation) => Ok(invitation),
+            _ => Err(invitation_unavailable("邀请控制返回了不匹配的状态响应")),
+        }
+    }
+
+    pub async fn revoke_invitation(
+        &self,
+        network_id: NetworkId,
+        invitation_id: InvitationId,
+        expected_revision: u64,
+    ) -> Result<InvitationStatusView, RuntimeControlError> {
+        match self
+            .execute_invitation(InvitationRuntimeCommand::Revoke {
+                network_id,
+                invitation_id,
+                expected_revision,
+            })
+            .await?
+        {
+            InvitationExecutionResult::Revoked(invitation) => Ok(invitation),
+            _ => Err(invitation_unavailable("邀请控制返回了不匹配的撤销响应")),
+        }
+    }
+
+    pub async fn preview_invitation(
+        &self,
+        network_id: NetworkId,
+        coordinator_url: String,
+        code: InvitationCode,
+    ) -> Result<InvitationPreview, RuntimeControlError> {
+        match self
+            .execute_invitation(InvitationRuntimeCommand::Preview {
+                network_id,
+                coordinator_url,
+                code,
+            })
+            .await?
+        {
+            InvitationExecutionResult::Preview(preview) => Ok(preview),
+            _ => Err(invitation_unavailable("邀请控制返回了不匹配的预览响应")),
+        }
+    }
+
+    pub async fn redeem_invitation(
+        &self,
+        coordinator_url: String,
+        request: InvitationRedeemRequest,
+    ) -> Result<InvitationRedemption, RuntimeControlError> {
+        match self
+            .execute_invitation(InvitationRuntimeCommand::Redeem {
+                coordinator_url,
+                request,
+            })
+            .await?
+        {
+            InvitationExecutionResult::Redeemed(redemption) => Ok(redemption),
+            _ => Err(invitation_unavailable("邀请控制返回了不匹配的兑换响应")),
+        }
+    }
+
+    async fn execute_invitation(
+        &self,
+        command: InvitationRuntimeCommand,
+    ) -> Result<InvitationExecutionResult, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::Invitation { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn stop(
         &self,
         networks: Vec<String>,
@@ -2178,6 +2379,10 @@ async fn run_actor(
                 let result = actor.execute_join_request_command(command).await;
                 let _ = reply.send(result);
             }
+            RuntimeControlCommand::Invitation { command, reply } => {
+                let result = actor.execute_invitation_command(command).await;
+                let _ = reply.send(result);
+            }
             RuntimeControlCommand::Stop {
                 networks,
                 all,
@@ -2343,6 +2548,152 @@ impl NetworkRuntimeActor {
                 result
                     .map(JoinRequestExecutionResult::Status)
                     .map_err(map_join_request_error)
+            }
+        }
+    }
+
+    async fn execute_invitation_command(
+        &mut self,
+        command: InvitationRuntimeCommand,
+    ) -> Result<InvitationExecutionResult, RuntimeControlError> {
+        match command {
+            InvitationRuntimeCommand::Create(request) => {
+                let network_id = request.network_id.clone();
+                let (signaling, ephemeral) = self.invitation_signaling(&network_id, None).await?;
+                let result = signaling.create_invitation(request).await;
+                self.close_ephemeral_invitation_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(InvitationExecutionResult::Created)
+                    .map_err(map_invitation_error)
+            }
+            InvitationRuntimeCommand::List { network_id } => {
+                let (signaling, ephemeral) = self.invitation_signaling(&network_id, None).await?;
+                let result = signaling.list_invitations(network_id).await;
+                self.close_ephemeral_invitation_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(InvitationExecutionResult::List)
+                    .map_err(map_invitation_error)
+            }
+            InvitationRuntimeCommand::Status {
+                network_id,
+                invitation_id,
+            } => {
+                let (signaling, ephemeral) = self.invitation_signaling(&network_id, None).await?;
+                let result = signaling
+                    .get_invitation_status(network_id, invitation_id)
+                    .await;
+                self.close_ephemeral_invitation_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(InvitationExecutionResult::Status)
+                    .map_err(map_invitation_error)
+            }
+            InvitationRuntimeCommand::Revoke {
+                network_id,
+                invitation_id,
+                expected_revision,
+            } => {
+                let (signaling, ephemeral) = self.invitation_signaling(&network_id, None).await?;
+                let result = signaling
+                    .revoke_invitation(network_id, invitation_id, expected_revision)
+                    .await;
+                self.close_ephemeral_invitation_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(InvitationExecutionResult::Revoked)
+                    .map_err(map_invitation_error)
+            }
+            InvitationRuntimeCommand::Preview {
+                network_id,
+                coordinator_url,
+                code,
+            } => {
+                let (signaling, ephemeral) = self
+                    .invitation_signaling(&network_id, Some(&coordinator_url))
+                    .await?;
+                let result = signaling.preview_invitation(network_id, code).await;
+                self.close_ephemeral_invitation_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(InvitationExecutionResult::Preview)
+                    .map_err(map_invitation_error)
+            }
+            InvitationRuntimeCommand::Redeem {
+                coordinator_url,
+                request,
+            } => {
+                let network_id = request.network_id.clone();
+                let (signaling, ephemeral) = self
+                    .invitation_signaling(&network_id, Some(&coordinator_url))
+                    .await?;
+                let result = signaling.redeem_invitation(request).await;
+                self.close_ephemeral_invitation_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(InvitationExecutionResult::Redeemed)
+                    .map_err(map_invitation_error)
+            }
+        }
+    }
+
+    /// Invitation management prefers the live authoritative signaling session.
+    /// Applicants previewing/redeeming before joining use the endpoint carried
+    /// by their command. Owner operations may fall back to the endpoint bound in
+    /// local network configuration without changing that binding.
+    async fn invitation_signaling(
+        &mut self,
+        network_id: &NetworkId,
+        coordinator_url: Option<&str>,
+    ) -> Result<(Arc<SignalingClient>, bool), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        if let Some(signaling) = self
+            .sessions
+            .values()
+            .find(|session| session.network_id.as_deref() == Some(network_id.as_str()))
+            .and_then(|session| session.signaling.clone())
+        {
+            return Ok((signaling, false));
+        }
+
+        let coordinator_url = coordinator_url
+            .filter(|url| !url.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.configs
+                    .list_networks()
+                    .ok()
+                    .and_then(|networks| {
+                        networks.into_iter().find(|network| {
+                            network.network_id.as_deref() == Some(network_id.as_str())
+                        })
+                    })
+                    .map(|network| network.coordinator_url)
+                    .filter(|url| !url.trim().is_empty())
+            });
+        let Some(coordinator_url) = coordinator_url else {
+            return Err(invitation_unavailable(
+                "目标网络当前未运行，且没有可用的 Websocket 邀请端点",
+            ));
+        };
+        let identity = self.configs.load_node_identity().map_err(|error| {
+            invitation_unavailable(format!("加载邀请控制连接所需节点身份失败: {error:#}"))
+        })?;
+        let signaling = SignalingClient::connect(&coordinator_url, identity, 0, NatType::Unknown)
+            .await
+            .map_err(|error| invitation_unavailable(format!("建立邀请控制连接失败: {error:#}")))?;
+        Ok((Arc::new(signaling), true))
+    }
+
+    async fn close_ephemeral_invitation_signaling(
+        &self,
+        signaling: &Arc<SignalingClient>,
+        ephemeral: bool,
+    ) {
+        if ephemeral {
+            if let Err(error) = signaling.close().await {
+                tracing::warn!(%error, "关闭一次性邀请控制连接失败");
             }
         }
     }
@@ -3112,6 +3463,17 @@ impl NetworkRuntimeActor {
                 record.document.network_id.as_str(),
                 &record.document.public_key.to_string(),
             ) {
+                let rollback = self.rollback_failed_join(&network_name).await;
+                return Err(join_rollback_error(
+                    format!("网络 [{network_name}] 已保存，但写入稳定身份失败: {error:#}"),
+                    rollback.err(),
+                ));
+            }
+        } else if let Some(network_id) = command.network_id.as_deref() {
+            if let Err(error) = self
+                .configs
+                .set_network_id_metadata(&network_name, network_id)
+            {
                 let rollback = self.rollback_failed_join(&network_name).await;
                 return Err(join_rollback_error(
                     format!("网络 [{network_name}] 已保存，但写入稳定身份失败: {error:#}"),

@@ -4,10 +4,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
 
 use fuckipv6_common::domain::{
-    CapabilityKind, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId,
-    JoinTermsAck, MembershipRole, MembershipTerms, NetworkDiscoveryRecord, NetworkId,
-    NetworkMembership, NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId,
-    OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
+    CapabilityKind, InvitationCreateRequest, InvitationPreview, InvitationRedeemRequest,
+    InvitationRedemption, InvitationState, JoinApplicantProfile, JoinRequest,
+    JoinRequestGrantPreview, JoinRequestId, JoinTermsAck, MembershipRole, MembershipTerms,
+    NetworkDiscoveryRecord, NetworkId, NetworkMembership, NetworkProfileWarning,
+    NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
 
@@ -496,15 +497,32 @@ impl NodeRuntimeHandler {
                     }
                     None => unavailable(request_id, "重申加入申请需要运行中的节点控制面"),
                 },
-                super::NodeCommand::CreateInvitation(_)
-                | super::NodeCommand::ListInvitations(_)
-                | super::NodeCommand::GetInvitationStatus(_)
-                | super::NodeCommand::RevokeInvitation(_)
-                | super::NodeCommand::PreviewInvitation(_)
-                | super::NodeCommand::RedeemInvitation(_) => unavailable(
-                    request_id,
-                    "私有邀请运行时尚未接线；当前不会伪造邀请或成员结果",
-                ),
+                super::NodeCommand::CreateInvitation(command) => match runtime {
+                    Some(runtime) => create_invitation(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "创建邀请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::ListInvitations(command) => match runtime {
+                    Some(runtime) => list_invitations(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "列出邀请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::GetInvitationStatus(command) => match runtime {
+                    Some(runtime) => get_invitation_status(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "读取邀请状态需要运行中的节点控制面"),
+                },
+                super::NodeCommand::RevokeInvitation(command) => match runtime {
+                    Some(runtime) => revoke_invitation(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "撤销邀请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::PreviewInvitation(command) => match runtime {
+                    Some(runtime) => preview_invitation(&runtime, request_id, command).await,
+                    None => unavailable(request_id, "预览邀请需要运行中的节点控制面"),
+                },
+                super::NodeCommand::RedeemInvitation(command) => match (runtime, configs) {
+                    (Some(runtime), Some(configs)) => {
+                        redeem_invitation(&runtime, &configs, &state, request_id, command).await
+                    }
+                    _ => unavailable(request_id, "接受邀请需要节点配置和运行中的控制面"),
+                },
                 super::NodeCommand::UpdateRouting(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
                     if command.is_exit_node && !capabilities.supported {
@@ -1542,6 +1560,378 @@ fn apply_join_request_status(
     }
 }
 
+async fn create_invitation(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeCreateInvitationCommand,
+) -> NodeCommandResult {
+    let network_id = command.network_id.clone();
+    let request = InvitationCreateRequest::new(
+        command.network_id,
+        command.role,
+        command.capabilities,
+        command.max_uses,
+        command.expires_in_ms,
+    );
+    match runtime.create_invitation(request).await {
+        Ok(issued) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::InvitationCreated(Box::new(issued)),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn list_invitations(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeListInvitationsCommand,
+) -> NodeCommandResult {
+    let network_id = command.network_id;
+    match runtime.list_invitations(network_id.clone()).await {
+        Ok(invitations) => {
+            NodeCommandResult::completed(request_id, NodeCommandOutcome::Invitations(invitations))
+        }
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn get_invitation_status(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeGetInvitationStatusCommand,
+) -> NodeCommandResult {
+    let network_id = command.network_id;
+    match runtime
+        .get_invitation_status(network_id.clone(), command.invitation_id)
+        .await
+    {
+        Ok(invitation) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::InvitationStatus(Box::new(invitation)),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn revoke_invitation(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodeRevokeInvitationCommand,
+) -> NodeCommandResult {
+    let network_id = command.network_id;
+    match runtime
+        .revoke_invitation(
+            network_id.clone(),
+            command.invitation_id,
+            command.expected_revision,
+        )
+        .await
+    {
+        Ok(invitation) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::InvitationRevoked(Box::new(invitation)),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn preview_invitation(
+    runtime: &NetworkRuntimeManager,
+    request_id: u64,
+    command: super::NodePreviewInvitationCommand,
+) -> NodeCommandResult {
+    let network_id = command.network_id;
+    match runtime
+        .preview_invitation(network_id.clone(), command.coordinator_url, command.code)
+        .await
+    {
+        Ok(preview) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::InvitationPreview(Box::new(preview)),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+fn invitation_conflict(message: impl Into<String>, network_name: Option<&str>) -> NodeProblem {
+    let mut problem = NodeProblem::new(NodeProblemCode::Conflict, message)
+        .with_message_key("invitation.error.preview_changed")
+        .retryable(false);
+    if let Some(network_name) = network_name {
+        problem = problem.for_network(network_name.to_owned());
+    }
+    problem
+}
+
+/// Bind consent to the exact preview digest and independently verify every
+/// security-relevant field before the credential is sent to the Coordinator.
+fn validate_invitation_preview(
+    request: &InvitationRedeemRequest,
+    preview: &InvitationPreview,
+    now_unix_ms: u64,
+) -> Result<(), NodeProblem> {
+    let computed = preview.compute_digest().map_err(|error| {
+        invitation_conflict(
+            format!("无法验证邀请预览摘要: {error}"),
+            Some(&preview.network_name),
+        )
+    })?;
+    if request.network_id != preview.network_id {
+        return Err(invitation_conflict(
+            "邀请预览的网络 ID 与确认内容不一致",
+            Some(&preview.network_name),
+        ));
+    }
+    if request.invitation_id != preview.invitation_id
+        || request.expected_invitation_revision != preview.invitation_revision
+    {
+        return Err(invitation_conflict(
+            "邀请已更新，请重新预览后再确认",
+            Some(&preview.network_name),
+        ));
+    }
+    if request.preview_digest != computed || request.terms_hash != preview.terms_hash {
+        return Err(invitation_conflict(
+            "邀请条款或权限预览已变化，请重新预览并确认",
+            Some(&preview.network_name),
+        ));
+    }
+    if preview.state != InvitationState::Active
+        || !preview.can_accept
+        || preview.denial_key.is_some()
+        || preview.remaining_uses == 0
+    {
+        return Err(invitation_conflict(
+            preview
+                .denial_key
+                .clone()
+                .unwrap_or_else(|| "邀请已过期、撤销或耗尽，无法接受".into()),
+            Some(&preview.network_name),
+        ));
+    }
+    if !matches!(
+        preview.role,
+        MembershipRole::Member | MembershipRole::Administrator
+    ) {
+        return Err(invitation_conflict(
+            "邀请不能授予网络所有者身份",
+            Some(&preview.network_name),
+        ));
+    }
+    if preview
+        .capabilities
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != preview.capabilities.len()
+    {
+        return Err(invitation_conflict(
+            "邀请能力列表包含重复项",
+            Some(&preview.network_name),
+        ));
+    }
+    if preview.creates_permanent_membership {
+        return Err(invitation_conflict(
+            "邀请必须创建普通成员关系，不能创建永久身份",
+            Some(&preview.network_name),
+        ));
+    }
+    if now_unix_ms
+        > request
+            .acknowledged_at_unix_ms
+            .saturating_add(5 * 60 * 1000)
+        || request.acknowledged_at_unix_ms >= preview.expires_at_unix_ms
+    {
+        return Err(invitation_conflict(
+            "接受确认已过期，请重新预览并确认",
+            Some(&preview.network_name),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_invitation_redemption(
+    preview: &InvitationPreview,
+    redemption: &InvitationRedemption,
+) -> Result<(), NodeProblem> {
+    if redemption.invitation_id != preview.invitation_id
+        || redemption.network_id != preview.network_id
+        || redemption.role != preview.role
+        || redemption.capabilities != preview.capabilities
+        || redemption.invitation_revision < preview.invitation_revision
+        || redemption.network_revision < preview.network_revision
+    {
+        return Err(invitation_conflict(
+            "协调服务器返回的成员权限与已确认预览不一致",
+            Some(&preview.network_name),
+        ));
+    }
+    if redemption.grants_permanent_membership {
+        return Err(invitation_conflict(
+            "协调服务器返回了永久成员身份，已拒绝写入本地",
+            Some(&preview.network_name),
+        ));
+    }
+    Ok(())
+}
+
+async fn persist_invitation_membership(
+    configs: &ConfigManager,
+    preview: InvitationPreview,
+    acknowledged_at_unix_ms: u64,
+    joined_at_unix_ms: u64,
+) -> Result<(crate::config_manager::JoinedNetworkMembership, bool), String> {
+    let configs = configs.clone();
+    tokio::task::spawn_blocking(move || {
+        let identity = configs
+            .load_node_identity()
+            .map_err(|error| error.to_string())?;
+        let node_id = NodeId::from_public_key(&identity.public_key_bytes());
+        let mut membership = NetworkMembership::new(
+            preview.network_id.clone(),
+            node_id,
+            preview.role,
+            acknowledged_at_unix_ms,
+        );
+        membership
+            .begin_apply(
+                preview.terms.clone(),
+                JoinTermsAck {
+                    terms_hash: preview.terms_hash.clone(),
+                    acknowledged_at_unix_ms,
+                },
+                acknowledged_at_unix_ms,
+            )
+            .map_err(|error| error.to_string())?;
+        membership
+            .accept(joined_at_unix_ms.max(acknowledged_at_unix_ms))
+            .map_err(|error| error.to_string())?;
+        configs
+            .upsert_joined_membership(&preview.network_name, membership)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("邀请成员关系写入任务失败: {error}"))?
+}
+
+async fn redeem_invitation(
+    runtime: &NetworkRuntimeManager,
+    configs: &ConfigManager,
+    state: &NodeStateStore,
+    request_id: u64,
+    command: super::NodeRedeemInvitationCommand,
+) -> NodeCommandResult {
+    let network_id = command.request.network_id.clone();
+    let preview = match runtime
+        .preview_invitation(
+            network_id.clone(),
+            command.coordinator_url.clone(),
+            command.request.code.clone(),
+        )
+        .await
+    {
+        Ok(preview) => preview,
+        Err(error) => {
+            return runtime_rejection_for_network(request_id, error, network_id.to_string())
+        }
+    };
+    if let Err(problem) = validate_invitation_preview(&command.request, &preview, unix_time_ms()) {
+        return NodeCommandResult::rejected(request_id, problem);
+    }
+
+    let conflicting_config = configs.list_networks().ok().and_then(|networks| {
+        networks.into_iter().find(|network| {
+            network.name == preview.network_name
+                && network.network_id.as_deref() != Some(preview.network_id.as_str())
+        })
+    });
+    if conflicting_config.is_some() {
+        return NodeCommandResult::rejected(
+            request_id,
+            invitation_conflict(
+                "本地已存在同名但不同网络 ID 的配置",
+                Some(&preview.network_name),
+            ),
+        );
+    }
+
+    let redemption = match runtime
+        .redeem_invitation(command.coordinator_url.clone(), command.request.clone())
+        .await
+    {
+        Ok(redemption) => redemption,
+        Err(error) => {
+            return runtime_rejection_for_network(request_id, error, network_id.to_string())
+        }
+    };
+    if let Err(problem) = validate_invitation_redemption(&preview, &redemption) {
+        return NodeCommandResult::rejected(request_id, problem);
+    }
+
+    match persist_invitation_membership(
+        configs,
+        preview.clone(),
+        command.request.acknowledged_at_unix_ms,
+        redemption.joined_at_unix_ms,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(error) => {
+            return NodeCommandResult::rejected(
+                request_id,
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    format!("邀请已兑换，但保存本地普通成员关系失败: {error}"),
+                )
+                .with_message_key("invitation.error.storage")
+                .with_param("error_kind", "storage")
+                .retryable(true)
+                .for_network(preview.network_name.clone()),
+            )
+        }
+    }
+    if let Err(error) = refresh_network_memberships(state, configs).await {
+        tracing::warn!(%error, network = %preview.network_name, "邀请接受后刷新成员关系失败");
+    }
+
+    let join_command = super::NodeJoinNetworkCommand {
+        target: command.coordinator_url,
+        network_name: Some(preview.network_name.clone()),
+        start: true,
+        discovery_record: None,
+        network_id: Some(preview.network_id.to_string()),
+        preview_digest: Some(command.request.preview_digest.as_str().to_owned()),
+        network_policy_revision: Some(preview.terms.network_policy_revision),
+        privacy_policy_revision: Some(preview.terms.privacy_policy_revision),
+        terms_hash: Some(command.request.terms_hash.clone()),
+        acknowledged_at_unix_ms: Some(command.request.acknowledged_at_unix_ms),
+    };
+    if let Err(error) = runtime.join(join_command).await {
+        tracing::warn!(
+            %error,
+            network = %preview.network_name,
+            "邀请已兑换并保存成员关系，但本地网络配置或启动失败"
+        );
+        let problem = NodeProblem::new(
+            error.problem_code(),
+            format!("邀请已接受并保存普通成员关系，但本地网络配置或启动失败: {error}"),
+        )
+        .with_message_key(error.message_key())
+        .retryable(true)
+        .for_network(preview.network_name.clone());
+        state
+            .update(|snapshot| snapshot.last_error = Some(problem))
+            .await;
+    }
+
+    NodeCommandResult::completed(
+        request_id,
+        NodeCommandOutcome::InvitationRedeemed(Box::new(redemption)),
+    )
+}
+
 async fn submit_join_request(
     runtime: &NetworkRuntimeManager,
     discovery: &DiscoveryIndexManager,
@@ -2548,10 +2938,58 @@ mod tests {
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use crate::symmetric::EmbeddedServiceStartRequest;
+    use fuckipv6_common::domain::{ContentHash, InvitationCode, InvitationId};
     use fuckipv6_common::{
         ExitNodeCapabilities, ExitNodePlatform, NetworkMode, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
     };
     use tokio::sync::mpsc;
+
+    fn invitation_preview() -> InvitationPreview {
+        let terms = MembershipTerms {
+            network_policy_revision: 7,
+            privacy_policy_revision: 3,
+            exit_contribution: Default::default(),
+            member_limit: Some(25),
+        };
+        let mut preview = InvitationPreview {
+            invitation_id: InvitationId::from_public_key(b"invitation"),
+            invitation_revision: 4,
+            network_id: NetworkId::from_public_key(b"network"),
+            network_name: "private-lab".into(),
+            network_revision: 11,
+            role: MembershipRole::Member,
+            capabilities: vec![CapabilityKind::Exit, CapabilityKind::File],
+            remaining_uses: 2,
+            expires_at_unix_ms: 100_000,
+            state: InvitationState::Active,
+            terms_hash: terms.content_hash().expect("terms hash"),
+            terms,
+            preview_digest: ContentHash::from_bytes(b"placeholder"),
+            permission_changes: vec!["member:exit,file".into()],
+            creates_permanent_membership: false,
+            requires_recent_reauthentication: true,
+            can_accept: true,
+            denial_key: None,
+        };
+        preview.preview_digest = preview.compute_digest().expect("preview digest");
+        preview
+    }
+
+    fn invitation_redeem_request(preview: &InvitationPreview) -> InvitationRedeemRequest {
+        InvitationRedeemRequest {
+            network_id: preview.network_id.clone(),
+            code: InvitationCode::generate().expect("invitation code"),
+            invitation_id: preview.invitation_id.clone(),
+            expected_invitation_revision: preview.invitation_revision,
+            preview_digest: preview.preview_digest.clone(),
+            terms_hash: preview.terms_hash.clone(),
+            acknowledged_at_unix_ms: 90_000,
+        }
+    }
+
+    fn rebind_preview_digest(preview: &mut InvitationPreview) {
+        preview.preview_digest = preview.compute_digest().expect("preview digest");
+    }
 
     async fn execute_rejected(
         bus: &NodeCommandBus,
@@ -3171,6 +3609,156 @@ mod tests {
 
         assert_problem(&problem, NodeProblemCode::NotFound, false);
         assert_eq!(problem.network_name.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn invitation_consent_rejects_digest_terms_and_reauthentication_drift() {
+        let preview = invitation_preview();
+        let mut request = invitation_redeem_request(&preview);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_ok());
+
+        request.preview_digest = ContentHash::from_bytes(b"different-preview");
+        let problem = validate_invitation_preview(&request, &preview, 95_000)
+            .expect_err("changed preview digest must be rejected");
+        assert_problem(&problem, NodeProblemCode::Conflict, false);
+        assert_eq!(
+            problem.message_key.as_str(),
+            "invitation.error.preview_changed"
+        );
+
+        let mut request = invitation_redeem_request(&preview);
+        request.terms_hash = ContentHash::from_bytes(b"different-terms");
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+
+        let request = invitation_redeem_request(&preview);
+        assert!(validate_invitation_preview(&request, &preview, 90_001).is_ok());
+        assert!(
+            validate_invitation_preview(&request, &preview, 90_001 + 5 * 60 * 1000).is_err(),
+            "consent older than five minutes must be rejected"
+        );
+    }
+
+    #[test]
+    fn invitation_consent_rejects_unavailable_privileged_and_permanent_grants() {
+        for state in [
+            InvitationState::Expired,
+            InvitationState::Revoked,
+            InvitationState::Exhausted,
+        ] {
+            let mut preview = invitation_preview();
+            preview.state = state;
+            preview.can_accept = false;
+            preview.denial_key = Some(format!("invitation.state.{state:?}").to_lowercase());
+            rebind_preview_digest(&mut preview);
+            let request = invitation_redeem_request(&preview);
+            assert!(
+                validate_invitation_preview(&request, &preview, 95_000).is_err(),
+                "{state:?} invitation must not be accepted"
+            );
+        }
+
+        let mut preview = invitation_preview();
+        preview.remaining_uses = 0;
+        rebind_preview_digest(&mut preview);
+        let request = invitation_redeem_request(&preview);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+
+        let mut preview = invitation_preview();
+        preview.role = MembershipRole::Owner;
+        rebind_preview_digest(&mut preview);
+        let request = invitation_redeem_request(&preview);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+
+        let mut preview = invitation_preview();
+        preview.creates_permanent_membership = true;
+        rebind_preview_digest(&mut preview);
+        let request = invitation_redeem_request(&preview);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+
+        let mut preview = invitation_preview();
+        preview.capabilities = vec![CapabilityKind::Exit, CapabilityKind::Exit];
+        rebind_preview_digest(&mut preview);
+        let request = invitation_redeem_request(&preview);
+        assert!(validate_invitation_preview(&request, &preview, 95_000).is_err());
+    }
+
+    #[test]
+    fn invitation_redemption_must_match_consented_permissions_and_not_be_permanent() {
+        let preview = invitation_preview();
+        let redemption = InvitationRedemption {
+            invitation_id: preview.invitation_id.clone(),
+            network_id: preview.network_id.clone(),
+            node_id: NodeId::from_public_key(b"member"),
+            role: preview.role,
+            capabilities: preview.capabilities.clone(),
+            network_revision: preview.network_revision,
+            invitation_revision: preview.invitation_revision + 1,
+            joined_at_unix_ms: 91_000,
+            already_redeemed: false,
+            grants_permanent_membership: false,
+        };
+        assert!(validate_invitation_redemption(&preview, &redemption).is_ok());
+
+        for mutate in [
+            (|value: &mut InvitationRedemption| value.role = MembershipRole::Administrator)
+                as fn(&mut InvitationRedemption),
+            |value: &mut InvitationRedemption| value.capabilities.push(CapabilityKind::Exit),
+            |value: &mut InvitationRedemption| value.capabilities = vec![CapabilityKind::Relay],
+            |value: &mut InvitationRedemption| {
+                value.network_id = NetworkId::from_public_key(b"other")
+            },
+            |value: &mut InvitationRedemption| value.grants_permanent_membership = true,
+        ] {
+            let mut candidate = redemption.clone();
+            mutate(&mut candidate);
+            assert!(validate_invitation_redemption(&preview, &candidate).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_persistence_creates_only_ordinary_accepted_membership() {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-runtime-handler-invitation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let configs = ConfigManager::new_for_dir(dir.clone()).expect("config manager");
+        let identity = configs.load_node_identity().expect("node identity");
+        let preview = invitation_preview();
+
+        let (stored, inserted) =
+            persist_invitation_membership(&configs, preview.clone(), 90_000, 91_000)
+                .await
+                .expect("persist invitation membership");
+        assert!(inserted);
+        assert_eq!(stored.network_name, preview.network_name);
+        assert_eq!(stored.membership.network_id, preview.network_id);
+        assert_eq!(
+            stored.membership.node_id,
+            NodeId::from_public_key(&identity.public_key_bytes())
+        );
+        assert_eq!(
+            stored.membership.state,
+            fuckipv6_common::domain::MembershipState::Accepted
+        );
+        assert_eq!(stored.membership.role, MembershipRole::Member);
+        assert_eq!(stored.membership.terms, Some(preview.terms.clone()));
+
+        let (replayed, inserted) =
+            persist_invitation_membership(&configs, preview.clone(), 90_000, 92_000)
+                .await
+                .expect("idempotent invitation persistence");
+        assert!(!inserted);
+        assert_eq!(replayed, stored);
+        assert_eq!(
+            configs
+                .list_joined_memberships()
+                .expect("memberships")
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

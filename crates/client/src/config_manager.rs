@@ -1294,6 +1294,39 @@ impl ConfigManager {
         self.save_network_list(&list)
     }
 
+    /// Bind a stable network ID when an invitation was the authority and no
+    /// signed public-network record was available. The public key remains
+    /// unknown until a signed profile is discovered; the stable ID is still
+    /// sufficient to prevent accidental joins to a different network.
+    pub(crate) fn set_network_id_metadata(
+        &self,
+        network_name: &str,
+        network_id: &str,
+    ) -> Result<()> {
+        Self::validate_network_name(network_name)?;
+        let network_id = NetworkId::parse(network_id.to_owned())
+            .map_err(|error| anyhow::anyhow!("网络 ID 格式无效: {error}"))?;
+        let mut list = self.load_network_list()?;
+        if list.networks.iter().any(|(name, network)| {
+            name != network_name && network.network_id.as_deref() == Some(network_id.as_str())
+        }) {
+            anyhow::bail!("稳定网络 ID [{network_id}] 已绑定到其他本地配置");
+        }
+        let network = list
+            .networks
+            .get_mut(network_name)
+            .with_context(|| format!("无法设置身份元数据：网络 [{network_name}] 不存在"))?;
+        if let Some(existing) = network.network_id.as_deref() {
+            if existing != network_id.as_str() {
+                anyhow::bail!(
+                    "网络 [{network_name}] 已绑定稳定网络 ID [{existing}]，不能覆盖为 [{network_id}]"
+                );
+            }
+        }
+        network.network_id = Some(network_id.to_string());
+        self.save_network_list(&list)
+    }
+
     fn configuration_store(&self) -> ConfigurationTransactionStore {
         ConfigurationTransactionStore::new(self.config_dir.clone())
     }
@@ -2285,6 +2318,51 @@ mod tests {
                 .iter()
                 .map(String::as_str)
                 .collect()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn stable_network_id_metadata_is_idempotent_and_cannot_be_rebound() -> anyhow::Result<()> {
+        let dir = temp_config_dir("network-id-metadata");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let home =
+            manager.create_owned_network(owned_profile("home"), "ws://127.0.0.1:6666", true)?;
+        let lab =
+            manager.create_owned_network(owned_profile("lab"), "ws://127.0.0.1:6667", false)?;
+
+        manager.set_network_id_metadata("home", home.record.network_id.as_str())?;
+        manager.set_network_id_metadata("home", home.record.network_id.as_str())?;
+        assert_eq!(
+            manager
+                .load_network_list()?
+                .networks
+                .get("home")
+                .and_then(|network| network.network_id.as_deref()),
+            Some(home.record.network_id.as_str())
+        );
+
+        let original = manager.load_network_list()?;
+        assert!(manager
+            .set_network_id_metadata("home", lab.record.network_id.as_str())
+            .is_err());
+        assert!(manager
+            .set_network_id_metadata("lab", home.record.network_id.as_str())
+            .is_err());
+        assert!(manager
+            .set_network_id_metadata("missing", home.record.network_id.as_str())
+            .is_err());
+        let after_failures = manager.load_network_list()?;
+        assert_eq!(
+            after_failures.networks["home"].network_id,
+            original.networks["home"].network_id
+        );
+        assert_eq!(
+            after_failures.networks["lab"].network_id,
+            original.networks["lab"].network_id
         );
 
         let _ = std::fs::remove_dir_all(dir);

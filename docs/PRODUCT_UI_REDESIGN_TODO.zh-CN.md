@@ -1460,22 +1460,52 @@ WebUI `npm test -- --run`（145 passed）、`npm run typecheck`、`npm run lint`
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`、
 `cargo fmt --all -- --check` 和 `git diff --check`。
 
-### W9-02 邀请、审批与移除 `[ ]`
+### W9-02 邀请、审批与移除 `[x]`
 
 - [x] 统一成员生命周期操作及允许前置状态；
-- [ ] 邀请、批准、拒绝、暂停、恢复、退出、移除均使用 operation；
-- [ ] 移除前展示网络访问、File 权限和数据影响；
-- [ ] 移除后立即撤销会话、授权和未完成传输；
-- [ ] 支持撤销误操作时的安全恢复路径，不复活泄漏凭据；
-- [ ] 管理员不能移除 Owner 或绕过保护阈值；
-- [ ] 普通成员不能操作其他成员；
-- [ ] 所有操作幂等并产生活动与审计。
+- [x] 邀请、批准、拒绝、暂停、恢复、退出、移除均使用 operation；
+- [x] 移除前展示网络访问、File 权限和数据影响；
+- [x] 移除后立即撤销会话、授权和未完成传输；
+- [x] 支持撤销误操作时的安全恢复路径，不复活泄漏凭据；
+- [x] 管理员不能移除 Owner 或绕过保护阈值；
+- [x] 普通成员不能操作其他成员；
+- [x] 所有操作幂等并产生活动与审计。
 
 **验收**：任何治理操作都有清晰状态转移、权限校验、撤销边界和并发测试。
 
-**证据（2026-11-04，进行中）**：`lifecycle_transition_table_covers_every_governance_action` 与
+**证据（2026-11-05）**：`lifecycle_transition_table_covers_every_governance_action` 与
 `illegal_lifecycle_predecessors_fail_closed` 覆盖邀请、批准、拒绝、暂停、恢复、退出、移除和恢复到待审批的全部合法/非法前置状态；
-`concurrent_mutations_use_cas_and_only_one_wins` 验证生命周期存储以 CAS revision 串行化并发治理。
+`signaling::member_lifecycle::tests`（8 passed）在 Coordinator 侧逐项验证目标功能：
+
+- `every_lifecycle_action_uses_the_same_operation_and_audit_ledger`：邀请、批准、拒绝、暂停、恢复、退出、移除和撤销移除均产生
+  同一 operation/audit 台账记录，且复用 idempotency key 时不会重复写入；
+- `removal_preview_discloses_revocations_without_deleting_files_or_reviving_credentials`：移除预览披露网络访问、File 权限、
+  未完成传输和凭据影响，明确本地文件保留、旧凭据不恢复；
+- `last_administrator_and_owner_cannot_be_removed`：Owner 与最后一名管理员受保护，无法被移除或降级绕过阈值；
+- `ordinary_members_cannot_operate_on_other_members_and_owner_is_protected`：普通成员不能对他人执行治理操作；
+- `concurrent_mutations_use_cas_and_only_one_wins`：生命周期存储以 CAS revision 串行化并发治理；
+- `idempotency_key_reuse_with_different_payload_is_rejected`：同一幂等键复用不同请求内容会被拒绝；
+- `lifecycle_mutations_are_authorized_and_idempotent`：重复提交同一请求返回幂等结果并保持审计一致；
+- `remove_undo_requires_reapproval_and_never_restores_old_epoch`：撤销误移除只会回到待审批并递增访问世代，旧凭据不复活。
+
+**移除后撤销边界**：Coordinator 在拒绝、暂停、退出和移除时断开目标节点会话
+（`signaling/session.rs::disconnect_node_sessions` 由 `signaling/server.rs` 调用），并把成员访问世代递增；
+`crates/common/src/domain/file_share.rs` 的 `resume_is_bound_to_identity_share_revision_and_file_version` 验证当前世代或请求世代不匹配时
+`resume()` 返回 `PermissionRevoked` 并把传输置为 `Cancelled`。当前尚未建立独立传输注册表或主动取消枚举，
+未完成传输由 access epoch 失效 fail closed，不能继续续传。
+
+**WebUI 证据**：`member-directory.test.tsx`（8 passed）覆盖治理区仅在 `can_manage_members` 时展示、可执行动作完全取自服务端
+`available_actions`、移除前先调用 `preview_member_removal` 并展示完整影响、移除提交携带 `target_node_id`/`role`/`expected_revision`、
+全部非移除动作直接走 operation、拒绝预览时禁用确认以及服务端拒绝不关闭对话框；`action-panel.test.tsx`（30 passed）覆盖
+`preview_member_removal`/`change_member_lifecycle` 动作卡、生命周期结果不关闭动作卡以及成功后按 `network_id` 刷新目录；
+`invariants.test.ts`（25 passed）覆盖新命令 payload、预览/变更 outcome 的 fail-closed 校验与非法动作拒绝。
+
+**验证通过**：`cargo test -p fuckipv6-common --all-features`（206 passed）、
+`cargo test -p fuckipv6-coordinator --all-features`（117 passed，另 2 个 signaling flow）、
+`cargo test -p fuckipv6-client --all-features --lib`（846 passed，3 ignored）、
+WebUI `npm test -- --run`（155 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
+`node ../scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、`./scripts/generate-contracts.sh`、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check`。
 
 ### W9-03 自定义组与动态组 `[ ]`
 

@@ -9,7 +9,10 @@ import type {
   NetworkMemberDirectory,
   NodeUiAction,
 } from "../../contracts/typescript/node-contract-v1";
-import { MemberDirectoryCard } from "./member-directory";
+import {
+  MemberDirectoryCard,
+  type MemberGovernanceSubmit,
+} from "./member-directory";
 import { installTestI18nRuntime } from "./test/runtime";
 
 const generatedAtUnixMs = 1_700_000_100_000;
@@ -30,6 +33,7 @@ function member(overrides: Partial<NetworkMember>): NetworkMember {
     },
     lifecycle_state: "approved",
     revision: 1,
+    access_epoch: 1,
     joined_at_unix_ms: generatedAtUnixMs - 60_000,
     ...overrides,
   };
@@ -329,8 +333,8 @@ describe("MemberDirectoryCard", () => {
     const user = userEvent.setup();
     const preview = removalPreview({ revision: 7 });
     const change = lifecycleChange({ action: "remove", revision: 8 });
-    const onSubmit = vi.fn(
-      async (submitted: NodeUiAction) =>
+    const onSubmit = vi.fn<MemberGovernanceSubmit>(
+      async (submitted) =>
         submitted.id === "preview_member_removal"
           ? {
               outcome: {
@@ -411,7 +415,7 @@ describe("MemberDirectoryCard", () => {
       "undo_remove",
     ];
     for (const lifecycle of actions) {
-      const onSubmit = vi.fn(async () => ({
+      const onSubmit = vi.fn<MemberGovernanceSubmit>(async () => ({
         outcome: {
           status: "member_lifecycle_changed" as const,
           data: lifecycleChange({ action: lifecycle }),
@@ -463,13 +467,14 @@ describe("MemberDirectoryCard", () => {
       denial_key: "member_lifecycle.error.owner_protected",
     });
     const rejected = {
-      category: "permission" as const,
+      category: "authorization" as const,
       code: "permission_denied" as const,
       message: "denied",
       message_key: "member_lifecycle.error.permission_denied",
       retryable: false,
     };
-    const onSubmit = vi.fn(async (submitted: NodeUiAction) =>
+    const onSubmit = vi.fn<MemberGovernanceSubmit>(
+      async (submitted) =>
       submitted.id === "preview_member_removal"
         ? {
             outcome: {
@@ -507,13 +512,13 @@ describe("MemberDirectoryCard", () => {
   it("surfaces server rejections from a lifecycle change without closing the dialog", async () => {
     const user = userEvent.setup();
     const rejected = {
-      category: "conflict" as const,
+      category: "state" as const,
       code: "conflict" as const,
       message: "stale",
       message_key: "member_lifecycle.error.stale_revision",
       retryable: true,
     };
-    const onSubmit = vi.fn(async () => ({
+    const onSubmit = vi.fn<MemberGovernanceSubmit>(async () => ({
       outcome: { status: "rejected" as const, data: rejected },
     }));
     render(

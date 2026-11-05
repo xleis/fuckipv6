@@ -26,6 +26,9 @@ function member(overrides: Partial<NetworkMember>): NetworkMember {
     groups: ["member"],
     capabilities: ["file"],
     status: "approved",
+    lifecycle_state: "approved",
+    revision: 1,
+    access_epoch: 1,
     presence: {
       state: "unknown",
       source: "not_observed",

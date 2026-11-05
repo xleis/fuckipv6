@@ -5,6 +5,8 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   InvitationPreview,
+  MemberLifecycleChange,
+  MemberRemovalPreview,
   InvitationStatusView,
   IssuedInvitation,
   JoinRequest,
@@ -90,6 +92,8 @@ const editedFingerprint = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
 const memberDirectory: NetworkMemberDirectory = {
   network_id: "net_stable_home",
   generated_at_unix_ms: 1_700_000_100_000,
+  viewer_role: "owner",
+  can_manage_members: true,
   members: [
     {
       node_id: "node-000",
@@ -99,6 +103,9 @@ const memberDirectory: NetworkMemberDirectory = {
       groups: ["owner"],
       capabilities: ["coordinator", "file"],
       status: "active",
+      lifecycle_state: "active",
+      revision: 3,
+      access_epoch: 2,
       presence: {
         state: "online",
         source: "live_session",
@@ -2402,6 +2409,363 @@ describe("action panel network member directory", () => {
       expect(
         screen.queryByText("translated:member_directory.title"),
       ).not.toBeInTheDocument();
+    });
+  });
+});
+
+
+describe("action panel member governance", () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(
+    Element.prototype,
+    "clientWidth",
+  );
+  const originalClientHeight = Object.getOwnPropertyDescriptor(
+    Element.prototype,
+    "clientHeight",
+  );
+
+  afterEach(() => {
+    if (originalClientWidth) {
+      Object.defineProperty(
+        Element.prototype,
+        "clientWidth",
+        originalClientWidth,
+      );
+    }
+    if (originalClientHeight) {
+      Object.defineProperty(
+        Element.prototype,
+        "clientHeight",
+        originalClientHeight,
+      );
+    }
+  });
+
+  const governedNodeId = `node_${"A".repeat(43)}`;
+  const previewMemberRemoval = manifest.pages
+    .flatMap((page) => page.actions)
+    .find((action) => action.id === "preview_member_removal") as NodeUiAction;
+  const changeMemberLifecycle = manifest.pages
+    .flatMap((page) => page.actions)
+    .find((action) => action.id === "change_member_lifecycle") as NodeUiAction;
+
+  function governedDirectory(
+    lifecycle: "active" | "removed" = "active",
+  ): NetworkMemberDirectory {
+    return {
+      network_id: "net_stable_home",
+      generated_at_unix_ms: 1_700_000_100_000,
+      viewer_role: "owner",
+      can_manage_members: true,
+      members: [
+        {
+          node_id: governedNodeId,
+          display_name: "Governed member",
+          identity_fingerprint: currentFingerprint,
+          role: "member",
+          groups: ["member"],
+          capabilities: ["file"],
+          status: lifecycle === "active" ? "active" : "removed",
+          lifecycle_state: lifecycle,
+          revision: lifecycle === "active" ? 3 : 4,
+          access_epoch: lifecycle === "active" ? 2 : 3,
+          available_actions: lifecycle === "active" ? ["remove", "suspend"] : [],
+          presence: {
+            state: "online",
+            source: "live_session",
+            observed_at_unix_ms: 1_700_000_095_000,
+          },
+          joined_at_unix_ms: 1_700_000_000_000,
+        },
+      ],
+    };
+  }
+
+  const removalPreview: MemberRemovalPreview = {
+    network_id: "net_stable_home",
+    target_node_id: governedNodeId,
+    role: "member",
+    status: "active",
+    lifecycle_state: "active",
+    revision: 3,
+    access_epoch: 2,
+    presence: {
+      state: "online",
+      source: "live_session",
+      observed_at_unix_ms: 1_700_000_095_000,
+    },
+    can_remove: true,
+    network_access_revoked: true,
+    file_access_revoked: true,
+    incomplete_transfers_resume_blocked: true,
+    credentials_revoked: true,
+    local_files_deleted: false,
+    old_access_epoch_invalidated: true,
+    safe_undo_requires_reapproval: true,
+    safe_undo_restores_old_credentials: false,
+    impact_keys: [
+      "member_removal.impact.network_access",
+      "member_removal.impact.file_access",
+      "member_removal.impact.incomplete_transfers",
+      "member_removal.impact.credentials",
+      "member_removal.impact.local_files_kept",
+      "member_removal.impact.safe_undo",
+    ],
+  };
+
+  const lifecycleChange: MemberLifecycleChange = {
+    network_id: "net_stable_home",
+    target_node_id: governedNodeId,
+    action: "remove",
+    status: "removed",
+    revision: 4,
+    access_epoch: 3,
+    access_revoked: true,
+    requires_reapproval: true,
+    requires_reauthentication: true,
+    idempotent: false,
+    operation_id: "op_lifecycle",
+    audit_id: "audit_lifecycle",
+  };
+
+  it("governs members from the authoritative directory and refreshes it after a change", async () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 680,
+      bottom: 360,
+      width: 680,
+      height: 360,
+      toJSON: () => ({}),
+    });
+    Object.defineProperty(Element.prototype, "clientWidth", {
+      configurable: true,
+      value: 680,
+    });
+    Object.defineProperty(Element.prototype, "clientHeight", {
+      configurable: true,
+      value: 360,
+    });
+    const user = userEvent.setup();
+    let directoryLoads = 0;
+    const onSubmit = vi.fn(
+      async (
+        submitted: NodeUiAction,
+        values: ActionValues,
+      ): Promise<ActionSubmission> => {
+        void values;
+        if (submitted.id === "list_network_members") {
+          directoryLoads += 1;
+          return {
+            outcome: {
+              status: "network_members",
+              data: governedDirectory(
+                directoryLoads === 1 ? "active" : "removed",
+              ),
+            },
+          };
+        }
+        if (submitted.id === "preview_member_removal") {
+          return {
+            outcome: { status: "member_removal_preview", data: removalPreview },
+          };
+        }
+        return {
+          outcome: { status: "member_lifecycle_changed", data: lifecycleChange },
+        };
+      },
+    );
+    render(
+      <ActionPanel
+        actions={[listNetworkMembers, previewMemberRemoval, changeMemberLifecycle]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const actionHead = screen.getByRole("button", {
+      name: "translated:action.list_network_members",
+    });
+    await user.click(actionHead);
+    await user.type(
+      screen.getByLabelText("translated:field.network_id"),
+      "net_stable_home",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    await user.click(
+      await screen.findByRole("option", { name: /Governed member/ }),
+    );
+    await user.click(screen.getByTestId("member-governance-action-remove"));
+    const impact = await screen.findByTestId("member-removal-impact");
+    expect(impact).toHaveTextContent("translated:member_removal.impact.credentials");
+    await user.click(screen.getByTestId("member-governance-confirm"));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(4));
+    const lifecycleCall = onSubmit.mock.calls[2];
+    expect(lifecycleCall[0].id).toBe("change_member_lifecycle");
+    expect(lifecycleCall[1]).toMatchObject({
+      network_id: "net_stable_home",
+      target_node_id: governedNodeId,
+      action: "remove",
+      role: "member",
+      expected_revision: "3",
+    });
+    const refreshCall = onSubmit.mock.calls[3];
+    expect(refreshCall[0].id).toBe("list_network_members");
+    expect(refreshCall[1]).toEqual({ network_id: "net_stable_home" });
+
+    expect(await screen.findByTestId("member-detail")).toHaveTextContent(
+      "translated:member_directory.lifecycle_state.removed",
+    );
+    expect(screen.getByTestId("member-detail")).toHaveTextContent("4");
+    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps a standalone removal preview open with the full impact summary", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      async (
+        submitted: NodeUiAction,
+        values: ActionValues,
+      ): Promise<ActionSubmission> => {
+        void submitted;
+        void values;
+        return {
+          outcome: { status: "member_removal_preview", data: removalPreview },
+        };
+      },
+    );
+    render(
+      <ActionPanel
+        actions={[previewMemberRemoval]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const actionHead = screen.getByRole("button", {
+      name: "translated:action.preview_member_removal",
+    });
+    await user.click(actionHead);
+    await user.type(
+      screen.getByLabelText("translated:field.network_id"),
+      "net_stable_home",
+    );
+    await user.type(
+      screen.getByLabelText("translated:field.target_node_id"),
+      governedNodeId,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    expect(
+      await screen.findByText("translated:outcome.member_removal_previewed"),
+    ).toBeInTheDocument();
+    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(onSubmit.mock.calls[0][1]).toEqual({
+      network_id: "net_stable_home",
+      target_node_id: governedNodeId,
+    });
+  });
+
+  it("keeps the lifecycle card open after a confirmed change", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      async (
+        submitted: NodeUiAction,
+        values: ActionValues,
+      ): Promise<ActionSubmission> => {
+        void submitted;
+        void values;
+        return {
+          outcome: {
+            status: "member_lifecycle_changed",
+            data: { ...lifecycleChange, action: "suspend", status: "suspended" },
+          },
+        };
+      },
+    );
+    render(
+      <ActionPanel
+        actions={[changeMemberLifecycle]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const actionHead = screen.getByRole("button", {
+      name: "translated:action.change_member_lifecycle",
+    });
+    await user.click(actionHead);
+    await user.type(
+      screen.getByLabelText("translated:field.network_id"),
+      "net_stable_home",
+    );
+    await user.type(
+      screen.getByLabelText("translated:field.target_node_id"),
+      governedNodeId,
+    );
+    await user.selectOptions(
+      screen.getByLabelText("translated:field.member_lifecycle_action"),
+      "suspend",
+    );
+    await user.selectOptions(
+      screen.getByLabelText("translated:field.membership_role"),
+      "member",
+    );
+    await user.type(
+      screen.getByLabelText("translated:field.expected_revision"),
+      "3",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    expect(
+      await screen.findByText("translated:outcome.member_lifecycle_changed"),
+    ).toBeInTheDocument();
+    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][1]).toMatchObject({
+      action: "suspend",
+      expected_revision: "3",
+      role: "member",
     });
   });
 });

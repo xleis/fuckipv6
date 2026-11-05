@@ -15,6 +15,7 @@ import type {
   IssuedInvitation,
   JoinRequest,
   JoinRequestReviewAction,
+  MemberLifecycleChange,
   NetworkMemberDirectory,
   NetworkProfileApplyResult,
   NetworkProfilePreview,
@@ -81,6 +82,7 @@ const selectInputs = new Set([
   "visibility",
   "join_mode",
   "join_request_review_action",
+  "member_lifecycle_action",
 ]);
 
 function selectOptions(
@@ -113,7 +115,28 @@ function selectOptions(
       { value: "ipv6_only", text: "ipv6_only" },
     ];
   }
+  if (field.input === "member_lifecycle_action") {
+    return [
+      "invite",
+      "approve",
+      "reject",
+      "suspend",
+      "resume",
+      "exit",
+      "remove",
+      "undo_remove",
+    ].map((value) => ({
+      value,
+      text: label(locale, `choice.member_lifecycle.${value}`),
+    }));
+  }
   if (field.input === "role") {
+    if (field.label_key === "field.membership_role") {
+      return ["owner", "administrator", "member"].map((value) => ({
+        value,
+        text: label(locale, `join_request.role.${value}`),
+      }));
+    }
     if (field.label_key === "field.invitation_role") {
       return ["member", "administrator"].map((value) => ({
         value,
@@ -2486,6 +2509,9 @@ function ActionCard({
   activePendingAction,
   reviewJoinRequestAction,
   batchReviewJoinRequestsAction,
+  previewMemberRemovalAction,
+  changeMemberLifecycleAction,
+  networkMembersAction,
   onRequestedActionOpened,
   onSubmit,
 }: {
@@ -2508,6 +2534,9 @@ function ActionCard({
   activePendingAction: string | null;
   reviewJoinRequestAction?: NodeUiAction;
   batchReviewJoinRequestsAction?: NodeUiAction;
+  previewMemberRemovalAction?: NodeUiAction;
+  changeMemberLifecycleAction?: NodeUiAction;
+  networkMembersAction?: NodeUiAction;
   onRequestedActionOpened(): void;
   onSubmit(
     action: NodeUiAction,
@@ -2778,7 +2807,9 @@ function ActionCard({
           setOpen(true);
         } else if (
           !submission.outcome.status.startsWith("invitation_") &&
-          submission.outcome.status !== "invitations"
+          submission.outcome.status !== "invitations" &&
+          submission.outcome.status !== "member_removal_preview" &&
+          submission.outcome.status !== "member_lifecycle_changed"
         ) {
           if (
             submission.outcome.status === "network_joined" ||
@@ -2976,6 +3007,24 @@ function ActionCard({
     });
   }
 
+  function handleLifecycleChanged(change: MemberLifecycleChange): void {
+    if (!networkMembersAction) return;
+    void onSubmit(
+      networkMembersAction,
+      { network_id: change.network_id },
+      () => {},
+    )
+      .then((submission) => {
+        if (submission.outcome?.status === "network_members") {
+          setNetworkMembers(submission.outcome.data);
+        }
+      })
+      .catch(() => {
+        // The next directory refresh keeps server truth; a failed refresh must
+        // not close or corrupt the governance result already shown.
+      });
+  }
+
   function handleSubmit(event: FormEvent): void {
     event.preventDefault();
     if (blocked || pending) return;
@@ -3032,6 +3081,11 @@ function ActionCard({
         <MemberDirectoryCard
           directory={networkMembers}
           locale={locale}
+          previewRemovalAction={previewMemberRemovalAction}
+          changeLifecycleAction={changeMemberLifecycleAction}
+          activePendingAction={activePendingAction}
+          onSubmit={onSubmit}
+          onLifecycleChanged={handleLifecycleChanged}
         />
       ) : null}
       {joinRequests ? (
@@ -3333,6 +3387,15 @@ export function ActionPanel(props: ActionPanelProps) {
             )}
             batchReviewJoinRequestsAction={actions.find(
               (candidate) => candidate.id === "batch_review_join_requests",
+            )}
+            previewMemberRemovalAction={actions.find(
+              (candidate) => candidate.id === "preview_member_removal",
+            )}
+            changeMemberLifecycleAction={actions.find(
+              (candidate) => candidate.id === "change_member_lifecycle",
+            )}
+            networkMembersAction={actions.find(
+              (candidate) => candidate.id === "list_network_members",
             )}
             onRequestedActionOpened={props.onRequestedActionOpened}
             onSubmit={onSubmit}

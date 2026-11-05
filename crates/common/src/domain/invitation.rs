@@ -460,6 +460,9 @@ pub struct InvitationRedemption {
     pub node_id: NodeId,
     pub role: MembershipRole,
     pub capabilities: Vec<CapabilityKind>,
+    /// Manager whose active invitation authorized this admission. The
+    /// lifecycle ledger revalidates this identity at redemption time.
+    pub invited_by: NodeId,
     pub network_revision: u64,
     pub invitation_revision: u64,
     pub joined_at_unix_ms: u64,

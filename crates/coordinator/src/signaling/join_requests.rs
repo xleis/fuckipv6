@@ -4,12 +4,14 @@ use fuckipv6_common::domain::{
     JoinRequest, JoinRequestId, JoinRequestState, NetworkId, NetworkJoinMode, NetworkRecord, NodeId,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem, JoinRequestReviewResult};
+
+use super::member_lifecycle::MemberLifecycleStore;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const JOIN_REQUEST_FILE_SCHEMA_VERSION: u16 = 1;
@@ -90,6 +92,7 @@ pub struct JoinRequestStore {
     network_record_path: Option<PathBuf>,
     fallback_owner: Option<NodeId>,
     fallback_administrators: BTreeSet<NodeId>,
+    member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     process_lock: Mutex<()>,
 }
 
@@ -120,8 +123,14 @@ impl JoinRequestStore {
             network_record_path,
             fallback_owner,
             fallback_administrators,
+            member_lifecycle_store: None,
             process_lock: Mutex::new(()),
         })
+    }
+
+    pub fn with_member_lifecycle_store(mut self, store: Arc<MemberLifecycleStore>) -> Self {
+        self.member_lifecycle_store = Some(store);
+        self
     }
 
     pub fn submit(
@@ -269,6 +278,10 @@ impl JoinRequestStore {
         if reviews.len() > 100 {
             bail!("batch review exceeds 100 requests");
         }
+        let lifecycle = self
+            .member_lifecycle_store
+            .as_ref()
+            .context("协调器未配置成员生命周期台账，审批操作失败关闭")?;
         self.repair_roster_projection(network_id)?;
         let mut seen = BTreeSet::new();
         if reviews
@@ -278,96 +291,84 @@ impl JoinRequestStore {
             bail!("batch review contains duplicate request ids");
         }
 
-        // Approval changes two durable files: the request ledger and the
-        // authoritative network roster. The same profile lock used by profile
-        // edits is held across both writes so a concurrent profile update cannot
-        // race the roster snapshot.
-        let record_path = self
-            .network_record_path
-            .as_ref()
-            .context("协调器未配置可信 network_record_path，审批操作失败关闭")?;
-        let profile_lock = lock_profile(record_path)?;
-        let result = (|| {
-            let mut network_record = read_network_record(record_path, network_id)?;
-            if !network_record.owner.eq(reviewer)
-                && !network_record
-                    .administrators
-                    .iter()
-                    .any(|admin| admin == reviewer)
-            {
-                bail!("actor is not a current owner or administrator");
+        self.with_file_lock(|file| {
+            let old_request_bytes = std::fs::read(&self.path).ok();
+            let mut candidate = file.clone();
+            candidate.expire_and_scrub(now_unix_ms)?;
+            let mut results = Vec::with_capacity(reviews.len());
+            let mut effects = Vec::with_capacity(reviews.len());
+            for review in &reviews {
+                let request = candidate
+                    .requests
+                    .get_mut(&review.request_id)
+                    .with_context(|| format!("join request not found: {}", review.request_id))?;
+                if request.network_id != *network_id {
+                    bail!("join request belongs to another network");
+                }
+                if request.applicant.node_id == *reviewer {
+                    bail!("join_request.error.self_review_forbidden");
+                }
+                request.review(
+                    review.expected_revision,
+                    review.action,
+                    reviewer.clone(),
+                    review.note.clone(),
+                    now_unix_ms,
+                )?;
+                if request.state == JoinRequestState::Approved {
+                    candidate
+                        .accepted_members
+                        .insert(request.applicant.node_id.clone());
+                }
+                effects.push((
+                    request.request_id.to_string(),
+                    request.applicant.node_id.clone(),
+                    review.action,
+                ));
+                results.push(JoinRequestReviewResult {
+                    request_id: request.request_id.clone(),
+                    state: request.state,
+                    revision: request.revision,
+                });
             }
 
-            self.with_file_lock(|file| {
-                let old_request_bytes = std::fs::read(&self.path).ok();
-                let mut candidate = file.clone();
-                candidate.expire_and_scrub(now_unix_ms)?;
-                let mut results = Vec::with_capacity(reviews.len());
-                let mut admitted = BTreeSet::new();
-                for review in &reviews {
-                    let request = candidate
-                        .requests
-                        .get_mut(&review.request_id)
-                        .with_context(|| {
-                            format!("join request not found: {}", review.request_id)
-                        })?;
-                    if request.network_id != *network_id {
-                        bail!("join request belongs to another network");
-                    }
-                    if request.applicant.node_id == *reviewer {
-                        bail!("join_request.error.self_review_forbidden");
-                    }
-                    request.review(
-                        review.expected_revision,
-                        review.action,
-                        reviewer.clone(),
-                        review.note.clone(),
-                        now_unix_ms,
-                    )?;
-                    if request.state == JoinRequestState::Approved {
-                        let applicant = request.applicant.node_id.clone();
-                        if candidate.accepted_members.contains(&applicant) {
-                            bail!("applicant already has a final accepted member state");
-                        }
-                        candidate.accepted_members.insert(applicant.clone());
-                        admitted.insert(applicant);
-                    }
-                    results.push(JoinRequestReviewResult {
-                        request_id: request.request_id.clone(),
-                        state: request.state,
-                        revision: request.revision,
-                    });
+            candidate.validate()?;
+            self.persist(&candidate)?;
+            for (source_key, applicant, action) in effects {
+                let effect = match action {
+                    fuckipv6_common::domain::JoinRequestReviewAction::Approve => lifecycle
+                        .admit(
+                            reviewer,
+                            network_id,
+                            &applicant,
+                            fuckipv6_common::domain::MembershipRole::Member,
+                            &source_key,
+                            now_unix_ms,
+                        )
+                        .map(|_| ()),
+                    fuckipv6_common::domain::JoinRequestReviewAction::Reject => lifecycle
+                        .reject_admission(
+                            reviewer,
+                            network_id,
+                            &applicant,
+                            &source_key,
+                            now_unix_ms,
+                        )
+                        .map(|_| ()),
+                    fuckipv6_common::domain::JoinRequestReviewAction::RequestInformation => Ok(()),
+                };
+                if let Err(error) = effect {
+                    let restore = restore_request_file(&self.path, old_request_bytes.as_deref());
+                    return match restore {
+                        Ok(()) => Err(error),
+                        Err(restore_error) => Err(anyhow::anyhow!(
+                            "{error:#}; 回滚审批请求失败: {restore_error:#}"
+                        )),
+                    };
                 }
-
-                // Validate the complete candidate before either file is
-                // touched, including the request/roster projection.
-                candidate.validate()?;
-                for applicant in &admitted {
-                    network_record.admit_member(applicant.clone(), now_unix_ms)?;
-                }
-
-                // Persist the intent first. If the roster write fails, restore
-                // the old request file. A process crash between the two writes
-                // is repaired from the approved request projection on the next
-                // read/review transaction.
-                self.persist(&candidate)?;
-                if !admitted.is_empty() {
-                    if let Err(error) = persist_network_record(record_path, &network_record) {
-                        let restore =
-                            restore_request_file(&self.path, old_request_bytes.as_deref());
-                        return match restore {
-                            Ok(()) => Err(error),
-                            Err(restore_error) => Err(anyhow::anyhow!(
-                                "{error:#}; 回滚审批请求失败: {restore_error:#}"
-                            )),
-                        };
-                    }
-                }
-                Ok(results)
-            })
-        })();
-        let _ = FileExt::unlock(&profile_lock);
-        result
+            }
+            Ok(results)
+        })
     }
 
     pub fn resubmit(
@@ -464,40 +465,52 @@ impl JoinRequestStore {
         })
     }
 
-    /// Complete the one possible crash window between persisting an approved
-    /// request ledger and persisting the authoritative roster. The approved
-    /// request is the durable intent, so startup/read recovery adds the exact
-    /// missing member IDs once and atomically rewrites the network record.
+    /// Complete the crash window between the request decision and the
+    /// lifecycle/roster projection through the same governance operation.
+    /// Tombstones are authoritative, so recovery can never resurrect a member
+    /// who was suspended or removed after approval.
     fn repair_roster_projection(&self, expected_network_id: &NetworkId) -> Result<()> {
-        let Some(path) = &self.network_record_path else {
+        let Some(lifecycle) = &self.member_lifecycle_store else {
             return Ok(());
         };
-        let lock = lock_profile(path)?;
-        let result = (|| {
-            let mut record = read_network_record(path, expected_network_id)?;
-            let changed = self.with_file_lock(|file| {
-                let mut changed = false;
-                for request in file.requests.values().filter(|request| {
+        let approved = self.with_file_lock(|file| {
+            Ok(file
+                .requests
+                .values()
+                .filter(|request| {
                     request.network_id == *expected_network_id
                         && request.state == JoinRequestState::Approved
-                }) {
-                    if !record.members.contains(&request.applicant.node_id) {
-                        record.members.push(request.applicant.node_id.clone());
-                        changed = true;
-                    }
+                })
+                .cloned()
+                .collect::<Vec<_>>())
+        })?;
+        for request in approved {
+            let current = lifecycle.record(expected_network_id, &request.applicant.node_id)?;
+            if current.as_ref().is_some_and(|record| {
+                record.status.is_tombstone()
+                    || record.status == fuckipv6_common::domain::MemberLifecycleStatus::Suspended
+            }) {
+                continue;
+            }
+            let reviewer = request
+                .reviewer_node_id
+                .as_ref()
+                .context("approved join request has no reviewer for recovery")?;
+            if let Err(error) = lifecycle.admit(
+                reviewer,
+                expected_network_id,
+                &request.applicant.node_id,
+                fuckipv6_common::domain::MembershipRole::Member,
+                request.request_id.to_string().as_str(),
+                request.updated_at_unix_ms,
+            ) {
+                if error.to_string() == "member_lifecycle.error.admission_revoked" {
+                    continue;
                 }
-                if changed {
-                    record.updated_at_unix_ms = record.updated_at_unix_ms.max(unix_time_ms());
-                    record.validate()?;
-                    persist_network_record(path, &record)?;
-                }
-                Ok(changed)
-            })?;
-            let _ = changed;
-            Ok(())
-        })();
-        let _ = FileExt::unlock(&lock);
-        result
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Fail closed when no trusted roster is configured. Member directories
@@ -622,24 +635,6 @@ impl JoinRequestStore {
     }
 }
 
-fn lock_profile(path: &std::path::Path) -> Result<File> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("无法创建网络资料目录: {}", parent.display()))?;
-    }
-    let lock_path = path.with_file_name(".profile.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("无法打开网络资料锁: {}", lock_path.display()))?;
-    lock.lock_exclusive()
-        .with_context(|| format!("无法锁定网络资料: {}", lock_path.display()))?;
-    Ok(lock)
-}
-
 fn lock_profile_shared(path: &std::path::Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -673,6 +668,7 @@ fn read_network_record(
     Ok(record)
 }
 
+#[cfg(test)]
 fn persist_network_record(path: &std::path::Path, record: &NetworkRecord) -> Result<()> {
     record.validate()?;
     let content = serde_json::to_vec_pretty(record).context("无法序列化审批授权网络资料")?;
@@ -725,9 +721,10 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CapabilityKind, ExitContributionObligation, JoinApplicantProfile, JoinRequestGrantPreview,
-        JoinRequestReviewAction, MembershipRole, MembershipTerms, NetworkCreateProfile,
-        NetworkVisibility,
+        CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinApplicantProfile,
+        JoinRequestGrantPreview, JoinRequestReviewAction, MemberLifecycleAction,
+        MemberLifecycleChangeRequest, MemberLifecycleStatus, MembershipRole, MembershipTerms,
+        NetworkCreateProfile, NetworkVisibility,
     };
     use std::path::Path;
     use std::sync::{Arc, Barrier};
@@ -825,6 +822,13 @@ mod tests {
         .unwrap()
     }
 
+    fn lifecycle_store(dir: &Path) -> Arc<MemberLifecycleStore> {
+        Arc::new(
+            MemberLifecycleStore::new(dir.join("member_lifecycle.json"), dir.join("network.json"))
+                .unwrap(),
+        )
+    }
+
     fn test_store(dir: &Path) -> JoinRequestStore {
         let record = network_record(owner(), vec![admin()]);
         write_network_record(dir, &record);
@@ -835,6 +839,7 @@ mod tests {
             vec![],
         )
         .unwrap()
+        .with_member_lifecycle_store(lifecycle_store(dir))
     }
 
     #[test]
@@ -877,7 +882,8 @@ mod tests {
             None,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle_store(&dir));
         let listed = reopened.list(&network_id(), &owner(), 1_003).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].state, JoinRequestState::Approved);
@@ -1011,7 +1017,8 @@ mod tests {
             None,
             Vec::new(),
         )
-        .unwrap();
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle_store(&dir));
 
         let approved_seed = "approved-applicant";
         let approved_id = applicant(approved_seed);
@@ -1357,7 +1364,8 @@ mod tests {
             None,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle_store(&dir));
         let listed = reopened
             .list(&network_id(), &owner(), deadline + 1)
             .unwrap();
@@ -1376,7 +1384,8 @@ mod tests {
             None,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle_store(&dir));
         let request = request(applicant_seed, "self-review", 1_000);
         store
             .submit(
@@ -1512,5 +1521,102 @@ mod tests {
         store.list(&network_id(), &owner(), 1_003).unwrap();
         let repaired = read_network_record(&path, &network_id()).unwrap();
         assert!(repaired.members.contains(&applicant_id));
+    }
+
+    #[test]
+    fn approval_retry_after_removal_cannot_resurrect_membership() {
+        let dir = test_dir("approval-after-removal");
+        write_network_record(&dir, &network_record(owner(), vec![admin()]));
+        let lifecycle = lifecycle_store(&dir);
+        let store = JoinRequestStore::new(
+            dir.join("join_requests.json"),
+            Some(dir.join("network.json")),
+            None,
+            vec![],
+        )
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle.clone());
+        let applicant_seed = "removed-approval-retry";
+        let applicant_id = applicant(applicant_seed);
+        let request = request(applicant_seed, "removed-approval-retry", 1_000);
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                request.clone(),
+                1_001,
+            )
+            .unwrap();
+        store
+            .review(
+                &network_id(),
+                &owner(),
+                vec![JoinRequestBatchReviewItem {
+                    request_id: request.request_id.clone(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+                1_002,
+            )
+            .unwrap();
+
+        let admitted = lifecycle
+            .record(&network_id(), &applicant_id)
+            .unwrap()
+            .expect("successful approval must create a lifecycle record");
+        assert!(admitted.status.grants_network_access());
+
+        let removal = lifecycle
+            .change(
+                &owner(),
+                MemberLifecycleChangeRequest {
+                    network_id: network_id(),
+                    target_node_id: applicant_id.clone(),
+                    action: MemberLifecycleAction::Remove,
+                    role: MembershipRole::Member,
+                    expected_revision: admitted.revision,
+                    idempotency_key: IdempotencyKey::from_public_key(b"remove-approval-retry"),
+                    reason: Some("removed after successful approval".into()),
+                },
+                1_003,
+            )
+            .unwrap();
+        let removed = lifecycle
+            .record(&network_id(), &applicant_id)
+            .unwrap()
+            .expect("removal must preserve a tombstone");
+        assert_eq!(removed.status, MemberLifecycleStatus::Removed);
+        assert_eq!(removed.revision, removal.revision);
+        assert!(removed.access_epoch > admitted.access_epoch);
+        assert!(removal.access_revoked);
+        assert!(removal.requires_reauthentication);
+
+        let error = lifecycle
+            .admit(
+                &owner(),
+                &network_id(),
+                &applicant_id,
+                MembershipRole::Member,
+                &request.request_id.to_string(),
+                1_004,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "member_lifecycle.error.admission_revoked"
+        );
+        let retried = lifecycle
+            .record(&network_id(), &applicant_id)
+            .unwrap()
+            .expect("failed retry must not delete the tombstone");
+        assert_eq!(retried.status, MemberLifecycleStatus::Removed);
+        assert_eq!(retried.revision, removed.revision);
+        assert_eq!(retried.access_epoch, removed.access_epoch);
+        store.list(&network_id(), &owner(), 1_005).unwrap();
+        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        assert!(!roster.members.contains(&applicant_id));
+        assert!(!roster.administrators.contains(&applicant_id));
     }
 }

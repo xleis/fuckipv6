@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::capability::CapabilityKind;
 use super::ids::{ContentHash, JoinRequestId, NetworkId, NodeId};
+use super::membership_lifecycle::{MemberLifecycleAction, MemberLifecycleStatus};
 use super::{DomainError, DomainResult};
 
 /// A member's governance role. Temporary Coordinator authority is intentionally
@@ -537,6 +538,18 @@ pub struct NetworkMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<CapabilityKind>>,
     pub status: NetworkMemberStatus,
+    /// Durable governance state. This is distinct from live connection status
+    /// and is always supplied by the lifecycle ledger or an authoritative
+    /// roster/request projection.
+    pub lifecycle_state: MemberLifecycleStatus,
+    /// Compare-and-swap revision for lifecycle mutations.
+    pub revision: u64,
+    /// Access generation used to invalidate old credentials and transfers.
+    pub access_epoch: u64,
+    /// Actions the authenticated viewer may currently attempt. The server still
+    /// re-authorizes and re-checks the transition on mutation.
+    #[serde(default)]
+    pub available_actions: Vec<MemberLifecycleAction>,
     pub presence: NetworkMemberPresence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_at_unix_ms: Option<u64>,
@@ -548,6 +561,9 @@ pub struct NetworkMember {
 pub struct NetworkMemberDirectory {
     pub network_id: NetworkId,
     pub generated_at_unix_ms: u64,
+    /// Role observed from the authoritative roster, never from a client claim.
+    pub viewer_role: MembershipRole,
+    pub can_manage_members: bool,
     pub members: Vec<NetworkMember>,
 }
 

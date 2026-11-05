@@ -7,11 +7,13 @@ use fuckipv6_common::domain::{
     NetworkJoinMode, NetworkRecord, NodeId,
 };
 use serde::{Deserialize, Serialize};
+
+use super::member_lifecycle::MemberLifecycleStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const INVITATION_FILE_SCHEMA_VERSION: u16 = 1;
 const INVITATION_TERMS_ACK_WINDOW_MS: u64 = 15 * 60 * 1000;
@@ -111,14 +113,16 @@ impl NetworkRoster {
 ///
 /// Plaintext invitation codes are returned exactly once from `create` and are
 /// never written to disk. The ledger persists only a content digest plus the
-/// bounded invitation metadata. Redemption holds the authoritative network
-/// profile lock across both ledger and roster writes; retries by the same node
-/// repair the one possible crash window and never consume another use.
+/// bounded invitation metadata. Redemption records the one-use grant and then
+/// delegates Invite/Approve to the lifecycle ledger, the only writer of the
+/// authoritative roster. Retries repair that hand-off without consuming a use
+/// and are rejected when the resulting membership has since been revoked.
 pub struct InvitationStore {
     path: PathBuf,
     network_record_path: Option<PathBuf>,
     fallback_owner: Option<NodeId>,
     fallback_administrators: BTreeSet<NodeId>,
+    member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     process_lock: Mutex<()>,
 }
 
@@ -149,8 +153,14 @@ impl InvitationStore {
             network_record_path,
             fallback_owner,
             fallback_administrators,
+            member_lifecycle_store: None,
             process_lock: Mutex::new(()),
         })
+    }
+
+    pub fn with_member_lifecycle_store(mut self, store: Arc<MemberLifecycleStore>) -> Self {
+        self.member_lifecycle_store = Some(store);
+        self
     }
 
     pub fn create(
@@ -356,136 +366,120 @@ impl InvitationStore {
         {
             bail!("invitation.error.terms_acknowledgement_stale");
         }
+        let lifecycle = self
+            .member_lifecycle_store
+            .as_ref()
+            .context("协调器未配置成员生命周期台账，邀请兑换失败关闭")?;
         let record_path = self
             .network_record_path
             .as_ref()
             .context("协调器未配置可信 network_record_path，邀请兑换失败关闭")?;
-        let profile_lock = lock_profile(record_path)?;
-        let result = (|| {
-            let network_id = request.network_id.clone();
-            let mut network_record = read_network_record(record_path, &network_id)?;
-            if network_record.join_mode != NetworkJoinMode::InviteOnly {
-                bail!("invitation.error.network_not_invite_only");
+        let network_id = request.network_id.clone();
+        let network_record = read_network_record(record_path, &network_id)?;
+        if network_record.join_mode != NetworkJoinMode::InviteOnly {
+            bail!("invitation.error.network_not_invite_only");
+        }
+        let roster = NetworkRoster {
+            owner: network_record.owner.clone(),
+            administrators: network_record.administrators.iter().cloned().collect(),
+        };
+        let old_file_bytes = std::fs::read(&self.path).ok();
+        let mut redemption = None;
+        self.with_file_lock(|file| {
+            let mut candidate = file.clone();
+            let stored = candidate
+                .invitations
+                .get(&request.invitation_id)
+                .context("invitation not found")?;
+            if stored.record.network_id != network_id || stored.digest != request.code.digest() {
+                bail!("invitation.error.invalid_code");
             }
-            let roster = NetworkRoster {
-                owner: network_record.owner.clone(),
-                administrators: network_record.administrators.iter().cloned().collect(),
+            if let Some(existing) = candidate
+                .redemptions
+                .get(&request.invitation_id)
+                .and_then(|entries| entries.get(actor))
+                .cloned()
+            {
+                redemption = Some(with_retry_flag(existing, true));
+                return Ok(());
+            }
+            if network_record.members.contains(actor) {
+                bail!("invitation.error.already_member");
+            }
+            let stored = candidate
+                .invitations
+                .get_mut(&request.invitation_id)
+                .context("invitation not found")?;
+            if stored.record.revision != request.expected_invitation_revision {
+                bail!("invitation.error.stale_revision");
+            }
+            if !roster.is_manager(&stored.record.created_by) {
+                bail!("invitation.error.creator_authority_revoked");
+            }
+            if !stored.record.state_at(now_unix_ms).is_active() {
+                return Err(anyhow::anyhow!(invitation_state_error(
+                    stored.record.state_at(now_unix_ms)
+                )));
+            }
+            if stored
+                .record
+                .capabilities
+                .iter()
+                .any(|capability| !network_record.capability_declarations.contains(capability))
+            {
+                bail!("invitation.error.capability_policy_changed");
+            }
+            let preview = build_preview(stored, &network_record, &roster, false, now_unix_ms)?;
+            if preview.preview_digest != request.preview_digest
+                || preview.terms_hash != request.terms_hash
+            {
+                bail!("invitation.error.preview_changed");
+            }
+
+            let created_by = stored.record.created_by.clone();
+            let role = stored.record.role;
+            stored.record.consume_one(now_unix_ms)?;
+            let value = InvitationRedemption {
+                invitation_id: stored.record.invitation_id.clone(),
+                network_id: network_id.clone(),
+                node_id: actor.clone(),
+                role,
+                capabilities: stored.record.capabilities.clone(),
+                network_revision: network_record.revision,
+                invitation_revision: stored.record.revision,
+                invited_by: created_by,
+                joined_at_unix_ms: now_unix_ms,
+                already_redeemed: false,
+                grants_permanent_membership: false,
             };
-            let old_file_bytes = std::fs::read(&self.path).ok();
-            let mut redemption = None;
-            let mut new_redemption = false;
-            self.with_file_lock(|file| {
-                let mut candidate = file.clone();
-                let stored = candidate
-                    .invitations
-                    .get(&request.invitation_id)
-                    .context("invitation not found")?;
-                if stored.record.network_id != network_id || stored.digest != request.code.digest()
-                {
-                    bail!("invitation.error.invalid_code");
-                }
-                if let Some(existing) = candidate
-                    .redemptions
-                    .get(&request.invitation_id)
-                    .and_then(|entries| entries.get(actor))
-                    .cloned()
-                {
-                    redemption = Some(with_retry_flag(existing, true));
-                    return Ok(());
-                }
-                if network_record.members.contains(actor) {
-                    bail!("invitation.error.already_member");
-                }
-                let stored = candidate
-                    .invitations
-                    .get_mut(&request.invitation_id)
-                    .context("invitation not found")?;
-                if stored.record.revision != request.expected_invitation_revision {
-                    bail!("invitation.error.stale_revision");
-                }
-                if !roster.is_manager(&stored.record.created_by) {
-                    bail!("invitation.error.creator_authority_revoked");
-                }
-                if !stored.record.state_at(now_unix_ms).is_active() {
-                    return Err(anyhow::anyhow!(invitation_state_error(
-                        stored.record.state_at(now_unix_ms)
-                    )));
-                }
-                if stored
-                    .record
-                    .capabilities
-                    .iter()
-                    .any(|capability| !network_record.capability_declarations.contains(capability))
-                {
-                    bail!("invitation.error.capability_policy_changed");
-                }
-                let preview = build_preview(stored, &network_record, &roster, false, now_unix_ms)?;
-                if preview.preview_digest != request.preview_digest
-                    || preview.terms_hash != request.terms_hash
-                {
-                    bail!("invitation.error.preview_changed");
-                }
+            candidate
+                .redemptions
+                .entry(request.invitation_id.clone())
+                .or_default()
+                .insert(actor.clone(), value.clone());
+            candidate.validate()?;
+            self.persist(&candidate)?;
+            redemption = Some(value);
+            Ok(())
+        })?;
 
-                stored.record.consume_one(now_unix_ms)?;
-                admit_invited_member(
-                    &mut network_record,
-                    actor.clone(),
-                    stored.record.role,
-                    now_unix_ms,
-                )?;
-                let value = InvitationRedemption {
-                    invitation_id: stored.record.invitation_id.clone(),
-                    network_id: network_id.clone(),
-                    node_id: actor.clone(),
-                    role: stored.record.role,
-                    capabilities: stored.record.capabilities.clone(),
-                    network_revision: network_record.revision,
-                    invitation_revision: stored.record.revision,
-                    joined_at_unix_ms: now_unix_ms,
-                    already_redeemed: false,
-                    grants_permanent_membership: false,
-                };
-                candidate
-                    .redemptions
-                    .entry(request.invitation_id.clone())
-                    .or_default()
-                    .insert(actor.clone(), value.clone());
-                candidate.validate()?;
-                self.persist(&candidate)?;
-                redemption = Some(value);
-                new_redemption = true;
-                Ok(())
-            })?;
-
-            // A persisted redemption is authoritative. This also repairs a
-            // process crash after the ledger write but before the roster write.
-            let mut roster_changed = new_redemption;
-            if let Some(value) = &redemption {
-                if !network_record.members.contains(actor) {
-                    network_record.admit_member(actor.clone(), value.joined_at_unix_ms)?;
-                    roster_changed = true;
-                }
-                if value.role == MembershipRole::Administrator
-                    && !network_record.administrators.contains(actor)
-                {
-                    network_record.administrators.push(actor.clone());
-                    network_record.updated_at_unix_ms = network_record
-                        .updated_at_unix_ms
-                        .max(value.joined_at_unix_ms);
-                    network_record.validate()?;
-                    roster_changed = true;
-                }
-                if roster_changed {
-                    if let Err(error) = persist_network_record(record_path, &network_record) {
-                        restore_invitation_file(&self.path, old_file_bytes.as_deref())?;
-                        return Err(error).context("无法保存邀请兑换后的网络名册");
-                    }
-                }
-            }
-            redemption.context("invitation redemption disappeared after commit")
-        })();
-        let _ = FileExt::unlock(&profile_lock);
-        result
+        let value = redemption.context("invitation redemption disappeared after commit")?;
+        if let Err(error) = lifecycle.admit(
+            &value.invited_by,
+            &value.network_id,
+            &value.node_id,
+            value.role,
+            &format!(
+                "invitation:{}:{}",
+                value.invitation_id.as_str(),
+                value.node_id.as_str()
+            ),
+            now_unix_ms,
+        ) {
+            restore_invitation_file(&self.path, old_file_bytes.as_deref())?;
+            return Err(error);
+        }
+        Ok(value)
     }
 
     /// Return the identity/state required for a server-originated change
@@ -703,21 +697,6 @@ fn build_preview(
     Ok(preview)
 }
 
-fn admit_invited_member(
-    record: &mut NetworkRecord,
-    member: NodeId,
-    role: MembershipRole,
-    now_unix_ms: u64,
-) -> Result<()> {
-    record.admit_member(member.clone(), now_unix_ms)?;
-    if role == MembershipRole::Administrator && !record.administrators.contains(&member) {
-        record.administrators.push(member);
-        record.updated_at_unix_ms = record.updated_at_unix_ms.max(now_unix_ms);
-        record.validate()?;
-    }
-    Ok(())
-}
-
 fn with_retry_flag(
     mut redemption: InvitationRedemption,
     already_redeemed: bool,
@@ -758,24 +737,6 @@ fn new_invitation_id() -> Result<InvitationId> {
     Ok(InvitationId::from_public_key(&bytes))
 }
 
-fn lock_profile(path: &Path) -> Result<File> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("无法创建网络资料目录: {}", parent.display()))?;
-    }
-    let lock_path = path.with_file_name(".profile.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("无法打开网络资料锁: {}", lock_path.display()))?;
-    lock.lock_exclusive()
-        .with_context(|| format!("无法锁定网络资料: {}", lock_path.display()))?;
-    Ok(lock)
-}
-
 fn lock_profile_shared(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -806,6 +767,7 @@ fn read_network_record(path: &Path, expected_network_id: &NetworkId) -> Result<N
     Ok(record)
 }
 
+#[cfg(test)]
 fn persist_network_record(path: &Path, record: &NetworkRecord) -> Result<()> {
     record.validate()?;
     let content = serde_json::to_vec_pretty(record).context("无法序列化邀请授权网络资料")?;
@@ -849,7 +811,10 @@ fn persist_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuckipv6_common::domain::{NetworkCreateProfile, NetworkVisibility, PublicKey};
+    use fuckipv6_common::domain::{
+        IdempotencyKey, MemberLifecycleAction, MemberLifecycleChangeRequest, MemberLifecycleStatus,
+        NetworkCreateProfile, NetworkVisibility, PublicKey,
+    };
     use std::sync::Arc;
 
     const NOW: u64 = 2_000_000;
@@ -917,6 +882,13 @@ mod tests {
         path
     }
 
+    fn lifecycle_store(dir: &Path) -> Arc<MemberLifecycleStore> {
+        Arc::new(
+            MemberLifecycleStore::new(dir.join("member_lifecycle.json"), dir.join("network.json"))
+                .unwrap(),
+        )
+    }
+
     fn open_store(dir: &Path) -> InvitationStore {
         InvitationStore::new(
             dir.join("invitations.json"),
@@ -925,6 +897,7 @@ mod tests {
             vec![],
         )
         .unwrap()
+        .with_member_lifecycle_store(lifecycle_store(dir))
     }
 
     fn create_request(max_uses: u32) -> InvitationCreateRequest {
@@ -1026,6 +999,77 @@ mod tests {
         let listed = store.list(&network_id(), &owner(), NOW + 4).unwrap();
         assert_eq!(listed[0].invitation.used_count, 1);
         assert_eq!(listed[0].remaining_uses, 1);
+    }
+
+    #[test]
+    fn redemption_retry_after_removal_cannot_resurrect_membership() {
+        let dir = test_dir("redeem-after-removal");
+        write_network_record(&dir, &network_record(vec![admin()]));
+        let lifecycle = lifecycle_store(&dir);
+        let store = InvitationStore::new(
+            dir.join("invitations.json"),
+            Some(dir.join("network.json")),
+            None,
+            vec![],
+        )
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle.clone());
+        let issued = store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        let invitee = invitee("removed-redemption-retry");
+        let preview = store
+            .preview(&network_id(), &invitee, &issued.code, NOW + 1)
+            .unwrap();
+        let request = redemption_request(&issued, &preview, NOW + 1);
+        store.redeem(request.clone(), &invitee, NOW + 2).unwrap();
+        let admitted = lifecycle
+            .record(&network_id(), &invitee)
+            .unwrap()
+            .expect("successful redemption must create a lifecycle record");
+        assert!(admitted.status.grants_network_access());
+
+        let removal = lifecycle
+            .change(
+                &owner(),
+                MemberLifecycleChangeRequest {
+                    network_id: network_id(),
+                    target_node_id: invitee.clone(),
+                    action: MemberLifecycleAction::Remove,
+                    role: MembershipRole::Member,
+                    expected_revision: admitted.revision,
+                    idempotency_key: IdempotencyKey::from_public_key(b"remove-redemption-retry"),
+                    reason: Some("removed after successful admission".into()),
+                },
+                NOW + 3,
+            )
+            .unwrap();
+        let removed = lifecycle
+            .record(&network_id(), &invitee)
+            .unwrap()
+            .expect("removal must preserve a tombstone");
+        assert_eq!(removed.status, MemberLifecycleStatus::Removed);
+        assert_eq!(removed.revision, removal.revision);
+        assert!(removed.access_epoch > admitted.access_epoch);
+        assert!(removal.access_revoked);
+        assert!(removal.requires_reauthentication);
+        assert_ne!(removal.access_epoch, admitted.access_epoch);
+
+        let error = store.redeem(request, &invitee, NOW + 4).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "member_lifecycle.error.admission_revoked"
+        );
+        let retried = lifecycle
+            .record(&network_id(), &invitee)
+            .unwrap()
+            .expect("failed retry must not delete the tombstone");
+        assert_eq!(retried.status, MemberLifecycleStatus::Removed);
+        assert_eq!(retried.revision, removed.revision);
+        assert_eq!(retried.access_epoch, removed.access_epoch);
+        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        assert!(!roster.members.contains(&invitee));
+        assert!(!roster.administrators.contains(&invitee));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    InvitationId, InvitationState, JoinRequest, JoinRequestId, JoinRequestState, NetworkId, NodeId,
+    InvitationId, InvitationState, JoinRequest, JoinRequestId, JoinRequestState,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId,
+    NetworkMemberPresence, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
@@ -21,6 +23,7 @@ use tokio_tungstenite::{
 
 use super::invitations::InvitationStore;
 use super::join_requests::JoinRequestStore;
+use super::member_lifecycle::MemberLifecycleStore;
 use super::members::build_member_directory;
 use super::session::SessionManager;
 
@@ -55,6 +58,7 @@ pub struct SignalingServer {
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
+    member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     listener: Option<TcpListener>,
 }
 
@@ -70,6 +74,7 @@ impl SignalingServer {
             relay_endpoints: Arc::new(Vec::new()),
             join_request_store: None,
             invitation_store: None,
+            member_lifecycle_store: None,
             listener: None,
         })
     }
@@ -82,6 +87,7 @@ impl SignalingServer {
             relay_endpoints: Arc::new(Vec::new()),
             join_request_store: None,
             invitation_store: None,
+            member_lifecycle_store: None,
             listener: None,
         }
     }
@@ -129,13 +135,23 @@ impl SignalingServer {
         state_dir: impl AsRef<std::path::Path>,
         config: &CoordinatorConfig,
     ) -> Result<Self> {
+        let network_record_path = config
+            .network_record_path
+            .clone()
+            .context("审批操作需要可信 network_record_path")?;
+        let lifecycle = Arc::new(MemberLifecycleStore::new(
+            state_dir.as_ref().join("member_lifecycle.json"),
+            network_record_path.clone(),
+        )?);
         let store = JoinRequestStore::new(
             state_dir.as_ref().join("join_requests.json"),
-            config.network_record_path.clone(),
+            Some(network_record_path),
             config.owner_node_id.clone(),
             config.administrator_node_ids.clone(),
-        )?;
+        )?
+        .with_member_lifecycle_store(lifecycle.clone());
         self.join_request_store = Some(Arc::new(store));
+        self.member_lifecycle_store = Some(lifecycle);
         Ok(self)
     }
 
@@ -151,13 +167,47 @@ impl SignalingServer {
         state_dir: impl AsRef<std::path::Path>,
         config: &CoordinatorConfig,
     ) -> Result<Self> {
+        let network_record_path = config
+            .network_record_path
+            .clone()
+            .context("邀请兑换需要可信 network_record_path")?;
+        let lifecycle = Arc::new(MemberLifecycleStore::new(
+            state_dir.as_ref().join("member_lifecycle.json"),
+            network_record_path.clone(),
+        )?);
         let store = InvitationStore::new(
             state_dir.as_ref().join("invitations.json"),
-            config.network_record_path.clone(),
+            Some(network_record_path),
             config.owner_node_id.clone(),
             config.administrator_node_ids.clone(),
-        )?;
+        )?
+        .with_member_lifecycle_store(lifecycle.clone());
         self.invitation_store = Some(Arc::new(store));
+        self.member_lifecycle_store = Some(lifecycle);
+        Ok(self)
+    }
+
+    /// Attach the durable unified membership lifecycle ledger. Management
+    /// actions fail closed when it is absent.
+    pub fn with_member_lifecycle_store(mut self, store: Arc<MemberLifecycleStore>) -> Self {
+        self.member_lifecycle_store = Some(store);
+        self
+    }
+
+    pub fn with_member_lifecycle_store_from_config(
+        mut self,
+        state_dir: impl AsRef<std::path::Path>,
+        config: &CoordinatorConfig,
+    ) -> Result<Self> {
+        let network_record_path = config
+            .network_record_path
+            .clone()
+            .context("成员生命周期需要可信 network_record_path")?;
+        let store = MemberLifecycleStore::new(
+            state_dir.as_ref().join("member_lifecycle.json"),
+            network_record_path,
+        )?;
+        self.member_lifecycle_store = Some(Arc::new(store));
         Ok(self)
     }
 
@@ -185,6 +235,7 @@ impl SignalingServer {
                     let relay_endpoints = self.relay_endpoints.clone();
                     let join_request_store = self.join_request_store.clone();
                     let invitation_store = self.invitation_store.clone();
+                    let member_lifecycle_store = self.member_lifecycle_store.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -195,6 +246,7 @@ impl SignalingServer {
                             relay_endpoints,
                             join_request_store,
                             invitation_store,
+                            member_lifecycle_store,
                         )
                         .await
                         {
@@ -234,6 +286,7 @@ fn signaling_websocket_config() -> WebSocketConfig {
 }
 
 /// 处理单个WebSocket连接
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
@@ -242,6 +295,7 @@ async fn handle_connection(
     relay_endpoints: Arc<Vec<RelayEndpoint>>,
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
+    member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
     let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
@@ -266,6 +320,7 @@ async fn handle_connection(
             &relay_endpoints,
             join_request_store.as_deref(),
             invitation_store.as_deref(),
+            member_lifecycle_store.as_deref(),
         )
         .await
         {
@@ -307,6 +362,7 @@ async fn handle_connection_message(
     relay_endpoints: &[RelayEndpoint],
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    member_lifecycle_store: Option<&MemberLifecycleStore>,
 ) -> bool {
     match msg {
         Ok(Message::Binary(data)) => {
@@ -321,6 +377,7 @@ async fn handle_connection_message(
                 relay_endpoints,
                 join_request_store,
                 invitation_store,
+                member_lifecycle_store,
             )
             .await;
             true
@@ -350,6 +407,7 @@ async fn handle_binary_message(
     relay_endpoints: &[RelayEndpoint],
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    member_lifecycle_store: Option<&MemberLifecycleStore>,
 ) {
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
     session_manager.record_signaling_rx(data.len());
@@ -371,6 +429,7 @@ async fn handle_binary_message(
                 relay_endpoints,
                 join_request_store,
                 invitation_store,
+                member_lifecycle_store,
             )
             .await
             {
@@ -433,6 +492,7 @@ async fn handle_signaling_message(
     relay_endpoints: &[RelayEndpoint],
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    member_lifecycle_store: Option<&MemberLifecycleStore>,
 ) -> Result<()> {
     match msg {
         SignalingMessage::Register { .. } => {
@@ -603,6 +663,27 @@ async fn handle_signaling_message(
                 client_id,
                 join_request_store,
                 invitation_store,
+                member_lifecycle_store,
+            )
+            .await?;
+        }
+        SignalingMessage::MemberRemovalPreview { request } => {
+            handle_member_removal_preview(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                member_lifecycle_store,
+            )
+            .await?;
+        }
+        SignalingMessage::MemberLifecycleChange { request } => {
+            handle_member_lifecycle_change(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                member_lifecycle_store,
             )
             .await?;
         }
@@ -619,7 +700,10 @@ async fn handle_signaling_message(
         | SignalingMessage::InvitationPreviewAck { .. }
         | SignalingMessage::InvitationRedeemAck { .. }
         | SignalingMessage::InvitationChanged { .. }
-        | SignalingMessage::MemberDirectoryListAck { .. } => {
+        | SignalingMessage::MemberDirectoryListAck { .. }
+        | SignalingMessage::MemberRemovalPreviewAck { .. }
+        | SignalingMessage::MemberLifecycleChangeAck { .. }
+        | SignalingMessage::MemberLifecycleChanged { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -811,6 +895,7 @@ async fn handle_member_directory_list(
     client_id: &Option<String>,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    member_lifecycle_store: Option<&MemberLifecycleStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -826,6 +911,7 @@ async fn handle_member_directory_list(
         unix_time_ms(),
         store,
         invitation_store,
+        member_lifecycle_store,
         session_manager,
     )
     .await
@@ -855,6 +941,155 @@ fn member_directory_error_message(error: &str) -> SignalingMessage {
         ErrorCode::Internal
     };
     SignalingMessage::protocol_error(code, "Member directory is unavailable")
+}
+
+fn require_member_lifecycle_store<'a>(
+    store: Option<&'a MemberLifecycleStore>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a MemberLifecycleStore>> {
+    if let Some(store) = store {
+        return Ok(Some(store));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Member lifecycle management is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+fn member_lifecycle_error_message(error: &str) -> SignalingMessage {
+    let code = match error {
+        "member_lifecycle.error.permission_denied"
+        | "member_lifecycle.error.owner_protected"
+        | "member_lifecycle.error.last_administrator_protected" => ErrorCode::Forbidden,
+        "member_lifecycle.error.stale_revision"
+        | "member_lifecycle.error.invalid_transition"
+        | "member_lifecycle.error.idempotency_conflict" => ErrorCode::BadRequest,
+        _ => ErrorCode::Internal,
+    };
+    SignalingMessage::protocol_error(code, error)
+}
+
+async fn handle_member_removal_preview(
+    request: MemberRemovalPreviewRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&MemberLifecycleStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_member_lifecycle_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager
+        .member_presence(now_unix_ms)
+        .await
+        .remove(&request.target_node_id)
+        .unwrap_or_else(NetworkMemberPresence::unknown);
+    let preview = match store.removal_preview(&actor, request, presence, now_unix_ms) {
+        Ok(preview) => preview,
+        Err(error) => {
+            tracing::warn!(%error, "成员移除预览失败");
+            send_binary(
+                tx,
+                session_manager,
+                member_lifecycle_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::MemberRemovalPreviewAck { preview },
+    )
+}
+
+async fn handle_member_lifecycle_change(
+    request: MemberLifecycleChangeRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&MemberLifecycleStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_member_lifecycle_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let network_id = request.network_id.clone();
+    let target_node_id = request.target_node_id.clone();
+    let change = match store.change(&actor, request, unix_time_ms()) {
+        Ok(change) => change,
+        Err(error) => {
+            tracing::warn!(%error, "成员生命周期变更失败");
+            send_binary(
+                tx,
+                session_manager,
+                member_lifecycle_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::MemberLifecycleChangeAck {
+            change: change.clone(),
+        },
+    )?;
+    let access_revoked = change.access_revoked;
+    broadcast_member_lifecycle_changed(
+        store,
+        session_manager,
+        &network_id,
+        &target_node_id,
+        change,
+    )
+    .await?;
+    if access_revoked {
+        session_manager
+            .disconnect_node_sessions(&target_node_id)
+            .await;
+    }
+    Ok(())
+}
+
+async fn broadcast_member_lifecycle_changed(
+    store: &MemberLifecycleStore,
+    session_manager: &SessionManager,
+    network_id: &NetworkId,
+    target_node_id: &NodeId,
+    change: MemberLifecycleChange,
+) -> Result<()> {
+    let recipients = store.notification_recipients(network_id, target_node_id)?;
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if recipients.contains(&node_id) {
+            session_manager
+                .send_to_client(
+                    &peer.client_id,
+                    SignalingMessage::MemberLifecycleChanged {
+                        change: change.clone(),
+                    },
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn handle_join_request_review(

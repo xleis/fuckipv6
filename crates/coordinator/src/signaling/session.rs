@@ -1050,6 +1050,27 @@ impl SessionManager {
         }
     }
 
+    /// Immediately close every signalling session for a lifecycle target.
+    /// This is intentionally not a persistent authorization revocation: the
+    /// lifecycle ledger remains the source of truth, so an UndoRemove followed
+    /// by a fresh approval can safely establish a new access epoch.
+    pub(crate) async fn disconnect_node_sessions(&self, target: &NodeId) -> usize {
+        let sessions_to_disconnect: Vec<(ClientId, mpsc::UnboundedSender<Message>)> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|session| NodeId::from_public_key(&session.peer_info.public_key) == *target)
+                .map(|session| (session.peer_info.client_id.clone(), session.tx.clone()))
+                .collect()
+        };
+        let disconnected = sessions_to_disconnect.len();
+        for (client_id, tx) in sessions_to_disconnect {
+            let _ = tx.send(Message::Close(None));
+            self.unregister_client(&client_id).await;
+        }
+        disconnected
+    }
+
     /// 获取所有在线的对等节点
     pub async fn get_all_peers(&self) -> Vec<PeerInfo> {
         self.sessions
@@ -2852,6 +2873,68 @@ mod tests {
             .unregister_client(&owner_identity.client_id().to_string())
             .await;
         let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_disconnect_targets_one_node_without_persistent_revocation() -> Result<()> {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let target_identity = Identity::generate()?;
+        let other_identity = Identity::generate()?;
+        let target_node = NodeId::from_public_key(&target_identity.public_key());
+        let target_client_id = target_identity.client_id().to_string();
+        let other_client_id = other_identity.client_id().to_string();
+
+        let (target_tx, mut target_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                target_client_id.clone(),
+                target_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41100),
+                51900,
+                NatType::Open,
+                target_tx,
+            )
+            .await?;
+        let (other_tx, _other_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                other_client_id.clone(),
+                other_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41101),
+                51901,
+                NatType::Open,
+                other_tx,
+            )
+            .await?;
+
+        assert_eq!(manager.disconnect_node_sessions(&target_node).await, 1);
+        assert!(manager.get_peer_info(&target_client_id).await.is_none());
+        assert!(manager.get_peer_info(&other_client_id).await.is_some());
+        let mut saw_close = false;
+        while let Ok(message) = target_rx.try_recv() {
+            if matches!(message, Message::Close(None)) {
+                saw_close = true;
+                break;
+            }
+        }
+        assert!(saw_close, "target session must receive a close frame");
+
+        let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
+        manager
+            .register_client(
+                target_client_id.clone(),
+                target_identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41102),
+                51902,
+                NatType::Open,
+                replacement_tx,
+            )
+            .await?;
+        assert!(manager.get_peer_info(&target_client_id).await.is_some());
+
+        manager.unregister_client(&target_client_id).await;
+        manager.unregister_client(&other_client_id).await;
         Ok(())
     }
 

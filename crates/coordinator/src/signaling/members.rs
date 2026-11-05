@@ -1,13 +1,15 @@
 use anyhow::{bail, Result};
 use fuckipv6_common::domain::{
-    InvitationRedemption, JoinRequest, JoinRequestState, MembershipRole, NetworkId, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberPresence, NetworkMemberStatus,
-    NetworkRecord, NodeId,
+    authorize_member_lifecycle_action, member_lifecycle_target, InvitationRedemption, JoinRequest,
+    JoinRequestState, MemberLifecycleAction, MemberLifecycleActorRole, MemberLifecycleRecord,
+    MemberLifecycleStatus, MembershipRole, NetworkId, NetworkMember, NetworkMemberDirectory,
+    NetworkMemberGroup, NetworkMemberPresence, NetworkRecord, NodeId,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::invitations::InvitationStore;
 use super::join_requests::JoinRequestStore;
+use super::member_lifecycle::MemberLifecycleStore;
 use super::session::SessionManager;
 
 /// Assemble the only member projection sent to clients. The Coordinator reads
@@ -19,6 +21,7 @@ pub(crate) async fn build_member_directory(
     now_unix_ms: u64,
     join_requests: &JoinRequestStore,
     invitations: Option<&InvitationStore>,
+    lifecycle: Option<&MemberLifecycleStore>,
     sessions: &SessionManager,
 ) -> Result<NetworkMemberDirectory> {
     let record = join_requests.member_directory_network(network_id)?;
@@ -32,20 +35,37 @@ pub(crate) async fn build_member_directory(
         Some(store) => store.member_directory_redemptions(network_id, actor)?,
         None => Vec::new(),
     };
+    let lifecycle_records = match lifecycle {
+        Some(store) => store.records(network_id)?,
+        None => Vec::new(),
+    };
     let presence = sessions.member_presence(now_unix_ms).await;
     let fingerprints = sessions.member_identity_fingerprints().await;
+    let viewer_role = role_for_viewer(&record, actor);
 
     Ok(NetworkMemberDirectory {
         network_id: network_id.clone(),
         generated_at_unix_ms: now_unix_ms,
-        members: project_members(&record, &requests, &redemptions, &presence, &fingerprints),
+        viewer_role,
+        can_manage_members: viewer_role != MembershipRole::Member,
+        members: project_members(
+            &record,
+            actor,
+            &requests,
+            &redemptions,
+            &lifecycle_records,
+            &presence,
+            &fingerprints,
+        ),
     })
 }
 
 fn project_members(
     record: &NetworkRecord,
+    actor: &NodeId,
     requests: &[JoinRequest],
     redemptions: &[InvitationRedemption],
+    lifecycle_records: &[MemberLifecycleRecord],
     presence: &BTreeMap<NodeId, NetworkMemberPresence>,
     fingerprints: &BTreeMap<NodeId, String>,
 ) -> Vec<NetworkMember> {
@@ -83,85 +103,100 @@ fn project_members(
                 .or_insert_with(|| redemption.clone());
             entries
         });
-
-    let mut members = Vec::new();
-    for node_id in &record.members {
-        let role = if *node_id == record.owner {
-            MembershipRole::Owner
-        } else if record.administrators.contains(node_id) {
-            MembershipRole::Administrator
-        } else {
-            MembershipRole::Member
-        };
-        let approved_request = approved.get(node_id);
-        let redemption = redemption_by_node.get(node_id);
-        let member_presence = presence
-            .get(node_id)
+    let lifecycle_by_node =
+        lifecycle_records
+            .iter()
             .cloned()
-            .unwrap_or_else(NetworkMemberPresence::unknown);
-        let capabilities = approved_request
-            .map(|request| request.grant_preview.capabilities.clone())
-            .or_else(|| redemption.map(|redemption| redemption.capabilities.clone()));
+            .fold(BTreeMap::new(), |mut entries, record| {
+                entries.insert(record.node_id.clone(), record);
+                entries
+            });
+
+    let mut node_ids = BTreeSet::new();
+    node_ids.extend(record.members.iter().cloned());
+    node_ids.extend(approved.keys().cloned());
+    node_ids.extend(pending.keys().cloned());
+    node_ids.extend(expired.keys().cloned());
+    node_ids.extend(redemption_by_node.keys().cloned());
+    // A lifecycle ledger may contain tombstones and invitations for nodes that
+    // are not in this viewer's roster/request projection. Managers need those
+    // tombstones to perform a safe undo, but extending an ordinary member's
+    // directory from the ledger would leak unrelated Node IDs.
+    if role_for_viewer(record, actor) != MembershipRole::Member {
+        node_ids.extend(lifecycle_by_node.keys().cloned());
+    }
+
+    let actor_role = role_for_viewer(record, actor).into();
+    let retained_administrators = record.administrators.len();
+    let mut members = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        let approved_request = approved.get(&node_id);
+        let pending_request = pending.get(&node_id);
+        let expired_request = expired.get(&node_id);
+        let redemption = redemption_by_node.get(&node_id);
+        let lifecycle = lifecycle_by_node.get(&node_id);
+        let role = role_for_member(
+            record,
+            &node_id,
+            lifecycle,
+            approved_request,
+            pending_request.or(expired_request),
+            redemption,
+        );
+        let lifecycle_state = lifecycle
+            .map(|record| record.status)
+            .or_else(|| pending_request.map(|_| MemberLifecycleStatus::PendingApproval))
+            .or_else(|| expired_request.map(|_| MemberLifecycleStatus::Expired))
+            .unwrap_or(MemberLifecycleStatus::Approved);
+        let member_presence = if lifecycle_state.grants_network_access() {
+            presence
+                .get(&node_id)
+                .cloned()
+                .unwrap_or_else(NetworkMemberPresence::unknown)
+        } else {
+            NetworkMemberPresence::unknown()
+        };
+        let capabilities = if lifecycle_state.grants_network_access() {
+            approved_request
+                .map(|request| request.grant_preview.capabilities.clone())
+                .or_else(|| redemption.map(|redemption| redemption.capabilities.clone()))
+        } else if lifecycle_state == MemberLifecycleStatus::PendingApproval {
+            pending_request.map(|request| request.grant_preview.capabilities.clone())
+        } else {
+            None
+        };
+        let revision = lifecycle.map(|record| record.revision).unwrap_or(1);
+        let access_epoch = lifecycle.map(|record| record.access_epoch).unwrap_or(1);
+        let profile = approved_request.or(pending_request).or(expired_request);
         members.push(NetworkMember {
             node_id: node_id.clone(),
-            display_name: approved_request
-                .and_then(|request| request.applicant.display_name.clone()),
-            identity_fingerprint: approved_request
+            display_name: profile.and_then(|request| request.applicant.display_name.clone()),
+            identity_fingerprint: profile
                 .map(|request| request.applicant.public_key_fingerprint.clone()),
             role,
-            groups: vec![group_for_role(role)],
-            capabilities,
-            status: if member_presence.state
-                == fuckipv6_common::domain::NetworkMemberOnlineState::Online
-            {
-                NetworkMemberStatus::Active
+            groups: if record.members.contains(&node_id) {
+                vec![group_for_role(role)]
             } else {
-                NetworkMemberStatus::Approved
+                Vec::new()
             },
+            capabilities,
+            status: lifecycle_state.to_member_status(member_presence.clone()),
+            lifecycle_state,
+            revision,
+            access_epoch,
+            available_actions: available_lifecycle_actions(
+                actor,
+                actor_role,
+                &node_id,
+                role,
+                lifecycle_state,
+                retained_administrators,
+            ),
             presence: member_presence,
             joined_at_unix_ms: approved_request
                 .and_then(|request| request.approved_at_unix_ms)
                 .or_else(|| redemption.map(|redemption| redemption.joined_at_unix_ms))
                 .or_else(|| (role == MembershipRole::Owner).then_some(record.created_at_unix_ms)),
-        });
-    }
-
-    for (node_id, request) in &pending {
-        if record.members.contains(node_id) {
-            continue;
-        }
-        members.push(NetworkMember {
-            node_id: node_id.clone(),
-            display_name: request.applicant.display_name.clone(),
-            identity_fingerprint: Some(request.applicant.public_key_fingerprint.clone()),
-            role: request.grant_preview.role,
-            groups: Vec::new(),
-            capabilities: Some(request.grant_preview.capabilities.clone()),
-            status: NetworkMemberStatus::Pending,
-            presence: NetworkMemberPresence::unknown(),
-            joined_at_unix_ms: None,
-        });
-    }
-
-    for (node_id, request) in expired {
-        // A newer pending request for the same node is the current lifecycle
-        // state. Never emit both the old expiry and the retry.
-        if record.members.contains(&node_id)
-            || approved.contains_key(&node_id)
-            || pending.contains_key(&node_id)
-        {
-            continue;
-        }
-        members.push(NetworkMember {
-            node_id,
-            display_name: request.applicant.display_name.clone(),
-            identity_fingerprint: Some(request.applicant.public_key_fingerprint.clone()),
-            role: request.grant_preview.role,
-            groups: Vec::new(),
-            capabilities: Some(request.grant_preview.capabilities.clone()),
-            status: NetworkMemberStatus::Expired,
-            presence: NetworkMemberPresence::unknown(),
-            joined_at_unix_ms: None,
         });
     }
 
@@ -179,6 +214,76 @@ fn project_members(
             .then_with(|| format!("{:?}", left.status).cmp(&format!("{:?}", right.status)))
     });
     members
+}
+
+fn role_for_viewer(record: &NetworkRecord, actor: &NodeId) -> MembershipRole {
+    if record.owner == *actor {
+        MembershipRole::Owner
+    } else if record.administrators.contains(actor) {
+        MembershipRole::Administrator
+    } else {
+        MembershipRole::Member
+    }
+}
+
+fn role_for_member(
+    record: &NetworkRecord,
+    node_id: &NodeId,
+    lifecycle: Option<&MemberLifecycleRecord>,
+    approved: Option<&JoinRequest>,
+    pending_or_expired: Option<&JoinRequest>,
+    redemption: Option<&InvitationRedemption>,
+) -> MembershipRole {
+    if *node_id == record.owner {
+        MembershipRole::Owner
+    } else if record.administrators.contains(node_id) {
+        MembershipRole::Administrator
+    } else if let Some(record) = lifecycle {
+        record.role
+    } else if let Some(request) = approved.or(pending_or_expired) {
+        request.grant_preview.role
+    } else if let Some(redemption) = redemption {
+        redemption.role
+    } else {
+        MembershipRole::Member
+    }
+}
+
+fn available_lifecycle_actions(
+    actor: &NodeId,
+    actor_role: MemberLifecycleActorRole,
+    target: &NodeId,
+    target_role: MembershipRole,
+    current: MemberLifecycleStatus,
+    administrators: usize,
+) -> Vec<MemberLifecycleAction> {
+    let retained_administrators = administrators.saturating_sub(usize::from(
+        target_role == MembershipRole::Administrator && target != actor,
+    ));
+    [
+        MemberLifecycleAction::Invite,
+        MemberLifecycleAction::Approve,
+        MemberLifecycleAction::Reject,
+        MemberLifecycleAction::Suspend,
+        MemberLifecycleAction::Resume,
+        MemberLifecycleAction::Exit,
+        MemberLifecycleAction::Remove,
+        MemberLifecycleAction::UndoRemove,
+    ]
+    .into_iter()
+    .filter(|action| member_lifecycle_target(Some(current), *action).is_ok())
+    .filter(|action| {
+        authorize_member_lifecycle_action(
+            actor,
+            actor_role,
+            target,
+            target_role,
+            *action,
+            retained_administrators,
+        )
+        .is_ok()
+    })
+    .collect()
 }
 
 fn insert_latest_request(entries: &mut BTreeMap<NodeId, JoinRequest>, request: &JoinRequest) {
@@ -203,10 +308,11 @@ fn group_for_role(role: MembershipRole) -> NetworkMemberGroup {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CapabilityKind, ExitContributionObligation, ExitContributionScope, InvitationId,
-        JoinApplicantProfile, JoinRequestGrantPreview, JoinRequestReviewAction, MembershipTerms,
-        NetworkCreateProfile, NetworkJoinMode, NetworkMemberOnlineState, NetworkVisibility,
-        PublicKey,
+        CapabilityKind, ExitContributionObligation, ExitContributionScope, IdempotencyKey,
+        InvitationId, JoinApplicantProfile, JoinRequestGrantPreview, JoinRequestReviewAction,
+        MemberLifecycleAction, MemberLifecycleChangeRequest, MemberLifecycleStatus,
+        MembershipTerms, NetworkCreateProfile, NetworkJoinMode, NetworkMemberOnlineState,
+        NetworkMemberStatus, NetworkVisibility, PublicKey,
     };
     use std::path::{Path, PathBuf};
 
@@ -305,6 +411,7 @@ mod tests {
             node_id: node("unverified-member"),
             role: MembershipRole::Member,
             capabilities: vec![CapabilityKind::Exit],
+            invited_by: NodeId::from_public_key(b"owner"),
             network_revision: 2,
             invitation_revision: 1,
             joined_at_unix_ms: 4_000,
@@ -315,8 +422,10 @@ mod tests {
 
         let projected = project_members(
             &record,
+            &record.owner,
             &[approved, pending],
             &[redemption],
+            &[],
             &presence,
             &BTreeMap::new(),
         );
@@ -361,7 +470,9 @@ mod tests {
 
         let projected = project_members(
             &record,
+            &record.owner,
             &[expired, pending],
+            &[],
             &[],
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -413,6 +524,7 @@ mod tests {
             10_000,
             &store,
             None,
+            None,
             &sessions,
         )
         .await
@@ -435,6 +547,7 @@ mod tests {
             10_000,
             &unconfigured,
             None,
+            None,
             &sessions,
         )
         .await
@@ -442,10 +555,107 @@ mod tests {
         assert!(!error.to_string().is_empty());
     }
 
+    #[tokio::test]
+    async fn directory_projects_authoritative_lifecycle_revision_actions_and_tombstones() {
+        let dir = test_dir("lifecycle-projection");
+        let record_path = dir.join("network.json");
+        let record = record();
+        write_record(&record_path, &record);
+        let lifecycle =
+            MemberLifecycleStore::new(dir.join("member_lifecycle.json"), record_path.clone())
+                .unwrap();
+        let target = node("member");
+        lifecycle
+            .change(
+                &record.owner,
+                MemberLifecycleChangeRequest {
+                    network_id: record.network_id.clone(),
+                    target_node_id: target.clone(),
+                    action: MemberLifecycleAction::Remove,
+                    role: MembershipRole::Member,
+                    expected_revision: 1,
+                    idempotency_key: IdempotencyKey::from_public_key(b"directory-remove"),
+                    reason: None,
+                },
+                10_000,
+            )
+            .unwrap();
+        let requests = JoinRequestStore::new(
+            dir.join("requests.json"),
+            Some(record_path),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let sessions = SessionManager::new("fd00::1000/120").unwrap();
+        let directory = build_member_directory(
+            &record.network_id,
+            &record.owner,
+            11_000,
+            &requests,
+            None,
+            Some(&lifecycle),
+            &sessions,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(directory.viewer_role, MembershipRole::Owner);
+        assert!(directory.can_manage_members);
+        let removed = directory
+            .members
+            .iter()
+            .find(|member| member.node_id == target)
+            .expect("removed lifecycle tombstone must remain visible for safe undo");
+        assert_eq!(removed.lifecycle_state, MemberLifecycleStatus::Removed);
+        assert_eq!(removed.status, NetworkMemberStatus::Removed);
+        assert_eq!(removed.revision, 2);
+        assert_eq!(removed.access_epoch, 2);
+        assert!(removed
+            .available_actions
+            .contains(&MemberLifecycleAction::UndoRemove));
+        assert!(!removed
+            .available_actions
+            .contains(&MemberLifecycleAction::Remove));
+
+        let member_view = build_member_directory(
+            &record.network_id,
+            &node("unverified-member"),
+            12_000,
+            &requests,
+            None,
+            Some(&lifecycle),
+            &sessions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(member_view.viewer_role, MembershipRole::Member);
+        assert!(!member_view.can_manage_members);
+        assert!(member_view.members.iter().all(|member| {
+            member.available_actions.is_empty()
+                || member.available_actions == vec![MemberLifecycleAction::Exit]
+        }));
+        assert!(
+            member_view
+                .members
+                .iter()
+                .all(|member| member.node_id != target),
+            "ordinary members must not discover lifecycle-only tombstones"
+        );
+    }
+
     #[test]
     fn owner_identity_is_not_inferred_from_network_wide_declarations() {
         let record = record();
-        let projected = project_members(&record, &[], &[], &BTreeMap::new(), &BTreeMap::new());
+        let projected = project_members(
+            &record,
+            &record.owner,
+            &[],
+            &[],
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         let owner = projected
             .iter()
             .find(|member| member.node_id == record.owner)

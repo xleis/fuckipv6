@@ -1507,18 +1507,56 @@ WebUI `npm test -- --run`（155 passed）、`npm run typecheck`、`npm run lint`
 `node ../scripts/test_webui_accessibility.mjs`、`./scripts/check-contracts.sh`、`./scripts/generate-contracts.sh`、
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check`。
 
-### W9-03 自定义组与动态组 `[ ]`
+### W9-03 自定义组与动态组 `[x]`
 
-- [ ] 建立静态组、动态查询组和保留系统角色；
-- [ ] 组表达式使用结构化字段，不执行任意脚本；
-- [ ] 支持组嵌套、循环检测和深度限制；
-- [ ] 支持预览成员集合、差异和权限影响；
-- [ ] 组变更原子应用并可回滚；
-- [ ] 动态组成员变化只影响授权，不隐式修改成员身份；
-- [ ] 删除组前处理引用、空组和并发编辑；
-- [ ] 拒绝优先于任何组允许。
+- [x] 建立静态组、动态查询组和保留系统角色；
+- [x] 组表达式使用结构化字段，不执行任意脚本；
+- [x] 支持组嵌套、循环检测和深度限制；
+- [x] 支持预览成员集合、差异和权限影响；
+- [x] 组变更原子应用并可回滚；
+- [x] 动态组成员变化只影响授权，不隐式修改成员身份；
+- [x] 删除组前处理引用、空组和并发编辑；
+- [x] 拒绝优先于任何组允许。
 
 **验收**：组求值确定、可解释、可测试；不存在循环、隐式提权或陈旧成员授权。
+
+**证据（2026-11-05）**：`crates/common/src/domain/groups.rs` 新增版本化 `GroupCatalog`
+（`network_id` + 单调 `revision` + 组集合）与确定性求值器，`crates/common/src/domain/permissions.rs`
+把 `GroupKind` 扩展为 `Manual`/`Dynamic`/`Nested`，`DynamicGroupSelector` 增加能力选择字段并加
+`deny_unknown_fields`，`GroupDefinition::validate` 下沉为组定义自校验。`domain::groups::tests`
+（11 passed）逐项覆盖：
+
+- `manual_dynamic_and_nested_groups_resolve_deterministically`：静态组按 `NodeId` 过滤花名册、动态组按
+  角色/节点/能力求值、嵌套组返回去重且有序的并集，并对每个节点记录贡献来源组（`via`），同一目录重复求值结果完全一致；
+- `reserved_system_role_names_cannot_be_shadowed_by_custom_groups`：`owner`/`administrator`/`member`
+  为保留系统角色名，大小写与首尾空白归一化后仍被拒绝，组名大小写不敏感唯一；
+- `group_expressions_are_structured_fields_and_never_scripts`：任意 `script`/`expression` 载荷在反序列化边界即失败，
+  空的动态选择器不会静默放行或匹配全体，只能使用结构化字段；
+- `nested_group_cycles_depth_and_unknown_references_are_rejected`：自引用与双组循环报 `domain.group_cycle`，
+  悬空引用报 `domain.group_unknown_reference`，8 层内允许、9 层报 `domain.group_depth_exceeded`，
+  单网络超过 256 组被拒绝；
+- `preview_reports_member_sets_diffs_and_permission_impact`：预览给出基线与候选 revision、增删改组集合、
+  每个组的成员增删集合以及逐成员权限影响（`AccessDecisionView`），预览不改变线上 revision 与求值结果；
+- `group_changes_apply_atomically_and_roll_back`：一次变更要么整体替换、要么完全不生效，回滚 token 在校验
+  `network_id`/revision/内容摘要后恢复上一版，任意后续版本落地后回滚报 `domain.group_stale_revision`；
+- `dynamic_membership_changes_only_affect_authorization`：动态组选择器改变只移动授权集合，`identity_changes == 0`
+  且花名册（身份、角色、启用状态）完全不变；
+- `group_deletion_requires_reference_cleanup_and_handles_empty_groups`：被嵌套组或权限规则引用的组删除时
+  返回 `blocking_references` 并以 `domain.group_change_blocked` 拒绝，替换组只重写嵌套引用不重写策略规则，
+  空组在解除引用后可删除，陈旧 `expected_revision` 报 `domain.group_stale_revision`；
+- `deny_rules_outrank_any_group_allow_and_the_role_ceiling`：组允许无法覆盖任一层拒绝（`permission.denied`），
+  也无法突破角色上限（`permission.role_ceiling_exceeded`）；
+- `roster_and_selector_inputs_reject_duplicates`、`catalog_rejects_groups_from_another_network`：
+  花名册、选择器、嵌套引用拒绝重复项，跨网络组与零 revision 目录被拒绝。
+
+**验证通过**：`cargo test -p fuckipv6-common --all-features`（217 passed）、
+`cargo test -p fuckipv6-coordinator --all-features`（117 passed，另 2 个 signaling flow）、
+`cargo test -p fuckipv6-client --all-features --lib`（846 passed，3 ignored）、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`cargo fmt --all -- --check` 和 `git diff --check`。
+
+**范围说明**：本项交付领域层的组目录、求值与变更契约；Coordinator 存储、节点契约动作与 WebUI 组管理界面
+尚未接线，后续拓扑/批量操作项复用同一 `GroupCatalog`，不会引入第二套状态机。
 
 ### W9-04 拓扑数据与聚合 `[ ]`
 

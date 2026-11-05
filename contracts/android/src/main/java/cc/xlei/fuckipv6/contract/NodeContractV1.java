@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -449,6 +449,68 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum MemberLifecycleAction {
+        INVITE("invite"),
+        APPROVE("approve"),
+        REJECT("reject"),
+        SUSPEND("suspend"),
+        RESUME("resume"),
+        EXIT("exit"),
+        REMOVE("remove"),
+        UNDO_REMOVE("undo_remove");
+
+        private final String wireName;
+
+        MemberLifecycleAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static MemberLifecycleAction fromWireName(String value) {
+            for (MemberLifecycleAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown MemberLifecycleAction wire value: " + value);
+        }
+    }
+
+    public enum MemberLifecycleStatus {
+        INVITED("invited"),
+        PENDING_APPROVAL("pending_approval"),
+        APPROVED("approved"),
+        ACTIVE("active"),
+        DEGRADED("degraded"),
+        SUSPENDED("suspended"),
+        EXITED("exited"),
+        REMOVED("removed"),
+        EXPIRED("expired"),
+        REJECTED("rejected");
+
+        private final String wireName;
+
+        MemberLifecycleStatus(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static MemberLifecycleStatus fromWireName(String value) {
+            for (MemberLifecycleStatus candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown MemberLifecycleStatus wire value: " + value);
+        }
+    }
+
     public enum MembershipRole {
         OWNER("owner"),
         ADMINISTRATOR("administrator"),
@@ -798,6 +860,7 @@ public final class NodeContractV1 {
         APPLY_CONFIGURATION("apply_configuration"),
         BAN_CLIENT("ban_client"),
         BATCH_REVIEW_JOIN_REQUESTS("batch_review_join_requests"),
+        CHANGE_MEMBER_LIFECYCLE("change_member_lifecycle"),
         CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
         CREATE_INVITATION("create_invitation"),
         CREATE_NETWORK("create_network"),
@@ -817,6 +880,7 @@ public final class NodeContractV1 {
         PREVIEW_CONFIGURATION("preview_configuration"),
         PREVIEW_INVITATION("preview_invitation"),
         PREVIEW_JOIN_NETWORK("preview_join_network"),
+        PREVIEW_MEMBER_REMOVAL("preview_member_removal"),
         PREVIEW_NETWORK_PROFILE("preview_network_profile"),
         PROBE_PEER("probe_peer"),
         PUBLISH_NETWORK_DISCOVERY("publish_network_discovery"),
@@ -1613,6 +1677,9 @@ public final class NodeContractV1 {
         JOIN_REQUEST_REASON("join_request_reason"),
         JOIN_REQUEST_REVIEW_ACTION("join_request_review_action"),
         JOIN_REQUEST_REVIEWS("join_request_reviews"),
+        NODE_ID("node_id"),
+        MEMBER_LIFECYCLE_ACTION("member_lifecycle_action"),
+        MEMBER_LIFECYCLE_REASON("member_lifecycle_reason"),
         INVITATION_CODE("invitation_code"),
         COORDINATOR_URL("coordinator_url"),
         PORT("port"),
@@ -1708,6 +1775,9 @@ public final class NodeContractV1 {
         JOIN_REQUEST_REASON("join_request_reason"),
         JOIN_REQUEST_REVIEW_ACTION("join_request_review_action"),
         JOIN_REQUEST_REVIEWS("join_request_reviews"),
+        NODE_ID("node_id"),
+        MEMBER_LIFECYCLE_ACTION("member_lifecycle_action"),
+        MEMBER_LIFECYCLE_REASON("member_lifecycle_reason"),
         INVITATION_CODE("invitation_code"),
         COORDINATOR_URL("coordinator_url");
 
@@ -1804,6 +1874,11 @@ public final class NodeContractV1 {
         MEMBERSHIP_APPROVE("membership_approve"),
         MEMBERSHIP_REJECT("membership_reject"),
         MEMBERSHIP_REMOVE("membership_remove"),
+        MEMBERSHIP_INVITE("membership_invite"),
+        MEMBERSHIP_SUSPEND("membership_suspend"),
+        MEMBERSHIP_RESUME("membership_resume"),
+        MEMBERSHIP_EXIT("membership_exit"),
+        MEMBERSHIP_UNDO_REMOVE("membership_undo_remove"),
         POLICY_TEST("policy_test"),
         POLICY_APPLY("policy_apply"),
         POLICY_ROLLBACK("policy_rollback"),
@@ -2266,18 +2341,20 @@ public final class NodeContractV1 {
         public final Boolean grants_permanent_membership;
         public final String invitation_id;
         public final Long invitation_revision;
+        public final String invited_by;
         public final Long joined_at_unix_ms;
         public final String network_id;
         public final Long network_revision;
         public final String node_id;
         public final MembershipRole role;
 
-        public InvitationRedemption(Boolean already_redeemed, List<CapabilityKind> capabilities, Boolean grants_permanent_membership, String invitation_id, Long invitation_revision, Long joined_at_unix_ms, String network_id, Long network_revision, String node_id, MembershipRole role) {
+        public InvitationRedemption(Boolean already_redeemed, List<CapabilityKind> capabilities, Boolean grants_permanent_membership, String invitation_id, Long invitation_revision, String invited_by, Long joined_at_unix_ms, String network_id, Long network_revision, String node_id, MembershipRole role) {
             this.already_redeemed = already_redeemed;
             this.capabilities = capabilities;
             this.grants_permanent_membership = grants_permanent_membership;
             this.invitation_id = invitation_id;
             this.invitation_revision = invitation_revision;
+            this.invited_by = invited_by;
             this.joined_at_unix_ms = joined_at_unix_ms;
             this.network_id = network_id;
             this.network_revision = network_revision;
@@ -2382,6 +2459,86 @@ public final class NodeContractV1 {
             this.file_access = file_access;
             this.grants_data_plane_access = grants_data_plane_access;
             this.role = role;
+        }
+    }
+
+    /** DTO for MemberLifecycleChange. */
+    public static final class MemberLifecycleChange {
+        public final Long access_epoch;
+        public final Boolean access_revoked;
+        public final MemberLifecycleAction action;
+        public final String audit_id;
+        public final Boolean idempotent;
+        public final String network_id;
+        public final String operation_id;
+        public final Boolean requires_reapproval;
+        public final Boolean requires_reauthentication;
+        public final Long revision;
+        public final MemberLifecycleStatus status;
+        public final String target_node_id;
+
+        public MemberLifecycleChange(Long access_epoch, Boolean access_revoked, MemberLifecycleAction action, String audit_id, Boolean idempotent, String network_id, String operation_id, Boolean requires_reapproval, Boolean requires_reauthentication, Long revision, MemberLifecycleStatus status, String target_node_id) {
+            this.access_epoch = access_epoch;
+            this.access_revoked = access_revoked;
+            this.action = action;
+            this.audit_id = audit_id;
+            this.idempotent = idempotent;
+            this.network_id = network_id;
+            this.operation_id = operation_id;
+            this.requires_reapproval = requires_reapproval;
+            this.requires_reauthentication = requires_reauthentication;
+            this.revision = revision;
+            this.status = status;
+            this.target_node_id = target_node_id;
+        }
+    }
+
+    /** DTO for MemberRemovalPreview. */
+    public static final class MemberRemovalPreview {
+        public final Long access_epoch;
+        public final List<CapabilityKind> active_capabilities;
+        public final Boolean can_remove;
+        public final Boolean credentials_revoked;
+        public final String denial_key;
+        public final String display_name;
+        public final Boolean file_access_revoked;
+        public final List<String> impact_keys;
+        public final Boolean incomplete_transfers_resume_blocked;
+        public final MemberLifecycleStatus lifecycle_state;
+        public final Boolean local_files_deleted;
+        public final Boolean network_access_revoked;
+        public final String network_id;
+        public final Boolean old_access_epoch_invalidated;
+        public final NetworkMemberPresence presence;
+        public final Long revision;
+        public final MembershipRole role;
+        public final Boolean safe_undo_requires_reapproval;
+        public final Boolean safe_undo_restores_old_credentials;
+        public final NetworkMemberStatus status;
+        public final String target_node_id;
+
+        public MemberRemovalPreview(Long access_epoch, List<CapabilityKind> active_capabilities, Boolean can_remove, Boolean credentials_revoked, String denial_key, String display_name, Boolean file_access_revoked, List<String> impact_keys, Boolean incomplete_transfers_resume_blocked, MemberLifecycleStatus lifecycle_state, Boolean local_files_deleted, Boolean network_access_revoked, String network_id, Boolean old_access_epoch_invalidated, NetworkMemberPresence presence, Long revision, MembershipRole role, Boolean safe_undo_requires_reapproval, Boolean safe_undo_restores_old_credentials, NetworkMemberStatus status, String target_node_id) {
+            this.access_epoch = access_epoch;
+            this.active_capabilities = active_capabilities;
+            this.can_remove = can_remove;
+            this.credentials_revoked = credentials_revoked;
+            this.denial_key = denial_key;
+            this.display_name = display_name;
+            this.file_access_revoked = file_access_revoked;
+            this.impact_keys = impact_keys;
+            this.incomplete_transfers_resume_blocked = incomplete_transfers_resume_blocked;
+            this.lifecycle_state = lifecycle_state;
+            this.local_files_deleted = local_files_deleted;
+            this.network_access_revoked = network_access_revoked;
+            this.network_id = network_id;
+            this.old_access_epoch_invalidated = old_access_epoch_invalidated;
+            this.presence = presence;
+            this.revision = revision;
+            this.role = role;
+            this.safe_undo_requires_reapproval = safe_undo_requires_reapproval;
+            this.safe_undo_restores_old_credentials = safe_undo_restores_old_credentials;
+            this.status = status;
+            this.target_node_id = target_node_id;
         }
     }
 
@@ -2519,24 +2676,32 @@ public final class NodeContractV1 {
 
     /** DTO for NetworkMember. */
     public static final class NetworkMember {
+        public final Long access_epoch;
+        public final List<MemberLifecycleAction> available_actions;
         public final List<CapabilityKind> capabilities;
         public final String display_name;
         public final List<NetworkMemberGroup> groups;
         public final String identity_fingerprint;
         public final Long joined_at_unix_ms;
+        public final MemberLifecycleStatus lifecycle_state;
         public final String node_id;
         public final NetworkMemberPresence presence;
+        public final Long revision;
         public final MembershipRole role;
         public final NetworkMemberStatus status;
 
-        public NetworkMember(List<CapabilityKind> capabilities, String display_name, List<NetworkMemberGroup> groups, String identity_fingerprint, Long joined_at_unix_ms, String node_id, NetworkMemberPresence presence, MembershipRole role, NetworkMemberStatus status) {
+        public NetworkMember(Long access_epoch, List<MemberLifecycleAction> available_actions, List<CapabilityKind> capabilities, String display_name, List<NetworkMemberGroup> groups, String identity_fingerprint, Long joined_at_unix_ms, MemberLifecycleStatus lifecycle_state, String node_id, NetworkMemberPresence presence, Long revision, MembershipRole role, NetworkMemberStatus status) {
+            this.access_epoch = access_epoch;
+            this.available_actions = available_actions;
             this.capabilities = capabilities;
             this.display_name = display_name;
             this.groups = groups;
             this.identity_fingerprint = identity_fingerprint;
             this.joined_at_unix_ms = joined_at_unix_ms;
+            this.lifecycle_state = lifecycle_state;
             this.node_id = node_id;
             this.presence = presence;
+            this.revision = revision;
             this.role = role;
             this.status = status;
         }
@@ -2544,14 +2709,18 @@ public final class NodeContractV1 {
 
     /** DTO for NetworkMemberDirectory. */
     public static final class NetworkMemberDirectory {
+        public final Boolean can_manage_members;
         public final Long generated_at_unix_ms;
         public final List<NetworkMember> members;
         public final String network_id;
+        public final MembershipRole viewer_role;
 
-        public NetworkMemberDirectory(Long generated_at_unix_ms, List<NetworkMember> members, String network_id) {
+        public NetworkMemberDirectory(Boolean can_manage_members, Long generated_at_unix_ms, List<NetworkMember> members, String network_id, MembershipRole viewer_role) {
+            this.can_manage_members = can_manage_members;
             this.generated_at_unix_ms = generated_at_unix_ms;
             this.members = members;
             this.network_id = network_id;
+            this.viewer_role = viewer_role;
         }
     }
 
@@ -2949,6 +3118,25 @@ public final class NodeContractV1 {
         public NodeCapabilitySnapshot(CapabilityKind kind, String state) {
             this.kind = kind;
             this.state = state;
+        }
+    }
+
+    /** DTO for NodeChangeMemberLifecycleCommand. */
+    public static final class NodeChangeMemberLifecycleCommand {
+        public final MemberLifecycleAction action;
+        public final Long expected_revision;
+        public final String network_id;
+        public final String reason;
+        public final MembershipRole role;
+        public final String target_node_id;
+
+        public NodeChangeMemberLifecycleCommand(MemberLifecycleAction action, Long expected_revision, String network_id, String reason, MembershipRole role, String target_node_id) {
+            this.action = action;
+            this.expected_revision = expected_revision;
+            this.network_id = network_id;
+            this.reason = reason;
+            this.role = role;
+            this.target_node_id = target_node_id;
         }
     }
 
@@ -3598,6 +3786,17 @@ public final class NodeContractV1 {
         public NodeManifestResponse(NodeUiManifest manifest, Integer schema_version) {
             this.manifest = manifest;
             this.schema_version = schema_version;
+        }
+    }
+
+    /** DTO for NodeMemberRemovalPreviewCommand. */
+    public static final class NodeMemberRemovalPreviewCommand {
+        public final String network_id;
+        public final String target_node_id;
+
+        public NodeMemberRemovalPreviewCommand(String network_id, String target_node_id) {
+            this.network_id = network_id;
+            this.target_node_id = target_node_id;
         }
     }
 
@@ -4929,6 +5128,24 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class PreviewMemberRemoval extends NodeCommand {
+            public final NodeMemberRemovalPreviewCommand payload;
+
+            public PreviewMemberRemoval(NodeMemberRemovalPreviewCommand payload) {
+                super(NodeCommandKind.PREVIEW_MEMBER_REMOVAL);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ChangeMemberLifecycle extends NodeCommand {
+            public final NodeChangeMemberLifecycleCommand payload;
+
+            public ChangeMemberLifecycle(NodeChangeMemberLifecycleCommand payload) {
+                super(NodeCommandKind.CHANGE_MEMBER_LIFECYCLE);
+                this.payload = payload;
+            }
+        }
+
         public static final class ReviewJoinRequest extends NodeCommand {
             public final NodeReviewJoinRequestCommand payload;
 
@@ -5365,6 +5582,24 @@ public final class NodeContractV1 {
 
             public NetworkMembers(NetworkMemberDirectory data) {
                 super("network_members");
+                this.data = data;
+            }
+        }
+
+        public static final class MemberRemovalPreview extends NodeCommandOutcome {
+            public final MemberRemovalPreview data;
+
+            public MemberRemovalPreview(MemberRemovalPreview data) {
+                super("member_removal_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class MemberLifecycleChanged extends NodeCommandOutcome {
+            public final MemberLifecycleChange data;
+
+            public MemberLifecycleChanged(MemberLifecycleChange data) {
+                super("member_lifecycle_changed");
                 this.data = data;
             }
         }
@@ -5919,6 +6154,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.APPLY_CONFIGURATION ||
             command == NodeCommandKind.BAN_CLIENT ||
             command == NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS ||
+            command == NodeCommandKind.CHANGE_MEMBER_LIFECYCLE ||
             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
             command == NodeCommandKind.CREATE_INVITATION ||
             command == NodeCommandKind.CREATE_NETWORK ||
@@ -5937,6 +6173,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.PREVIEW_CONFIGURATION ||
             command == NodeCommandKind.PREVIEW_INVITATION ||
             command == NodeCommandKind.PREVIEW_JOIN_NETWORK ||
+            command == NodeCommandKind.PREVIEW_MEMBER_REMOVAL ||
             command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.PUBLISH_NETWORK_DISCOVERY ||

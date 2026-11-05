@@ -634,6 +634,97 @@
           "confirmation": null
         },
         {
+          "id": "preview_member_removal",
+          "label_key": "action.preview_member_removal",
+          "command": "preview_member_removal",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "target_node_id",
+              "label_key": "field.target_node_id",
+              "input": "node_id",
+              "required": true,
+              "validation": "node_id"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "change_member_lifecycle",
+          "label_key": "action.change_member_lifecycle",
+          "command": "change_member_lifecycle",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "membership.change"
+          },
+          "availability": "node_running",
+          "fields": [
+            {
+              "id": "network_id",
+              "label_key": "field.network_id",
+              "input": "network_name",
+              "required": true,
+              "validation": "non_empty"
+            },
+            {
+              "id": "target_node_id",
+              "label_key": "field.target_node_id",
+              "input": "node_id",
+              "required": true,
+              "validation": "node_id"
+            },
+            {
+              "id": "action",
+              "label_key": "field.member_lifecycle_action",
+              "input": "member_lifecycle_action",
+              "required": true,
+              "validation": "member_lifecycle_action"
+            },
+            {
+              "id": "role",
+              "label_key": "field.membership_role",
+              "input": "role",
+              "required": true,
+              "validation": "role"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "reason",
+              "label_key": "field.lifecycle_reason",
+              "input": "member_lifecycle_reason",
+              "required": false,
+              "validation": "member_lifecycle_reason"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.change_member_lifecycle.title",
+            "consequence_key": "confirm.change_member_lifecycle.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
           "id": "review_join_request",
           "label_key": "action.review_join_request",
           "command": "review_join_request",

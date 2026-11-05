@@ -113,6 +113,20 @@
       ],
       "type": "string"
     },
+    "MemberLifecycleAction": {
+      "description": "Every durable governance action uses this vocabulary. Runtime connection\nstates stay in `MembershipState`; this enum is the operation semantics shared\nby the Coordinator, command bus, audit/activity projections and UI adapters.",
+      "enum": [
+        "invite",
+        "approve",
+        "reject",
+        "suspend",
+        "resume",
+        "exit",
+        "remove",
+        "undo_remove"
+      ],
+      "type": "string"
+    },
     "MembershipRole": {
       "description": "A member's governance role. Temporary Coordinator authority is intentionally\nrepresented by `CoordinatorTerm`, never by mutating this durable role.",
       "enum": [
@@ -485,6 +499,41 @@
       ],
       "type": "object"
     },
+    "NodeChangeMemberLifecycleCommand": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/MemberLifecycleAction"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole",
+          "default": "member"
+        },
+        "target_node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "target_node_id",
+        "action",
+        "expected_revision"
+      ],
+      "type": "object"
+    },
     "NodeClientBlacklistCommand": {
       "properties": {
         "client_id": {
@@ -778,6 +827,21 @@
       },
       "required": [
         "network_id"
+      ],
+      "type": "object"
+    },
+    "NodeMemberRemovalPreviewCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "target_node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "target_node_id"
       ],
       "type": "object"
     },
@@ -1555,6 +1619,40 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeNetworkMembersCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Disclose the exact access, File and data impact before member removal.",
+      "properties": {
+        "command": {
+          "const": "preview_member_removal",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeMemberRemovalPreviewCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Apply one revision-checked member lifecycle governance action.",
+      "properties": {
+        "command": {
+          "const": "change_member_lifecycle",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeChangeMemberLifecycleCommand"
         }
       },
       "required": [

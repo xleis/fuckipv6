@@ -773,6 +773,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "invited_by": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Manager whose active invitation authorized this admission. The\nlifecycle ledger revalidates this identity at redemption time."
+        },
         "joined_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -799,6 +803,7 @@
         "node_id",
         "role",
         "capabilities",
+        "invited_by",
         "network_revision",
         "invitation_revision",
         "joined_at_unix_ms",
@@ -1053,6 +1058,202 @@
         "expired"
       ],
       "type": "string"
+    },
+    "MemberLifecycleAction": {
+      "description": "Every durable governance action uses this vocabulary. Runtime connection\nstates stay in `MembershipState`; this enum is the operation semantics shared\nby the Coordinator, command bus, audit/activity projections and UI adapters.",
+      "enum": [
+        "invite",
+        "approve",
+        "reject",
+        "suspend",
+        "resume",
+        "exit",
+        "remove",
+        "undo_remove"
+      ],
+      "type": "string"
+    },
+    "MemberLifecycleChange": {
+      "properties": {
+        "access_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "access_revoked": {
+          "type": "boolean"
+        },
+        "action": {
+          "$ref": "#/$defs/MemberLifecycleAction"
+        },
+        "audit_id": {
+          "$ref": "#/$defs/AuditId"
+        },
+        "idempotent": {
+          "description": "True when the response is the durable result of an earlier retry.",
+          "type": "boolean"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "requires_reapproval": {
+          "type": "boolean"
+        },
+        "requires_reauthentication": {
+          "type": "boolean"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/MemberLifecycleStatus"
+        },
+        "target_node_id": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "network_id",
+        "target_node_id",
+        "action",
+        "status",
+        "revision",
+        "access_epoch",
+        "operation_id",
+        "audit_id",
+        "idempotent",
+        "access_revoked",
+        "requires_reauthentication",
+        "requires_reapproval"
+      ],
+      "type": "object"
+    },
+    "MemberLifecycleStatus": {
+      "description": "Authoritative lifecycle state independent of the local client's connection\nworkflow. A live data-plane observation may refine `Approved` to `Active`,\nbut it can never overwrite a suspended, exited or removed tombstone.",
+      "enum": [
+        "invited",
+        "pending_approval",
+        "approved",
+        "active",
+        "degraded",
+        "suspended",
+        "exited",
+        "removed",
+        "expired",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "MemberRemovalPreview": {
+      "description": "Explicit, non-secret disclosure shown before removal. It states what will be\nrevoked without pretending a transfer registry exists where none does.",
+      "properties": {
+        "access_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "active_capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "can_remove": {
+          "type": "boolean"
+        },
+        "credentials_revoked": {
+          "type": "boolean"
+        },
+        "denial_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file_access_revoked": {
+          "type": "boolean"
+        },
+        "impact_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "incomplete_transfers_resume_blocked": {
+          "type": "boolean"
+        },
+        "lifecycle_state": {
+          "$ref": "#/$defs/MemberLifecycleStatus"
+        },
+        "local_files_deleted": {
+          "type": "boolean"
+        },
+        "network_access_revoked": {
+          "type": "boolean"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "old_access_epoch_invalidated": {
+          "type": "boolean"
+        },
+        "presence": {
+          "$ref": "#/$defs/NetworkMemberPresence"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "safe_undo_requires_reapproval": {
+          "type": "boolean"
+        },
+        "safe_undo_restores_old_credentials": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/NetworkMemberStatus"
+        },
+        "target_node_id": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "network_id",
+        "target_node_id",
+        "role",
+        "status",
+        "lifecycle_state",
+        "revision",
+        "access_epoch",
+        "presence",
+        "can_remove",
+        "network_access_revoked",
+        "file_access_revoked",
+        "incomplete_transfers_resume_blocked",
+        "credentials_revoked",
+        "old_access_epoch_invalidated",
+        "local_files_deleted",
+        "safe_undo_requires_reapproval",
+        "safe_undo_restores_old_credentials",
+        "impact_keys"
+      ],
+      "type": "object"
     },
     "MembershipRole": {
       "description": "A member's governance role. Temporary Coordinator authority is intentionally\nrepresented by `CoordinatorTerm`, never by mutating this durable role.",
@@ -1395,6 +1596,20 @@
     "NetworkMember": {
       "description": "One sanitized directory row. Fields that are not authorized or not known are\nomitted rather than populated from unrelated network-wide declarations.",
       "properties": {
+        "access_epoch": {
+          "description": "Access generation used to invalidate old credentials and transfers.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "available_actions": {
+          "default": [],
+          "description": "Actions the authenticated viewer may currently attempt. The server still\nre-authorizes and re-checks the transition on mutation.",
+          "items": {
+            "$ref": "#/$defs/MemberLifecycleAction"
+          },
+          "type": "array"
+        },
         "capabilities": {
           "items": {
             "$ref": "#/$defs/CapabilityKind"
@@ -1430,11 +1645,21 @@
             "null"
           ]
         },
+        "lifecycle_state": {
+          "$ref": "#/$defs/MemberLifecycleStatus",
+          "description": "Durable governance state. This is distinct from live connection status\nand is always supplied by the lifecycle ledger or an authoritative\nroster/request projection."
+        },
         "node_id": {
           "$ref": "#/$defs/NodeId"
         },
         "presence": {
           "$ref": "#/$defs/NetworkMemberPresence"
+        },
+        "revision": {
+          "description": "Compare-and-swap revision for lifecycle mutations.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "role": {
           "$ref": "#/$defs/MembershipRole"
@@ -1448,6 +1673,9 @@
         "role",
         "groups",
         "status",
+        "lifecycle_state",
+        "revision",
+        "access_epoch",
         "presence"
       ],
       "type": "object"
@@ -1455,6 +1683,9 @@
     "NetworkMemberDirectory": {
       "description": "Server-owned snapshot. A directory never carries endpoints, invitation\nmaterial, approval prose, public-key bytes or transfer metadata.",
       "properties": {
+        "can_manage_members": {
+          "type": "boolean"
+        },
         "generated_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -1468,11 +1699,17 @@
         },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
+        },
+        "viewer_role": {
+          "$ref": "#/$defs/MembershipRole",
+          "description": "Role observed from the authoritative roster, never from a client claim."
         }
       },
       "required": [
         "network_id",
         "generated_at_unix_ms",
+        "viewer_role",
+        "can_manage_members",
         "members"
       ],
       "type": "object"
@@ -2610,6 +2847,41 @@
       ],
       "type": "object"
     },
+    "NodeChangeMemberLifecycleCommand": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/MemberLifecycleAction"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole",
+          "default": "member"
+        },
+        "target_node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "target_node_id",
+        "action",
+        "expected_revision"
+      ],
+      "type": "object"
+    },
     "NodeCleanupFailureReason": {
       "enum": [
         "still_running",
@@ -3054,6 +3326,40 @@
             },
             "payload": {
               "$ref": "#/$defs/NodeNetworkMembersCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Disclose the exact access, File and data impact before member removal.",
+          "properties": {
+            "command": {
+              "const": "preview_member_removal",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeMemberRemovalPreviewCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Apply one revision-checked member lifecycle governance action.",
+          "properties": {
+            "command": {
+              "const": "change_member_lifecycle",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeChangeMemberLifecycleCommand"
             }
           },
           "required": [
@@ -3886,6 +4192,38 @@
             },
             "status": {
               "const": "network_members",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/MemberRemovalPreview"
+            },
+            "status": {
+              "const": "member_removal_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/MemberLifecycleChange"
+            },
+            "status": {
+              "const": "member_lifecycle_changed",
               "type": "string"
             }
           },
@@ -5753,6 +6091,21 @@
       "required": [
         "schema_version",
         "manifest"
+      ],
+      "type": "object"
+    },
+    "NodeMemberRemovalPreviewCommand": {
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "target_node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_id",
+        "target_node_id"
       ],
       "type": "object"
     },
@@ -7760,6 +8113,8 @@
             "submit_join_request",
             "list_join_requests",
             "list_network_members",
+            "preview_member_removal",
+            "change_member_lifecycle",
             "review_join_request",
             "batch_review_join_requests",
             "withdraw_join_request",
@@ -7977,6 +8332,9 @@
         "join_request_reason",
         "join_request_review_action",
         "join_request_reviews",
+        "node_id",
+        "member_lifecycle_action",
+        "member_lifecycle_reason",
         "invitation_code",
         "coordinator_url",
         "port",
@@ -8101,6 +8459,9 @@
         "join_request_reason",
         "join_request_review_action",
         "join_request_reviews",
+        "node_id",
+        "member_lifecycle_action",
+        "member_lifecycle_reason",
         "invitation_code",
         "coordinator_url"
       ],
@@ -8430,6 +8791,11 @@
         "membership_approve",
         "membership_reject",
         "membership_remove",
+        "membership_invite",
+        "membership_suspend",
+        "membership_resume",
+        "membership_exit",
+        "membership_undo_remove",
         "policy_test",
         "policy_apply",
         "policy_rollback",

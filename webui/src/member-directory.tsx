@@ -1,4 +1,10 @@
-import { Download, ShieldCheck, UserRound } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Download,
+  ShieldCheck,
+  UserRound,
+} from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   useEffect,
@@ -10,14 +16,26 @@ import {
 } from "react";
 import type {
   CapabilityKind,
+  MemberLifecycleAction,
+  MemberLifecycleChange,
+  MemberRemovalPreview,
   MembershipRole,
   NetworkMember,
   NetworkMemberDirectory,
   NetworkMemberGroup,
   NetworkMemberOnlineState,
   NetworkMemberStatus,
+  NodeCommandOutcome,
+  NodeOperationSnapshot,
+  NodeUiAction,
 } from "../../contracts/typescript/node-contract-v1";
-import { i18n, label } from "./contract/invariants";
+import {
+  i18n,
+  label,
+  outcomeSummary,
+  validateActionValues,
+  type ActionValues,
+} from "./contract/invariants";
 import {
   EMPTY_MEMBER_FILTERS,
   exportMemberDirectory,
@@ -37,6 +55,29 @@ import {
   type MemberHealthFilter,
 } from "./members";
 import { tr } from "./i18n";
+
+export type MemberGovernanceSubmission = {
+  outcome?: NodeCommandOutcome;
+  operation?: NodeOperationSnapshot;
+};
+
+export type MemberGovernanceSubmit = (
+  action: NodeUiAction,
+  values: ActionValues,
+  onOperation: (operation: NodeOperationSnapshot) => void,
+) => Promise<MemberGovernanceSubmission>;
+
+type GovernanceDialog =
+  | {
+      member: NetworkMember;
+      action: MemberLifecycleAction;
+      preview: null;
+    }
+  | {
+      member: NetworkMember;
+      action: "remove";
+      preview: MemberRemovalPreview;
+    };
 
 const MEMBERSHIP_ROLES: MembershipRole[] = [
   "owner",
@@ -69,6 +110,18 @@ const PRESENCE_STATES: NetworkMemberOnlineState[] = [
   "offline",
   "unknown",
 ];
+
+function operationFailureText(
+  operation: NodeOperationSnapshot,
+  locale: Locale,
+): string {
+  const error = operation.error;
+  if (!error) return label(locale, "common.operation_failed");
+  const message = tr(locale, error.message_key, error.params ?? {});
+  return error.recovery
+    ? `${message} · ${label(locale, error.recovery.hint_key)}`
+    : message;
+}
 
 function memberStatusClass(member: NetworkMember): string {
   if (member.status === "active" || member.status === "approved") return "good";
@@ -156,6 +209,19 @@ function MemberDetail({
           <dd>{memberStatusText(locale, member)}</dd>
         </div>
         <div>
+          <dt>{label(locale, "member_directory.lifecycle_state")}</dt>
+          <dd>
+            {label(
+              locale,
+              `member_directory.lifecycle_state.${member.lifecycle_state}`,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.revision")}</dt>
+          <dd>{i18n().formatInteger(locale, member.revision)}</dd>
+        </div>
+        <div>
           <dt>{label(locale, "member_directory.presence")}</dt>
           <dd>{memberPresenceText(locale, member)}</dd>
         </div>
@@ -187,9 +253,19 @@ function MemberDetail({
 export function MemberDirectoryCard({
   directory,
   locale,
+  previewRemovalAction,
+  changeLifecycleAction,
+  activePendingAction = null,
+  onSubmit,
+  onLifecycleChanged,
 }: {
   directory: NetworkMemberDirectory;
   locale: Locale;
+  previewRemovalAction?: NodeUiAction;
+  changeLifecycleAction?: NodeUiAction;
+  activePendingAction?: string | null;
+  onSubmit?: MemberGovernanceSubmit;
+  onLifecycleChanged?(change: MemberLifecycleChange): void;
 }) {
   const [filters, setFilters] = useState<MemberFilters>({
     ...EMPTY_MEMBER_FILTERS,
@@ -197,6 +273,12 @@ export function MemberDirectoryCard({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [exportFeedback, setExportFeedback] = useState("");
   const [exportFailed, setExportFailed] = useState(false);
+  const [dialog, setDialog] = useState<GovernanceDialog | null>(null);
+  const [reason, setReason] = useState("");
+  const [governanceErrors, setGovernanceErrors] = useState<string[]>([]);
+  const [governanceFailure, setGovernanceFailure] = useState("");
+  const [governanceFeedback, setGovernanceFeedback] = useState("");
+  const [governing, setGoverning] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const filteredMembers = useMemo(
@@ -249,6 +331,137 @@ export function MemberDirectoryCard({
     } catch {
       setExportFeedback(label(locale, "member_directory.export_failed"));
       setExportFailed(true);
+    }
+  }
+
+  const governanceActions = selectedMember?.available_actions ?? [];
+  const canGovern =
+    Boolean(onSubmit) &&
+    directory.can_manage_members &&
+    Boolean(changeLifecycleAction) &&
+    governanceActions.length > 0;
+  const governanceBusy =
+    governing ||
+    activePendingAction === "preview_member_removal" ||
+    activePendingAction === "change_member_lifecycle";
+
+  function resetGovernanceMessages(): void {
+    setGovernanceErrors([]);
+    setGovernanceFailure("");
+  }
+
+  async function beginLifecycle(
+    member: NetworkMember,
+    lifecycleAction: MemberLifecycleAction,
+  ): Promise<void> {
+    if (!onSubmit || governanceBusy) return;
+    resetGovernanceMessages();
+    setGovernanceFeedback("");
+    setReason("");
+    if (lifecycleAction !== "remove") {
+      setDialog({ member, action: lifecycleAction, preview: null });
+      return;
+    }
+    if (!previewRemovalAction) {
+      setGovernanceFailure(
+        label(locale, "member_directory.governance.unavailable"),
+      );
+      return;
+    }
+    setGoverning(true);
+    try {
+      const submission = await onSubmit(
+        previewRemovalAction,
+        {
+          network_id: directory.network_id,
+          target_node_id: member.node_id,
+        },
+        () => {},
+      );
+      if (submission.outcome?.status === "member_removal_preview") {
+        setDialog({
+          member,
+          action: "remove",
+          preview: submission.outcome.data,
+        });
+      } else if (submission.outcome?.status === "rejected") {
+        setGovernanceFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.operation) {
+        setGovernanceFailure(
+          operationFailureText(submission.operation, locale),
+        );
+      } else {
+        setGovernanceFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setGovernanceFailure(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setGoverning(false);
+    }
+  }
+
+  async function submitLifecycle(): Promise<void> {
+    if (!dialog || !onSubmit || !changeLifecycleAction || governing) return;
+    const member = dialog.member;
+    const expectedRevision = (
+      dialog.preview?.revision ?? member.revision
+    ).toString();
+    const values: ActionValues = {
+      network_id: directory.network_id,
+      target_node_id: member.node_id,
+      action: dialog.action,
+      role: member.role,
+      expected_revision: expectedRevision,
+      ...(reason.trim() ? { reason: reason.trim() } : {}),
+    };
+    const validation = validateActionValues(
+      changeLifecycleAction,
+      values,
+      locale,
+    );
+    if (validation.length > 0) {
+      setGovernanceErrors(validation);
+      return;
+    }
+    setGoverning(true);
+    setGovernanceErrors([]);
+    setGovernanceFailure("");
+    try {
+      const submission = await onSubmit(changeLifecycleAction, values, () => {});
+      if (submission.outcome?.status === "member_lifecycle_changed") {
+        setGovernanceFeedback(
+          tr(locale, "member_directory.governance.changed", {
+            action: label(
+              locale,
+              `choice.member_lifecycle.${submission.outcome.data.action}`,
+            ),
+            member: memberDisplayName(member),
+            revision: i18n().formatInteger(
+              locale,
+              submission.outcome.data.revision,
+            ),
+          }),
+        );
+        setDialog(null);
+        setReason("");
+        onLifecycleChanged?.(submission.outcome.data);
+      } else if (submission.outcome?.status === "rejected") {
+        setGovernanceFailure(outcomeSummary(submission.outcome, locale));
+      } else if (submission.operation) {
+        setGovernanceFailure(
+          operationFailureText(submission.operation, locale),
+        );
+      } else {
+        setGovernanceFailure(label(locale, "common.operation_failed"));
+      }
+    } catch (error) {
+      setGovernanceFailure(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setGoverning(false);
     }
   }
 
@@ -448,6 +661,152 @@ export function MemberDirectoryCard({
         />
       </div>
 
+      {canGovern ? (
+        <section
+          className="member-governance"
+          aria-label={label(locale, "member_directory.governance.title")}
+          data-testid="member-governance"
+        >
+          <div className="member-governance-heading">
+            <ShieldCheck size={16} />
+            <div>
+              <strong>
+                {label(locale, "member_directory.governance.title")}
+              </strong>
+              <p>{label(locale, "member_directory.governance.hint")}</p>
+            </div>
+          </div>
+          <div className="member-governance-actions">
+            {governanceActions.map((lifecycleAction) => (
+              <button
+                key={lifecycleAction}
+                type="button"
+                className="secondary-button"
+                disabled={governanceBusy}
+                data-testid={`member-governance-action-${lifecycleAction}`}
+                onClick={() =>
+                  void beginLifecycle(selectedMember!, lifecycleAction)
+                }
+              >
+                {label(locale, `choice.member_lifecycle.${lifecycleAction}`)}
+              </button>
+            ))}
+          </div>
+          {governanceFeedback ? (
+            <p className="form-success" role="status" data-testid="member-governance-feedback">
+              <Check size={15} />
+              <span>{governanceFeedback}</span>
+            </p>
+          ) : null}
+          {!dialog && governanceFailure ? (
+            <p className="form-error" role="alert">
+              {governanceFailure}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+      {dialog ? (
+        <section
+          className="member-governance-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label={label(
+            locale,
+            dialog.action === "remove"
+              ? "member_directory.governance.remove_title"
+              : "member_directory.governance.confirm_title",
+          )}
+          data-testid="member-governance-dialog"
+        >
+          <h4>
+            {label(
+              locale,
+              dialog.action === "remove"
+                ? "member_directory.governance.remove_title"
+                : "member_directory.governance.confirm_title",
+            )}
+            {" · "}
+            {label(locale, `choice.member_lifecycle.${dialog.action}`)}
+          </h4>
+          <p className="member-governance-target">
+            <strong>{memberDisplayName(dialog.member)}</strong>{" "}
+            <code>{dialog.member.node_id}</code>
+          </p>
+          {dialog.preview ? (
+            <>
+              <p className="member-governance-impact-title">
+                <AlertTriangle size={15} />
+                <span>{label(locale, "member_removal.impact.title")}</span>
+              </p>
+              <ul className="member-governance-impact" data-testid="member-removal-impact">
+                {dialog.preview.impact_keys.map((key) => (
+                  <li key={key}>{label(locale, key)}</li>
+                ))}
+              </ul>
+              {!dialog.preview.can_remove ? (
+                <p className="form-error" role="alert">
+                  {label(locale, "member_directory.governance.unavailable")}
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <p className="member-governance-consequence">
+              {label(
+                locale,
+                "confirm.change_member_lifecycle.consequence",
+              )}
+            </p>
+          )}
+          <label className="form-field" htmlFor={`${titleId}-reason`}>
+            <span>{label(locale, "field.lifecycle_reason")}</span>
+            <input
+              id={`${titleId}-reason`}
+              type="text"
+              value={reason}
+              maxLength={512}
+              autoComplete="off"
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </label>
+          {governanceErrors.length > 0 ? (
+            <ul className="form-error" role="alert">
+              {governanceErrors.map((error) => (
+                <li key={error}>{error}</li>
+              ))}
+            </ul>
+          ) : null}
+          {governanceFailure ? (
+            <p className="form-error" role="alert">
+              {governanceFailure}
+            </p>
+          ) : null}
+          <div className="member-governance-dialog-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              data-testid="member-governance-cancel"
+              onClick={() => {
+                setDialog(null);
+                setReason("");
+                resetGovernanceMessages();
+              }}
+            >
+              {label(locale, "common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              data-testid="member-governance-confirm"
+              disabled={
+                governing || (dialog.preview ? !dialog.preview.can_remove : false)
+              }
+              onClick={() => void submitLifecycle()}
+            >
+              {label(locale, `choice.member_lifecycle.${dialog.action}`)}
+            </button>
+          </div>
+        </section>
+      ) : null}
       <p className="member-directory-boundary">
         <ShieldCheck size={14} />
         <span>{label(locale, "member_directory.privacy_boundary")}</span>

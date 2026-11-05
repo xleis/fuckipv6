@@ -2775,6 +2775,22 @@ export function outcomeSummary(
       ),
     });
   }
+  if (outcome.status === "member_removal_preview") {
+    return i18n().tr(locale, "outcome.member_removal_previewed", {
+      member: outcome.data.display_name ?? outcome.data.target_node_id,
+      state: label(
+        locale,
+        `member_directory.lifecycle_state.${outcome.data.lifecycle_state}`,
+      ),
+    });
+  }
+  if (outcome.status === "member_lifecycle_changed") {
+    return i18n().tr(locale, "outcome.member_lifecycle_changed", {
+      action: label(locale, `choice.member_lifecycle.${outcome.data.action}`),
+      member: outcome.data.target_node_id,
+      revision: i18n().formatInteger(locale, outcome.data.revision),
+    });
+  }
   if (outcome.status === "network_joined") {
     return i18n().tr(locale, "outcome.network_joined", {
       network: outcome.data.membership.network_name,

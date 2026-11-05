@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fuckipv6_common::domain::{
     InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestId, MembershipRole, NetworkId, NetworkMemberDirectory,
+    JoinRequest, JoinRequestId, MemberLifecycleChange, MemberLifecycleChangeRequest,
+    MemberRemovalPreview, MemberRemovalPreviewRequest, MembershipRole, NetworkId,
+    NetworkMemberDirectory,
 };
 use fuckipv6_common::{
     ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NatType, NetworkTicket,
@@ -1521,6 +1523,14 @@ enum JoinRequestRuntimeCommand {
         network_id: NetworkId,
         coordinator_url: Option<String>,
     },
+    PreviewRemoval {
+        request: MemberRemovalPreviewRequest,
+        coordinator_url: Option<String>,
+    },
+    LifecycleChange {
+        request: MemberLifecycleChangeRequest,
+        coordinator_url: Option<String>,
+    },
     Review {
         network_id: NetworkId,
         reviews: Vec<JoinRequestBatchReviewItem>,
@@ -1543,6 +1553,8 @@ enum JoinRequestExecutionResult {
     Status(JoinRequestStatusSnapshot),
     List(Vec<JoinRequest>),
     Members(NetworkMemberDirectory),
+    RemovalPreview(MemberRemovalPreview),
+    LifecycleChanged(MemberLifecycleChange),
     Review(Vec<JoinRequestReviewResult>),
 }
 
@@ -1975,6 +1987,48 @@ impl NetworkRuntimeManager {
                 code: NodeProblemCode::Internal,
                 message_key: "join_request.error.unavailable",
                 message: "审批控制返回了不匹配的成员目录响应".into(),
+            }),
+        }
+    }
+
+    pub async fn preview_member_removal(
+        &self,
+        request: MemberRemovalPreviewRequest,
+        coordinator_url: Option<String>,
+    ) -> Result<MemberRemovalPreview, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::PreviewRemoval {
+                request,
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::RemovalPreview(preview) => Ok(preview),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的移除预览响应".into(),
+            }),
+        }
+    }
+
+    pub async fn change_member_lifecycle(
+        &self,
+        request: MemberLifecycleChangeRequest,
+        coordinator_url: Option<String>,
+    ) -> Result<MemberLifecycleChange, RuntimeControlError> {
+        match self
+            .execute_join_request(JoinRequestRuntimeCommand::LifecycleChange {
+                request,
+                coordinator_url,
+            })
+            .await?
+        {
+            JoinRequestExecutionResult::LifecycleChanged(change) => Ok(change),
+            _ => Err(RuntimeControlError::JoinRequest {
+                code: NodeProblemCode::Internal,
+                message_key: "join_request.error.unavailable",
+                message: "审批控制返回了不匹配的生命周期变更响应".into(),
             }),
         }
     }
@@ -2537,6 +2591,36 @@ impl NetworkRuntimeActor {
                     .await;
                 result
                     .map(JoinRequestExecutionResult::Members)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::PreviewRemoval {
+                request,
+                coordinator_url,
+            } => {
+                let network_id = request.network_id.clone();
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling.preview_member_removal(request).await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::RemovalPreview)
+                    .map_err(map_join_request_error)
+            }
+            JoinRequestRuntimeCommand::LifecycleChange {
+                request,
+                coordinator_url,
+            } => {
+                let network_id = request.network_id.clone();
+                let (signaling, ephemeral) = self
+                    .join_request_signaling(&network_id, coordinator_url.as_deref(), true)
+                    .await?;
+                let result = signaling.change_member_lifecycle(request).await;
+                self.close_ephemeral_join_request_signaling(&signaling, ephemeral)
+                    .await;
+                result
+                    .map(JoinRequestExecutionResult::LifecycleChanged)
                     .map_err(map_join_request_error)
             }
             JoinRequestRuntimeCommand::Review {

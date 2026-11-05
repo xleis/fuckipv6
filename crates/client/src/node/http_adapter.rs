@@ -1318,6 +1318,8 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::ConfigurationPreview(_)
         | NodeCommandOutcome::ConfigurationApplied(_)
         | NodeCommandOutcome::ConfigurationHistory(_)
+        | NodeCommandOutcome::MemberRemovalPreview(_)
+        | NodeCommandOutcome::MemberLifecycleChanged(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
     }
 }
@@ -1388,6 +1390,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::SubmitJoinRequest(_)
         | NodeCommand::ReviewJoinRequest(_)
         | NodeCommand::BatchReviewJoinRequests(_)
+        | NodeCommand::ChangeMemberLifecycle(_)
         | NodeCommand::WithdrawJoinRequest(_)
         | NodeCommand::ResubmitJoinRequest(_)
         | NodeCommand::CreateInvitation(_)
@@ -1421,6 +1424,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::PreviewJoinNetwork(_)
         | NodeCommand::ListJoinRequests(_)
         | NodeCommand::ListNetworkMembers(_)
+        | NodeCommand::PreviewMemberRemoval(_)
         | NodeCommand::ListInvitations(_)
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
@@ -1447,6 +1451,8 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         NodeCommand::PreviewJoinNetwork(command) => network_target(&command.network_id),
         NodeCommand::ListJoinRequests(command) => network_target(&command.network_id),
         NodeCommand::ListNetworkMembers(command) => network_target(&command.network_id),
+        NodeCommand::PreviewMemberRemoval(command) => network_target(&command.network_id),
+        NodeCommand::ChangeMemberLifecycle(command) => network_target(&command.network_id),
         NodeCommand::SubmitJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::ReviewJoinRequest(command) => network_target(&command.network_id),
         NodeCommand::BatchReviewJoinRequests(command) => network_target(&command.network_id),

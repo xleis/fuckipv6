@@ -4,12 +4,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
 
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, ExitContributionScope, InvitationCreateRequest,
-    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
-    JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, JoinTermsAck,
-    MembershipRole, MembershipTerms, NetworkDiscoveryRecord, NetworkId, NetworkMembership,
-    NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId,
-    JOIN_REQUEST_DEFAULT_EXPIRY_MS,
+    CapabilityKind, ExitContributionObligation, ExitContributionScope, IdempotencyKey,
+    InvitationCreateRequest, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
+    InvitationState, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId,
+    JoinTermsAck, MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, MembershipRole,
+    MembershipTerms, NetworkDiscoveryRecord, NetworkId, NetworkMembership, NetworkProfileWarning,
+    NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
 
@@ -30,8 +30,9 @@ use crate::discovery_index::{
 use crate::ipc::MultiNetworkRegistry;
 use crate::network_setup::NetworkSetupStage;
 use crate::node::command::{
-    NodeJoinRequestListResult, NodeJoinRequestReviewAck, NodeJoinRequestReviewOutcome,
-    NodeNetworkProfileCommand, NodeResubmitJoinRequestCommand, NodeSubmitJoinRequestCommand,
+    NodeChangeMemberLifecycleCommand, NodeJoinRequestListResult, NodeJoinRequestReviewAck,
+    NodeJoinRequestReviewOutcome, NodeMemberRemovalPreviewCommand, NodeNetworkProfileCommand,
+    NodeResubmitJoinRequestCommand, NodeSubmitJoinRequestCommand,
 };
 use crate::symmetric::EmbeddedServiceManager;
 
@@ -473,6 +474,20 @@ impl NodeRuntimeHandler {
                         .await
                     }
                     None => unavailable(request_id, "列出成员目录需要运行中的节点控制面"),
+                },
+                super::NodeCommand::PreviewMemberRemoval(command) => match runtime {
+                    Some(runtime) => {
+                        preview_member_removal(&runtime, discovery.as_ref(), request_id, command)
+                            .await
+                    }
+                    None => unavailable(request_id, "预览成员移除需要运行中的节点控制面"),
+                },
+                super::NodeCommand::ChangeMemberLifecycle(command) => match runtime {
+                    Some(runtime) => {
+                        change_member_lifecycle(&runtime, discovery.as_ref(), request_id, command)
+                            .await
+                    }
+                    None => unavailable(request_id, "变更成员生命周期需要运行中的节点控制面"),
                 },
                 super::NodeCommand::ReviewJoinRequest(command) => match runtime {
                     Some(runtime) => {
@@ -2437,6 +2452,113 @@ async fn list_network_members(
     }
 }
 
+async fn preview_member_removal(
+    runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    request_id: u64,
+    command: NodeMemberRemovalPreviewCommand,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(command.network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "member_lifecycle.error.invalid_network",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let target_node_id = match NodeId::parse(command.target_node_id) {
+        Ok(node_id) => node_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "member_lifecycle.error.invalid_target",
+                "目标节点 ID 格式无效",
+            )
+        }
+    };
+    let coordinator_url = approval_coordinator_url(discovery, &network_id).await;
+    let request = MemberRemovalPreviewRequest {
+        network_id: network_id.clone(),
+        target_node_id,
+    };
+    match runtime
+        .preview_member_removal(request, coordinator_url)
+        .await
+    {
+        Ok(preview) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::MemberRemovalPreview(Box::new(preview)),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
+async fn change_member_lifecycle(
+    runtime: &NetworkRuntimeManager,
+    discovery: Option<&DiscoveryIndexManager>,
+    request_id: u64,
+    command: NodeChangeMemberLifecycleCommand,
+) -> NodeCommandResult {
+    let network_id = match NetworkId::parse(command.network_id) {
+        Ok(network_id) => network_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "member_lifecycle.error.invalid_network",
+                "网络 ID 格式无效",
+            )
+        }
+    };
+    let target_node_id = match NodeId::parse(command.target_node_id) {
+        Ok(node_id) => node_id,
+        Err(_) => {
+            return join_request_rejection(
+                request_id,
+                "member_lifecycle.error.invalid_target",
+                "目标节点 ID 格式无效",
+            )
+        }
+    };
+    let reason = command.reason.map(|reason| reason.trim().to_owned());
+    let idempotency_seed = serde_json::to_vec(&(
+        network_id.as_str(),
+        target_node_id.as_str(),
+        command.action,
+        command.role,
+        command.expected_revision,
+        reason.as_deref(),
+    ))
+    .unwrap_or_else(|_| {
+        format!(
+            "{}:{}:{:?}:{:?}:{}",
+            network_id, target_node_id, command.action, command.role, command.expected_revision
+        )
+        .into_bytes()
+    });
+    let request = MemberLifecycleChangeRequest {
+        network_id: network_id.clone(),
+        target_node_id,
+        action: command.action,
+        role: command.role,
+        expected_revision: command.expected_revision,
+        idempotency_key: IdempotencyKey::from_public_key(&idempotency_seed),
+        reason,
+    };
+    let coordinator_url = approval_coordinator_url(discovery, &network_id).await;
+    match runtime
+        .change_member_lifecycle(request, coordinator_url)
+        .await
+    {
+        Ok(change) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::MemberLifecycleChanged(Box::new(change)),
+        ),
+        Err(error) => runtime_rejection_for_network(request_id, error, network_id.to_string()),
+    }
+}
+
 fn domain_join_request_reviews(
     reviews: Vec<crate::node::command::NodeJoinRequestReviewItem>,
 ) -> Result<Vec<JoinRequestBatchReviewItem>, NodeProblem> {
@@ -4315,6 +4437,7 @@ mod tests {
             node_id: NodeId::from_public_key(b"member"),
             role: preview.role,
             capabilities: preview.capabilities.clone(),
+            invited_by: NodeId::from_public_key(b"owner"),
             network_revision: preview.network_revision,
             invitation_revision: preview.invitation_revision + 1,
             joined_at_unix_ms: 91_000,

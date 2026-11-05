@@ -216,9 +216,10 @@ fn enum_string_values(value: &Value, key: &str, output: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::node::{
-        NodeApplyConfigurationCommand, NodeClientBlacklistCommand, NodeCreateInvitationCommand,
-        NodeCreateNetworkCommand, NodeGetInvitationStatusCommand, NodeJoinNetworkCommand,
-        NodeListInvitationsCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
+        NodeApplyConfigurationCommand, NodeChangeMemberLifecycleCommand,
+        NodeClientBlacklistCommand, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
+        NodeGetInvitationStatusCommand, NodeJoinNetworkCommand, NodeListInvitationsCommand,
+        NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
         NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
         NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodeProbePeerCommand,
         NodeRedeemInvitationCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
@@ -227,8 +228,8 @@ mod tests {
     };
     use fuckipv6_common::{
         domain::{
-            ContentHash, InvitationCode, InvitationId, InvitationRedeemRequest, MembershipRole,
-            NetworkId, NetworkProfileUpdate,
+            ContentHash, InvitationCode, InvitationId, InvitationRedeemRequest,
+            MemberLifecycleAction, MembershipRole, NetworkId, NetworkProfileUpdate, NodeId,
         },
         NetworkMode,
     };
@@ -353,6 +354,18 @@ mod tests {
                     b"join-request-network",
                 )
                 .to_string(),
+            }),
+            NodeCommand::PreviewMemberRemoval(NodeMemberRemovalPreviewCommand {
+                network_id: NetworkId::from_public_key(b"join-request-network").to_string(),
+                target_node_id: NodeId::from_public_key(b"member-removal-target").to_string(),
+            }),
+            NodeCommand::ChangeMemberLifecycle(NodeChangeMemberLifecycleCommand {
+                network_id: NetworkId::from_public_key(b"join-request-network").to_string(),
+                target_node_id: NodeId::from_public_key(b"member-lifecycle-target").to_string(),
+                action: MemberLifecycleAction::Remove,
+                role: MembershipRole::Member,
+                expected_revision: 2,
+                reason: Some("Remove a compromised member identity.".into()),
             }),
             NodeCommand::ReviewJoinRequest(crate::node::command::NodeReviewJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(

@@ -1293,6 +1293,35 @@ impl GpuiShell {
                     &[("count", &count.to_string())],
                 ));
             }
+            NodeCommandOutcome::MemberRemovalPreview(preview) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.member_removal_previewed",
+                    &[
+                        ("network", preview.network_id.as_str()),
+                        ("target", preview.target_node_id.as_str()),
+                        ("effects", &preview.impact_keys.len().to_string()),
+                    ],
+                ));
+            }
+            NodeCommandOutcome::MemberLifecycleChanged(change) => {
+                self.notice = Some(tr(
+                    self.locale,
+                    "gpui.member_lifecycle_changed",
+                    &[
+                        ("action", change.action.audit_action()),
+                        ("target", change.target_node_id.as_str()),
+                        ("revision", &change.revision.to_string()),
+                        ("idempotent", &change.idempotent.to_string()),
+                    ],
+                ));
+                self.submit_raw(
+                    NodeCommand::ListNetworkMembers(crate::node::NodeNetworkMembersCommand {
+                        network_id: change.network_id.to_string(),
+                    }),
+                    cx,
+                );
+            }
             NodeCommandOutcome::JoinRequestsReviewed(result) => {
                 self.apply_join_request_review_ack(&result);
                 self.notice = Some(tr(
@@ -10798,6 +10827,8 @@ fn action_label(locale: Locale, id: &str) -> String {
         "submit_join_request" => "action.submit_join_request",
         "list_join_requests" => "action.list_join_requests",
         "list_network_members" => "action.list_network_members",
+        "preview_member_removal" => "action.preview_member_removal",
+        "change_member_lifecycle" => "action.change_member_lifecycle",
         "review_join_request" => "action.review_join_request",
         "batch_review_join_requests" => "action.batch_review_join_requests",
         "resubmit_join_request" => "action.resubmit_join_request",
@@ -11045,6 +11076,30 @@ pub fn run_window(
 
 #[cfg(test)]
 mod tests {
+
+    fn lifecycle_state_for_status(
+        status: NetworkMemberStatus,
+    ) -> fuckipv6_common::domain::MemberLifecycleStatus {
+        match status {
+            NetworkMemberStatus::Pending => {
+                fuckipv6_common::domain::MemberLifecycleStatus::PendingApproval
+            }
+            NetworkMemberStatus::Approved => {
+                fuckipv6_common::domain::MemberLifecycleStatus::Approved
+            }
+            NetworkMemberStatus::Active => fuckipv6_common::domain::MemberLifecycleStatus::Active,
+            NetworkMemberStatus::Degraded => {
+                fuckipv6_common::domain::MemberLifecycleStatus::Degraded
+            }
+            NetworkMemberStatus::Suspended => {
+                fuckipv6_common::domain::MemberLifecycleStatus::Suspended
+            }
+            NetworkMemberStatus::Exited => fuckipv6_common::domain::MemberLifecycleStatus::Exited,
+            NetworkMemberStatus::Removed => fuckipv6_common::domain::MemberLifecycleStatus::Removed,
+            NetworkMemberStatus::Expired => fuckipv6_common::domain::MemberLifecycleStatus::Expired,
+        }
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -11311,6 +11366,10 @@ mod tests {
             groups: vec![group],
             capabilities,
             status,
+            lifecycle_state: lifecycle_state_for_status(status),
+            revision: 1,
+            access_epoch: 1,
+            available_actions: Vec::new(),
             presence,
             joined_at_unix_ms: Some(1_700_000_000_000),
         }
@@ -11366,6 +11425,8 @@ mod tests {
         NetworkMemberDirectory {
             network_id: NetworkId::from_public_key(b"gpui-member-directory-network"),
             generated_at_unix_ms: 1_700_000_010_000,
+            viewer_role: MembershipRole::Owner,
+            can_manage_members: true,
             members,
         }
     }

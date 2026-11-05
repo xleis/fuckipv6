@@ -1748,6 +1748,7 @@ mod tests {
     use fuckipv6_common::JoinRequestBatchReviewItem;
     use fuckipv6_coordinator::signaling::{
         invitations::InvitationStore, join_requests::JoinRequestStore,
+        member_lifecycle::MemberLifecycleStore,
     };
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2702,13 +2703,18 @@ mod tests {
         );
 
         let network_path = write_network_record_for_store(&dir, &profile);
+        let lifecycle = Arc::new(
+            MemberLifecycleStore::new(dir.join("member_lifecycle.json"), network_path.clone())
+                .unwrap(),
+        );
         let store = JoinRequestStore::new(
             dir.join("join_requests.json"),
             Some(network_path.clone()),
             None,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle);
         let applicant_identity = Identity::generate().unwrap();
         let applicant_id = NodeId::from_public_key(&applicant_identity.public_key_bytes());
         let now = now_unix_ms();
@@ -2793,13 +2799,18 @@ mod tests {
             .await
             .expect("signed invitation network record is accepted");
         let network_path = write_network_record_for_store(&dir, &profile);
+        let lifecycle = Arc::new(
+            MemberLifecycleStore::new(dir.join("member_lifecycle.json"), network_path.clone())
+                .unwrap(),
+        );
         let store = InvitationStore::new(
             dir.join("invitations.json"),
             Some(network_path.clone()),
             None,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+        .with_member_lifecycle_store(lifecycle);
         let now = now_unix_ms();
         let issued = store
             .create(

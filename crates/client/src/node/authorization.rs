@@ -446,6 +446,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
         | NodeCommandKind::ListNetworkMembers
+        | NodeCommandKind::PreviewMemberRemoval
         | NodeCommandKind::ListInvitations
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::RefreshDiscoveryIndex
@@ -468,6 +469,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::SubmitJoinRequest
         | NodeCommandKind::ReviewJoinRequest
         | NodeCommandKind::BatchReviewJoinRequests
+        | NodeCommandKind::ChangeMemberLifecycle
         | NodeCommandKind::WithdrawJoinRequest
         | NodeCommandKind::ResubmitJoinRequest
         | NodeCommandKind::CreateInvitation
@@ -539,6 +541,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
         | NodeCommandKind::ListNetworkMembers
+        | NodeCommandKind::PreviewMemberRemoval
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
@@ -571,6 +574,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         NodeCommandKind::RevokeInvitation => (PolicyAction::Remove, ResourceKind::Membership),
         NodeCommandKind::ReviewJoinRequest
         | NodeCommandKind::BatchReviewJoinRequests
+        | NodeCommandKind::ChangeMemberLifecycle
         | NodeCommandKind::WithdrawJoinRequest
         | NodeCommandKind::ResubmitJoinRequest => (PolicyAction::Update, ResourceKind::Membership),
         NodeCommandKind::LeaveNetwork => (PolicyAction::Remove, ResourceKind::Membership),
@@ -640,6 +644,12 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
             NetworkTargets::Named(vec![command.network_id.clone()])
         }
         NodeCommand::ListNetworkMembers(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::PreviewMemberRemoval(command) => {
+            NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::ChangeMemberLifecycle(command) => {
             NetworkTargets::Named(vec![command.network_id.clone()])
         }
         NodeCommand::SubmitJoinRequest(command) => {

@@ -413,6 +413,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewJoinNetwork
         | NodeCommandKind::ListJoinRequests
         | NodeCommandKind::ListNetworkMembers
+        | NodeCommandKind::PreviewMemberRemoval
         | NodeCommandKind::ListInvitations
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::PreviewInvitation
@@ -432,6 +433,7 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::JoinNetwork => NodeUiAudit::record("network.join"),
         NodeCommandKind::SubmitJoinRequest => NodeUiAudit::record("network.join_request.submit"),
         NodeCommandKind::ReviewJoinRequest => NodeUiAudit::record("network.join_request.review"),
+        NodeCommandKind::ChangeMemberLifecycle => NodeUiAudit::record("membership.change"),
         NodeCommandKind::BatchReviewJoinRequests => {
             NodeUiAudit::record("network.join_request.batch_review")
         }
@@ -520,6 +522,9 @@ pub enum NodeUiInputKind {
     JoinRequestReason,
     JoinRequestReviewAction,
     JoinRequestReviews,
+    NodeId,
+    MemberLifecycleAction,
+    MemberLifecycleReason,
     InvitationCode,
     CoordinatorUrl,
     Port,
@@ -563,6 +568,9 @@ pub enum NodeUiValidation {
     JoinRequestReason,
     JoinRequestReviewAction,
     JoinRequestReviews,
+    NodeId,
+    MemberLifecycleAction,
+    MemberLifecycleReason,
     InvitationCode,
     CoordinatorUrl,
 }
@@ -1110,6 +1118,89 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             NodeUiValidation::NonEmpty,
                         )],
                         None,
+                    ),
+                    action(
+                        "preview_member_removal",
+                        "action.preview_member_removal",
+                        NodeCommandKind::PreviewMemberRemoval,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "target_node_id",
+                                "field.target_node_id",
+                                NodeUiInputKind::NodeId,
+                                true,
+                                NodeUiValidation::NodeId,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "change_member_lifecycle",
+                        "action.change_member_lifecycle",
+                        NodeCommandKind::ChangeMemberLifecycle,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NodeRunning,
+                        vec![
+                            field(
+                                "network_id",
+                                "field.network_id",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "target_node_id",
+                                "field.target_node_id",
+                                NodeUiInputKind::NodeId,
+                                true,
+                                NodeUiValidation::NodeId,
+                            ),
+                            field(
+                                "action",
+                                "field.member_lifecycle_action",
+                                NodeUiInputKind::MemberLifecycleAction,
+                                true,
+                                NodeUiValidation::MemberLifecycleAction,
+                            ),
+                            field(
+                                "role",
+                                "field.membership_role",
+                                NodeUiInputKind::Role,
+                                true,
+                                NodeUiValidation::Role,
+                            ),
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "reason",
+                                "field.lifecycle_reason",
+                                NodeUiInputKind::MemberLifecycleReason,
+                                false,
+                                NodeUiValidation::MemberLifecycleReason,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::ChangeMemberLifecycle,
+                            "confirm.change_member_lifecycle.title",
+                            "confirm.change_member_lifecycle.consequence",
+                            true,
+                        )),
                     ),
                     action(
                         "review_join_request",

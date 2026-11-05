@@ -5,9 +5,10 @@ use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
-    ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberGroup, NetworkMemberOnlineState,
-    NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility,
+    ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate,
+    NetworkVisibility, NodeId,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -15,11 +16,12 @@ use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
-    NodeBatchReviewJoinRequestsCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
-    NodeControlHealth, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
-    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
-    NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
+    NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
+    NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
+    NodeCreateInvitationCommand, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus,
+    NodeGetInvitationStatusCommand, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
+    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
+    NodeListInvitationsCommand, NodeListJoinRequestsCommand, NodeMemberRemovalPreviewCommand,
     NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
     NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
     NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
@@ -223,6 +225,8 @@ pub enum ActionBinding {
     SubmitJoinRequest,
     ListJoinRequests,
     ListNetworkMembers,
+    PreviewMemberRemoval,
+    ChangeMemberLifecycle,
     ReviewJoinRequest,
     BatchReviewJoinRequests,
     WithdrawJoinRequest,
@@ -263,7 +267,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 54] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -279,6 +283,8 @@ impl ActionBinding {
         Self::SubmitJoinRequest,
         Self::ListJoinRequests,
         Self::ListNetworkMembers,
+        Self::PreviewMemberRemoval,
+        Self::ChangeMemberLifecycle,
         Self::ReviewJoinRequest,
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
@@ -335,6 +341,8 @@ impl ActionBinding {
             Self::SubmitJoinRequest => "submit_join_request",
             Self::ListJoinRequests => "list_join_requests",
             Self::ListNetworkMembers => "list_network_members",
+            Self::PreviewMemberRemoval => "preview_member_removal",
+            Self::ChangeMemberLifecycle => "change_member_lifecycle",
             Self::ReviewJoinRequest => "review_join_request",
             Self::BatchReviewJoinRequests => "batch_review_join_requests",
             Self::WithdrawJoinRequest => "withdraw_join_request",
@@ -943,6 +951,14 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::ListNetworkMembers,
             NodeCommandKind::ListNetworkMembers,
         ),
+        "preview_member_removal" => (
+            ActionBinding::PreviewMemberRemoval,
+            NodeCommandKind::PreviewMemberRemoval,
+        ),
+        "change_member_lifecycle" => (
+            ActionBinding::ChangeMemberLifecycle,
+            NodeCommandKind::ChangeMemberLifecycle,
+        ),
         "review_join_request" => (
             ActionBinding::ReviewJoinRequest,
             NodeCommandKind::ReviewJoinRequest,
@@ -1139,7 +1155,10 @@ pub fn default_form_values(
                 (_, "timeout_ms") => "1500".into(),
                 (_, "acknowledged_at_unix_ms") => "1700000000000".into(),
                 ("join_network", "start") => "true".into(),
-                ("list_network_members", "network_id") => selected_network
+                (
+                    "list_network_members" | "preview_member_removal" | "change_member_lifecycle",
+                    "network_id",
+                ) => selected_network
                     .and_then(|network| network_membership_id(snapshot, network))
                     .unwrap_or_default()
                     .into(),
@@ -1230,9 +1249,12 @@ pub fn default_form_values(
                 (
                     "review_join_request"
                     | "batch_review_join_requests"
-                    | "resubmit_join_request",
+                    | "resubmit_join_request"
+                    | "change_member_lifecycle",
                     "expected_revision",
                 ) => "1".into(),
+                ("change_member_lifecycle", "action") => "approve".into(),
+                ("change_member_lifecycle", "role") => "member".into(),
                 (_, "network_id") => snapshot
                     .network_profiles
                     .iter()
@@ -1486,6 +1508,38 @@ pub fn build_command(
                 network_id: field("network_id"),
             }))
         }
+        Ok(ActionBinding::PreviewMemberRemoval) => Ok(NodeCommand::PreviewMemberRemoval(
+            NodeMemberRemovalPreviewCommand {
+                network_id: parse_network_id(action, "network_id", &required("network_id")?)?
+                    .to_string(),
+                target_node_id: parse_node_id(
+                    action,
+                    "target_node_id",
+                    &required("target_node_id")?,
+                )?
+                .to_string(),
+            },
+        )),
+        Ok(ActionBinding::ChangeMemberLifecycle) => Ok(NodeCommand::ChangeMemberLifecycle(
+            NodeChangeMemberLifecycleCommand {
+                network_id: parse_network_id(action, "network_id", &required("network_id")?)?
+                    .to_string(),
+                target_node_id: parse_node_id(
+                    action,
+                    "target_node_id",
+                    &required("target_node_id")?,
+                )?
+                .to_string(),
+                action: parse_member_lifecycle_action(action, &required("action")?)?,
+                role: parse_invitation_role(action, &required("role")?)?,
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                reason: parse_lifecycle_reason(action, &field("reason"))?,
+            },
+        )),
         Ok(ActionBinding::ReviewJoinRequest) => {
             let review_action = match field("action").as_str() {
                 "approve" => JoinRequestReviewAction::Approve,
@@ -1841,6 +1895,15 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "submit_join_request" => HashSet::from(["network_id", "reason"]),
         "list_join_requests" => HashSet::from(["network_id"]),
         "list_network_members" => HashSet::from(["network_id"]),
+        "preview_member_removal" => HashSet::from(["network_id", "target_node_id"]),
+        "change_member_lifecycle" => HashSet::from([
+            "network_id",
+            "target_node_id",
+            "action",
+            "role",
+            "expected_revision",
+            "reason",
+        ]),
         "review_join_request" => HashSet::from([
             "network_id",
             "request_id",
@@ -2227,6 +2290,57 @@ fn parse_invitation_code(
         action_id: action.id.clone(),
         field_id: "code".into(),
         value: "[redacted]".into(),
+    })
+}
+
+fn parse_member_lifecycle_action(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<MemberLifecycleAction, CommandBuildError> {
+    match value.trim() {
+        "invite" => Ok(MemberLifecycleAction::Invite),
+        "approve" => Ok(MemberLifecycleAction::Approve),
+        "reject" => Ok(MemberLifecycleAction::Reject),
+        "suspend" => Ok(MemberLifecycleAction::Suspend),
+        "resume" => Ok(MemberLifecycleAction::Resume),
+        "exit" => Ok(MemberLifecycleAction::Exit),
+        "remove" => Ok(MemberLifecycleAction::Remove),
+        "undo_remove" => Ok(MemberLifecycleAction::UndoRemove),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "action".into(),
+            value: value.into(),
+        }),
+    }
+}
+
+fn parse_lifecycle_reason(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<Option<String>, CommandBuildError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 512 || trimmed.chars().any(char::is_control) {
+        return Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "reason".into(),
+            value: "[invalid lifecycle reason]".into(),
+        });
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+fn parse_node_id(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<NodeId, CommandBuildError> {
+    NodeId::parse(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
     })
 }
 
@@ -4296,6 +4410,30 @@ pub fn validate_manifest_bindings(manifest: &NodeUiManifest) -> Result<(), Strin
 // display server. The GPUI widget rendering consumes the same PageModel.
 #[cfg(test)]
 mod tests {
+
+    fn lifecycle_state_for_status(
+        status: NetworkMemberStatus,
+    ) -> fuckipv6_common::domain::MemberLifecycleStatus {
+        match status {
+            NetworkMemberStatus::Pending => {
+                fuckipv6_common::domain::MemberLifecycleStatus::PendingApproval
+            }
+            NetworkMemberStatus::Approved => {
+                fuckipv6_common::domain::MemberLifecycleStatus::Approved
+            }
+            NetworkMemberStatus::Active => fuckipv6_common::domain::MemberLifecycleStatus::Active,
+            NetworkMemberStatus::Degraded => {
+                fuckipv6_common::domain::MemberLifecycleStatus::Degraded
+            }
+            NetworkMemberStatus::Suspended => {
+                fuckipv6_common::domain::MemberLifecycleStatus::Suspended
+            }
+            NetworkMemberStatus::Exited => fuckipv6_common::domain::MemberLifecycleStatus::Exited,
+            NetworkMemberStatus::Removed => fuckipv6_common::domain::MemberLifecycleStatus::Removed,
+            NetworkMemberStatus::Expired => fuckipv6_common::domain::MemberLifecycleStatus::Expired,
+        }
+    }
+
     use super::*;
     use crate::node::{
         node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeIdentitySnapshot, NodeInterfaceAddress,
@@ -4405,6 +4543,10 @@ mod tests {
             groups: vec![group],
             capabilities,
             status,
+            lifecycle_state: lifecycle_state_for_status(status),
+            revision: 1,
+            access_epoch: 1,
+            available_actions: Vec::new(),
             presence,
             joined_at_unix_ms: Some(1_700_000_000_000),
         }
@@ -5500,7 +5642,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 52);
+        assert_eq!(ActionBinding::ALL.len(), 54);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -5570,6 +5712,19 @@ mod tests {
                         ContentHash::from_bytes(b"policy-command-terms")
                             .as_str()
                             .to_string(),
+                    );
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "preview_member_removal" | "change_member_lifecycle"
+                ) {
+                    values.insert(
+                        "network_id".into(),
+                        NetworkId::from_public_key(b"member-command-network").to_string(),
+                    );
+                    values.insert(
+                        "target_node_id".into(),
+                        NodeId::from_public_key(b"member-command-target").to_string(),
                     );
                 }
                 if matches!(

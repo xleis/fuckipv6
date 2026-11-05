@@ -3,7 +3,8 @@ use bytes::Bytes;
 use fuckipv6_common::domain::{
     InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, NetworkId,
+    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
     NetworkMemberDirectory,
 };
 use fuckipv6_common::{
@@ -82,6 +83,8 @@ pub(crate) enum JoinRequestResponse {
         network_id: NetworkId,
         reviews: Vec<JoinRequestReviewResult>,
     },
+    RemovalPreview(MemberRemovalPreview),
+    LifecycleChanged(MemberLifecycleChange),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -122,6 +125,8 @@ enum PendingJoinRequest {
         network_id: NetworkId,
         request_ids: Vec<JoinRequestId>,
     },
+    RemovalPreview(MemberRemovalPreviewRequest),
+    LifecycleChange(MemberLifecycleChangeRequest),
 }
 
 struct PendingJoinRequestResponse {
@@ -187,6 +192,23 @@ impl JoinRequestResponseHub {
                         && reviews.iter().all(|review| request_ids.contains(&review.request_id))
                 )
             }),
+            SignalingMessage::MemberRemovalPreviewAck { preview } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingJoinRequest::RemovalPreview(request)
+                        if request.network_id == preview.network_id
+                            && request.target_node_id == preview.target_node_id
+                )
+            }),
+            SignalingMessage::MemberLifecycleChangeAck { change } => self.matches(|expected| {
+                matches!(
+                    expected,
+                    PendingJoinRequest::LifecycleChange(request)
+                        if request.network_id == change.network_id
+                            && request.target_node_id == change.target_node_id
+                            && request.action == change.action
+                )
+            }),
             _ => return false,
         };
 
@@ -196,6 +218,8 @@ impl JoinRequestResponseHub {
                 | SignalingMessage::JoinRequestListResponse { .. }
                 | SignalingMessage::MemberDirectoryListAck { .. }
                 | SignalingMessage::JoinRequestReviewAck { .. }
+                | SignalingMessage::MemberRemovalPreviewAck { .. }
+                | SignalingMessage::MemberLifecycleChangeAck { .. }
         );
         if !matches {
             return is_approval_response;
@@ -226,6 +250,12 @@ impl JoinRequestResponseHub {
                 network_id: network_id.clone(),
                 reviews: reviews.clone(),
             },
+            SignalingMessage::MemberRemovalPreviewAck { preview } => {
+                JoinRequestResponse::RemovalPreview(preview.clone())
+            }
+            SignalingMessage::MemberLifecycleChangeAck { change } => {
+                JoinRequestResponse::LifecycleChanged(change.clone())
+            }
             SignalingMessage::Error { code, .. } => {
                 return self.finish(Err(JoinRequestControlError::Rejected(*code)));
             }
@@ -763,6 +793,42 @@ impl SignalingClient {
         };
         match self.send_join_request_operation(message, expected).await? {
             JoinRequestResponse::Review { reviews, .. } => Ok(reviews),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn preview_member_removal(
+        &self,
+        request: MemberRemovalPreviewRequest,
+    ) -> std::result::Result<MemberRemovalPreview, JoinRequestControlError> {
+        match self
+            .send_join_request_operation(
+                SignalingMessage::MemberRemovalPreview {
+                    request: request.clone(),
+                },
+                PendingJoinRequest::RemovalPreview(request),
+            )
+            .await?
+        {
+            JoinRequestResponse::RemovalPreview(preview) => Ok(preview),
+            _ => Err(JoinRequestControlError::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn change_member_lifecycle(
+        &self,
+        request: MemberLifecycleChangeRequest,
+    ) -> std::result::Result<MemberLifecycleChange, JoinRequestControlError> {
+        match self
+            .send_join_request_operation(
+                SignalingMessage::MemberLifecycleChange {
+                    request: request.clone(),
+                },
+                PendingJoinRequest::LifecycleChange(request),
+            )
+            .await?
+        {
+            JoinRequestResponse::LifecycleChanged(change) => Ok(change),
             _ => Err(JoinRequestControlError::InvalidResponse),
         }
     }

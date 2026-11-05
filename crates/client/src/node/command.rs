@@ -10,10 +10,11 @@ use fuckipv6_common::domain::{
     ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationCreateRequest,
     InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
     InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId,
-    NetworkJoinMode, NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview,
-    NetworkProfileUpdate, NetworkVisibility, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS,
-    JOIN_REQUEST_MAX_REASON_CHARS, NETWORK_PROFILE_MAX_TAG_CHARS,
+    MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
+    NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
+    NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
+    NetworkVisibility, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
+    NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -86,6 +87,8 @@ pub enum NodeCommandKind {
     SubmitJoinRequest,
     ListJoinRequests,
     ListNetworkMembers,
+    PreviewMemberRemoval,
+    ChangeMemberLifecycle,
     ReviewJoinRequest,
     BatchReviewJoinRequests,
     WithdrawJoinRequest,
@@ -122,7 +125,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 54] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -143,6 +146,8 @@ impl NodeCommandKind {
         Self::SubmitJoinRequest,
         Self::ListJoinRequests,
         Self::ListNetworkMembers,
+        Self::PreviewMemberRemoval,
+        Self::ChangeMemberLifecycle,
         Self::ReviewJoinRequest,
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
@@ -179,7 +184,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 51] = [
+    pub const ACTIONS: [Self; 53] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -199,6 +204,8 @@ impl NodeCommandKind {
         Self::SubmitJoinRequest,
         Self::ListJoinRequests,
         Self::ListNetworkMembers,
+        Self::PreviewMemberRemoval,
+        Self::ChangeMemberLifecycle,
         Self::ReviewJoinRequest,
         Self::BatchReviewJoinRequests,
         Self::WithdrawJoinRequest,
@@ -248,6 +255,7 @@ impl NodeCommandKind {
                 | Self::SetNodeDisplayName
                 | Self::RotateNodeIdentity
                 | Self::CleanupResiduals
+                | Self::ChangeMemberLifecycle
                 | Self::CreateInvitation
                 | Self::RevokeInvitation
                 | Self::PreviewInvitation
@@ -277,6 +285,8 @@ impl NodeCommandKind {
             Self::SubmitJoinRequest => "submit_join_request",
             Self::ListJoinRequests => "list_join_requests",
             Self::ListNetworkMembers => "list_network_members",
+            Self::PreviewMemberRemoval => "preview_member_removal",
+            Self::ChangeMemberLifecycle => "change_member_lifecycle",
             Self::ReviewJoinRequest => "review_join_request",
             Self::BatchReviewJoinRequests => "batch_review_join_requests",
             Self::WithdrawJoinRequest => "withdraw_join_request",
@@ -336,6 +346,7 @@ impl NodeCommandKind {
                 | Self::BatchReviewJoinRequests
                 | Self::WithdrawJoinRequest
                 | Self::ResubmitJoinRequest
+                | Self::ChangeMemberLifecycle
                 | Self::CreateInvitation
                 | Self::RevokeInvitation
                 | Self::RedeemInvitation
@@ -424,6 +435,10 @@ pub enum NodeCommand {
     ListJoinRequests(NodeListJoinRequestsCommand),
     /// Read the Coordinator-authoritative, privacy-filtered member directory.
     ListNetworkMembers(NodeNetworkMembersCommand),
+    /// Disclose the exact access, File and data impact before member removal.
+    PreviewMemberRemoval(NodeMemberRemovalPreviewCommand),
+    /// Apply one revision-checked member lifecycle governance action.
+    ChangeMemberLifecycle(NodeChangeMemberLifecycleCommand),
     /// Apply one revision-checked approval decision.
     ReviewJoinRequest(NodeReviewJoinRequestCommand),
     /// Apply a revision-checked approval batch atomically.
@@ -514,6 +529,8 @@ impl NodeCommand {
             Self::SubmitJoinRequest(_) => NodeCommandKind::SubmitJoinRequest,
             Self::ListJoinRequests(_) => NodeCommandKind::ListJoinRequests,
             Self::ListNetworkMembers(_) => NodeCommandKind::ListNetworkMembers,
+            Self::PreviewMemberRemoval(_) => NodeCommandKind::PreviewMemberRemoval,
+            Self::ChangeMemberLifecycle(_) => NodeCommandKind::ChangeMemberLifecycle,
             Self::ReviewJoinRequest(_) => NodeCommandKind::ReviewJoinRequest,
             Self::BatchReviewJoinRequests(_) => NodeCommandKind::BatchReviewJoinRequests,
             Self::WithdrawJoinRequest(_) => NodeCommandKind::WithdrawJoinRequest,
@@ -628,6 +645,8 @@ impl NodeCommand {
             Self::SubmitJoinRequest(command) => command.validate(),
             Self::ListJoinRequests(command) => command.validate(),
             Self::ListNetworkMembers(command) => command.validate(),
+            Self::PreviewMemberRemoval(command) => command.validate(),
+            Self::ChangeMemberLifecycle(command) => command.validate(),
             Self::ReviewJoinRequest(command) => command.validate(),
             Self::BatchReviewJoinRequests(command) => command.validate(),
             Self::WithdrawJoinRequest(command) => command.validate(),
@@ -1144,6 +1163,76 @@ impl NodeNetworkMembersCommand {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeMemberRemovalPreviewCommand {
+    pub network_id: String,
+    pub target_node_id: String,
+}
+
+impl NodeMemberRemovalPreviewCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        validate_node_id_field(&self.target_node_id)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeChangeMemberLifecycleCommand {
+    pub network_id: String,
+    pub target_node_id: String,
+    pub action: MemberLifecycleAction,
+    #[serde(default = "default_member_lifecycle_role")]
+    #[schemars(default = "default_member_lifecycle_role")]
+    pub role: MembershipRole,
+    pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl NodeChangeMemberLifecycleCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_id_field(&self.network_id)?;
+        validate_node_id_field(&self.target_node_id)?;
+        if self.expected_revision == 0 && self.action != MemberLifecycleAction::Invite {
+            return Err(join_request_invalid(
+                "member_lifecycle.error.invalid_transition",
+                "只有首次邀请可以使用 revision 0",
+            ));
+        }
+        if let Some(reason) = self.reason.as_deref() {
+            let reason = reason.trim();
+            if reason.is_empty()
+                || reason.chars().count() > 512
+                || reason.chars().any(char::is_control)
+            {
+                return Err(join_request_invalid(
+                    "member_lifecycle.error.invalid_reason",
+                    "成员治理原因必须为 1 至 512 个字符且不能包含控制字符",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn default_member_lifecycle_role() -> MembershipRole {
+    MembershipRole::Member
+}
+
+impl std::fmt::Debug for NodeChangeMemberLifecycleCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeChangeMemberLifecycleCommand")
+            .field("network_id", &self.network_id)
+            .field("target_node_id", &self.target_node_id)
+            .field("action", &self.action)
+            .field("role", &self.role)
+            .field("expected_revision", &self.expected_revision)
+            .field("reason", &self.reason.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeJoinRequestReviewItem {
     pub request_id: String,
@@ -1446,6 +1535,17 @@ fn validate_network_id_field(network_id: &str) -> Result<(), NodeProblem> {
         ));
     }
     Ok(())
+}
+
+fn validate_node_id_field(node_id: &str) -> Result<(), NodeProblem> {
+    fuckipv6_common::domain::NodeId::parse(node_id.to_owned())
+        .map(|_| ())
+        .map_err(|_| {
+            join_request_invalid(
+                "member_lifecycle.error.invalid_target",
+                "目标节点 ID 格式无效",
+            )
+        })
 }
 
 fn validate_join_request_id_field(request_id: &str) -> Result<(), NodeProblem> {
@@ -2195,6 +2295,8 @@ pub enum NodeCommandOutcome {
     JoinRequestSubmitted(Box<JoinRequest>),
     JoinRequests(Box<NodeJoinRequestListResult>),
     NetworkMembers(Box<NetworkMemberDirectory>),
+    MemberRemovalPreview(Box<MemberRemovalPreview>),
+    MemberLifecycleChanged(Box<MemberLifecycleChange>),
     JoinRequestsReviewed(Box<NodeJoinRequestReviewAck>),
     JoinRequestUpdated(Box<JoinRequest>),
     InvitationCreated(Box<IssuedInvitation>),
@@ -3035,6 +3137,30 @@ mod tests {
                 )
                 .to_string(),
             }),
+            NodeCommand::PreviewMemberRemoval(NodeMemberRemovalPreviewCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                target_node_id: fuckipv6_common::domain::NodeId::from_public_key(
+                    b"member-removal-target",
+                )
+                .to_string(),
+            }),
+            NodeCommand::ChangeMemberLifecycle(NodeChangeMemberLifecycleCommand {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"join-request-network",
+                )
+                .to_string(),
+                target_node_id: fuckipv6_common::domain::NodeId::from_public_key(
+                    b"member-lifecycle-target",
+                )
+                .to_string(),
+                action: MemberLifecycleAction::Remove,
+                role: MembershipRole::Member,
+                expected_revision: 1,
+                reason: Some("No longer participates in this network.".into()),
+            }),
             NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
                     b"join-request-network",
@@ -3232,13 +3358,14 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 52);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 51);
+        assert_eq!(NodeCommandKind::ALL.len(), 54);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 53);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
             NodeCommandKind::PreviewInvitation,
             NodeCommandKind::RedeemInvitation,
+            NodeCommandKind::ChangeMemberLifecycle,
         ] {
             assert!(kind.requires_recent_reauthentication(), "{kind:?}");
         }
@@ -3925,6 +4052,7 @@ mod tests {
             NodeCommandKind::PreviewJoinNetwork,
             NodeCommandKind::ListJoinRequests,
             NodeCommandKind::ListNetworkMembers,
+            NodeCommandKind::PreviewMemberRemoval,
             NodeCommandKind::ListInvitations,
             NodeCommandKind::GetInvitationStatus,
             NodeCommandKind::PreviewInvitation,
@@ -3947,6 +4075,7 @@ mod tests {
                     | NodeCommandKind::PreviewJoinNetwork
                     | NodeCommandKind::ListJoinRequests
                     | NodeCommandKind::ListNetworkMembers
+                    | NodeCommandKind::PreviewMemberRemoval
                     | NodeCommandKind::ListInvitations
                     | NodeCommandKind::GetInvitationStatus
                     | NodeCommandKind::PreviewInvitation

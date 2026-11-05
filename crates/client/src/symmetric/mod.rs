@@ -6,7 +6,8 @@ use fuckipv6_common::{
 use fuckipv6_coordinator::{
     relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
     signaling::invitations::InvitationStore, signaling::join_requests::JoinRequestStore,
-    signaling::server::SignalingServer, signaling::session::SessionManager,
+    signaling::member_lifecycle::MemberLifecycleStore, signaling::server::SignalingServer,
+    signaling::session::SessionManager,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -173,10 +174,17 @@ impl EmbeddedCoordinator {
             InvitationStore::new(
                 blacklist_path.with_file_name("invitations.json"),
                 Some(network_record_path.clone()),
-                Some(owner_node_id),
+                Some(owner_node_id.clone()),
                 Vec::new(),
             )
             .context("无法初始化私有邀请存储")?,
+        );
+        let member_lifecycle_store = Arc::new(
+            MemberLifecycleStore::new(
+                blacklist_path.with_file_name("member_lifecycle.json"),
+                network_record_path.clone(),
+            )
+            .context("无法初始化成员生命周期存储")?,
         );
         let session_manager = Arc::new(
             SessionManager::new_with_allocation(&persisted_allocation)
@@ -196,6 +204,7 @@ impl EmbeddedCoordinator {
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
                 .with_join_request_store(join_request_store)
                 .with_invitation_store(invitation_store)
+                .with_member_lifecycle_store(member_lifecycle_store)
                 .bind()
                 .await
                 .context("无法绑定内嵌信令服务")?;

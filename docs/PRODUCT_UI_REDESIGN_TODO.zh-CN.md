@@ -1558,18 +1558,60 @@ WebUI `npm test -- --run`（155 passed）、`npm run typecheck`、`npm run lint`
 **范围说明**：本项交付领域层的组目录、求值与变更契约；Coordinator 存储、节点契约动作与 WebUI 组管理界面
 尚未接线，后续拓扑/批量操作项复用同一 `GroupCatalog`，不会引入第二套状态机。
 
-### W9-04 拓扑数据与聚合 `[ ]`
+### W9-04 拓扑数据与聚合 `[x]`
 
-- [ ] 建立节点、网络边界、连接和能力的单一拓扑模型；
-- [ ] 服务端按隐私策略返回最小必要节点集合；
-- [ ] 同一节点多网络聚合为单个对象；
-- [ ] 连接去重并保留所属网络关系；
-- [ ] 支持稳定布局、增量更新和对象身份保持；
-- [ ] 对超大网络采用聚合、分层或按需展开；
-- [ ] 拓扑和列表共享搜索、筛选、选择；
-- [ ] 不把陈旧连接绘制为当前活跃链路。
+- [x] 建立节点、网络边界、连接和能力的单一拓扑模型；
+- [x] 服务端按隐私策略返回最小必要节点集合；
+- [x] 同一节点多网络聚合为单个对象；
+- [x] 连接去重并保留所属网络关系；
+- [x] 支持稳定布局、增量更新和对象身份保持；
+- [x] 对超大网络采用聚合、分层或按需展开；
+- [x] 拓扑和列表共享搜索、筛选、选择；
+- [x] 不把陈旧连接绘制为当前活跃链路。
 
 **验收**：同一节点只绘制一次；多网络关系通过边界和详情表达；增量刷新不跳变或丢失选择。
+
+**证据（2026-11-05）**：`crates/common/src/domain/topology.rs` 新增唯一拓扑模型 `TopologySnapshot`
+（`revision`、`generated_at_unix_ms`、`viewer`、`truncated`、`boundaries`、`nodes`、`connections`、
+`clusters`），由 `TopologyBuilder` 从 `TopologyNetworkInput`/`TopologyMemberInput`/`TopologyLinkObservation`
+投影生成；节点能力用 `CapabilityKind`、健康用 `TopologyNodeHealth`（`Healthy`/`Unknown`/`Degraded`/
+`Unreachable`，取最严重者）、连接状态用 `TopologyConnectionState`（`Active`/`Idle`/`Stale`）。
+`domain::topology::tests`（10 passed）逐项覆盖：
+
+- `nodes_are_aggregated_across_networks_exactly_once`：同一 `NodeId` 出现在多个网络时只产生一个
+  `TopologyNode`，`networks` 按 `network_id` 排序并逐网络保留角色、状态、能力与健康，聚合后的能力为各网络并集，
+  健康取最严重等级，`node_ids()` 长度等于去重节点数；
+- `privacy_projection_omits_invisible_networks_and_their_nodes`：不在 `viewer.visible_networks` 内的网络
+  不产生边界、节点或连接，也不贡献任何计数，`boundary()` 对不可见网络返回 `None`；
+- `connections_are_deduplicated_and_keep_network_relations`：连接按无序节点对归一（`from`/`to` 排序），
+  `connection_id` 为 `ContentHash("from|to")`，同一条连接在多个网络被观测到时只出现一次并保留全部网络 id；
+- `stale_observations_are_never_reported_as_active`：观测时间距 `generated_at_unix_ms` 超过
+  `CONNECTION_STALE_AFTER_MS`（60s）的链路为 `Stale`，`active=false` 的新鲜链路为 `Idle`，
+  `active_connections()` 只返回非陈旧且仍在活跃的链路；陈旧链路不会因为曾经活跃而继续显示为活跃；
+- `layout_is_deterministic_and_preserves_object_identity`：`layout()` 对同一快照与视口给出完全相同的锚点/槽位/坐标，
+  `layout_preserving()` 复用旧布局中仍存在对象的锚点、槽位与坐标，只为新对象分配空槽，因此刷新不跳变；
+  锚点按 `ANCHOR_SLOTS`（12 个/环）排布、节点按 `NODE_SLOTS_PER_RING`（16 个/环）围绕锚点排布并输出整数坐标，
+  多网络节点只归属其排序后第一个网络的锚点，因此仍只绘制一次；
+- `large_networks_are_aggregated_and_expandable`：单网络可见成员超过 `MAX_VISIBLE_MEMBERS_PER_NETWORK`（64）
+  时按 `NodeId` 排序截断并生成 `TopologyCluster`（`hidden_member_count`、3 个 `sample`、`expandable`），
+  `truncated=true`，`expand_network()` 后该网络全量展开且集群消失；`TopologyBoundary` 同时给出权威
+  `member_count` 与 `visible_member_count`；
+- `topology_and_list_share_search_filter_and_selection`：`query()` 复用与成员列表相同的筛选维度
+  （名称包含、`NodeId` 前缀、角色、能力、健康、`network_id`），`retain_selection()` 仅在节点仍存在时保留选择、
+  节点消失后清空，因此筛选变化与增量刷新后选择行为确定；
+- `diff_reports_incremental_changes_without_duplicating_nodes`：`diff()` 按 `NodeId`/`connection_id`/
+  `network_id` 输出新增、更新、移除的节点、连接与边界，并给出 `unchanged_node_count`，未变化对象不重复出现在
+  增量结果中；
+- `non_members_are_not_projected_and_duplicates_are_rejected`：非成员（邀请中/已移除等）身份不投影为节点，
+  同一网络内重复 `NodeId` 直接报领域不变量错误而不是静默去重；
+- `snapshot_round_trips_through_serde`：快照可经 JSON 序列化/反序列化往返保持等价，契约可直接下发到界面层。
+
+**验证通过**：`cargo test -p fuckipv6-common --all-features`（227 passed）、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`cargo fmt --all -- --check` 和 `git diff --check`。
+
+**范围说明**：本项交付领域层的拓扑投影、聚合、布局、筛选与增量差异契约；Coordinator 实时链路观测接入和
+WebUI 画布替换在 W9-05/W9-06 复用同一 `TopologySnapshot`，不另建拓扑状态。
 
 ### W9-05 多网络边界与视觉编码 `[ ]`
 

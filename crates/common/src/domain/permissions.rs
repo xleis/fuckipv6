@@ -164,28 +164,52 @@ impl PermissionCondition {
 pub enum GroupKind {
     Manual,
     Dynamic,
+    Nested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DynamicGroupSelector {
     #[serde(default)]
     pub roles: Vec<NetworkRole>,
     #[serde(default)]
     pub nodes: Vec<NodeId>,
+    #[serde(default)]
+    pub capabilities: Vec<super::capability::CapabilityKind>,
 }
 
 impl DynamicGroupSelector {
+    /// Role/Node membership without capability data. Capability-aware callers
+    /// must use [`Self::matches_member`].
     pub fn matches(&self, role: NetworkRole, node_id: &NodeId) -> bool {
         self.roles.contains(&role) || self.nodes.contains(node_id)
     }
 
+    /// Structured selector matching. Every field is a declared, typed value;
+    /// no expression language or script is ever evaluated.
+    pub fn matches_member(
+        &self,
+        role: NetworkRole,
+        node_id: &NodeId,
+        capabilities: &BTreeSet<super::capability::CapabilityKind>,
+    ) -> bool {
+        self.roles.contains(&role)
+            || self.nodes.contains(node_id)
+            || capabilities
+                .iter()
+                .any(|capability| self.capabilities.contains(capability))
+    }
+
     pub fn validate(&self) -> DomainResult<()> {
-        if self.roles.is_empty() && self.nodes.is_empty() {
+        if self.roles.is_empty() && self.nodes.is_empty() && self.capabilities.is_empty() {
             return Err(DomainError::invalid_value(
                 "dynamic group selector cannot be empty",
             ));
         }
-        if has_duplicates(&self.roles) || has_duplicates(&self.nodes) {
+        if has_duplicates(&self.roles)
+            || has_duplicates(&self.nodes)
+            || has_duplicates(&self.capabilities)
+        {
             return Err(DomainError::invariant(
                 "dynamic group selector contains duplicates",
             ));
@@ -197,8 +221,17 @@ impl DynamicGroupSelector {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum GroupDefinition {
-    Manual { members: Vec<NodeId> },
-    Dynamic { selector: DynamicGroupSelector },
+    Manual {
+        members: Vec<NodeId>,
+    },
+    Dynamic {
+        selector: DynamicGroupSelector,
+    },
+    /// Nested groups resolve to the union of their child groups. References
+    /// are checked by `GroupCatalog` for existence, cycles and depth.
+    Nested {
+        members: Vec<GroupId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -209,28 +242,52 @@ pub struct NetworkGroup {
     pub definition: GroupDefinition,
 }
 
-impl NetworkGroup {
+impl GroupDefinition {
+    /// Validate the structured definition in isolation. Nested references are
+    /// only checked for shape here; the catalogue additionally verifies that
+    /// they exist and form a shallow, acyclic graph.
     pub fn validate(&self) -> DomainResult<()> {
-        if self.name.is_empty() || self.name.len() > 80 {
-            return Err(DomainError::invalid_value("network group name is invalid"));
-        }
-        match &self.definition {
-            GroupDefinition::Manual { members } => {
+        match self {
+            Self::Manual { members } => {
                 if has_duplicates(members) {
                     return Err(DomainError::invariant(
                         "manual group contains duplicate members",
                     ));
                 }
             }
-            GroupDefinition::Dynamic { selector } => selector.validate()?,
+            Self::Dynamic { selector } => selector.validate()?,
+            Self::Nested { members } => {
+                if members.is_empty() {
+                    return Err(DomainError::invalid_value(
+                        "nested group must reference at least one group",
+                    ));
+                }
+                if has_duplicates(members) {
+                    return Err(DomainError::invariant(
+                        "nested group contains duplicate references",
+                    ));
+                }
+            }
         }
         Ok(())
+    }
+}
+
+impl NetworkGroup {
+    pub fn validate(&self) -> DomainResult<()> {
+        if self.name.is_empty() || self.name.len() > 80 {
+            return Err(DomainError::invalid_value("network group name is invalid"));
+        }
+        self.definition.validate()
     }
 
     pub fn contains(&self, role: NetworkRole, node_id: &NodeId) -> bool {
         match &self.definition {
             GroupDefinition::Manual { members } => members.contains(node_id),
             GroupDefinition::Dynamic { selector } => selector.matches(role, node_id),
+            // Nested groups can only be resolved through `GroupCatalog`, which
+            // has the full graph and cycle/depth checks.
+            GroupDefinition::Nested { .. } => false,
         }
     }
 
@@ -238,6 +295,7 @@ impl NetworkGroup {
         match self.definition {
             GroupDefinition::Manual { .. } => GroupKind::Manual,
             GroupDefinition::Dynamic { .. } => GroupKind::Dynamic,
+            GroupDefinition::Nested { .. } => GroupKind::Nested,
         }
     }
 }
@@ -630,6 +688,7 @@ mod tests {
                 selector: DynamicGroupSelector {
                     roles: vec![NetworkRole::Administrator],
                     nodes: Vec::new(),
+                    capabilities: Vec::new(),
                 },
             },
         };

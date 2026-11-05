@@ -23,6 +23,7 @@ pub mod node;
 pub mod operation;
 pub mod permissions;
 pub mod security_policy;
+pub mod topology;
 pub mod traffic_policy;
 
 pub use audit::*;
@@ -40,6 +41,7 @@ pub use node::*;
 pub use operation::*;
 pub use permissions::*;
 pub use security_policy::*;
+pub use topology::*;
 pub use traffic_policy::*;
 
 /// Stable, machine-readable domain violation.

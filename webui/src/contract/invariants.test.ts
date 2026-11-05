@@ -827,6 +827,8 @@ describe("node UI contract invariants", () => {
       data: {
         network_id: networkId,
         generated_at_unix_ms: 1_700_000_100_000,
+        viewer_role: "owner" as const,
+        can_manage_members: true,
         members: [
           {
             node_id: "node-owner",
@@ -837,6 +839,10 @@ describe("node UI contract invariants", () => {
             groups: ["owner" as const],
             capabilities: null,
             status: "approved" as const,
+            lifecycle_state: "approved" as const,
+            revision: 4,
+            access_epoch: 4,
+            available_actions: [],
             presence: {
               state: "unknown" as const,
               source: "not_observed" as const,
@@ -850,6 +856,10 @@ describe("node UI contract invariants", () => {
             groups: ["member" as const],
             capabilities: ["file" as const, "relay" as const],
             status: "active" as const,
+            lifecycle_state: "active" as const,
+            revision: 2,
+            access_epoch: 2,
+            available_actions: ["suspend", "remove"] as const,
             presence: {
               state: "online" as const,
               source: "live_session" as const,
@@ -911,6 +921,235 @@ describe("node UI contract invariants", () => {
         49,
       ),
     ).toThrow("member 0 offline presence is inconsistent");
+  });
+
+  it("builds member lifecycle governance commands from server truth", () => {
+    const actions = manifest.pages.flatMap((page) => page.actions);
+    const preview = actions.find(
+      (candidate) => candidate.id === "preview_member_removal",
+    )!;
+    const change = actions.find(
+      (candidate) => candidate.id === "change_member_lifecycle",
+    )!;
+    const networkId = "net_stable_home";
+    const targetNodeId = `node_${"A".repeat(43)}`;
+
+    expect(
+      buildCommand(
+        preview,
+        { network_id: networkId, target_node_id: targetNodeId },
+        "en",
+      ),
+    ).toEqual({
+      command: "preview_member_removal",
+      payload: { network_id: networkId, target_node_id: targetNodeId },
+    });
+
+    expect(
+      buildCommand(
+        change,
+        {
+          network_id: networkId,
+          target_node_id: targetNodeId,
+          action: "remove",
+          role: "member",
+          expected_revision: "7",
+          reason: "  duplicate identity  ",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "change_member_lifecycle",
+      payload: {
+        network_id: networkId,
+        target_node_id: targetNodeId,
+        action: "remove",
+        role: "member",
+        expected_revision: 7,
+        reason: "duplicate identity",
+      },
+    });
+
+    expect(
+      buildCommand(
+        change,
+        {
+          network_id: networkId,
+          target_node_id: targetNodeId,
+          action: "invite",
+          role: "member",
+          expected_revision: "0",
+          reason: "   ",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "change_member_lifecycle",
+      payload: {
+        network_id: networkId,
+        target_node_id: targetNodeId,
+        action: "invite",
+        role: "member",
+        expected_revision: 0,
+      },
+    });
+
+    expect(() =>
+      buildCommand(
+        preview,
+        { network_id: networkId, target_node_id: "not-a-node" },
+        "en",
+      ),
+    ).toThrow("translated:validation.node_id");
+    expect(() =>
+      buildCommand(
+        change,
+        {
+          network_id: networkId,
+          target_node_id: targetNodeId,
+          action: "promote",
+          role: "member",
+          expected_revision: "1",
+        },
+        "en",
+      ),
+    ).toThrow("translated:validation.member_lifecycle_action");
+  });
+
+  it("validates member removal preview and lifecycle change outcomes", () => {
+    const preview: NodeCommandOutcome = {
+      status: "member_removal_preview",
+      data: {
+        network_id: "net_stable_home",
+        target_node_id: `node_${"B".repeat(43)}`,
+        role: "member",
+        status: "active",
+        lifecycle_state: "active",
+        revision: 3,
+        access_epoch: 3,
+        presence: {
+          state: "online",
+          source: "live_session",
+          observed_at_unix_ms: 1_700_000_090_000,
+        },
+        can_remove: true,
+        network_access_revoked: true,
+        file_access_revoked: true,
+        incomplete_transfers_resume_blocked: true,
+        credentials_revoked: true,
+        old_access_epoch_invalidated: true,
+        local_files_deleted: false,
+        safe_undo_requires_reapproval: true,
+        safe_undo_restores_old_credentials: false,
+        impact_keys: [
+          "member_removal.impact.network_access",
+          "member_removal.impact.file_access",
+          "member_removal.impact.incomplete_transfers",
+          "member_removal.impact.credentials",
+          "member_removal.impact.local_files_kept",
+          "member_removal.impact.safe_undo",
+        ],
+      },
+    } satisfies NodeCommandOutcome;
+
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 61,
+          server_time: "2026-11-01T00:00:00Z",
+          result: { request_id: 61, outcome: preview },
+        },
+        61,
+      ),
+    ).toEqual(preview);
+
+    const deleted = structuredClone(preview) as unknown as {
+      data: Record<string, unknown>;
+    };
+    deleted.data.local_files_deleted = true;
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 62,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 62,
+            outcome: deleted as unknown as NodeCommandOutcome,
+          },
+        },
+        62,
+      ),
+    ).toThrow("member removal preview must never delete local files");
+
+    const revived = structuredClone(preview) as unknown as {
+      data: Record<string, unknown>;
+    };
+    revived.data.safe_undo_restores_old_credentials = true;
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 63,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 63,
+            outcome: revived as unknown as NodeCommandOutcome,
+          },
+        },
+        63,
+      ),
+    ).toThrow("member removal preview must never restore old credentials");
+
+    const change: NodeCommandOutcome = {
+      status: "member_lifecycle_changed",
+      data: {
+        network_id: "net_stable_home",
+        target_node_id: `node_${"B".repeat(43)}`,
+        action: "remove",
+        status: "removed",
+        revision: 4,
+        access_epoch: 4,
+        operation_id: `op_${"C".repeat(43)}`,
+        audit_id: `audit_${"D".repeat(43)}`,
+        idempotent: false,
+        access_revoked: true,
+        requires_reauthentication: true,
+        requires_reapproval: true,
+      },
+    } satisfies NodeCommandOutcome;
+
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 64,
+          server_time: "2026-11-01T00:00:00Z",
+          result: { request_id: 64, outcome: change },
+        },
+        64,
+      ),
+    ).toEqual(change);
+
+    const stale = structuredClone(change) as unknown as {
+      data: Record<string, unknown>;
+    };
+    stale.data.revision = 0;
+    expect(() =>
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 65,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 65,
+            outcome: stale as unknown as NodeCommandOutcome,
+          },
+        },
+        65,
+      ),
+    ).toThrow("member lifecycle revision invalid");
   });
 
   it("uses the shared canonical reason for unsupported exit-node actions", () => {

@@ -97,6 +97,8 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   submit_join_request: "submit_join_request",
   list_join_requests: "list_join_requests",
   list_network_members: "list_network_members",
+  preview_member_removal: "preview_member_removal",
+  change_member_lifecycle: "change_member_lifecycle",
   review_join_request: "review_join_request",
   batch_review_join_requests: "batch_review_join_requests",
   withdraw_join_request: "withdraw_join_request",
@@ -186,6 +188,9 @@ const INPUT_KINDS = new Set([
   "join_request_reason",
   "join_request_review_action",
   "join_request_reviews",
+  "node_id",
+  "member_lifecycle_action",
+  "member_lifecycle_reason",
   "port",
   "role",
   "routing_mode",
@@ -229,6 +234,9 @@ const VALIDATIONS = new Set([
   "join_request_reason",
   "join_request_review_action",
   "join_request_reviews",
+  "node_id",
+  "member_lifecycle_action",
+  "member_lifecycle_reason",
   "coordinator_url",
   "invitation_code",
 ]);
@@ -248,6 +256,8 @@ const OUTCOME_STATUSES = new Set([
   "join_request_submitted",
   "join_requests",
   "network_members",
+  "member_removal_preview",
+  "member_lifecycle_changed",
   "join_requests_reviewed",
   "join_request_updated",
   "invitation_created",
@@ -284,6 +294,36 @@ const NETWORK_STATUSES = new Set([
 ]);
 const NETWORK_ROLES = new Set(["member", "discovery", "relay", "exit_node"]);
 const MEMBERSHIP_ROLES = new Set(["owner", "administrator", "member"]);
+const MEMBER_LIFECYCLE_ACTIONS = new Set([
+  "invite",
+  "approve",
+  "reject",
+  "suspend",
+  "resume",
+  "exit",
+  "remove",
+  "undo_remove",
+]);
+const MEMBER_LIFECYCLE_STATUSES = new Set([
+  "invited",
+  "pending_approval",
+  "approved",
+  "active",
+  "degraded",
+  "suspended",
+  "exited",
+  "removed",
+  "expired",
+  "rejected",
+]);
+const MEMBER_REMOVAL_IMPACT_KEYS = new Set([
+  "member_removal.impact.network_access",
+  "member_removal.impact.file_access",
+  "member_removal.impact.incomplete_transfers",
+  "member_removal.impact.credentials",
+  "member_removal.impact.local_files_kept",
+  "member_removal.impact.safe_undo",
+]);
 const CAPABILITY_KINDS = new Set<CapabilityKind>([
   "coordinator",
   "relay",
@@ -1445,6 +1485,23 @@ export function validateActionValues(
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
       }
+    } else if (field.validation === "node_id") {
+      if (!/^node_[A-Za-z0-9_-]{43}$/.test(String(value).trim())) {
+        errors.push(label(locale, "validation.node_id"));
+      }
+    } else if (field.validation === "member_lifecycle_action") {
+      if (!MEMBER_LIFECYCLE_ACTIONS.has(String(value))) {
+        errors.push(label(locale, "validation.member_lifecycle_action"));
+      }
+    } else if (field.validation === "member_lifecycle_reason") {
+      const reason = String(value).trim();
+      if (
+        reason.length === 0 ||
+        [...reason].length > 512 ||
+        /\p{Cc}/u.test(reason)
+      ) {
+        errors.push(label(locale, "validation.member_lifecycle_reason"));
+      }
     } else if (field.validation === "network_name") {
       const name = String(value).trim();
       if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") {
@@ -1830,6 +1887,43 @@ export function buildCommand(
         command: "list_network_members",
         payload: { network_id: requiredString("network_id") },
       };
+    case "preview_member_removal":
+      return {
+        command: "preview_member_removal",
+        payload: {
+          network_id: requiredString("network_id"),
+          target_node_id: requiredString("target_node_id"),
+        },
+      };
+    case "change_member_lifecycle": {
+      const reason = optional(values, "reason")?.trim();
+      const role = optional(values, "role") ?? "member";
+      if (!MEMBERSHIP_ROLES.has(role))
+        throw new Error(label(locale, "validation.role_invalid"));
+      return {
+        command: "change_member_lifecycle",
+        payload: {
+          network_id: requiredString("network_id"),
+          target_node_id: requiredString("target_node_id"),
+          action: requiredString("action") as
+            | "invite"
+            | "approve"
+            | "reject"
+            | "suspend"
+            | "resume"
+            | "exit"
+            | "remove"
+            | "undo_remove",
+          role: role as "owner" | "administrator" | "member",
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+          ...(reason ? { reason } : {}),
+        },
+      };
+    }
     case "review_join_request": {
       const note = optional(values, "note");
       return {
@@ -2162,6 +2256,150 @@ function optionalNullableInteger(value: unknown, message: string): void {
   if (value !== undefined && value !== null) nonNegativeInteger(value, message);
 }
 
+function memberRemovalPreview(value: unknown): void {
+  if (!record(value)) fail("member removal preview invalid");
+  stringValue(value.network_id, "member removal preview network id invalid", true);
+  stringValue(
+    value.target_node_id,
+    "member removal preview target node id invalid",
+    true,
+  );
+  const role = stringValue(
+    value.role,
+    "member removal preview role invalid",
+    true,
+  );
+  if (!MEMBERSHIP_ROLES.has(role))
+    fail("member removal preview role invalid");
+  const status = stringValue(
+    value.status,
+    "member removal preview status invalid",
+    true,
+  );
+  if (!MEMBER_STATUSES.has(status))
+    fail("member removal preview status invalid");
+  const lifecycleState = stringValue(
+    value.lifecycle_state,
+    "member removal preview lifecycle state invalid",
+    true,
+  );
+  if (!MEMBER_LIFECYCLE_STATUSES.has(lifecycleState))
+    fail("member removal preview lifecycle state invalid");
+  nonNegativeInteger(
+    value.revision,
+    "member removal preview revision invalid",
+  );
+  nonNegativeInteger(
+    value.access_epoch,
+    "member removal preview access epoch invalid",
+  );
+  if (!record(value.presence))
+    fail("member removal preview presence invalid");
+  stringValue(
+    value.presence.state,
+    "member removal preview presence state invalid",
+    true,
+  );
+  for (const flag of [
+    "can_remove",
+    "network_access_revoked",
+    "file_access_revoked",
+    "incomplete_transfers_resume_blocked",
+    "credentials_revoked",
+    "old_access_epoch_invalidated",
+    "local_files_deleted",
+    "safe_undo_requires_reapproval",
+    "safe_undo_restores_old_credentials",
+  ]) {
+    booleanValueRaw(value[flag], `member removal preview ${flag} invalid`);
+  }
+  if (value.local_files_deleted !== false)
+    fail("member removal preview must never delete local files");
+  if (value.safe_undo_restores_old_credentials !== false)
+    fail("member removal preview must never restore old credentials");
+  const impactKeys = arrayValue(
+    value.impact_keys,
+    "member removal preview impact keys invalid",
+  ).map((key) => stringValue(key, "member removal impact key invalid", true));
+  unique(impactKeys, "member removal impact key");
+  if (impactKeys.length === 0)
+    fail("member removal preview must disclose its impact");
+  for (const key of impactKeys) {
+    if (!MEMBER_REMOVAL_IMPACT_KEYS.has(key))
+      fail(`unknown member removal impact key: ${key}`);
+  }
+  if (value.active_capabilities !== undefined) {
+    const capabilities = arrayValue(
+      value.active_capabilities,
+      "member removal preview capabilities invalid",
+    ).map((capability) => {
+      const kind = stringValue(
+        capability,
+        "member removal preview capability invalid",
+        true,
+      );
+      if (!CAPABILITY_KINDS.has(kind as CapabilityKind))
+        fail("member removal preview capability invalid");
+      return kind;
+    });
+    unique(capabilities, "member removal preview capability");
+  }
+  if (value.denial_key !== undefined && value.denial_key !== null) {
+    stringValue(
+      value.denial_key,
+      "member removal preview denial key invalid",
+      true,
+    );
+  }
+  if (value.display_name !== undefined && value.display_name !== null) {
+    stringValue(
+      value.display_name,
+      "member removal preview display name invalid",
+      true,
+    );
+  }
+}
+
+function memberLifecycleChange(value: unknown): void {
+  if (!record(value)) fail("member lifecycle change invalid");
+  stringValue(value.network_id, "member lifecycle network id invalid", true);
+  stringValue(
+    value.target_node_id,
+    "member lifecycle target node id invalid",
+    true,
+  );
+  const action = stringValue(
+    value.action,
+    "member lifecycle action invalid",
+    true,
+  );
+  if (!MEMBER_LIFECYCLE_ACTIONS.has(action))
+    fail("member lifecycle action invalid");
+  const status = stringValue(
+    value.status,
+    "member lifecycle status invalid",
+    true,
+  );
+  if (!MEMBER_LIFECYCLE_STATUSES.has(status))
+    fail("member lifecycle status invalid");
+  nonNegativeInteger(value.revision, "member lifecycle revision invalid");
+  if (Number(value.revision) < 1)
+    fail("member lifecycle revision invalid");
+  nonNegativeInteger(value.access_epoch, "member lifecycle access epoch invalid");
+  if (Number(value.access_epoch) < 1)
+    fail("member lifecycle access epoch invalid");
+  stringValue(value.operation_id, "member lifecycle operation id invalid", true);
+  stringValue(value.audit_id, "member lifecycle audit id invalid", true);
+  for (const flag of [
+    "idempotent",
+    "access_revoked",
+    "requires_reauthentication",
+    "requires_reapproval",
+  ]) {
+    booleanValueRaw(value[flag], `member lifecycle ${flag} invalid`);
+  }
+}
+
 function memberDirectory(value: unknown): NetworkMemberDirectory {
   if (!record(value)) fail("member directory invalid");
   stringValue(value.network_id, "member directory network id invalid", true);
@@ -2169,6 +2407,19 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
     value.generated_at_unix_ms,
     "member directory generation time invalid",
   );
+  const viewerRole = stringValue(
+    value.viewer_role,
+    "member directory viewer role invalid",
+    true,
+  );
+  if (!MEMBERSHIP_ROLES.has(viewerRole))
+    fail("member directory viewer role invalid");
+  const canManage = booleanValueRaw(
+    value.can_manage_members,
+    "member directory manage flag invalid",
+  );
+  if (canManage && viewerRole === "member")
+    fail("member directory manage flag contradicts viewer role");
   const members = arrayValue(value.members, "member directory rows invalid");
   const seenNodeIds: string[] = [];
   for (const [index, entry] of members.entries()) {
@@ -2233,6 +2484,40 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
       entry.joined_at_unix_ms,
       `member ${index} join time invalid`,
     );
+    const lifecycleState = stringValue(
+      entry.lifecycle_state,
+      `member ${index} lifecycle state invalid`,
+      true,
+    );
+    if (!MEMBER_LIFECYCLE_STATUSES.has(lifecycleState))
+      fail(`member ${index} lifecycle state invalid`);
+    const memberRevision = nonNegativeInteger(
+      entry.revision,
+      `member ${index} revision invalid`,
+    );
+    if (memberRevision < 1) fail(`member ${index} revision invalid`);
+    const accessEpoch = nonNegativeInteger(
+      entry.access_epoch,
+      `member ${index} access epoch invalid`,
+    );
+    if (accessEpoch < 1) fail(`member ${index} access epoch invalid`);
+    if (entry.available_actions !== undefined) {
+      const actions = arrayValue(
+        entry.available_actions,
+        `member ${index} available actions invalid`,
+      ).map((action) => {
+        const value = stringValue(
+          action,
+          `member ${index} available action invalid`,
+          true,
+        );
+        if (!MEMBER_LIFECYCLE_ACTIONS.has(value))
+          fail(`member ${index} available action invalid`);
+        return value;
+      });
+      unique(actions, `member ${index} available action`);
+      if (!canManage) fail(`member ${index} exposes actions without governance`);
+    }
 
     if (!record(entry.presence)) fail(`member ${index} presence invalid`);
     const presenceState = stringValue(
@@ -2285,6 +2570,10 @@ function validatedOutcome(value: unknown): NodeCommandOutcome {
   const outcome = value as NodeCommandOutcome;
   if (outcome.status === "snapshot") validateSnapshot(outcome.data);
   if (outcome.status === "network_members") memberDirectory(outcome.data);
+  if (outcome.status === "member_removal_preview")
+    memberRemovalPreview(outcome.data);
+  if (outcome.status === "member_lifecycle_changed")
+    memberLifecycleChange(outcome.data);
   if (outcome.status === "configuration") configurationDocument(outcome.data);
   if (outcome.status === "configuration_preview")
     configurationPreview(outcome.data);

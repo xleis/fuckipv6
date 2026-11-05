@@ -740,6 +740,10 @@ pub struct TransferBinding {
     pub operation_id: OperationId,
     pub share_id: FileShareId,
     pub actor: NodeId,
+    /// Membership access generation observed when the transfer was created.
+    /// Suspension, exit, removal and safe undo advance the generation so an
+    /// incomplete transfer can never resume against stale authorization.
+    pub access_epoch: u64,
     pub path: SharedPath,
     pub direction: TransferDirection,
     /// Existing file version for download, or the version being replaced by an
@@ -755,6 +759,7 @@ pub struct ResumeRequest {
     pub operation_id: OperationId,
     pub share_id: FileShareId,
     pub actor: NodeId,
+    pub access_epoch: u64,
     pub path: SharedPath,
     pub direction: TransferDirection,
     pub content_hash: ContentHash,
@@ -831,7 +836,10 @@ impl TransferSession {
         manifest
             .validate()
             .map_err(|_| FileTransferError::InvalidManifest)?;
-        if binding.share_revision == 0 || now_unix_ms >= binding.expires_at_unix_ms {
+        if binding.share_revision == 0
+            || binding.access_epoch == 0
+            || now_unix_ms >= binding.expires_at_unix_ms
+        {
             return Err(FileTransferError::InvalidManifest);
         }
         if binding.direction == TransferDirection::Download
@@ -863,13 +871,17 @@ impl TransferSession {
         current_file_version: Option<&FileVersion>,
         current_share_revision: u64,
         authorized: bool,
+        current_access_epoch: u64,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferError> {
         if now_unix_ms >= self.binding.expires_at_unix_ms {
             self.state = TransferState::Expired;
             return Err(FileTransferError::Expired);
         }
-        if !authorized {
+        if !authorized
+            || current_access_epoch != self.binding.access_epoch
+            || request.access_epoch != self.binding.access_epoch
+        {
             self.state = TransferState::Cancelled;
             return Err(FileTransferError::PermissionRevoked);
         }
@@ -1249,23 +1261,23 @@ mod tests {
     fn resume_is_bound_to_identity_share_revision_and_file_version() {
         let actor = node(2);
         let content = b"abcdefgh";
-        let mut active = session(content, binding("upload.bin", actor));
+        let mut active = session(content, binding("upload.bin", actor.clone()));
         active
-            .resume(&request(&active), None, 1, true, 2)
+            .resume(&request(&active), None, 1, true, 1, 2)
             .expect("start");
         active.pause(3).expect("pause");
         active
-            .resume(&request(&active), None, 1, true, 4)
+            .resume(&request(&active), None, 1, true, 1, 4)
             .expect("resume");
 
         let mut stale = request(&active);
         stale.actor = node(3);
         assert_eq!(
-            active.resume(&stale, None, 1, true, 5),
+            active.resume(&stale, None, 1, true, 1, 5),
             Err(FileTransferError::BindingMismatch)
         );
         assert_eq!(
-            active.resume(&request(&active), None, 2, true, 5),
+            active.resume(&request(&active), None, 2, true, 1, 5),
             Err(FileTransferError::BindingMismatch)
         );
         let changed_version = FileVersion {
@@ -1274,13 +1286,27 @@ mod tests {
             revision: 1,
         };
         assert_eq!(
-            active.resume(&request(&active), Some(&changed_version), 1, true, 5),
+            active.resume(&request(&active), Some(&changed_version), 1, true, 1, 5),
             Err(FileTransferError::VersionChanged)
         );
         assert_eq!(
-            active.resume(&request(&active), None, 1, false, 5),
+            active.resume(&request(&active), None, 1, false, 1, 5),
             Err(FileTransferError::PermissionRevoked)
         );
+
+        let mut stale_epoch = request(&active);
+        stale_epoch.access_epoch = 2;
+        assert_eq!(
+            active.resume(&stale_epoch, None, 1, true, 1, 5),
+            Err(FileTransferError::PermissionRevoked)
+        );
+
+        let mut removed = session(content, binding("removed.bin", actor));
+        assert_eq!(
+            removed.resume(&request(&removed), None, 1, true, 2, 5),
+            Err(FileTransferError::PermissionRevoked)
+        );
+        assert_eq!(removed.state, TransferState::Cancelled);
     }
 
     #[test]
@@ -1288,7 +1314,7 @@ mod tests {
         let content = b"abcdefghij";
         let mut active = session(content, binding("upload.bin", node(2)));
         active
-            .resume(&request(&active), None, 1, true, 2)
+            .resume(&request(&active), None, 1, true, 1, 2)
             .expect("start");
         active.record_chunk(0, b"abcd", 3).expect("chunk");
         active.record_chunk(0, b"abcd", 3).expect("replay");
@@ -1340,6 +1366,7 @@ mod tests {
             operation_id: OperationId::from_public_key(b"operation"),
             share_id: FileShareId::from_public_key(b"share"),
             actor,
+            access_epoch: 1,
             path: SharedPath::parse(path).expect("path"),
             direction: TransferDirection::Upload,
             file_version: None,
@@ -1354,6 +1381,7 @@ mod tests {
             operation_id: session.binding.operation_id.clone(),
             share_id: session.binding.share_id.clone(),
             actor: session.binding.actor.clone(),
+            access_epoch: session.binding.access_epoch,
             path: session.binding.path.clone(),
             direction: session.binding.direction,
             content_hash: session.manifest.content_hash.clone(),

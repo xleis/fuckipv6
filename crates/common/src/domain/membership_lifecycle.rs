@@ -113,9 +113,13 @@ pub fn member_lifecycle_target(
 ) -> DomainResult<MemberLifecycleStatus> {
     let target = match action {
         MemberLifecycleAction::Invite => match current {
-            None | Some(MemberLifecycleStatus::Exited | MemberLifecycleStatus::Removed) => {
-                MemberLifecycleStatus::Invited
-            }
+            None
+            | Some(
+                MemberLifecycleStatus::Exited
+                | MemberLifecycleStatus::Removed
+                | MemberLifecycleStatus::Expired
+                | MemberLifecycleStatus::Rejected,
+            ) => MemberLifecycleStatus::Invited,
             Some(_) => return Err(invalid_transition(action, current)),
         },
         MemberLifecycleAction::Approve => match current {

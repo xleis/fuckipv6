@@ -103,13 +103,26 @@ impl MemberLifecycleStore {
         request: MemberLifecycleChangeRequest,
         now_unix_ms: u64,
     ) -> Result<MemberLifecycleChange> {
-        request.validate()?;
-        if now_unix_ms == 0 {
-            bail!("member lifecycle change time must be positive");
+        self.change_with_history(actor, request, now_unix_ms)
+            .map(|(change, _)| change)
+    }
+
+    /// Internal admission bridge used by the join-request and invitation
+    /// ledgers. A verified admission is represented by the same Invite then
+    /// Approve operations as an operator-driven flow, and both transitions are
+    /// committed with one roster/lifecycle write.
+    pub fn admit(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        target_node_id: &NodeId,
+        role: MembershipRole,
+        source_key: &str,
+        now_unix_ms: u64,
+    ) -> Result<MemberLifecycleChange> {
+        if source_key.is_empty() || now_unix_ms == 0 {
+            bail!("member lifecycle admission input is invalid");
         }
-        let request_digest = ContentHash::from_bytes(
-            &serde_json::to_vec(&request).context("无法序列化成员生命周期请求摘要")?,
-        );
         let _process_guard = self
             .process_lock
             .lock()
@@ -118,66 +131,265 @@ impl MemberLifecycleStore {
         self.ensure_parent()?;
         let _file_lock = lock_lifecycle_file(&self.path)?;
         let mut file = self.load_unlocked()?;
+        let mut network = read_network_record(&self.network_record_path, network_id)?;
+        let previous_lifecycle_bytes = std::fs::read(&self.path).ok();
+        let previous_network_bytes = std::fs::read(&self.network_record_path).ok();
 
+        let approve_key =
+            admission_idempotency_key("approve", source_key, network_id, target_node_id);
         if let Some(stored) = file
             .idempotency
-            .get(&request.network_id)
-            .and_then(|entries| entries.get(&request.idempotency_key))
+            .get(network_id)
+            .and_then(|entries| entries.get(&approve_key))
         {
-            if stored.request_digest != request_digest {
-                bail!("member_lifecycle.error.idempotency_conflict");
+            let current = lifecycle_for_target(&file, &network, target_node_id);
+            if !current
+                .as_ref()
+                .is_some_and(|record| record.status.grants_network_access())
+            {
+                bail!("member_lifecycle.error.admission_revoked");
             }
+            reconcile_admitted_roster(
+                &self.network_record_path,
+                &mut network,
+                current
+                    .as_ref()
+                    .context("admission retry has no lifecycle record")?,
+                now_unix_ms,
+            )?;
             let mut change = stored.change.clone();
             change.idempotent = true;
             return Ok(change);
         }
 
-        let previous_lifecycle_bytes = std::fs::read(&self.path).ok();
-        let previous_network_bytes = std::fs::read(&self.network_record_path).ok();
-        let network = read_network_record(&self.network_record_path, &request.network_id)?;
-        let evaluation = evaluate_change(&file, &network, actor, &request, now_unix_ms);
+        let current = lifecycle_for_target(&file, &network, target_node_id);
+        if current.as_ref().is_some_and(|record| {
+            record.status.is_tombstone() || record.status == MemberLifecycleStatus::Suspended
+        }) {
+            bail!("member_lifecycle.error.admission_revoked");
+        }
+        if current
+            .as_ref()
+            .is_some_and(|record| record.status.grants_network_access())
+        {
+            reconcile_admitted_roster(
+                &self.network_record_path,
+                &mut network,
+                current
+                    .as_ref()
+                    .context("admission retry has no lifecycle record")?,
+                now_unix_ms,
+            )?;
+            return synthesize_admission_retry(network_id, target_node_id, current.as_ref());
+        }
 
-        let (change, record, next_network) = match evaluation {
-            Ok(value) => value,
+        let mut latest = current;
+        if latest.as_ref().is_none_or(|record| {
+            matches!(
+                record.status,
+                MemberLifecycleStatus::Exited
+                    | MemberLifecycleStatus::Removed
+                    | MemberLifecycleStatus::Expired
+                    | MemberLifecycleStatus::Rejected
+            )
+        }) {
+            let invite = MemberLifecycleChangeRequest {
+                network_id: network_id.clone(),
+                target_node_id: target_node_id.clone(),
+                action: MemberLifecycleAction::Invite,
+                role,
+                expected_revision: latest.as_ref().map(|record| record.revision).unwrap_or(0),
+                idempotency_key: admission_idempotency_key(
+                    "invite",
+                    source_key,
+                    network_id,
+                    target_node_id,
+                ),
+                reason: None,
+            };
+            let invitation =
+                apply_change_in_memory(&mut file, &network, actor, &invite, now_unix_ms)?;
+            network = invitation.1;
+            latest = Some(invitation.2);
+        }
+
+        let revision = latest
+            .as_ref()
+            .map(|record| record.revision)
+            .context("member lifecycle admission has no predecessor")?;
+        let approve = MemberLifecycleChangeRequest {
+            network_id: network_id.clone(),
+            target_node_id: target_node_id.clone(),
+            action: MemberLifecycleAction::Approve,
+            role,
+            expected_revision: revision,
+            idempotency_key: approve_key,
+            reason: None,
+        };
+        let change = match apply_change_in_memory(&mut file, &network, actor, &approve, now_unix_ms)
+        {
+            Ok((change, next_network, _)) => {
+                network = next_network;
+                change
+            }
             Err(error) => {
-                append_audit(
-                    &mut file,
-                    actor,
-                    &request,
-                    &request_digest,
-                    AuditOutcome::Denied,
-                    None,
-                    now_unix_ms,
-                )?;
                 file.validate()?;
                 self.persist(&file)?;
                 return Err(error);
             }
         };
+        file.validate()?;
+        if let Err(error) = persist_network_record(&self.network_record_path, &network) {
+            restore_optional_file(&self.network_record_path, previous_network_bytes.as_deref())?;
+            return Err(error);
+        }
+        if let Err(error) = self.persist(&file) {
+            restore_optional_file(&self.network_record_path, previous_network_bytes.as_deref())?;
+            restore_optional_file(&self.path, previous_lifecycle_bytes.as_deref())?;
+            return Err(error);
+        }
+        Ok(change)
+    }
 
-        file.records
-            .entry(request.network_id.clone())
-            .or_default()
-            .insert(request.target_node_id.clone(), record);
-        file.idempotency
-            .entry(request.network_id.clone())
-            .or_default()
-            .insert(
-                request.idempotency_key.clone(),
-                StoredLifecycleResult {
-                    request_digest: request_digest.clone(),
-                    change: change.clone(),
-                },
-            );
-        append_audit(
-            &mut file,
-            actor,
-            &request,
-            &request_digest,
-            AuditOutcome::Succeeded,
-            Some(&change),
-            now_unix_ms,
-        )?;
+    /// Rejecting a pending join request still produces an invite/reject
+    /// lifecycle operation, but never grants roster access.
+    pub fn reject_admission(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        target_node_id: &NodeId,
+        source_key: &str,
+        now_unix_ms: u64,
+    ) -> Result<MemberLifecycleChange> {
+        if source_key.is_empty() || now_unix_ms == 0 {
+            bail!("member lifecycle rejection input is invalid");
+        }
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("成员生命周期存储锁已损坏"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, true)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_lifecycle_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let mut network = read_network_record(&self.network_record_path, network_id)?;
+        let previous_lifecycle_bytes = std::fs::read(&self.path).ok();
+        let previous_network_bytes = std::fs::read(&self.network_record_path).ok();
+        let reject_key =
+            admission_idempotency_key("reject", source_key, network_id, target_node_id);
+        if let Some(stored) = file
+            .idempotency
+            .get(network_id)
+            .and_then(|entries| entries.get(&reject_key))
+        {
+            let mut change = stored.change.clone();
+            change.idempotent = true;
+            return Ok(change);
+        }
+        let current = lifecycle_for_target(&file, &network, target_node_id);
+        if current
+            .as_ref()
+            .is_some_and(|record| record.status.grants_network_access())
+        {
+            bail!("member_lifecycle.error.invalid_transition");
+        }
+        let mut latest = current;
+        if latest.as_ref().is_none_or(|record| {
+            matches!(
+                record.status,
+                MemberLifecycleStatus::Exited
+                    | MemberLifecycleStatus::Removed
+                    | MemberLifecycleStatus::Expired
+            )
+        }) {
+            let invite = MemberLifecycleChangeRequest {
+                network_id: network_id.clone(),
+                target_node_id: target_node_id.clone(),
+                action: MemberLifecycleAction::Invite,
+                role: MembershipRole::Member,
+                expected_revision: latest.as_ref().map(|record| record.revision).unwrap_or(0),
+                idempotency_key: admission_idempotency_key(
+                    "reject-invite",
+                    source_key,
+                    network_id,
+                    target_node_id,
+                ),
+                reason: None,
+            };
+            let invitation =
+                apply_change_in_memory(&mut file, &network, actor, &invite, now_unix_ms)?;
+            network = invitation.1;
+            latest = Some(invitation.2);
+        }
+        let revision = latest
+            .as_ref()
+            .map(|record| record.revision)
+            .context("member lifecycle rejection has no predecessor")?;
+        let reject = MemberLifecycleChangeRequest {
+            network_id: network_id.clone(),
+            target_node_id: target_node_id.clone(),
+            action: MemberLifecycleAction::Reject,
+            role: MembershipRole::Member,
+            expected_revision: revision,
+            idempotency_key: reject_key,
+            reason: None,
+        };
+        let change = match apply_change_in_memory(&mut file, &network, actor, &reject, now_unix_ms)
+        {
+            Ok((change, next_network, _)) => {
+                network = next_network;
+                change
+            }
+            Err(error) => {
+                file.validate()?;
+                self.persist(&file)?;
+                return Err(error);
+            }
+        };
+        file.validate()?;
+        if let Err(error) = persist_network_record(&self.network_record_path, &network) {
+            restore_optional_file(&self.network_record_path, previous_network_bytes.as_deref())?;
+            return Err(error);
+        }
+        if let Err(error) = self.persist(&file) {
+            restore_optional_file(&self.network_record_path, previous_network_bytes.as_deref())?;
+            restore_optional_file(&self.path, previous_lifecycle_bytes.as_deref())?;
+            return Err(error);
+        }
+        Ok(change)
+    }
+
+    fn change_with_history(
+        &self,
+        actor: &NodeId,
+        request: MemberLifecycleChangeRequest,
+        now_unix_ms: u64,
+    ) -> Result<(MemberLifecycleChange, MemberLifecycleRecord)> {
+        request.validate()?;
+        if now_unix_ms == 0 {
+            bail!("member lifecycle change time must be positive");
+        }
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("成员生命周期存储锁已损坏"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, true)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_lifecycle_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &request.network_id)?;
+        let previous_lifecycle_bytes = std::fs::read(&self.path).ok();
+        let previous_network_bytes = std::fs::read(&self.network_record_path).ok();
+        let applied =
+            match apply_change_in_memory(&mut file, &network, actor, &request, now_unix_ms) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    file.validate()?;
+                    self.persist(&file)?;
+                    return Err(error);
+                }
+            };
+        let (change, next_network, record) = applied;
         file.validate()?;
 
         if let Err(error) = persist_network_record(&self.network_record_path, &next_network) {
@@ -189,7 +401,7 @@ impl MemberLifecycleStore {
             restore_optional_file(&self.path, previous_lifecycle_bytes.as_deref())?;
             return Err(error);
         }
-        Ok(change)
+        Ok((change, record))
     }
 
     pub fn removal_preview(
@@ -324,6 +536,22 @@ impl MemberLifecycleStore {
             .unwrap_or_default())
     }
 
+    /// Only current managers and the affected member receive lifecycle change
+    /// notifications. The roster is re-read under the profile lock so a target
+    /// that left the manager set cannot keep observing private governance.
+    pub fn notification_recipients(
+        &self,
+        network_id: &NetworkId,
+        target_node_id: &NodeId,
+    ) -> Result<BTreeSet<NodeId>> {
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+        let mut recipients = network.administrators.into_iter().collect::<BTreeSet<_>>();
+        recipients.insert(network.owner);
+        recipients.insert(target_node_id.clone());
+        Ok(recipients)
+    }
+
     pub fn audit_entries(&self) -> Result<Vec<fuckipv6_common::domain::AuditEntry>> {
         self.ensure_parent()?;
         let _process_guard = self
@@ -359,6 +587,147 @@ impl MemberLifecycleStore {
         let bytes = serde_json::to_vec_pretty(file).context("无法序列化成员生命周期存储")?;
         persist_bytes_atomic(&self.path, &bytes)
     }
+}
+
+fn apply_change_in_memory(
+    file: &mut MemberLifecycleFile,
+    network: &NetworkRecord,
+    actor: &NodeId,
+    request: &MemberLifecycleChangeRequest,
+    now_unix_ms: u64,
+) -> Result<(MemberLifecycleChange, NetworkRecord, MemberLifecycleRecord)> {
+    request.validate()?;
+    let request_digest = ContentHash::from_bytes(
+        &serde_json::to_vec(request).context("无法序列化成员生命周期请求摘要")?,
+    );
+    if let Some(stored) = file
+        .idempotency
+        .get(&request.network_id)
+        .and_then(|entries| entries.get(&request.idempotency_key))
+    {
+        if stored.request_digest != request_digest {
+            bail!("member_lifecycle.error.idempotency_conflict");
+        }
+        let record = file
+            .records
+            .get(&request.network_id)
+            .and_then(|records| records.get(&request.target_node_id))
+            .cloned()
+            .or_else(|| {
+                lifecycle_for_target(file, network, &request.target_node_id).map(|mut record| {
+                    record.last_operation_id = Some(stored.change.operation_id.clone());
+                    record.last_idempotency_key = Some(request.idempotency_key.clone());
+                    record
+                })
+            })
+            .context("member lifecycle idempotent result has no record")?;
+        let mut change = stored.change.clone();
+        change.idempotent = true;
+        return Ok((change, network.clone(), record));
+    }
+
+    let evaluation = evaluate_change(file, network, actor, request, now_unix_ms);
+    let (change, record, next_network) = match evaluation {
+        Ok(value) => value,
+        Err(error) => {
+            append_audit(
+                file,
+                actor,
+                request,
+                &request_digest,
+                AuditOutcome::Denied,
+                None,
+                now_unix_ms,
+            )?;
+            return Err(error);
+        }
+    };
+    file.records
+        .entry(request.network_id.clone())
+        .or_default()
+        .insert(request.target_node_id.clone(), record.clone());
+    file.idempotency
+        .entry(request.network_id.clone())
+        .or_default()
+        .insert(
+            request.idempotency_key.clone(),
+            StoredLifecycleResult {
+                request_digest,
+                change: change.clone(),
+            },
+        );
+    append_audit(
+        file,
+        actor,
+        request,
+        &ContentHash::from_bytes(
+            &serde_json::to_vec(request).context("无法序列化成员生命周期请求摘要")?,
+        ),
+        AuditOutcome::Succeeded,
+        Some(&change),
+        now_unix_ms,
+    )?;
+    Ok((change, next_network, record))
+}
+
+fn reconcile_admitted_roster(
+    path: &Path,
+    network: &mut NetworkRecord,
+    record: &MemberLifecycleRecord,
+    now_unix_ms: u64,
+) -> Result<()> {
+    if network.members.contains(&record.node_id)
+        && (record.role != MembershipRole::Administrator
+            || network.administrators.contains(&record.node_id))
+    {
+        return Ok(());
+    }
+    apply_roster_state(network, record, now_unix_ms)?;
+    persist_network_record(path, network)
+}
+
+fn admission_idempotency_key(
+    operation: &str,
+    source_key: &str,
+    network_id: &NetworkId,
+    target_node_id: &NodeId,
+) -> IdempotencyKey {
+    IdempotencyKey::from_public_key(
+        format!("member-admission:{operation}:{network_id}:{source_key}:{target_node_id}")
+            .as_bytes(),
+    )
+}
+
+fn synthesize_admission_retry(
+    network_id: &NetworkId,
+    target_node_id: &NodeId,
+    current: Option<&MemberLifecycleRecord>,
+) -> Result<MemberLifecycleChange> {
+    let current = current.context("admission retry has no lifecycle record")?;
+    let operation_id = current
+        .last_operation_id
+        .clone()
+        .context("admitted lifecycle record has no operation id")?;
+    Ok(MemberLifecycleChange {
+        network_id: network_id.clone(),
+        target_node_id: target_node_id.clone(),
+        action: MemberLifecycleAction::Approve,
+        status: current.status,
+        revision: current.revision,
+        access_epoch: current.access_epoch,
+        audit_id: AuditId::from_public_key(
+            format!(
+                "admission-retry:{}:{network_id}:{target_node_id}",
+                current.revision
+            )
+            .as_bytes(),
+        ),
+        operation_id,
+        idempotent: true,
+        access_revoked: false,
+        requires_reauthentication: false,
+        requires_reapproval: false,
+    })
 }
 
 fn evaluate_change(
@@ -414,11 +783,10 @@ fn evaluate_change(
         .unwrap_or(0)
         .checked_add(1)
         .context("member lifecycle revision overflow")?;
-    let operation_seed = format!(
-        "member-lifecycle:{}:{}:{}",
-        request.network_id,
-        request.idempotency_key,
-        request.action.audit_action()
+    let operation_seed = lifecycle_operation_seed(
+        &request.network_id,
+        &request.idempotency_key,
+        request.action,
     );
     let operation_id = OperationId::from_public_key(operation_seed.as_bytes());
     let audit_id = AuditId::from_public_key(
@@ -587,6 +955,27 @@ fn retained_administrators(network: &NetworkRecord, target: &NodeId) -> usize {
         .count()
 }
 
+fn lifecycle_operation_seed(
+    network_id: &NetworkId,
+    idempotency_key: &IdempotencyKey,
+    action: MemberLifecycleAction,
+) -> String {
+    format!(
+        "member-lifecycle:{network_id}:{idempotency_key}:{}",
+        action.audit_action()
+    )
+}
+
+fn lifecycle_operation_id(
+    network_id: &NetworkId,
+    idempotency_key: &IdempotencyKey,
+    action: MemberLifecycleAction,
+) -> OperationId {
+    OperationId::from_public_key(
+        lifecycle_operation_seed(network_id, idempotency_key, action).as_bytes(),
+    )
+}
+
 fn append_audit(
     file: &mut MemberLifecycleFile,
     actor: &NodeId,
@@ -625,12 +1014,10 @@ fn append_audit(
     }
     file.audit_log.append(AuditEntry {
         audit_id: AuditId::from_public_key(seed.as_bytes()),
-        operation_id: Some(OperationId::from_public_key(
-            format!(
-                "member-lifecycle-operation:{}:{}",
-                request.network_id, request.idempotency_key
-            )
-            .as_bytes(),
+        operation_id: Some(lifecycle_operation_id(
+            &request.network_id,
+            &request.idempotency_key,
+            request.action,
         )),
         actor: actor.clone(),
         network_id: Some(request.network_id.clone()),
@@ -991,6 +1378,79 @@ mod tests {
         );
         let record = read_network_record(&network_path, &network_record().network_id).unwrap();
         assert!(!record.members.contains(&member()));
+    }
+
+    #[test]
+    fn every_lifecycle_action_uses_the_same_operation_and_audit_ledger() {
+        let (_dir, _network_path, store) = setup("operation-ledger");
+        let target = NodeId::from_public_key(b"lifecycle-target");
+        let mut revision = 0;
+        let mut operation_ids = BTreeSet::new();
+        let mut audit_ids = BTreeSet::new();
+        let mut observed_actions = Vec::new();
+
+        for (index, (action, actor)) in [
+            (MemberLifecycleAction::Invite, owner()),
+            (MemberLifecycleAction::Approve, owner()),
+            (MemberLifecycleAction::Suspend, owner()),
+            (MemberLifecycleAction::Resume, owner()),
+            (MemberLifecycleAction::Exit, target.clone()),
+            (MemberLifecycleAction::Remove, owner()),
+            (MemberLifecycleAction::UndoRemove, owner()),
+            (MemberLifecycleAction::Reject, owner()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let step = u64::try_from(index + 1).unwrap();
+            let change = store
+                .change(
+                    &actor,
+                    request(action, target.clone(), revision),
+                    200 + step,
+                )
+                .unwrap();
+            assert!(!change.operation_id.as_str().is_empty());
+            assert!(!change.audit_id.as_str().is_empty());
+            operation_ids.insert(change.operation_id.clone());
+            audit_ids.insert(change.audit_id.clone());
+            observed_actions.push(change.action);
+            revision = change.revision;
+        }
+
+        assert_eq!(operation_ids.len(), 8);
+        assert_eq!(audit_ids.len(), 8);
+        assert_eq!(
+            observed_actions,
+            vec![
+                MemberLifecycleAction::Invite,
+                MemberLifecycleAction::Approve,
+                MemberLifecycleAction::Suspend,
+                MemberLifecycleAction::Resume,
+                MemberLifecycleAction::Exit,
+                MemberLifecycleAction::Remove,
+                MemberLifecycleAction::UndoRemove,
+                MemberLifecycleAction::Reject,
+            ]
+        );
+        let audits = store.audit_entries().unwrap();
+        assert_eq!(audits.len(), 8);
+        assert_eq!(
+            audits
+                .iter()
+                .map(|entry| entry.action.as_str())
+                .collect::<Vec<_>>(),
+            observed_actions
+                .iter()
+                .map(|action| action.audit_action())
+                .collect::<Vec<_>>()
+        );
+        assert!(audits.iter().all(|entry| {
+            entry
+                .operation_id
+                .as_ref()
+                .is_some_and(|id| operation_ids.contains(id))
+        }));
     }
 
     #[test]

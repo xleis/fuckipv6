@@ -6,16 +6,17 @@
 //! ceiling before a handler is dispatched.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    evaluate_permissions, AccessContext, GroupId, MembershipRole, MembershipState, NetworkId,
-    NetworkRole, OperationId, PermissionCondition, PermissionDecision, PermissionDenialCode,
-    PermissionEffect, PermissionIntent, PermissionRequest, PermissionRule, PolicyAction,
-    ResourceKind, ResourceRef, SecurityRuleId, SubjectSelector,
+    evaluate_effective_access, AccessContext, GroupId, MembershipRole, MembershipState, NetworkAcl,
+    NetworkId, NetworkRole, NodeLocalAccessPolicy, OperationId, PermissionCondition,
+    PermissionDenialCode, PermissionEffect, PermissionIntent, PermissionRequest, PermissionRule,
+    PolicyAction, ResourceKind, ResourceRef, SecurityRuleId, SubjectSelector,
 };
 
 use super::command::{NodeCommand, NodeCommandKind};
-use super::state::{NodePermission, NodeSnapshot};
+use super::state::{NodeAccessControlSnapshot, NodePermission, NodeSnapshot};
 
 /// A trusted, adapter-constructed command principal. The fields are private so
 /// callers cannot turn untrusted wire data into an owner context.
@@ -25,6 +26,8 @@ pub struct NodeCommandContext {
     source: String,
     capabilities: HashSet<NodePermission>,
     local_policy: Vec<PermissionRule>,
+    local_access_policy: Option<NodeLocalAccessPolicy>,
+    access_control_invalid: bool,
     network_scopes: BTreeMap<String, NetworkCommandScope>,
     recent_reauthentication: bool,
     local_owner: bool,
@@ -43,6 +46,7 @@ pub struct NetworkCommandScope {
     membership_state: MembershipState,
     groups: BTreeSet<GroupId>,
     policy: Vec<PermissionRule>,
+    network_acl: Option<NetworkAcl>,
 }
 
 impl NetworkCommandScope {
@@ -58,6 +62,7 @@ impl NetworkCommandScope {
             membership_state,
             groups: BTreeSet::new(),
             policy,
+            network_acl: None,
         }
     }
 
@@ -85,6 +90,8 @@ impl NodeCommandContext {
             source: source.into(),
             capabilities: NodePermission::ALL.into_iter().collect(),
             local_policy: Vec::new(),
+            local_access_policy: None,
+            access_control_invalid: false,
             network_scopes: BTreeMap::new(),
             recent_reauthentication: true,
             local_owner: true,
@@ -118,7 +125,7 @@ impl NodeCommandContext {
                 membership.state,
             );
         }
-        context
+        context.with_access_control_snapshot(&snapshot.access_control)
     }
 
     /// Derive a verified WebUI owner context from the current node identity
@@ -152,6 +159,8 @@ impl NodeCommandContext {
             source: source.into(),
             capabilities: capabilities.into_iter().collect(),
             local_policy: Vec::new(),
+            local_access_policy: None,
+            access_control_invalid: false,
             network_scopes,
             recent_reauthentication: recently_reauthenticated,
             local_owner: false,
@@ -211,11 +220,33 @@ impl NodeCommandContext {
         self
     }
 
-    /// Attach the node-local policy layer. Network access succeeds only when
-    /// both this layer and the matching network policy contain an allow and
-    /// neither contains a deny.
-    pub fn with_local_policy(mut self, policy: Vec<PermissionRule>) -> Self {
+    /// Attach trusted local baseline rules. Adapter code supplies these from
+    /// authenticated node state; command JSON can never call this method.
+    #[cfg(test)]
+    pub(crate) fn with_local_policy(mut self, policy: Vec<PermissionRule>) -> Self {
         self.local_policy = policy;
+        self
+    }
+
+    /// Attach the owner-authored local restrictions and every network ACL from
+    /// an authoritative snapshot. Missing ACLs mean "no additional ACL"; an
+    /// ambiguous duplicate makes all policy-scoped commands fail closed.
+    pub(crate) fn with_access_control_snapshot(
+        mut self,
+        snapshot: &NodeAccessControlSnapshot,
+    ) -> Self {
+        self.local_access_policy = snapshot.local_policy.clone();
+        let mut invalid = false;
+        for scope in self.network_scopes.values_mut() {
+            match snapshot.network_acl_for(&scope.network_id) {
+                Ok(acl) => scope.network_acl = acl.cloned(),
+                Err(()) => {
+                    invalid = true;
+                    scope.network_acl = None;
+                }
+            }
+        }
+        self.access_control_invalid |= invalid;
         self
     }
 
@@ -229,6 +260,8 @@ impl NodeCommandContext {
             source: source.into(),
             capabilities: HashSet::new(),
             local_policy: Vec::new(),
+            local_access_policy: None,
+            access_control_invalid: false,
             network_scopes: BTreeMap::new(),
             recent_reauthentication: false,
             local_owner: false,
@@ -324,6 +357,13 @@ pub(crate) fn authorize_command(
         return Err(CommandDenial::new(
             PermissionDenialCode::AuthenticationRequired.as_str(),
             "actor is not authenticated",
+        ));
+    }
+
+    if context.access_control_invalid {
+        return Err(CommandDenial::new(
+            PermissionDenialCode::PolicyDenied.as_str(),
+            "trusted access control snapshot is ambiguous or invalid",
         ));
     }
 
@@ -424,25 +464,33 @@ pub(crate) fn authorize_command(
             recent_reauthentication: context.recent_reauthentication,
             emergency_coordinator: scope.role == NetworkRole::TemporaryCoordinator,
         };
-        let decision =
-            evaluate_permissions(&context.local_policy, &scope.policy, &request, &access);
-        if let PermissionDecision::Deny {
-            code,
-            layer,
-            rule_id,
-        } = decision
-        {
-            let reason = match rule_id {
-                Some(rule_id) => {
-                    format!("policy denied by {layer} layer rule {rule_id}: {network_name}")
-                }
-                None => format!("policy denied by {layer} layer: {network_name} ({code})"),
-            };
-            return Err(CommandDenial::new(&code, reason));
+        let decision = evaluate_effective_access(
+            &context.local_policy,
+            &scope.policy,
+            scope.network_acl.as_ref(),
+            context.local_access_policy.as_ref(),
+            &request,
+            &access,
+            unix_time_ms(),
+        );
+        if !decision.allowed {
+            let code = decision
+                .code
+                .as_deref()
+                .unwrap_or(PermissionDenialCode::PolicyDenied.as_str());
+            let reason = decision.explanation(&network_name);
+            return Err(CommandDenial::new(code, reason));
         }
     }
 
     Ok(())
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn role_name(role: NetworkRole) -> &'static str {
@@ -842,6 +890,7 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
+        ContributionKind, NetworkAclGrant, NodeContributionVeto, NodeNetworkScope,
         PermissionCondition, PermissionEffect, SecurityRuleId, SubjectSelector,
     };
 
@@ -958,6 +1007,69 @@ mod tests {
     fn start_home() -> NodeCommand {
         NodeCommand::StartNetworks {
             selection: crate::node::NodeNetworkSelection::Named(vec!["home".into()]),
+        }
+    }
+
+    fn access_control_acl(
+        network_id: NetworkId,
+        rules: Vec<PermissionRule>,
+        grants: Vec<NetworkAclGrant>,
+    ) -> NetworkAcl {
+        let now = unix_time_ms();
+        NetworkAcl {
+            network_id,
+            revision: 1,
+            issued_at_unix_ms: now.saturating_sub(10_000),
+            expires_at_unix_ms: now.saturating_add(60_000),
+            rules,
+            grants,
+        }
+    }
+
+    fn access_control_grant(
+        grant_id: &[u8],
+        action: PolicyAction,
+        resource: ResourceKind,
+        expires_at_unix_ms: u64,
+    ) -> NetworkAclGrant {
+        let now = unix_time_ms();
+        NetworkAclGrant {
+            grant_id: SecurityRuleId::from_public_key(grant_id),
+            subjects: vec![SubjectSelector::AnyMember],
+            resources: vec![resource],
+            actions: vec![action],
+            issued_at_unix_ms: now.saturating_sub(1_000),
+            expires_at_unix_ms,
+            revoked_at_unix_ms: None,
+            revoked_by: None,
+            requires_recent_reauthentication: false,
+        }
+    }
+
+    fn access_control_local_policy(
+        network_scope: NodeNetworkScope,
+        contribution_vetoes: Vec<NodeContributionVeto>,
+        rules: Vec<PermissionRule>,
+    ) -> NodeLocalAccessPolicy {
+        let now = unix_time_ms();
+        NodeLocalAccessPolicy {
+            node_id: actor(),
+            revision: 1,
+            issued_at_unix_ms: now.saturating_sub(1_000),
+            expires_at_unix_ms: now.saturating_add(60_000),
+            network_scope,
+            contribution_vetoes,
+            rules,
+        }
+    }
+
+    fn access_control_snapshot(
+        local_policy: Option<NodeLocalAccessPolicy>,
+        network_acls: Vec<NetworkAcl>,
+    ) -> NodeAccessControlSnapshot {
+        NodeAccessControlSnapshot {
+            local_policy,
+            network_acls,
         }
     }
 
@@ -1875,6 +1987,348 @@ mod tests {
                 expected_code,
             );
         }
+    }
+
+    #[test]
+    fn network_acl_and_local_policy_denials_override_admin_allows() {
+        let home = network_id("home");
+        let (local_policy, network_policy) = start_policies();
+        let network_deny = deny(
+            b"acl-deny-start",
+            SubjectSelector::AnyMember,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+        );
+        let network_deny_id = network_deny.rule_id.to_string();
+        let acl = access_control_acl(
+            home.clone(),
+            vec![network_deny],
+            vec![access_control_grant(
+                b"acl-direct-allow",
+                PolicyAction::Enable,
+                ResourceKind::Network,
+                unix_time_ms().saturating_add(30_000),
+            )],
+        );
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy.clone(),
+            network_policy.clone(),
+        )
+        .with_access_control_snapshot(&access_control_snapshot(None, vec![acl]));
+        let denial = authorize_command(&context, &start_home()).expect_err("ACL deny must win");
+        assert_eq!(denial.code, PermissionDenialCode::Denied.as_str());
+        assert!(denial.reason.contains(&network_deny_id), "{denial:?}");
+        assert!(denial.reason.contains("network layer"), "{denial:?}");
+
+        let local_deny = deny(
+            b"local-policy-deny-start",
+            SubjectSelector::AnyMember,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+        );
+        let local_deny_id = local_deny.rule_id.to_string();
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy,
+            network_policy,
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            Some(access_control_local_policy(
+                NodeNetworkScope::All,
+                Vec::new(),
+                vec![local_deny],
+            )),
+            Vec::new(),
+        ));
+        let denial = authorize_command(&context, &start_home()).expect_err("local deny must win");
+        assert_eq!(denial.code, PermissionDenialCode::Denied.as_str());
+        assert!(denial.reason.contains(&local_deny_id), "{denial:?}");
+        assert!(denial.reason.contains("local layer"), "{denial:?}");
+    }
+
+    #[test]
+    fn node_owner_network_scope_cannot_be_widened_by_network_admin() {
+        let (local_policy, network_policy) = start_policies();
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy,
+            network_policy,
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            Some(access_control_local_policy(
+                NodeNetworkScope::Only(vec![network_id("office")]),
+                Vec::new(),
+                Vec::new(),
+            )),
+            Vec::new(),
+        ));
+
+        let denial = authorize_command(&context, &start_home())
+            .expect_err("the node owner's network restriction must win");
+        assert_eq!(
+            denial.code,
+            PermissionDenialCode::NetworkScopeDenied.as_str()
+        );
+        assert!(denial.reason.contains("network_scope_restricted"));
+    }
+
+    #[test]
+    fn contribution_veto_and_network_scope_are_fail_closed() {
+        let home = network_id("home");
+        let request = PermissionRequest {
+            action: PolicyAction::Use,
+            resource: ResourceRef {
+                kind: ResourceKind::ExitGrant,
+                network_id: home.clone(),
+                object_id: None,
+            },
+            intent: PermissionIntent::Mutating,
+        };
+        let context = AccessContext {
+            network_id: home.clone(),
+            actor: actor(),
+            role: NetworkRole::Administrator,
+            groups: BTreeSet::new(),
+            membership_active: true,
+            recent_reauthentication: true,
+            emergency_coordinator: false,
+        };
+        let veto_id = SecurityRuleId::from_public_key(b"command-veto-exit");
+        let local_policy = access_control_local_policy(
+            NodeNetworkScope::All,
+            vec![NodeContributionVeto {
+                veto_id: veto_id.clone(),
+                network_id: home,
+                contributions: vec![ContributionKind::Exit],
+            }],
+            Vec::new(),
+        );
+        let decision = evaluate_effective_access(
+            &[],
+            &[allow(
+                b"network-exit-allow",
+                SubjectSelector::Role(NetworkRole::Administrator),
+                PolicyAction::Use,
+                ResourceKind::ExitGrant,
+            )],
+            None,
+            Some(&local_policy),
+            &request,
+            &context,
+            unix_time_ms(),
+        );
+        assert!(!decision.allowed);
+        assert_eq!(decision.rule_id.as_ref(), Some(&veto_id));
+        assert!(decision
+            .explanation("home")
+            .contains("local_contribution_veto"));
+    }
+
+    #[test]
+    fn acl_grant_lifecycle_and_reauthentication_are_enforced_before_dispatch() {
+        let home = network_id("home");
+        let local_policy = vec![allow(
+            b"local-grant-allow",
+            SubjectSelector::AnyMember,
+            PolicyAction::Enable,
+            ResourceKind::Network,
+        )];
+        let now = unix_time_ms();
+
+        let active = access_control_grant(
+            b"active-grant",
+            PolicyAction::Enable,
+            ResourceKind::Network,
+            now.saturating_add(30_000),
+        );
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy.clone(),
+            Vec::new(),
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            None,
+            vec![access_control_acl(home.clone(), Vec::new(), vec![active])],
+        ));
+        authorize_command(&context, &start_home()).expect("active direct grant must allow");
+
+        let expired = access_control_grant(
+            b"expired-grant",
+            PolicyAction::Enable,
+            ResourceKind::Network,
+            now.saturating_sub(1),
+        );
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy.clone(),
+            Vec::new(),
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            None,
+            vec![access_control_acl(home.clone(), Vec::new(), vec![expired])],
+        ));
+        let denial =
+            authorize_command(&context, &start_home()).expect_err("expired grant must deny");
+        assert_eq!(denial.code, PermissionDenialCode::PolicyDenied.as_str());
+        assert!(denial.reason.contains("authorization_expired"));
+
+        let mut revoked = access_control_grant(
+            b"revoked-grant",
+            PolicyAction::Enable,
+            ResourceKind::Network,
+            now.saturating_add(30_000),
+        );
+        revoked.revoked_at_unix_ms = Some(now.saturating_sub(1));
+        revoked.revoked_by = Some(actor());
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy.clone(),
+            Vec::new(),
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            None,
+            vec![access_control_acl(home.clone(), Vec::new(), vec![revoked])],
+        ));
+        let denial =
+            authorize_command(&context, &start_home()).expect_err("revoked grant must deny");
+        assert_eq!(denial.code, PermissionDenialCode::PolicyDenied.as_str());
+        assert!(denial.reason.contains("authorization_revoked"));
+
+        let mut reauthentication = access_control_grant(
+            b"reauth-grant",
+            PolicyAction::Enable,
+            ResourceKind::Network,
+            now.saturating_add(30_000),
+        );
+        reauthentication.requires_recent_reauthentication = true;
+        let context = network_context_with_groups(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            std::iter::empty(),
+            (local_policy, Vec::new()),
+            false,
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            None,
+            vec![access_control_acl(home, Vec::new(), vec![reauthentication])],
+        ));
+        let denial = authorize_command(&context, &start_home())
+            .expect_err("stale authentication must not satisfy a grant");
+        assert_eq!(
+            denial.code,
+            PermissionDenialCode::RecentAuthenticationRequired.as_str()
+        );
+        assert!(
+            denial.reason.contains("recent_reauthentication_required"),
+            "{denial:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_and_ambiguous_access_control_fail_closed() {
+        let home = network_id("home");
+        let (local_policy, network_policy) = start_policies();
+        let mut malformed = access_control_acl(home.clone(), Vec::new(), Vec::new());
+        malformed.revision = 0;
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy.clone(),
+            network_policy.clone(),
+        )
+        .with_access_control_snapshot(&access_control_snapshot(None, vec![malformed]));
+        let denial =
+            authorize_command(&context, &start_home()).expect_err("malformed ACL must fail closed");
+        assert_eq!(denial.code, PermissionDenialCode::PolicyDenied.as_str());
+        assert!(denial.reason.contains("invalid_policy"));
+
+        let duplicate = access_control_acl(home, Vec::new(), Vec::new());
+        let context = network_context(
+            NetworkRole::Administrator,
+            [NodePermission::ManageNetworks],
+            &["home"],
+            MembershipState::Active,
+            local_policy,
+            network_policy,
+        )
+        .with_access_control_snapshot(&access_control_snapshot(
+            None,
+            vec![duplicate.clone(), duplicate],
+        ));
+        let denial = authorize_command(&context, &start_home())
+            .expect_err("duplicate ACLs must fail closed");
+        assert_eq!(denial.code, PermissionDenialCode::PolicyDenied.as_str());
+        assert!(denial.reason.contains("ambiguous"));
+    }
+
+    #[test]
+    fn snapshot_acl_is_attached_to_the_authoritative_owner_scope() {
+        let home = network_id("home");
+        let snapshot = NodeSnapshot {
+            memberships: vec![crate::node::NodeNetworkMembershipSnapshot {
+                network_name: "home".into(),
+                network_id: home.to_string(),
+                node_id: actor().to_string(),
+                state: MembershipState::Active,
+                role: MembershipRole::Owner,
+                local_policy_revision: 1,
+                network_policy_revision: Some(1),
+                privacy_policy_revision: Some(1),
+                member_limit: None,
+                exit_contribution: None,
+                exit_contribution_scope: None,
+                terms_hash: None,
+                current_terms: None,
+                current_terms_hash: None,
+                policy_confirmation_required: false,
+                acknowledged_at_unix_ms: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+                suspension_reason: None,
+            }],
+            access_control: access_control_snapshot(
+                None,
+                vec![access_control_acl(
+                    home,
+                    vec![deny(
+                        b"snapshot-ban-deny",
+                        SubjectSelector::AnyMember,
+                        PolicyAction::Update,
+                        ResourceKind::SecurityPolicy,
+                    )],
+                    Vec::new(),
+                )],
+            ),
+            ..NodeSnapshot::default()
+        };
+        let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "gpui");
+        let denial = authorize_command(&context, &ban_home())
+            .expect_err("snapshot ACL must constrain network governance");
+        assert_eq!(denial.code, PermissionDenialCode::Denied.as_str());
+        assert!(denial.reason.contains("network layer"));
     }
 
     #[test]

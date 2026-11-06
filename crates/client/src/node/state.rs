@@ -7,10 +7,11 @@ use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
     ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation,
-    ExitContributionScope, MembershipRole, MembershipState, MembershipTerms, NetworkId,
+    ExitContributionScope, MembershipRole, MembershipState, MembershipTerms, NetworkAcl, NetworkId,
     NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence, NetworkMemberStatus,
-    NetworkVisibility, NodeId, OperationRecovery, TopologyBuilder, TopologyLinkObservation,
-    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
+    NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery, TopologyBuilder,
+    TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput, TopologySnapshot,
+    TopologyViewer,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -43,6 +44,11 @@ pub struct NodeSnapshot {
     pub capabilities: NodeCapabilityRegistrySnapshot,
     #[serde(default)]
     pub permissions: NodePermissionSnapshot,
+    /// Trusted node-owner restrictions and versioned network governance ACLs.
+    /// Authorization consumes these documents directly; UI capability hints
+    /// are never used as policy input.
+    #[serde(default, skip_serializing_if = "NodeAccessControlSnapshot::is_empty")]
+    pub access_control: NodeAccessControlSnapshot,
     #[serde(default)]
     pub embedded_services: Vec<NodeEmbeddedServiceSnapshot>,
     #[serde(default)]
@@ -910,6 +916,44 @@ impl NodePermission {
         Self::StopNode,
         Self::ViewLogs,
     ];
+}
+
+/// Trusted authorization documents carried with the authoritative node state.
+/// `local_policy` is authored by the node owner; each network ACL is authored by
+/// that network's governance. Duplicate network ACLs are never resolved by
+/// ordering and cause command authorization to fail closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeAccessControlSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_policy: Option<NodeLocalAccessPolicy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_acls: Vec<NetworkAcl>,
+}
+
+impl NodeAccessControlSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.local_policy.is_none() && self.network_acls.is_empty()
+    }
+
+    /// Resolve exactly one ACL for a network. Ambiguous duplicates and
+    /// cross-network documents return an error so callers deny rather than
+    /// choosing a potentially stale or unrelated policy.
+    pub fn network_acl_for(&self, network_id: &NetworkId) -> Result<Option<&NetworkAcl>, ()> {
+        let mut matching = self
+            .network_acls
+            .iter()
+            .filter(|acl| &acl.network_id == network_id);
+        let first = matching.next();
+        if matching.next().is_some() {
+            return Err(());
+        }
+        if let Some(acl) = first {
+            if acl.network_id != *network_id {
+                return Err(());
+            }
+        }
+        Ok(first)
+    }
 }
 
 /// Public node identity metadata. Secret key material must never enter this DTO.

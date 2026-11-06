@@ -4320,6 +4320,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acl_denial_precedes_handler_and_is_audited_without_payload_secrets() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let network_id = fuckipv6_common::domain::NetworkId::from_public_key(b"acl-audit-home");
+        let now = unix_time_ms();
+        let deny_rule = PermissionRule {
+            rule_id: SecurityRuleId::from_public_key(b"acl-audit-deny"),
+            effect: PermissionEffect::Deny,
+            subjects: vec![SubjectSelector::AnyMember],
+            resources: vec![ResourceKind::SecurityPolicy],
+            actions: vec![PolicyAction::Update],
+            conditions: vec![PermissionCondition::MembershipActive],
+        };
+        let deny_rule_id = deny_rule.rule_id.to_string();
+        let acl = fuckipv6_common::domain::NetworkAcl {
+            network_id: network_id.clone(),
+            revision: 1,
+            issued_at_unix_ms: now.saturating_sub(10_000),
+            expires_at_unix_ms: now.saturating_add(60_000),
+            rules: vec![deny_rule],
+            grants: Vec::new(),
+        };
+        let context = NodeCommandContext::local_owner(actor(), "gpui:owner-session")
+            .with_network_scopes([(
+                "home".into(),
+                crate::node::NetworkCommandScope::new(
+                    network_id,
+                    fuckipv6_common::domain::NetworkRole::Owner,
+                    fuckipv6_common::domain::MembershipState::Active,
+                    Vec::new(),
+                ),
+            )])
+            .with_access_control_snapshot(&crate::node::state::NodeAccessControlSnapshot {
+                local_policy: None,
+                network_acls: vec![acl],
+            });
+        let bus = NodeCommandBus::spawn(
+            Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        let client_id = "payload-secret-client-id";
+        let command = NodeCommand::BanClient(NodeClientBlacklistCommand {
+            network_name: "home".into(),
+            client_id: client_id.into(),
+        });
+
+        let result = bus
+            .execute(context, NodeCommandRequest::new(59, command))
+            .await
+            .expect("authorization denial is a command result");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected authorization rejection");
+        };
+        assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some(PermissionDenialCode::Denied.as_str())
+        );
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].outcome, AuditOutcome::Denied);
+        assert_eq!(audit[0].action, "network.blacklist.ban");
+        assert!(audit[0].details["authorization_reason"].contains(&deny_rule_id));
+        assert!(!format!("{audit:?}").contains(client_id));
+    }
+
+    #[tokio::test]
     async fn create_network_permission_denial_precedes_handler_and_is_audited() {
         let calls = Arc::new(AtomicUsize::new(0));
         let network_id = fuckipv6_common::domain::NetworkId::from_public_key(b"create-denied-home");

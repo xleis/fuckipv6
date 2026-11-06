@@ -373,6 +373,15 @@
       "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
       "type": "string"
     },
+    "ContributionKind": {
+      "description": "Node-local contributions that the owner may veto independently of network\ngovernance. Coordinator participation is deliberately not a local veto:\nCoordinator terms are governed by the separate coordinator contract.",
+      "enum": [
+        "relay",
+        "exit",
+        "file"
+      ],
+      "type": "string"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
@@ -516,6 +525,9 @@
         "iptables_unavailable",
         "ipv4_forwarding_unavailable"
       ],
+      "type": "string"
+    },
+    "GroupId": {
       "type": "string"
     },
     "IdempotencyKey": {
@@ -1316,6 +1328,117 @@
         "network_policy_revision",
         "privacy_policy_revision",
         "exit_contribution"
+      ],
+      "type": "object"
+    },
+    "NetworkAcl": {
+      "description": "Revisioned network ACL. Explicit deny rules live in `rules`; direct\nrole/group/node grants live in `grants` and are subject to expiry,\nrevocation and reauthentication freshness.",
+      "properties": {
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grants": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NetworkAclGrant"
+          },
+          "type": "array"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "revision",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "NetworkAclGrant": {
+      "description": "One explicit direct grant. Grants are additive allow entries; they never\noverride a matching deny in either authorization layer.",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PolicyAction"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grant_id": {
+          "$ref": "#/$defs/SecurityRuleId"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requires_recent_reauthentication": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceKind"
+          },
+          "type": "array"
+        },
+        "revoked_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revoked_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/$defs/SubjectSelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "grant_id",
+        "subjects",
+        "resources",
+        "actions",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
       ],
       "type": "object"
     },
@@ -2203,6 +2326,16 @@
       ],
       "type": "object"
     },
+    "NetworkRole": {
+      "description": "Durable network roles plus the runtime-only emergency Coordinator role.",
+      "enum": [
+        "owner",
+        "administrator",
+        "member",
+        "temporary_coordinator"
+      ],
+      "type": "string"
+    },
     "NetworkVisibility": {
       "description": "How much of a network's public profile is discoverable without membership.",
       "enum": [
@@ -2211,6 +2344,28 @@
         "private"
       ],
       "type": "string"
+    },
+    "NodeAccessControlSnapshot": {
+      "description": "Trusted authorization documents carried with the authoritative node state.\n`local_policy` is authored by the node owner; each network ACL is authored by\nthat network's governance. Duplicate network ACLs are never resolved by\nordering and cause command authorization to fail closed.",
+      "properties": {
+        "local_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeLocalAccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_acls": {
+          "items": {
+            "$ref": "#/$defs/NetworkAcl"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "NodeAccessModel": {
       "enum": [
@@ -4595,6 +4750,29 @@
       ],
       "type": "object"
     },
+    "NodeContributionVeto": {
+      "description": "A non-overridable local contribution veto for one network.",
+      "properties": {
+        "contributions": {
+          "items": {
+            "$ref": "#/$defs/ContributionKind"
+          },
+          "type": "array"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "veto_id": {
+          "$ref": "#/$defs/SecurityRuleId"
+        }
+      },
+      "required": [
+        "veto_id",
+        "network_id",
+        "contributions"
+      ],
+      "type": "object"
+    },
     "NodeControlHealth": {
       "description": "Whether the adapter can currently reach the node control plane.",
       "enum": [
@@ -6040,6 +6218,54 @@
       ],
       "type": "object"
     },
+    "NodeLocalAccessPolicy": {
+      "description": "The trusted, owner-authored local authorization layer. A network\nadministrator can add further restrictions but can never replace this\ndocument or any of its vetoes.",
+      "properties": {
+        "contribution_vetoes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeContributionVeto"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_scope": {
+          "$ref": "#/$defs/NodeNetworkScope"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "revision",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "network_scope"
+      ],
+      "type": "object"
+    },
     "NodeLogEntry": {
       "properties": {
         "level": {
@@ -6804,6 +7030,42 @@
         "exit_node"
       ],
       "type": "string"
+    },
+    "NodeNetworkScope": {
+      "description": "A node owner can either participate in every authenticated network or\nexplicitly limit participation to a fixed set. An empty `Only` set is\ninvalid rather than an accidental allow-all sentinel.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "only",
+              "type": "string"
+            },
+            "network_ids": {
+              "items": {
+                "$ref": "#/$defs/NetworkId"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "network_ids"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "NodeNetworkSelection": {
       "description": "How a node should choose the networks it loads at startup.",
@@ -7770,6 +8032,10 @@
     "NodeSnapshot": {
       "description": "Stable, transport-neutral state rendered by every node UI adapter.",
       "properties": {
+        "access_control": {
+          "$ref": "#/$defs/NodeAccessControlSnapshot",
+          "description": "Trusted node-owner restrictions and versioned network governance ACLs.\nAuthorization consumes these documents directly; UI capability hints\nare never used as policy input."
+        },
         "capabilities": {
           "$ref": "#/$defs/NodeCapabilityRegistrySnapshot",
           "default": {
@@ -8857,13 +9123,221 @@
       ],
       "type": "string"
     },
+    "PermissionCondition": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "membership_active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "recent_reauthentication",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "resource_in_network",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NetworkId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "non_emergency_coordinator",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PermissionEffect": {
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "PermissionRule": {
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PolicyAction"
+          },
+          "type": "array"
+        },
+        "conditions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionCondition"
+          },
+          "type": "array"
+        },
+        "effect": {
+          "$ref": "#/$defs/PermissionEffect"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceKind"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/SecurityRuleId"
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/$defs/SubjectSelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "subjects",
+        "resources",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "PolicyAction": {
+      "enum": [
+        "read",
+        "create",
+        "update",
+        "delete",
+        "approve",
+        "reject",
+        "remove",
+        "enable",
+        "disable",
+        "use",
+        "recover",
+        "export",
+        "test"
+      ],
+      "type": "string"
+    },
     "PublicKey": {
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
+      "type": "string"
+    },
+    "ResourceKind": {
+      "enum": [
+        "network",
+        "ownership",
+        "membership",
+        "group",
+        "security_policy",
+        "traffic_policy",
+        "capability",
+        "exit_grant",
+        "file_share",
+        "audit",
+        "coordinator_term",
+        "keys"
+      ],
+      "type": "string"
+    },
+    "SecurityRuleId": {
       "type": "string"
     },
     "Signature": {
       "description": "Signature bytes encoded as URL-safe base64 without padding.",
       "type": "string"
+    },
+    "SubjectSelector": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "any_member",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "role",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NetworkRole"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "node",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NodeId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "group",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/GroupId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "TopologyBoundary": {
       "description": "One network boundary. `member_count` is the authoritative count, while\n`visible_member_count` reflects aggregation so a surface can explain it.",

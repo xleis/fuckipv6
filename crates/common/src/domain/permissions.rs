@@ -202,7 +202,7 @@ impl PermissionRule {
         Ok(())
     }
 
-    fn matches(&self, request: &PermissionRequest, context: &AccessContext) -> bool {
+    pub(crate) fn matches(&self, request: &PermissionRequest, context: &AccessContext) -> bool {
         self.actions.contains(&request.action)
             && self.resources.contains(&request.resource.kind)
             && self.subjects.iter().any(|subject| subject.matches(context))

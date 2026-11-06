@@ -92,6 +92,8 @@ export type ConfigurationValidationIssue = {
 
 export type ContentHash = string;
 
+export type ContributionKind = "relay" | "exit" | "file";
+
 export type DiscoveryTransport = "quic" | "tcp" | "websocket" | "local";
 
 export type DisplayEnvironment = "linux_x11" | "linux_wayland" | "windows_desktop" | "macos_desktop" | "headless";
@@ -124,6 +126,8 @@ export type ExitNodeCapabilities = {
 export type ExitNodePlatform = "linux" | "windows" | "macos" | "other";
 
 export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_required" | "routing_tool_unavailable" | "iptables_unavailable" | "ipv4_forwarding_unavailable";
+
+export type GroupId = string;
 
 export type IdempotencyKey = string;
 
@@ -302,6 +306,27 @@ export type MembershipTerms = {
   "member_limit"?: number | null;
   "network_policy_revision": number;
   "privacy_policy_revision": number;
+};
+
+export type NetworkAcl = {
+  "expires_at_unix_ms": number;
+  "grants"?: Array<NetworkAclGrant>;
+  "issued_at_unix_ms": number;
+  "network_id": NetworkId;
+  "revision": number;
+  "rules"?: Array<PermissionRule>;
+};
+
+export type NetworkAclGrant = {
+  "actions": Array<PolicyAction>;
+  "expires_at_unix_ms": number;
+  "grant_id": SecurityRuleId;
+  "issued_at_unix_ms": number;
+  "requires_recent_reauthentication"?: boolean;
+  "resources": Array<ResourceKind>;
+  "revoked_at_unix_ms"?: number | null;
+  "revoked_by"?: NodeId | null;
+  "subjects": Array<SubjectSelector>;
 };
 
 export type NetworkAdminProfileProjection = {
@@ -498,7 +523,14 @@ export type NetworkPublicProfileRecord = {
   "signature": Signature;
 };
 
+export type NetworkRole = "owner" | "administrator" | "member" | "temporary_coordinator";
+
 export type NetworkVisibility = "public" | "unlisted" | "private";
+
+export type NodeAccessControlSnapshot = {
+  "local_policy"?: NodeLocalAccessPolicy | null;
+  "network_acls"?: Array<NetworkAcl>;
+};
 
 export type NodeAccessModel = "trusted_control_plane";
 
@@ -974,6 +1006,12 @@ export type NodeConfigurationSnapshot = {
   "networks": Array<NodeNetworkConfigSnapshot>;
 };
 
+export type NodeContributionVeto = {
+  "contributions": Array<ContributionKind>;
+  "network_id": NetworkId;
+  "veto_id": SecurityRuleId;
+};
+
 export type NodeControlHealth = "unknown" | "available" | "unavailable";
 
 export type NodeCreateInvitationCommand = {
@@ -1307,6 +1345,16 @@ export type NodeListJoinRequestsCommand = {
   "network_id": string;
 };
 
+export type NodeLocalAccessPolicy = {
+  "contribution_vetoes"?: Array<NodeContributionVeto>;
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "network_scope": NodeNetworkScope;
+  "node_id": NodeId;
+  "revision": number;
+  "rules"?: Array<PermissionRule>;
+};
+
 export type NodeLogEntry = {
   "level": NodeLogLevel;
   "message": string;
@@ -1475,6 +1523,13 @@ export type NodeNetworkProfileSnapshot = {
 };
 
 export type NodeNetworkRole = "member" | "discovery" | "relay" | "exit_node";
+
+export type NodeNetworkScope = {
+  "kind": "all";
+} | {
+  "kind": "only";
+  "network_ids": Array<NetworkId>;
+};
 
 export type NodeNetworkSelection = "default" | "all" | "none" | {
   "named": Array<string>;
@@ -1686,6 +1741,7 @@ export type NodeSignedNetworkProfileSnapshot = {
 };
 
 export type NodeSnapshot = {
+  "access_control"?: NodeAccessControlSnapshot;
   "capabilities"?: NodeCapabilityRegistrySnapshot;
   "configuration"?: NodeConfigurationSnapshot;
   "control_health"?: NodeControlHealth;
@@ -1867,9 +1923,50 @@ export type OperationRecovery = {
 
 export type OperationState = "queued" | "running" | "waiting_for_reauth" | "succeeded" | "failed" | "cancelled" | "timed_out";
 
+export type PermissionCondition = {
+  "kind": "membership_active";
+} | {
+  "kind": "recent_reauthentication";
+} | {
+  "kind": "resource_in_network";
+  "value": NetworkId;
+} | {
+  "kind": "non_emergency_coordinator";
+};
+
+export type PermissionEffect = "allow" | "deny";
+
+export type PermissionRule = {
+  "actions": Array<PolicyAction>;
+  "conditions"?: Array<PermissionCondition>;
+  "effect": PermissionEffect;
+  "resources": Array<ResourceKind>;
+  "rule_id": SecurityRuleId;
+  "subjects": Array<SubjectSelector>;
+};
+
+export type PolicyAction = "read" | "create" | "update" | "delete" | "approve" | "reject" | "remove" | "enable" | "disable" | "use" | "recover" | "export" | "test";
+
 export type PublicKey = string;
 
+export type ResourceKind = "network" | "ownership" | "membership" | "group" | "security_policy" | "traffic_policy" | "capability" | "exit_grant" | "file_share" | "audit" | "coordinator_term" | "keys";
+
+export type SecurityRuleId = string;
+
 export type Signature = string;
+
+export type SubjectSelector = {
+  "kind": "any_member";
+} | {
+  "kind": "role";
+  "value": NetworkRole;
+} | {
+  "kind": "node";
+  "value": NodeId;
+} | {
+  "kind": "group";
+  "value": GroupId;
+};
 
 export type TopologyBoundary = {
   "capabilities"?: Array<CapabilityKind>;

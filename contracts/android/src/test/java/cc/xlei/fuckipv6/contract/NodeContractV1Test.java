@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 160,
+                NodeContractV1.DTO_CLASS_NAMES.length == 169,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -108,10 +108,61 @@ public final class NodeContractV1Test {
             "recent_activity",
             "routing_summaries",
             "logs",
-            "last_error"
+            "last_error",
+            "access_control"
         }) {
             NodeContractV1.NodeSnapshot.class.getDeclaredField(field);
         }
+
+        for (String field : new String[] {"local_policy", "network_acls"}) {
+            NodeContractV1.NodeAccessControlSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "expires_at_unix_ms", "grants", "issued_at_unix_ms", "network_id", "revision", "rules"
+        }) {
+            NodeContractV1.NetworkAcl.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "actions", "expires_at_unix_ms", "grant_id", "issued_at_unix_ms",
+            "requires_recent_reauthentication", "resources", "revoked_at_unix_ms",
+            "revoked_by", "subjects"
+        }) {
+            NodeContractV1.NetworkAclGrant.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "contribution_vetoes", "expires_at_unix_ms", "issued_at_unix_ms", "network_scope",
+            "node_id", "revision", "rules"
+        }) {
+            NodeContractV1.NodeLocalAccessPolicy.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"contributions", "network_id", "veto_id"}) {
+            NodeContractV1.NodeContributionVeto.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "actions", "conditions", "effect", "resources", "rule_id", "subjects"
+        }) {
+            NodeContractV1.PermissionRule.class.getDeclaredField(field);
+        }
+        assertSame(
+                "deny",
+                NodeContractV1.PermissionEffect.fromWireName("deny").wireName(),
+                "ACL deny effect");
+        assertSame(
+                "any_member",
+                new NodeContractV1.SubjectSelector.AnyMember().kind,
+                "ACL any-member selector");
+        assertSame(
+                "node",
+                new NodeContractV1.SubjectSelector.Node("node-a").kind,
+                "ACL node selector");
+        assertSame(
+                "membership_active",
+                new NodeContractV1.PermissionCondition.MembershipActive().kind,
+                "ACL membership condition");
+        assertSame(
+                "all",
+                new NodeContractV1.NodeNetworkScope.All().kind,
+                "local policy all scope");
 
         assertSame(
                 NodeCommandKind.GET_SNAPSHOT,

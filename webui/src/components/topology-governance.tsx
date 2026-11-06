@@ -377,13 +377,12 @@ export function TopologyGovernancePanel({
               reason: outcomeSummary(submission.outcome, locale),
             });
           } else if (submission.operation) {
-            const succeeded = submission.operation.state === "succeeded";
-            if (succeeded) successes.push(candidate.nodeId);
+            const commandSucceeded = submission.operation.state === "succeeded";
             appendResult({
               nodeId: candidate.nodeId,
               name: candidate.name,
-              status: succeeded ? "success" : "failed",
-              reason: succeeded
+              status: "failed",
+              reason: commandSucceeded
                 ? label(locale, "topology.batch.result.command_succeeded")
                 : operationFailureText(submission.operation, locale),
             });

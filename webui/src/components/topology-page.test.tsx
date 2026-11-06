@@ -13,6 +13,7 @@ import type {
   MemberLifecycleAction,
   NetworkMember,
   NetworkMemberDirectory,
+  NodeOperationSnapshot,
   NodeUiAction,
   NodeUiManifest,
   TopologySnapshot,
@@ -71,6 +72,7 @@ function member(
 function directory(
   canManageMembers = true,
   viewerRole: NetworkMemberDirectory["viewer_role"] = "owner",
+  availableActions: MemberLifecycleAction[] = ["suspend", "remove"],
 ): NetworkMemberDirectory {
   return {
     network_id: "net-alpha",
@@ -78,8 +80,8 @@ function directory(
     viewer_role: viewerRole,
     can_manage_members: canManageMembers,
     members: [
-      member(BOB_ID, "Bob", ["suspend", "remove"], 7),
-      member(CAROL_ID, "Carol", ["suspend", "remove"], 9),
+      member(BOB_ID, "Bob", availableActions, 7),
+      member(CAROL_ID, "Carol", availableActions, 9),
     ],
   };
 }
@@ -578,6 +580,207 @@ describe("TopologyPage interactions and governance", () => {
     expect(
       onSubmit.mock.calls.filter(([action]) => action.id === "change_member_lifecycle"),
     ).toHaveLength(0);
+  });
+
+  it.each([
+    ["approve", "approved"],
+    ["reject", "rejected"],
+    ["suspend", "suspended"],
+    ["resume", "active"],
+    ["remove", "removed"],
+    ["undo_remove", "degraded"],
+  ] as const)(
+    "reports a per-item audited success for the %s batch action",
+    async (lifecycleAction, lifecycleStatus) => {
+      const user = userEvent.setup();
+      const auditId = `audit-${lifecycleAction}`;
+      const onSubmit = vi.fn(
+        async (action: NodeUiAction, values: Record<string, unknown>) => {
+          if (action.id === "list_network_members") {
+            return {
+              outcome: {
+                status: "network_members" as const,
+                data: directory(true, "owner", [lifecycleAction]),
+              },
+            };
+          }
+          if (action.id === "preview_member_removal") {
+            return {
+              outcome: {
+                status: "member_removal_preview" as const,
+                data: {
+                  network_id: "net-alpha",
+                  target_node_id: values.target_node_id as string,
+                  role: "member" as const,
+                  status: "degraded" as const,
+                  lifecycle_state: "degraded" as const,
+                  revision: Number(values.target_node_id === BOB_ID ? 17 : 19),
+                  access_epoch: 4,
+                  presence: {
+                    state: "offline" as const,
+                    source: "disconnect_observed" as const,
+                  },
+                  can_remove: true,
+                  network_access_revoked: true,
+                  file_access_revoked: true,
+                  incomplete_transfers_resume_blocked: false,
+                  credentials_revoked: true,
+                  local_files_deleted: false,
+                  old_access_epoch_invalidated: true,
+                  safe_undo_requires_reapproval: true,
+                  safe_undo_restores_old_credentials: false,
+                  impact_keys: ["member_removal.impact.network_access"],
+                },
+              },
+            };
+          }
+          if (action.id === "change_member_lifecycle") {
+            return {
+              outcome: {
+                status: "member_lifecycle_changed" as const,
+                data: {
+                  network_id: "net-alpha",
+                  target_node_id: values.target_node_id as string,
+                  action: lifecycleAction,
+                  status: lifecycleStatus,
+                  revision: Number(values.expected_revision) + 1,
+                  access_epoch: 5,
+                  access_revoked: lifecycleAction === "remove",
+                  requires_reapproval: ["approve", "reject", "remove"].includes(
+                    lifecycleAction,
+                  ),
+                  requires_reauthentication: ["suspend", "remove"].includes(
+                    lifecycleAction,
+                  ),
+                  idempotent: false,
+                  operation_id: `op-${values.target_node_id}`,
+                  audit_id: `${auditId}-${values.target_node_id}`,
+                },
+              },
+            };
+          }
+          return {};
+        },
+      );
+
+      render(
+        <TopologyPage
+          topology={snapshot()}
+          locale="zh-CN"
+          actions={governanceActions}
+          onSubmitAction={onSubmit}
+        />,
+      );
+      await selectRows(user, ["Bob", "Carol"]);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: translated("topology.batch.preview") }),
+        ).toBeEnabled(),
+      );
+      await user.selectOptions(
+        screen.getByLabelText(translated("topology.batch.action")),
+        lifecycleAction,
+      );
+      await user.click(
+        screen.getByRole("button", { name: translated("topology.batch.preview") }),
+      );
+      await user.click(
+        within(await screen.findByTestId("topology-batch-dialog")).getByRole(
+          "button",
+          { name: translated("topology.batch.execute") },
+        ),
+      );
+
+      const results = await screen.findByTestId("topology-batch-results");
+      const bob = within(results).getByTestId(`topology-batch-result-${BOB_ID}`);
+      const carol = within(results).getByTestId(`topology-batch-result-${CAROL_ID}`);
+      for (const result of [bob, carol]) {
+        expect(result).toHaveTextContent(translated("topology.batch.result.success"));
+        expect(result).toHaveTextContent(auditId);
+      }
+      expect(results).toHaveTextContent(
+        translated("topology.batch.result.summary")
+          .replace("{success}", "2")
+          .replace("{skipped}", "0")
+          .replace("{failed}", "0"),
+      );
+
+      const lifecycleCalls = onSubmit.mock.calls.filter(
+        ([action]) => action.id === "change_member_lifecycle",
+      );
+      expect(lifecycleCalls).toHaveLength(2);
+      expect(lifecycleCalls.map(([, values]) => values)).toEqual([
+        expect.objectContaining({
+          target_node_id: BOB_ID,
+          action: lifecycleAction,
+          expected_revision: lifecycleAction === "remove" ? "17" : "7",
+        }),
+        expect.objectContaining({
+          target_node_id: CAROL_ID,
+          action: lifecycleAction,
+          expected_revision: lifecycleAction === "remove" ? "19" : "9",
+        }),
+      ]);
+      const previewCalls = onSubmit.mock.calls.filter(
+        ([action]) => action.id === "preview_member_removal",
+      );
+      expect(previewCalls).toHaveLength(lifecycleAction === "remove" ? 2 : 0);
+    },
+  );
+
+  it("does not report an operation-only success without an authoritative audit result", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      async (action: NodeUiAction) => {
+        if (action.id === "list_network_members") {
+          return {
+            outcome: {
+              status: "network_members" as const,
+              data: directory(true, "owner", ["suspend"]),
+            },
+          };
+        }
+        return {
+          operation: {
+            state: "succeeded",
+            operation_id: "op-without-authoritative-result",
+          } as NodeOperationSnapshot,
+        };
+      },
+    );
+    render(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+    await selectRows(user, ["Bob"]);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: translated("topology.batch.preview") }),
+      ).toBeEnabled(),
+    );
+    await user.click(
+      screen.getByRole("button", { name: translated("topology.batch.preview") }),
+    );
+    await user.click(
+      within(await screen.findByTestId("topology-batch-dialog")).getByRole(
+        "button",
+        { name: translated("topology.batch.execute") },
+      ),
+    );
+
+    const result = within(await screen.findByTestId("topology-batch-results")).getByTestId(
+      `topology-batch-result-${BOB_ID}`,
+    );
+    expect(result).toHaveTextContent(translated("topology.batch.result.failed"));
+    expect(result).toHaveTextContent(
+      translated("topology.batch.result.command_succeeded"),
+    );
+    expect(result).not.toHaveTextContent(translated("topology.batch.audit_id"));
+    expect(result).not.toHaveTextContent(translated("topology.batch.result.success"));
   });
 
   it("reports mixed success and rejection item by item with the real audit ID", async () => {

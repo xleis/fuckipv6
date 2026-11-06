@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "SubjectSelector"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "SubjectSelector"
     };
 
     public enum AclAction {
@@ -369,6 +369,32 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown ExitNodeUnsupportedReason wire value: " + value);
+        }
+    }
+
+    public enum FieldVisibility {
+        PUBLIC("public"),
+        NETWORK("network"),
+        ADMINISTRATORS("administrators"),
+        OWNER_ONLY("owner_only");
+
+        private final String wireName;
+
+        FieldVisibility(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static FieldVisibility fromWireName(String value) {
+            for (FieldVisibility candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown FieldVisibility wire value: " + value);
         }
     }
 
@@ -2059,6 +2085,79 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum PrivacyField {
+        MEMBER_NODE_ID("member_node_id"),
+        MEMBER_DISPLAY_NAME("member_display_name"),
+        MEMBER_IDENTITY_FINGERPRINT("member_identity_fingerprint"),
+        MEMBER_ROLE("member_role"),
+        MEMBER_GROUPS("member_groups"),
+        MEMBER_CAPABILITIES("member_capabilities"),
+        MEMBER_STATUS("member_status"),
+        MEMBER_LIFECYCLE_STATE("member_lifecycle_state"),
+        MEMBER_REVISION("member_revision"),
+        MEMBER_ACCESS_EPOCH("member_access_epoch"),
+        MEMBER_AVAILABLE_ACTIONS("member_available_actions"),
+        MEMBER_PRESENCE("member_presence"),
+        MEMBER_JOINED_AT("member_joined_at"),
+        NODE_DISPLAY_NAME("node_display_name"),
+        NODE_PUBLIC_KEY("node_public_key"),
+        NODE_PLATFORM_AND_VERSION("node_platform_and_version"),
+        NODE_ONLINE_STATE("node_online_state"),
+        NODE_ENDPOINTS("node_endpoints"),
+        NODE_REAL_NETWORK_ADDRESSES("node_real_network_addresses"),
+        NODE_TRAFFIC_STATISTICS("node_traffic_statistics"),
+        NODE_LOCAL_PROCESSES("node_local_processes"),
+        NODE_LOCAL_PATHS("node_local_paths"),
+        NODE_DETAILED_LOGS("node_detailed_logs"),
+        TOPOLOGY_NODE_ID("topology_node_id"),
+        TOPOLOGY_DISPLAY_NAME("topology_display_name"),
+        TOPOLOGY_ROLE("topology_role"),
+        TOPOLOGY_STATUS("topology_status"),
+        TOPOLOGY_PRESENCE("topology_presence"),
+        TOPOLOGY_HEALTH("topology_health"),
+        TOPOLOGY_CAPABILITIES("topology_capabilities"),
+        TOPOLOGY_NETWORK_MEMBERSHIP("topology_network_membership"),
+        TOPOLOGY_CONNECTIONS("topology_connections"),
+        ACTIVITY_ACTOR("activity_actor"),
+        ACTIVITY_ACTION("activity_action"),
+        ACTIVITY_RESOURCE("activity_resource"),
+        ACTIVITY_OUTCOME("activity_outcome"),
+        ACTIVITY_OCCURRED_AT("activity_occurred_at"),
+        ACTIVITY_SUMMARY("activity_summary"),
+        ACTIVITY_DETAILS("activity_details"),
+        FILE_ID("file_id"),
+        FILE_NETWORK_ID("file_network_id"),
+        FILE_DISPLAY_NAME("file_display_name"),
+        FILE_OWNER("file_owner"),
+        FILE_MODE("file_mode"),
+        FILE_REVISION("file_revision"),
+        FILE_NETWORK_ACL("file_network_acl"),
+        FILE_LOCAL_ACL("file_local_acl"),
+        FILE_QUOTA("file_quota"),
+        FILE_PATH_POLICY("file_path_policy"),
+        FILE_TIMESTAMPS("file_timestamps"),
+        FILE_AUDIT_SETTINGS("file_audit_settings");
+
+        private final String wireName;
+
+        PrivacyField(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PrivacyField fromWireName(String value) {
+            for (PrivacyField candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PrivacyField wire value: " + value);
+        }
+    }
+
     public enum ResourceKind {
         NETWORK("network"),
         OWNERSHIP("ownership"),
@@ -2429,6 +2528,36 @@ public final class NodeContractV1 {
             this.schema_version = schema_version;
             this.supported = supported;
             this.unsupported_reasons = unsupported_reasons;
+        }
+    }
+
+    /** DTO for FieldPrivacyPolicy. */
+    public static final class FieldPrivacyPolicy {
+        public final Long effective_at_unix_ms;
+        public final Long expires_at_unix_ms;
+        public final Long issued_at_unix_ms;
+        public final String network_id;
+        public final Long revision;
+        public final List<FieldVisibilityRule> rules;
+
+        public FieldPrivacyPolicy(Long effective_at_unix_ms, Long expires_at_unix_ms, Long issued_at_unix_ms, String network_id, Long revision, List<FieldVisibilityRule> rules) {
+            this.effective_at_unix_ms = effective_at_unix_ms;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.network_id = network_id;
+            this.revision = revision;
+            this.rules = rules;
+        }
+    }
+
+    /** DTO for FieldVisibilityRule. */
+    public static final class FieldVisibilityRule {
+        public final PrivacyField field;
+        public final FieldVisibility visibility;
+
+        public FieldVisibilityRule(PrivacyField field, FieldVisibility visibility) {
+            this.field = field;
+            this.visibility = visibility;
         }
     }
 
@@ -3174,10 +3303,12 @@ public final class NodeContractV1 {
 
     /** DTO for NodeAccessControlSnapshot. */
     public static final class NodeAccessControlSnapshot {
+        public final List<FieldPrivacyPolicy> field_privacy_policies;
         public final NodeLocalAccessPolicy local_policy;
         public final List<NetworkAcl> network_acls;
 
-        public NodeAccessControlSnapshot(NodeLocalAccessPolicy local_policy, List<NetworkAcl> network_acls) {
+        public NodeAccessControlSnapshot(List<FieldPrivacyPolicy> field_privacy_policies, NodeLocalAccessPolicy local_policy, List<NetworkAcl> network_acls) {
+            this.field_privacy_policies = field_privacy_policies;
             this.local_policy = local_policy;
             this.network_acls = network_acls;
         }

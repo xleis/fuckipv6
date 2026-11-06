@@ -127,6 +127,22 @@ export type ExitNodePlatform = "linux" | "windows" | "macos" | "other";
 
 export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_required" | "routing_tool_unavailable" | "iptables_unavailable" | "ipv4_forwarding_unavailable";
 
+export type FieldPrivacyPolicy = {
+  "effective_at_unix_ms": number;
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "network_id"?: NetworkId | null;
+  "revision": number;
+  "rules"?: Array<FieldVisibilityRule>;
+};
+
+export type FieldVisibility = "public" | "network" | "administrators" | "owner_only";
+
+export type FieldVisibilityRule = {
+  "field": PrivacyField;
+  "visibility": FieldVisibility;
+};
+
 export type GroupId = string;
 
 export type IdempotencyKey = string;
@@ -528,6 +544,7 @@ export type NetworkRole = "owner" | "administrator" | "member" | "temporary_coor
 export type NetworkVisibility = "public" | "unlisted" | "private";
 
 export type NodeAccessControlSnapshot = {
+  "field_privacy_policies"?: Array<FieldPrivacyPolicy>;
   "local_policy"?: NodeLocalAccessPolicy | null;
   "network_acls"?: Array<NetworkAcl>;
 };
@@ -1946,6 +1963,8 @@ export type PermissionRule = {
 };
 
 export type PolicyAction = "read" | "create" | "update" | "delete" | "approve" | "reject" | "remove" | "enable" | "disable" | "use" | "recover" | "export" | "test";
+
+export type PrivacyField = "member_node_id" | "member_display_name" | "member_identity_fingerprint" | "member_role" | "member_groups" | "member_capabilities" | "member_status" | "member_lifecycle_state" | "member_revision" | "member_access_epoch" | "member_available_actions" | "member_presence" | "member_joined_at" | "node_display_name" | "node_public_key" | "node_platform_and_version" | "node_online_state" | "node_endpoints" | "node_real_network_addresses" | "node_traffic_statistics" | "node_local_processes" | "node_local_paths" | "node_detailed_logs" | "topology_node_id" | "topology_display_name" | "topology_role" | "topology_status" | "topology_presence" | "topology_health" | "topology_capabilities" | "topology_network_membership" | "topology_connections" | "activity_actor" | "activity_action" | "activity_resource" | "activity_outcome" | "activity_occurred_at" | "activity_summary" | "activity_details" | "file_id" | "file_network_id" | "file_display_name" | "file_owner" | "file_mode" | "file_revision" | "file_network_acl" | "file_local_acl" | "file_quota" | "file_path_policy" | "file_timestamps" | "file_audit_settings";
 
 export type PublicKey = string;
 

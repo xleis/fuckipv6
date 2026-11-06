@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    evaluate_effective_access, AccessContext, GroupId, MembershipRole, MembershipState, NetworkAcl,
-    NetworkId, NetworkRole, NodeLocalAccessPolicy, OperationId, PermissionCondition,
-    PermissionDenialCode, PermissionEffect, PermissionIntent, PermissionRequest, PermissionRule,
-    PolicyAction, ResourceKind, ResourceRef, SecurityRuleId, SubjectSelector,
+    evaluate_effective_access, resolve_field_privacy_policy, AccessContext, FieldPrivacyPolicy,
+    GroupId, MembershipRole, MembershipState, NetworkAcl, NetworkId, NetworkRole,
+    NodeLocalAccessPolicy, OperationId, PermissionCondition, PermissionDenialCode,
+    PermissionEffect, PermissionIntent, PermissionRequest, PermissionRule, PolicyAction,
+    PrivacyViewer, ResourceKind, ResourceRef, SecurityRuleId, SubjectSelector,
 };
 
 use super::command::{NodeCommand, NodeCommandKind};
@@ -28,6 +29,8 @@ pub struct NodeCommandContext {
     local_policy: Vec<PermissionRule>,
     local_access_policy: Option<NodeLocalAccessPolicy>,
     access_control_invalid: bool,
+    field_privacy_policies: Vec<FieldPrivacyPolicy>,
+    field_privacy_invalid: bool,
     network_scopes: BTreeMap<String, NetworkCommandScope>,
     recent_reauthentication: bool,
     local_owner: bool,
@@ -92,6 +95,8 @@ impl NodeCommandContext {
             local_policy: Vec::new(),
             local_access_policy: None,
             access_control_invalid: false,
+            field_privacy_policies: Vec::new(),
+            field_privacy_invalid: false,
             network_scopes: BTreeMap::new(),
             recent_reauthentication: true,
             local_owner: true,
@@ -161,6 +166,8 @@ impl NodeCommandContext {
             local_policy: Vec::new(),
             local_access_policy: None,
             access_control_invalid: false,
+            field_privacy_policies: Vec::new(),
+            field_privacy_invalid: false,
             network_scopes,
             recent_reauthentication: recently_reauthenticated,
             local_owner: false,
@@ -247,6 +254,13 @@ impl NodeCommandContext {
             }
         }
         self.access_control_invalid |= invalid;
+
+        self.field_privacy_policies = snapshot.field_privacy_policies.clone();
+        let mut seen = BTreeSet::new();
+        let now = unix_time_ms();
+        self.field_privacy_invalid = self.field_privacy_policies.iter().any(|policy| {
+            !seen.insert(policy.network_id.clone()) || policy.validate_at(now).is_err()
+        });
         self
     }
 
@@ -262,6 +276,8 @@ impl NodeCommandContext {
             local_policy: Vec::new(),
             local_access_policy: None,
             access_control_invalid: false,
+            field_privacy_policies: Vec::new(),
+            field_privacy_invalid: false,
             network_scopes: BTreeMap::new(),
             recent_reauthentication: false,
             local_owner: false,
@@ -323,6 +339,55 @@ impl NodeCommandContext {
         } else {
             None
         }
+    }
+
+    /// Build the verified disclosure viewer for one network boundary. A
+    /// temporary coordinator remains a network member for read visibility and
+    /// is never promoted to a durable administrator.
+    pub(crate) fn privacy_viewer_for(&self, network_id: Option<&NetworkId>) -> PrivacyViewer {
+        let scoped = network_id.and_then(|network_id| {
+            self.network_scopes
+                .values()
+                .find(|scope| &scope.network_id == network_id)
+        });
+        if self.local_owner {
+            return match (network_id, scoped) {
+                (Some(network_id), Some(scope)) => PrivacyViewer::node_owner_in_network(
+                    self.actor.clone(),
+                    network_id.clone(),
+                    membership_role_for_privacy(scope.role),
+                    scope.membership_state,
+                ),
+                (Some(network_id), None) => {
+                    PrivacyViewer::node_owner(self.actor.clone(), Some(network_id.clone()))
+                }
+                (None, _) => PrivacyViewer::node_owner(self.actor.clone(), None),
+            };
+        }
+        match (network_id, scoped) {
+            (Some(network_id), Some(scope)) => PrivacyViewer::network(
+                self.actor.clone(),
+                network_id.clone(),
+                membership_role_for_privacy(scope.role),
+                scope.membership_state,
+            ),
+            (Some(network_id), None) => {
+                PrivacyViewer::public(self.actor.clone(), Some(network_id.clone()))
+            }
+            (None, _) => PrivacyViewer::public(self.actor.clone(), None),
+        }
+    }
+
+    /// Resolve the one active field policy for a network. Ambiguous, expired,
+    /// not-yet-effective or malformed policies fail closed.
+    pub(crate) fn field_privacy_policy_for(
+        &self,
+        network_id: Option<&NetworkId>,
+    ) -> Result<Option<&FieldPrivacyPolicy>, ()> {
+        if self.field_privacy_invalid {
+            return Err(());
+        }
+        resolve_field_privacy_policy(&self.field_privacy_policies, network_id, unix_time_ms())
     }
 
     pub fn recently_reauthenticated(&self) -> bool {
@@ -540,6 +605,16 @@ fn network_role_from_membership(role: MembershipRole) -> NetworkRole {
         MembershipRole::Owner => NetworkRole::Owner,
         MembershipRole::Administrator => NetworkRole::Administrator,
         MembershipRole::Member => NetworkRole::Member,
+    }
+}
+
+fn membership_role_for_privacy(role: NetworkRole) -> MembershipRole {
+    match role {
+        NetworkRole::Owner => MembershipRole::Owner,
+        NetworkRole::Administrator => MembershipRole::Administrator,
+        // Emergency coordinators are temporary read principals, not durable
+        // administrators. Their visibility ceiling is ordinary membership.
+        NetworkRole::Member | NetworkRole::TemporaryCoordinator => MembershipRole::Member,
     }
 }
 
@@ -890,8 +965,9 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        ContributionKind, NetworkAclGrant, NodeContributionVeto, NodeNetworkScope,
-        PermissionCondition, PermissionEffect, SecurityRuleId, SubjectSelector,
+        ContributionKind, FieldVisibility, FieldVisibilityRule, NetworkAclGrant,
+        NodeContributionVeto, NodeNetworkScope, PermissionCondition, PermissionEffect,
+        PrivacyField, PrivacyPrincipal, SecurityRuleId, SubjectSelector,
     };
 
     fn actor() -> fuckipv6_common::domain::NodeId {
@@ -1070,6 +1146,22 @@ mod tests {
         NodeAccessControlSnapshot {
             local_policy,
             network_acls,
+            field_privacy_policies: Vec::new(),
+        }
+    }
+
+    fn field_privacy_policy(network_id: NetworkId) -> FieldPrivacyPolicy {
+        let now = unix_time_ms();
+        FieldPrivacyPolicy {
+            network_id: Some(network_id),
+            revision: 3,
+            issued_at_unix_ms: now.saturating_sub(1_000),
+            effective_at_unix_ms: now.saturating_sub(500),
+            expires_at_unix_ms: now.saturating_add(60_000),
+            rules: vec![FieldVisibilityRule {
+                field: PrivacyField::NodeEndpoints,
+                visibility: FieldVisibility::Administrators,
+            }],
         }
     }
 
@@ -2282,6 +2374,69 @@ mod tests {
             .expect_err("duplicate ACLs must fail closed");
         assert_eq!(denial.code, PermissionDenialCode::PolicyDenied.as_str());
         assert!(denial.reason.contains("ambiguous"));
+    }
+
+    #[test]
+    fn field_privacy_snapshot_is_trusted_and_ambiguity_fails_closed() {
+        let home = network_id("home");
+        let policy = field_privacy_policy(home.clone());
+        let context = NodeCommandContext::network_session(
+            actor(),
+            "network-test",
+            [NodePermission::ViewState],
+            [(
+                "home".into(),
+                NetworkCommandScope::new(
+                    home.clone(),
+                    NetworkRole::TemporaryCoordinator,
+                    MembershipState::Active,
+                    Vec::new(),
+                ),
+            )],
+            true,
+        )
+        .with_access_control_snapshot(&NodeAccessControlSnapshot {
+            local_policy: None,
+            network_acls: Vec::new(),
+            field_privacy_policies: vec![policy.clone()],
+        });
+
+        let viewer = context.privacy_viewer_for(Some(&home));
+        assert_eq!(
+            viewer.principal,
+            PrivacyPrincipal::NetworkMember,
+            "temporary coordinator must not become a durable administrator"
+        );
+        assert!(viewer.has_active_network_role());
+        assert_eq!(
+            context
+                .field_privacy_policy_for(Some(&home))
+                .expect("trusted policy")
+                .map(|policy| policy.revision),
+            Some(3)
+        );
+
+        let duplicate = NodeCommandContext::network_session(
+            actor(),
+            "network-test",
+            [NodePermission::ViewState],
+            [(
+                "home".into(),
+                NetworkCommandScope::new(
+                    home.clone(),
+                    NetworkRole::Member,
+                    MembershipState::Active,
+                    Vec::new(),
+                ),
+            )],
+            true,
+        )
+        .with_access_control_snapshot(&NodeAccessControlSnapshot {
+            local_policy: None,
+            network_acls: Vec::new(),
+            field_privacy_policies: vec![policy.clone(), policy],
+        });
+        assert!(duplicate.field_privacy_policy_for(Some(&home)).is_err());
     }
 
     #[test]

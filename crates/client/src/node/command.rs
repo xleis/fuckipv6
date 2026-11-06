@@ -4354,6 +4354,7 @@ mod tests {
             .with_access_control_snapshot(&crate::node::state::NodeAccessControlSnapshot {
                 local_policy: None,
                 network_acls: vec![acl],
+                field_privacy_policies: Vec::new(),
             });
         let bus = NodeCommandBus::spawn(
             Arc::new(CountingHandler {

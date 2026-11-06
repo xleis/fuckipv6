@@ -7,11 +7,11 @@ use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
     ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation,
-    ExitContributionScope, MembershipRole, MembershipState, MembershipTerms, NetworkAcl, NetworkId,
-    NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence, NetworkMemberStatus,
-    NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery, TopologyBuilder,
-    TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput, TopologySnapshot,
-    TopologyViewer,
+    ExitContributionScope, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
+    NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
+    NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
+    TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
+    TopologySnapshot, TopologyViewer,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -928,11 +928,17 @@ pub struct NodeAccessControlSnapshot {
     pub local_policy: Option<NodeLocalAccessPolicy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_acls: Vec<NetworkAcl>,
+    /// Versioned network-authored field disclosure documents. Like ACLs,
+    /// these are trusted control-plane data and never come from command JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_privacy_policies: Vec<FieldPrivacyPolicy>,
 }
 
 impl NodeAccessControlSnapshot {
     pub fn is_empty(&self) -> bool {
-        self.local_policy.is_none() && self.network_acls.is_empty()
+        self.local_policy.is_none()
+            && self.network_acls.is_empty()
+            && self.field_privacy_policies.is_empty()
     }
 
     /// Resolve exactly one ACL for a network. Ambiguous duplicates and

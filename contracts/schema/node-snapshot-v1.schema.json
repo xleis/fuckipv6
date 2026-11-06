@@ -242,6 +242,81 @@
       ],
       "type": "string"
     },
+    "FieldPrivacyPolicy": {
+      "description": "Immutable network-authored field policy. Revisions are monotonic and carry\nboth issuance and effective time. A malformed, duplicate, expired or\nnot-yet-effective policy fails closed.",
+      "properties": {
+        "effective_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FieldVisibilityRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "issued_at_unix_ms",
+        "effective_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "FieldVisibility": {
+      "description": "Audience ceiling for one field.\n\nThe ordering is from least to most restrictive. `serde` aliases preserve\ncompatibility with the pre-W10 three-level node privacy documents.",
+      "enum": [
+        "public",
+        "network",
+        "administrators",
+        "owner_only"
+      ],
+      "type": "string"
+    },
+    "FieldVisibilityRule": {
+      "description": "One explicit field override. A policy can only tighten the supplied floor.",
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/PrivacyField"
+        },
+        "visibility": {
+          "$ref": "#/$defs/FieldVisibility"
+        }
+      },
+      "required": [
+        "field",
+        "visibility"
+      ],
+      "type": "object"
+    },
     "GroupId": {
       "type": "string"
     },
@@ -733,6 +808,13 @@
     "NodeAccessControlSnapshot": {
       "description": "Trusted authorization documents carried with the authoritative node state.\n`local_policy` is authored by the node owner; each network ACL is authored by\nthat network's governance. Duplicate network ACLs are never resolved by\nordering and cause command authorization to fail closed.",
       "properties": {
+        "field_privacy_policies": {
+          "description": "Versioned network-authored field disclosure documents. Like ACLs,\nthese are trusted control-plane data and never come from command JSON.",
+          "items": {
+            "$ref": "#/$defs/FieldPrivacyPolicy"
+          },
+          "type": "array"
+        },
         "local_policy": {
           "anyOf": [
             {
@@ -2487,6 +2569,63 @@
         "recover",
         "export",
         "test"
+      ],
+      "type": "string"
+    },
+    "PrivacyField": {
+      "description": "Stable field identifiers. Serialized policies and public previews use these\nnames verbatim; hidden values are never represented by a masked placeholder.",
+      "enum": [
+        "member_node_id",
+        "member_display_name",
+        "member_identity_fingerprint",
+        "member_role",
+        "member_groups",
+        "member_capabilities",
+        "member_status",
+        "member_lifecycle_state",
+        "member_revision",
+        "member_access_epoch",
+        "member_available_actions",
+        "member_presence",
+        "member_joined_at",
+        "node_display_name",
+        "node_public_key",
+        "node_platform_and_version",
+        "node_online_state",
+        "node_endpoints",
+        "node_real_network_addresses",
+        "node_traffic_statistics",
+        "node_local_processes",
+        "node_local_paths",
+        "node_detailed_logs",
+        "topology_node_id",
+        "topology_display_name",
+        "topology_role",
+        "topology_status",
+        "topology_presence",
+        "topology_health",
+        "topology_capabilities",
+        "topology_network_membership",
+        "topology_connections",
+        "activity_actor",
+        "activity_action",
+        "activity_resource",
+        "activity_outcome",
+        "activity_occurred_at",
+        "activity_summary",
+        "activity_details",
+        "file_id",
+        "file_network_id",
+        "file_display_name",
+        "file_owner",
+        "file_mode",
+        "file_revision",
+        "file_network_acl",
+        "file_local_acl",
+        "file_quota",
+        "file_path_policy",
+        "file_timestamps",
+        "file_audit_settings"
       ],
       "type": "string"
     },

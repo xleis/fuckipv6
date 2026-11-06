@@ -83,6 +83,7 @@ import { t, tr } from "../i18n";
 import { resolveNetworkMembershipId } from "../members";
 import { advancedSettingsGroups } from "../settings";
 import type { TopologyActionSubmit } from "../topology-actions";
+import type { TopologyPresentationSignals } from "../topology-presentation";
 import { TopologyPage } from "./topology-page";
 
 const TOPOLOGY_ACTION_IDS = new Set([
@@ -107,6 +108,7 @@ type PageContentProps = {
   onRunAction(actionId: string): Promise<void>;
   manifestActions?: NodeUiAction[];
   onSubmitAction?: TopologyActionSubmit;
+  topologySignals?: TopologyPresentationSignals;
 };
 
 function empty(text: string): JSX.Element {
@@ -2878,6 +2880,7 @@ export function PageContent(props: PageContentProps) {
         <TopologyPage
           topology={snapshot.topology ?? null}
           locale={locale}
+          presentationSignals={props.topologySignals}
           preferredNetworkId={resolveNetworkMembershipId(
             snapshot.memberships,
             selectedNetwork,

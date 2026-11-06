@@ -402,6 +402,65 @@ describe("TopologyView visual encodings", () => {
     );
     expect(screen.getByText(translated("topology.empty.no_networks"))).toBeInTheDocument();
   });
+
+  it("renders loading, partial, stale, error and permission states without inventing data", () => {
+    const { rerender } = render(
+      <TopologyView
+        topology={topologySnapshot()}
+        locale="zh-CN"
+        presentationSignals={{ initialLoading: true }}
+      />,
+    );
+    expect(screen.getByTestId("topology-state-initial_loading")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", {
+        name: translated("topology.aria.graph_title"),
+      }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <TopologyView
+        topology={{ ...topologySnapshot(), truncated: true }}
+        locale="zh-CN"
+        presentationSignals={{ stale: true }}
+      />,
+    );
+    expect(screen.getByTestId("topology-state-stale")).toBeInTheDocument();
+    expect(screen.getByTestId("topology-state-partial")).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", {
+        name: translated("topology.aria.graph_title"),
+      }),
+    ).toBeInTheDocument();
+
+    rerender(
+      <TopologyView
+        topology={topologySnapshot()}
+        locale="zh-CN"
+        presentationSignals={{ error: "snapshot failed" }}
+      />,
+    );
+    expect(screen.getByTestId("topology-state-error")).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", {
+        name: translated("topology.aria.graph_title"),
+      }),
+    ).toBeInTheDocument();
+
+    rerender(
+      <TopologyView
+        topology={topologySnapshot()}
+        locale="zh-CN"
+        presentationSignals={{ permissionDenied: true }}
+      />,
+    );
+    expect(screen.getByTestId("topology-state-permission_denied")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", {
+        name: translated("topology.aria.graph_title"),
+      }),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("Topology keyboard, touch and accessibility behavior", () => {

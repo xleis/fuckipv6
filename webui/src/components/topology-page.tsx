@@ -20,6 +20,7 @@ import {
 import { label, outcomeSummary } from "../contract/invariants";
 import { TopologyGovernancePanel } from "./topology-governance";
 import { TopologyView } from "./topology-view";
+import type { TopologyPresentationSignals } from "../topology-presentation";
 
 type Props = {
   topology: TopologySnapshot | null;
@@ -27,6 +28,7 @@ type Props = {
   preferredNetworkId?: string | null;
   actions: NodeUiAction[];
   onSubmitAction?: TopologyActionSubmit;
+  presentationSignals?: TopologyPresentationSignals;
 };
 
 function validNetworkId(
@@ -187,6 +189,7 @@ export function TopologyPage({
   preferredNetworkId,
   actions,
   onSubmitAction,
+  presentationSignals,
 }: Props) {
   const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(null);
   const networkId = validNetworkId(
@@ -395,6 +398,7 @@ export function TopologyPage({
       <TopologyView
         topology={null}
         locale={locale}
+        presentationSignals={presentationSignals}
         filters={filters}
         onFiltersChange={setFilters}
       />
@@ -406,6 +410,7 @@ export function TopologyPage({
       <TopologyView
         topology={topology}
         locale={locale}
+        presentationSignals={presentationSignals}
         filters={filters}
         onFiltersChange={changeFilters}
         selectedNodeIds={selectedSet}

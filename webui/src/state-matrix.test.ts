@@ -157,4 +157,35 @@ describe("page state matrix", () => {
       expect(interactionBlockReason(staleSignals)).toBe("stale");
     }
   });
+
+  it("uses authoritative topology rather than networks for topology content", () => {
+    const withoutTopology = {
+      ...snapshot,
+      networks: snapshot.networks.length > 0 ? snapshot.networks : [{}],
+      topology: null,
+    } as NodeSnapshot;
+    expect(pageHasContent(withoutTopology, "topology")).toBe(false);
+
+    const withTopology = {
+      ...withoutTopology,
+      topology: {
+        revision: 1,
+        generated_at_unix_ms: 1,
+        viewer: "node-self",
+        truncated: false,
+        boundaries: [
+          {
+            network_id: "net-alpha",
+            name: "Alpha",
+            member_count: 0,
+            visible_member_count: 0,
+            viewer_role: null,
+          },
+        ],
+        nodes: [],
+        connections: [],
+      },
+    };
+    expect(pageHasContent(withTopology, "topology")).toBe(true);
+  });
 });

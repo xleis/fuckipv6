@@ -201,9 +201,10 @@ export function pageHasContent(
 ): boolean {
   switch (pageId) {
     case "networks":
-    case "topology":
     case "traffic":
       return snapshot.networks.length > 0;
+    case "topology":
+      return Boolean(snapshot.topology?.boundaries.length);
     case "peers":
       return snapshot.peers.length > 0;
     case "routing":

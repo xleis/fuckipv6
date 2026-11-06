@@ -1752,7 +1752,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 
 ### W9-09 拓扑状态与视觉回归 `[ ]`
 
-- [ ] 加载、部分数据、陈旧、空、错误、无权限状态完整；
+- [x] 加载、部分数据、陈旧、空、错误、无权限状态完整；
 - [ ] 单网络、多网络、公共节点、离线、降级、能力混合场景有基线；
 - [ ] GPUI 与 WebUI 使用同一对象详情、菜单和状态；
 - [ ] 同尺寸/DPR/字体下视觉回归；
@@ -1762,6 +1762,17 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 - [ ] 证据包含筛选、选择和动作结果。
 
 **验收**：拓扑完成从数据、权限、交互到视觉回归的闭环。
+
+**证据（2026-11-06，状态契约）**：`webui/src/topology-presentation.ts` 建立拓扑专用状态模型，
+显式区分 `initial_loading`、`partial`、`stale`、`offline`、`refreshing`、`empty`、`error`、
+`permission_denied`、`unavailable` 和 `ready`。同一快照可同时保留陈旧、刷新与裁剪状态；除无权限和
+首次加载外，陈旧/错误状态继续展示最后权威拓扑，不用空态覆盖已有对象。`TopologySnapshot.truncated`
+现在有独立可见状态。`pageHasContent("topology")` 改为只依据 `snapshot.topology.boundaries`，不再因
+`snapshot.networks` 非空而误判拓扑有内容。
+
+**验证通过**：WebUI `npm test -- --run`（18 files，194 passed）、`npm run typecheck`、
+`npm run lint`、`node scripts/test_i18n_runtime.mjs`、
+`cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
 ### W9-10 拓扑与成员 E2E `[ ]`
 

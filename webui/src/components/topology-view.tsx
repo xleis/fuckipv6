@@ -15,13 +15,18 @@ import {
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  AlertTriangle,
+  Info,
+  LoaderCircle,
   LocateFixed,
   Minus,
   Pause,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
+  ShieldAlert,
   ShieldCheck,
   X,
 } from "lucide-react";
@@ -65,10 +70,17 @@ import {
   type BatchMemberAction,
   type TopologyFilters,
 } from "../topology-actions";
+import {
+  topologyConditionCopy,
+  topologyPresentation,
+  type TopologyPresentation,
+  type TopologyPresentationSignals,
+} from "../topology-presentation";
 
 type Props = {
   topology: TopologySnapshot | null;
   locale: Locale;
+  presentationSignals?: TopologyPresentationSignals;
   filters?: TopologyFilters;
   onFiltersChange?: (filters: TopologyFilters) => void;
   selectedNodeIds?: ReadonlySet<string>;
@@ -81,6 +93,57 @@ type Props = {
   onClearSelection?: () => void;
   selectionNotice?: string;
 };
+
+function TopologyPresentationNotices({
+  presentation,
+  locale,
+}: {
+  presentation: TopologyPresentation;
+  locale: Locale;
+}) {
+  return (
+    <div className="topology-state-notices">
+      {presentation.conditions
+        .filter((condition) => condition !== "ready")
+        .map((condition) => {
+          const copy = topologyConditionCopy(condition);
+          const Icon =
+            copy.tone === "danger"
+              ? AlertTriangle
+              : condition === "refreshing" || condition === "initial_loading"
+                ? LoaderCircle
+                : copy.tone === "warn"
+                  ? ShieldAlert
+                  : condition === "partial"
+                    ? RefreshCw
+                    : Info;
+          return (
+            <div
+              className={`state-notice ${copy.tone}`}
+              data-topology-state={condition}
+              data-testid={`topology-state-${condition}`}
+              key={condition}
+              role={copy.tone === "danger" ? "alert" : "status"}
+            >
+              <Icon
+                className={
+                  condition === "refreshing" || condition === "initial_loading"
+                    ? "spin"
+                    : undefined
+                }
+                size={17}
+                aria-hidden="true"
+              />
+              <div>
+                <strong>{label(locale, copy.titleKey)}</strong>
+                <p>{label(locale, copy.detailKey)}</p>
+              </div>
+            </div>
+          );
+        })}
+    </div>
+  );
+}
 
 type HoverState = {
   nodeId: string;
@@ -1945,6 +2008,7 @@ function Legend({
 export function TopologyView({
   topology,
   locale,
+  presentationSignals,
   filters,
   onFiltersChange,
   selectedNodeIds = EMPTY_SELECTED_NODE_IDS,
@@ -1957,6 +2021,7 @@ export function TopologyView({
   onClearSelection,
   selectionNotice = "",
 }: Props): JSX.Element {
+  const presentation = topologyPresentation(topology, presentationSignals);
   const narrowViewport = useNarrowViewport();
   const [view, setView] = useState<TopologyViewMode>(() =>
     narrowViewport ? "list" : "graph",
@@ -2137,17 +2202,26 @@ export function TopologyView({
     setFocusRequest((current) => current + 1);
   }
 
-  if (!sourceTopology) {
+  if (!presentation.canRender || !sourceTopology) {
     return (
-      <div className="empty-state">
-        {label(locale, "topology.empty.unavailable")}
+      <div
+        className="topology-state-shell"
+        data-topology-state={presentation.kind}
+      >
+        <TopologyPresentationNotices
+          presentation={presentation}
+          locale={locale}
+        />
       </div>
     );
   }
   if (sourceTopology.boundaries.length === 0) {
     return (
-      <div className="empty-state">
-        {label(locale, "topology.empty.no_networks")}
+      <div className="topology-state-shell" data-topology-state="empty">
+        <TopologyPresentationNotices
+          presentation={topologyPresentation(sourceTopology)}
+          locale={locale}
+        />
       </div>
     );
   }
@@ -2174,8 +2248,13 @@ export function TopologyView({
       className={`topology-view ${highContrast ? "topology-high-contrast" : ""}`}
       data-color-mode={mode}
       data-frozen={frozenTopology ? "true" : "false"}
+      data-topology-state={presentation.kind}
       data-view={view}
     >
+      <TopologyPresentationNotices
+        presentation={presentation}
+        locale={locale}
+      />
       <div
         className="topology-toolbar"
         role="group"

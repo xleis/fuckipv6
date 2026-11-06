@@ -1324,6 +1324,14 @@ function AppShell({
                   recentDiagnostics={recentDiagnostics}
                   manifestActions={manifestActions}
                   onSubmitAction={submitAction}
+                  topologySignals={{
+                    refreshing: controlRefreshing,
+                    stale: eventState.stale,
+                    offline: !browserOnline,
+                    error: maintenance ? null : pageErrorMessage,
+                    permissionDenied:
+                      !snapshot.permissions?.permissions.includes("view_state"),
+                  }}
                   footer={
                     activePage.actions.some((action) =>
                       CONFIGURATION_ACTION_IDS.has(action.id),

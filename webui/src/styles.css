@@ -1762,6 +1762,14 @@ button:disabled {
   min-width: 0;
   gap: var(--space-3);
 }
+.topology-state-shell,
+.topology-state-notices {
+  display: grid;
+  gap: var(--space-2);
+}
+.topology-state-shell {
+  align-content: start;
+}
 .topology-toolbar {
   display: flex;
   min-width: 0;

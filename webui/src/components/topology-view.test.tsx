@@ -311,6 +311,108 @@ describe("TopologyView visual encodings", () => {
     expect(container.querySelector(".topology-cluster")?.textContent).toContain("+5");
   });
 
+  it("renders only authoritative nodes and observed connections across refreshes", () => {
+    const source = topologySnapshot();
+    const { container, rerender } = render(
+      <TopologyView topology={source} locale="zh-CN" />,
+    );
+    const canvas = container.querySelector(".topology-canvas");
+
+    const renderedNodeIds = [
+      ...container.querySelectorAll<SVGGElement>("g.topology-node[role='option']"),
+    ].map((element) => element.getAttribute("data-node-id"));
+    expect(renderedNodeIds).toEqual(source.nodes.map((node) => node.node_id));
+    expect(canvas).toHaveAttribute(
+      "data-rendered-nodes",
+      String(source.nodes.length),
+    );
+
+    const renderedConnections = [
+      ...container.querySelectorAll<SVGGElement>("g.topology-connection"),
+    ].map((element) => ({
+      id: element.getAttribute("data-connection-id"),
+      from: element.getAttribute("data-from"),
+      to: element.getAttribute("data-to"),
+      networks: element.getAttribute("data-networks"),
+      state: [...element.classList].find((name) =>
+        ["active", "idle", "stale"].includes(name),
+      ),
+    }));
+    expect(renderedConnections).toEqual(
+      source.connections.map((connection) => ({
+        id: connection.connection_id,
+        from: connection.from,
+        to: connection.to,
+        networks: (connection.networks ?? []).join(","),
+        state: connection.state,
+      })),
+    );
+    expect(canvas).toHaveAttribute(
+      "data-rendered-connections",
+      String(source.connections.length),
+    );
+
+    const next = {
+      ...source,
+      revision: source.revision + 1,
+      nodes: source.nodes.filter((node) => node.node_id !== "node-unknown"),
+      connections: source.connections.filter(
+        (connection) => connection.connection_id !== "connection-stale",
+      ),
+    };
+    rerender(<TopologyView topology={next} locale="zh-CN" />);
+    expect(
+      container.querySelector('[data-node-id="node-unknown"]'),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector('[data-connection-id="connection-stale"]'),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <TopologyView
+        topology={{
+          ...next,
+          connections: [
+            {
+              connection_id: "server-reference-without-endpoints",
+              from: "node-self",
+              to: "node-missing",
+              networks: ["net_alpha"],
+              state: "active",
+            },
+          ],
+        }}
+        locale="zh-CN"
+      />,
+    );
+    expect(container.querySelectorAll("g.topology-connection")).toHaveLength(0);
+    expect(container.querySelector(".topology-canvas")).toHaveAttribute(
+      "data-rendered-nodes",
+      String(next.nodes.length),
+    );
+    expect(container.querySelector(".topology-canvas")).toHaveAttribute(
+      "data-rendered-connections",
+      "0",
+    );
+
+    rerender(
+      <TopologyView
+        topology={{ ...next, nodes: [], connections: [] }}
+        locale="zh-CN"
+      />,
+    );
+    expect(
+      container.querySelectorAll("g.topology-connection"),
+    ).toHaveLength(0);
+    expect(
+      container.querySelectorAll("g.topology-node[role='option']"),
+    ).toHaveLength(0);
+    expect(container.querySelector(".topology-canvas")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(translated("topology.filters.empty")),
+    ).toBeInTheDocument();
+  });
+
   it("switches to an equivalent list with every node, network and connection state", async () => {
     const user = userEvent.setup();
     const { container } = render(

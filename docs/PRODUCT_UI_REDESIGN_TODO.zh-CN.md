@@ -1758,7 +1758,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 - [x] 同尺寸/DPR/字体下视觉回归；
 - [x] 选择、悬停和菜单状态可对比；
 - [x] 布局重置和持久化行为一致；
-- [ ] 禁止拓扑展示假节点或静态连接；
+- [x] 禁止拓扑展示假节点或静态连接；
 - [ ] 证据包含筛选、选择和动作结果。
 
 **验收**：拓扑完成从数据、权限、交互到视觉回归的闭环。
@@ -1848,11 +1848,24 @@ capability-mixed `32ac8d8f9b8d6ba0fa14784f5c4abba6898457c3429c01dadd3a99e54a44ed
 动作数据仍共用同一权威快照与状态契约。人工审查固定态与重置态截图，确认拖动后的标签和连接
 随节点移动、固定状态提示可见，重置后节点、边界和连接恢复自动布局，无残留固定状态。
 
-**验证通过**：WebUI `npm test -- --run`（19 files，207 passed）、`npm run typecheck`、
+**证据（2026-11-06，权威对象渲染）**：WebUI 图形拓扑先按当前权威快照的实际布局结果生成
+`renderedNodes` 与 `renderedConnections`，只渲染拥有坐标的节点以及两端均可布局的连接；画布
+`data-rendered-nodes`、`data-rendered-connections` 和 SVG ARIA 描述也使用真实渲染数量。连接 DOM
+暴露稳定连接 ID、起止节点、网络和观测时间，供自动化逐项绑定。测试
+`renders only authoritative nodes and observed connections across refreshes` 验证初始节点顺序/ID、
+连接 ID/端点/网络/状态与快照完全一致；刷新移除节点或连接后旧 DOM 不残留；服务端连接缺少可布局
+端点时不画臆造连接；节点为空时显示空态而非占位画布。CDP 视觉基线同步逐个深比较连接身份、端点和
+网络，不再只比较数量与状态。GPUI 既有
+`topology_shared_scenarios_render_only_authoritative_objects` 逐场景验证权威节点/连接齐全且不存在
+额外节点、静态连接或多余连接，本项单独复跑通过。生产 UI 未从本地常量、浏览器注入或占位数据生成
+拓扑对象。
+
+**验证通过**：WebUI `npm test -- --run`（19 files，208 passed）、`npm run typecheck`、
 `npm run lint`、`npm run visual:topology-baseline`（含构建，6 scenarios、3 interaction states、
 1 layout persistence check）、最终脚本 `--skip-build` 连续 2 次、`node scripts/test_i18n_runtime.mjs`、
-`node scripts/test_webui_accessibility.mjs`、`cargo test -p fuckipv6-common --all-features i18n`
-（9 passed）和 `git diff --check`。
+`node scripts/test_webui_accessibility.mjs`、
+`cargo test -p fuckipv6-client --all-features --lib topology_shared_scenarios_render_only_authoritative_objects`
+（1 passed）、`cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
 ### W9-10 拓扑与成员 E2E `[ ]`
 

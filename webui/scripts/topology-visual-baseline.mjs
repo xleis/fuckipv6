@@ -825,6 +825,12 @@ async function topologySemantics(session) {
           rect: rect(element),
         })),
         connections: [...document.querySelectorAll("g.topology-connection")].map((element) => ({
+          connection_id: element.getAttribute("data-connection-id"),
+          from: element.getAttribute("data-from"),
+          to: element.getAttribute("data-to"),
+          networks: (element.getAttribute("data-networks") ?? "")
+            .split(",")
+            .filter(Boolean),
           state: [...element.classList].find((value) =>
             ${JSON.stringify(["active", "idle", "stale"])}.includes(value),
           ) ?? null,
@@ -995,6 +1001,21 @@ function assertScenarioSemantics(scenario, semantics) {
     semantics.connections.map((connection) => connection.state),
     topology.connections.map((connection) => connection.state),
     `${scenario.id} connection states`,
+  );
+  assert.deepEqual(
+    semantics.connections.map(({ connection_id, from, to, networks }) => ({
+      connection_id,
+      from,
+      to,
+      networks,
+    })),
+    topology.connections.map(({ connection_id, from, to, networks }) => ({
+      connection_id,
+      from,
+      to,
+      networks: networks ?? [],
+    })),
+    `${scenario.id} connection identities, endpoints and networks`,
   );
   assert.equal(
     semantics.canvas.rendered_nodes,

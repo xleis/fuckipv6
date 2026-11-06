@@ -46,7 +46,6 @@ import {
   CAPABILITY_ORDER,
   CONNECTION_ORDER,
   HEALTH_ORDER,
-  activeConnections,
   capabilityColor,
   capabilitySegments,
   connectionDash,
@@ -952,6 +951,18 @@ const GraphView = memo(function GraphView({
     }
     return grouped;
   }, [layout]);
+  const renderedNodes = useMemo(
+    () => graphTopology.nodes.filter((node) => placements.has(node.node_id)),
+    [graphTopology.nodes, placements],
+  );
+  const renderedConnections = useMemo(
+    () =>
+      graphTopology.connections.filter(
+        (connection) =>
+          placements.has(connection.from) && placements.has(connection.to),
+      ),
+    [graphTopology.connections, placements],
+  );
   const boundaryNames = useMemo(
     () =>
       new Map(
@@ -1120,8 +1131,8 @@ const GraphView = memo(function GraphView({
       className="topology-canvas"
       id="topology-object-navigation"
       data-layout-pending={layoutPending ? "true" : "false"}
-      data-rendered-nodes={graphTopology.nodes.length}
-      data-rendered-connections={graphTopology.connections.length}
+      data-rendered-nodes={renderedNodes.length}
+      data-rendered-connections={renderedConnections.length}
     >
       <svg
         viewBox={`0 0 ${layout.width} ${layout.height}`}
@@ -1139,8 +1150,15 @@ const GraphView = memo(function GraphView({
         <desc id="topology-svg-desc">
           {label(locale, "topology.aria.graph_description")
             .replace("{networks}", String(topology.boundaries.length))
-            .replace("{nodes}", String(graphTopology.nodes.length))
-            .replace("{links}", String(activeConnections(graphTopology).length))}
+            .replace("{nodes}", String(renderedNodes.length))
+            .replace(
+              "{links}",
+              String(
+                renderedConnections.filter(
+                  (connection) => connection.state === "active",
+                ).length,
+              ),
+            )}
         </desc>
         {layout.anchors.map((anchor) => {
           const boundary = index.boundariesById.get(anchor.networkId);
@@ -1187,7 +1205,7 @@ const GraphView = memo(function GraphView({
             </g>
           );
         })}
-        {graphTopology.connections.map((connection) => (
+        {renderedConnections.map((connection) => (
           <ConnectionLine
             key={connection.connection_id}
             connection={connection}
@@ -1210,7 +1228,7 @@ const GraphView = memo(function GraphView({
           aria-multiselectable="true"
           aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home End"
         >
-          {graphTopology.nodes.map((node, nodeIndex) => {
+          {renderedNodes.map((node, nodeIndex) => {
             const placement = placements.get(node.node_id);
             if (!placement) return null;
             const visual = visuals.get(placement.anchorNetworkId);
@@ -1218,7 +1236,7 @@ const GraphView = memo(function GraphView({
               <TopologyNodeGlyph
                 key={node.node_id}
                 itemIndex={nodeIndex}
-                itemCount={graphTopology.nodes.length}
+                itemCount={renderedNodes.length}
                 node={node}
                 ariaLabel={nodeLabels.get(node.node_id) ?? ""}
                 x={placement.x}
@@ -1310,7 +1328,14 @@ const ConnectionLine = memo(function ConnectionLine({
     .map((networkId) => boundaryNames.get(networkId) ?? networkId)
     .join(", ");
   return (
-    <g className={`topology-connection ${connection.state}`}>
+    <g
+      className={`topology-connection ${connection.state}`}
+      data-connection-id={connection.connection_id}
+      data-from={connection.from}
+      data-to={connection.to}
+      data-networks={(connection.networks ?? []).join(",")}
+      data-observed-at={connection.observed_at_unix_ms ?? ""}
+    >
       <title>
         {`${fromName} → ${toName} · ${stateLabel}${networks ? ` · ${networks}` : ""}`}
       </title>

@@ -863,7 +863,7 @@ async function main() {
     await pressKey(cdp, "End");
     await waitForActive(
       cdp,
-      `el?.getAttribute("role") === "menuitem" && el?.textContent?.includes("batch selection")`,
+      `el?.getAttribute("role") === "menuitem" && el?.textContent?.trim() === "Pin current layout"`,
       "menu End target",
     );
     await pressKey(cdp, "Escape");

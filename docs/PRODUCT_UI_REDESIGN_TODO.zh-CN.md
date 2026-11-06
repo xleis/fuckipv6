@@ -1677,18 +1677,36 @@ ARIA 名称和列表列出全部网络归属；超大网络的未展开成员以
 `npm run build`、`node ../scripts/test_webui_accessibility.mjs`、
 `cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
-### W9-07 键盘、触控与无障碍 `[ ]`
+### W9-07 键盘、触控与无障碍 `[x]`
 
-- [ ] 拓扑支持方向键移动、Enter 打开、菜单键操作；
-- [ ] 提供可搜索的对象列表作为等价导航；
-- [ ] 窄屏默认列表，长按等价右键菜单；
-- [ ] 冻结/缩放/定位当前节点可仅用键盘完成；
-- [ ] 焦点移动不因实时刷新丢失；
-- [ ] 屏幕阅读器获得对象名称、能力和关系摘要；
-- [ ] 减少动效设置生效；
-- [ ] 完成无鼠标 E2E。
+- [x] 拓扑支持方向键移动、Enter 打开、菜单键操作；
+- [x] 提供可搜索的对象列表作为等价导航；
+- [x] 窄屏默认列表，长按等价右键菜单；
+- [x] 冻结/缩放/定位当前节点可仅用键盘完成；
+- [x] 焦点移动不因实时刷新丢失；
+- [x] 屏幕阅读器获得对象名称、能力和关系摘要；
+- [x] 减少动效设置生效；
+- [x] 完成无鼠标 E2E。
 
 **验收**：拓扑不是必须使用鼠标的孤岛，所有治理操作有键盘/触控等价路径。
+
+**证据（2026-11-06）**：图节点和列表行使用 roving tabindex，支持方向键循环、Home/End、
+Enter 打开详情、Space 选择、Shift+F10/ContextMenu 打开菜单；菜单支持方向键、Home/End、Escape
+恢复焦点和 Enter 执行。窄屏首次进入默认列表，显式切换后尊重用户选择；触控长按 450ms 打开同一
+菜单，移动超过 8px、滚动或取消会中止，长按后的合成 click 被抑制。缩放、重置、冻结和定位当前
+节点均可仅用键盘完成，冻结固定完整拓扑快照；实时刷新保留仍存在对象的焦点，对象消失时转移到
+自身或回退对象。搜索框通过 `aria-controls` 关联列表，筛选结果为 live region；节点无障碍名称包含
+名称、健康、能力、网络角色和连接摘要，`prefers-reduced-motion: reduce` 禁用拓扑动效。
+
+`topology-view.test.tsx`（15 tests）覆盖键盘移动/打开/选择、菜单、实时刷新焦点、窄屏默认列表、
+触控长按取消和冻结布局；新增 `topology-keyboard-e2e.mjs` 在真实 Chrome 中完成 10 项无鼠标检查，
+覆盖纯 Tab/Enter 导航、ARIA 摘要、减少动效、全部键盘控件、图/列表菜单、窄屏、搜索、列表键盘
+导航和真实触摸长按，报告写入 `target/topology-keyboard-e2e/report.json`。
+
+**验证通过**：WebUI `npm test -- --run`（15 files，181 passed）、`npm run typecheck`、
+`npm run lint`、`npm run build`、`node webui/scripts/topology-keyboard-e2e.mjs --skip-build`
+（10 checks passed）、`node scripts/test_webui_accessibility.mjs`、
+`cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
 ### W9-08 1,000 节点/5,000 连接性能 `[ ]`
 

@@ -1,6 +1,14 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
@@ -146,10 +154,27 @@ function topologySnapshot(): TopologySnapshot {
 
 beforeEach(() => {
   installTestI18nRuntime();
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 120,
+    bottom: 120,
+    width: 120,
+    height: 120,
+    toJSON: () => ({}),
+  });
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("TopologyView visual encodings", () => {
@@ -339,6 +364,275 @@ describe("TopologyView visual encodings", () => {
       />,
     );
     expect(screen.getByText(translated("topology.empty.no_networks"))).toBeInTheDocument();
+  });
+});
+
+describe("Topology keyboard, touch and accessibility behavior", () => {
+  it("navigates graph nodes and opens the action menu without a mouse", async () => {
+    const user = userEvent.setup();
+    const onOpenNode = vi.fn();
+    const onToggleNode = vi.fn();
+    const { container } = render(
+      <TopologyView
+        topology={topologySnapshot()}
+        locale="zh-CN"
+        onOpenNode={onOpenNode}
+        onToggleNode={onToggleNode}
+      />,
+    );
+    const self = container.querySelector(
+      '[data-node-id="node-self"]',
+    ) as SVGGElement;
+    const shared = container.querySelector(
+      '[data-node-id="node-shared"]',
+    ) as SVGGElement;
+
+    self.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(shared).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onOpenNode).toHaveBeenCalledWith("node-shared");
+    await user.keyboard(" ");
+    expect(onToggleNode).toHaveBeenCalledWith("node-shared");
+
+    await user.keyboard("{Shift>}{F10}{/Shift}");
+    const menu = await screen.findByRole("menu");
+    const openAction = within(menu).getByRole("menuitem", {
+      name: translated("topology.menu.open"),
+    });
+    await waitFor(() => expect(openAction).toHaveFocus());
+    const selectAction = within(menu).getByRole("menuitem", {
+      name: translated("topology.menu.select"),
+    });
+    await user.keyboard("{ArrowDown}");
+    expect(selectAction).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(openAction).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(selectAction).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(selectAction).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(openAction).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(shared).toHaveFocus());
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("uses the list by default on a narrow viewport and supports row navigation", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query === "(max-width: 600px)",
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const user = userEvent.setup();
+    const onOpenNode = vi.fn();
+    const { container } = render(
+      <TopologyView
+        topology={topologySnapshot()}
+        locale="zh-CN"
+        onOpenNode={onOpenNode}
+      />,
+    );
+
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-view",
+      "list",
+    );
+    const firstRow = container.querySelector(
+      'tr[data-node-id="node-self"]',
+    ) as HTMLTableRowElement;
+    firstRow.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).not.toBe(firstRow);
+    await user.keyboard("{Enter}");
+    expect(onOpenNode).toHaveBeenCalled();
+  });
+
+  it("opens the equivalent context menu after a touch long press and cancels on movement", async () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const self = container.querySelector(
+      '[data-node-id="node-self"]',
+    ) as SVGGElement;
+
+    fireEvent.pointerDown(self, {
+      pointerType: "touch",
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    });
+    const menu = await screen.findByRole("menu");
+    await waitFor(() =>
+      expect(
+        within(menu).getByRole("menuitem", {
+          name: translated("topology.menu.open"),
+        }),
+      ).toHaveFocus(),
+    );
+    fireEvent.pointerUp(self);
+    fireEvent.click(self);
+    expect(menu).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+    const shared = container.querySelector(
+      '[data-node-id="node-shared"]',
+    ) as SVGGElement;
+    fireEvent.pointerDown(shared, {
+      pointerType: "touch",
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    fireEvent.pointerMove(shared, {
+      pointerType: "touch",
+      clientX: 40,
+      clientY: 20,
+    });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("supports keyboard zoom, reset, locate and freeze without moving the frozen layout", async () => {
+    const user = userEvent.setup();
+    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
+    const first = topologySnapshot();
+    const { container, rerender } = render(
+      <TopologyView topology={first} locale="zh-CN" />,
+    );
+    const initialTransform = container
+      .querySelector('[data-node-id="node-self"]')
+      ?.getAttribute("transform");
+
+    await user.click(
+      screen.getByRole("button", { name: translated("topology.zoom.in") }),
+    );
+    expect(container.querySelector(".topology-canvas svg")).toHaveAttribute(
+      "data-zoom",
+      "1.25",
+    );
+    await user.click(
+      screen.getByRole("button", { name: translated("topology.zoom.reset") }),
+    );
+    expect(container.querySelector(".topology-canvas svg")).toHaveAttribute(
+      "data-zoom",
+      "1",
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: translated("topology.locate.current"),
+      }),
+    );
+    expect(container.querySelector('[data-node-id="node-self"]')).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: translated("topology.freeze.freeze"),
+      }),
+    );
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-frozen",
+      "true",
+    );
+    const next = {
+      ...first,
+      revision: first.revision + 1,
+      nodes: [
+        ...first.nodes,
+        node("node-new", "New Node", "healthy", [
+          { networkId: "net_beta", role: "member" },
+        ]),
+      ],
+    };
+    rerender(<TopologyView topology={next} locale="zh-CN" />);
+    expect(
+      container.querySelector('[data-node-id="node-self"]')?.getAttribute(
+        "transform",
+      ),
+    ).toBe(initialTransform);
+    expect(container.querySelector('[data-node-id="node-new"]')).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: translated("topology.freeze.unfreeze"),
+      }),
+    );
+    expect(container.querySelector('[data-node-id="node-new"]')).toBeInTheDocument();
+  });
+
+  it("exposes capabilities, networks and relationship counts in the accessible name", () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const label = container
+      .querySelector('[data-node-id="node-shared"]')
+      ?.getAttribute("aria-label");
+
+    expect(label).toContain(translated("capability.coordinator"));
+    expect(label).toContain(translated("capability.file"));
+    expect(label).toContain("Alpha");
+    expect(label).toContain("Beta");
+    expect(label).toContain(translated("topology.aria.relationships"));
+    expect(label).toContain(translated("topology.connection.active"));
+    expect(label).toContain(translated("topology.connection.idle"));
+  });
+
+  it("keeps focus across live refreshes and moves it to a fallback when the object disappears", async () => {
+    const first = topologySnapshot();
+    const { container, rerender } = render(
+      <TopologyView topology={first} locale="zh-CN" />,
+    );
+    const shared = container.querySelector(
+      '[data-node-id="node-shared"]',
+    ) as SVGGElement;
+    shared.focus();
+
+    rerender(
+      <TopologyView
+        topology={{ ...first, revision: first.revision + 1 }}
+        locale="zh-CN"
+      />,
+    );
+    expect(
+      container.querySelector('[data-node-id="node-shared"]'),
+    ).toHaveFocus();
+
+    rerender(
+      <TopologyView
+        topology={{
+          ...first,
+          revision: first.revision + 2,
+          nodes: first.nodes.filter((item) => item.node_id !== "node-shared"),
+          connections: first.connections.filter(
+            (item) =>
+              item.from !== "node-shared" && item.to !== "node-shared",
+          ),
+        }}
+        locale="zh-CN"
+      />,
+    );
+    await waitFor(() =>
+      expect(container.querySelector('[data-node-id="node-self"]')).toHaveFocus(),
+    );
   });
 });
 

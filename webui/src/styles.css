@@ -1820,6 +1820,61 @@ button:disabled {
   height: 16px;
   accent-color: var(--accent);
 }
+.topology-navigation-controls {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--border);
+}
+.topology-control-button {
+  display: inline-flex;
+  min-width: 34px;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+.topology-control-button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.topology-control-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.topology-control-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+.topology-control-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--warning) 58%, var(--border));
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface-raised));
+  color: var(--warning);
+}
+.topology-control-wide {
+  white-space: nowrap;
+}
+.topology-zoom-status {
+  min-width: 44px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  font-size: var(--font-size-xs);
+}
+.topology-view[data-frozen="true"] .topology-canvas {
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border));
+}
 .topology-canvas {
   position: relative;
   min-height: 380px;
@@ -4941,6 +4996,22 @@ button:disabled {
   }
   .topology-contrast-toggle {
     width: 100%;
+  }
+  .topology-navigation-controls {
+    width: 100%;
+    padding-top: var(--space-2);
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+  .topology-control-button {
+    min-height: 44px;
+  }
+  .topology-zoom-button {
+    min-width: 44px;
+  }
+  .topology-control-wide {
+    flex: 1 1 auto;
   }
   .topology-canvas {
     min-height: 300px;

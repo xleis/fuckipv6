@@ -1,0 +1,1048 @@
+{
+  "schema_version": 1,
+  "locale": "en",
+  "language_preference": "en",
+  "fixture_revision": 1,
+  "scenarios": [
+    {
+      "id": "single-network",
+      "title": "Single network",
+      "expect": {
+        "boundary_ids": [
+          "home"
+        ],
+        "node_ids": [
+          "node-single-self",
+          "node-single-peer"
+        ],
+        "shared_node_ids": [],
+        "health_by_node": {
+          "node-single-self": "healthy",
+          "node-single-peer": "healthy"
+        },
+        "enabled_capabilities_by_node": {
+          "node-single-self": [
+            "relay"
+          ],
+          "node-single-peer": [
+            "exit"
+          ]
+        },
+        "connection_states": [
+          "active"
+        ],
+        "detail_node_id": "node-single-peer",
+        "detail_contains": [
+          "Single Peer",
+          "Member",
+          "Exit",
+          "Healthy",
+          "Active",
+          "Online"
+        ]
+      },
+      "topology": {
+        "revision": 9001,
+        "viewer": "node-single-self",
+        "generated_at_unix_ms": 1700000005000,
+        "truncated": false,
+        "boundaries": [
+          {
+            "network_id": "home",
+            "name": "Home",
+            "member_count": 2,
+            "visible_member_count": 2,
+            "viewer_role": "owner",
+            "capabilities": [
+              "relay"
+            ]
+          }
+        ],
+        "clusters": [],
+        "nodes": [
+          {
+            "node_id": "node-single-self",
+            "display_name": "Single Self",
+            "health": "healthy",
+            "is_self": true,
+            "capabilities": [
+              "relay"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "owner",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-single-peer",
+            "display_name": "Single Peer",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "exit"
+                ]
+              }
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "connection_id": "connection-single",
+            "from": "node-single-self",
+            "to": "node-single-peer",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000004000,
+            "state": "active"
+          }
+        ]
+      }
+    },
+    {
+      "id": "multi-network",
+      "title": "Multiple networks",
+      "expect": {
+        "boundary_ids": [
+          "home",
+          "studio"
+        ],
+        "node_ids": [
+          "node-multi-self",
+          "node-multi-home",
+          "node-multi-studio"
+        ],
+        "shared_node_ids": [
+          "node-multi-self"
+        ],
+        "health_by_node": {
+          "node-multi-self": "healthy",
+          "node-multi-home": "healthy",
+          "node-multi-studio": "healthy"
+        },
+        "enabled_capabilities_by_node": {
+          "node-multi-self": [
+            "relay",
+            "exit"
+          ],
+          "node-multi-home": [
+            "file"
+          ],
+          "node-multi-studio": [
+            "coordinator"
+          ]
+        },
+        "connection_states": [
+          "active",
+          "idle"
+        ],
+        "detail_node_id": "node-multi-self",
+        "detail_contains": [
+          "Multi Self",
+          "Relay, Exit",
+          "Healthy",
+          "Owner",
+          "Active",
+          "Online",
+          "home",
+          "studio"
+        ]
+      },
+      "topology": {
+        "revision": 9002,
+        "viewer": "node-multi-self",
+        "generated_at_unix_ms": 1700000005000,
+        "truncated": false,
+        "boundaries": [
+          {
+            "network_id": "home",
+            "name": "Home",
+            "member_count": 2,
+            "visible_member_count": 2,
+            "viewer_role": "owner",
+            "capabilities": [
+              "relay",
+              "exit"
+            ]
+          },
+          {
+            "network_id": "studio",
+            "name": "Studio",
+            "member_count": 2,
+            "visible_member_count": 2,
+            "viewer_role": "administrator",
+            "capabilities": [
+              "coordinator"
+            ]
+          }
+        ],
+        "clusters": [],
+        "nodes": [
+          {
+            "node_id": "node-multi-self",
+            "display_name": "Multi Self",
+            "health": "healthy",
+            "is_self": true,
+            "capabilities": [
+              "relay",
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "owner",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              },
+              {
+                "network_id": "studio",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "administrator",
+                "status": "active",
+                "capabilities": [
+                  "exit"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-multi-home",
+            "display_name": "Home Peer",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "file"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "file"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-multi-studio",
+            "display_name": "Studio Peer",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "coordinator"
+            ],
+            "networks": [
+              {
+                "network_id": "studio",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "coordinator"
+                ]
+              }
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "connection_id": "connection-multi-home",
+            "from": "node-multi-self",
+            "to": "node-multi-home",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000004000,
+            "state": "active"
+          },
+          {
+            "connection_id": "connection-multi-studio",
+            "from": "node-multi-self",
+            "to": "node-multi-studio",
+            "networks": [
+              "studio"
+            ],
+            "observed_at_unix_ms": 1700000003900,
+            "state": "idle"
+          }
+        ]
+      }
+    },
+    {
+      "id": "public-node",
+      "title": "Cross-network public node",
+      "expect": {
+        "boundary_ids": [
+          "home",
+          "studio"
+        ],
+        "node_ids": [
+          "node-public-self",
+          "node-public-relay",
+          "node-public-home",
+          "node-public-studio"
+        ],
+        "shared_node_ids": [
+          "node-public-relay"
+        ],
+        "health_by_node": {
+          "node-public-self": "healthy",
+          "node-public-relay": "healthy",
+          "node-public-home": "healthy",
+          "node-public-studio": "healthy"
+        },
+        "enabled_capabilities_by_node": {
+          "node-public-self": [
+            "relay"
+          ],
+          "node-public-relay": [
+            "coordinator",
+            "relay",
+            "exit"
+          ],
+          "node-public-home": [
+            "file"
+          ],
+          "node-public-studio": [
+            "exit"
+          ]
+        },
+        "connection_states": [
+          "active",
+          "active",
+          "idle"
+        ],
+        "detail_node_id": "node-public-relay",
+        "detail_contains": [
+          "Public Relay",
+          "Coordinator, Relay, Exit",
+          "Healthy",
+          "Member",
+          "Active",
+          "Online",
+          "home",
+          "studio"
+        ]
+      },
+      "topology": {
+        "revision": 9003,
+        "viewer": "node-public-self",
+        "generated_at_unix_ms": 1700000005000,
+        "truncated": false,
+        "boundaries": [
+          {
+            "network_id": "home",
+            "name": "Home",
+            "member_count": 3,
+            "visible_member_count": 3,
+            "viewer_role": "owner",
+            "capabilities": [
+              "relay"
+            ]
+          },
+          {
+            "network_id": "studio",
+            "name": "Studio",
+            "member_count": 2,
+            "visible_member_count": 2,
+            "viewer_role": "member",
+            "capabilities": [
+              "coordinator",
+              "relay",
+              "exit"
+            ]
+          }
+        ],
+        "clusters": [],
+        "nodes": [
+          {
+            "node_id": "node-public-self",
+            "display_name": "Public Self",
+            "health": "healthy",
+            "is_self": true,
+            "capabilities": [
+              "relay"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "owner",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-public-relay",
+            "display_name": "Public Relay",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "coordinator",
+              "relay",
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              },
+              {
+                "network_id": "studio",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "administrator",
+                "status": "active",
+                "capabilities": [
+                  "coordinator",
+                  "relay",
+                  "exit"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-public-home",
+            "display_name": "Home File Peer",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "file"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "file"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-public-studio",
+            "display_name": "Studio Exit Peer",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "studio",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "exit"
+                ]
+              }
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "connection_id": "connection-public-self-relay",
+            "from": "node-public-self",
+            "to": "node-public-relay",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000004000,
+            "state": "active"
+          },
+          {
+            "connection_id": "connection-public-relay-home",
+            "from": "node-public-relay",
+            "to": "node-public-home",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000003900,
+            "state": "active"
+          },
+          {
+            "connection_id": "connection-public-relay-studio",
+            "from": "node-public-relay",
+            "to": "node-public-studio",
+            "networks": [
+              "studio"
+            ],
+            "observed_at_unix_ms": 1700000003800,
+            "state": "idle"
+          }
+        ]
+      }
+    },
+    {
+      "id": "offline",
+      "title": "Offline node",
+      "expect": {
+        "boundary_ids": [
+          "home"
+        ],
+        "node_ids": [
+          "node-offline-self",
+          "node-offline-peer"
+        ],
+        "shared_node_ids": [],
+        "health_by_node": {
+          "node-offline-self": "healthy",
+          "node-offline-peer": "unreachable"
+        },
+        "enabled_capabilities_by_node": {
+          "node-offline-self": [
+            "relay"
+          ],
+          "node-offline-peer": [
+            "exit"
+          ]
+        },
+        "connection_states": [
+          "stale"
+        ],
+        "detail_node_id": "node-offline-peer",
+        "detail_contains": [
+          "Offline Peer",
+          "Member",
+          "Exit",
+          "Unreachable",
+          "Suspended",
+          "Offline"
+        ]
+      },
+      "topology": {
+        "revision": 9004,
+        "viewer": "node-offline-self",
+        "generated_at_unix_ms": 1700000005000,
+        "truncated": false,
+        "boundaries": [
+          {
+            "network_id": "home",
+            "name": "Home",
+            "member_count": 2,
+            "visible_member_count": 2,
+            "viewer_role": "owner",
+            "capabilities": [
+              "relay"
+            ]
+          }
+        ],
+        "clusters": [],
+        "nodes": [
+          {
+            "node_id": "node-offline-self",
+            "display_name": "Offline Self",
+            "health": "healthy",
+            "is_self": true,
+            "capabilities": [
+              "relay"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "owner",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-offline-peer",
+            "display_name": "Offline Peer",
+            "health": "unreachable",
+            "is_self": false,
+            "capabilities": [
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "unreachable",
+                "presence": {
+                  "state": "offline",
+                  "source": "disconnect_observed",
+                  "observed_at_unix_ms": 1699999990000
+                },
+                "role": "member",
+                "status": "suspended",
+                "capabilities": [
+                  "exit"
+                ]
+              }
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "connection_id": "connection-offline",
+            "from": "node-offline-self",
+            "to": "node-offline-peer",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1699999990000,
+            "state": "stale"
+          }
+        ]
+      }
+    },
+    {
+      "id": "degraded",
+      "title": "Degraded node",
+      "expect": {
+        "boundary_ids": [
+          "home"
+        ],
+        "node_ids": [
+          "node-degraded-self",
+          "node-degraded-peer"
+        ],
+        "shared_node_ids": [],
+        "health_by_node": {
+          "node-degraded-self": "healthy",
+          "node-degraded-peer": "degraded"
+        },
+        "enabled_capabilities_by_node": {
+          "node-degraded-self": [
+            "relay"
+          ],
+          "node-degraded-peer": [
+            "exit"
+          ]
+        },
+        "connection_states": [
+          "idle"
+        ],
+        "detail_node_id": "node-degraded-peer",
+        "detail_contains": [
+          "Degraded Peer",
+          "Member",
+          "Exit",
+          "Degraded",
+          "Online"
+        ]
+      },
+      "topology": {
+        "revision": 9005,
+        "viewer": "node-degraded-self",
+        "generated_at_unix_ms": 1700000005000,
+        "truncated": false,
+        "boundaries": [
+          {
+            "network_id": "home",
+            "name": "Home",
+            "member_count": 2,
+            "visible_member_count": 2,
+            "viewer_role": "owner",
+            "capabilities": [
+              "relay"
+            ]
+          }
+        ],
+        "clusters": [],
+        "nodes": [
+          {
+            "node_id": "node-degraded-self",
+            "display_name": "Degraded Self",
+            "health": "healthy",
+            "is_self": true,
+            "capabilities": [
+              "relay"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "owner",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-degraded-peer",
+            "display_name": "Degraded Peer",
+            "health": "degraded",
+            "is_self": false,
+            "capabilities": [
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "degraded",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "degraded",
+                "capabilities": [
+                  "exit"
+                ]
+              }
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "connection_id": "connection-degraded",
+            "from": "node-degraded-self",
+            "to": "node-degraded-peer",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000003500,
+            "state": "idle"
+          }
+        ]
+      }
+    },
+    {
+      "id": "capability-mixed",
+      "title": "Mixed capabilities",
+      "expect": {
+        "boundary_ids": [
+          "home"
+        ],
+        "node_ids": [
+          "node-cap-self",
+          "node-cap-relay",
+          "node-cap-exit",
+          "node-cap-file",
+          "node-cap-none"
+        ],
+        "shared_node_ids": [],
+        "health_by_node": {
+          "node-cap-self": "healthy",
+          "node-cap-relay": "healthy",
+          "node-cap-exit": "healthy",
+          "node-cap-file": "healthy",
+          "node-cap-none": "healthy"
+        },
+        "enabled_capabilities_by_node": {
+          "node-cap-self": [
+            "coordinator",
+            "relay"
+          ],
+          "node-cap-relay": [
+            "relay"
+          ],
+          "node-cap-exit": [
+            "exit"
+          ],
+          "node-cap-file": [
+            "file"
+          ],
+          "node-cap-none": []
+        },
+        "connection_states": [
+          "active",
+          "active",
+          "active",
+          "active"
+        ],
+        "detail_node_id": "node-cap-file",
+        "detail_contains": [
+          "File Only",
+          "Member",
+          "File",
+          "Healthy",
+          "Active",
+          "Online"
+        ]
+      },
+      "topology": {
+        "revision": 9006,
+        "viewer": "node-cap-self",
+        "generated_at_unix_ms": 1700000005000,
+        "truncated": false,
+        "boundaries": [
+          {
+            "network_id": "home",
+            "name": "Capability Lab",
+            "member_count": 5,
+            "visible_member_count": 5,
+            "viewer_role": "owner",
+            "capabilities": [
+              "coordinator",
+              "relay",
+              "exit",
+              "file"
+            ]
+          }
+        ],
+        "clusters": [],
+        "nodes": [
+          {
+            "node_id": "node-cap-self",
+            "display_name": "Capability Self",
+            "health": "healthy",
+            "is_self": true,
+            "capabilities": [
+              "coordinator",
+              "relay"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "owner",
+                "status": "active",
+                "capabilities": [
+                  "coordinator",
+                  "relay"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-cap-relay",
+            "display_name": "Relay Only",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "relay"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "relay"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-cap-exit",
+            "display_name": "Exit Only",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "exit"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "exit"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-cap-file",
+            "display_name": "File Only",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [
+              "file"
+            ],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": [
+                  "file"
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "node-cap-none",
+            "display_name": "No Capabilities",
+            "health": "healthy",
+            "is_self": false,
+            "capabilities": [],
+            "networks": [
+              {
+                "network_id": "home",
+                "health": "healthy",
+                "presence": {
+                  "state": "online",
+                  "source": "live_session",
+                  "observed_at_unix_ms": 1700000000000
+                },
+                "role": "member",
+                "status": "active",
+                "capabilities": []
+              }
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "connection_id": "connection-cap-relay",
+            "from": "node-cap-self",
+            "to": "node-cap-relay",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000004000,
+            "state": "active"
+          },
+          {
+            "connection_id": "connection-cap-exit",
+            "from": "node-cap-self",
+            "to": "node-cap-exit",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000003900,
+            "state": "active"
+          },
+          {
+            "connection_id": "connection-cap-file",
+            "from": "node-cap-self",
+            "to": "node-cap-file",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000003800,
+            "state": "active"
+          },
+          {
+            "connection_id": "connection-cap-none",
+            "from": "node-cap-self",
+            "to": "node-cap-none",
+            "networks": [
+              "home"
+            ],
+            "observed_at_unix_ms": 1700000003700,
+            "state": "active"
+          }
+        ]
+      }
+    }
+  ]
+}

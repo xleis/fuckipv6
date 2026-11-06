@@ -10,7 +10,8 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest",
     "visual:snapshot": "node scripts/visual-snapshot.mjs",
-    "visual:regression": "node scripts/visual-regression.mjs"
+    "visual:regression": "node scripts/visual-regression.mjs",
+    "visual:topology-baseline": "node scripts/topology-visual-baseline.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.16",

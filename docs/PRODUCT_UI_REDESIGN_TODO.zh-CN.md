@@ -1753,7 +1753,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 ### W9-09 拓扑状态与视觉回归 `[ ]`
 
 - [x] 加载、部分数据、陈旧、空、错误、无权限状态完整；
-- [ ] 单网络、多网络、公共节点、离线、降级、能力混合场景有基线；
+- [x] 单网络、多网络、公共节点、离线、降级、能力混合场景有基线；
 - [ ] GPUI 与 WebUI 使用同一对象详情、菜单和状态；
 - [ ] 同尺寸/DPR/字体下视觉回归；
 - [ ] 选择、悬停和菜单状态可对比；
@@ -1773,6 +1773,30 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 **验证通过**：WebUI `npm test -- --run`（18 files，194 passed）、`npm run typecheck`、
 `npm run lint`、`node scripts/test_i18n_runtime.mjs`、
 `cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
+
+**证据（2026-11-06，场景基线）**：`contracts/typescript/fixtures/topology-presentation-scenarios.json`
+提供单网络、多网络、跨网络公共节点、离线、降级和能力混合六个独立权威拓扑快照，fixture SHA-256 为
+`756f7ea4fdc9a4b6e7a996a30462fff3ef118db699cd6ef726014b79957beb47`。这些是可重复测试夹具，
+不冒充生产运行数据。`webui/scripts/topology-visual-baseline.mjs` 启动真实 Chrome/CDP 和产品 WebUI，
+由 fixture 服务端在 `/api/v1/snapshot` 返回对应 `snapshot.topology`，不从浏览器注入假节点；逐场景校验
+边界、节点顺序、健康、能力环、共享节点标记、连接状态、ready 状态和节点详情文本。
+
+固定环境为 1440×900 viewport、DPR 2、Inter、`en-US`、UTC、减少动效；截图均为 2880×1800，
+运行环境为 Chrome `157.0.8103.38`、Node `v26.13.0`、Linux x86_64。使用
+`cd webui && npm run visual:topology-baseline` 完成构建并通过 6 个场景；不跳过构建的最终运行和
+提交前连续 5 次运行结果一致。截图 SHA-256 分别为：single-network
+`4dba5bec6825e0a778acc6c68958e51c08931e49b6971ffc722ef1c285b7cc7f`、multi-network
+`6dbf043970c912db24a78d2d25a978f0bcd1e545e2dacfc20ff5050e6d9c7587`、public-node
+`68dff66426ea2ff97976a93ecc1dfb969ec3fad3ca0c69082a7451a986f2e6e1`、offline
+`543a3672f2382e24ad5f127a819f0a717dbf9e291d8b46e28114a4f84da54a5f`、degraded
+`04ee4853faa3859649fe70c9cf4889e99bcdb087a08c76a0dba941f97c0c99e8`、capability-mixed
+`4bb71067f298f54f76aadbb2edad64ccd6d710ec641cb69d122d132b40715701`。人工审查拼图确认公共节点
+共享计数、不可达节点、降级警告、能力环和连接虚线均实际可见。
+
+**验证通过**：WebUI `npm test -- --run`（18 files，194 passed）、`npm run typecheck`、
+`npm run lint`、`npm run visual:topology-baseline`（6 scenarios）、
+`node scripts/test_i18n_runtime.mjs`、`cargo test -p fuckipv6-common --all-features i18n`
+（9 passed）和 `git diff --check`。
 
 ### W9-10 拓扑与成员 E2E `[ ]`
 

@@ -1756,7 +1756,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 - [x] 单网络、多网络、公共节点、离线、降级、能力混合场景有基线；
 - [x] GPUI 与 WebUI 使用同一对象详情、菜单和状态；
 - [x] 同尺寸/DPR/字体下视觉回归；
-- [ ] 选择、悬停和菜单状态可对比；
+- [x] 选择、悬停和菜单状态可对比；
 - [ ] 布局重置和持久化行为一致；
 - [ ] 禁止拓扑展示假节点或静态连接；
 - [ ] 证据包含筛选、选择和动作结果。
@@ -1805,6 +1805,16 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 `04ee4853faa3859649fe70c9cf4889e99bcdb087a08c76a0dba941f97c0c99e8`、capability-mixed
 `4bb71067f298f54f76aadbb2edad64ccd6d710ec641cb69d122d132b40715701`。人工审查拼图确认公共节点
 共享计数、不可达节点、降级警告、能力环和连接虚线均实际可见。
+
+**证据（2026-11-06，交互状态基线）**：同一视觉基线脚本通过 CDP `Input.dispatchMouseEvent`
+发送真实指针事件，分别移动到 `Studio Peer` 生成悬停卡、Shift+单击生成批量选择栏、右键打开对象菜单；
+截图前不使用 DOM 注入或直接修改 React 状态。脚本逐项校验悬停卡的成员角色/能力/健康/presence、选择
+节点 ID 与选择栏文案、对象菜单标题/NodeId/菜单项及服务端无动作时的禁用说明。三种状态均为
+2880×1800，连续 5 次运行哈希稳定：悬停
+`f18326db7d5a044503a2e810f2812c3144477c292adc2d7b5bb9996015347a9b`、选择
+`afc9fe572d0a7d1c89435212f9f6c3e31f19b427c96d2b8d30a842fd6cab9b8a`、菜单
+`1046faafcdda8b6749b10fb54e0950642aee23d74dbe9641eca3ac1f57808ba4`。人工审查截图确认
+悬停卡未遮挡关键节点、选择栏完整可见、右键菜单无截断且禁用动作有明确说明。
 
 **验证通过**：WebUI `npm test -- --run`（18 files，194 passed）、`npm run typecheck`、
 `npm run lint`、`npm run visual:topology-baseline`（6 scenarios）、

@@ -27,6 +27,8 @@ const FIXED_SERVER_TIME = "2026-01-01T00:00:05Z";
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const HEALTH_VALUES = ["healthy", "unknown", "degraded", "unreachable"];
 const CAPABILITY_ORDER = ["coordinator", "relay", "exit", "file"];
+const INTERACTION_SCENARIO_ID = "multi-network";
+const INTERACTION_NODE_ID = "node-multi-studio";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -510,6 +512,83 @@ async function waitForReady(session, timeoutMs = 20_000) {
   await sleep(250);
 }
 
+async function nodeCenter(session, nodeId) {
+  return evaluate(
+    session,
+    `(() => {
+      const node = document.querySelector('g.topology-node[data-node-id=${JSON.stringify(nodeId)}]');
+      if (!node) throw new Error("interaction target is missing from the graph");
+      const rect = node.getBoundingClientRect();
+      const point = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      const hit = document.elementFromPoint(point.x, point.y)?.closest("g.topology-node");
+      if (hit?.getAttribute("data-node-id") !== ${JSON.stringify(nodeId)}) {
+        throw new Error("interaction target center is occluded by another node");
+      }
+      return point;
+    })()`,
+  );
+}
+
+async function dispatchMouse(session, type, x, y, options = {}) {
+  await session.send("Input.dispatchMouseEvent", {
+    type,
+    x,
+    y,
+    ...options,
+  });
+}
+
+async function movePointerAway(session) {
+  await dispatchMouse(session, "mouseMoved", VIEWPORT.width / 2, 16, {
+    button: "none",
+    buttons: 0,
+  });
+  await waitFor(
+    session,
+    `!document.querySelector('[data-testid="topology-node-hover"]')`,
+    "topology hover to clear",
+    5_000,
+  );
+}
+
+async function shiftClick(session, point) {
+  const modifiers = 8;
+  await dispatchMouse(session, "mouseMoved", point.x, point.y, {
+    button: "none",
+    buttons: 0,
+    modifiers,
+  });
+  await dispatchMouse(session, "mousePressed", point.x, point.y, {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    modifiers,
+  });
+  await dispatchMouse(session, "mouseReleased", point.x, point.y, {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    modifiers,
+  });
+}
+
+async function rightClick(session, point) {
+  await dispatchMouse(session, "mouseMoved", point.x, point.y, {
+    button: "none",
+    buttons: 0,
+  });
+  await dispatchMouse(session, "mousePressed", point.x, point.y, {
+    button: "right",
+    buttons: 2,
+    clickCount: 1,
+  });
+  await dispatchMouse(session, "mouseReleased", point.x, point.y, {
+    button: "right",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
 async function navigateToTopology(session, nodeCount) {
   await waitFor(
     session,
@@ -659,6 +738,111 @@ function detailEvidence(session, nodeId) {
   );
 }
 
+function interactionSemantics(session) {
+  return evaluate(
+    session,
+    `(() => {
+      const text = (element) => element?.textContent?.replace(/\\s+/g, " ").trim() ?? "";
+      const rect = (element) => {
+        if (!element) return null;
+        const bounds = element.getBoundingClientRect();
+        return {
+          x: Number(bounds.x.toFixed(4)),
+          y: Number(bounds.y.toFixed(4)),
+          width: Number(bounds.width.toFixed(4)),
+          height: Number(bounds.height.toFixed(4)),
+        };
+      };
+      const hoverElement = document.querySelector('[data-testid="topology-node-hover"]');
+      const menuElement = document.querySelector('[data-testid="topology-node-menu"]');
+      const selectionBar = document.querySelector(".topology-selection-bar");
+      return {
+        hover: hoverElement ? {
+          heading: text(hoverElement.querySelector(".topology-node-hover-heading strong")),
+          health: text(hoverElement.querySelector(".topology-node-hover-heading .status-pill")),
+          fields: [...hoverElement.querySelectorAll("dl > div")].map((field) => ({
+            label: text(field.querySelector("dt")),
+            value: text(field.querySelector("dd")),
+          })),
+          hint: text(hoverElement.querySelector("p")),
+          rect: rect(hoverElement),
+        } : null,
+        menu: menuElement ? {
+          label: menuElement.getAttribute("aria-label"),
+          heading: text(menuElement.querySelector(".topology-node-menu-heading strong")),
+          node_id: text(menuElement.querySelector(".topology-node-menu-heading code")),
+          items: [...menuElement.querySelectorAll('[role="menuitem"]')].map((item) => ({
+            text: text(item),
+            disabled: item.getAttribute("aria-disabled") === "true",
+          })),
+          rect: rect(menuElement),
+        } : null,
+        selection: {
+          selected_ids: [...document.querySelectorAll('g.topology-node[data-selected="true"]')]
+            .map((node) => node.getAttribute("data-node-id")),
+          bar: selectionBar ? {
+            text: text(selectionBar),
+            rect: rect(selectionBar),
+          } : null,
+          notice: text(document.querySelector(".topology-selection-notice")),
+        },
+        viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+      };
+    })()`,
+  );
+}
+
+function assertInteractionSemantics(state, semantics) {
+  assert.equal(semantics.viewport.width, VIEWPORT.width, `${state} viewport width`);
+  assert.equal(semantics.viewport.height, VIEWPORT.height, `${state} viewport height`);
+  assert.equal(
+    semantics.viewport.devicePixelRatio,
+    VIEWPORT.deviceScaleFactor,
+    `${state} device pixel ratio`,
+  );
+  if (state === "hover") {
+    assert.ok(semantics.hover, "hover state must render the hover card");
+    assert.equal(semantics.hover.heading, "Studio Peer");
+    assert.equal(semantics.hover.health, "Healthy");
+    assert.deepEqual(
+      semantics.hover.fields,
+      [
+        { label: "Role", value: "Member" },
+        { label: "Capabilities", value: "Coordinator" },
+        { label: "Health", value: "Healthy · Online" },
+      ],
+    );
+    assert.match(semantics.hover.hint, /Shift\+F10/);
+    assert.equal(semantics.menu, null);
+    assert.deepEqual(semantics.selection.selected_ids, []);
+    return;
+  }
+  if (state === "selected") {
+    assert.equal(semantics.hover, null);
+    assert.equal(semantics.menu, null);
+    assert.deepEqual(semantics.selection.selected_ids, [INTERACTION_NODE_ID]);
+    assert.match(semantics.selection.bar?.text ?? "", /1 nodes selected/);
+    assert.match(semantics.selection.bar?.text ?? "", /Shift-click to add more nodes/);
+    assert.equal(semantics.selection.notice, "");
+    return;
+  }
+  if (state === "menu") {
+    assert.equal(semantics.hover, null);
+    assert.ok(semantics.menu, "menu state must render the object menu");
+    assert.match(semantics.menu.label ?? "", /Studio Peer/);
+    assert.equal(semantics.menu.heading, "Studio Peer");
+    assert.equal(semantics.menu.node_id, INTERACTION_NODE_ID);
+    assert.deepEqual(semantics.menu.items, [
+      { text: "Open node details", disabled: false },
+      { text: "Add to batch selection", disabled: false },
+      { text: "The server exposes no actions for this object", disabled: true },
+    ]);
+    assert.deepEqual(semantics.selection.selected_ids, []);
+    return;
+  }
+  throw new Error(`unexpected interaction state: ${state}`);
+}
+
 function assertScenarioSemantics(scenario, semantics) {
   const topology = scenario.topology;
   const expectedBoundaryNames = topology.boundaries.map((boundary) => boundary.name);
@@ -773,6 +957,7 @@ async function main() {
       font_family: "Inter",
     },
     scenarios: [],
+    interactions: [],
   };
 
   const workspace = await mkdtemp(join(tmpdir(), "fuckipv6-topology-baseline-"));
@@ -929,12 +1114,89 @@ async function main() {
       );
     }
 
+    const interactionScenario = scenarioDocument.scenarios.find(
+      (scenario) => scenario.id === INTERACTION_SCENARIO_ID,
+    );
+    assert.ok(interactionScenario, "interaction scenario must exist");
+    for (const state of ["hover", "selected", "menu"]) {
+      await loadScenario(interactionScenario);
+      const point = await nodeCenter(cdp, INTERACTION_NODE_ID);
+      if (state === "hover") {
+        await dispatchMouse(cdp, "mouseMoved", point.x, point.y, {
+          button: "none",
+          buttons: 0,
+        });
+        await waitFor(
+          cdp,
+          `Boolean(document.querySelector('[data-testid="topology-node-hover"]'))`,
+          "topology hover card",
+          5_000,
+        );
+      } else if (state === "selected") {
+        await shiftClick(cdp, point);
+        await waitFor(
+          cdp,
+          `document.querySelector('g.topology-node[data-node-id=${JSON.stringify(INTERACTION_NODE_ID)}]')?.getAttribute("data-selected") === "true"`,
+          "topology node selection",
+          5_000,
+        );
+        await movePointerAway(cdp);
+      } else {
+        await rightClick(cdp, point);
+        await waitFor(
+          cdp,
+          `Boolean(document.querySelector('[data-testid="topology-node-menu"]'))`,
+          "topology object menu",
+          5_000,
+        );
+      }
+      await sleep(150);
+      const semantics = await interactionSemantics(cdp);
+      assertInteractionSemantics(state, semantics);
+      const screenshot = await cdp.send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      const image = Buffer.from(screenshot.data, "base64");
+      const dimensions = pngDimensions(image);
+      assert.equal(dimensions.width, VIEWPORT.width * VIEWPORT.deviceScaleFactor);
+      assert.equal(dimensions.height, VIEWPORT.height * VIEWPORT.deviceScaleFactor);
+      const name = `${INTERACTION_SCENARIO_ID}-${state}`;
+      const imageName = `${name}.png`;
+      const metadataName = `${name}.json`;
+      const imageSha256 = sha256(image);
+      const interactionReport = {
+        scenario_id: INTERACTION_SCENARIO_ID,
+        node_id: INTERACTION_NODE_ID,
+        state,
+        topology_revision: interactionScenario.topology.revision,
+        topology_sha256: sha256(JSON.stringify(interactionScenario.topology)),
+        image: {
+          path: imageName,
+          dimensions,
+          sha256: imageSha256,
+        },
+        semantics,
+      };
+      await writeFile(join(OUTPUT_ROOT, imageName), image);
+      await writeFile(
+        join(OUTPUT_ROOT, metadataName),
+        `${JSON.stringify(interactionReport, null, 2)}\n`,
+      );
+      report.interactions.push(interactionReport);
+      process.stdout.write(
+        `${name}: ${dimensions.width}x${dimensions.height} ${imageSha256}\n`,
+      );
+    }
+
     await writeFile(
       join(OUTPUT_ROOT, "manifest.json"),
       `${JSON.stringify(report, null, 2)}\n`,
     );
     process.stdout.write(
-      `topology visual baseline passed (${report.scenarios.length} scenarios)\n` +
+      `topology visual baseline passed (${report.scenarios.length} scenarios, ` +
+        `${report.interactions.length} interaction states)\n` +
         `${join(OUTPUT_ROOT, "manifest.json")}\n`,
     );
   } catch (error) {

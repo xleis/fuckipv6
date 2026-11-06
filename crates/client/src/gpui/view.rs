@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -12606,6 +12606,174 @@ mod tests {
         snapshot: NodeSnapshot,
     }
 
+    const TOPOLOGY_SCENARIO_FIXTURE: &str = include_str!(
+        "../../../../contracts/typescript/fixtures/topology-presentation-scenarios.json"
+    );
+
+    #[derive(serde::Deserialize)]
+    struct TopologyScenarioDocument {
+        schema_version: u32,
+        fixture_revision: u32,
+        scenarios: Vec<TopologyScenarioFixture>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologyScenarioFixture {
+        id: String,
+        title: String,
+        expect: TopologyScenarioExpectation,
+        topology: TopologySnapshotFixture,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologyScenarioExpectation {
+        boundary_ids: Vec<String>,
+        node_ids: Vec<String>,
+        shared_node_ids: Vec<String>,
+        health_by_node: BTreeMap<String, TopologyNodeHealth>,
+        enabled_capabilities_by_node: BTreeMap<String, Vec<CapabilityKind>>,
+        connection_states: Vec<TopologyConnectionState>,
+        detail_node_id: String,
+        detail_contains: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologySnapshotFixture {
+        revision: u64,
+        viewer: String,
+        generated_at_unix_ms: u64,
+        truncated: bool,
+        boundaries: Vec<TopologyBoundaryFixture>,
+        nodes: Vec<TopologyNodeFixture>,
+        connections: Vec<TopologyConnectionFixture>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologyBoundaryFixture {
+        network_id: String,
+        name: String,
+        member_count: u32,
+        visible_member_count: u32,
+        viewer_role: Option<MembershipRole>,
+        #[serde(default)]
+        capabilities: Vec<CapabilityKind>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologyNodeFixture {
+        node_id: String,
+        display_name: Option<String>,
+        is_self: bool,
+        health: TopologyNodeHealth,
+        #[serde(default)]
+        capabilities: Vec<CapabilityKind>,
+        networks: Vec<TopologyNodeNetworkFixture>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologyNodeNetworkFixture {
+        network_id: String,
+        health: TopologyNodeHealth,
+        presence: NetworkMemberPresence,
+        role: MembershipRole,
+        status: NetworkMemberStatus,
+        #[serde(default)]
+        capabilities: Vec<CapabilityKind>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TopologyConnectionFixture {
+        connection_id: String,
+        from: String,
+        to: String,
+        #[serde(default)]
+        networks: Vec<String>,
+        observed_at_unix_ms: Option<u64>,
+        state: TopologyConnectionState,
+    }
+
+    fn topology_scenario_document() -> TopologyScenarioDocument {
+        let document: TopologyScenarioDocument = serde_json::from_str(TOPOLOGY_SCENARIO_FIXTURE)
+            .expect("parse shared topology presentation fixture");
+        assert_eq!(document.schema_version, 1);
+        assert!(document.fixture_revision > 0);
+        assert_eq!(document.scenarios.len(), 6);
+        document
+    }
+
+    fn fixture_network_id(slug: &str) -> NetworkId {
+        NetworkId::from_public_key(format!("topology-fixture-network:{slug}").as_bytes())
+    }
+
+    fn fixture_node_id(slug: &str) -> NodeId {
+        NodeId::from_public_key(format!("topology-fixture-node:{slug}").as_bytes())
+    }
+
+    impl TopologySnapshotFixture {
+        fn to_snapshot(&self) -> TopologySnapshot {
+            TopologySnapshot {
+                revision: self.revision,
+                generated_at_unix_ms: self.generated_at_unix_ms,
+                viewer: fixture_node_id(&self.viewer),
+                truncated: self.truncated,
+                boundaries: self
+                    .boundaries
+                    .iter()
+                    .map(|boundary| TopologyBoundary {
+                        network_id: fixture_network_id(&boundary.network_id),
+                        name: boundary.name.clone(),
+                        member_count: boundary.member_count,
+                        visible_member_count: boundary.visible_member_count,
+                        viewer_role: boundary.viewer_role,
+                        capabilities: boundary.capabilities.clone(),
+                    })
+                    .collect(),
+                nodes: self
+                    .nodes
+                    .iter()
+                    .map(|node| TopologyNode {
+                        node_id: fixture_node_id(&node.node_id),
+                        display_name: node.display_name.clone(),
+                        is_self: node.is_self,
+                        health: node.health,
+                        capabilities: node.capabilities.clone(),
+                        networks: node
+                            .networks
+                            .iter()
+                            .map(|network| TopologyNodeNetwork {
+                                network_id: fixture_network_id(&network.network_id),
+                                role: network.role,
+                                status: network.status,
+                                presence: network.presence.clone(),
+                                health: network.health,
+                                capabilities: network.capabilities.clone(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                connections: self
+                    .connections
+                    .iter()
+                    .map(|connection| TopologyConnection {
+                        connection_id: fuckipv6_common::domain::ContentHash::from_bytes(
+                            connection.connection_id.as_bytes(),
+                        ),
+                        from: fixture_node_id(&connection.from),
+                        to: fixture_node_id(&connection.to),
+                        networks: connection
+                            .networks
+                            .iter()
+                            .map(|network_id| fixture_network_id(network_id))
+                            .collect(),
+                        state: connection.state,
+                        observed_at_unix_ms: connection.observed_at_unix_ms,
+                    })
+                    .collect(),
+                clusters: Vec::new(),
+            }
+        }
+    }
+
     struct DiscoveryRecordFixture<'a> {
         name: &'a str,
         visibility: NetworkVisibility,
@@ -12865,7 +13033,6 @@ mod tests {
         snapshot: NodeSnapshot,
         network_id: NetworkId,
         relay_id: NodeId,
-        viewer_id: NodeId,
         directory: NetworkMemberDirectory,
     }
 
@@ -12990,7 +13157,6 @@ mod tests {
             },
             network_id,
             relay_id,
-            viewer_id,
             directory,
         }
     }
@@ -13025,6 +13191,87 @@ mod tests {
         shell.topology_directory_error = None;
         shell.topology_directory_request = None;
         cx.notify();
+    }
+
+    fn install_shared_topology_snapshot(
+        shell: &mut GpuiShell,
+        topology: &TopologySnapshot,
+        cx: &mut Context<GpuiShell>,
+    ) {
+        shell.manifest = Some(crate::node::node_ui_manifest());
+        shell.locale = Locale::En;
+        shell.selected_page = "topology".into();
+        shell.error = None;
+        shell.notice = None;
+        shell.apply_snapshot(
+            NodeSnapshot {
+                revision: topology.revision,
+                permissions: NodePermissionSnapshot {
+                    permissions: NodePermission::ALL.to_vec(),
+                    ..Default::default()
+                },
+                topology: Some(topology.clone()),
+                ..Default::default()
+            },
+            cx,
+        );
+        let boundary = topology
+            .boundaries
+            .first()
+            .expect("shared topology scenario boundary")
+            .clone();
+        shell.topology_directory_ready = Some(TopologyDirectoryReady {
+            directory: NetworkMemberDirectory {
+                network_id: boundary.network_id.clone(),
+                generated_at_unix_ms: topology.generated_at_unix_ms,
+                viewer_role: boundary.viewer_role.unwrap_or(MembershipRole::Member),
+                can_manage_members: false,
+                members: Vec::new(),
+            },
+            network_id: boundary.network_id.clone(),
+            boundary,
+            topology_revision: topology.revision,
+            generation: shell.topology_directory_generation,
+        });
+        shell.topology_directory_error = None;
+        shell.topology_directory_request = None;
+        cx.notify();
+    }
+
+    fn topology_node_selector(index: usize) -> &'static str {
+        match index {
+            0 => "visual-topology-node-0",
+            1 => "visual-topology-node-1",
+            2 => "visual-topology-node-2",
+            3 => "visual-topology-node-3",
+            4 => "visual-topology-node-4",
+            5 => "visual-topology-node-5",
+            _ => panic!("unexpected topology node index {index}"),
+        }
+    }
+
+    fn topology_open_selector(index: usize) -> &'static str {
+        match index {
+            0 => "visual-topology-open-0",
+            1 => "visual-topology-open-1",
+            2 => "visual-topology-open-2",
+            3 => "visual-topology-open-3",
+            4 => "visual-topology-open-4",
+            5 => "visual-topology-open-5",
+            _ => panic!("unexpected topology node index {index}"),
+        }
+    }
+
+    fn topology_connection_selector(index: usize) -> &'static str {
+        match index {
+            0 => "visual-topology-connection-0",
+            1 => "visual-topology-connection-1",
+            2 => "visual-topology-connection-2",
+            3 => "visual-topology-connection-3",
+            4 => "visual-topology-connection-4",
+            5 => "visual-topology-connection-5",
+            _ => panic!("unexpected topology connection index {index}"),
+        }
     }
 
     #[gpui::test]
@@ -13085,6 +13332,234 @@ mod tests {
                 );
             })
             .expect("verify menu state");
+    }
+
+    #[gpui::test]
+    fn topology_shared_scenarios_render_only_authoritative_objects(cx: &mut TestAppContext) {
+        let document = topology_scenario_document();
+        let window = open_shell_window(cx, 1200.0, 1800.0);
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+
+        for scenario in &document.scenarios {
+            assert!(!scenario.title.trim().is_empty());
+            let topology = scenario.topology.to_snapshot();
+            let expected_boundaries = scenario
+                .expect
+                .boundary_ids
+                .iter()
+                .map(|network_id| fixture_network_id(network_id))
+                .collect::<Vec<_>>();
+            let expected_nodes = scenario
+                .expect
+                .node_ids
+                .iter()
+                .map(|node_id| fixture_node_id(node_id))
+                .collect::<Vec<_>>();
+            let expected_shared_nodes = scenario
+                .expect
+                .shared_node_ids
+                .iter()
+                .map(|node_id| fixture_node_id(node_id))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                topology
+                    .boundaries
+                    .iter()
+                    .map(|boundary| boundary.network_id.clone())
+                    .collect::<Vec<_>>(),
+                expected_boundaries,
+                "{} boundaries",
+                scenario.id
+            );
+            assert_eq!(
+                topology
+                    .nodes
+                    .iter()
+                    .map(|node| node.node_id.clone())
+                    .collect::<Vec<_>>(),
+                expected_nodes,
+                "{} nodes",
+                scenario.id
+            );
+            assert_eq!(
+                topology
+                    .nodes
+                    .iter()
+                    .filter(|node| node.networks.len() > 1)
+                    .map(|node| node.node_id.clone())
+                    .collect::<Vec<_>>(),
+                expected_shared_nodes,
+                "{} shared nodes",
+                scenario.id
+            );
+            assert_eq!(
+                topology
+                    .connections
+                    .iter()
+                    .map(|connection| connection.state)
+                    .collect::<Vec<_>>(),
+                scenario.expect.connection_states,
+                "{} connections",
+                scenario.id
+            );
+            for (node_id, expected_health) in &scenario.expect.health_by_node {
+                let node = topology
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == fixture_node_id(node_id))
+                    .unwrap_or_else(|| panic!("{} missing node {node_id}", scenario.id));
+                assert_eq!(node.health, *expected_health, "{} {node_id}", scenario.id);
+            }
+            for (node_id, expected_capabilities) in &scenario.expect.enabled_capabilities_by_node {
+                let node = topology
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == fixture_node_id(node_id))
+                    .unwrap_or_else(|| panic!("{} missing node {node_id}", scenario.id));
+                assert_eq!(
+                    node.capabilities, *expected_capabilities,
+                    "{} {node_id}",
+                    scenario.id
+                );
+            }
+
+            let presentation =
+                topology_presentation(Some(&topology), TopologyPresentationSignals::default());
+            assert_eq!(
+                presentation.kind,
+                TopologyPresentationCondition::Ready,
+                "{}",
+                scenario.id
+            );
+            assert!(presentation.can_render, "{}", scenario.id);
+
+            let network_id = fixture_network_id(
+                scenario
+                    .expect
+                    .boundary_ids
+                    .first()
+                    .expect("scenario boundary"),
+            );
+            let detail_node = topology
+                .nodes
+                .iter()
+                .find(|node| node.node_id == fixture_node_id(&scenario.expect.detail_node_id))
+                .unwrap_or_else(|| panic!("{} missing detail node", scenario.id));
+            let detail =
+                topology_node_detail(detail_node, Some(network_id.as_str()), None, Locale::En);
+            let mut detail_text = [
+                detail.display_name,
+                detail.node_id,
+                detail.health,
+                detail.role,
+                detail.capabilities,
+                detail.status,
+                detail.presence,
+                detail.networks,
+            ]
+            .join(" | ");
+            for (slug, converted) in scenario.expect.node_ids.iter().zip(topology.nodes.iter()) {
+                detail_text = detail_text.replace(converted.node_id.as_str(), slug);
+            }
+            for (slug, converted) in scenario
+                .expect
+                .boundary_ids
+                .iter()
+                .zip(topology.boundaries.iter())
+            {
+                detail_text = detail_text.replace(converted.network_id.as_str(), slug);
+            }
+            for expected_text in &scenario.expect.detail_contains {
+                assert!(
+                    detail_text.contains(expected_text),
+                    "{} detail {detail_text:?} must contain {expected_text:?}",
+                    scenario.id
+                );
+            }
+
+            let topology_for_shell = topology.clone();
+            window
+                .update(cx, |shell, _, cx| {
+                    install_shared_topology_snapshot(shell, &topology_for_shell, cx);
+                })
+                .expect("install shared topology scenario");
+            visible.run_until_parked();
+
+            let visible_nodes = topology
+                .nodes
+                .iter()
+                .filter(|node| node.belongs_to(&network_id))
+                .collect::<Vec<_>>();
+            let visible_connections = topology
+                .connections
+                .iter()
+                .filter(|connection| connection.networks.contains(&network_id))
+                .collect::<Vec<_>>();
+            let detail_index = visible_nodes
+                .iter()
+                .position(|node| node.node_id == fixture_node_id(&scenario.expect.detail_node_id))
+                .expect("detail node is visible");
+            for index in 0..visible_nodes.len() {
+                assert!(
+                    visible
+                        .debug_bounds(topology_node_selector(index))
+                        .is_some(),
+                    "{} must render authoritative node {index}",
+                    scenario.id
+                );
+            }
+            assert!(
+                visible
+                    .debug_bounds(topology_node_selector(visible_nodes.len()))
+                    .is_none(),
+                "{} must not render extra nodes",
+                scenario.id
+            );
+            for index in 0..visible_connections.len() {
+                assert!(
+                    visible
+                        .debug_bounds(topology_connection_selector(index))
+                        .is_some(),
+                    "{} must render authoritative connection {index}",
+                    scenario.id
+                );
+            }
+            assert!(
+                visible
+                    .debug_bounds(topology_connection_selector(visible_connections.len()))
+                    .is_none(),
+                "{} must not render static or extra connections",
+                scenario.id
+            );
+
+            assert!(visible
+                .debug_bounds("visual-topology-detail-empty")
+                .is_some());
+            let detail_action = visible
+                .debug_bounds(topology_open_selector(detail_index))
+                .expect("detail action for authoritative node");
+            visible.simulate_click(detail_action.center(), Modifiers::default());
+            visible.run_until_parked();
+            assert!(
+                visible
+                    .debug_bounds("visual-topology-detail-empty")
+                    .is_none(),
+                "{} must render the selected authoritative node detail",
+                scenario.id
+            );
+            let expected_detail_node = fixture_node_id(&scenario.expect.detail_node_id)
+                .as_str()
+                .to_string();
+            window
+                .update(cx, |shell, _, _| {
+                    assert_eq!(
+                        shell.selected_topology_node_id.as_deref(),
+                        Some(expected_detail_node.as_str())
+                    );
+                })
+                .expect("verify shared scenario selection");
+        }
     }
 
     fn join_preview_fixture() -> NodeNetworkJoinPreview {

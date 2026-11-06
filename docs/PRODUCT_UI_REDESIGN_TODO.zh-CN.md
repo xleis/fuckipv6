@@ -1642,18 +1642,40 @@ ARIA 名称和列表列出全部网络归属；超大网络的未展开成员以
 `npm run build`、`node ../scripts/test_webui_accessibility.mjs`、
 `cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
-### W9-06 悬停、右键与批量操作 `[ ]`
+### W9-06 悬停、右键与批量操作 `[~]`
 
-- [ ] 悬停展示名称、角色、能力和简要健康；
-- [ ] 右键/菜单键打开对象操作菜单；
+- [x] 悬停展示名称、角色、能力和简要健康；
+- [x] 右键/菜单键打开对象操作菜单；
 - [ ] 选择多个节点后提供权限允许的批量邀请、分组或策略操作；
-- [ ] 批量操作前显示对象数量、失败策略和权限差异；
-- [ ] 操作结果逐项展示成功、跳过和失败原因；
-- [ ] 取消选择、筛选变化和刷新后选择行为明确；
-- [ ] 危险批量操作要求确认和近期重认证；
+- [x] 批量操作前显示对象数量、失败策略和权限差异；
+- [x] 操作结果逐项展示成功、跳过和失败原因；
+- [x] 取消选择、筛选变化和刷新后选择行为明确；
+- [x] 危险批量操作要求确认和近期重认证；
 - [ ] 所有结果写入活动与审计。
 
 **验收**：拓扑操作与列表一致；批量失败不会被总成功提示掩盖。
+
+**证据（2026-11-06）**：拓扑页接入服务端权威 `list_network_members` 目录，批量计划只从
+`can_manage_members`、`viewer_role` 和每个成员自己的 `available_actions` 生成；`viewer_role=member`
+或目录未授权时不渲染生命周期动作，也不提交伪命令。当前可安全批量执行的是已有成员生命周期
+`approve/reject/suspend/resume/remove/undo_remove`；当前命令清单没有批量邀请、组成员变更或安全策略命令，
+因此不以可点击伪按钮声称覆盖这些能力，第 3 项保持未完成。移除前逐成员调用
+`preview_member_removal`，被服务端拒绝的成员记为该批量中的 `skipped` 且绝不提交生命周期命令；
+其余动作逐成员使用目录中的 revision，避免全批共用一个过期版本。执行前对话框显示选中数、可执行数、
+跳过数、失败继续策略、危险确认和近期认证要求；服务端要求重新认证时，`App.tsx` 通过 Passkey 重认证后
+以原命令和参数重发。结果逐项区分成功、跳过和失败并披露服务端返回的真实 `audit_id`，混合失败不会被
+总成功摘要掩盖；跳过和未提交项不会伪造审计编号，批量级活动/审计汇总仍待后端命令支持，因此第 8 项
+保持未完成。
+
+悬停卡展示名称、当前网络角色、能力、健康和 presence；右键、`Shift+F10` 与菜单键打开同一对象菜单。
+取消选择、筛选变化和网络切换会清空选择并给出原因提示；实时刷新只保留仍存在的节点身份，消失后再次
+出现的节点不会复活旧选择。`topology-page.test.tsx`（7 tests）覆盖悬停、右键/`Shift+F10`、筛选清空、
+刷新保留/永久移除、无管理权限、服务端移除预检拒绝、Bob 成功/Carol 拒绝的混合结果及逐成员 revision；
+`topology-actions.test.ts`（4 tests）覆盖共享筛选、选择保留、权限差异和目录整体禁止管理。
+
+**验证通过**：WebUI `npm test -- --run`（15 files，175 passed）、`npm run typecheck`、`npm run lint`、
+`npm run build`、`node ../scripts/test_webui_accessibility.mjs`、
+`cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
 ### W9-07 键盘、触控与无障碍 `[ ]`
 

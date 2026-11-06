@@ -60,6 +60,7 @@ import type {
   NodeRoutingSummarySnapshot,
   NodeRoutingTargetSnapshot,
   NodeSnapshot,
+  NodeUiAction,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
@@ -81,7 +82,14 @@ import {
 import { t, tr } from "../i18n";
 import { resolveNetworkMembershipId } from "../members";
 import { advancedSettingsGroups } from "../settings";
-import { TopologyView } from "./topology-view";
+import type { TopologyActionSubmit } from "../topology-actions";
+import { TopologyPage } from "./topology-page";
+
+const TOPOLOGY_ACTION_IDS = new Set([
+  "list_network_members",
+  "preview_member_removal",
+  "change_member_lifecycle",
+]);
 
 type PageContentProps = {
   page: NodeUiPage;
@@ -97,6 +105,8 @@ type PageContentProps = {
     initialValues?: ActionValues,
   ): void;
   onRunAction(actionId: string): Promise<void>;
+  manifestActions?: NodeUiAction[];
+  onSubmitAction?: TopologyActionSubmit;
 };
 
 function empty(text: string): JSX.Element {
@@ -2848,7 +2858,7 @@ const PAGE_ICONS: Record<string, LucideIcon> = {
 };
 
 export function PageContent(props: PageContentProps) {
-  const { page, snapshot, locale } = props;
+  const { page, snapshot, locale, selectedNetwork } = props;
   let content: JSX.Element;
   switch (page.id) {
     case "overview":
@@ -2865,9 +2875,17 @@ export function PageContent(props: PageContentProps) {
       break;
     case "topology":
       content = (
-        <TopologyView
+        <TopologyPage
           topology={snapshot.topology ?? null}
           locale={locale}
+          preferredNetworkId={resolveNetworkMembershipId(
+            snapshot.memberships,
+            selectedNetwork,
+          )}
+          actions={(props.manifestActions ?? []).filter((action) =>
+            TOPOLOGY_ACTION_IDS.has(action.id),
+          )}
+          onSubmitAction={props.onSubmitAction}
         />
       );
       break;

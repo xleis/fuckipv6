@@ -703,6 +703,17 @@ function AppShell({
     manifest.pages.find((page) => page.id === pageId) ?? initialPage;
   const activeModule = moduleForPage(activePage?.id ?? "overview");
   const selectedNetwork = defaultNetworkName(snapshot, selectedNetworkState);
+  const manifestActions = useMemo(
+    () =>
+      [
+        ...new Map(
+          manifest.pages
+            .flatMap((page) => page.actions)
+            .map((action) => [action.id, action]),
+        ).values(),
+      ],
+    [manifest],
+  );
   const searchResults = useMemo(
     () => searchNodeSnapshot(manifest, snapshot, searchQuery, locale),
     [locale, manifest, searchQuery, snapshot],
@@ -1292,6 +1303,8 @@ function AppShell({
                   locale={locale}
                   selectedNetwork={selectedNetwork}
                   recentDiagnostics={recentDiagnostics}
+                  manifestActions={manifestActions}
+                  onSubmitAction={submitAction}
                   footer={
                     activePage.actions.some((action) =>
                       CONFIGURATION_ACTION_IDS.has(action.id),

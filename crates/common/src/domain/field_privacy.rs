@@ -888,6 +888,28 @@ pub fn resolve_field_privacy_policy<'a>(
     }
 }
 
+/// Resolve one field decision without serializing either the policy or the
+/// hidden value. Transport adapters use this before constructing their own
+/// wire DTOs, so field policy remains a server-side serialization boundary.
+pub fn field_is_visible(
+    policy: Option<&FieldPrivacyPolicy>,
+    field: PrivacyField,
+    viewer: &PrivacyViewer,
+    state: PrivacyObjectState,
+    object_node_id: Option<&NodeId>,
+    now_unix_ms: u64,
+) -> bool {
+    field_visible(
+        policy,
+        field,
+        viewer,
+        state,
+        object_node_id,
+        field.default_visibility(),
+        now_unix_ms,
+    )
+}
+
 fn field_visible(
     policy: Option<&FieldPrivacyPolicy>,
     field: PrivacyField,
@@ -1085,7 +1107,18 @@ pub fn project_topology_snapshot(
     let state = PrivacyObjectState::Active;
     let mut kept_networks = BTreeSet::new();
     for boundary in &snapshot.boundaries {
-        if viewer.can_view_network(&boundary.network_id) {
+        let network_viewer = viewer.with_network(boundary.network_id.clone());
+        if network_viewer.can_view_network(&boundary.network_id)
+            && field_visible(
+                policy,
+                PrivacyField::TopologyNetworkMembership,
+                &network_viewer,
+                state,
+                None,
+                PrivacyField::TopologyNetworkMembership.default_visibility(),
+                now_unix_ms,
+            )
+        {
             kept_networks.insert(boundary.network_id.clone());
         }
     }

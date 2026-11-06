@@ -7,6 +7,7 @@ mod lifecycle;
 mod network_interfaces;
 mod operation_service;
 mod plan;
+mod privacy_projection;
 mod runtime_control;
 mod runtime_handler;
 pub(crate) mod runtime_metadata;
@@ -62,6 +63,11 @@ pub use operation_service::{
     OperationSubmitError,
 };
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
+pub use privacy_projection::{
+    project_node_snapshot, NodeSnapshotProjectionError, ProjectedNodeEmbeddedServiceSnapshot,
+    ProjectedNodeIdentitySnapshot, ProjectedNodeInterfaceSnapshot, ProjectedNodeNetworkSnapshot,
+    ProjectedNodePeerSnapshot, ProjectedNodeSnapshot,
+};
 pub(crate) use runtime_control::{
     NetworkRuntimeManager, RuntimeControlError, StartSummary, RESTART_TIMEOUT, START_TIMEOUT,
     STOP_TIMEOUT,

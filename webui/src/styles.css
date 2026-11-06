@@ -1892,6 +1892,25 @@ button:disabled {
   min-width: 620px;
   height: auto;
 }
+.topology-canvas-pending {
+  display: grid;
+  min-height: 380px;
+  place-items: center;
+  padding: var(--space-4);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+.topology-graph-budget {
+  position: sticky;
+  bottom: 0;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  backdrop-filter: blur(8px);
+}
 .topology-boundary-label {
   font-size: 12px;
   font-weight: var(--font-weight-semibold);
@@ -2097,6 +2116,21 @@ button:disabled {
 }
 .topology-list-table table {
   min-width: 840px;
+}
+.topology-list-table {
+  max-height: min(64vh, 680px);
+}
+.topology-list-table tbody tr[data-node-id] {
+  height: 72px;
+}
+.topology-list-spacer,
+.topology-list-spacer:hover {
+  background: transparent;
+}
+.topology-list-spacer td {
+  height: 0;
+  padding: 0;
+  border: 0;
 }
 .topology-list-self,
 .topology-list-role {

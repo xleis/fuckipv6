@@ -1,6 +1,9 @@
 import {
+  startTransition,
   useCallback,
+  useDeferredValue,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -10,6 +13,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   LocateFixed,
   Minus,
@@ -39,13 +43,21 @@ import {
   capabilityColor,
   capabilitySegments,
   connectionDash,
+  cachedTopologyIndex,
+  createTopologyIndex,
   healthEncoding,
   hiddenMemberCount,
   layoutTopology,
   networkVisuals,
+  topologyGraphBudget,
+  topologyLayoutKey,
   topologyListRows,
   type HealthEncoding,
   type TopologyColorMode,
+  type TopologyConnectionCounts,
+  type TopologyIndex,
+  type TopologyLayout,
+  type TopologyPlacement,
 } from "../topology";
 import {
   EMPTY_TOPOLOGY_FILTERS,
@@ -88,6 +100,7 @@ const NARROW_VIEWPORT_QUERY = "(max-width: 600px)";
 const TOUCH_LONG_PRESS_MS = 450;
 const TOUCH_MOVE_TOLERANCE_PX = 8;
 const ZOOM_LEVELS = [0.75, 1, 1.25, 1.5, 2] as const;
+const EMPTY_SELECTED_NODE_IDS: ReadonlySet<string> = new Set();
 
 type TopologyViewMode = "graph" | "list";
 
@@ -240,20 +253,15 @@ function healthLabel(locale: Locale, health: TopologyNode["health"]): string {
 function nodeRelationshipText(
   locale: Locale,
   nodeId: string,
-  topology: TopologySnapshot,
+  index: TopologyIndex,
 ): string {
-  const counts = new Map<
-    (typeof CONNECTION_ORDER)[number],
-    number
-  >(CONNECTION_ORDER.map((state) => [state, 0]));
-  for (const connection of topology.connections) {
-    if (connection.from !== nodeId && connection.to !== nodeId) continue;
-    counts.set(connection.state, (counts.get(connection.state) ?? 0) + 1);
-  }
-  const summary = CONNECTION_ORDER.filter((state) => (counts.get(state) ?? 0) > 0)
+  const counts: TopologyConnectionCounts = index.connectionCountsByNode.get(
+    nodeId,
+  ) ?? { active: 0, idle: 0, stale: 0 };
+  const summary = CONNECTION_ORDER.filter((state) => counts[state] > 0)
     .map(
       (state) =>
-        `${label(locale, `topology.connection.${state}`)} ${counts.get(state)}`,
+        `${label(locale, `topology.connection.${state}`)} ${counts[state]}`,
     )
     .join(label(locale, "common.list_separator"));
   return summary || label(locale, "topology.aria.no_connections");
@@ -263,7 +271,7 @@ function nodeAriaLabel(
   locale: Locale,
   node: TopologyNode,
   networkNames: Map<string, string>,
-  topology: TopologySnapshot,
+  index: TopologyIndex,
 ): string {
   const capabilities = nodeCapabilityText(locale, node, undefined);
   const networks = node.networks
@@ -275,7 +283,7 @@ function nodeAriaLabel(
         )})`,
     )
     .join(label(locale, "common.list_separator"));
-  const relationships = nodeRelationshipText(locale, node.node_id, topology);
+  const relationships = nodeRelationshipText(locale, node.node_id, index);
   return `${nodeName(node)} · ${healthLabel(locale, node.health)} · ${capabilities} · ${networks} · ${label(locale, "topology.aria.relationships")}: ${relationships}`;
 }
 
@@ -656,8 +664,87 @@ function FilterToolbar({
   );
 }
 
-function GraphView({
+type TopologyLayoutState = {
+  layout: TopologyLayout | null;
+  pending: boolean;
+};
+
+const MAX_SYNC_LAYOUT_NODES = 80;
+
+/** Large layouts are computed in a worker; small layouts stay synchronous so
+ * tests and first paint never depend on an asynchronous round trip. */
+function useTopologyLayout(topology: TopologySnapshot): TopologyLayoutState {
+  const layoutKey = useMemo(() => topologyLayoutKey(topology), [topology]);
+  const synchronousLayout = useMemo(
+    () =>
+      topology.nodes.length <= MAX_SYNC_LAYOUT_NODES
+        ? layoutTopology(topology)
+        : null,
+    [topology],
+  );
+  const topologyForLayoutRef = useRef(topology);
+  const layoutRequestSequence = useRef(0);
+  const [workerLayout, setWorkerLayout] = useState<{
+    key: string;
+    layout: TopologyLayout;
+  } | null>(null);
+
+  useEffect(() => {
+    topologyForLayoutRef.current = topology;
+  }, [topology]);
+
+  useEffect(() => {
+    if (topology.nodes.length <= MAX_SYNC_LAYOUT_NODES) {
+      return;
+    }
+    const layoutTopologySnapshot = topologyForLayoutRef.current;
+    const requestId = ++layoutRequestSequence.current;
+    let active = true;
+    const commitLayout = (layout: TopologyLayout): void => {
+      if (!active || layoutRequestSequence.current !== requestId) return;
+      startTransition(() => setWorkerLayout({ key: layoutKey, layout }));
+    };
+    if (typeof Worker === "undefined") {
+      queueMicrotask(() => commitLayout(layoutTopology(layoutTopologySnapshot)));
+      return;
+    }
+    const worker = new Worker(
+      new URL("../topology-layout-worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    worker.onmessage = (
+      event: MessageEvent<{
+        requestId: number;
+        layout: TopologyLayout;
+      }>,
+    ) => {
+      if (event.data.requestId !== requestId) return;
+      commitLayout(event.data.layout);
+    };
+    worker.onerror = () => {
+      commitLayout(layoutTopology(layoutTopologySnapshot));
+    };
+    worker.postMessage({
+      requestId,
+      snapshot: { ...layoutTopologySnapshot, connections: [] },
+      width: 720,
+      height: 360,
+    });
+    return () => {
+      active = false;
+      worker.terminate();
+    };
+  }, [layoutKey, topology.nodes.length]);
+
+  if (synchronousLayout) return { layout: synchronousLayout, pending: false };
+  const currentWorkerLayout =
+    workerLayout?.key === layoutKey ? workerLayout.layout : null;
+  return { layout: currentWorkerLayout, pending: currentWorkerLayout === null };
+}
+
+const GraphView = memo(function GraphView({
   topology,
+  index,
   locale,
   mode,
   zoom,
@@ -671,6 +758,7 @@ function GraphView({
   onShowMenu,
 }: {
   topology: TopologySnapshot;
+  index: TopologyIndex;
   locale: Locale;
   mode: TopologyColorMode;
   zoom: number;
@@ -683,45 +771,136 @@ function GraphView({
   onHideHover(): void;
   onShowMenu(nodeId: string, x: number, y: number): void;
 }): JSX.Element {
-  const layout = useMemo(() => layoutTopology(topology), [topology]);
-  const visuals = useMemo(() => networkVisuals(topology, mode), [topology, mode]);
+  const budget = useMemo(
+    () => topologyGraphBudget(topology, selectedNodeIds),
+    [selectedNodeIds, topology],
+  );
+  const graphTopology = useMemo(
+    () => ({
+      ...topology,
+      nodes: budget.nodes,
+      connections: budget.connections,
+    }),
+    [budget.connections, budget.nodes, topology],
+  );
+  const { layout, pending: layoutPending } = useTopologyLayout(graphTopology);
+  const visuals = useMemo(
+    () => networkVisuals(topology, mode),
+    [mode, topology],
+  );
   const placements = useMemo(
-    () => new Map(layout.placements.map((placement) => [placement.nodeId, placement])),
+    () =>
+      new Map(
+        (layout?.placements ?? []).map((placement) => [
+          placement.nodeId,
+          placement,
+        ]),
+      ),
     [layout],
   );
-  const nodeById = useMemo(
-    () => new Map(topology.nodes.map((node) => [node.node_id, node])),
-    [topology],
-  );
+  const placementsByNetwork = useMemo(() => {
+    const grouped = new Map<string, TopologyPlacement[]>();
+    for (const placement of layout?.placements ?? []) {
+      const networkPlacements = grouped.get(placement.anchorNetworkId) ?? [];
+      networkPlacements.push(placement);
+      grouped.set(placement.anchorNetworkId, networkPlacements);
+    }
+    return grouped;
+  }, [layout]);
   const boundaryNames = useMemo(
     () =>
       new Map(
-        topology.boundaries.map((boundary) => [boundary.network_id, boundary.name]),
+        topology.boundaries.map((boundary) => [
+          boundary.network_id,
+          boundary.name,
+        ]),
       ),
-    [topology],
+    [topology.boundaries],
   );
-  const connections = topology.connections.filter((connection) =>
-    placements.has(connection.from) && placements.has(connection.to),
+  const nodeLabels = useMemo(
+    () =>
+      new Map(
+        graphTopology.nodes.map((node) => [
+          node.node_id,
+          nodeAriaLabel(locale, node, boundaryNames, index),
+        ]),
+      ),
+    [boundaryNames, graphTopology.nodes, index, locale],
   );
+  const nodeIds = graphTopology.nodes.map((node) => node.node_id);
+  const nodeIdsRef = useRef(nodeIds);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
   const focusedNodeIdRef = useRef<string | null>(null);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(
     () =>
-      topology.nodes.find((node) => node.is_self)?.node_id ??
-      topology.nodes[0]?.node_id ??
+      graphTopology.nodes.find((node) => node.is_self)?.node_id ??
+      graphTopology.nodes[0]?.node_id ??
       null,
   );
   const fallbackNodeId =
-    topology.nodes.find((node) => node.is_self)?.node_id ??
-    topology.nodes[0]?.node_id ??
+    graphTopology.nodes.find((node) => node.is_self)?.node_id ??
+    graphTopology.nodes[0]?.node_id ??
     null;
-  const resolvedActiveNodeId = topology.nodes.some(
+  const resolvedActiveNodeId = graphTopology.nodes.some(
     (node) => node.node_id === activeNodeId,
   )
     ? activeNodeId
     : fallbackNodeId;
   const longPress = useTouchLongPress(onShowMenu);
   const focusTargetNodeRef = useRef(focusTargetNodeId);
+  const focusNode = useCallback((nodeId: string): void => {
+    setActiveNodeId(nodeId);
+    focusedNodeIdRef.current = nodeId;
+  }, []);
+  const setNodeRef = useCallback(
+    (nodeId: string, element: SVGGElement | null): void => {
+      if (element) nodeRefs.current.set(nodeId, element);
+      else nodeRefs.current.delete(nodeId);
+    },
+    [],
+  );
+  const menuFromFocus = useCallback(
+    (event: ReactKeyboardEvent<SVGGElement>, nodeId: string): void => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
+        return;
+      }
+      event.preventDefault();
+      const position = rectPosition(event.currentTarget.getBoundingClientRect());
+      onShowMenu(nodeId, position.x, position.y);
+    },
+    [onShowMenu],
+  );
+  const navigateNode = useCallback(
+    (event: ReactKeyboardEvent<SVGGElement>, nodeId: string): void => {
+      if (
+        !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(
+          event.key,
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      const nodeIds = nodeIdsRef.current;
+      const currentIndex = Math.max(0, nodeIds.indexOf(nodeId));
+      let nextIndex = 0;
+      if (event.key === "End") nextIndex = nodeIds.length - 1;
+      else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (currentIndex + 1) % nodeIds.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (currentIndex - 1 + nodeIds.length) % nodeIds.length;
+      }
+      const nextNodeId = nodeIds[nextIndex];
+      if (!nextNodeId) return;
+      setActiveNodeId(nextNodeId);
+      focusedNodeIdRef.current = nextNodeId;
+      nodeRefs.current.get(nextNodeId)?.focus();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    nodeIdsRef.current = nodeIds;
+  }, [nodeIds]);
 
   useEffect(() => {
     focusTargetNodeRef.current = focusTargetNodeId;
@@ -737,7 +916,7 @@ function GraphView({
     if (
       !focusedNodeId ||
       !focusLostToDocument ||
-      topology.nodes.some((node) => node.node_id === focusedNodeId)
+      graphTopology.nodes.some((node) => node.node_id === focusedNodeId)
     ) {
       return;
     }
@@ -747,7 +926,7 @@ function GraphView({
       : undefined;
     fallback?.focus();
     fallback?.scrollIntoView?.({ block: "center", inline: "center" });
-  }, [resolvedActiveNodeId, topology.nodes]);
+  }, [graphTopology.nodes, resolvedActiveNodeId]);
 
   useEffect(() => {
     if (focusRequest === 0) return;
@@ -760,46 +939,27 @@ function GraphView({
     element.scrollIntoView?.({ block: "center", inline: "center" });
   }, [focusRequest]);
 
-  function navigateNode(
-    event: ReactKeyboardEvent<SVGGElement>,
-    nodeId: string,
-  ): void {
-    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
-      return;
-    }
-    event.preventDefault();
-    const currentIndex = topology.nodes.findIndex(
-      (node) => node.node_id === nodeId,
+  if (!layout) {
+    return (
+      <div
+        className="topology-canvas topology-canvas-pending"
+        id="topology-object-navigation"
+        role="status"
+        data-layout-pending="true"
+      >
+        {label(locale, "topology.layout.pending")}
+      </div>
     );
-    let nextIndex = 0;
-    if (event.key === "End") nextIndex = topology.nodes.length - 1;
-    else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      nextIndex = (currentIndex + 1) % topology.nodes.length;
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      nextIndex =
-        (currentIndex - 1 + topology.nodes.length) % topology.nodes.length;
-    }
-    const nextNodeId = topology.nodes[nextIndex]?.node_id;
-    if (!nextNodeId) return;
-    setActiveNodeId(nextNodeId);
-    focusedNodeIdRef.current = nextNodeId;
-    nodeRefs.current.get(nextNodeId)?.focus();
-  }
-
-  function menuFromFocus(
-    event: ReactKeyboardEvent<SVGGElement>,
-    nodeId: string,
-  ): void {
-    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
-      return;
-    }
-    event.preventDefault();
-    const position = rectPosition(event.currentTarget.getBoundingClientRect());
-    onShowMenu(nodeId, position.x, position.y);
   }
 
   return (
-    <div className="topology-canvas" id="topology-object-navigation">
+    <div
+      className="topology-canvas"
+      id="topology-object-navigation"
+      data-layout-pending={layoutPending ? "true" : "false"}
+      data-rendered-nodes={graphTopology.nodes.length}
+      data-rendered-connections={graphTopology.connections.length}
+    >
       <svg
         viewBox={`0 0 ${layout.width} ${layout.height}`}
         role="group"
@@ -816,18 +976,14 @@ function GraphView({
         <desc id="topology-svg-desc">
           {label(locale, "topology.aria.graph_description")
             .replace("{networks}", String(topology.boundaries.length))
-            .replace("{nodes}", String(topology.nodes.length))
-            .replace("{links}", String(activeConnections(topology).length))}
+            .replace("{nodes}", String(graphTopology.nodes.length))
+            .replace("{links}", String(activeConnections(graphTopology).length))}
         </desc>
         {layout.anchors.map((anchor) => {
-          const boundary = topology.boundaries.find(
-            (candidate) => candidate.network_id === anchor.networkId,
-          );
+          const boundary = index.boundariesById.get(anchor.networkId);
           const visual = visuals.get(anchor.networkId);
           if (!boundary || !visual) return null;
-          const memberSlots = layout.placements.filter(
-            (placement) => placement.anchorNetworkId === anchor.networkId,
-          );
+          const memberSlots = placementsByNetwork.get(anchor.networkId) ?? [];
           const ring = memberSlots.reduce(
             (maximum, placement) => Math.max(maximum, placement.slot),
             0,
@@ -835,7 +991,7 @@ function GraphView({
           const ringCount = Math.floor(ring / 16);
           const rx = 64 + ringCount * 30 + 22;
           const ry = 58 + ringCount * 30 + 18;
-          const hidden = hiddenMemberCount(topology, anchor.networkId);
+          const hidden = hiddenMemberCount(topology, anchor.networkId, index);
           return (
             <g key={`boundary-${anchor.networkId}`} className="topology-boundary">
               <ellipse
@@ -868,13 +1024,20 @@ function GraphView({
             </g>
           );
         })}
-        {connections.map((connection) => (
+        {graphTopology.connections.map((connection) => (
           <ConnectionLine
             key={connection.connection_id}
             connection={connection}
             placements={placements}
             locale={locale}
-            nodeById={nodeById}
+            fromName={
+              index.nodesById.get(connection.from)?.display_name ??
+              connection.from
+            }
+            toName={
+              index.nodesById.get(connection.to)?.display_name ??
+              connection.to
+            }
             boundaryNames={boundaryNames}
           />
         ))}
@@ -884,22 +1047,21 @@ function GraphView({
           aria-multiselectable="true"
           aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home End"
         >
-          {topology.nodes.map((node, index) => {
+          {graphTopology.nodes.map((node, nodeIndex) => {
             const placement = placements.get(node.node_id);
             if (!placement) return null;
             const visual = visuals.get(placement.anchorNetworkId);
             return (
               <TopologyNodeGlyph
                 key={node.node_id}
-                itemIndex={index}
-                itemCount={topology.nodes.length}
+                itemIndex={nodeIndex}
+                itemCount={graphTopology.nodes.length}
                 node={node}
+                ariaLabel={nodeLabels.get(node.node_id) ?? ""}
                 x={placement.x}
                 y={placement.y}
                 mode={mode}
                 locale={locale}
-                networkNames={boundaryNames}
-                topology={topology}
                 networkColor={visual?.color ?? "#6b7280"}
                 selected={selectedNodeIds.has(node.node_id)}
                 tabIndex={resolvedActiveNodeId === node.node_id ? 0 : -1}
@@ -910,20 +1072,12 @@ function GraphView({
                 onShowMenu={onShowMenu}
                 onMenuKey={menuFromFocus}
                 onNavigate={navigateNode}
-                onFocusNode={(nodeId) => {
-                  setActiveNodeId(nodeId);
-                  focusedNodeIdRef.current = nodeId;
-                }}
-                onLongPressStart={(event, nodeId) =>
-                  longPress.start(event, nodeId)
-                }
+                onFocusNode={focusNode}
+                onLongPressStart={longPress.start}
                 onLongPressMove={longPress.move}
                 onLongPressEnd={longPress.end}
                 consumeLongPress={longPress.consumeActivation}
-                nodeRef={(element) => {
-                  if (element) nodeRefs.current.set(node.node_id, element);
-                  else nodeRefs.current.delete(node.node_id);
-                }}
+                setNodeRef={setNodeRef}
               />
             );
           })}
@@ -953,21 +1107,32 @@ function GraphView({
           );
         })}
       </svg>
+      {budget.hiddenNodes > 0 || budget.hiddenConnections > 0 ? (
+        <p className="topology-graph-budget" role="status">
+          {label(locale, "topology.graph.compact")
+            .replace("{nodes}", String(graphTopology.nodes.length))
+            .replace("{totalNodes}", String(topology.nodes.length))
+            .replace("{connections}", String(graphTopology.connections.length))
+            .replace("{totalConnections}", String(topology.connections.length))}
+        </p>
+      ) : null}
     </div>
   );
-}
+});
 
-function ConnectionLine({
+const ConnectionLine = memo(function ConnectionLine({
   connection,
   placements,
   locale,
-  nodeById,
+  fromName,
+  toName,
   boundaryNames,
 }: {
   connection: TopologyConnection;
   placements: Map<string, { x: number; y: number }>;
   locale: Locale;
-  nodeById: Map<string, TopologyNode>;
+  fromName: string;
+  toName: string;
   boundaryNames: Map<string, string>;
 }): JSX.Element | null {
   const from = placements.get(connection.from);
@@ -980,9 +1145,7 @@ function ConnectionLine({
   return (
     <g className={`topology-connection ${connection.state}`}>
       <title>
-        {`${nodeById.get(connection.from)?.display_name ?? connection.from} → ${
-          nodeById.get(connection.to)?.display_name ?? connection.to
-        } · ${stateLabel}${networks ? ` · ${networks}` : ""}`}
+        {`${fromName} → ${toName} · ${stateLabel}${networks ? ` · ${networks}` : ""}`}
       </title>
       <line
         x1={from.x}
@@ -993,44 +1156,96 @@ function ConnectionLine({
       />
     </g>
   );
+}, areConnectionLinePropsEqual);
+
+function samePlacement(
+  left: { x: number; y: number } | undefined,
+  right: { x: number; y: number } | undefined,
+): boolean {
+  return left === right || (left?.x === right?.x && left?.y === right?.y);
 }
 
-function TopologyNodeGlyph({
-  itemIndex,
-  itemCount,
-  node,
-  x,
-  y,
-  mode,
-  locale,
-  networkNames,
-  topology,
-  networkColor,
-  selected,
-  tabIndex,
-  onOpenNode,
-  onToggleNode,
-  onShowHover,
-  onHideHover,
-  onShowMenu,
-  onMenuKey,
-  onNavigate,
-  onFocusNode,
-  onLongPressStart,
-  onLongPressMove,
-  onLongPressEnd,
-  consumeLongPress,
-  nodeRef,
-}: {
+function sameConnectionNetworks(
+  left: TopologyConnection,
+  right: TopologyConnection,
+  boundaryNames: Map<string, string>,
+): boolean {
+  const leftNetworks = left.networks ?? [];
+  const rightNetworks = right.networks ?? [];
+  return (
+    leftNetworks.length === rightNetworks.length &&
+    leftNetworks.every(
+      (networkId, index) =>
+        networkId === rightNetworks[index] &&
+        boundaryNames.get(networkId) === boundaryNames.get(rightNetworks[index] ?? ""),
+    )
+  );
+}
+
+function areConnectionLinePropsEqual(
+  previous: {
+    connection: TopologyConnection;
+    placements: Map<string, { x: number; y: number }>;
+    locale: Locale;
+    fromName: string;
+    toName: string;
+    boundaryNames: Map<string, string>;
+  },
+  next: {
+    connection: TopologyConnection;
+    placements: Map<string, { x: number; y: number }>;
+    locale: Locale;
+    fromName: string;
+    toName: string;
+    boundaryNames: Map<string, string>;
+  },
+): boolean {
+  if (
+    previous.connection === next.connection &&
+    previous.placements === next.placements &&
+    previous.locale === next.locale &&
+    previous.fromName === next.fromName &&
+    previous.toName === next.toName &&
+    previous.boundaryNames === next.boundaryNames
+  ) {
+    return true;
+  }
+  if (
+    previous.locale !== next.locale ||
+    previous.connection.connection_id !== next.connection.connection_id ||
+    previous.connection.from !== next.connection.from ||
+    previous.connection.to !== next.connection.to ||
+    previous.connection.state !== next.connection.state ||
+    previous.fromName !== next.fromName ||
+    previous.toName !== next.toName ||
+    !sameConnectionNetworks(
+      previous.connection,
+      next.connection,
+      next.boundaryNames,
+    ) ||
+    !samePlacement(
+      previous.placements.get(previous.connection.from),
+      next.placements.get(next.connection.from),
+    ) ||
+    !samePlacement(
+      previous.placements.get(previous.connection.to),
+      next.placements.get(next.connection.to),
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+type TopologyNodeGlyphProps = {
   itemIndex: number;
   itemCount: number;
   node: TopologyNode;
+  ariaLabel: string;
   x: number;
   y: number;
   mode: TopologyColorMode;
   locale: Locale;
-  networkNames: Map<string, string>;
-  topology: TopologySnapshot;
   networkColor: string;
   selected: boolean;
   tabIndex: number;
@@ -1049,8 +1264,35 @@ function TopologyNodeGlyph({
   onLongPressMove(event: ReactPointerEvent<SVGGElement>): void;
   onLongPressEnd(): void;
   consumeLongPress(nodeId: string): boolean;
-  nodeRef(element: SVGGElement | null): void;
-}): JSX.Element {
+  setNodeRef(nodeId: string, element: SVGGElement | null): void;
+};
+
+const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
+  itemIndex,
+  itemCount,
+  node,
+  ariaLabel,
+  x,
+  y,
+  mode,
+  locale,
+  networkColor,
+  selected,
+  tabIndex,
+  onOpenNode,
+  onToggleNode,
+  onShowHover,
+  onHideHover,
+  onShowMenu,
+  onMenuKey,
+  onNavigate,
+  onFocusNode,
+  onLongPressStart,
+  onLongPressMove,
+  onLongPressEnd,
+  consumeLongPress,
+  setNodeRef,
+}: TopologyNodeGlyphProps): JSX.Element {
   const segments = capabilitySegments(node, mode);
   const health = healthEncoding(node.health);
   const shared = node.networks.length > 1;
@@ -1089,7 +1331,7 @@ function TopologyNodeGlyph({
 
   return (
     <g
-      ref={nodeRef}
+      ref={(element) => setNodeRef(node.node_id, element)}
       transform={`translate(${x} ${y})`}
       className={`topology-node ${node.is_self ? "self" : ""} ${node.health} ${selected ? "selected" : ""}`}
       data-node-id={node.node_id}
@@ -1100,7 +1342,7 @@ function TopologyNodeGlyph({
       aria-posinset={itemIndex + 1}
       aria-setsize={itemCount}
       aria-keyshortcuts="Enter Space Shift+F10 ContextMenu"
-      aria-label={nodeAriaLabel(locale, node, networkNames, topology)}
+      aria-label={ariaLabel}
       onClick={openOrToggle}
       onKeyDown={onKeyDown}
       onMouseEnter={(event) =>
@@ -1122,7 +1364,7 @@ function TopologyNodeGlyph({
         onShowMenu(node.node_id, event.clientX, event.clientY);
       }}
     >
-      <title>{nodeAriaLabel(locale, node, networkNames, topology)}</title>
+      <title>{ariaLabel}</title>
       <circle r="24" className="topology-node-halo" stroke={networkColor} />
       {selected ? (
         <g className="topology-node-selection-mark" transform="translate(-17 17)">
@@ -1170,10 +1412,42 @@ function TopologyNodeGlyph({
       </text>
     </g>
   );
+}, areTopologyNodeGlyphPropsEqual);
+
+function areTopologyNodeGlyphPropsEqual(
+  previous: TopologyNodeGlyphProps,
+  next: TopologyNodeGlyphProps,
+): boolean {
+  return (
+    previous.itemIndex === next.itemIndex &&
+    previous.itemCount === next.itemCount &&
+    previous.ariaLabel === next.ariaLabel &&
+    previous.x === next.x &&
+    previous.y === next.y &&
+    previous.mode === next.mode &&
+    previous.locale === next.locale &&
+    previous.networkColor === next.networkColor &&
+    previous.selected === next.selected &&
+    previous.tabIndex === next.tabIndex &&
+    previous.onOpenNode === next.onOpenNode &&
+    previous.onToggleNode === next.onToggleNode &&
+    previous.onShowHover === next.onShowHover &&
+    previous.onHideHover === next.onHideHover &&
+    previous.onShowMenu === next.onShowMenu &&
+    previous.onMenuKey === next.onMenuKey &&
+    previous.onNavigate === next.onNavigate &&
+    previous.onFocusNode === next.onFocusNode &&
+    previous.onLongPressStart === next.onLongPressStart &&
+    previous.onLongPressMove === next.onLongPressMove &&
+    previous.onLongPressEnd === next.onLongPressEnd &&
+    previous.consumeLongPress === next.consumeLongPress &&
+    previous.setNodeRef === next.setNodeRef
+  );
 }
 
 function ListView({
   topology,
+  index,
   locale,
   mode,
   focusRequest,
@@ -1186,6 +1460,7 @@ function ListView({
   onShowMenu,
 }: {
   topology: TopologySnapshot;
+  index: TopologyIndex;
   locale: Locale;
   mode: TopologyColorMode;
   focusRequest: number;
@@ -1197,23 +1472,41 @@ function ListView({
   onHideHover(): void;
   onShowMenu(nodeId: string, x: number, y: number): void;
 }): JSX.Element {
-  const rows = useMemo(() => topologyListRows(topology, mode), [topology, mode]);
-  const nodes = useMemo(
-    () => new Map(topology.nodes.map((node) => [node.node_id, node])),
-    [topology],
+  const rows = useMemo(
+    () => topologyListRows(topology, mode, index),
+    [index, mode, topology],
   );
+  const nodes = index.nodesById;
   const networkNames = useMemo(
     () =>
       new Map(
-        topology.boundaries.map((boundary) => [
+        [...index.boundariesById.values()].map((boundary) => [
           boundary.network_id,
           boundary.name,
         ]),
       ),
-    [topology.boundaries],
+    [index],
   );
+  const rowIndexById = useMemo(
+    () => new Map(rows.map((row, rowIndex) => [row.nodeId, rowIndex])),
+    [rows],
+  );
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // TanStack Virtual intentionally exposes non-memoizable callbacks. Keep the
+  // virtualizer scoped here so it never crosses a memoized component boundary.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 72,
+    overscan: 8,
+    initialRect: { width: 840, height: 420 },
+  });
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
   const focusedRowIdRef = useRef<string | null>(null);
+  const pendingFocusRowIdRef = useRef<string | null>(null);
+  const focusRequestTokenRef = useRef(0);
+  const focusTimerRef = useRef<number | null>(null);
   const [activeRowId, setActiveRowId] = useState<string | null>(
     () => rows[0]?.nodeId ?? null,
   );
@@ -1222,6 +1515,48 @@ function ListView({
     : rows[0]?.nodeId ?? null;
   const longPress = useTouchLongPress(onShowMenu);
   const focusTargetNodeRef = useRef(focusTargetNodeId);
+  const tryFocusPendingRow = useCallback((): boolean => {
+    const nodeId = pendingFocusRowIdRef.current;
+    if (!nodeId) return true;
+    const element = rowRefs.current.get(nodeId);
+    if (!element) return false;
+    pendingFocusRowIdRef.current = null;
+    if (focusTimerRef.current !== null) {
+      window.clearTimeout(focusTimerRef.current);
+      focusTimerRef.current = null;
+    }
+    element.focus({ preventScroll: true });
+    element.scrollIntoView?.({ block: "center", inline: "center" });
+    return true;
+  }, []);
+  const focusRow = useCallback(
+    (nodeId: string): void => {
+      const rowIndex = rowIndexById.get(nodeId);
+      if (rowIndex === undefined) return;
+      const requestToken = ++focusRequestTokenRef.current;
+      pendingFocusRowIdRef.current = nodeId;
+      setActiveRowId(nodeId);
+      focusedRowIdRef.current = nodeId;
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+        focusTimerRef.current = null;
+      }
+      virtualizer.scrollToIndex(rowIndex, { align: "center" });
+      const focusWhenMounted = (attempt: number): void => {
+        if (focusRequestTokenRef.current !== requestToken) return;
+        if (tryFocusPendingRow() || attempt >= 30) {
+          if (attempt >= 30) pendingFocusRowIdRef.current = null;
+          return;
+        }
+        focusTimerRef.current = window.setTimeout(
+          () => focusWhenMounted(attempt + 1),
+          16,
+        );
+      };
+      focusWhenMounted(0);
+    },
+    [rowIndexById, tryFocusPendingRow, virtualizer],
+  );
 
   useEffect(() => {
     focusTargetNodeRef.current = focusTargetNodeId;
@@ -1242,23 +1577,26 @@ function ListView({
       return;
     }
     focusedRowIdRef.current = resolvedActiveRowId;
-    const fallback = resolvedActiveRowId
-      ? rowRefs.current.get(resolvedActiveRowId)
-      : undefined;
-    fallback?.focus();
-    fallback?.scrollIntoView?.({ block: "center", inline: "center" });
-  }, [resolvedActiveRowId, rows]);
+    if (resolvedActiveRowId) focusRow(resolvedActiveRowId);
+  }, [focusRow, resolvedActiveRowId, rows]);
 
   useEffect(() => {
     if (focusRequest === 0) return;
     const nodeId = focusTargetNodeRef.current;
-    const element = nodeId ? rowRefs.current.get(nodeId) : undefined;
-    if (!nodeId || !element) return;
-    setActiveRowId(nodeId);
-    focusedRowIdRef.current = nodeId;
-    element.focus({ preventScroll: true });
-    element.scrollIntoView?.({ block: "center", inline: "center" });
-  }, [focusRequest]);
+    if (!nodeId) return;
+    focusRow(nodeId);
+  }, [focusRequest, focusRow]);
+
+  useEffect(
+    () => () => {
+      focusRequestTokenRef.current += 1;
+      pendingFocusRowIdRef.current = null;
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+      }
+    },
+    [],
+  );
 
   function handleRowKey(
     event: ReactKeyboardEvent<HTMLTableRowElement>,
@@ -1271,7 +1609,7 @@ function ListView({
       )
     ) {
       event.preventDefault();
-      const currentIndex = rows.findIndex((row) => row.nodeId === nodeId);
+      const currentIndex = rowIndexById.get(nodeId) ?? 0;
       let nextIndex = 0;
       if (event.key === "End") nextIndex = rows.length - 1;
       else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
@@ -1281,9 +1619,7 @@ function ListView({
       }
       const nextNodeId = rows[nextIndex]?.nodeId;
       if (!nextNodeId) return;
-      setActiveRowId(nextNodeId);
-      focusedRowIdRef.current = nextNodeId;
-      rowRefs.current.get(nextNodeId)?.focus();
+      focusRow(nextNodeId);
       return;
     }
     if (event.key === "Enter") {
@@ -1303,12 +1639,36 @@ function ListView({
     }
   }
 
+  const measuredVirtualRows = virtualizer.getVirtualItems();
+  const virtualRows =
+    measuredVirtualRows.length > 0
+      ? measuredVirtualRows
+      : rows.slice(0, 12).map((row, rowIndex) => ({
+          index: rowIndex,
+          key: row.nodeId,
+          start: rowIndex * 72,
+          size: 72,
+          end: (rowIndex + 1) * 72,
+        }));
+  useEffect(() => {
+    tryFocusPendingRow();
+  }, [tryFocusPendingRow, virtualRows]);
+
+  const firstVirtualRow = virtualRows[0];
+  const lastVirtualRow = virtualRows[virtualRows.length - 1];
+  const topSpacer = firstVirtualRow?.start ?? 0;
+  const bottomSpacer = lastVirtualRow
+    ? Math.max(0, virtualizer.getTotalSize() - lastVirtualRow.end)
+    : 0;
+
   return (
     <div
+      ref={scrollRef}
       className="table-shell topology-list-table"
       id="topology-object-navigation"
+      data-rendered-rows={virtualRows.length}
     >
-      <table>
+      <table aria-rowcount={rows.length + 1}>
         <caption className="sr-only">
           {tr(locale, "topology.list.caption", {
             count: String(rows.length),
@@ -1329,7 +1689,16 @@ function ListView({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          <tr
+            className="topology-list-spacer"
+            role="presentation"
+            aria-hidden="true"
+          >
+            <td colSpan={6} style={{ height: `${topSpacer}px` }} />
+          </tr>
+          {virtualRows.map((virtualRow) => {
+            const row = rows[virtualRow.index];
+            if (!row) return null;
             const node = nodes.get(row.nodeId);
             if (!node) return null;
             const selected = selectedNodeIds.has(row.nodeId);
@@ -1339,13 +1708,16 @@ function ListView({
                 ref={(element) => {
                   if (element) rowRefs.current.set(row.nodeId, element);
                   else rowRefs.current.delete(row.nodeId);
+                  virtualizer.measureElement(element);
                 }}
+                data-index={virtualRow.index}
                 data-node-id={row.nodeId}
                 data-selected={selected ? "true" : "false"}
                 className={selected ? "selected" : undefined}
                 aria-selected={selected}
+                aria-rowindex={virtualRow.index + 2}
                 aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home End Enter Space Shift+F10 ContextMenu"
-                aria-label={nodeAriaLabel(locale, node, networkNames, topology)}
+                aria-label={nodeAriaLabel(locale, node, networkNames, index)}
                 tabIndex={resolvedActiveRowId === row.nodeId ? 0 : -1}
                 onClick={(event) => {
                   if (longPress.consumeActivation(row.nodeId)) return;
@@ -1456,6 +1828,13 @@ function ListView({
               </tr>
             );
           })}
+          <tr
+            className="topology-list-spacer"
+            role="presentation"
+            aria-hidden="true"
+          >
+            <td colSpan={6} style={{ height: `${bottomSpacer}px` }} />
+          </tr>
         </tbody>
       </table>
     </div>
@@ -1568,7 +1947,7 @@ export function TopologyView({
   locale,
   filters,
   onFiltersChange,
-  selectedNodeIds = new Set<string>(),
+  selectedNodeIds = EMPTY_SELECTED_NODE_IDS,
   onToggleNode,
   onOpenNode,
   networkId = null,
@@ -1595,18 +1974,34 @@ export function TopologyView({
   });
   const [hover, setHover] = useState<HoverState | null>(null);
   const [menu, setMenu] = useState<NodeMenuState | null>(null);
+  const menuOpenRef = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuNodeIdRef = useRef<string | null>(null);
   const activeFilters = filters ?? internalFilters;
+  const deferredFilters = useDeferredValue(activeFilters);
   const sourceTopology = frozenTopology ?? topology;
+  const sourceIndex = useMemo(
+    () => (sourceTopology ? cachedTopologyIndex(sourceTopology) : null),
+    [sourceTopology],
+  );
   const filtered = useMemo(
     () =>
-      sourceTopology
-        ? filteredTopologySnapshot(sourceTopology, activeFilters)
+      sourceTopology && sourceIndex
+        ? filteredTopologySnapshot(
+            sourceTopology,
+            deferredFilters,
+            sourceIndex,
+          )
         : null,
-    [sourceTopology, activeFilters],
+    [deferredFilters, sourceIndex, sourceTopology],
   );
   const visible = filtered ?? sourceTopology;
+  const displayed = visible ?? sourceTopology;
+  const displayedIndex = useMemo(() => {
+    if (!displayed) return null;
+    if (displayed === sourceTopology && sourceIndex) return sourceIndex;
+    return createTopologyIndex(displayed, sourceIndex);
+  }, [displayed, sourceIndex, sourceTopology]);
   const focusTargetNodeId =
     visible?.nodes.find((node) => node.is_self)?.node_id ??
     visible?.nodes[0]?.node_id ??
@@ -1616,6 +2011,10 @@ export function TopologyView({
   useEffect(() => {
     visibleTopologyRef.current = visible;
   }, [visible]);
+
+  useEffect(() => {
+    menuOpenRef.current = menu !== null;
+  }, [menu]);
 
   const restoreTopologyFocus = useCallback((nodeId: string): void => {
     window.setTimeout(() => {
@@ -1690,17 +2089,21 @@ export function TopologyView({
     else setInternalFilters(next);
   }
 
-  function showHover(nodeId: string, rect: DOMRect): void {
-    if (menu) return;
-    const position = rectPosition(rect);
-    const clamped = clampOverlayPosition(
-      position.x + 14,
-      position.y + 14,
-      340,
-      190,
-    );
-    setHover({ nodeId, x: clamped.x, y: clamped.y });
-  }
+  const showHover = useCallback((nodeId: string, rect: DOMRect): void => {
+    setHover((current) => {
+      if (menuOpenRef.current) return current;
+      const position = rectPosition(rect);
+      const clamped = clampOverlayPosition(
+        position.x + 14,
+        position.y + 14,
+        340,
+        190,
+      );
+      return { nodeId, x: clamped.x, y: clamped.y };
+    });
+  }, []);
+
+  const hideHover = useCallback((): void => setHover(null), []);
 
   const showMenu = useCallback(
     (nodeId: string, x: number, y: number): void => {
@@ -1749,15 +2152,17 @@ export function TopologyView({
     );
   }
 
-  const displayed = visible ?? sourceTopology;
-  const hoverNode = hover
-    ? sourceTopology.nodes.find((node) => node.node_id === hover.nodeId)
-    : null;
-  const menuNode = menu
-    ? sourceTopology.nodes.find((node) => node.node_id === menu.nodeId)
-    : null;
+  if (!displayed || !displayedIndex) {
+    return (
+      <div className="empty-state">
+        {label(locale, "topology.empty.unavailable")}
+      </div>
+    );
+  }
+  const hoverNode = hover ? sourceIndex?.nodesById.get(hover.nodeId) : null;
+  const menuNode = menu ? sourceIndex?.nodesById.get(menu.nodeId) : null;
   const selectionCount = [...selectedNodeIds].filter((nodeId) =>
-    sourceTopology.nodes.some((node) => node.node_id === nodeId),
+    sourceIndex?.nodesById.has(nodeId),
   ).length;
   const zoomIndex = ZOOM_LEVELS.indexOf(
     zoom as (typeof ZOOM_LEVELS)[number],
@@ -1952,6 +2357,7 @@ export function TopologyView({
       ) : view === "graph" ? (
         <GraphView
           topology={displayed}
+          index={displayedIndex}
           locale={locale}
           mode={mode}
           zoom={zoom}
@@ -1961,12 +2367,13 @@ export function TopologyView({
           onOpenNode={onOpenNode}
           onToggleNode={onToggleNode}
           onShowHover={showHover}
-          onHideHover={() => setHover(null)}
+          onHideHover={hideHover}
           onShowMenu={showMenu}
         />
       ) : (
         <ListView
           topology={displayed}
+          index={displayedIndex}
           locale={locale}
           mode={mode}
           focusRequest={focusRequest}
@@ -1975,7 +2382,7 @@ export function TopologyView({
           onOpenNode={onOpenNode}
           onToggleNode={onToggleNode}
           onShowHover={showHover}
-          onHideHover={() => setHover(null)}
+          onHideHover={hideHover}
           onShowMenu={showMenu}
         />
       )}

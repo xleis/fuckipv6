@@ -152,6 +152,43 @@ function topologySnapshot(): TopologySnapshot {
   };
 }
 
+function largeTopologySnapshot(nodeCount = 1_000): TopologySnapshot {
+  return {
+    revision: 100,
+    viewer: "node-0000",
+    generated_at_unix_ms: 1_700_000_000_000,
+    truncated: false,
+    boundaries: [
+      {
+        network_id: "capacity",
+        name: "Capacity",
+        member_count: nodeCount,
+        visible_member_count: nodeCount,
+        viewer_role: "owner",
+      },
+    ],
+    clusters: [],
+    nodes: Array.from({ length: nodeCount }, (_, index) => {
+      const nodeId = `node-${String(index).padStart(4, "0")}`;
+      return node(
+        nodeId,
+        `Node ${index}`,
+        index % 11 === 0 ? "degraded" : "healthy",
+        [{ networkId: "capacity", role: index === 0 ? "owner" : "member" }],
+        index % 3 === 0 ? ["relay"] : [],
+        index === 0,
+      );
+    }),
+    connections: Array.from({ length: 5_000 }, (_, index) => ({
+      connection_id: `capacity-connection-${index}`,
+      from: `node-${String(index % nodeCount).padStart(4, "0")}`,
+      to: `node-${String((index + 1) % nodeCount).padStart(4, "0")}`,
+      networks: ["capacity"],
+      state: (["active", "idle", "stale"] as const)[index % 3],
+    })),
+  };
+}
+
 beforeEach(() => {
   installTestI18nRuntime();
   Object.defineProperty(Element.prototype, "scrollIntoView", {
@@ -456,6 +493,38 @@ describe("Topology keyboard, touch and accessibility behavior", () => {
     expect(document.activeElement).not.toBe(firstRow);
     await user.keyboard("{Enter}");
     expect(onOpenNode).toHaveBeenCalled();
+  });
+
+  it("bounds virtual list rows for 1,000 nodes while preserving the full row count", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query === "(max-width: 600px)",
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const { container } = render(
+      <TopologyView topology={largeTopologySnapshot()} locale="zh-CN" />,
+    );
+
+    const firstRow = await waitFor(() => {
+      const row = container.querySelector(
+        'tr[data-node-id="node-0000"]',
+      ) as HTMLTableRowElement | null;
+      expect(row).not.toBeNull();
+      return row!;
+    });
+    expect(
+      container.querySelectorAll("tbody tr[data-node-id]").length,
+    ).toBeLessThanOrEqual(40);
+    expect(screen.getByRole("table")).toHaveAttribute("aria-rowcount", "1001");
+    expect(firstRow).toHaveAttribute("aria-rowindex", "2");
   });
 
   it("opens the equivalent context menu after a touch long press and cancels on movement", async () => {

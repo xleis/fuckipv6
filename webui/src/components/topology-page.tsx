@@ -206,6 +206,10 @@ export function TopologyPage({
   });
   const requestSequence = useRef(0);
   const topologyRevision = topology?.revision ?? 0;
+  const topologyRevisionRef = useRef(topologyRevision);
+  useEffect(() => {
+    topologyRevisionRef.current = topologyRevision;
+  }, [topologyRevision]);
 
   const listAction = useMemo(
     () => actions.find((action) => action.id === "list_network_members"),
@@ -248,7 +252,7 @@ export function TopologyPage({
           state: "ready",
           networkId: activeNetworkId,
           directory: submission.outcome.data,
-          topologyRevision,
+          topologyRevision: topologyRevisionRef.current,
         });
         return;
       }
@@ -272,7 +276,7 @@ export function TopologyPage({
         message: errorText(error, locale),
       });
     }
-  }, [listAction, locale, networkId, onSubmitAction, topologyRevision]);
+  }, [listAction, locale, networkId, onSubmitAction]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -327,7 +331,7 @@ export function TopologyPage({
     setFilters((current) => ({ ...current, networkId: "all" }));
   }
 
-  function toggleNode(nodeId: string): void {
+  const toggleNode = useCallback((nodeId: string): void => {
     setSelected((current) => {
       const next = new Set(current);
       if (next.has(nodeId)) next.delete(nodeId);
@@ -336,19 +340,19 @@ export function TopologyPage({
     });
     setDetailNodeId(nodeId);
     setSelectionNotice("");
-  }
+  }, []);
 
-  function openNode(nodeId: string): void {
+  const openNode = useCallback((nodeId: string): void => {
     setDetailNodeId(nodeId);
     document
       .getElementById("topology-node-detail")
       ?.scrollIntoView({ block: "nearest" });
-  }
+  }, []);
 
-  function clearSelection(): void {
+  const clearSelection = useCallback((): void => {
     setSelected(new Set());
     setSelectionNotice("");
-  }
+  }, []);
 
   function changeFilters(next: TopologyFilters): void {
     const changed =
@@ -366,17 +370,17 @@ export function TopologyPage({
     setFilters(next);
   }
 
-  function prepareLifecycle(
+  const prepareLifecycle = useCallback((
     nodeId: string,
     action: BatchMemberAction,
-  ): void {
+  ): void => {
     setSelected(new Set([nodeId]));
     setDetailNodeId(nodeId);
     setRequestedBatchAction(action);
     document
       .getElementById("topology-governance")
       ?.scrollIntoView({ block: "nearest" });
-  }
+  }, []);
 
   function lifecycleActionsFor(nodeId: string): MemberLifecycleAction[] {
     return memberLifecycleActions(

@@ -3,10 +3,10 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEBUI_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -93,6 +93,19 @@ function fileResponse(response, body, contentType) {
     "cache-control": "no-store",
   });
   response.end(body);
+}
+
+function contentType(pathname) {
+  switch (extname(pathname)) {
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 function topologyFixture() {
@@ -260,10 +273,16 @@ function memberDirectory(networkId) {
 
 async function startFixtureServer(manifest, fixture, sharedAssets) {
   const appHtml = await readFile(join(DIST_ROOT, "index.html"));
-  const appJs = await readFile(join(DIST_ROOT, "assets/app.js"));
-  const appCss = await readFile(join(DIST_ROOT, "assets/app.css"));
   const webuiCss = await readFile(join(sharedAssets, "webui.css"));
   const i18nJs = await readFile(join(sharedAssets, "i18n.js"));
+  const distAssets = new Map(
+    await Promise.all(
+      (await readdir(join(DIST_ROOT, "assets"))).map(async (name) => [
+        `/assets/${name}`,
+        await readFile(join(DIST_ROOT, "assets", name)),
+      ]),
+    ),
+  );
   const sockets = new Set();
 
   const server = createServer((request, response) => {
@@ -314,12 +333,6 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
       case "/":
         fileResponse(response, appHtml, "text/html; charset=utf-8");
         return;
-      case "/assets/app.js":
-        fileResponse(response, appJs, "text/javascript; charset=utf-8");
-        return;
-      case "/assets/app.css":
-        fileResponse(response, appCss, "text/css; charset=utf-8");
-        return;
       case "/assets/webui.css":
         fileResponse(response, webuiCss, "text/css; charset=utf-8");
         return;
@@ -348,9 +361,15 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
           snapshot: fixture.snapshot,
         });
         return;
-      default:
+      default: {
+        const asset = distAssets.get(url.pathname);
+        if (asset) {
+          fileResponse(response, asset, contentType(url.pathname));
+          return;
+        }
         response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
         response.end("not found");
+      }
     }
   });
 

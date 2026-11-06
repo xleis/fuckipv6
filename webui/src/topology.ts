@@ -2,6 +2,7 @@ import type {
   CapabilityKind,
   MembershipRole,
   NodeId,
+  TopologyBoundary,
   TopologyConnection,
   TopologyConnectionState,
   TopologyNode,
@@ -185,6 +186,208 @@ export type TopologyLayout = {
   placements: TopologyPlacement[];
 };
 
+export type TopologyConnectionCounts = Record<TopologyConnectionState, number>;
+
+/// Reusable indexes for paths that used to scan every node × connection or
+/// boundary × cluster pair on each render.
+export type TopologyIndex = {
+  nodesById: Map<NodeId, TopologyNode>;
+  boundariesById: Map<string, TopologyBoundary>;
+  connectionCountsByNode: Map<NodeId, TopologyConnectionCounts>;
+  hiddenMembersByNetwork: Map<string, number>;
+  searchFieldsByNode: Map<NodeId, { name: string; nodeId: string }>;
+  source: {
+    nodes: TopologyNode[];
+    boundaries: TopologyBoundary[];
+    connections: TopologyConnection[];
+    clusters: NonNullable<TopologySnapshot["clusters"]>;
+  };
+};
+
+function connectionCounts(): TopologyConnectionCounts {
+  return { active: 0, idle: 0, stale: 0 };
+}
+
+export function createTopologyIndex(
+  snapshot: TopologySnapshot,
+  previous?: TopologyIndex | null,
+): TopologyIndex {
+  const cached = previous ?? undefined;
+  const previousSource = cached?.source;
+  const nodesById = new Map(
+    snapshot.nodes.map((node) => [node.node_id, node]),
+  );
+  const boundariesById =
+    cached !== undefined && previousSource?.boundaries === snapshot.boundaries
+      ? cached.boundariesById
+      : new Map(
+          snapshot.boundaries.map((boundary) => [
+            boundary.network_id,
+            boundary,
+          ]),
+        );
+
+  let sameNodeIds =
+    cached !== undefined &&
+    cached.nodesById.size === snapshot.nodes.length;
+  if (sameNodeIds && cached !== undefined) {
+    for (const node of snapshot.nodes) {
+      if (!cached.nodesById.has(node.node_id)) {
+        sameNodeIds = false;
+        break;
+      }
+    }
+  }
+  const connectionCountsByNode =
+    cached !== undefined &&
+    previousSource?.connections === snapshot.connections &&
+    sameNodeIds
+      ? cached.connectionCountsByNode
+      : (() => {
+          const counts = new Map<NodeId, TopologyConnectionCounts>();
+          for (const node of snapshot.nodes) {
+            counts.set(node.node_id, connectionCounts());
+          }
+          for (const connection of snapshot.connections) {
+            const from = counts.get(connection.from);
+            if (from) from[connection.state] += 1;
+            if (connection.to !== connection.from) {
+              const to = counts.get(connection.to);
+              if (to) to[connection.state] += 1;
+            }
+          }
+          return counts;
+        })();
+
+  const searchFieldsByNode =
+    cached !== undefined && previousSource?.nodes === snapshot.nodes
+      ? cached.searchFieldsByNode
+      : new Map(
+          snapshot.nodes.map((node) => [
+            node.node_id,
+            {
+              name: (node.display_name ?? "").toLocaleLowerCase(),
+              nodeId: node.node_id.toLocaleLowerCase(),
+            },
+          ]),
+        );
+  const clusters = snapshot.clusters ?? [];
+  const hiddenMembersByNetwork =
+    cached !== undefined && previousSource?.clusters === clusters
+      ? cached.hiddenMembersByNetwork
+      : (() => {
+          const hidden = new Map<string, number>();
+          for (const cluster of clusters) {
+            hidden.set(
+              cluster.network_id,
+              (hidden.get(cluster.network_id) ?? 0) +
+                cluster.hidden_member_count,
+            );
+          }
+          return hidden;
+        })();
+
+  return {
+    nodesById,
+    boundariesById,
+    connectionCountsByNode,
+    hiddenMembersByNetwork,
+    searchFieldsByNode,
+    source: {
+      nodes: snapshot.nodes,
+      boundaries: snapshot.boundaries,
+      connections: snapshot.connections,
+      clusters,
+    },
+  };
+}
+
+/**
+ * Snapshot patches preserve unchanged array identities. Keying the last index
+ * by the connection array lets a name/health refresh reuse all expensive
+ * sub-indexes without reading a React ref during render.
+ */
+const topologyIndexesByConnections = new WeakMap<
+  TopologyConnection[],
+  TopologyIndex
+>();
+
+export function cachedTopologyIndex(snapshot: TopologySnapshot): TopologyIndex {
+  const previous = topologyIndexesByConnections.get(snapshot.connections);
+  const index = createTopologyIndex(snapshot, previous);
+  topologyIndexesByConnections.set(snapshot.connections, index);
+  return index;
+}
+
+/** Layout only depends on boundaries and node network membership, never on
+ * connection traffic, so refreshes that only update health keep their frame. */
+export function topologyLayoutKey(snapshot: TopologySnapshot): string {
+  return `${snapshot.boundaries
+    .map((boundary) => boundary.network_id)
+    .join(",")}|${snapshot.nodes
+    .map((node) => `${node.node_id}:${node.networks.map((network) => network.network_id).join("+")}`)
+    .join(",")}`;
+}
+
+export const MAX_GRAPH_NODES = 80;
+export const MAX_GRAPH_CONNECTIONS = 200;
+
+export type TopologyGraphBudget = {
+  nodes: TopologyNode[];
+  connections: TopologyConnection[];
+  hiddenNodes: number;
+  hiddenConnections: number;
+};
+
+/** Bound SVG work while keeping every object available through the
+ * virtualized list. Self and selected nodes stay visible when possible. */
+export function topologyGraphBudget(
+  snapshot: TopologySnapshot,
+  selectedNodeIds: ReadonlySet<string> = new Set(),
+  maxNodes = MAX_GRAPH_NODES,
+  maxConnections = MAX_GRAPH_CONNECTIONS,
+): TopologyGraphBudget {
+  if (
+    snapshot.nodes.length <= maxNodes &&
+    snapshot.connections.length <= maxConnections
+  ) {
+    return {
+      nodes: snapshot.nodes,
+      connections: snapshot.connections,
+      hiddenNodes: 0,
+      hiddenConnections: 0,
+    };
+  }
+  const priorities = new Map<string, number>();
+  snapshot.nodes.forEach((node, index) => {
+    let priority = index;
+    if (node.is_self) priority -= snapshot.nodes.length + 2;
+    if (selectedNodeIds.has(node.node_id)) priority -= snapshot.nodes.length + 1;
+    priorities.set(node.node_id, priority);
+  });
+  const nodes = [...snapshot.nodes]
+    .sort(
+      (left, right) =>
+        (priorities.get(left.node_id) ?? 0) -
+          (priorities.get(right.node_id) ?? 0) ||
+        left.node_id.localeCompare(right.node_id),
+    )
+    .slice(0, maxNodes);
+  const visible = new Set(nodes.map((node) => node.node_id));
+  const connections = snapshot.connections
+    .filter(
+      (connection) =>
+        visible.has(connection.from) && visible.has(connection.to),
+    )
+    .slice(0, maxConnections);
+  return {
+    nodes,
+    connections,
+    hiddenNodes: snapshot.nodes.length - nodes.length,
+    hiddenConnections: snapshot.connections.length - connections.length,
+  };
+}
+
 const ANCHOR_SLOTS = 12;
 const NODE_SLOTS_PER_RING = 16;
 
@@ -273,22 +476,11 @@ export type TopologyListRow = {
 export function topologyListRows(
   snapshot: TopologySnapshot,
   mode: TopologyColorMode = "default",
+  index: TopologyIndex = createTopologyIndex(snapshot),
 ): TopologyListRow[] {
   const visuals = networkVisuals(snapshot, mode);
-  const boundaryNames = new Map(
-    snapshot.boundaries.map((boundary) => [boundary.network_id, boundary.name]),
-  );
   return snapshot.nodes.map((node) => {
-    const connections: Record<TopologyConnectionState, number> = {
-      active: 0,
-      idle: 0,
-      stale: 0,
-    };
-    for (const connection of snapshot.connections) {
-      if (connection.from === node.node_id || connection.to === node.node_id) {
-        connections[connection.state] += 1;
-      }
-    }
+    const connections = index.connectionCountsByNode.get(node.node_id) ?? connectionCounts();
     return {
       nodeId: node.node_id,
       name: node.display_name?.trim() || node.node_id,
@@ -300,7 +492,9 @@ export function topologyListRows(
       ),
       networks: node.networks.map((network) => ({
         networkId: network.network_id,
-        name: boundaryNames.get(network.network_id) ?? network.network_id,
+        name:
+          index.boundariesById.get(network.network_id)?.name ??
+          network.network_id,
         role: network.role,
         color: visuals.get(network.network_id)?.color ?? "#6b7280",
         dash: visuals.get(network.network_id)?.dash ?? "6 4",
@@ -390,10 +584,12 @@ export function topologyLegend(
   ];
 }
 
-export function hiddenMemberCount(snapshot: TopologySnapshot, networkId: string): number {
-  return (snapshot.clusters ?? [])
-    .filter((cluster) => cluster.network_id === networkId)
-    .reduce((total, cluster) => total + cluster.hidden_member_count, 0);
+export function hiddenMemberCount(
+  snapshot: TopologySnapshot,
+  networkId: string,
+  index: TopologyIndex = createTopologyIndex(snapshot),
+): number {
+  return index.hiddenMembersByNetwork.get(networkId) ?? 0;
 }
 
 export function connectionDash(state: TopologyConnectionState): string | undefined {

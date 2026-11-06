@@ -59,6 +59,7 @@ import {
   type LanguagePreference,
 } from "./api/session";
 import { webAuthnIssue } from "./auth/webauthn";
+import { createCoalescedTask } from "./coalesced-task";
 import { tr } from "./i18n";
 import {
   NAVIGATION_MODULES,
@@ -195,15 +196,54 @@ function useNodeEvents(
     if (!authenticated) return;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
+    let messageTimer: number | null = null;
+    let pendingMessage: string | null = null;
     let stopped = false;
+    const invalidateSnapshot = createCoalescedTask(() => {
+      void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
+    }, 150);
+
+    const processPendingMessage = () => {
+      messageTimer = null;
+      const raw = pendingMessage;
+      pendingMessage = null;
+      if (raw === null) return;
+      try {
+        const message = JSON.parse(raw) as Record<string, unknown>;
+        if (
+          message.schema_version !== 1 ||
+          typeof message.type !== "string"
+        ) {
+          queueResync();
+          return;
+        }
+        if (message.type === "snapshot" || message.type === "resync") {
+          const snapshot = validateSnapshot(message.snapshot as NodeSnapshot);
+          queryClient.setQueryData(SNAPSHOT_QUERY_KEY, snapshot);
+          setState({
+            status: "live",
+            stale: false,
+            lastAuthoritativeAt: Date.now(),
+          });
+          return;
+        }
+        if (message.type === "event") {
+          invalidateSnapshot.schedule();
+          return;
+        }
+        if (message.type === "error") queueResync();
+      } catch {
+        queueResync();
+      }
+    };
 
     const queueResync = () => {
-      setState((current) => ({
-        ...current,
-        status: "resyncing",
-        stale: true,
-      }));
-      void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
+      setState((current) =>
+        current.status === "resyncing" && current.stale
+          ? current
+          : { ...current, status: "resyncing", stale: true },
+      );
+      invalidateSnapshot.schedule();
     };
 
     const connect = () => {
@@ -217,37 +257,13 @@ function useNodeEvents(
         setState((current) => ({ ...current, status: "live" })),
       );
       socket.addEventListener("message", (event) => {
-        try {
-          const message = JSON.parse(String(event.data)) as Record<
-            string,
-            unknown
-          >;
-          if (
-            message.schema_version !== 1 ||
-            typeof message.type !== "string"
-          ) {
-            queueResync();
-            return;
-          }
-          if (message.type === "snapshot" || message.type === "resync") {
-            const snapshot = validateSnapshot(message.snapshot as NodeSnapshot);
-            queryClient.setQueryData(SNAPSHOT_QUERY_KEY, snapshot);
-            setState({
-              status: "live",
-              stale: false,
-              lastAuthoritativeAt: Date.now(),
-            });
-            return;
-          }
-          if (message.type === "event") {
-            void queryClient.invalidateQueries({
-              queryKey: SNAPSHOT_QUERY_KEY,
-            });
-            return;
-          }
-          if (message.type === "error") queueResync();
-        } catch {
-          queueResync();
+        // Snapshot invalidation events are level-triggered: only the newest
+        // queued frame matters. Deferring the parse keeps a 500-frame burst
+        // from doing 500 JSON validations on the interaction thread.
+        pendingMessage =
+          typeof event.data === "string" ? event.data : String(event.data);
+        if (messageTimer === null) {
+          messageTimer = window.setTimeout(processPendingMessage, 0);
         }
       });
       socket.addEventListener("close", () => {
@@ -264,7 +280,10 @@ function useNodeEvents(
     connect();
     return () => {
       stopped = true;
+      invalidateSnapshot.dispose();
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (messageTimer !== null) window.clearTimeout(messageTimer);
+      pendingMessage = null;
       socket?.close();
     };
   }, [authenticated, queryClient]);
@@ -1441,7 +1460,10 @@ export function App(): JSX.Element {
   });
   const snapshotQuery = useQuery({
     queryKey: SNAPSHOT_QUERY_KEY,
-    queryFn: loadSnapshot,
+    queryFn: () =>
+      loadSnapshot(
+        queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY),
+      ),
     enabled: authenticated,
     retry: false,
     placeholderData: (previous) => previous,

@@ -1708,18 +1708,45 @@ Enter 打开详情、Space 选择、Shift+F10/ContextMenu 打开菜单；菜单�
 （10 checks passed）、`node scripts/test_webui_accessibility.mjs`、
 `cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
-### W9-08 1,000 节点/5,000 连接性能 `[ ]`
+### W9-08 1,000 节点/5,000 连接性能 `[~]`
 
-- [ ] 建立可重复的大图基准数据；
-- [ ] 布局、筛选、选择和增量更新不阻塞主线程；
-- [ ] 首次绘制、刷新和交互达到冻结的性能预算；
-- [ ] 使用索引、空间分区或聚合避免 O(n²) 路径；
-- [ ] 内存和 DOM/原生对象数量有上限；
-- [ ] 持续更新时不产生无界事件队列；
+- [x] 建立可重复的大图基准数据；
+- [x] 布局、筛选、选择和增量更新不阻塞主线程；
+- [x] 首次绘制、刷新和交互达到冻结的性能预算；
+- [x] 使用索引、空间分区或聚合避免 O(n²) 路径；
+- [x] 内存和 DOM/原生对象数量有上限；
+- [x] 持续更新时不产生无界事件队列；
 - [ ] 在最小支持桌面尺寸和 Android 真机测试；
-- [ ] 性能报告绑定 commit、数据集和平台。
+- [x] 性能报告绑定 commit、数据集和平台。
 
 **验收**：目标规模下可交互且无卡死；报告可复核，不以小规模演示代替容量测试。
+桌面 960×640 容量验收已通过；Android 真机尚无设备可测，本项保持 `[~]`。
+
+**证据（2026-11-06）**：`webui/scripts/topology-capacity-e2e.mjs` 生成固定 1,000 节点、
+5,000 连接的基准拓扑，数据集 SHA-256 为
+`2d36eef16c8451f17c15c2a76469d0ecc66f34158d4a1179272d059d4dc81e4c`。报告记录
+Chrome `157.0.8103.38`、Linux x64、960×640、DPR 1、减少动效，并绑定生成时的 commit、
+分支和工作树状态。冻结预算为首次可交互 2,000ms、筛选/选择/增量刷新/列表键盘导航各 500ms、
+Long Task 50ms、图工作集 80 节点/200 连接、列表 DOM 40 行、500 个事件最多 2 次快照请求、
+JS heap 256MB；测试没有放宽这些预算。
+
+一轮桌面实测：首次可交互 72ms、筛选 8ms、选择 15ms、500 事件刷新 192ms、列表键盘导航
+24ms；500 帧事件突发只产生 1 次 snapshot 请求。图工作集渲染 80 节点/50 连接，列表 DOM
+13/14 行但通过 `aria-rowcount=1001` 暴露完整 1,000 节点；无超过 50ms 的 Long Task，
+JS heap 为 9.30MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Worker；拓扑索引按快照使用
+`WeakMap` 缓存，500 帧事件只保留最新帧并合并一次 trailing snapshot 失效，避免无界队列。
+`TopologyPage` 不再因每次 topology revision 变化自动拉取成员目录，空选择刷新也不会扫描全部
+节点生成批量计划。
+
+容量脚本连续 4 次通过 10 项检查，键盘 E2E 同时通过 10 项检查。Android 方面 `adb devices -l`
+可用，但没有连接设备；报告明确写入 `android_real_device.tested: false`，因此不宣称 Android
+真机通过，第 7 项保持未完成。报告路径为 `target/topology-capacity-e2e/report.json`。
+
+**验证通过**：WebUI `npm test -- --run`（17 files，187 passed）、`npm run typecheck`、
+`npm run lint`、`npm run build`、`node webui/scripts/topology-capacity-e2e.mjs --skip-build`、
+`node webui/scripts/topology-keyboard-e2e.mjs --skip-build`、
+`node scripts/test_webui_accessibility.mjs`、`cargo test -p fuckipv6-common --all-features i18n`
+（9 passed）和 `git diff --check`。
 
 ### W9-09 拓扑状态与视觉回归 `[ ]`
 

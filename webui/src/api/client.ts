@@ -18,6 +18,12 @@ import {
   validateSnapshotResponse,
 } from "../contract/invariants";
 import { NODE_CONTRACT_SCHEMA_VERSION } from "../../../contracts/typescript/node-contract-v1";
+import {
+  applySnapshotPatch,
+} from "./snapshot-patch";
+import type {
+  SnapshotWorkerResponse,
+} from "./snapshot-worker-protocol";
 
 export class AuthenticationError extends Error {
   constructor(message = "authentication required") {
@@ -115,6 +121,15 @@ export function newIdempotencyKey(): string {
   return `idem_${encoded}`;
 }
 
+function throwHttpError(status: number, payload: unknown): void {
+  if (status === 401 && recentAuthenticationRequired(payload)) {
+    throw new ReauthenticationRequiredError();
+  }
+  if (status === 401) {
+    throw new AuthenticationError();
+  }
+}
+
 export async function requestJson<T>(path: string, init: RequestInit = {}): Promise<JsonResult<T>> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has("Content-Type")) {
@@ -132,12 +147,7 @@ export async function requestJson<T>(path: string, init: RequestInit = {}): Prom
   } catch {
     payload = null;
   }
-  if (response.status === 401 && recentAuthenticationRequired(payload)) {
-    throw new ReauthenticationRequiredError();
-  }
-  if (response.status === 401) {
-    throw new AuthenticationError();
-  }
+  throwHttpError(response.status, payload);
   return { response, payload };
 }
 
@@ -157,11 +167,92 @@ export async function loadManifest(): Promise<NodeUiManifest> {
   return validateManifestResponse(payload);
 }
 
-export async function loadSnapshot(): Promise<NodeSnapshot> {
-  const payload = await apiRequest<NodeApiSnapshotResponse>(
+function loadSnapshotInline(): Promise<NodeSnapshot> {
+  return apiRequest<NodeApiSnapshotResponse>(
     `/api/v1/snapshot?schema_version=${NODE_CONTRACT_SCHEMA_VERSION}`,
-  );
-  return validateSnapshotResponse(payload);
+  ).then(validateSnapshotResponse);
+}
+
+type PendingSnapshotRequest = {
+  resolve(result: SnapshotWorkerResponse): void;
+  reject(error: unknown): void;
+};
+
+let snapshotWorker: Worker | null = null;
+let snapshotWorkerRequestSequence = 0;
+let lastWorkerSnapshot: NodeSnapshot | null = null;
+let lastWorkerSnapshotToken = 0;
+const pendingSnapshotRequests = new Map<number, PendingSnapshotRequest>();
+
+function rejectPendingSnapshotRequests(error: unknown): void {
+  for (const pending of pendingSnapshotRequests.values()) pending.reject(error);
+  pendingSnapshotRequests.clear();
+}
+
+function getSnapshotWorker(): Worker {
+  if (snapshotWorker) return snapshotWorker;
+  const worker = new Worker(new URL("./snapshot-worker.ts", import.meta.url), {
+    type: "module",
+  });
+  worker.onmessage = (event: MessageEvent<SnapshotWorkerResponse>) => {
+    const pending = pendingSnapshotRequests.get(event.data.requestId);
+    if (!pending) return;
+    pendingSnapshotRequests.delete(event.data.requestId);
+    pending.resolve(event.data);
+  };
+  worker.onerror = (event) => {
+    rejectPendingSnapshotRequests(
+      new Error(event.message || "snapshot worker failed"),
+    );
+    worker.terminate();
+    if (snapshotWorker === worker) snapshotWorker = null;
+  };
+  snapshotWorker = worker;
+  return worker;
+}
+
+function loadSnapshotInWorker(previous?: NodeSnapshot): Promise<NodeSnapshot> {
+  const worker = getSnapshotWorker();
+  const requestId = ++snapshotWorkerRequestSequence;
+  const baseMatches = previous !== undefined && previous === lastWorkerSnapshot;
+  return new Promise<SnapshotWorkerResponse>((resolve, reject) => {
+    pendingSnapshotRequests.set(requestId, { resolve, reject });
+    worker.postMessage({
+      requestId,
+      url: `/api/v1/snapshot?schema_version=${NODE_CONTRACT_SCHEMA_VERSION}`,
+      baseToken: baseMatches ? lastWorkerSnapshotToken : undefined,
+    });
+  }).then((result) => {
+    if (result.kind === "failure") throw new Error(result.message);
+    if (result.kind === "contract") {
+      throw new ContractError(result.message.replace(/^node-ui-contract: /, ""));
+    }
+    if (result.kind === "http") {
+      throwHttpError(result.status, result.payload);
+      throw new HttpError(
+        result.status,
+        result.payload as NodeApiErrorResponse | null,
+      );
+    }
+
+    let next: NodeSnapshot;
+    if (result.kind === "snapshot") {
+      next = result.snapshot;
+    } else {
+      if (!previous || !baseMatches) {
+        throw new ContractError("snapshot patch has no matching base snapshot");
+      }
+      next = applySnapshotPatch(previous, result.patch);
+    }
+    lastWorkerSnapshot = next;
+    lastWorkerSnapshotToken = result.token;
+    return next;
+  });
+}
+
+export async function loadSnapshot(previous?: NodeSnapshot): Promise<NodeSnapshot> {
+  if (typeof Worker === "undefined") return loadSnapshotInline();
+  return loadSnapshotInWorker(previous);
 }
 
 export async function sendCommand(envelope: NodeCommandHttpRequest): Promise<NodeApiCommandResponse> {

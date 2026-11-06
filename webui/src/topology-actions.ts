@@ -10,6 +10,7 @@ import type {
   TopologySnapshot,
 } from "../../contracts/typescript/node-contract-v1";
 import type { ActionValues } from "./contract/invariants";
+import { createTopologyIndex, type TopologyIndex } from "./topology";
 
 /// Lifecycle actions that make sense for an existing, visible topology member.
 /// Invitation targets non-members; exit is self-service only and is handled by
@@ -90,14 +91,22 @@ export function retainTopologySelection(
   snapshot: TopologySnapshot,
   selected: ReadonlySet<string>,
 ): Set<string> {
+  if (selected.size === 0) {
+    return selected instanceof Set ? selected : new Set(selected);
+  }
   const existing = new Set(snapshot.nodes.map((node) => node.node_id));
-  return new Set([...selected].filter((nodeId) => existing.has(nodeId)));
+  const retained = [...selected].filter((nodeId) => existing.has(nodeId));
+  if (retained.length === selected.size) {
+    return selected instanceof Set ? selected : new Set(selected);
+  }
+  return new Set(retained);
 }
 
 /** Shared graph/list query so both views cannot disagree about visible nodes. */
 export function queryTopology(
   snapshot: TopologySnapshot,
   filters: TopologyFilters,
+  index: TopologyIndex = createTopologyIndex(snapshot),
 ): TopologyNode[] {
   const needle = filters.search.trim().toLocaleLowerCase();
   return snapshot.nodes.filter((node) => {
@@ -127,9 +136,9 @@ export function queryTopology(
       return false;
     }
     if (!needle) return true;
-    return (
-      (node.display_name ?? "").toLocaleLowerCase().includes(needle) ||
-      node.node_id.toLocaleLowerCase().startsWith(needle)
+    const fields = index.searchFieldsByNode.get(node.node_id);
+    return Boolean(
+      fields?.name.includes(needle) || fields?.nodeId.startsWith(needle),
     );
   });
 }
@@ -137,8 +146,19 @@ export function queryTopology(
 export function filteredTopologySnapshot(
   snapshot: TopologySnapshot,
   filters: TopologyFilters,
+  index: TopologyIndex = createTopologyIndex(snapshot),
 ): TopologySnapshot {
-  const nodes = queryTopology(snapshot, filters);
+  if (
+    filters.search.trim() === "" &&
+    filters.networkId === "all" &&
+    filters.role === "all" &&
+    filters.capability === "all" &&
+    filters.health === "all"
+  ) {
+    return snapshot;
+  }
+  const nodes = queryTopology(snapshot, filters, index);
+  if (nodes.length === snapshot.nodes.length) return snapshot;
   const visible = new Set(nodes.map((node) => node.node_id));
   return {
     ...snapshot,
@@ -161,7 +181,7 @@ export function buildBatchMemberPlan(
   networkId: string | null,
   directory: NetworkMemberDirectory | null,
 ): BatchPlan {
-  if (!networkId) {
+  if (!networkId || selected.size === 0) {
     return { candidates: [], eligible: [], skipped: [], actionOptions: [] };
   }
   const directoryMembers = new Map(

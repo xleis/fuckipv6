@@ -1,0 +1,375 @@
+import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
+import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
+import type {
+  NodeSnapshot,
+  NodeUiManifest,
+  NodeUiPage,
+  TopologyNode,
+  TopologyNodeHealth,
+  TopologySnapshot,
+} from "../../../contracts/typescript/node-contract-v1";
+import { installTestI18nRuntime } from "../test/runtime";
+import { PageContent } from "./page-content";
+import { TopologyView } from "./topology-view";
+
+const translated = (key: string) => `translated:${key}`;
+
+function membership(
+  networkId: string,
+  role: "owner" | "administrator" | "member",
+  health: TopologyNodeHealth,
+) {
+  return {
+    network_id: networkId,
+    role,
+    status: "active" as const,
+    health,
+    presence: {
+      source: "live_session" as const,
+      state: "online" as const,
+      observed_at_unix_ms: 1_700_000_000_000,
+    },
+  };
+}
+
+function node(
+  nodeId: string,
+  displayName: string,
+  health: TopologyNodeHealth,
+  networks: Array<{ networkId: string; role: "owner" | "administrator" | "member" }>,
+  capabilities: TopologyNode["capabilities"] = [],
+  isSelf = false,
+): TopologyNode {
+  return {
+    node_id: nodeId,
+    display_name: displayName,
+    health,
+    is_self: isSelf,
+    capabilities,
+    networks: networks.map(({ networkId, role }) =>
+      membership(networkId, role, health),
+    ),
+  };
+}
+
+function topologySnapshot(): TopologySnapshot {
+  return {
+    revision: 7,
+    viewer: "node-self",
+    generated_at_unix_ms: 1_700_000_000_000,
+    truncated: false,
+    boundaries: [
+      {
+        network_id: "net_alpha",
+        name: "Alpha",
+        member_count: 3,
+        visible_member_count: 3,
+        viewer_role: "owner",
+      },
+      {
+        network_id: "net_beta",
+        name: "Beta",
+        member_count: 6,
+        visible_member_count: 1,
+        viewer_role: "member",
+      },
+    ],
+    clusters: [
+      {
+        network_id: "net_beta",
+        hidden_member_count: 5,
+        expandable: false,
+        sample: ["node-hidden-a", "node-hidden-b"],
+      },
+    ],
+    nodes: [
+      node(
+        "node-self",
+        "Self Node",
+        "healthy",
+        [{ networkId: "net_alpha", role: "owner" }],
+        ["coordinator", "relay"],
+        true,
+      ),
+      node(
+        "node-shared",
+        "Shared Node",
+        "degraded",
+        [
+          { networkId: "net_alpha", role: "member" },
+          { networkId: "net_beta", role: "administrator" },
+        ],
+        ["coordinator", "relay", "exit", "file"],
+      ),
+      node(
+        "node-unreachable",
+        "Unreachable Node",
+        "unreachable",
+        [{ networkId: "net_beta", role: "member" }],
+        ["exit"],
+      ),
+      node(
+        "node-unknown",
+        "Unknown Node",
+        "unknown",
+        [{ networkId: "net_alpha", role: "member" }],
+      ),
+    ],
+    connections: [
+      {
+        connection_id: "connection-active",
+        from: "node-self",
+        to: "node-shared",
+        networks: ["net_alpha"],
+        state: "active",
+      },
+      {
+        connection_id: "connection-idle",
+        from: "node-shared",
+        to: "node-unreachable",
+        networks: ["net_beta"],
+        state: "idle",
+      },
+      {
+        connection_id: "connection-stale",
+        from: "node-self",
+        to: "node-unknown",
+        networks: ["net_alpha"],
+        state: "stale",
+      },
+    ],
+  };
+}
+
+beforeEach(() => {
+  installTestI18nRuntime();
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("TopologyView visual encodings", () => {
+  it("draws each network with a distinct dashed boundary and visible name", () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const boundaries = [
+      ...container.querySelectorAll<SVGEllipseElement>(".topology-boundary ellipse"),
+    ];
+    const labels = [
+      ...container.querySelectorAll<SVGTextElement>(".topology-boundary-label"),
+    ];
+
+    expect(boundaries).toHaveLength(2);
+    expect(new Set(boundaries.map((boundary) => boundary.getAttribute("stroke"))).size).toBe(2);
+    expect(new Set(boundaries.map((boundary) => boundary.getAttribute("stroke-dasharray"))).size).toBe(2);
+    expect(boundaries.every((boundary) => boundary.getAttribute("stroke-dasharray"))).toBe(true);
+    expect(labels.map((label) => label.textContent)).toEqual(["Alpha", "Beta"]);
+  });
+
+  it("keeps network, capability and health encodings in separate visual channels", () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const shared = container.querySelector('[data-node-id="node-shared"]') as SVGGElement;
+    const networkStroke = shared
+      .querySelector(".topology-node-halo")
+      ?.getAttribute("stroke");
+    const capabilityStrokes = [
+      ...shared.querySelectorAll<SVGPathElement>(".capability-enabled"),
+    ].map((segment) => segment.getAttribute("stroke"));
+
+    expect(capabilityStrokes).toHaveLength(4);
+    expect(new Set(capabilityStrokes).size).toBe(4);
+    expect(capabilityStrokes).not.toContain(networkStroke);
+    expect(shared.querySelector(".topology-node-core")).toHaveClass("warn");
+  });
+
+  it("encodes all four capability segments and each health state by shape and glyph", () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const shared = container.querySelector('[data-node-id="node-shared"]') as SVGGElement;
+    expect(shared.querySelectorAll(".capability-enabled")).toHaveLength(4);
+    expect(shared.querySelectorAll(".capability-disabled")).toHaveLength(0);
+
+    const expected = {
+      "node-self": { glyph: "✓", shape: "circle", tone: "good" },
+      "node-shared": { glyph: "!", shape: "path", tone: "warn" },
+      "node-unreachable": { glyph: "×", shape: "rect", tone: "bad" },
+      "node-unknown": { glyph: "?", shape: "path", tone: "unknown" },
+    } as const;
+    for (const [nodeId, encoding] of Object.entries(expected)) {
+      const badge = container.querySelector(
+        `[data-node-id="${nodeId}"] .topology-health-badge`,
+      ) as SVGGElement;
+      expect(badge.firstElementChild?.tagName.toLowerCase()).toBe(encoding.shape);
+      expect(badge.querySelector("text")?.textContent).toBe(encoding.glyph);
+      expect(badge).toHaveClass(encoding.tone);
+    }
+  });
+
+  it("draws a shared node once and exposes all memberships and overlap counts", () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const sharedNodes = container.querySelectorAll('[data-node-id="node-shared"]');
+    const shared = sharedNodes[0] as SVGGElement;
+
+    expect(sharedNodes).toHaveLength(1);
+    expect(shared.querySelector(".topology-node-shared")?.textContent).toContain("×2");
+    expect(shared.getAttribute("aria-label")).toContain("Alpha");
+    expect(shared.getAttribute("aria-label")).toContain("Beta");
+    expect(shared.getAttribute("aria-label")).toContain(
+      translated("join_request.role.administrator"),
+    );
+    expect(container.querySelector(".topology-cluster")?.textContent).toContain("+5");
+  });
+
+  it("switches to an equivalent list with every node, network and connection state", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: translated("topology.view.list") }),
+    );
+    const table = screen.getByRole("table");
+    expect(container.querySelector(".topology-canvas")).not.toBeInTheDocument();
+    expect(within(table).getAllByRole("row")).toHaveLength(5);
+
+    const shared = table.querySelector('tr[data-node-id="node-shared"]') as HTMLElement;
+    expect(shared).toHaveTextContent("Shared Node");
+    expect(shared).toHaveTextContent("Alpha");
+    expect(shared).toHaveTextContent("Beta");
+    expect(shared).toHaveTextContent(translated("join_request.role.administrator"));
+    expect(shared).toHaveTextContent(translated("capability.coordinator"));
+    expect(shared).toHaveTextContent(translated("capability.relay"));
+    expect(shared).toHaveTextContent(translated("capability.exit"));
+    expect(shared).toHaveTextContent(translated("capability.file"));
+    expect(shared).toHaveTextContent(translated("topology.health.degraded"));
+    for (const state of ["active", "idle", "stale"] as const) {
+      expect(shared).toHaveTextContent(translated(`topology.connection.${state}`));
+    }
+    expect(shared.querySelector(".topology-list-connections")?.textContent).toContain("1");
+
+    await user.click(
+      screen.getByRole("button", { name: translated("topology.view.graph") }),
+    );
+    expect(container.querySelectorAll("[data-node-id]")).toHaveLength(4);
+  });
+
+  it("collapses the legend by default and keeps it aligned with the canvas encodings", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const summary = screen.getByText(translated("topology.legend.title"));
+    const legend = summary.closest("details") as HTMLDetailsElement;
+    expect(legend.open).toBe(false);
+
+    await user.click(summary);
+    expect(legend.open).toBe(true);
+    const networkLines = [
+      ...legend.querySelectorAll<SVGLineElement>("section:first-of-type line"),
+    ];
+    const boundaryStrokes = [
+      ...container.querySelectorAll<SVGEllipseElement>(".topology-boundary ellipse"),
+    ].map((boundary) => boundary.getAttribute("stroke"));
+    expect(networkLines.map((line) => line.getAttribute("stroke"))).toEqual(
+      boundaryStrokes,
+    );
+
+    for (const state of ["active", "idle", "stale"] as const) {
+      const canvasLine = container.querySelector(
+        `.topology-connection.${state} line`,
+      );
+      const legendLine = legend.querySelector(
+        `section:nth-of-type(4) li:nth-child(${state === "active" ? 1 : state === "idle" ? 2 : 3}) line`,
+      );
+      expect(legendLine?.getAttribute("stroke-dasharray")).toBe(
+        canvasLine?.getAttribute("stroke-dasharray"),
+      );
+    }
+    expect(legend).toHaveTextContent(translated("topology.legend.overlap"));
+  });
+
+  it("changes the colour palette and applies an explicit high-contrast mode", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const root = container.querySelector(".topology-view") as HTMLElement;
+    const capabilityBefore = container
+      .querySelector('[data-node-id="node-self"] .capability-enabled')
+      ?.getAttribute("stroke");
+
+    expect(root).toHaveAttribute("data-color-mode", "default");
+    await user.click(
+      screen.getByRole("button", { name: translated("topology.mode.colorblind") }),
+    );
+    expect(root).toHaveAttribute("data-color-mode", "colorblind");
+    expect(
+      container
+        .querySelector('[data-node-id="node-self"] .capability-enabled')
+        ?.getAttribute("stroke"),
+    ).not.toBe(capabilityBefore);
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: translated("topology.mode.high_contrast"),
+      }),
+    );
+    expect(root).toHaveClass("topology-high-contrast");
+  });
+
+  it("shows explicit empty states when topology or network boundaries are unavailable", () => {
+    const { rerender } = render(<TopologyView topology={null} locale="zh-CN" />);
+    expect(screen.getByText(translated("topology.empty.unavailable"))).toBeInTheDocument();
+
+    rerender(
+      <TopologyView
+        topology={{ ...topologySnapshot(), boundaries: [], nodes: [], connections: [] }}
+        locale="zh-CN"
+      />,
+    );
+    expect(screen.getByText(translated("topology.empty.no_networks"))).toBeInTheDocument();
+  });
+});
+
+describe("Topology page integration", () => {
+  it("renders the snapshot topology through PageContent", () => {
+    const manifest = manifestFixture as NodeUiManifest;
+    const topologyPage = manifest.pages.find((page) => page.id === "topology") as NodeUiPage;
+    const snapshot = {
+      ...(productFixture.snapshot as NodeSnapshot),
+      topology: topologySnapshot(),
+    };
+
+    render(
+      <PageContent
+        page={topologyPage}
+        snapshot={snapshot}
+        locale="zh-CN"
+        selectedNetwork="home"
+        recentDiagnostics={null}
+        onSelectNetwork={() => {}}
+        onNavigate={() => {}}
+        onRequestAction={() => {}}
+        onRunAction={async () => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole("group", {
+        name: translated("topology.aria.graph_title"),
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Shared Node")).toBeInTheDocument();
+  });
+});

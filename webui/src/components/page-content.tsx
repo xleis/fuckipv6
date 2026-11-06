@@ -81,6 +81,7 @@ import {
 import { t, tr } from "../i18n";
 import { resolveNetworkMembershipId } from "../members";
 import { advancedSettingsGroups } from "../settings";
+import { TopologyView } from "./topology-view";
 
 type PageContentProps = {
   page: NodeUiPage;
@@ -2187,90 +2188,6 @@ function Peers({
   );
 }
 
-function Topology({
-  snapshot,
-  locale,
-}: Omit<
-  PageContentProps,
-  "page" | "selectedNetwork" | "onSelectNetwork" | "onNavigate"
->) {
-  const centerX = 360;
-  const centerY = 170;
-  return (
-    <div className="topology-layout">
-      <div className="topology-canvas" aria-hidden="true">
-        <svg viewBox="0 0 720 340" role="presentation">
-          {snapshot.networks.map((network, networkIndex) => {
-            const x = 130 + networkIndex * 230;
-            return (
-              <g key={network.name}>
-                <path
-                  d={`M ${centerX} ${centerY} Q ${(centerX + x) / 2} ${centerY - 80} ${x} ${centerY}`}
-                  className="topology-link"
-                />
-                <circle
-                  cx={x}
-                  cy={centerY}
-                  r="34"
-                  className={`topology-network ${statusTone(network.status)}`}
-                />
-                <text x={x} y={centerY + 5} textAnchor="middle">
-                  {network.name.slice(0, 10)}
-                </text>
-                {snapshot.peers
-                  .filter((peer) => peer.network_name === network.name)
-                  .map((peer, index) => {
-                    const angle =
-                      (index / Math.max(1, network.peer_count)) * Math.PI * 2;
-                    const peerX = x + Math.cos(angle) * 64;
-                    const peerY = centerY + Math.sin(angle) * 64;
-                    return (
-                      <circle
-                        key={peer.peer_id}
-                        cx={peerX}
-                        cy={peerY}
-                        r="8"
-                        className={
-                          peer.online ? "topology-peer online" : "topology-peer"
-                        }
-                      />
-                    );
-                  })}
-              </g>
-            );
-          })}
-          <circle
-            cx={centerX}
-            cy={centerY}
-            r="44"
-            className="topology-center"
-          />
-          <text x={centerX} y={centerY + 5} textAnchor="middle">
-            THIS NODE
-          </text>
-        </svg>
-      </div>
-      <div className="topology-list">
-        {snapshot.networks.map((network) => (
-          <div className="topology-row" key={network.name}>
-            <Network size={16} />
-            <div>
-              <strong>{network.name}</strong>
-              <span>
-                {network.peer_count} peers ·{" "}
-                {network.roles.join(" / ") || "member"}
-              </span>
-            </div>
-            <span className={`status-pill ${statusTone(network.status)}`}>
-              {t(locale, `status.network.${network.status}`)}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function Traffic({
   snapshot,
   locale,
@@ -2947,7 +2864,12 @@ export function PageContent(props: PageContentProps) {
       content = <NodeRuntime {...props} />;
       break;
     case "topology":
-      content = <Topology {...props} />;
+      content = (
+        <TopologyView
+          topology={snapshot.topology ?? null}
+          locale={locale}
+        />
+      );
       break;
     case "traffic":
       content = <Traffic {...props} />;

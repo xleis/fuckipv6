@@ -13,6 +13,7 @@ const navigationContract = readFileSync(path.join(root, "crates/common/assets/ui
 const reactStyles = readFileSync(path.join(root, "webui/src/styles.css"), "utf8");
 const reactActionPanel = readFileSync(path.join(root, "webui/src/components/action-panel.tsx"), "utf8");
 const reactPageContent = readFileSync(path.join(root, "webui/src/components/page-content.tsx"), "utf8");
+const reactTopologyView = readFileSync(path.join(root, "webui/src/components/topology-view.tsx"), "utf8");
 
 function findChrome() {
   const candidates = [
@@ -399,8 +400,13 @@ async function main() {
     assert.match(reactPageContent, /<DropdownMenu\.Trigger asChild>/);
     assert.match(reactPageContent, /onPointerDown=\{startLongPress\}/);
     assert.match(reactPageContent, /network-actions-menu/);
-    assert.match(reactPageContent, /className="topology-list"/);
-    assert.match(reactPageContent, /network\.peer_count/);
+    assert.match(reactPageContent, /<TopologyView/);
+    assert.match(reactPageContent, /snapshot\.topology/);
+    assert.match(reactTopologyView, /data-color-mode/);
+    assert.match(reactTopologyView, /topology-high-contrast/);
+    assert.match(reactTopologyView, /role="list"/);
+    assert.match(reactTopologyView, /topology-health-badge/);
+    assert.match(reactStyles, /\.topology-high-contrast/);
 
     console.log("test_webui_accessibility: passed");
   } finally {

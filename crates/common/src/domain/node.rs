@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::field_privacy::FieldVisibility;
 use super::ids::{NetworkId, NodeId, PasskeyCredentialId, PublicKey, SecretRef, SessionRef};
 use super::{DomainError, DomainResult};
 
@@ -223,16 +224,6 @@ impl NodeOwner {
     }
 }
 
-/// Visibility scope for a node-local field. These are labels over a server-side
-/// authorization result, never client-side enforcement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FieldVisibility {
-    NetworkMembers,
-    NetworkAdmins,
-    NodeOwner,
-}
-
 /// Privacy defaults for node-local fields. Secrets and traffic contents are
 /// intentionally unrepresentable and therefore can never be made visible here.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -252,30 +243,30 @@ pub struct NodePrivacySettings {
 impl Default for NodePrivacySettings {
     fn default() -> Self {
         Self {
-            display_name: FieldVisibility::NetworkMembers,
-            public_key: FieldVisibility::NetworkMembers,
-            platform_and_version: FieldVisibility::NetworkMembers,
-            online_state: FieldVisibility::NetworkMembers,
-            endpoints: FieldVisibility::NetworkMembers,
-            real_network_addresses: FieldVisibility::NetworkAdmins,
-            traffic_statistics: FieldVisibility::NetworkAdmins,
-            local_processes: FieldVisibility::NodeOwner,
-            local_paths: FieldVisibility::NodeOwner,
-            detailed_logs: FieldVisibility::NodeOwner,
+            display_name: FieldVisibility::Network,
+            public_key: FieldVisibility::Network,
+            platform_and_version: FieldVisibility::Network,
+            online_state: FieldVisibility::Network,
+            endpoints: FieldVisibility::Network,
+            real_network_addresses: FieldVisibility::Administrators,
+            traffic_statistics: FieldVisibility::Administrators,
+            local_processes: FieldVisibility::OwnerOnly,
+            local_paths: FieldVisibility::OwnerOnly,
+            detailed_logs: FieldVisibility::OwnerOnly,
         }
     }
 }
 
 impl NodePrivacySettings {
     pub fn validate(&self) -> DomainResult<()> {
-        if self.real_network_addresses == FieldVisibility::NetworkMembers {
+        if self.real_network_addresses == FieldVisibility::Network {
             return Err(DomainError::invariant(
                 "real network addresses cannot be visible to all members",
             ));
         }
-        if self.local_processes != FieldVisibility::NodeOwner
-            || self.local_paths != FieldVisibility::NodeOwner
-            || self.detailed_logs != FieldVisibility::NodeOwner
+        if self.local_processes != FieldVisibility::OwnerOnly
+            || self.local_paths != FieldVisibility::OwnerOnly
+            || self.detailed_logs != FieldVisibility::OwnerOnly
         {
             return Err(DomainError::invariant(
                 "local-only fields can only be visible to the node owner",
@@ -438,13 +429,13 @@ mod tests {
     #[test]
     fn privacy_cannot_expose_local_only_or_real_address_fields() {
         let privacy = NodePrivacySettings {
-            local_processes: FieldVisibility::NetworkMembers,
+            local_processes: FieldVisibility::Network,
             ..NodePrivacySettings::default()
         };
         assert!(privacy.validate().is_err());
 
         let privacy = NodePrivacySettings {
-            real_network_addresses: FieldVisibility::NetworkMembers,
+            real_network_addresses: FieldVisibility::Network,
             ..NodePrivacySettings::default()
         };
         assert!(privacy.validate().is_err());

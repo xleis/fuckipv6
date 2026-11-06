@@ -135,7 +135,7 @@
         ],
         "node_ids": [
           "node-multi-self",
-          "node-multi-home",
+          "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           "node-multi-studio"
         ],
         "shared_node_ids": [
@@ -143,7 +143,7 @@
         ],
         "health_by_node": {
           "node-multi-self": "healthy",
-          "node-multi-home": "healthy",
+          "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA": "healthy",
           "node-multi-studio": "healthy"
         },
         "enabled_capabilities_by_node": {
@@ -151,7 +151,7 @@
             "relay",
             "exit"
           ],
-          "node-multi-home": [
+          "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA": [
             "file"
           ],
           "node-multi-studio": [
@@ -245,7 +245,7 @@
             ]
           },
           {
-            "node_id": "node-multi-home",
+            "node_id": "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "display_name": "Home Peer",
             "health": "healthy",
             "is_self": false,
@@ -299,7 +299,7 @@
           {
             "connection_id": "connection-multi-home",
             "from": "node-multi-self",
-            "to": "node-multi-home",
+            "to": "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "networks": [
               "home"
             ],

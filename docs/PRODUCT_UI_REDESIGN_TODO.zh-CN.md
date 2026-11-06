@@ -1750,7 +1750,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 `node scripts/test_webui_accessibility.mjs`、`cargo test -p fuckipv6-common --all-features i18n`
 （9 passed）和 `git diff --check`。
 
-### W9-09 拓扑状态与视觉回归 `[ ]`
+### W9-09 拓扑状态与视觉回归 `[x]`
 
 - [x] 加载、部分数据、陈旧、空、错误、无权限状态完整；
 - [x] 单网络、多网络、公共节点、离线、降级、能力混合场景有基线；
@@ -1759,7 +1759,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 - [x] 选择、悬停和菜单状态可对比；
 - [x] 布局重置和持久化行为一致；
 - [x] 禁止拓扑展示假节点或静态连接；
-- [ ] 证据包含筛选、选择和动作结果。
+- [x] 证据包含筛选、选择和动作结果。
 
 **验收**：拓扑完成从数据、权限、交互到视觉回归的闭环。
 
@@ -1866,6 +1866,32 @@ capability-mixed `32ac8d8f9b8d6ba0fa14784f5c4abba6898457c3429c01dadd3a99e54a44ed
 `node scripts/test_webui_accessibility.mjs`、
 `cargo test -p fuckipv6-client --all-features --lib topology_shared_scenarios_render_only_authoritative_objects`
 （1 passed）、`cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
+
+**证据（2026-11-06，筛选、选择与动作结果）**：同一真实 Chrome/CDP 基线新增 `filtered` 与
+`action-result` 状态。筛选态通过真实键盘输入 `Studio`，只保留 `node-multi-studio`，并校验
+“Showing 1 of 3 nodes”、筛选框值与画布 `data-rendered-nodes=1`；选择态继续校验批量选择栏和唯一
+NodeId。动作结果态从 `Home Peer` 的右键菜单发起真实 `Suspend`，在确认对话框点击执行，服务端严格
+收到一次 `list_network_members`、一次 `change_member_lifecycle`（`action=suspend`、
+`expected_revision=9002`）和动作后一次目录刷新；结果面板逐项显示 `Succeeded 1 · Skipped 0 · Failed 0`、
+变更后 revision `9003` 与服务端 audit ID，不使用本地伪成功或伪审计。动作目标改用符合正式 NodeId
+契约的稳定值，避免视觉夹具绕过生产端预检。另修复拓扑页在提交回调及等价 manifest 对象刷新时反复
+加载成员目录的循环；`topology-page.test.tsx` 的
+`loads the member directory once across equivalent callback and manifest refreshes` 回归覆盖该场景。
+
+筛选、选择与动作结果截图均为 2880×1800；最终脚本连续两次 `--skip-build` 哈希完全一致：
+筛选 `566e807a75a02afbab187e1aed9d93fb1378246329b3472c6ac8b7b67a7944f6`、选择
+`6b38897db9c5e5e0cf11df1079da821eac5a01ce71e4e74080f2f47e1f09ffef`、动作结果
+`43e4d389066275601212accdc6f1d638ea168376d72e8f95d8dc440d42845030`。当前场景 fixture
+SHA-256 为 `e0b7288b5e609a6767117622aed323c2fa3c0bda3de8c40da2c34fbed93ab306`，基线报告
+`target/topology-visual-baseline/manifest.json` 的 SHA-256 为
+`6b100e279b4996fb8f2357dad3cd8a8ee3947939461273b0ee069159f5d73baa`。人工审查确认筛选计数、
+选择反馈和动作结果逐项状态在固定视口内完整可读，失败/跳过区未被总摘要遮盖。
+
+**验证通过**：WebUI `npm test -- --run`（19 files，209 passed）、`npm run typecheck`、
+`npm run lint`、`npm run build`、`node scripts/topology-visual-baseline.mjs --skip-build`
+（最终连续 2 次，6 scenarios、5 interaction states、1 layout persistence check）、
+`node ../scripts/test_webui_accessibility.mjs`、`node ../scripts/test_i18n_runtime.mjs` 和
+`git diff --check`。
 
 ### W9-10 拓扑与成员 E2E `[ ]`
 

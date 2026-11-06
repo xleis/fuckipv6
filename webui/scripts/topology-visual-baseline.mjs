@@ -28,7 +28,14 @@ const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const HEALTH_VALUES = ["healthy", "unknown", "degraded", "unreachable"];
 const CAPABILITY_ORDER = ["coordinator", "relay", "exit", "file"];
 const INTERACTION_SCENARIO_ID = "multi-network";
+const INTERACTION_NODE_IDS = [
+  "node-multi-self",
+  "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "node-multi-studio",
+];
 const INTERACTION_NODE_ID = "node-multi-studio";
+const ACTION_NODE_ID = "node_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const ACTION_NETWORK_ID = "home";
 const TOPOLOGY_LAYOUT_STORAGE_KEY = "fuckipv6.topology.layout.v1";
 
 function sha256(value) {
@@ -242,7 +249,10 @@ function memberDirectory(topology, networkId) {
           lifecycle_state: membership.status,
           revision: topology.revision,
           access_epoch: 1,
-          available_actions: [],
+          available_actions:
+            viewerRole !== "member" && node.node_id !== topology.viewer
+              ? ["suspend"]
+              : [],
           presence: membership.presence,
         },
       ];
@@ -263,6 +273,7 @@ async function startFixtureServer(manifest, getSnapshot, sharedAssets) {
     ),
   );
   const sockets = new Set();
+  const commands = [];
 
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -275,39 +286,108 @@ async function startFixtureServer(manifest, getSnapshot, sharedAssets) {
       request.on("end", () => {
         try {
           const envelope = JSON.parse(body);
-          const command = envelope?.request?.command;
-          if (command !== "list_network_members") {
-            jsonResponse(
-              response,
-              {
-                schema_version: 1,
-                error: {
-                  code: "unsupported_command",
-                  message: `fixture does not implement ${String(command)}`,
-                },
-              },
-              400,
-            );
-            return;
-          }
-          const snapshot = getSnapshot();
+          const request = envelope?.request ?? {};
+          const commandRequest = request.command;
+          const command =
+            typeof commandRequest === "string"
+              ? commandRequest
+              : commandRequest?.command;
+          const payload = commandRequest?.payload ?? request.payload ?? {};
+          const snapshot = getSnapshot().snapshot;
+          commands.push({ command, payload: structuredClone(payload) });
           const networkId = String(
-            envelope?.request?.payload?.network_id ??
+            payload.network_id ??
               snapshot.topology?.boundaries[0]?.network_id ??
               "home",
           );
-          jsonResponse(response, {
-            schema_version: 1,
-            result: {
-              request_id: envelope.request.request_id,
-              outcome: {
-                status: "network_members",
-                data: memberDirectory(snapshot.topology, networkId),
+          if (command === "list_network_members") {
+            jsonResponse(response, {
+              schema_version: 1,
+              result: {
+                request_id: envelope.request.request_id,
+                outcome: {
+                  status: "network_members",
+                  data: memberDirectory(snapshot.topology, networkId),
+                },
+              },
+            });
+            return;
+          }
+          if (command === "change_member_lifecycle") {
+            const targetNodeId = String(payload.target_node_id ?? "");
+            const action = String(payload.action ?? "");
+            const member = snapshot.topology.nodes.find(
+              (node) =>
+                node.node_id === targetNodeId &&
+                node.networks.some((network) => network.network_id === networkId),
+            );
+            if (!member || action !== "suspend") {
+              jsonResponse(
+                response,
+                {
+                  schema_version: 1,
+                  error: {
+                    code: "invalid_fixture_action",
+                    message: "fixture supports suspend for a visible network member",
+                  },
+                },
+                400,
+              );
+              return;
+            }
+            const expectedRevision = Number(payload.expected_revision);
+            const revision =
+              Number.isSafeInteger(expectedRevision) && expectedRevision > 0
+                ? expectedRevision + 1
+                : snapshot.topology.revision + 1;
+            jsonResponse(response, {
+              schema_version: 1,
+              result: {
+                request_id: envelope.request.request_id,
+                outcome: {
+                  status: "member_lifecycle_changed",
+                  data: {
+                    network_id: networkId,
+                    target_node_id: targetNodeId,
+                    action,
+                    status: "suspended",
+                    revision,
+                    access_epoch: 2,
+                    operation_id: `fixture-operation-${action}-${targetNodeId}`,
+                    audit_id: `fixture-audit-${action}-${targetNodeId}`,
+                    idempotent: false,
+                    access_revoked: true,
+                    requires_reauthentication: true,
+                    requires_reapproval: true,
+                  },
+                },
+              },
+            });
+            return;
+          }
+          jsonResponse(
+            response,
+            {
+              schema_version: 1,
+              error: {
+                code: "unsupported_command",
+                message: `fixture does not implement ${String(command)}`,
               },
             },
-          });
-        } catch {
-          jsonResponse(response, { error: "invalid command envelope" }, 400);
+            400,
+          );
+        } catch (error) {
+          process.stderr.write(
+            `Fixture command failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
+          );
+          jsonResponse(
+            response,
+            {
+              error: "invalid command envelope",
+              detail: error instanceof Error ? error.message : String(error),
+            },
+            400,
+          );
         }
       });
       return;
@@ -387,6 +467,7 @@ async function startFixtureServer(manifest, getSnapshot, sharedAssets) {
   }
   return {
     origin: `http://127.0.0.1:${address.port}`,
+    commands,
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise((resolvePromise) => server.close(resolvePromise));
@@ -588,6 +669,79 @@ async function rightClick(session, point) {
     buttons: 0,
     clickCount: 1,
   });
+}
+
+async function clickElement(session, expression, description) {
+  await waitFor(session, `Boolean(${expression})`, description, 5_000);
+  await evaluate(
+    session,
+    `(() => {
+      const element = ${expression};
+      element.scrollIntoView({ block: "center", inline: "center" });
+      return true;
+    })()`,
+  );
+  await sleep(150);
+  const point = await evaluate(
+    session,
+    `(() => {
+      const element = ${expression};
+      if (!element) throw new Error(${JSON.stringify(description)} + " is missing");
+      const bounds = element.getBoundingClientRect();
+      const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+      const hit = document.elementFromPoint(point.x, point.y);
+      if (hit !== element && !element.contains(hit)) {
+        throw new Error(${JSON.stringify(description)} + " is occluded");
+      }
+      return point;
+    })()`,
+  );
+  await dispatchMouse(session, "mouseMoved", point.x, point.y, {
+    button: "none",
+    buttons: 0,
+  });
+  await dispatchMouse(session, "mousePressed", point.x, point.y, {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await dispatchMouse(session, "mouseReleased", point.x, point.y, {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
+async function typeTopologyFilter(session, value) {
+  const input = `.topology-filters input[type='search']`;
+  await clickElement(session, `document.querySelector(${JSON.stringify(input)})`, "topology search input");
+  await session.send("Input.insertText", { text: value });
+  await waitFor(
+    session,
+    `(() => {
+      const input = document.querySelector(${JSON.stringify(input)});
+      const canvas = document.querySelector(".topology-canvas");
+      return input?.value === ${JSON.stringify(value)} &&
+        canvas?.getAttribute("data-rendered-nodes") === "1";
+    })()`,
+    "filtered topology graph",
+    5_000,
+  );
+}
+
+async function waitForRecordedCommand(server, startIndex, command, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const recorded = server.commands.slice(startIndex);
+    if (recorded.some((entry) => entry.command === command)) {
+      return;
+    }
+    await sleep(50);
+  }
+  const recorded = server.commands.slice(startIndex);
+  throw new Error(
+    `timed out waiting for recorded command ${command}; recorded=${JSON.stringify(recorded)}`,
+  );
 }
 
 function transformTranslation(transform) {
@@ -892,6 +1046,8 @@ function interactionSemantics(session) {
       const hoverElement = document.querySelector('[data-testid="topology-node-hover"]');
       const menuElement = document.querySelector('[data-testid="topology-node-menu"]');
       const selectionBar = document.querySelector(".topology-selection-bar");
+      const filterInput = document.querySelector(".topology-filters input[type='search']");
+      const actionResults = document.querySelector('[data-testid="topology-batch-results"]');
       return {
         hover: hoverElement ? {
           heading: text(hoverElement.querySelector(".topology-node-hover-heading strong")),
@@ -922,6 +1078,31 @@ function interactionSemantics(session) {
           } : null,
           notice: text(document.querySelector(".topology-selection-notice")),
         },
+        filter: {
+          search: filterInput?.value ?? "",
+          count: text(document.querySelector(".topology-filter-count")),
+          rendered_nodes: Number(
+            document.querySelector(".topology-canvas")?.getAttribute("data-rendered-nodes"),
+          ),
+          node_ids: [...document.querySelectorAll("g.topology-node[role='option']")]
+            .map((node) => node.getAttribute("data-node-id")),
+        },
+        action_result: actionResults ? {
+          title: text(actionResults.querySelector("#topology-batch-results-title")),
+          summary: text(actionResults.querySelector(".topology-governance-heading p")),
+          results: [...actionResults.querySelectorAll('[data-testid^="topology-batch-result-"]')]
+            .map((item) => ({
+              test_id: item.getAttribute("data-testid"),
+              status: [...item.classList].find((value) =>
+                ${JSON.stringify(["success", "skipped", "failed"])}.includes(value),
+              ) ?? null,
+              name: text(item.querySelector("strong")),
+              result: text(item.querySelector(".topology-batch-result-status")),
+              reason: text(item.querySelector("p")),
+              audit_id: text(item.querySelector("code")),
+            })),
+          rect: rect(actionResults),
+        } : null,
         viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
       };
     })()`,
@@ -936,6 +1117,22 @@ function assertInteractionSemantics(state, semantics) {
     VIEWPORT.deviceScaleFactor,
     `${state} device pixel ratio`,
   );
+  if (state !== "action-result") {
+    assert.equal(semantics.action_result, null, `${state} must not show action results`);
+  }
+  if (state !== "filtered") {
+    assert.equal(semantics.filter.search, "", `${state} search must be empty`);
+    assert.equal(
+      semantics.filter.rendered_nodes,
+      INTERACTION_NODE_IDS.length,
+      `${state} rendered node count`,
+    );
+    assert.deepEqual(
+      semantics.filter.node_ids,
+      INTERACTION_NODE_IDS,
+      `${state} rendered node ids`,
+    );
+  }
   if (state === "hover") {
     assert.ok(semantics.hover, "hover state must render the hover card");
     assert.equal(semantics.hover.heading, "Studio Peer");
@@ -951,6 +1148,16 @@ function assertInteractionSemantics(state, semantics) {
     assert.match(semantics.hover.hint, /Shift\+F10/);
     assert.equal(semantics.menu, null);
     assert.deepEqual(semantics.selection.selected_ids, []);
+    return;
+  }
+  if (state === "filtered") {
+    assert.equal(semantics.hover, null);
+    assert.equal(semantics.menu, null);
+    assert.deepEqual(semantics.selection.selected_ids, []);
+    assert.equal(semantics.filter.search, "Studio");
+    assert.equal(semantics.filter.count, "Showing 1 of 3 nodes");
+    assert.equal(semantics.filter.rendered_nodes, 1);
+    assert.deepEqual(semantics.filter.node_ids, [INTERACTION_NODE_ID]);
     return;
   }
   if (state === "selected") {
@@ -975,6 +1182,29 @@ function assertInteractionSemantics(state, semantics) {
       { text: "The server exposes no actions for this object", disabled: true },
     ]);
     assert.deepEqual(semantics.selection.selected_ids, []);
+    return;
+  }
+  if (state === "action-result") {
+    assert.equal(semantics.hover, null);
+    assert.equal(semantics.menu, null);
+    assert.deepEqual(semantics.selection.selected_ids, []);
+    assert.equal(semantics.filter.search, "");
+    assert.ok(semantics.action_result, "action-result state must show batch results");
+    assert.equal(semantics.action_result.title, "Batch operation results");
+    assert.equal(
+      semantics.action_result.summary,
+      "Succeeded 1 · Skipped 0 · Failed 0",
+    );
+    assert.deepEqual(semantics.action_result.results, [
+      {
+        test_id: `topology-batch-result-${ACTION_NODE_ID}`,
+        status: "success",
+        name: "Home Peer",
+        result: "Succeeded",
+        reason: "Completed; member revision is now 9003",
+        audit_id: `fixture-audit-suspend-${ACTION_NODE_ID}`,
+      },
+    ]);
     return;
   }
   throw new Error(`unexpected interaction state: ${state}`);
@@ -1194,12 +1424,20 @@ async function main() {
     report.environment.platform = process.platform;
     report.environment.node = process.version;
 
+    let scenarioLoadSequence = 0;
     const loadScenario = async (scenario) => {
       activeFixture = {
         language_preference: scenarioDocument.language_preference,
         snapshot: scenarioSnapshot(baseFixture, scenario),
       };
-      await cdp.send("Page.navigate", { url: `${fixtureServer.origin}/` });
+      const loadId = `${scenario.id}-${++scenarioLoadSequence}`;
+      const search = `?scenario-load=${encodeURIComponent(loadId)}`;
+      await cdp.send("Page.navigate", { url: `${fixtureServer.origin}/${search}` });
+      await waitFor(
+        cdp,
+        `location.search === ${JSON.stringify(search)} && document.readyState !== "loading"`,
+        `scenario document ${loadId}`,
+      );
       await waitForReady(cdp);
       await navigateToTopology(cdp, scenario.topology.nodes.length);
     };
@@ -1271,7 +1509,8 @@ async function main() {
       (scenario) => scenario.id === INTERACTION_SCENARIO_ID,
     );
     assert.ok(interactionScenario, "interaction scenario must exist");
-    for (const state of ["hover", "selected", "menu"]) {
+    for (const state of ["hover", "filtered", "selected", "menu", "action-result"]) {
+      const commandStart = fixtureServer.commands.length;
       await loadScenario(interactionScenario);
       const point = await nodeCenter(cdp, INTERACTION_NODE_ID);
       if (state === "hover") {
@@ -1285,6 +1524,9 @@ async function main() {
           "topology hover card",
           5_000,
         );
+      } else if (state === "filtered") {
+        await typeTopologyFilter(cdp, "Studio");
+        await movePointerAway(cdp);
       } else if (state === "selected") {
         await shiftClick(cdp, point);
         await waitFor(
@@ -1294,13 +1536,64 @@ async function main() {
           5_000,
         );
         await movePointerAway(cdp);
-      } else {
+      } else if (state === "menu") {
         await rightClick(cdp, point);
         await waitFor(
           cdp,
           `Boolean(document.querySelector('[data-testid="topology-node-menu"]'))`,
           "topology object menu",
           5_000,
+        );
+      } else {
+        await waitForRecordedCommand(
+          fixtureServer,
+          commandStart,
+          "list_network_members",
+        );
+        const selectionPoint = await nodeCenter(cdp, ACTION_NODE_ID);
+        await shiftClick(cdp, selectionPoint);
+        await waitFor(
+          cdp,
+          `Boolean(document.querySelector('[data-testid="topology-governance"], #topology-governance.topology-governance-error'))`,
+          "settled member governance",
+          5_000,
+        );
+        const actionPoint = await nodeCenter(cdp, ACTION_NODE_ID);
+        await rightClick(cdp, actionPoint);
+        const suspendItem = `[...document.querySelectorAll('[data-testid="topology-node-menu"] [role="menuitem"]')].find((element) => element.textContent?.trim() === "Suspend")`;
+        await clickElement(cdp, suspendItem, "Suspend menu action");
+        const previewButton = `[...document.querySelectorAll("#topology-governance button")].find((element) => element.textContent?.trim() === "Preview and confirm" && !element.disabled)`;
+        await waitFor(cdp, `Boolean(${previewButton})`, "enabled batch preview", 5_000);
+        await clickElement(cdp, previewButton, "batch preview button");
+        await waitFor(
+          cdp,
+          `Boolean(document.querySelector('[data-testid="topology-batch-dialog"]'))`,
+          "batch confirmation dialog",
+          5_000,
+        );
+        const executeButton = `[...document.querySelectorAll('[data-testid="topology-batch-dialog"] button')].find((element) => element.textContent?.trim().startsWith("Execute "))`;
+        await clickElement(cdp, executeButton, "batch execute button");
+        await waitFor(
+          cdp,
+          `Boolean(document.querySelector('[data-testid="topology-batch-results"] [data-testid="topology-batch-result-${ACTION_NODE_ID}"].success'))`,
+          "successful batch action result",
+          5_000,
+        );
+        await waitForRecordedCommand(
+          fixtureServer,
+          commandStart,
+          "change_member_lifecycle",
+        );
+        const actionCommand = fixtureServer.commands
+          .slice(commandStart)
+          .find((entry) => entry.command === "change_member_lifecycle");
+        assert.equal(actionCommand.payload.network_id, ACTION_NETWORK_ID);
+        assert.equal(actionCommand.payload.target_node_id, ACTION_NODE_ID);
+        assert.equal(actionCommand.payload.action, "suspend");
+        assert.equal(actionCommand.payload.expected_revision, 9002);
+        await evaluate(
+          cdp,
+          `document.querySelector('[data-testid="topology-batch-results"]')?.scrollIntoView({ block: "center" }); true`,
         );
       }
       await sleep(150);
@@ -1319,9 +1612,10 @@ async function main() {
       const imageName = `${name}.png`;
       const metadataName = `${name}.json`;
       const imageSha256 = sha256(image);
+      const serverCommands = fixtureServer.commands.slice(commandStart);
       const interactionReport = {
         scenario_id: INTERACTION_SCENARIO_ID,
-        node_id: INTERACTION_NODE_ID,
+        node_id: state === "action-result" ? ACTION_NODE_ID : INTERACTION_NODE_ID,
         state,
         topology_revision: interactionScenario.topology.revision,
         topology_sha256: sha256(JSON.stringify(interactionScenario.topology)),
@@ -1331,6 +1625,11 @@ async function main() {
           sha256: imageSha256,
         },
         semantics,
+        ...(state === "action-result"
+          ? {
+              server_commands: serverCommands,
+            }
+          : {}),
       };
       await writeFile(join(OUTPUT_ROOT, imageName), image);
       await writeFile(
@@ -1491,6 +1790,25 @@ async function main() {
         `${join(OUTPUT_ROOT, "manifest.json")}\n`,
     );
   } catch (error) {
+    if (cdp) {
+      try {
+        const diagnostic = await evaluate(
+          cdp,
+          `({
+            url: location.href,
+            menu: document.querySelector('[data-testid="topology-node-menu"]')?.innerText ?? null,
+            governance: document.querySelector('#topology-governance')?.innerText ?? null,
+            page: document.querySelector('[data-ui-region="content"]')?.innerText?.slice(0, 4000) ?? null,
+          })`,
+        );
+        diagnostic.commands = fixtureServer?.commands.slice(-10) ?? [];
+        process.stderr.write(`Topology baseline diagnostic:\n${JSON.stringify(diagnostic, null, 2)}\n`);
+      } catch (diagnosticError) {
+        process.stderr.write(
+          `Topology baseline diagnostic failed: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}\n`,
+        );
+      }
+    }
     if (chrome && chrome.exitCode === null) {
       const chromeStderr = chrome.stderr.read();
       if (chromeStderr) process.stderr.write(`Chrome stderr:\n${chromeStderr}\n`);

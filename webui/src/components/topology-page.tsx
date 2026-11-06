@@ -208,8 +208,15 @@ export function TopologyPage({
     state: "idle",
   });
   const requestSequence = useRef(0);
+  const directoryNetworkRef = useRef<string | null>(null);
+  const submitActionRef = useRef(onSubmitAction);
+  const listActionRef = useRef<NodeUiAction | undefined>(undefined);
+  const localeRef = useRef(locale);
   const topologyRevision = topology?.revision ?? 0;
   const topologyRevisionRef = useRef(topologyRevision);
+  useEffect(() => {
+    submitActionRef.current = onSubmitAction;
+  }, [onSubmitAction]);
   useEffect(() => {
     topologyRevisionRef.current = topologyRevision;
   }, [topologyRevision]);
@@ -226,18 +233,26 @@ export function TopologyPage({
     () => actions.find((action) => action.id === "change_member_lifecycle"),
     [actions],
   );
+  const listActionAvailable = Boolean(listAction);
+  useEffect(() => {
+    listActionRef.current = listAction;
+    localeRef.current = locale;
+  }, [listAction, locale]);
 
   const refreshDirectory = useCallback(async () => {
     const activeNetworkId = networkId;
     const request = ++requestSequence.current;
-    if (!activeNetworkId || !onSubmitAction || !listAction) {
+    const submitAction = submitActionRef.current;
+    const activeListAction = listActionRef.current;
+    const activeLocale = localeRef.current;
+    if (!activeNetworkId || !submitAction || !activeListAction) {
       setDirectoryLoad({ state: "idle" });
       return;
     }
     setDirectoryLoad({ state: "loading", networkId: activeNetworkId });
     try {
-      const submission = await onSubmitAction(
-        listAction,
+      const submission = await submitAction(
+        activeListAction,
         { network_id: activeNetworkId },
         () => {},
       );
@@ -263,8 +278,8 @@ export function TopologyPage({
         state: "error",
         networkId: activeNetworkId,
         message: submission.outcome
-          ? outcomeSummary(submission.outcome, locale)
-          : label(locale, "topology.batch.directory_failed"),
+          ? outcomeSummary(submission.outcome, activeLocale)
+          : label(activeLocale, "topology.batch.directory_failed"),
       });
     } catch (error) {
       if (
@@ -276,17 +291,31 @@ export function TopologyPage({
       setDirectoryLoad({
         state: "error",
         networkId: activeNetworkId,
-        message: errorText(error, locale),
+        message: errorText(error, activeLocale),
       });
     }
-  }, [listAction, locale, networkId, onSubmitAction]);
+  }, [networkId]);
 
   useEffect(() => {
+    if (!networkId) {
+      directoryNetworkRef.current = null;
+      return;
+    }
+    if (
+      !listActionAvailable ||
+      directoryNetworkRef.current === networkId
+    ) {
+      return;
+    }
+    // Manifest refreshes may briefly replace the action objects after a
+    // command. Latch the network so equivalent manifest generations cannot
+    // recursively trigger another directory command.
+    directoryNetworkRef.current = networkId;
     const timer = window.setTimeout(() => {
       void refreshDirectory();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [refreshDirectory]);
+  }, [listActionAvailable, networkId, refreshDirectory]);
 
   const directory =
     directoryLoad.state === "ready" &&

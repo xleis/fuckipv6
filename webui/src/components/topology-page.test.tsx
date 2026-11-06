@@ -206,6 +206,41 @@ afterEach(() => {
 });
 
 describe("TopologyPage interactions and governance", () => {
+  it("loads the member directory once across equivalent callback and manifest refreshes", async () => {
+    const firstSubmit = vi.fn(directorySubmit(directory()));
+    const { rerender } = render(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={firstSubmit}
+      />,
+    );
+
+    await waitFor(() => expect(firstSubmit).toHaveBeenCalledTimes(1));
+    rerender(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={[]}
+        onSubmitAction={firstSubmit}
+      />,
+    );
+    const secondSubmit = vi.fn(directorySubmit(directory()));
+    rerender(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions.map((action) => ({ ...action }))}
+        onSubmitAction={secondSubmit}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(firstSubmit).toHaveBeenCalledTimes(1);
+    expect(secondSubmit).not.toHaveBeenCalled();
+  });
+
   it("shows role, Exit capability, degraded health and presence on hover", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn(directorySubmit(directory()));

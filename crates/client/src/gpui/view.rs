@@ -315,6 +315,7 @@ struct GpuiShell {
     network_actions_open: Option<String>,
     selected_topology_network_id: Option<NetworkId>,
     selected_topology_node_id: Option<String>,
+    hovered_topology_node_id: Option<String>,
     topology_menu_node_id: Option<String>,
     topology_selection: BTreeSet<String>,
     topology_directory_request: Option<TopologyDirectoryRequest>,
@@ -403,6 +404,7 @@ impl GpuiShell {
             network_actions_open: None,
             selected_topology_network_id: None,
             selected_topology_node_id: None,
+            hovered_topology_node_id: None,
             topology_menu_node_id: None,
             topology_selection: BTreeSet::new(),
             topology_directory_request: None,
@@ -762,6 +764,7 @@ impl GpuiShell {
             .and_then(|topology| topology.boundary(&network_id))
             .map(|boundary| boundary.name.clone());
         self.selected_topology_node_id = None;
+        self.hovered_topology_node_id = None;
         self.topology_menu_node_id = None;
         self.topology_selection.clear();
         self.pending_topology_lifecycle = None;
@@ -836,6 +839,7 @@ impl GpuiShell {
             return;
         }
         self.selected_topology_node_id = Some(node_id.clone());
+        self.hovered_topology_node_id = None;
         if self.topology_menu_node_id.as_deref() == Some(node_id.as_str()) {
             self.topology_menu_node_id = None;
         } else {
@@ -980,6 +984,7 @@ impl GpuiShell {
         }
         if topology_network_changed {
             self.selected_topology_node_id = None;
+            self.hovered_topology_node_id = None;
             self.topology_menu_node_id = None;
             self.topology_selection.clear();
             self.pending_topology_lifecycle = None;
@@ -1017,6 +1022,13 @@ impl GpuiShell {
                 self.selected_topology_node_id = None;
             }
             if self
+                .hovered_topology_node_id
+                .as_ref()
+                .is_some_and(|node_id| !valid_nodes.contains(node_id))
+            {
+                self.hovered_topology_node_id = None;
+            }
+            if self
                 .topology_menu_node_id
                 .as_ref()
                 .is_some_and(|node_id| !valid_nodes.contains(node_id))
@@ -1037,6 +1049,7 @@ impl GpuiShell {
                 .retain(|node_id| valid_nodes.contains(node_id));
         } else {
             self.selected_topology_node_id = None;
+            self.hovered_topology_node_id = None;
             self.topology_menu_node_id = None;
             self.topology_selection.clear();
             self.pending_topology_lifecycle = None;
@@ -7561,6 +7574,7 @@ impl GpuiShell {
             let node_id = node.node_id.as_str().to_string();
             let open_node_id = node_id.clone();
             let menu_node_id = node_id.clone();
+            let hover_node_id = node_id.clone();
             let menu_actions = topology_member_actions(
                 directory.as_ref(),
                 Some(network_id.as_str()),
@@ -7631,7 +7645,118 @@ impl GpuiShell {
                         .text_xs()
                         .text_color(rgba(COLOR_MUTED))
                         .child(format!("{} · {}", detail.node_id, detail.health)),
+                )
+                .on_hover(cx.listener(move |shell, is_hovered: &bool, _, cx| {
+                    if shell.topology_menu_node_id.is_some() {
+                        return;
+                    }
+                    let next = is_hovered.then(|| hover_node_id.clone());
+                    if shell.hovered_topology_node_id != next {
+                        shell.hovered_topology_node_id = next;
+                        cx.notify();
+                    }
+                }));
+
+            let hovered = self.hovered_topology_node_id.as_deref() == Some(node.node_id.as_str())
+                && !menu_open;
+            if hovered {
+                let hover_field =
+                    |label_key: &'static str, value: String, selector: &'static str| {
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(88.0))
+                                    .flex_shrink_0()
+                                    .text_size(px(10.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(t(self.locale, label_key).to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .debug_selector(move || selector.into())
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(value),
+                            )
+                    };
+                card = card.child(
+                    div()
+                        .id("visual-topology-hover")
+                        .debug_selector(|| "visual-topology-hover".into())
+                        .role(Role::Article)
+                        .aria_label(format!(
+                            "{} · {} · {}: {} · {}: {}",
+                            detail.display_name,
+                            detail.health,
+                            t(self.locale, "topology.hover.role"),
+                            detail.role,
+                            t(self.locale, "topology.hover.capabilities"),
+                            detail.capabilities
+                        ))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .bg(rgba(COLOR_PANEL_RAISED))
+                        .w_full()
+                        .max_w(px(340.0))
+                        .min_w(px(0.0))
+                        .p_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .debug_selector(|| "visual-topology-hover-name".into())
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_TEXT))
+                                        .child(detail.display_name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| {
+                                            "visual-topology-hover-health-badge".into()
+                                        })
+                                        .text_xs()
+                                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                        .child(detail.health.clone()),
+                                ),
+                        )
+                        .child(hover_field(
+                            "topology.hover.role",
+                            detail.role.clone(),
+                            "visual-topology-hover-role",
+                        ))
+                        .child(hover_field(
+                            "topology.hover.capabilities",
+                            detail.capabilities.clone(),
+                            "visual-topology-hover-capabilities",
+                        ))
+                        .child(hover_field(
+                            "topology.hover.health",
+                            format!("{} · {}", detail.health, detail.presence),
+                            "visual-topology-hover-health",
+                        ))
+                        .child(
+                            div()
+                                .debug_selector(|| "visual-topology-hover-hint".into())
+                                .text_size(px(10.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(t(self.locale, "topology.hover.hint").to_string()),
+                        ),
                 );
+            }
 
             if menu_open {
                 let mut menu = div()
@@ -13314,12 +13439,21 @@ mod tests {
             })
             .expect("verify detail-only state");
 
+        let outside = visible
+            .debug_bounds("visual-topbar")
+            .expect("topbar outside topology nodes");
+        visible.simulate_mouse_move(outside.center(), None, Modifiers::default());
+        visible.run_until_parked();
         let menu = visible
             .debug_bounds("visual-topology-menu-trigger-0")
             .expect("first topology node menu trigger");
+        visible.simulate_mouse_move(menu.center(), None, Modifiers::default());
+        visible.run_until_parked();
+        let menu = visible
+            .debug_bounds("visual-topology-menu-trigger-0")
+            .expect("first topology node menu trigger after hover layout");
         visible.simulate_click(menu.center(), Modifiers::default());
         visible.run_until_parked();
-        assert!(visible.debug_bounds("visual-topology-menu").is_some());
         window
             .update(cx, |shell, _, _| {
                 assert_eq!(
@@ -13332,6 +13466,94 @@ mod tests {
                 );
             })
             .expect("verify menu state");
+        assert!(visible.debug_bounds("visual-topology-menu").is_some());
+    }
+
+    #[gpui::test]
+    fn topology_hover_summary_matches_detail_and_yields_to_menu(cx: &mut TestAppContext) {
+        let fixture = topology_widget_fixture();
+        let relay_id = fixture.relay_id.as_str().to_string();
+        let window = open_shell_window(cx, 1600.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_topology_widget_fixture(shell, &fixture, cx);
+            })
+            .expect("install topology fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-topology-hover").is_none());
+
+        let node_card = visible
+            .debug_bounds("visual-topology-node-0")
+            .expect("first topology node card");
+        visible.simulate_mouse_move(node_card.center(), None, Modifiers::default());
+        visible.run_until_parked();
+        for selector in [
+            "visual-topology-hover",
+            "visual-topology-hover-name",
+            "visual-topology-hover-role",
+            "visual-topology-hover-capabilities",
+            "visual-topology-hover-health",
+            "visual-topology-hover-hint",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "hover summary must expose {selector}"
+            );
+        }
+        assert!(visible
+            .debug_bounds("visual-topology-detail-empty")
+            .is_some());
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.hovered_topology_node_id.as_deref(),
+                    Some(relay_id.as_str())
+                );
+                assert_eq!(shell.selected_topology_node_id, None);
+                assert_eq!(shell.topology_menu_node_id, None);
+            })
+            .expect("verify hover state");
+
+        let outside = visible
+            .debug_bounds("visual-topbar")
+            .expect("topbar outside topology nodes");
+        visible.simulate_mouse_move(outside.center(), None, Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-topology-hover").is_none());
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.hovered_topology_node_id, None);
+            })
+            .expect("verify hover dismissal");
+
+        let node_card = visible
+            .debug_bounds("visual-topology-node-0")
+            .expect("first topology node card after hover dismissal");
+        visible.simulate_mouse_move(node_card.center(), None, Modifiers::default());
+        visible.run_until_parked();
+        let menu_trigger = visible
+            .debug_bounds("visual-topology-menu-trigger-0")
+            .expect("first topology node menu trigger");
+        visible.simulate_mouse_move(menu_trigger.center(), None, Modifiers::default());
+        visible.run_until_parked();
+        let menu_trigger = visible
+            .debug_bounds("visual-topology-menu-trigger-0")
+            .expect("first topology node menu trigger after pointer move");
+        visible.simulate_click(menu_trigger.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.topology_menu_node_id.as_deref(),
+                    Some(relay_id.as_str())
+                );
+                assert_eq!(shell.hovered_topology_node_id, None);
+            })
+            .expect("verify menu suppresses hover");
+        assert!(visible.debug_bounds("visual-topology-menu").is_some());
+        assert!(visible.debug_bounds("visual-topology-hover").is_none());
     }
 
     #[gpui::test]
